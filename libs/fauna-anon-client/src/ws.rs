@@ -2,15 +2,20 @@
 //! **anonymous** (pre-identity) endpoint.
 //!
 //! This is a pared-down twin of `fauna-client`'s `ws_adapter`: the anonymous
-//! connection has no reconnect supervisor, so there is no close-code
-//! classification (`ReconnectSignal`) — a `Close` frame simply ends the
+//! connection has no reconnect supervisor, so a `Close` frame simply ends the
 //! stream, which the fixed `RpcDispatcher` surfaces as
-//! `fauna.protocol.disconnected`.
+//! `fauna.protocol.disconnected`. The close is still READ — recorded as a
+//! `ReconnectSignal` in the adapter's [`CloseSignal`] — so a request that failed
+//! on a 4426 close (an app offering a `fauna.v<N>` the nest does not serve) is
+//! typed `AnonClientError::SubprotocolMismatch`, not a blip
+//! (`transport-connection.md` § Connection lifecycle, the 4426 paragraph).
 
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
+use fauna_ws_substrate::ReconnectSignal;
 use futures_util::{Sink, Stream};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -159,7 +164,7 @@ pub(crate) async fn connect_anonymous(
         }
         .map_err(|e| {
             fauna_ws_substrate::dial_budget::note_dial_error(&budget_key, &e);
-            AnonClientError::WebSocket(format!("ws connect: {e}"))
+            map_ws_connect_err(e)
         })
     })
     .await
@@ -176,7 +181,7 @@ pub(crate) async fn connect_anonymous(
         connect_ms = (started.elapsed() - budget_wait).as_millis() as u64,
         "anonymous connect up"
     );
-    Ok((AnonWsAdapter { inner: ws_stream }, capture))
+    Ok((AnonWsAdapter::new(ws_stream), capture))
 }
 
 /// Connect to the nest's **authenticated** endpoint with the subprotocol-bearer
@@ -221,9 +226,25 @@ pub(crate) async fn connect_authed(
     let pin = crate::tls_dial::resolve_graduated_pin(&request);
     let (ws_stream, _resp) = crate::tls_dial::dial_ws_trusted(request, ws_config, pin)
         .await
-        .map_err(|e| AnonClientError::WebSocket(format!("ws connect: {e}")))?;
+        .map_err(map_ws_connect_err)?;
 
-    Ok(AnonWsAdapter { inner: ws_stream })
+    Ok(AnonWsAdapter::new(ws_stream))
+}
+
+/// Map a WS-upgrade failure to an [`AnonClientError`]: a nest answering HTTP
+/// `426` refused this app's subprotocol before any socket opened, which is
+/// [`AnonClientError::SubprotocolMismatch`] — the app is too old for the nest,
+/// and no retry can fix it. Everything else is a transport fault. The
+/// anonymous twin of `fauna-client`'s `map_ws_connect_err`, which gives the
+/// authenticated endpoint's 426 the same reading (`transport-connection.md`
+/// § Connection lifecycle).
+fn map_ws_connect_err(e: tokio_tungstenite::tungstenite::Error) -> AnonClientError {
+    if let tokio_tungstenite::tungstenite::Error::Http(ref resp) = e
+        && resp.status().as_u16() == 426
+    {
+        return AnonClientError::SubprotocolMismatch;
+    }
+    AnonClientError::WebSocket(format!("ws connect: {e}"))
 }
 
 /// Bytes-shaped Stream+Sink wrapping a tungstenite WebSocketStream. `Stream`
@@ -231,6 +252,42 @@ pub(crate) async fn connect_authed(
 /// `Sink<Bytes>` writes each Bytes payload as a binary WS frame.
 pub(crate) struct AnonWsAdapter {
     inner: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    close: CloseSignal,
+}
+
+impl AnonWsAdapter {
+    fn new(inner: WebSocketStream<MaybeTlsStream<TcpStream>>) -> Self {
+        Self {
+            inner,
+            close: CloseSignal::default(),
+        }
+    }
+
+    /// The handle the client keeps after the adapter moves into its dispatcher.
+    pub(crate) fn close_signal(&self) -> CloseSignal {
+        self.close.clone()
+    }
+}
+
+/// How the nest closed a one-shot connection, as `fauna_ws_substrate`'s
+/// supervised adapter reads it ([`ReconnectSignal::from_close`]). Written by the
+/// adapter when a close frame arrives, read by the client when a request fails.
+#[derive(Clone, Default, Debug)]
+pub(crate) struct CloseSignal(Arc<Mutex<Option<ReconnectSignal>>>);
+
+impl CloseSignal {
+    fn record(&self, signal: ReconnectSignal) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(signal);
+    }
+
+    /// True once the nest closed this connection 4426: it does not serve this
+    /// app's subprotocol.
+    pub(crate) fn is_subprotocol_mismatch(&self) -> bool {
+        matches!(
+            *self.0.lock().unwrap_or_else(|e| e.into_inner()),
+            Some(ReconnectSignal::SubprotocolMismatch)
+        )
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -256,8 +313,13 @@ impl Stream for AnonWsAdapter {
                     return Poll::Ready(Some(Ok(b)));
                 }
                 // A close frame ends the stream; the dispatcher synthesises
-                // `fauna.protocol.disconnected` for any in-flight call.
-                Poll::Ready(Some(Ok(Message::Close(_)))) => return Poll::Ready(None),
+                // `fauna.protocol.disconnected` for any in-flight call. Its
+                // code is recorded first, so that failure can be read typed.
+                Poll::Ready(Some(Ok(Message::Close(frame)))) => {
+                    this.close
+                        .record(ReconnectSignal::from_close(frame.as_ref()));
+                    return Poll::Ready(None);
+                }
                 // Non-binary frames are not part of the wire protocol; skip.
                 Poll::Ready(Some(Ok(
                     Message::Text(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_),
@@ -339,6 +401,34 @@ mod tests {
              not overflow the small foreign cooperative-pool stack the native \
              UniFFI clients poll it on (see the connect_anonymous comment)."
         );
+    }
+
+    /// A nest answering the anonymous upgrade with HTTP 426 — the app is too
+    /// old for it — is the typed [`AnonClientError::SubprotocolMismatch`], not
+    /// a transport fault the launch path would offer to retry
+    /// (`version-compatibility.md` § Dimension 4).
+    #[tokio::test]
+    async fn connect_anonymous_classifies_a_426_upgrade_rejection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral listener");
+        let addr = listener.local_addr().expect("listener local_addr");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            stream
+                .write_all(b"HTTP/1.1 426 Upgrade Required\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .expect("write 426");
+        });
+
+        match connect_anonymous(&format!("http://{addr}"), None).await {
+            Err(AnonClientError::SubprotocolMismatch) => {}
+            Err(other) => panic!("expected SubprotocolMismatch, got Err({other:?})"),
+            Ok(_) => panic!("expected SubprotocolMismatch, but the upgrade succeeded"),
+        }
     }
 
     /// Regression guard for the connect-phase deadline. Before this fix,

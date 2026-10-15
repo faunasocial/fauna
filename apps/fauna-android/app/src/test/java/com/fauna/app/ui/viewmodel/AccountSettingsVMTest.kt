@@ -264,6 +264,32 @@ class AccountSettingsVMTest {
         assertTrue(f.vm.switchError.value != null)
     }
 
+    /**
+     * A switch the registry refuses (`FfiAccountRegistry.setActive` throws
+     * `FfiException.General` whose `msg` IS the shared `switch_refused_copy`
+     * line — `long-term-store.md` § Multi-account evolution, "Activating
+     * refuses an account it cannot launch as") paints that line, bare, on the
+     * Account page's `error-message`. The generated exception's `message` is
+     * the aggregated `"msg=…"` form, which is what the page used to show
+     * (`multiple-accounts` outcome 9; windows fixed the same `@msg=` paint).
+     * Nothing is torn down: the refusal lands before the outgoing account's
+     * state is dropped.
+     */
+    @Test
+    fun refusedSwitch_paintsTheSharedLineBareAndTearsNothingDown() {
+        val f = makeVm()
+        val line = "Can't switch to bob: this device no longer holds its key."
+        whenever(f.registry.setActive("refused-actor"))
+            .thenThrow(com.fauna.ffi.FfiException.General(line))
+        var completed = false
+
+        f.vm.switchAccount("refused-actor", confirmed = false) { completed = true }
+
+        assertEquals(line, f.vm.switchError.value)
+        verify(f.actorScope, never()).dropActorScopedState()
+        assertFalse(completed)
+    }
+
     private companion object {
         const val APPENDED_SECRET =
             "0202020202020202020202020202020202020202020202020202020202020202"

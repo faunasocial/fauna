@@ -37,38 +37,38 @@ class CustodyActions:
         layer, never a test body).
 
         tui (2026-08-16/17), linux, windows and macOS + iOS (all 2026-09-28;
-        apple through the shared FaunaKit ``DevicesContent``) render pieces
-        1 + 3 and the mint with live controls. web is a DECLARED absence:
-        accept, the mint and set-budget/stop are gated on capabilities web
-        lacks (devices.md § Where logic lives). android has the UniFFI exports
-        (``custody_accept`` … ``devices_keyless_posture``) but not yet the
-        render — unbuilt debt, not an absence. Piece 2 (owner-side render,
-        ``custody-holder-card``) is built on all seven apps."""
-        if (
-            self.driver.is_tui()
-            or self.driver.is_linux()
-            or self.driver.is_windows()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-        ):
+        apple through the shared FaunaKit ``DevicesContent``) and android
+        (2026-10-08, ``DevicesScreen.kt``) render pieces 1 + 3 and the mint with
+        live controls. web is a DECLARED absence: accept, the mint and
+        set-budget/stop are gated on capabilities web lacks (devices.md § Where
+        logic lives). Piece 2 (owner-side render, ``custody-holder-card``) is
+        built on all seven apps."""
+        if not self.driver.is_web():
             return
-        from helpers.app_surface import declared_absence, skip_unbuilt
+        from helpers.app_surface import declared_absence
 
-        if self.driver.is_web():
-            declared_absence(
-                self.driver,
-                capability="custody ceremony (accept, mint, set-budget/stop)",
-                doc="ui/devices.md § Where logic lives",
-            )
-        skip_unbuilt(
+        declared_absence(
             self.driver,
-            surface="the T16 custody ceremony (mint + accept, pieces 1+3)",
-            detail="the UniFFI face exports the acts and the keyless-posture "
-                   "read; the per-app render is the remaining leg",
-            tracked="devices.md § Implementation status today; the batched per-app trickle-down",
+            capability="custody ceremony (accept, mint, set-budget/stop)",
+            doc="ui/devices.md § Where logic lives",
         )
 
-    # ── offer initiation (owner side) ────────────────────────────────────────
+    def require_holder_rows_supported(self) -> None:
+        """Skip unless this app renders piece 2 — the owner-side
+        ``custody-holder-card`` rows with their receipt status and revoke
+        (convention 7). Separate from :meth:`require_supported` because piece
+        2 needs neither the mint nor the accept: a seat that only OBSERVES a
+        custody another device of the account minted reads it from its own
+        replica of ``fauna.state.custody-ceremony`` (web: over the account
+        port, ``custody_port::PortCustodyStore``) and revokes through the
+        shared ``custody_acts::revoke_custody``.
+
+        Built on all seven apps (web 2026-08-17, ``DevicesSection.svelte``),
+        so no app skips today; a future app or a regressed shell declares its
+        absence HERE, never in a test body."""
+        return
+
+    # ── offer initiation (owner side)────────────────────────────────────────
 
     def open_mint(self) -> None:
         """Reveal the mint flow (``custody-mint-button``). A missing 1:1
@@ -167,6 +167,17 @@ class CustodyActions:
 
     def stop_holding(self, index: int = 0) -> None:
         self.driver.click("custody-held-stop-button", index=index)
+
+    def held_stop_label(self, index: int = 0) -> str:
+        """The stop control's label — once stopped it says the stored bytes
+        remain until removed (stop is the pause, never the reclaim)."""
+        return self.driver.get_text("custody-held-stop-button", index=index)
+
+    def remove_holding(self, index: int = 0) -> None:
+        """The reclaim (``custody-held-remove-button``): drop the hold and free
+        its space. Always available, stopped or not; the card stops rendering
+        the custody once removed."""
+        self.driver.click("custody-held-remove-button", index=index)
 
     # ── custodian rows (owner side, Devices page — device-anchored) ─────────
 

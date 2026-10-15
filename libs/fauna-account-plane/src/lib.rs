@@ -48,7 +48,7 @@ pub mod backup_rows;
 pub mod bind_leg;
 pub mod blessed_nest_rows;
 /// The throwaway fleet-scope replica a process that hosts no account store
-/// reads fleet-only kinds through (`on-demand-files.md` § Shared sets on a
+/// reads fleet-only kinds through (`on-demand-files-shared-sets.md` § Shared sets on a
 /// capability host, decision 1′).
 pub mod cold_replica;
 pub mod contact_overlay_rows;
@@ -61,6 +61,11 @@ pub mod custody_rows;
 /// retires each predecessor row once a listed member row carries its item
 /// (`succession-aftermath.md` § Re-key scope).
 pub mod delegable_reclaim;
+/// The ceremony device's record of the predecessor's departed fleet, off the
+/// live runtime or the closed store at rest
+/// (`succession-aftermath.md` § Re-key scope).
+#[cfg(feature = "account-driver")]
+pub mod departed_fleet;
 pub mod departure;
 pub mod deployment_seed_recovery;
 pub mod deployment_seed_rows;
@@ -70,8 +75,8 @@ pub mod dns_rows;
 /// of a principal writer (`third-party-kinds.md` § Principal write authority).
 pub mod ext_writers;
 /// The store half of a device removal, and its completion leg over the slot
-/// seam (`account-data-taxonomy.md` § The generation machinery →
-/// *Fleet-scope reclamation*, clause (4)).
+/// seam (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (4)).
 pub mod fleet_removal;
 pub mod folder_key_rows;
 pub mod follows_rows;
@@ -85,15 +90,15 @@ pub mod generation_escrow_recover;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod generation_fixture_test_support;
 /// The let-go — a dead generation's rows retired by the user's confirmed act,
-/// and by nothing else (`account-data-taxonomy.md` § The generation machinery
-/// → *Fleet-scope reclamation*, clause (3)(j)).
+/// and by nothing else (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (3)(j)).
 pub mod generation_let_go;
 pub mod generation_mint;
 /// The fleet-scope reclamation pass — the `fauna.state.device-reach` writer
 /// and the `fauna.account.state.retire` caller that keep the fleet scope's
 /// live-entry count flat across generations and removals
-/// (`account-data-taxonomy.md` § The generation machinery → *Fleet-scope
-/// reclamation*).
+/// (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*).
 pub mod generation_reclaim;
 /// The re-escrow pass — the generation axis's succession rider: every live
 /// generation this device keys is escrowed to the identity this runtime is.
@@ -184,7 +189,7 @@ pub mod publish_diff;
 pub mod refused_change_rows;
 /// The removal's nest half: at every nest a runtime completes, the grant of
 /// every roster row whose principal merged state reads removed is revoked by
-/// key (`account-data-taxonomy.md` § Fleet-scope reclamation, clause (4) →
+/// key (`fleet-scope-reclamation.md` § Fleet-scope reclamation, clause (4) →
 /// *The nest half follows merged state*).
 pub mod removed_grants;
 pub mod scope_set;

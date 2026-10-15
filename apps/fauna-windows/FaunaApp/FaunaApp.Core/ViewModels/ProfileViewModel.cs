@@ -58,6 +58,17 @@ public partial class ProfileViewModel : ViewModelBase
     /// by each successful <see cref="ToggleBlockAsync"/>; mirrors linux
     /// <c>views/profile/mod.rs</c> <c>is_blocked</c>.</summary>
     [ObservableProperty] private bool _isBlocked;
+    /// <summary><c>false</c> from open until the open-time contact-edge read lands (or
+    /// fails), or the viewer's own press settles the edge. The
+    /// <c>profile-block-button</c> is disabled while it is <c>false</c> and
+    /// <see cref="ToggleBlockAsync"/> issues nothing: a press on the not-blocked
+    /// default would re-send <c>knocks_block</c> to an actor the viewer already
+    /// blocks (succeeds, label stays "Unblock", nothing errors). Mirrors tui's
+    /// <c>is_blocked: Option&lt;bool&gt;</c> and android's <c>blockKnown</c>.</summary>
+    [ObservableProperty] private bool _isBlockKnown;
+    /// <summary>Bumped by each settled press; a read that began before it is
+    /// stale and must not rewind the press (android's <c>applyBlockRead</c> fold).</summary>
+    private int _blockEpoch;
 
     // §1 My tiers
     public ObservableCollection<SubscriptionTierRow> Tiers { get; } = new();
@@ -104,9 +115,13 @@ public partial class ProfileViewModel : ViewModelBase
 #endif   // PAYMENTS
 
     // ── Profile edit (display-name / bio / links read-modify-write) ──────────
-    /// <summary>The header label — the published display name when present, else the
-    /// <see cref="ActorId"/> fallback (rich identity is publish-path-gated).</summary>
+    /// <summary>The header's primary line (<c>profile-handle</c>) — the shared overlay
+    /// resolver's answer: the viewer's nickname, else the published display name, else
+    /// the canonical short id (see <see cref="RefreshHeaderAsync"/>).</summary>
     [ObservableProperty] private string _headerName = "";
+    /// <summary>The header's secondary line (<c>profile-public-name</c>): the public name
+    /// a nickname replaced, empty while no nickname is the primary line.</summary>
+    [ObservableProperty] private string _headerPublicName = "";
     [ObservableProperty] private bool _showEditForm;
     [ObservableProperty] private string _editDisplayName = "";
     [ObservableProperty] private string _editBio = "";
@@ -170,6 +185,7 @@ public partial class ProfileViewModel : ViewModelBase
         ActorId = actorId;
         IsSelf = isSelf;
         HeaderName = actorId;   // the actor-id fallback until a refresh lands a name
+        _knockAsk = KnockAskState.ForPeer(isSelf ? null : actorId);
     }
 
     /// <summary>Load the Tiers-tab data: SELF → re-read §1 tiers + §2 requests, the §3
@@ -629,9 +645,13 @@ public partial class ProfileViewModel : ViewModelBase
     /// <c>Err(_) =&gt; false</c>).</summary>
     public async Task RefreshBlockStateAsync()
     {
+        var epoch = _blockEpoch;
         try
         {
             var contacts = await _nest.ContactsListAsync();
+            // A press that settled while the read was in flight is newer than the
+            // read: it must not rewind the press.
+            if (epoch != _blockEpoch) return;
             // Shared predicate (fauna_core::format::contact_row_blocks_actor; FFI
             // ContactRowBlocksActor) — a blocked edge whose peer_id matches this actor
             // (case-insensitive hex). The wire status string is the lowercased enum
@@ -639,10 +659,13 @@ public partial class ProfileViewModel : ViewModelBase
             IsBlocked = contacts.Any(c =>
                 FaunaFfiMethods.ContactRowBlocksActor(
                     c.ActorId, c.Status.ToString().ToLowerInvariant(), ActorId));
+            IsBlockKnown = true;
         }
         catch (Exception)
         {
-            // Non-fatal — leave the synchronous "Block" default (linux Err(_) => false).
+            // Non-fatal — settle on the synchronous "Block" default (linux Err(_) =>
+            // false) so a failed read never leaves the toggle disabled for good.
+            if (epoch == _blockEpoch) IsBlockKnown = true;
         }
     }
 
@@ -659,6 +682,8 @@ public partial class ProfileViewModel : ViewModelBase
     /// <c>toggle_block</c>.</summary>
     public async Task ToggleBlockAsync()
     {
+        // A press before the open-time edge read lands issues nothing (tui parity).
+        if (!IsBlockKnown) return;
         ErrorMessage = null;
         var wasBlocked = IsBlocked;
         try
@@ -667,10 +692,91 @@ public partial class ProfileViewModel : ViewModelBase
                 await _nest.KnocksUnblockAsync(ActorId);
             else
                 await _nest.KnocksBlockAsync(ActorId);
+            _blockEpoch++;
             IsBlocked = !wasBlocked;
         }
         catch (Exception ex)
         {
+            ShowError(ex);
+        }
+    }
+
+    // ── Request contact + the supervised ward's guardian ask (OTHER only) ──────
+    // `profile-request-contact-button`'s knock and the `contact-request-guardian-button`
+    // / `contact-request-pending` pair (family-safety.md § Child-initiated contact
+    // requests → App affordance; profile.md § Where logic lives → Request contact
+    // routing). Per open, bound to the viewed actor; replies fold through
+    // WardAskFolds.FoldKnockReply keyed on the peer they were SENT to, so a reply can
+    // only ever paint on its own actor's open (rule (g)). tui's `profile/mod.rs`
+    // `knock_sent` / `guardian_refused` / `contact_ask_sent`, android's `ProfileVM`.
+
+    /// <summary>The knock/ask state for this open's viewed actor (<c>Peer</c> null on
+    /// SELF, where neither surface exists).</summary>
+    [ObservableProperty] private KnockAskState _knockAsk = KnockAskState.ForPeer(null);
+
+    /// <summary>Where this open's knock goes: the shared
+    /// <c>FaunaFfiMethods.KnockRecipientNestUrl</c> over the profile
+    /// <see cref="RefreshHeaderAsync"/> already fetched. <c>null</c> until that read
+    /// lands, and whenever the profile gives no better answer — the knock then goes to
+    /// this nest.</summary>
+    private string? _knockRoute;
+
+    /// <summary>The pair's render — durable pending first (rule (c)); <c>null</c> on
+    /// SELF.</summary>
+    internal ContactAskRender? ContactAskRenderNow() =>
+        KnockAsk.Peer is { } peer
+            ? WardAskFolds.ContactAskRenderOf(WardAsksCache.ContactAskPending(peer), KnockAsk)
+            : null;
+
+    /// <summary><c>profile-request-contact-button</c> — knock the viewed actor on the
+    /// route the open-time read took from its own profile. Reads "Request sent" and
+    /// stays disabled once the nest accepted it; the TYPED guardian refusal re-enables
+    /// it, offers the ask, and STAYS on <c>error-message</c> (rules (a), (b)). Mirrors
+    /// tui's <c>Action::RequestContact</c>.</summary>
+    public async Task RequestContactAsync()
+    {
+        if (IsSelf) return;
+        var peer = ActorId;
+        var before = KnockAsk;
+        if (before.KnockSent || before.KnockInFlight) return;
+        KnockAsk = before with { KnockInFlight = true };
+        var route = _knockRoute;
+        var result = await WardAskFolds.ClassifyKnockAsync(() => _nest.SendKnockAsync(peer, route));
+        var (next, effect) = WardAskFolds.FoldKnockReply(KnockAsk, peer, result);
+        KnockAsk = next;
+        switch (effect)
+        {
+            case KnockErrorEffect.Clear:
+                ErrorMessage = null;
+                break;
+            case KnockErrorEffect.Guardian:
+                SetError(Strings.Get("contacts/guardian_approval_required"));
+                break;
+            case KnockErrorEffect.Failed failed:
+                ShowError(failed.Error);
+                break;
+        }
+    }
+
+    /// <summary><c>contact-request-guardian-button</c> — ask the guardian about the
+    /// viewed actor (<c>fauna.family.contact.request</c>); a pending ask is not
+    /// re-sent.</summary>
+    public async Task AskGuardianAsync()
+    {
+        if (IsSelf) return;
+        var peer = ActorId;
+        var before = KnockAsk;
+        if (before.AskInFlight || ContactAskRenderNow() == ContactAskRender.Pending) return;
+        KnockAsk = before with { AskInFlight = true };
+        try
+        {
+            await _nest.FamilyContactRequestAsync(peer);
+            KnockAsk = WardAskFolds.FoldContactAsked(KnockAsk, peer);
+            ErrorMessage = null;
+        }
+        catch (Exception ex)
+        {
+            KnockAsk = WardAskFolds.FoldContactAskFailed(KnockAsk, peer);
             ShowError(ex);
         }
     }
@@ -775,22 +881,60 @@ public partial class ProfileViewModel : ViewModelBase
     /// <summary>Discard the edit form without publishing.</summary>
     public void CancelEdit() => ShowEditForm = false;
 
-    /// <summary>Re-read the profile and update <see cref="HeaderName"/> — the
-    /// published display name when present, else the <see cref="ActorId"/> fallback
-    /// (an unpublished profile / read failure keeps the fallback).</summary>
+    /// <summary>The public display name the last <see cref="RefreshHeaderAsync"/> read
+    /// (null when unpublished or the read failed) — the input
+    /// <see cref="RepaintHeader"/> hands the shared resolver again when the overlay moves.</summary>
+    private string? _publicDisplayName;
+
+    /// <summary>Re-read the profile, then paint the header's two names from the shared
+    /// overlay resolver: <see cref="HeaderName"/> is the viewer's nickname, else the
+    /// published display name, else the canonical short id (an unpublished profile /
+    /// read failure just gives the last); <see cref="HeaderPublicName"/> is the name a
+    /// nickname replaced (profile.md § The private section → <i>The header shows both
+    /// names</i>).</summary>
     public async Task RefreshHeaderAsync()
     {
         try
         {
             var res = await _nest.ProfileGetAsync(ActorId);
-            HeaderName = !string.IsNullOrWhiteSpace(res?.Display.DisplayName)
+            _publicDisplayName = !string.IsNullOrWhiteSpace(res?.Display.DisplayName)
                 ? res!.Display.DisplayName!
-                : ActorId;
+                : null;
+            // The same read fills the knock route: the profile the header renders is
+            // the one whose home nest a knock from this page goes to (profile.md §
+            // Where logic lives → Request contact routing — the shared rule refuses
+            // anyone else's word, so a route cannot leak across two opens).
+            _knockRoute = null;
+            if (!IsSelf && res is not null)
+            {
+                try
+                {
+                    _knockRoute = FaunaFfiMethods.KnockRecipientNestUrl(
+                        Convert.FromHexString(ActorId), res.RawBody, _nest.HomeUrl);
+                }
+                catch (Exception)
+                {
+                    _knockRoute = null;   // no better answer ⇒ this nest
+                }
+            }
         }
         catch (Exception)
         {
-            HeaderName = ActorId;
+            _publicDisplayName = null;
         }
+        RepaintHeader();
+    }
+
+    /// <summary>Re-ask the overlay face what the header calls this person — the page
+    /// calls it when the projection moves (a Save here, a sibling device's edit, a late
+    /// load after a relaunch), with no profile re-read.</summary>
+    public void RepaintHeader()
+    {
+        using var names = ContactOverlayNames.Open();
+        // Profile header: `peer_label(display_name, None, id)` (the face's contract).
+        var label = names.PeerLabel(_publicDisplayName, null, ActorId);
+        HeaderName = label.primary;
+        HeaderPublicName = label.@public ?? "";
     }
 
     /// Lowercase hex of a 32-byte actor id (the display form linux/apple use; rich

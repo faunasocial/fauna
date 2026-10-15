@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The subset of `AppState`/`MacAppState` a feed post-card needs to render:
@@ -192,7 +195,7 @@ public struct PostCardBody: View {
 
                     RepostAttributionBadge(isRepost: isRepostRow)
 
-                    ProtocolBadge(source: post.source)
+                    ProtocolBadge(source: post.source, bridgeRoster: vm.bridgeRoster)
 
                     UnverifiedSourceBadge(verification: post.verification)
 
@@ -407,3 +410,4 @@ public struct PostCardBody: View {
         }
     }
 }
+#endif // !FAUNA_KIDS

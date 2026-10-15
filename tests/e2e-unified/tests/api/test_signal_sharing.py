@@ -204,3 +204,79 @@ def test_signal_sharing_k_gate_transparency_flip_public_gate_and_opt_out(signal_
     assert _wait_bus(db_path, post_id, SKIP, None) is None, (
         "opt-out withdraws the signal:skip bus row"
     )
+
+
+def _published(port: int, actor: dict, post_id_hex: str, factor: str):
+    """The count the ≥k-gated export view publishes for ``(post, factor)`` —
+    exactly what a peer nest would receive — or ``None`` when it is absent."""
+    entry = _published_entry(port, actor, post_id_hex, factor)
+    return None if entry is None else entry["count"]
+
+
+@pytest.mark.feature("learn-from-my-activity")
+def test_opting_out_of_one_sharing_family_leaves_the_other_shared(signal_nest):
+    """`learn-from-my-activity` outcome 12: turning signal sharing off withdraws
+    only your activity signals and leaves any spam reports you share untouched,
+    and the other way round (`engagement-cues.md` § Layer B — the two opt-ins
+    are independent; each opt-out deletes only its own family's rows).
+
+    Three users opt in to BOTH families and judge one public post both ways — a
+    shared spam report (``report:spam``) and an activity verdict
+    (``signal:watch-complete``) — so both aggregates sit at exactly k=3 in the
+    export view. Then one contributor drops one family at a time; the dropped
+    family falls below k and leaves the export view, the other stays at 3.
+
+    Asserted on the export view a peer nest would receive (``published``), not
+    the bus row, so nothing waits on the post settling into ``content_meta``.
+    """
+    port = signal_nest["port"]
+    admin_sk = signal_nest["admin"]["signing_key"]
+
+    author = create_actor_and_register(port, admin_signing_key=admin_sk)
+    people = [create_actor_and_register(port, admin_signing_key=admin_sk) for _ in range(3)]
+
+    now_us = int(time.time() * 1_000_000)
+    body = "Win a free prize now, and also a cat video you will watch to the end."
+    post_id = ws_api.create_post(
+        port, author, sign_and_encode_post(author["signing_key"], now_us, body, tags=[])
+    )
+
+    for p in people:
+        assert ws_api.report_share_set(port, p, True)["share"] is True
+        assert ws_api.signal_share_set(port, p, True)["share"] is True
+        assert ws_api.moderation_train(port, p, post_id, "spam")["status"] == "trained"
+        ws_api.signal_contribute(port, p, post_id, "watch-complete")
+
+    assert _published(port, author, post_id, "report:spam") == 3
+    assert _published(port, author, post_id, WC) == 3
+
+    leaver = people[2]
+
+    # ── Turning signal sharing off withdraws only the activity signal.
+    assert ws_api.signal_share_set(port, leaver, False)["share"] is False
+    assert _published(port, author, post_id, WC) is None, (
+        "opting out of signal sharing must withdraw this user's activity signal "
+        "(the aggregate falls below k)"
+    )
+    assert _published(port, author, post_id, "report:spam") == 3, (
+        "opting out of signal sharing must leave the user's shared spam report alone"
+    )
+    assert ws_api.report_share_status(port, leaver)["share"] is True, (
+        "the report-sharing opt-in must be untouched by the signal opt-out"
+    )
+
+    # ── Back in for signals, then the other way round.
+    assert ws_api.signal_share_set(port, leaver, True)["share"] is True
+    ws_api.signal_contribute(port, leaver, post_id, "watch-complete")
+    assert _published(port, author, post_id, WC) == 3
+
+    assert ws_api.report_share_set(port, leaver, False)["share"] is False
+    assert _published(port, author, post_id, "report:spam") is None, (
+        "opting out of report sharing must withdraw this user's spam report"
+    )
+    assert _published(port, author, post_id, WC) == 3, (
+        "opting out of report sharing must leave the user's activity signal alone"
+    )
+    assert ws_api.signal_share_status(port, leaver)["share"] is True, (
+        "the signal-sharing opt-in must be untouched by the report opt-out"
+    )

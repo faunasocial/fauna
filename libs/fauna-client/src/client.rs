@@ -84,7 +84,11 @@ impl SupervisorStop {
         let (e, refresh) = match ended {
             Ok(()) => return Self::Clean,
             Err(S::SubprotocolMismatch) => return Self::SubprotocolMismatch,
-            Err(S::TerminalRefusal(e)) => (e, false),
+            // A dial-time stop reads the channel only when the mint flattened
+            // its refusal (`connect_error_is_terminal`'s case 5 stops on a
+            // latched `not_registered` behind an `Auth`); a typed one keeps
+            // its own name.
+            Err(S::TerminalRefusal(e)) => (e, matches!(e, NestClientError::Auth(_))),
             Err(S::AuthRefresh(e)) => (e, true),
         };
         if let Some(refusal) = auth.superseded_refusal() {
@@ -193,10 +197,21 @@ pub struct NestClient {
     /// supervisor this client spawns so a refused dial is retried promptly
     /// while one waits ([`fauna_ws_substrate::DialDemand`]).
     dial_demand: Arc<fauna_ws_substrate::DialDemand>,
-    /// The push device id every connection announces (`fauna.push.presence`),
-    /// shared with each supervisor's channel; `None` until
-    /// [`Self::set_push_presence`] names one.
+    /// The announce every connection sends (`fauna.push.presence`: the push
+    /// device id and its kind), shared with each supervisor's channel; `None`
+    /// until [`Self::set_push_presence`] or
+    /// [`Self::set_push_presence_stand_in`] names one.
     push_presence: crate::reconnect::PushPresence,
+    /// What the live connection has proven about the nest at its far end —
+    /// consulted and filled by `fauna_client_pair`'s bound-identity resolver
+    /// through [`Self::proven_identity_memo`]; keyed on
+    /// [`Self::live_connection`] so a reconnect remembers nothing.
+    proven_identity: fauna_protocol::ProvenIdentityMemo,
+    /// The live connection's `fauna.nest.info` reply, read once per
+    /// connection by every reader that goes through
+    /// `fauna_protocol::read_nest_info` (the settings landing's legs, the
+    /// sign-in update look); keyed on [`Self::live_connection`].
+    nest_info: fauna_protocol::NestInfoMemo,
 }
 
 /// **No dialer outlives its client.** The supervisor task holds the channel,
@@ -261,6 +276,8 @@ impl NestClient {
             backoff_override: Default::default(),
             dial_demand: fauna_ws_substrate::DialDemand::new(),
             push_presence: Default::default(),
+            proven_identity: fauna_protocol::ProvenIdentityMemo::new(),
+            nest_info: fauna_protocol::NestInfoMemo::new(),
         })
     }
 
@@ -336,6 +353,40 @@ impl NestClient {
         self.reconnect_tx.subscribe()
     }
 
+    /// The number of the connection a request issued now would ride
+    /// ([`RpcDispatcher::connection_id`] of the dispatcher the supervisor
+    /// has parked), or `None` while no connection is live — a reconnect in
+    /// progress, a torn-down client, or the slot held by the supervisor at
+    /// this instant (a `try_read` miss reads as "nothing live", which only
+    /// costs the caller a re-proof). The key of [`Self::proven_identity_memo`].
+    pub fn live_connection(&self) -> Option<u64> {
+        let guard = self.dispatcher.try_read().ok()?;
+        guard.as_ref().map(|d| d.connection_id())
+    }
+
+    /// What this client's connections have proven about the nest at the far
+    /// end, per connection ([`fauna_protocol::ProvenIdentityMemo`]). Read and
+    /// filled by the one shared bound-identity resolver
+    /// (`fauna_client_pair::LinkedNestsMachine::bound_nest_id`), so every
+    /// reader of "which nest is this" on this connection re-proves once per
+    /// connection rather than once per read — `security.md` § Transport trust
+    /// → *The proven identity is remembered per connection*.
+    pub fn proven_identity_memo(&self) -> &fauna_protocol::ProvenIdentityMemo {
+        &self.proven_identity
+    }
+
+    /// Watch who this session is signed in as — the `handle`/`domain`/`tier`
+    /// the session's own bearer mint confirmed
+    /// ([`AuthClient::subscribe_self_identity`]). `None` when the client's
+    /// bearer source cannot say (a static or handshake bearer). An app reads
+    /// its account cache and self-address from here instead of running a
+    /// challenge of its own at sign-in (`transport-connection.md` § The dial
+    /// budget); a session-ending verdict from the same mint arrives on
+    /// [`Self::supervisor_stop`], never here.
+    pub fn subscribe_self_identity(&self) -> Option<fauna_nest_http::SelfIdentityWatch> {
+        self.auth.subscribe_self_identity()
+    }
+
     /// Test-only: the dispatcher slot and connection-state sender this
     /// client's `request*` methods observe. A reconnect test drives
     /// `fauna_ws_substrate::run_supervisor` against these so it can exercise the
@@ -373,18 +424,72 @@ impl NestClient {
     /// presents as `SyncCapability::device_id` — or the nest reads the app's
     /// own row as absent and dials it while the app is open. Callers that
     /// never call this announce nothing, which keeps the pre-announce
-    /// behaviour.
+    /// behaviour. This is an app's announce: the device renders its own
+    /// events, so the nest skips its relay rows while the connection lives.
     pub async fn set_push_presence(&self, device_id: impl Into<String>) {
-        let device_id = device_id.into();
+        self.announce_push_presence(device_id.into(), false).await;
+    }
+
+    /// [`Self::set_push_presence`] for the device's **wake stand-in** — the
+    /// sync agent, which renders nothing itself: the announce carries
+    /// `stand_in: true`, so the nest delivers the device's `ws-device` row to
+    /// this connection and still dials its `web-push`/`apns` rows
+    /// (`common.md` § Push Notifications → *Dispatch Logic*, ruled
+    /// 2026-10-03). No app announces as a stand-in.
+    pub async fn set_push_presence_stand_in(&self, device_id: impl Into<String>) {
+        self.announce_push_presence(device_id.into(), true).await;
+    }
+
+    /// [`Self::set_push_presence_stand_in`] for a client **nothing has connected
+    /// yet** — the synchronous form a constructor uses, so the client it hands
+    /// back announces from its first connect. It writes only the slot every
+    /// connect reads: a connection already up would not hear it until it
+    /// reconnects, so it is for construction, never for a live client (debug
+    /// builds assert there is none).
+    pub fn announcing_stand_in(self: Arc<Self>, device_id: impl Into<String>) -> Arc<Self> {
+        debug_assert!(
+            self.dispatcher
+                .try_read()
+                .map_or(true, |live| live.is_none()),
+            "announcing_stand_in on a connected client; use set_push_presence_stand_in"
+        );
         *self
             .push_presence
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(device_id.clone());
-        // A connection already up announced nothing (or an older id) at its
-        // connect; tell it now. One that comes up later reads the slot itself.
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(fauna_protocol::push::PresenceRequest {
+                device_id: device_id.into(),
+                stand_in: true,
+                ..Default::default()
+            });
+        self
+    }
+
+    /// What every (re)connect of this client announces — the last
+    /// [`Self::set_push_presence`] or [`Self::set_push_presence_stand_in`] —
+    /// or `None` for a client that announces nothing.
+    pub fn push_presence(&self) -> Option<fauna_protocol::push::PresenceRequest> {
+        self.push_presence
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    async fn announce_push_presence(&self, device_id: String, stand_in: bool) {
+        let announce = fauna_protocol::push::PresenceRequest {
+            device_id,
+            stand_in,
+            ..Default::default()
+        };
+        *self
+            .push_presence
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(announce.clone());
+        // A connection already up announced nothing (or an older announce) at
+        // its connect; tell it now. One that comes up later reads the slot itself.
         let live = self.dispatcher.read().await.as_ref().map(Arc::clone);
         if let Some(dispatcher) = live {
-            tokio::spawn(crate::reconnect::announce_presence(dispatcher, device_id));
+            tokio::spawn(crate::reconnect::announce_presence(dispatcher, announce));
         }
     }
 
@@ -395,6 +500,12 @@ impl NestClient {
     /// `recv().await` in a loop.
     pub fn subscribe_pushes(&self) -> tokio::sync::broadcast::Receiver<fauna_protocol::PushEvent> {
         self.pushes.subscribe()
+    }
+
+    /// How many [`Self::subscribe_pushes`] receivers are alive — whether a
+    /// consumer is still listening on this client's push stream.
+    pub fn push_receiver_count(&self) -> usize {
+        self.pushes.receiver_count()
     }
 
     /// Subscribe to one specific push kind. Filtering happens broker-side.
@@ -860,6 +971,14 @@ impl fauna_protocol::RpcRequester for NestClient {
     {
         NestClient::request(self, kind, payload).await
     }
+
+    fn live_connection_id(&self) -> Option<u64> {
+        NestClient::live_connection(self)
+    }
+
+    fn nest_info_memo(&self) -> Option<&fauna_protocol::NestInfoMemo> {
+        Some(&self.nest_info)
+    }
 }
 
 /// A [`NestClient`] whose holder is its only owner — nothing else ever calls
@@ -884,6 +1003,14 @@ impl fauna_protocol::RpcRequester for SelfConnecting {
     {
         self.0.ensure_connected().await?;
         NestClient::request(&self.0, kind, payload).await
+    }
+
+    fn live_connection_id(&self) -> Option<u64> {
+        self.0.live_connection()
+    }
+
+    fn nest_info_memo(&self) -> Option<&fauna_protocol::NestInfoMemo> {
+        Some(&self.0.nest_info)
     }
 }
 
@@ -1202,8 +1329,20 @@ mod tests {
             Some(crate::error::SessionEndingVerdict::SignInRefused)
         );
 
-        // A dial-time terminal refusal is not a refresh: the last-refusal
-        // channel does not rename it.
+        // A dial-time stop on the same refusal — the reconnect after a nest
+        // restart that forgot this identity (a factory reset), whose mint
+        // never saw a 4401 — reads the same channel when the mint flattened
+        // it, so it too ends as the typed refusal.
+        let flattened = NestClientError::Auth("(403) fauna.auth.not_registered".into());
+        let stop = SupervisorStop::of(&Err(S::TerminalRefusal(flattened)), owned.auth()).error();
+        assert_eq!(
+            stop.session_ending_verdict(),
+            Some(crate::error::SessionEndingVerdict::SignInRefused),
+            "{stop:?}"
+        );
+
+        // A dial-time terminal refusal the mint did not flatten keeps its own
+        // name: the last-refusal channel does not rename it.
         let stop = SupervisorStop::of(
             &Err(S::TerminalRefusal(NestClientError::SubprotocolMismatch)),
             owned.auth(),
@@ -1212,6 +1351,133 @@ mod tests {
         assert!(
             matches!(stop, NestClientError::SubprotocolMismatch),
             "{stop:?}"
+        );
+    }
+
+    /// A bearer that mints until the nest revokes it, then meets `.1` on every
+    /// re-mint — the degraded nest's `fauna.nest.outdated`, or the 426 of a nest
+    /// upgraded past this app: `LaunchMachineBearer`'s and `WsChallengeBearer`'s
+    /// shape now that each carries both verdicts typed.
+    struct RefusedAfterRevoke(std::sync::atomic::AtomicBool, fauna_nest_http::ApiError);
+
+    #[async_trait::async_trait]
+    impl fauna_nest_http::BearerSource for RefusedAfterRevoke {
+        async fn bearer(&self) -> Result<String, fauna_nest_http::ApiError> {
+            if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                Err(self.1.clone())
+            } else {
+                Ok("tok".into())
+            }
+        }
+
+        async fn notify_401(&self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// **A signed-in session whose nest restarts into its degraded needs-update
+    /// mode ends, typed, instead of redialling for as long as the nest stays
+    /// stale** (`version-compatibility.md` § Dimension 4; § 2.2: the degraded
+    /// nest rejects connects). The degraded nest refuses the bearer upgrade with
+    /// `401`; the re-mint meets `fauna.nest.outdated`; the supervisor stops, and
+    /// its stop names [`crate::SessionEndingVerdict::NestOutdated`] — the verdict
+    /// every app routes to its non-retry update surface.
+    #[tokio::test]
+    async fn a_nest_restarted_degraded_ends_the_supervisor_as_needs_update() {
+        let (err, stop) =
+            session_stop_after_a_refused_re_mint(fauna_nest_http::ApiError::NestOutdated).await;
+        assert_eq!(
+            err.session_ending_verdict(),
+            Some(crate::error::SessionEndingVerdict::NestOutdated),
+            "{err:?}"
+        );
+        assert_eq!(stop, Some(crate::error::SessionEndingVerdict::NestOutdated));
+    }
+
+    /// **The other direction: a signed-in session whose nest is upgraded past
+    /// this app ends, typed, instead of redialling for ever** (`version-
+    /// compatibility.md` § Dimension 4). The revoke forces a mint-first
+    /// reconnect, and the mint's own upgrade meets the nest's 426 — before the
+    /// typed carry it rode `ApiError::Transport`, which the supervisor backs off
+    /// on at the 60 s ceiling for as long as the app stays old. The stop names
+    /// [`crate::SessionEndingVerdict::AppOutdated`], the same verdict a
+    /// connect-first reconnect's 426 earns.
+    #[tokio::test]
+    async fn a_nest_upgraded_past_the_app_ends_a_mint_first_reconnect_as_app_outdated() {
+        let (err, stop) =
+            session_stop_after_a_refused_re_mint(fauna_nest_http::ApiError::SubprotocolMismatch)
+                .await;
+        assert!(
+            matches!(err, NestClientError::SubprotocolMismatch),
+            "{err:?}"
+        );
+        assert_eq!(stop, Some(crate::error::SessionEndingVerdict::AppOutdated));
+    }
+
+    /// Drive a signed-in session whose bearer the nest revokes (a `401` on every
+    /// upgrade) and whose every re-mint is then refused with `refusal`; return
+    /// the request's error and the recorded stop's verdict. The deadline is an
+    /// hour, so only the recorded stop can end the request; the outer timeout is
+    /// a hang guard for a regression, not a timing assertion (convention 14).
+    async fn session_stop_after_a_refused_re_mint(
+        refusal: fauna_nest_http::ApiError,
+    ) -> (NestClientError, Option<crate::error::SessionEndingVerdict>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await; // drain the upgrade request
+                let _ = stream
+                    .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+        let bearer: Arc<dyn fauna_nest_http::BearerSource> = Arc::new(RefusedAfterRevoke(
+            std::sync::atomic::AtomicBool::new(false),
+            refusal,
+        ));
+        let client = NestClient::with_auth(Arc::new(AuthClient::bearer_only(
+            format!("http://{addr}"),
+            [0x5au8; 32],
+            bearer,
+            reqwest::Client::new(),
+        )));
+        client
+            .connect()
+            .await
+            .expect("connect (the first mint succeeds)");
+
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            client.request_with_deadline::<NoPayload, fauna_protocol::Value>(
+                "fauna.nest.info",
+                NoPayload {},
+                std::time::Duration::from_secs(3600),
+            ),
+        )
+        .await
+        .expect("the supervisor kept redialling a nest it can never mint against")
+        .expect_err("a version-skewed nest serves no session");
+        let stop = client
+            .supervisor_stop()
+            .and_then(|s| s.session_ending_verdict());
+        (err, stop)
+    }
+
+    /// The `4401` twin: a live session's bearer is revoked by close code and the
+    /// re-mint meets `fauna.nest.outdated` — the supervisor already stops on a
+    /// failed `4401` refresh, and the stop must name the needs-update verdict.
+    #[test]
+    fn a_re_mint_refused_as_outdated_after_4401_names_the_needs_update_verdict() {
+        use fauna_ws_substrate::SupervisorError as S;
+        let client = unreachable_bearer_only_client();
+        let typed = NestClientError::Rpc(fauna_protocol::RpcError::nest_outdated());
+        let stop = SupervisorStop::of(&Err(S::AuthRefresh(typed)), client.auth()).error();
+        assert_eq!(
+            stop.session_ending_verdict(),
+            Some(crate::error::SessionEndingVerdict::NestOutdated)
         );
     }
 

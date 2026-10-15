@@ -21,7 +21,7 @@
 //!   no set has two engines writing it from one device id. A presence is a
 //!   *delivery seat* — it pulls the head and hydrates on open — so an own set
 //!   where this device holds no place, or a place with delivery switched off,
-//!   gets none (`on-demand-files.md` § Apple File Provider binding, the
+//!   gets none (`on-demand-files-apple.md` § Apple File Provider binding, the
 //!   mode-free rule). A set shared WITH the account is a delivery seat by the
 //!   membership itself: the device roster is the owner's, a member's device
 //!   holds no row in it, and accepting the share is the member's yes
@@ -52,7 +52,7 @@ use fauna_core::folder_keys::{ActorScopedFolderRef, FolderRef};
 use serde::{Deserialize, Serialize};
 
 /// How the account holds a set. Both roles join the plan
-/// (`on-demand-files.md` § Shared sets on a capability host, decision 3);
+/// (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 3);
 /// [`PresenceRole::joins_plan`] stays the one seam a role is admitted or
 /// withheld at, so the plan's signature never changes with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,7 +112,7 @@ pub struct PresenceSet {
 
 /// The display name of a set shared with the account: the set's own name with
 /// its owner's label, because a member can hold a set that wears the name of
-/// one of their own (`on-demand-files.md` § Shared sets on a capability host,
+/// one of their own (`on-demand-files-shared-sets.md` § Shared sets on a capability host,
 /// decision 3). `owner` is the owner's account display label (the handle, else
 /// the short id) for a same-nest set; a cross-nest set's custody record names
 /// no owner, so it carries its home nest's host instead.
@@ -128,7 +128,7 @@ pub fn shared_display_name(name: &str, owner: &str) -> String {
 /// Every set the account holds, as the plan takes it — the one mapping from
 /// the member-visible folder list and the account's folder-key custody to
 /// [`PresenceSet`]s, shared by every set-level platform so none grows its own
-/// (`on-demand-files.md` § Shared sets on a capability host, decision 3).
+/// (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 3).
 ///
 /// - `rows` — this nest's `fauna.folders.list` with `include_shared_with_me`.
 /// - `custody` — the account's folder-key custody.
@@ -193,7 +193,7 @@ pub fn held_sets(
         let name = record.set_name.as_deref()?;
         // The owner's canonical `handle@domain`, as the home nest stamped it
         // and this member's own nest verified it; the home nest's host until
-        // that pair lands (`on-demand-files.md` § Shared sets on a capability
+        // that pair lands (`on-demand-files-shared-sets.md` § Shared sets on a capability
         // host, decision 3; `federation.md` § … *The cross-nest owner label*).
         let owner = fauna_core::format::qualified_handle(
             record.owner_handle.as_deref(),

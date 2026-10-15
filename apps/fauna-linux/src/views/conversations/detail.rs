@@ -16,7 +16,7 @@
 //! bubbles whose `subject_line.is_some()`.
 
 use fauna_ui_ids as ids;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -34,9 +34,17 @@ use crate::settings::member_review::Roster;
 
 use super::{
     add_participant_overlay, compose_bar::ComposeBar, message_bubble,
-    recipient_picker::RecipientPicker, rename_overlay, room_settings_overlay, subject_divider,
-    thread_header::ThreadHeader,
+    recipient_picker::RecipientPicker, rename_overlay, room_labelers::LabelerSeams,
+    room_settings_overlay, subject_divider, thread_header::ThreadHeader,
 };
+
+/// The room editor's catalog machine has no page of its own to repaint on a
+/// notification: every gesture it issues repaints from its own completion.
+struct NoopLabelerObserver;
+
+impl fauna_labeler_catalog_machine::LabelerCatalogObserver for NoopLabelerObserver {
+    fn on_changed(&self) {}
+}
 
 pub struct ConversationDetail {
     pub root: gtk::Box,
@@ -90,6 +98,10 @@ pub struct ConversationDetail {
     /// old and new selected bubbles still repaint their `message-selected`
     /// class / `selected` timestamp attribute.
     selected_message_id_rendered: RefCell<Option<MessageId>>,
+    /// [`crate::content_policy::epoch`] as of the last render — a bubble's
+    /// content-policy verdict is decided at build time, so when the viewer's own
+    /// thresholds move (a reconnect re-read) every reused bubble must rebuild.
+    content_policy_epoch_rendered: Cell<u64>,
     /// The `SearchNav::Mail` selected message already brought into view —
     /// once per selection, never per tick, so a per-tick bring-into-view
     /// never fights the user's own scrolling (windows
@@ -121,6 +133,11 @@ pub struct ConversationDetail {
     add_participant_dialog: adw::MessageDialog,
     add_participant_picker: RecipientPicker,
     add_participant_visible: std::cell::Cell<bool>,
+    // ── Room settings editor ──────────────────────────────────
+    /// The open policy editor, if any — held so each snapshot tick can repaint
+    /// its pending-invitation section from the live detail (the editor is built
+    /// once, at open).
+    room_editor: Rc<RefCell<Option<Rc<room_settings_overlay::RoomSettingsEditor>>>>,
 }
 
 impl ConversationDetail {
@@ -232,12 +249,38 @@ impl ConversationDetail {
                 move || {
                     let m = m2.clone();
                     rt2.spawn(async move {
-                        m.resolve_recipient().await;
-                        m.accept_current_recipient_chip();
+                        crate::conversations::host::resolve_accept_and_refresh(&m).await;
                     });
                 },
             )
         };
+        // `recipient-picker-home-nest-toggle` — only this composer founds a
+        // room; the add-participant dialog and the folder share dialog reuse the
+        // widget without it. A local, synchronous manager write.
+        {
+            let m = manager.clone();
+            new_thread_picker.enable_home_nest_toggle(move |include| {
+                m.set_new_thread_home_nest(include);
+            });
+        }
+        // A suggestion click is `accept_suggestion(i)` — the Enter path run over
+        // that row's spelling — and a chip's × is `remove_recipient_chip(i)`
+        // (`conversations.md` § Where logic lives → *Recipient suggestions*).
+        {
+            let m = manager.clone();
+            let rt = rt.clone();
+            new_thread_picker.connect_suggestion_accepted(move |i| {
+                let m = m.clone();
+                rt.spawn(async move {
+                    m.accept_suggestion(i).await;
+                    m.refresh_list_send(None).await;
+                });
+            });
+        }
+        {
+            let m = manager.clone();
+            new_thread_picker.connect_chip_removed(move |i| m.remove_recipient_chip(i));
+        }
         new_thread_box.append(&new_thread_picker.root);
 
         let group_hint = gtk::Label::new(Some(
@@ -511,11 +554,15 @@ impl ConversationDetail {
         // the editor closes only when all of them landed, and otherwise stays
         // open with the page's `error-message` saying which was refused
         // (`ui/conversations.md` § Element IDs, the `room_settings` sub-page).
+        let room_editor: Rc<RefCell<Option<Rc<room_settings_overlay::RoomSettingsEditor>>>> =
+            Rc::new(RefCell::new(None));
         {
             let m = manager.clone();
             let id = detail_thread_id.clone();
             let stack_for_dialog = stack.clone();
             let rt = rt.clone();
+            let room_editor_for_open = Rc::clone(&room_editor);
+            let client_for_room_editor = Rc::clone(&client);
             thread_header.on_room_settings(move || {
                 let Some(tid) = id.borrow().clone() else {
                     return;
@@ -525,17 +572,25 @@ impl ConversationDetail {
                 };
                 let m_for_save = m.clone();
                 let rt_for_save = rt.clone();
+                let m_for_withdraw = m.clone();
+                let rt_for_withdraw = rt.clone();
+                let tid_for_withdraw = tid.clone();
+                let m_for_leave = m.clone();
+                let rt_for_leave = rt.clone();
+                let tid_for_leave = tid.clone();
+                let client_for_labelers = Rc::clone(&client_for_room_editor);
+                let rt_for_labelers = rt.clone();
                 // Captured for the overlay's own index resolution; Save
                 // below re-reads the LIVE list instead, so a member who left
                 // while the overlay sat open cannot be written into the
                 // room's signed policy.
                 let participants = detail.participants.clone();
-                let editor_slot: Rc<
-                    RefCell<Option<Rc<room_settings_overlay::RoomSettingsEditor>>>,
-                > = Rc::new(RefCell::new(None));
+                let editor_slot = Rc::clone(&room_editor_for_open);
                 let slot_for_save = Rc::clone(&editor_slot);
-                let editor =
-                    room_settings_overlay::show(&stack_for_dialog, &detail, move |staged| {
+                let editor = room_settings_overlay::show(
+                    &stack_for_dialog,
+                    &detail,
+                    move |staged| {
                         let live = m_for_save
                             .thread_detail(tid.clone())
                             .map(|d| d.participants)
@@ -573,7 +628,45 @@ impl ConversationDetail {
                                 }
                             },
                         );
-                    });
+                    },
+                    // `room-pending-invite-withdraw-button[i]` — acts at once,
+                    // outside Save's staged set. One manager call: it re-reads
+                    // the list on success (the row leaves the editor on the
+                    // next tick) and puts a refusal on `error-message`.
+                    {
+                        let m = m_for_withdraw;
+                        let rt = rt_for_withdraw;
+                        let tid = tid_for_withdraw;
+                        move |invitee_actor_hex| {
+                            let m = m.clone();
+                            let tid = tid.clone();
+                            rt.spawn(async move {
+                                m.withdraw_room_invite(tid, invitee_actor_hex).await;
+                            });
+                        }
+                    },
+                    // `room-leave-confirm` → `manager.leave_room`: one verb,
+                    // the class picks the door inside the backend. The thread
+                    // stays in the leaver's list; a refusal rides the page's
+                    // `error-message`.
+                    move || {
+                        let m = m_for_leave.clone();
+                        let tid = tid_for_leave.clone();
+                        rt_for_leave.spawn(async move {
+                            m.leave_room(tid).await;
+                        });
+                    },
+                    // The catalog the labeler section reads and inspects — a
+                    // machine of its own, so opening a labeler here never
+                    // leaves the Community labelers page's inspect panel open.
+                    LabelerSeams {
+                        machine: crate::views::personalization::build_machine(
+                            &client_for_labelers,
+                            Arc::new(NoopLabelerObserver),
+                        ),
+                        rt: rt_for_labelers,
+                    },
+                );
                 *editor_slot.borrow_mut() = editor;
             });
         }
@@ -625,6 +718,21 @@ impl ConversationDetail {
                 move || m.cancel_add_participant()
             },
         );
+
+        {
+            let m = manager.clone();
+            let rt = rt.clone();
+            add_participant_picker.connect_suggestion_accepted(move |i| {
+                let m = m.clone();
+                rt.spawn(async move {
+                    m.accept_suggestion(i).await;
+                });
+            });
+        }
+        {
+            let m = manager.clone();
+            add_participant_picker.connect_chip_removed(move |i| m.remove_recipient_chip(i));
+        }
 
         {
             let m = manager.clone();
@@ -811,6 +919,7 @@ impl ConversationDetail {
             latest_snapshot_by_id: Rc::new(RefCell::new(HashMap::new())),
             attachment_residency_by_id: RefCell::new(HashMap::new()),
             selected_message_id_rendered: RefCell::new(None),
+            content_policy_epoch_rendered: Cell::new(crate::content_policy::epoch()),
             brought_into_view_message_id: RefCell::new(None),
             detail_compose,
             detail_thread_id,
@@ -824,17 +933,20 @@ impl ConversationDetail {
             add_participant_dialog,
             add_participant_picker,
             add_participant_visible: std::cell::Cell::new(false),
+            room_editor,
         }
     }
 
     /// Render the detail pane from the current snapshot + active thread
     /// detail. Called by the orchestrator on every observer tick.
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
         snapshot: &ConversationsSnapshot,
         active_detail: Option<&ThreadDetail>,
         self_handle: &str,
         served_elsewhere: bool,
+        state_needs_newer_app: bool,
         receive_stopped: bool,
         unopenable_mail: u32,
     ) {
@@ -871,13 +983,34 @@ impl ConversationDetail {
                 .and_then(|p| p.chips.first())
                 .and_then(|addr| addr.rail());
             // A new thread answers nothing, so there is no reply to preview.
+            // A send that founds a community room is the `room.create`
+            // ceremony — the same discriminant tui carries as
+            // `SendNewThread::founds_room`.
+            let founds_room = c.recipient_picker.as_ref().is_some_and(|p| {
+                p.include_home_nest
+                    && fauna_conversations::prospective_room_class(&p.chips, true)
+                        == Some(fauna_conversations::RoomClass::Community)
+            });
             self.new_thread_compose
-                .render(c, None, new_thread_rail, None);
+                .render(c, None, new_thread_rail, None, founds_room);
             // Group-conversation hint surfaces once we have ≥2 chips — same
             // threshold as Windows ConversationsPage.xaml.cs:227.
             self.group_hint.set_visible(chip_count >= 2);
         } else {
             self.group_hint.set_visible(false);
+        }
+
+        // ── room settings editor ──────────────────────────────
+        // Repaint the open editor's pending-invitation section off the live
+        // detail; forget an editor whose window has gone.
+        {
+            let open = self.room_editor.borrow().clone();
+            if let Some(editor) = open {
+                match active_detail {
+                    Some(d) if editor.is_open() => editor.sync_live(d),
+                    _ => *self.room_editor.borrow_mut() = None,
+                }
+            }
         }
 
         // ── add-participant overlay ───────────────────────────
@@ -939,8 +1072,20 @@ impl ConversationDetail {
                 *self.selected_message_id_rendered.borrow_mut() = None;
                 *self.brought_into_view_message_id.borrow_mut() = None;
                 *self.bubbles_thread_id.borrow_mut() = Some(d.thread_id.clone());
+                // A thread just opened: re-derive its compose's list-send view
+                // (a thread with one of the account's own lists as its mail
+                // recipient shows the same notes as the new-thread compose).
+                let m = crate::conversations::manager();
+                let tid = d.thread_id.clone();
+                self.rt.spawn(async move {
+                    m.refresh_list_send(Some(tid)).await;
+                });
             }
             let prev_selected = self.selected_message_id_rendered.borrow().clone();
+            let policy_changed = self
+                .content_policy_epoch_rendered
+                .replace(crate::content_policy::epoch())
+                != crate::content_policy::epoch();
 
             // Reply-all is offered only on recipient-selection rails (mail);
             // gated per bubble via the shared capability.
@@ -987,8 +1132,11 @@ impl ConversationDetail {
                 self.attachment_residency_by_id
                     .borrow_mut()
                     .insert(msg.message_id.clone(), residency);
-                let changed =
-                    is_new || content_changed || residency_changed || (is_selected != was_selected);
+                let changed = is_new
+                    || content_changed
+                    || residency_changed
+                    || policy_changed
+                    || (is_selected != was_selected);
 
                 if let Some(s) = &msg.subject_line {
                     if is_new
@@ -1101,6 +1249,7 @@ impl ConversationDetail {
                 Some(&d.capabilities),
                 Some(d.rail),
                 reply_preview.as_ref(),
+                false,
             );
         } else {
             // Off the thread page (empty / new-thread) — drop the thread
@@ -1118,6 +1267,7 @@ impl ConversationDetail {
             snapshot,
             active_detail,
             served_elsewhere,
+            state_needs_newer_app,
             receive_stopped,
             unopenable_mail,
         );
@@ -1158,11 +1308,22 @@ fn page_error_text(
     snapshot: &ConversationsSnapshot,
     active_detail: Option<&ThreadDetail>,
     served_elsewhere: bool,
+    state_needs_newer_app: bool,
     receive_stopped: bool,
     unopenable_mail: u32,
 ) -> Option<String> {
     if served_elsewhere {
         return Some(crate::i18n::strings::conversations::errors::SERVED_ELSEWHERE.to_string());
+    }
+    // The sixth standing truth (`ui/conversations.md` § Errors & edge cases):
+    // a newer build wrote this account's conversation state with a breaking
+    // change (`ConversationsManager::engine_state_needs_newer_app`). Same kind
+    // of truth as the role refusal — no engine, nothing to fail, never cleared
+    // by a gesture — so it sits beside it above the dead rail.
+    if state_needs_newer_app {
+        return Some(
+            crate::i18n::strings::conversations::errors::STATE_NEEDS_NEWER_APP.to_string(),
+        );
     }
     if receive_stopped {
         return Some(crate::i18n::strings::conversations::errors::RECEIVE_STOPPED.to_string());
@@ -1311,8 +1472,8 @@ mod page_error_tests {
             ..Default::default()
         });
 
-        let shown =
-            page_error_text(&snap, None, false, false, 0).expect("snapshot.error must surface");
+        let shown = page_error_text(&snap, None, false, false, false, 0)
+            .expect("snapshot.error must surface");
         assert!(
             shown.contains("no key package published"),
             "the backend's own reason must reach the user, got {shown:?}"
@@ -1340,12 +1501,44 @@ mod page_error_tests {
             ..Default::default()
         });
 
-        let shown = page_error_text(&snap, None, true, false, 0)
+        let shown = page_error_text(&snap, None, true, false, false, 0)
             .expect("the standing refusal must surface even with other errors stamped");
         assert_eq!(
             shown,
             crate::i18n::strings::conversations::errors::SERVED_ELSEWHERE,
             "got {shown:?}"
+        );
+    }
+
+    /// The sixth standing truth on `error-message` (`ui/conversations.md` §
+    /// Errors & edge cases): a newer build's conversation state outranks
+    /// `snapshot.error`, a failed send and a dead receive rail, and yields only
+    /// to the role refusal. Mirrors tui's `state_needs_newer_app` arm.
+    #[test]
+    fn state_needs_newer_app_outranks_everything_but_served_elsewhere() {
+        let mut snap = empty_snapshot();
+        snap.error = Some(LocalizedText::key_arg(
+            "conversations.unified.error_add_participant",
+            "message",
+            "no key package published",
+        ));
+        snap.new_thread_compose = Some(ComposeState {
+            send_state: SendState::failed("send failed"),
+            ..Default::default()
+        });
+
+        let shown = page_error_text(&snap, None, false, true, true, 2)
+            .expect("the standing notice must surface even with other errors stamped");
+        assert_eq!(
+            shown,
+            crate::i18n::strings::conversations::errors::STATE_NEEDS_NEWER_APP,
+            "got {shown:?}"
+        );
+        let under_role_refusal = page_error_text(&snap, None, true, true, false, 0)
+            .expect("the role refusal still ranks first");
+        assert_eq!(
+            under_role_refusal,
+            crate::i18n::strings::conversations::errors::SERVED_ELSEWHERE
         );
     }
 
@@ -1369,7 +1562,7 @@ mod page_error_tests {
             ..Default::default()
         });
 
-        let shown = page_error_text(&snap, None, false, true, 0)
+        let shown = page_error_text(&snap, None, false, false, true, 0)
             .expect("a stopped receive rail must surface even with other errors stamped");
         assert_eq!(
             shown,
@@ -1377,7 +1570,7 @@ mod page_error_tests {
             "got {shown:?}"
         );
 
-        let shown_under_served_elsewhere = page_error_text(&snap, None, true, true, 0)
+        let shown_under_served_elsewhere = page_error_text(&snap, None, true, false, true, 0)
             .expect("served_elsewhere still outranks a stopped receive rail");
         assert_eq!(
             shown_under_served_elsewhere,
@@ -1401,7 +1594,7 @@ mod page_error_tests {
         );
 
         let snap = empty_snapshot();
-        let shown = page_error_text(&snap, None, false, manager.receive_stopped(), 0)
+        let shown = page_error_text(&snap, None, false, false, manager.receive_stopped(), 0)
             .expect("a receive loop that died by panic must surface on error-message");
         assert_eq!(
             shown,
@@ -1415,7 +1608,7 @@ mod page_error_tests {
             "a newer receive loop over the same manager must retire the notice"
         );
         assert_eq!(
-            page_error_text(&snap, None, false, manager.receive_stopped(), 0),
+            page_error_text(&snap, None, false, false, manager.receive_stopped(), 0),
             None,
             "the retired notice must not keep surfacing"
         );
@@ -1434,8 +1627,8 @@ mod page_error_tests {
             ..Default::default()
         });
 
-        let shown =
-            page_error_text(&snap, None, false, false, 0).expect("a failed send must surface");
+        let shown = page_error_text(&snap, None, false, false, false, 0)
+            .expect("a failed send must surface");
         assert!(
             shown.contains("nest rejected fauna.email.send"),
             "the backend's own reason must reach the user, got {shown:?}"
@@ -1451,7 +1644,7 @@ mod page_error_tests {
         let snap = empty_snapshot();
         let detail = thread_detail_with_send_state(SendState::failed("boom"));
 
-        let shown = page_error_text(&snap, Some(&detail), false, false, 0)
+        let shown = page_error_text(&snap, Some(&detail), false, false, false, 0)
             .expect("the selected thread's failure surfaces");
         assert!(shown.contains("boom"), "got {shown:?}");
         assert!(
@@ -1463,7 +1656,7 @@ mod page_error_tests {
     #[test]
     fn no_error_and_no_failed_send_shows_nothing() {
         let snap = empty_snapshot();
-        assert_eq!(page_error_text(&snap, None, false, false, 0), None);
+        assert_eq!(page_error_text(&snap, None, false, false, false, 0), None);
     }
 
     /// The floor of the stack (`ui/conversations.md` § Errors & edge cases →
@@ -1474,12 +1667,12 @@ mod page_error_tests {
     fn unopenable_mail_shows_only_when_nothing_else_present() {
         let snap = empty_snapshot();
         assert_eq!(
-            page_error_text(&snap, None, false, false, 0),
+            page_error_text(&snap, None, false, false, false, 0),
             None,
             "sanity: nothing skipped shows no error"
         );
 
-        let shown = page_error_text(&snap, None, false, false, 2)
+        let shown = page_error_text(&snap, None, false, false, false, 2)
             .expect("skipped unopenable mail must surface on error-message");
         assert!(
             shown.starts_with("2 ") && shown.contains("could not be opened"),
@@ -1498,7 +1691,7 @@ mod page_error_tests {
             ..Default::default()
         });
 
-        let shown = page_error_text(&snap, None, false, false, 2)
+        let shown = page_error_text(&snap, None, false, false, false, 2)
             .expect("a failed send must surface over the unopenable-mail floor");
         assert!(
             shown.contains("send failed"),
@@ -1509,7 +1702,7 @@ mod page_error_tests {
     #[test]
     fn served_elsewhere_outranks_unopenable_mail() {
         let snap = empty_snapshot();
-        let shown = page_error_text(&snap, None, true, false, 2)
+        let shown = page_error_text(&snap, None, true, false, false, 2)
             .expect("the standing refusal must surface over the unopenable-mail floor");
         assert_eq!(
             shown,
@@ -1577,7 +1770,15 @@ mod member_review_tests {
                 Rc::clone(&roster),
             );
             let detail = manager.thread_detail(thread).expect("the group is open");
-            pane.render(&manager.snapshot(), Some(&detail), "", false, false, 0);
+            pane.render(
+                &manager.snapshot(),
+                Some(&detail),
+                "",
+                false,
+                false,
+                false,
+                0,
+            );
 
             let root: gtk::Widget = pane.root.clone().upcast();
             assert!(

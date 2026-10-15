@@ -59,7 +59,7 @@ async fn router_and_state() -> (RpcRouter, Arc<AppState>) {
 /// pre-activation state), which would make every routing assertion vacuous.
 async fn router_and_state_with_resolver() -> (RpcRouter, Arc<AppState>, Arc<HostResolver>) {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
-    let resolver = Arc::new(HostResolver::new("example.com".to_string()));
+    let resolver = Arc::new(HostResolver::new("example.net".to_string()));
     let mut st = AppState::for_test(db);
     st.host_resolver = Some(resolver.clone());
     let mut b = RpcRouter::builder();
@@ -81,7 +81,7 @@ async fn router_and_state_with_web_site() -> (
     tempfile::TempDir,
 ) {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
-    let resolver = Arc::new(HostResolver::new("example.com".to_string()));
+    let resolver = Arc::new(HostResolver::new("example.net".to_string()));
     let blobs = tempfile::tempdir().unwrap();
     let store = Arc::new(fauna_nest::blob_store::DiskBlobStore::new(blobs.path()).unwrap());
     let mut st = AppState::for_test(db.clone());
@@ -1681,7 +1681,7 @@ async fn router_and_state_with_gated_web_site_and_deadline(
     tempfile::TempDir,
 ) {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
-    let resolver = Arc::new(HostResolver::new("example.com".to_string()));
+    let resolver = Arc::new(HostResolver::new("example.net".to_string()));
     let blobs = tempfile::tempdir().unwrap();
     let gated = Arc::new(GatedBlobs {
         inner: fauna_nest::blob_store::DiskBlobStore::new(blobs.path()).unwrap(),

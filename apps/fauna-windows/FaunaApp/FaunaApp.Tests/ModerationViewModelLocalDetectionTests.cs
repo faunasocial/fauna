@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Xunit;
+using FaunaApp.Core.Helpers;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
 using uniffi.fauna_client_moderation;
@@ -78,6 +79,43 @@ public class ModerationViewModelLocalDetectionTests
         Assert.Equal(72, localRow.ConfidencePercent);              // (720 + 5) / 10, shared half-up rounding
     }
 
+    /// <summary>The badge's automation attributes (moderation.md § Element IDs → <i>Queue
+    /// row facts</i>): <c>confidence</c> is the painted whole percent with its <c>%</c>,
+    /// <c>action</c> the resolved action label, absent on a local detection. UIA gives the
+    /// badge one HelpText, so they ride one <see cref="AutomationAttributePack"/>, and the
+    /// shared category key rides with them so a local row's pack still holds two pairs:
+    /// the FlaUI bridge reads a lone pair as a bare value
+    /// (<c>flaui-bridge/PackedAttr.cs</c>), which would answer <c>action</c> with the
+    /// confidence pair instead of nothing.</summary>
+    [Fact]
+    public async Task Load_BadgeAttributes_PackConfidenceAndAction_LocalRowOmitsAction()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextModerationActions = new List<FfiObligationAction>
+            {
+                ServerRow("aa", "phishing", action: 2, perMille: 880, ts: 200),
+            },
+        };
+        var local = new FakeLocal(LocalRow("bb", "spam", perMille: 720, ts: 100));
+        var vm = new ModerationViewModel(rpc, local);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        var server = vm.Actions[0];
+        Assert.Equal(
+            AutomationAttributePack.Pack(("category", "phishing"), ("confidence", "88%"), ("action", server.ActionLabel)),
+            server.BadgeAttributes);
+
+        var localRow = vm.Actions[1];
+        Assert.Equal(
+            AutomationAttributePack.Pack(("category", "spam"), ("confidence", "72%")),
+            localRow.BadgeAttributes);
+        Assert.DoesNotContain("action=", localRow.BadgeAttributes);
+        Assert.True(localRow.BadgeAttributes.Split(';').Length >= 2,
+            $"a lone pair reads back as a bare value on the bridge: {localRow.BadgeAttributes}");
+    }
+
     [Fact]
     public async Task Load_DedupesByContentId_ServerRowWins()
     {
@@ -116,7 +154,6 @@ public class ModerationViewModelLocalDetectionTests
         // A local detection has no nest obligation to train — the correction removes the
         // client-side false-positive flag and repaints (moderation.md § State: held client-side).
         Assert.Contains("bb", local.Removed);
-        Assert.Null(rpc.LastTrain);
         Assert.Empty(vm.Actions);           // refreshed → the removed flag is gone
     }
 
@@ -131,15 +168,14 @@ public class ModerationViewModelLocalDetectionTests
             },
         };
         var local = new FakeLocal();  // empty local store
-        var vm = new ModerationViewModel(rpc, local);
+        var calls = new List<(string ContentId, bool IsSpam)>();
+        var vm = new ModerationViewModel(rpc, local, new RecordingCorrectionSeam(calls));
         await vm.LoadCommand.ExecuteAsync(null);
 
         await vm.TrainCommand.ExecuteAsync(vm.Actions[0]);
 
-        // A server row still trains the caller's Bayesian model via the nest.
-        Assert.NotNull(rpc.LastTrain);
-        Assert.Equal("srv", rpc.LastTrain!.Value.ContentId);
-        Assert.Equal("ham", rpc.LastTrain!.Value.Verdict);
+        // A server row runs the shared correction flow (not-spam) and removes no local flag.
+        Assert.Equal(new[] { ("srv", false) }, calls);
         Assert.Empty(local.Removed);
     }
 }

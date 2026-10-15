@@ -84,11 +84,7 @@ impl LocalizedText {
         let template = lookup(&self.key)
             .map(|s| s.as_ref().to_string())
             .unwrap_or_else(|| self.key.clone());
-        let mut out = template;
-        for (k, v) in &self.args {
-            out = out.replace(&format!("{{{}}}", k), v);
-        }
-        out
+        substitute(&template, &self.args, |v| v.to_string())
     }
 
     /// [`resolve`](Self::resolve), but each **argument** is first put through
@@ -120,14 +116,11 @@ impl LocalizedText {
         let template = lookup(&self.key)
             .map(|s| s.as_ref().to_string())
             .unwrap_or_else(|| self.key.clone());
-        let mut out = template;
-        for (k, v) in &self.args {
-            let value = lookup(v)
+        substitute(&template, &self.args, |v| {
+            lookup(v)
                 .map(|s| s.as_ref().to_string())
-                .unwrap_or_else(|| v.clone());
-            out = out.replace(&format!("{{{}}}", k), &value);
-        }
-        out
+                .unwrap_or_else(|| v.to_string())
+        })
     }
 
     /// A compact, redaction-safe rendering for logs: the i18n `key` followed by
@@ -150,6 +143,38 @@ impl LocalizedText {
             .join(", ");
         format!("{} ({rendered})", self.key)
     }
+}
+
+/// Fill `{name}` placeholders in one left-to-right pass over `template`.
+///
+/// A sequential `str::replace` per arg re-scans text an earlier arg already
+/// inserted, so an untrusted value containing `{other}` would expand another
+/// arg — and, with `HashMap` order, differently from run to run. Here a
+/// substituted value is never re-scanned. An unknown `{name}` (or a lone `{`)
+/// is left as written.
+fn substitute(
+    template: &str,
+    args: &HashMap<String, String>,
+    value: impl Fn(&str) -> String,
+) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find('}').map(|close| (close, &after[..close])) {
+            Some((close, name)) if args.contains_key(name) => {
+                out.push_str(&value(&args[name]));
+                rest = &after[close + 1..];
+            }
+            _ => {
+                out.push('{');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -218,6 +243,20 @@ mod tests {
             }),
             "Hi Ada!"
         );
+    }
+
+    /// An arg holding another arg's placeholder is data, never a template: the
+    /// result must not depend on `HashMap` iteration order. Run it enough times
+    /// (each `HashMap` has its own random seed) that a sequential `replace`
+    /// loop cannot pass by luck.
+    #[test]
+    fn an_arg_containing_a_placeholder_is_not_expanded() {
+        let lookup = |k: &str| (k == "t").then_some("{a} / {b}");
+        for _ in 0..64 {
+            let lt = LocalizedText::key_args("t", [("a", "{b}"), ("b", "second")]);
+            assert_eq!(lt.resolve(lookup), "{b} / second");
+            assert_eq!(lt.resolve_nested(lookup), "{b} / second");
+        }
     }
 
     #[test]

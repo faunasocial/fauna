@@ -135,6 +135,34 @@
             <!-- Separator -->
             <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
 
+            <!-- Node — the nest's own `fauna.nest.info` (domain + version); absent
+                 until the node leg loads. -->
+            <StackPanel x:Name="NodeSection" Spacing="8" Visibility="Collapsed">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=status/node/title}" />
+                <Grid RowSpacing="8">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="120" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Row="0" Grid.Column="0" Opacity="0.7" Text="{loc:Localize Key=common/domain}" />
+                    <TextBlock Grid.Row="0" Grid.Column="1" x:Name="NodeDomainText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.StatusNodeDomain}"
+                               IsTextSelectionEnabled="True" />
+                    <TextBlock Grid.Row="1" Grid.Column="0" Opacity="0.7" Text="{loc:Localize Key=admin/dashboard/version}" />
+                    <TextBlock Grid.Row="1" Grid.Column="1" x:Name="NodeVersionText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.StatusNodeVersion}"
+                               IsTextSelectionEnabled="True" />
+                </Grid>
+            </StackPanel>
+
+            <!-- Separator -->
+            <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
+
             <!-- Sync summary -->
             <StackPanel Spacing="8">
                 <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
@@ -151,7 +179,9 @@
                         VerticalAlignment="Center" />
                 </StackPanel>
 
-                <Grid RowSpacing="8" Margin="0,8,0,0">
+                <!-- Collapsed until the sync leg loads (the local agent answered): a
+                     section is absent, never a placeholder (status.md § Layout & flow). -->
+                <Grid x:Name="SyncLegGrid" RowSpacing="8" Margin="0,8,0,0" Visibility="Collapsed">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
@@ -169,25 +199,25 @@
                     <TextBlock Grid.Row="0" Grid.Column="0" Opacity="0.7" Text="{loc:Localize Key=common/pending}" />
                     <TextBlock Grid.Row="0" Grid.Column="1" x:Name="FilesPendingText"
                                AutomationProperties.AutomationId="{x:Bind ids:Ids.StatusSyncPending}"
-                               Text="0" />
+                               IsTextSelectionEnabled="True" />
 
                     <TextBlock Grid.Row="1" Grid.Column="0" Opacity="0.7" Text="{loc:Localize Key=status/sync/last_sync}" />
                     <TextBlock Grid.Row="1" Grid.Column="1" x:Name="LastSyncText"
                                AutomationProperties.AutomationId="{x:Bind ids:Ids.StatusSyncLast}"
-                               Text="--" />
+                               IsTextSelectionEnabled="True" />
                 </Grid>
             </StackPanel>
 
             <!-- Separator -->
             <Border Height="1" Background="{ThemeResource DividerStrokeColorDefaultBrush}" />
 
-            <!-- MLS Encryption -->
-            <StackPanel Spacing="8">
+            <!-- MLS Encryption — absent until the MLS leg loads (key-package count +
+                 the conversations manager's channel count); no dash placeholder. -->
+            <StackPanel x:Name="MlsSection" Spacing="8" Visibility="Collapsed">
                 <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
                            Text="{loc:Localize Key=settings/encryption_page/title}" />
                 <Grid RowSpacing="8">
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
@@ -195,12 +225,30 @@
                         <ColumnDefinition Width="120" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Row="0" Grid.Column="0" Opacity="0.7" Text="{loc:Localize Key=status/encryption/mls_engine}" />
-                    <TextBlock Grid.Row="0" Grid.Column="1" x:Name="MlsInitText" Text="--" />
-                    <TextBlock Grid.Row="1" Grid.Column="0" Opacity="0.7" Text="{loc:Localize Key=status/encryption/key_packages}" />
-                    <TextBlock Grid.Row="1" Grid.Column="1" x:Name="KeyPackageCountText" Text="--" />
-                    <TextBlock Grid.Row="2" Grid.Column="0" Opacity="0.7" Text="{loc:Localize Key=status/encryption/dm_channels}" />
-                    <TextBlock Grid.Row="2" Grid.Column="1" x:Name="DmChannelCountText" Text="--" />
+                    <TextBlock Grid.Row="0" Grid.Column="0" Opacity="0.7" Text="{loc:Localize Key=status/encryption/key_packages}" />
+                    <TextBlock Grid.Row="0" Grid.Column="1" x:Name="KeyPackageCountText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.StatusMlsKeyPackages}"
+                               IsTextSelectionEnabled="True" />
+                    <TextBlock Grid.Row="1" Grid.Column="0" Opacity="0.7" Text="{loc:Localize Key=status/encryption/dm_channels}" />
+                    <TextBlock Grid.Row="1" Grid.Column="1" x:Name="DmChannelCountText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.StatusMlsChannels}"
+                               IsTextSelectionEnabled="True" />
+                </Grid>
+            </StackPanel>
+
+            <!-- Build — absent on an unstamped build (never a `dev` placeholder). -->
+            <StackPanel x:Name="BuildSection" Spacing="8" Visibility="Collapsed">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=status/build/title}" />
+                <Grid RowSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="120" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Opacity="0.7" Text="{loc:Localize Key=status/build/commit}" />
+                    <TextBlock Grid.Column="1" x:Name="BuildShaText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.StatusBuildSha}"
+                               IsTextSelectionEnabled="True" FontFamily="Consolas" />
                 </Grid>
             </StackPanel>
 

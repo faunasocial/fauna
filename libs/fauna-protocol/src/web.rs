@@ -369,6 +369,13 @@ pub struct WebFilesPruneSealedRequest {
     /// Hash-first addressing (S5b) — see `crate::folders::FolderUpdateRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }

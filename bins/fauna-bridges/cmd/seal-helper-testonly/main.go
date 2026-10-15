@@ -491,6 +491,10 @@ type publishLabelerParams struct {
 	NeedsHashtags      bool   `json:"needs_hashtags"`
 	NeedsMediaMetadata bool   `json:"needs_media_metadata"`
 	NeedsAuthor        bool   `json:"needs_author"`
+	// The signed output revision (`LabelerOutput::label_abi`). Absent/0 reads
+	// as 1, the only revision a build reads today; the tier_3 "newer than this
+	// app" inspect journey passes a later one.
+	LabelAbi           uint16 `json:"label_abi"`
 	MaxMemoryBytes     uint64 `json:"max_memory_bytes"`
 	MaxCpuMicroseconds uint64 `json:"max_cpu_microseconds"`
 	UpdatedAt          uint64 `json:"updated_at"`
@@ -509,9 +513,14 @@ func runPublishLabeler(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	labelAbi := p.LabelAbi
+	if labelAbi == 0 {
+		labelAbi = 1
+	}
 	return publishLabeler(
 		seed, wasmBytes, p.Version,
 		p.NeedsText, p.NeedsHashtags, p.NeedsMediaMetadata, p.NeedsAuthor,
+		labelAbi,
 		p.MaxMemoryBytes, p.MaxCpuMicroseconds, p.UpdatedAt,
 	)
 }

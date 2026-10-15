@@ -197,34 +197,39 @@ pub(crate) fn install(
     // below.
     let claim = HOST.begin(());
     tokio::spawn(async move {
-        let params = build_params(
-            AppRuntimeInputs {
-                actor_id_hex,
-                principal,
-                memberships: Some(memberships),
-                // The registry walk above (`HostInputs::accounts`). Empty for
-                // an identity that never succeeded, which is fail-safe.
-                attested_predecessors,
-                // The peer leg (W5.7) is a separate tranche: it needs the
-                // `fauna-iroh` dependency, which only tui carries today.
-                peer_transport: None,
-                store_container,
-            },
-            Arc::clone(&nest),
-            &nest_url,
-        );
-        let params = with_session_wakes(params, reconnects, pushes);
+        // `build_params` refuses a process with no absolute home (the shared
+        // no-home refusal); it lands in the same failed-assembly arm below.
+        let started = async {
+            let params = build_params(
+                AppRuntimeInputs {
+                    actor_id_hex,
+                    principal,
+                    memberships: Some(memberships),
+                    // The registry walk above (`HostInputs::accounts`). Empty for
+                    // an identity that never succeeded, which is fail-safe.
+                    attested_predecessors,
+                    // The peer leg (W5.7) is a separate tranche: it needs the
+                    // `fauna-iroh` dependency, which only tui carries today.
+                    peer_transport: None,
+                    store_container,
+                },
+                Arc::clone(&nest),
+                &nest_url,
+            )?;
+            let params = with_session_wakes(params, reconnects, pushes);
 
-        let started = resolve_and_start(
-            params,
-            ResolveContext {
-                nest_url,
-                // Already resolved by the app (it owns the device row), so
-                // phase 2's blocking task has nothing to read here — the
-                // closure shape is the crate's contract, not a cost.
-                own_device_id_hex: Box::new(move || own_device_id_hex),
-            },
-        )
+            resolve_and_start(
+                params,
+                ResolveContext {
+                    nest_url,
+                    // Already resolved by the app (it owns the device row), so
+                    // phase 2's blocking task has nothing to read here — the
+                    // closure shape is the crate's contract, not a cost.
+                    own_device_id_hex: Box::new(move || own_device_id_hex),
+                },
+            )
+            .await
+        }
         .await;
 
         match started {
@@ -262,7 +267,8 @@ pub(crate) fn install(
                                 .await
                             {
                                 tracing::warn!(
-                                    "deployment-seed custody leg (store-ready edge): {warning}"
+                                    "deployment-seed custody leg (store-ready edge): {}",
+                                    warning.key
                                 );
                             }
                         });
@@ -551,6 +557,8 @@ pub(crate) async fn teardown(reason: StopReason) {
     crate::offline_share::reset_session_seat();
     #[cfg(feature = "p2p-share")]
     crate::share_plane::forget();
+    #[cfg(feature = "file-provider-host")]
+    crate::relay_serving::forget();
     // `shutdown` drains the pump's in-flight pass before the store closes,
     // which is what keeps a mid-pass sign-out from leaving the outbox
     // half-drained; the shared stop does that for both halves under one budget.

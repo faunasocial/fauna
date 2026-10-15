@@ -520,3 +520,31 @@ async fn an_oversized_error_body_is_read_only_up_to_the_cap() {
         other => panic!("expected Status, got {other:?}"),
     }
 }
+
+/// A 2xx body past the caller's cap is refused through `get_capped`, not
+/// buffered whole — the twin of the error-body pin above for the success path,
+/// where a body can be a chunk, a manifest or a blob from a nest someone else
+/// runs. A body inside the cap comes back whole.
+#[tokio::test]
+async fn an_oversized_success_body_is_refused_by_get_capped() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/chunks/big"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![7u8; 4096]))
+        .mount(&server)
+        .await;
+    let client = api(&server, StaticBearer("t0".into()));
+    let err = client
+        .get_capped("/api/v1/chunks/big", &[], 1024)
+        .await
+        .expect_err("a body past the cap must be refused");
+    assert!(
+        matches!(&err, ApiError::Transport(m) if m.contains("size cap")),
+        "got {err:?}"
+    );
+    let ok = client
+        .get_capped("/api/v1/chunks/big", &[], 4096)
+        .await
+        .expect("a body at the cap is read whole");
+    assert_eq!(ok.len(), 4096);
+}

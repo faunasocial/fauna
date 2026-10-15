@@ -14,7 +14,12 @@ from `libs/fauna-mail/src/imap_client/session.rs`, not from RFC 3501 at large:
     LOGIN <user> <pass>
     LIST "" "*"                                  → list_mailboxes
     EXAMINE <mailbox>                            → examine (read-only, never SELECT)
-    UID FETCH <n>:* (UID RFC822.SIZE)            → enumerate_uids
+    STATUS <mailbox> (MESSAGES SIZE)             → estimate_mailbox, only when
+                                                   STATUS=SIZE is advertised
+                                                   (``status_size=True``)
+    UID FETCH <n>:* (UID RFC822.SIZE INTERNALDATE)
+                                                 → enumerate_uids (and the
+                                                   estimate without STATUS=SIZE)
     UID FETCH <uid> (UID FLAGS INTERNALDATE BODY.PEEK[])
                                                  → fetch_messages
     LOGOUT
@@ -22,6 +27,30 @@ from `libs/fauna-mail/src/imap_client/session.rs`, not from RFC 3501 at large:
 Anything else gets a tagged ``BAD``, which is the honest answer and surfaces as
 a wizard error rather than a hang — convention 11's rule applied to a fake:
 never silently drop a command.
+
+**Misbehaviours, one keyword each** — the source-side failures of
+`mailbox-migration.md` § Failure handling → *Source-side errors* and § The two
+TLS modes, which a witness has to provoke on a real connection:
+``refuse_starttls`` (answers ``STARTTLS`` with ``NO``), ``unreadable`` (a
+``(mailbox, uid)`` whose body ``FETCH`` is answered ``NO``), ``vanish_on_fetch``
+(mailboxes deleted the first time any body is fetched, so they are listed but
+gone by the time the import reaches them), ``hold_fetch_in`` (a mailbox whose
+body fetches wait for :meth:`FakeImapSource.release_hold`, so a witness can
+read the wizard mid-run without racing it) and ``revoke_password_after`` (after
+that many bodies the password changes and the connection drops, as a provider
+does when the account's password is changed), ``drop_after`` (after that many
+bodies the connection drops and the server stays down — every new connection
+closed unanswered — until :meth:`FakeImapSource.come_back`, as a provider's
+outage looks to a client that retries) and, per mailbox,
+``SourceMailbox.special_use`` (the RFC 6154 role its ``LIST`` line advertises,
+or Gmail's ``\\Important``). An untrusted certificate needs
+no keyword: leave ``cert`` unset and the instance mints its own, which no app
+was launched trusting.
+
+**Every command is recorded** in :attr:`FakeImapSource.commands` — the verb
+and its arguments, a ``LOGIN``'s password left out — so a witness can say what
+the client never asked for (no ``SELECT``, no ``STORE``, every body read with
+``BODY.PEEK``), which a record of only the expected commands cannot.
 
 **TLS is not optional here** and that is the whole reason this file exists.
 § The two TLS modes ratifies that a source session has no plaintext variant —
@@ -58,6 +87,9 @@ from cryptography.x509.oid import NameOID
 # message carrying it), so serving it here exercises that filter rather than
 # tripping it.
 DEFAULT_FLAGS = ("\\Seen",)
+
+# The INTERNALDATE every message carries unless its mailbox says otherwise.
+DEFAULT_INTERNALDATE = "01-Jan-2020 00:00:00 +0000"
 
 
 def mint_localhost_chain() -> tuple[str, str, str]:
@@ -198,6 +230,19 @@ class SourceMailbox:
     selectable: bool = True
     uid_validity: int = 42
     first_uid: int = 1
+    # Per-message IMAP flags and INTERNALDATE (RFC 3501 `date-time`), parallel
+    # to `messages`. Absent → every message is `DEFAULT_FLAGS` on
+    # `DEFAULT_INTERNALDATE`. A source's own marks and arrival dates are what an
+    # import must carry across and an export must hand back, so a fixture that
+    # varies them is how a test tells "kept" apart from "defaulted".
+    flags: list[tuple[str, ...]] | None = None
+    internal_dates: list[str] | None = None
+    # The role `LIST` advertises for this mailbox (RFC 6154 — `\Trash`,
+    # `\Junk`, `\All`, `\Flagged`, `\Sent`, … — or Gmail's
+    # `\Important`), backslash included; None advertises none. A localized
+    # server names its Trash in its own language and says what it is only
+    # here, which is what the wizard's default scope reads first.
+    special_use: str | None = None
 
     def uids(self) -> list[int]:
         return [self.first_uid + i for i in range(len(self.messages))]
@@ -207,6 +252,16 @@ class SourceMailbox:
         if 0 <= idx < len(self.messages):
             return self.messages[idx]
         return None
+
+    def flags_for(self, uid: int) -> tuple[str, ...]:
+        if self.flags is None:
+            return DEFAULT_FLAGS
+        return self.flags[uid - self.first_uid]
+
+    def internal_date_for(self, uid: int) -> str:
+        if self.internal_dates is None:
+            return DEFAULT_INTERNALDATE
+        return self.internal_dates[uid - self.first_uid]
 
 
 def sample_message(subject: str, body: str = "hello from the old mailbox") -> bytes:
@@ -244,6 +299,13 @@ class FakeImapSource:
         tls_mode: str = "implicit",
         host: str = "127.0.0.1",
         cert: tuple[str, str] | None = None,
+        status_size: bool = False,
+        refuse_starttls: bool = False,
+        unreadable: frozenset[tuple[str, int]] | set[tuple[str, int]] = frozenset(),
+        vanish_on_fetch: tuple[str, ...] = (),
+        hold_fetch_in: str | None = None,
+        revoke_password_after: int | None = None,
+        drop_after: int | None = None,
     ) -> None:
         if tls_mode not in ("implicit", "starttls"):
             raise ValueError(f"tls_mode must be implicit|starttls, got {tls_mode!r}")
@@ -251,6 +313,9 @@ class FakeImapSource:
         self.username = username
         self.password = password
         self.tls_mode = tls_mode
+        # RFC 8438: advertise `STATUS=SIZE` and answer the `SIZE` status item,
+        # as a Dovecot does; off, the server is RFC 3501's, as Gmail's is.
+        self.status_size = status_size
 
         # `cert` lets a caller pin the session CA the app was launched trusting
         # (see `session_cert`). Left None, each instance mints its own — right
@@ -278,6 +343,40 @@ class FakeImapSource:
         # rather than a screenshot.
         self.logins: list[tuple[str, str]] = []
         self.fetched_uids: list[tuple[str, int]] = []
+        # `(mailbox, items)` per STATUS — which way the Confirm estimate asked.
+        self.status_queries: list[tuple[str, str]] = []
+        # Every command line after its tag, a LOGIN's password left out.
+        self.commands: list[str] = []
+        # `(mailbox, uid)` per body FETCH answered NO (`unreadable`).
+        self.refused_fetches: list[tuple[str, int]] = []
+        # `(mailbox, answer)` per EXAMINE — `OK` or `NO`.
+        self.examines: list[tuple[str, str]] = []
+        # How many STARTTLS commands were refused (`refuse_starttls`).
+        self.starttls_refusals = 0
+
+        self.refuse_starttls = refuse_starttls
+        self.unreadable = frozenset(unreadable)
+        self.vanish_on_fetch = tuple(vanish_on_fetch)
+        self.hold_fetch_in = hold_fetch_in
+        self._hold = threading.Event()
+        # Set once a body fetch in `hold_fetch_in` is waiting on the hold.
+        self.holding = threading.Event()
+        self.revoke_password_after = revoke_password_after
+        self.password_revoked = False
+        self.drop_after = drop_after
+        # Set while the source is down (`drop_after`): every connection is
+        # closed the moment it is accepted, and counted — one per reconnect
+        # the client tried.
+        self.down = threading.Event()
+        self.refused_connections = 0
+        self._lock = threading.Lock()
+
+        # Held body fetches (`hold`): the client's request for one of these
+        # `(mailbox, uid)` pairs is not answered until `release`. `waiting`
+        # records each one the client has actually reached, so a test waits on
+        # the client's own progress rather than on time (convention 14).
+        self._holds: dict[tuple[str, int], threading.Event] = {}
+        self.waiting: set[tuple[str, int]] = set()
 
         self._stopped = threading.Event()
         self._thread = threading.Thread(target=self._serve, daemon=True)
@@ -286,8 +385,37 @@ class FakeImapSource:
         self._thread.start()
         return self
 
+    def come_back(self) -> None:
+        """End the outage `drop_after` began: connections are served again."""
+        self.down.clear()
+
+    def release_hold(self) -> None:
+        """Let the body fetches `hold_fetch_in` is holding go ahead."""
+        self._hold.set()
+
+    def hold(self, mailbox: str, uid: int) -> None:
+        """Answer nothing to the client's body fetch of `uid` in `mailbox`
+        until :meth:`release` — one message, where `hold_fetch_in` holds a
+        whole mailbox once: several can be parked in turn, each released on
+        its own, so a test acts at a chosen point of the run (pause, cancel,
+        read the progress step) without racing it. The fetch is recorded in
+        `fetched_uids` once it is served.
+        """
+        self._holds[(mailbox, uid)] = threading.Event()
+
+    def release(self, mailbox: str, uid: int) -> None:
+        self._holds[(mailbox, uid)].set()
+
+    def is_waiting_at(self, mailbox: str, uid: int) -> bool:
+        """The client has asked for a held message and is waiting on it."""
+        return (mailbox, uid) in self.waiting
+
     def stop(self) -> None:
         self._stopped.set()
+        self._hold.set()
+        # Free every parked handler thread, so none outlives the instance.
+        for gate in self._holds.values():
+            gate.set()
         try:
             self._sock.close()
         except OSError:
@@ -311,6 +439,11 @@ class FakeImapSource:
             threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
 
     def _handle(self, conn: socket.socket) -> None:
+        if self.down.is_set():
+            with self._lock:
+                self.refused_connections += 1
+            conn.close()
+            return
         try:
             conn.settimeout(30.0)
             if self.tls_mode == "implicit":
@@ -348,8 +481,44 @@ class FakeImapSource:
         if "STARTTLS" not in line.upper():
             conn.sendall(f"{tag} BAD expected STARTTLS\r\n".encode())
             return None
+        if self.refuse_starttls:
+            # § The two TLS modes: a MITM can always manufacture this `NO`, so
+            # the client must give up here — with the password unsent.
+            self.starttls_refusals += 1
+            conn.sendall(f"{tag} NO STARTTLS not available\r\n".encode())
+            # Stay on the line: a client that fell back to plaintext would send
+            # its LOGIN next, and the record must be able to see it.
+            self._serve_plaintext_after_refusal(conn)
+            return None
         conn.sendall(f"{tag} OK begin TLS\r\n".encode())
         return self._ctx.wrap_socket(conn, server_side=True)
+
+    def _serve_plaintext_after_refusal(self, conn: socket.socket) -> None:
+        """Answer whatever follows a refused STARTTLS in the clear, recording
+        it — the evidence that a downgraded client sent its password."""
+        conn.settimeout(5.0)
+        buf = bytearray()
+        while not self._stopped.is_set():
+            try:
+                chunk = conn.recv(4096)
+            except OSError:
+                return
+            if not chunk:
+                return
+            buf.extend(chunk)
+            while b"\r\n" in buf:
+                idx = buf.index(b"\r\n")
+                line = bytes(buf[:idx]).decode("utf-8", "replace")
+                del buf[: idx + 2]
+                reply, _, done = self._respond(line, None)
+                if reply is _DROP:
+                    return
+                try:
+                    conn.sendall(reply)
+                except OSError:
+                    return
+                if done:
+                    return
 
     def _greet_and_serve(self, stream: ssl.SSLSocket) -> None:
         stream.sendall(b"* OK IMAP4rev1 fake source ready\r\n")
@@ -377,6 +546,10 @@ class FakeImapSource:
                 line = bytes(buf[:idx]).decode("utf-8", "replace")
                 del buf[: idx + 2]
                 reply, selected, done = self._respond(line, selected)
+                if reply is _DROP:
+                    # The connection drops with the command unanswered, as a
+                    # provider's does when the account's password changes.
+                    return
                 if reply:
                     try:
                         stream.sendall(reply)
@@ -392,13 +565,44 @@ class FakeImapSource:
         tag = parts[0] if parts else "*"
         verb = parts[1].upper() if len(parts) > 1 else ""
         rest = parts[2] if len(parts) > 2 else ""
+        recorded = (
+            f"LOGIN {_unquote(rest.partition(' ')[0])}"
+            if verb == "LOGIN"
+            else f"{verb} {rest}".strip()
+        )
+        with self._lock:
+            self.commands.append(recorded)
 
         if verb == "CAPABILITY":
+            caps = "IMAP4rev1 UIDPLUS" + (" STATUS=SIZE" if self.status_size else "")
             return (
-                f"* CAPABILITY IMAP4rev1 UIDPLUS\r\n{tag} OK CAPABILITY done\r\n".encode(),
+                f"* CAPABILITY {caps}\r\n{tag} OK CAPABILITY done\r\n".encode(),
                 selected,
                 False,
             )
+
+        if verb == "STATUS":
+            # RFC 3501 §6.3.10: read-only, selects nothing, so `selected` is
+            # left as it was. `SIZE` (RFC 8438) is answered only by a server
+            # that advertises it.
+            m = re.match(r'^("(?:[^"\\]|\\.)*"|\S+)\s+\(([^)]*)\)\s*$', rest)
+            if m is None:
+                return (f"{tag} BAD malformed STATUS\r\n".encode(), selected, False)
+            name, items = _unquote(m.group(1)), m.group(2).upper().split()
+            self.status_queries.append((name, " ".join(items)))
+            mailbox = self.mailboxes.get(name)
+            if mailbox is None:
+                return (f"{tag} NO no such mailbox\r\n".encode(), selected, False)
+            answers = []
+            for item in items:
+                if item == "MESSAGES":
+                    answers.append(f"MESSAGES {len(mailbox.messages)}")
+                elif item == "SIZE" and self.status_size:
+                    answers.append(f"SIZE {sum(len(b) for b in mailbox.messages)}")
+                elif item == "SIZE":
+                    return (f"{tag} BAD unknown status item\r\n".encode(), selected, False)
+            out = f'* STATUS "{name}" ({" ".join(answers)})\r\n{tag} OK STATUS done\r\n'
+            return (out.encode(), selected, False)
 
         if verb == "LOGIN":
             user, _, pwd = rest.partition(" ")
@@ -422,7 +626,12 @@ class FakeImapSource:
             noselect = "\\Noselect"
             out = "".join(
                 '* LIST ({}) "/" "{}"\r\n'.format(
-                    "" if m.selectable else noselect, m.name
+                    " ".join(
+                        a
+                        for a in ("" if m.selectable else noselect, m.special_use or "")
+                        if a
+                    ),
+                    m.name,
                 )
                 for m in self.mailboxes.values()
             )
@@ -432,7 +641,9 @@ class FakeImapSource:
             name = _unquote(rest.strip())
             mailbox = self.mailboxes.get(name)
             if mailbox is None:
+                self.examines.append((name, "NO"))
                 return (f"{tag} NO no such mailbox\r\n".encode(), selected, False)
+            self.examines.append((name, "OK"))
             out = (
                 f"* {len(mailbox.messages)} EXISTS\r\n"
                 f"* OK [UIDVALIDITY {mailbox.uid_validity}] uids valid\r\n"
@@ -455,7 +666,8 @@ class FakeImapSource:
     def _uid_fetch(self, tag: str, rest: str, mailbox: SourceMailbox) -> bytes:
         upper = rest.upper()
 
-        # enumerate_uids: `UID FETCH <n>:* (UID RFC822.SIZE)`.
+        # enumerate_uids: `UID FETCH <n>:* (UID RFC822.SIZE INTERNALDATE)` —
+        # the date is what the Confirm estimate counts a since range by.
         if "RFC822.SIZE" in upper:
             m = re.search(r"FETCH\s+(\d+):\*", rest, re.IGNORECASE)
             from_uid = int(m.group(1)) if m else mailbox.first_uid
@@ -464,7 +676,10 @@ class FakeImapSource:
                 if uid < from_uid:
                     continue
                 body = mailbox.body_for(uid) or b""
-                lines.append(f"* {seq} FETCH (UID {uid} RFC822.SIZE {len(body)})\r\n")
+                lines.append(
+                    f"* {seq} FETCH (UID {uid} RFC822.SIZE {len(body)} "
+                    f'INTERNALDATE "{mailbox.internal_date_for(uid)}")\r\n'
+                )
             return ("".join(lines) + f"{tag} OK UID FETCH done\r\n").encode()
 
         # fetch_messages: `UID FETCH <uid> (UID FLAGS INTERNALDATE BODY.PEEK[])`.
@@ -472,21 +687,56 @@ class FakeImapSource:
         if m is None:
             return f"{tag} BAD malformed UID FETCH\r\n".encode()
         uid = int(m.group(1))
+        if (
+            self.revoke_password_after is not None
+            and len(self.fetched_uids) >= self.revoke_password_after
+        ):
+            with self._lock:
+                if not self.password_revoked:
+                    self.password_revoked = True
+                    self.password = f"{self.password}-changed"
+            return _DROP
+        if self.drop_after is not None and len(self.fetched_uids) >= self.drop_after:
+            with self._lock:
+                self.drop_after = None
+                self.down.set()
+            return _DROP
+        if mailbox.name == self.hold_fetch_in and not self._hold.is_set():
+            self.holding.set()
+            self._hold.wait(timeout=120.0)
+        if self.vanish_on_fetch:
+            with self._lock:
+                for name in self.vanish_on_fetch:
+                    self.mailboxes.pop(name, None)
+                self.vanish_on_fetch = ()
+        if (mailbox.name, uid) in self.unreadable:
+            self.refused_fetches.append((mailbox.name, uid))
+            return f"{tag} NO [UNAVAILABLE] message cannot be read\r\n".encode()
         body = mailbox.body_for(uid)
         if body is None:
             # A UID that vanished between enumerate and fetch is legal (the user
             # deleted it on the source mid-import); RFC 3501 says answer with no
             # untagged data, not an error.
             return f"{tag} OK UID FETCH done\r\n".encode()
+        gate = self._holds.get((mailbox.name, uid))
+        if gate is not None:
+            self.waiting.add((mailbox.name, uid))
+            # Bounded, so a test that forgets to release cannot park the
+            # handler thread for good; `stop` releases every gate anyway.
+            gate.wait(timeout=300.0)
         self.fetched_uids.append((mailbox.name, uid))
         seq = mailbox.uids().index(uid) + 1
-        flags = " ".join(DEFAULT_FLAGS)
+        flags = " ".join(mailbox.flags_for(uid))
         head = (
             f"* {seq} FETCH (UID {uid} FLAGS ({flags}) "
-            f'INTERNALDATE "01-Jan-2020 00:00:00 +0000" '
+            f'INTERNALDATE "{mailbox.internal_date_for(uid)}" '
             f"BODY[] {{{len(body)}}}\r\n"
         ).encode()
         return head + body + f")\r\n{tag} OK UID FETCH done\r\n".encode()
+
+
+# `_respond`'s answer for "drop the connection, answer nothing".
+_DROP = b"\x00drop"
 
 
 def _unquote(value: str) -> str:

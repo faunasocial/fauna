@@ -51,6 +51,9 @@ pytestmark = [
     # `AliasView.is_canonical` flag — one implementation for both targets.
     pytest.mark.macos,
     pytest.mark.ios,
+    # android: `MailAliasesScreen.kt` renders the primary-address badge in place
+    # of the mutating controls off the same `isCanonical` flag.
+    pytest.mark.android,
 ]
 
 # The four per-row controls `build_alias_row` renders for an ordinary alias and

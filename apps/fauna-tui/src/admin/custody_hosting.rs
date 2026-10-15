@@ -156,24 +156,29 @@ pub(super) fn custody_hosting_elements(state: &AdminState) -> Vec<Element> {
         return els;
     };
 
-    els.push(Element::label(
-        ids::ADMIN_CUSTODY_HOSTING_COUNT,
-        t::custody_hosting::count(&snap.rows.len().to_string()),
-    ));
-
-    if snap.rows.is_empty() {
+    // A read that landed without an answer (it failed — the client's own
+    // deadline included) is the same unknown as pre-hydrate: its error rides
+    // `error-message`, and the count and the empty line stay unpainted.
+    if let Some(rows) = snap.rows.as_ref() {
         els.push(Element::label(
-            ids::ADMIN_CUSTODY_HOSTING_EMPTY,
-            t::custody_hosting::EMPTY,
+            ids::ADMIN_CUSTODY_HOSTING_COUNT,
+            t::custody_hosting::count(&rows.len().to_string()),
         ));
-    }
 
-    for (i, row) in snap.rows.iter().enumerate() {
-        let armed = state
-            .custody_hosting_confirm
-            .as_ref()
-            .is_some_and(|(host, grant)| host == &row.host_actor_id && grant == &row.grant_id);
-        els.extend(row_elements(i, row, armed));
+        if rows.is_empty() {
+            els.push(Element::label(
+                ids::ADMIN_CUSTODY_HOSTING_EMPTY,
+                t::custody_hosting::EMPTY,
+            ));
+        }
+
+        for (i, row) in rows.iter().enumerate() {
+            let armed = state
+                .custody_hosting_confirm
+                .as_ref()
+                .is_some_and(|(host, grant)| host == &row.host_actor_id && grant == &row.grant_id);
+            els.extend(row_elements(i, row, armed));
+        }
     }
 
     // The remove's own verdict, present only once one has been attempted. Not
@@ -185,6 +190,23 @@ pub(super) fn custody_hosting_elements(state: &AdminState) -> Vec<Element> {
     }
 
     els
+}
+
+/// The page's answered state for the automation snapshot
+/// (`data.admin_custody_hosting`): `answered` is true exactly when the page
+/// paints its count — the same `rows` the builder above reads — and
+/// `row_count` is `null` until then. tui's twin of outcome 13's six-app
+/// witness reads it through `/app/state`, the one channel that answers while
+/// the nav's awaited read is held at the nest. Not a ui.yaml `state_fields`
+/// block: no cross-app action reads it — the six apps paint the page around
+/// the pending read, so their elements already answer.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+pub(crate) fn state_json(state: &AdminState) -> serde_json::Value {
+    let rows = state.custody_hosting.as_ref().and_then(|s| s.rows.as_ref());
+    serde_json::json!({
+        "answered": rows.is_some(),
+        "row_count": rows.map(Vec::len),
+    })
 }
 
 /// This page's read/write failure — read by `App::screen_error_text`, not
@@ -218,7 +240,7 @@ mod tests {
 
     fn snap(rows: Vec<AdminHostingRowView>) -> AdminHostingSnapshot {
         AdminHostingSnapshot {
-            rows,
+            rows: Some(rows),
             status: None,
             error: None,
         }
@@ -312,6 +334,36 @@ mod tests {
         );
     }
 
+    /// A read that FAILED (the client's own deadline on a held read included)
+    /// is not an answer either: no count, no empty line — and the automation
+    /// snapshot agrees with the paint, `answered` false until rows land.
+    #[test]
+    fn a_failed_read_paints_neither_count_nor_empty_line() {
+        let failed = app_on_page(Some(AdminHostingSnapshot {
+            rows: None,
+            status: None,
+            error: Some("load held custody: the nest took too long to respond".to_string()),
+        }));
+        let els = custody_hosting_elements(&failed.admin);
+        assert!(
+            !els.iter().any(|e| e.id == ids::ADMIN_CUSTODY_HOSTING_EMPTY
+                || e.id == ids::ADMIN_CUSTODY_HOSTING_COUNT),
+            "a failed read must not say how much is held, nor that nothing is"
+        );
+        assert_eq!(
+            state_json(&failed.admin),
+            serde_json::json!({"answered": false, "row_count": null})
+        );
+        assert_eq!(
+            state_json(&app_on_page(None).admin),
+            serde_json::json!({"answered": false, "row_count": null})
+        );
+        assert_eq!(
+            state_json(&app_on_page(Some(snap(Vec::new()))).admin),
+            serde_json::json!({"answered": true, "row_count": 0})
+        );
+    }
+
     /// The confirm names ONE row. Arming row 1 must leave row 0's confirm
     /// unpainted, or an admin could confirm against a row they never armed.
     #[test]
@@ -385,7 +437,7 @@ mod tests {
     #[test]
     fn the_page_pushes_no_error_message_element_of_its_own() {
         let app = app_on_page(Some(AdminHostingSnapshot {
-            rows: Vec::new(),
+            rows: None,
             status: None,
             error: Some("hosting list failed".to_string()),
         }));

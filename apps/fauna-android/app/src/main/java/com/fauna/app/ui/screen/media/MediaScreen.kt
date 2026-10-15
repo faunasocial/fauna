@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
+import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
@@ -57,6 +58,7 @@ import kotlinx.coroutines.launch
 import uniffi.fauna_core.SyncDisplayState
 import uniffi.fauna_media_machine.FileVersionSummary
 import uniffi.fauna_media_machine.FollowedScopeOption
+import uniffi.fauna_media_machine.MediaFolderOption
 import uniffi.fauna_media_machine.MediaItemSummary
 import uniffi.fauna_media_machine.MediaPageSnapshot
 import uniffi.fauna_media_machine.ShareCreateSnapshot
@@ -146,9 +148,11 @@ fun MediaScreen(
     // off-thread in the VM. ui.yaml's canonical type is text_input — the divergence
     // is documented in ui-actual-android.yaml.
     var pickedUri by remember { mutableStateOf<Uri?>(null) }
+    val stagePicked: (Uri?) -> Unit = remember { { uri -> pickedUri = uri } }
     val picker = rememberLauncherForActivityResult(
-        ActivityResultContracts.GetContent()
-    ) { uri: Uri? -> pickedUri = uri }
+        ActivityResultContracts.GetContent(),
+        stagePicked,
+    )
 
     Scaffold(
         topBar = {
@@ -172,6 +176,7 @@ fun MediaScreen(
                 onSetFilter = vm::setFilter,
                 onSelectFollowed = vm::selectFollowed,
                 onPickFile = { picker.launch("*/*") },
+                onFilePicked = stagePicked,
                 // upload-button with nothing picked: say so on `error-message`
                 // (`media.file_required`), never a disabled or silent button —
                 // which presents as a dead one (media.md § User actions).
@@ -232,6 +237,10 @@ data class MediaActions(
      *  (media.md § Followed public folders). */
     val onSelectFollowed: (String) -> Unit = {},
     val onPickFile: () -> Unit = {},
+    /** The picked file becomes the page's pick — the `file-upload` picker's
+     *  result (`null` on cancel clears it), and the e2e pick seam's staged
+     *  file (`TestAgent.mediaFilePick`, registered by the upload row). */
+    val onFilePicked: (Uri?) -> Unit = {},
     val onUpload: () -> Unit = {},
 )
 
@@ -249,7 +258,11 @@ data class MediaDetailActions(
         { _, _, _ -> emptyList() },
     val onRestoreVersion: suspend (folder: String, path: String, version: FileVersionSummary) -> Boolean =
         { _, _, _ -> false },
-    val onDeleteItem: suspend (folder: String, path: String) -> Boolean = { _, _ -> false },
+    /** Delete the opened file. `filterValue` is the item's [MediaItemSummary.filterValue]
+     *  — its set's row-addressed value, so a writer member's delete of a shared
+     *  set's file never tombstones a same-named own set (media.md § The filter
+     *  and the upload target address the row). */
+    val onDeleteItem: suspend (filterValue: String, path: String) -> Boolean = { _, _ -> false },
     /** `file-version-undelete-button` — restore a soft-pruned version to the
      *  listable population (`file-versions.md` § Retention (3), apps row 323). */
     val onUndeleteVersion: suspend (path: String, versionNum: Long) -> Boolean = { _, _ -> false },
@@ -386,8 +399,8 @@ private fun MediaToolbar(
 ) {
     val grid = snapshot?.viewGrid ?: false
     val sort = snapshot?.sort ?: "name"
-    val filter = snapshot?.filter
-    val folders = snapshot?.folders.orEmpty()
+    val filterLabel = snapshot?.filterLabel
+    val options = snapshot?.folderOptions.orEmpty()
     val followed = snapshot?.followed.orEmpty()
     val followedScope = snapshot?.followedScope
 
@@ -409,7 +422,7 @@ private fun MediaToolbar(
     }
 
     // Row 2: per-set filter (all-media default + one-set scope + followed scopes).
-    FilterSelect(filter, folders, followed, actions.onSetFilter, actions.onSelectFollowed)
+    FilterSelect(filterLabel, options, followed, actions.onSetFilter, actions.onSelectFollowed)
 
     // share-link-list-button — the caller's share links, page-level
     // (`share-links.md` § Flows → List).
@@ -426,6 +439,27 @@ private fun MediaToolbar(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
+        // The OS picker gives UiAutomator nothing to drive, so while this row
+        // is shown it registers the picker's own staging on
+        // `TestAgent.mediaFilePick`, where the `compose.file`[file-upload] arm
+        // stands in for the picker's result (media.md § User actions: every
+        // e2e upload drives `file-upload`). Keyed to the row: a followed scope
+        // removes it, and with it the handler. `BuildConfig.DEBUG`-gated so
+        // the release shrinker folds it away (convention 15).
+        if (BuildConfig.DEBUG) {
+            val onFilePicked = actions.onFilePicked
+            val stagePath: (String) -> Unit = remember(onFilePicked) {
+                { path -> onFilePicked(Uri.fromFile(java.io.File(path))) }
+            }
+            DisposableEffect(stagePath) {
+                com.fauna.app.testing.TestAgent.mediaFilePick = stagePath
+                onDispose {
+                    if (com.fauna.app.testing.TestAgent.mediaFilePick === stagePath) {
+                        com.fauna.app.testing.TestAgent.mediaFilePick = null
+                    }
+                }
+            }
+        }
         IconButton(
             onClick = actions.onPickFile,
             modifier = Modifier.testTag(Ids.FILE_UPLOAD),
@@ -486,19 +520,20 @@ private fun SortSelect(current: String, onSelect: (String) -> Unit, modifier: Mo
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FilterSelect(
-    current: String?,
-    folders: List<String>,
+    currentFilterLabel: String?,
+    options: List<MediaFolderOption>,
     followed: List<FollowedScopeOption>,
     onSelect: (String?) -> Unit,
     onSelectFollowed: (String) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     val allLabel = stringResource(R.string.media_filter_all)
-    // null filter = the all-media default; else the selected set name — or a
-    // followed scope's opaque value, which the value→label side map turns back
-    // into its minted label (media.md § Followed public folders: a Compose
-    // picker's model holds values, and a followed value is never shown).
-    val currentLabel = current?.let { v -> followed.firstOrNull { it.value == v }?.label ?: v } ?: allLabel
+    // null label = the all-media default; else the shared-Rust-minted label of
+    // the active option (a set's name, a shared set's `<name> (<owner>)`, a
+    // followed scope's label) — never re-derived here, and the opaque value is
+    // never shown (media.md § Encryption at rest → *The filter and the upload
+    // target address the row*; § Followed public folders).
+    val currentLabel = currentFilterLabel ?: allLabel
     ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = !expanded }) {
         OutlinedTextField(
             value = currentLabel,
@@ -509,8 +544,14 @@ private fun FilterSelect(
         )
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             DropdownMenuItem(text = { Text(allLabel) }, onClick = { expanded = false; onSelect(null) })
-            folders.forEach { set ->
-                DropdownMenuItem(text = { Text(set) }, onClick = { expanded = false; onSelect(set) })
+            // One entry per offered set: the label paints, the minted value
+            // goes back to the filter gesture verbatim — a same-named pair is
+            // two entries.
+            options.forEach { opt ->
+                DropdownMenuItem(
+                    text = { Text(opt.label) },
+                    onClick = { expanded = false; onSelect(opt.value) },
+                )
             }
             // Followed scopes append after the own-set options; the value goes
             // back to the shared gesture verbatim, never parsed here.
@@ -630,9 +671,9 @@ private fun MediaItemDetail(
     var downloading by remember(item.folder, item.path) { mutableStateOf(false) }
 
     suspend fun reloadVersions() {
-        versions = detailActions.loadVersions(item.folder, item.path, showPruned)
+        versions = detailActions.loadVersions(item.filterValue, item.path, showPruned)
     }
-    LaunchedEffect(item.folder, item.path, showPruned, followed) { if (!followed) reloadVersions() }
+    LaunchedEffect(item.filterValue, item.path, showPruned, followed) { if (!followed) reloadVersions() }
     // Rows arrive oldest→newest: the last one is the current file, and its
     // manifest keys the shared `download_file` walk.
     val latest = versions?.lastOrNull()
@@ -773,7 +814,7 @@ private fun MediaItemDetail(
                     onClick = {
                         showDeleteConfirm = false
                         scope.launch {
-                            if (detailActions.onDeleteItem(item.folder, item.path)) onDismiss()
+                            if (detailActions.onDeleteItem(item.filterValue, item.path)) onDismiss()
                         }
                     },
                     modifier = Modifier.testTag(Ids.MEDIA_DELETE_CONFIRM_BUTTON),
@@ -845,6 +886,16 @@ private fun ShareCreateSection(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        // A sealed file's link carries its key: painted only off the shared
+        // snapshot's bit, absent on a public file.
+        if (create.keyInFragment) {
+            Text(
+                stringResource(R.string.share_link_key_notice),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(Ids.SHARE_LINK_KEY_NOTICE),
+            )
+        }
         val url = create.url
         // `fauna.share.create` is OnlineOnly: the shared verdict greys Create
         // while the nest is unreachable.

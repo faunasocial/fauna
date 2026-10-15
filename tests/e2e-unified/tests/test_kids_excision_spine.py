@@ -103,8 +103,8 @@ def test_the_kids_flavor_excises_the_ratified_planes():
     """
     kids = _closure(_features(), "kids-safe") | set(_features()["kids-safe"])
     for plane in (
-        "feed-manager", "feed-rules", "feed-badge",  # the feed
-        "search-manager",  # discovery
+        "feed-manager", "feed-rules", "feed-badge", "feed-client",  # the feed
+        "search-manager", "search-client",  # discovery
         "mail-admin", "mail-import", "atproto-settings", "nostr-npub-confirm",  # bridges
         "web-content",  # web publishing
         "subscriptions-author", "payments", "zaps",  # monetization
@@ -492,6 +492,98 @@ def test_the_android_kids_witness_checks_both_columns():
     assert "vacuous" in body
 
 
+# The kind-string half of criterion 2 (dynamic-features.md § What "completely
+# compiled away" means): the feed, search and web planes' wire senders AND
+# their kind-catalog text. The catalog lives in `fauna-protocol`, which every
+# build links, so each plane's entries sit behind a protocol feature forwarded
+# only by the plane's own client crate; fauna-ffi reaches those crates only
+# through features in `store-safe`'s tail.
+_PROTOCOL = _REPO / "libs" / "fauna-protocol"
+_KIND_PLANES = ("feed", "search", "web")
+_KIND_PATS = r"KIND_PATS=\('fauna\\.feed\\.' 'fauna\\.search\\.' 'fauna\\.web\\.'\)"
+
+
+def _manifest(crate: str) -> dict:
+    return tomllib.loads((_REPO / "libs" / crate / "Cargo.toml").read_text(encoding="utf-8"))
+
+
+def test_the_excised_planes_kind_catalog_is_gated_per_plane():
+    protocol = _manifest("fauna-protocol")["features"]
+    kind_rs = (_PROTOCOL / "src" / "kind.rs").read_text(encoding="utf-8")
+    offline = (_PROTOCOL / "src" / "offline_class.rs").read_text(encoding="utf-8")
+    for plane in _KIND_PLANES:
+        assert plane in protocol, f"fauna-protocol lost its `{plane}` kind-catalog feature"
+        assert plane not in protocol["default"], (
+            f"`{plane}` is default-on in fauna-protocol — any consumer taking the crate "
+            "with default features would re-acquire the excised plane's catalog"
+        )
+        fn = "register_search_kinds" if plane == "search" else f"register_{plane}_kinds"
+        assert re.search(rf'#\[cfg\(feature = "{plane}"\)\]\s*pub fn {fn}\b', kind_rs), (
+            f"`{fn}` is not behind fauna-protocol's `{plane}` feature"
+        )
+        assert re.search(rf'#\[cfg\(feature = "{plane}"\)\]\s*self\.{fn}\(\);', kind_rs), (
+            f"`register_all_kinds` calls `{fn}` ungated"
+        )
+        # Every offline-class row of the plane sits inside a `cfg(feature)` block.
+        for m in re.finditer(rf'm\.insert\("fauna\.{plane}\.', offline):
+            block_start = offline.rfind("#[cfg(", 0, m.start())
+            assert offline[block_start:].startswith(f'#[cfg(feature = "{plane}")]'), (
+                f"an offline_class row of `fauna.{plane}.*` is outside the `{plane}` gate"
+            )
+            assert "}" not in offline[offline.index("{", block_start):m.start()], (
+                f"an offline_class row of `fauna.{plane}.*` is outside the `{plane}` gate"
+            )
+
+
+def test_only_the_plane_crates_and_store_safe_reach_the_kind_catalog():
+    # Each plane's client crate forwards its catalog — except search, whose crate
+    # the kids flavor still links for the on-device index seam, so only its
+    # opt-in `query` half (the nest sender) forwards it.
+    for crate, plane in (("fauna-client-feed", "feed"), ("fauna-client-web", "web")):
+        dep = _manifest(crate)["dependencies"]["fauna-protocol"]
+        assert plane in dep.get("features", []), f"{crate} no longer carries the `{plane}` catalog"
+    search = _manifest("fauna-client-search")
+    assert "search" not in search["dependencies"]["fauna-protocol"].get("features", []), (
+        "fauna-client-search names the `search` catalog on its dep line — the kids flavor "
+        "links this crate for the local index seam, so that would re-acquire the catalog"
+    )
+    assert search["features"]["query"] == ["fauna-protocol/search"]
+    assert "query" not in search["features"]["default"]
+
+    features = _features()
+    kids = _closure(features, "kids-safe") | set(features["kids-safe"])
+    for entry in (
+        "feed-client", "search-client", "dep:fauna-client-feed", "dep:fauna-client-search",
+        "dep:fauna-feed", "dep:fauna-client-web", "fauna-client-search/query",
+        "fauna-devices-machine?/web", "fauna-sync-engine/web",
+    ):
+        assert entry not in kids, f"the kids complement reaches `{entry}`, an excised plane's sender"
+    store_safe = _closure(features, "store-safe")
+    for entry in ("feed-client", "search-client", "fauna-devices-machine?/web", "fauna-sync-engine/web"):
+        assert entry in store_safe, f"store-safe lost `{entry}` — the plane would vanish from the main app"
+    deps = tomllib.loads((_FFI / "Cargo.toml").read_text(encoding="utf-8"))["dependencies"]
+    for crate in ("fauna-client-feed", "fauna-client-search", "fauna-feed", "fauna-client-web"):
+        assert deps[crate].get("optional"), f"fauna-ffi links `{crate}` unconditionally"
+    # Rule (b): the devices machine's website half is forwarded from fauna-ffi's
+    # own feature, never named on the dependency line.
+    assert "web" not in deps["fauna-devices-machine"].get("features", [])
+
+
+def test_both_kids_witnesses_grep_the_kind_strings_in_both_columns():
+    for recipe, kids_file, default_file in (
+        ("android-kids-check", '"$WORK/kids-all.txt"', '"$WORK/rel-all.txt"'),
+        ("apple-kids-check", '"$SCRATCH/kids.strings"', '"$SCRATCH/default.strings"'),
+    ):
+        body = _recipe(recipe)
+        assert re.search(_KIND_PATS, body), f"{recipe} lost its feed/search/web kind-string patterns"
+        loops = re.findall(r'for pat in "\$\{KIND_PATS\[@\]\}"; do\n(.*?)\n    done', body, re.S)
+        assert len(loops) == 2, f"{recipe} must check the kind strings in both columns"
+        assert kids_file in loops[0] and default_file in loops[1], (
+            f"{recipe}'s kind column reads the wrong artifact"
+        )
+        assert "vacuous" in loops[1]
+
+
 def test_the_post_tip_resolver_twin_is_not_in_a_kids_compiled_directory():
     """`resolvePostTipsIfBuilt` extends the FEED manager, so its excised twin cannot
     live in `src/noPayments/` (which the kids build type also compiles and whose
@@ -505,3 +597,104 @@ def test_the_post_tip_resolver_twin_is_not_in_a_kids_compiled_directory():
         assert "FfiFeedManager" not in _kotlin_code_only(path.read_text(encoding="utf-8")), (
             f"{path} names FfiFeedManager, which the kids bindings lack"
         )
+
+
+# ── the iOS leg ──────────────────────────────────────────────────────────────
+# family-safety.md § The account age band, the kids-app bullet, item (5), apple:
+# a second app target sharing FaunaKit, built `-D FAUNA_KIDS` over the kids FFI
+# flavor, the render conditioned, witnessed by `apple-kids-check` on the archive.
+
+_APPLE = _REPO / "apps/fauna-apple"
+_PBXPROJ = _APPLE / "Fauna.xcodeproj/project.pbxproj"
+_UI_IDS_SWIFT = _APPLE / "FaunaKit/Sources/FaunaKit/Generated/UiIds.swift"
+_UI_IDS_GENERATOR = _REPO / "scripts/ui-ids-generate.py"
+_APPLE_KIDS_FEATURES = (
+    'FEATURE_ARGS=(--no-default-features --features "kids-safe,kids-floor,file-provider-host")'
+)
+
+
+def test_the_apple_kids_ffi_is_the_named_complement_plus_the_floor():
+    assert '_apple-ffi-flavor "kids-safe,kids-floor"' in _recipe("apple-ffi-kids")
+    assert '_apple-ffi-host-flavor "{{config}}" "kids-safe,kids-floor"' in _recipe("apple-ffi-host-kids")
+    for helper in ("_apple-ffi-build-impl", "_apple-ffi-host-flavor"):
+        assert _APPLE_KIDS_FEATURES in _recipe(helper), (
+            f"{helper} has no kids branch, so `kids-safe,kids-floor` falls through to the "
+            "additive arm and builds WITH the default features — nothing excised"
+        )
+
+
+def test_the_swift_id_table_puts_the_kids_prefixes_behind_the_kids_condition():
+    generator = _UI_IDS_GENERATOR.read_text(encoding="utf-8")
+    m = re.search(r"KIDS_EXCISED_ID_PREFIXES = \(([^)]*)\)", generator)
+    assert m, "ui-ids-generate.py lost its kids prefix list"
+    assert tuple(re.findall(r'"([^"]+)"', m.group(1))) == _KIDS_EXCISED_ID_PREFIXES, (
+        "the Swift table's kids prefixes drifted from the android witness's"
+    )
+    table = _UI_IDS_SWIFT.read_text(encoding="utf-8")
+    shared = table.split("public enum Ids {", 1)[1].split("\n}\n", 1)[0]
+    leaked = re.findall(rf'"((?:{"|".join(map(re.escape, _KIDS_EXCISED_ID_PREFIXES))})[^"]*)"', shared)
+    assert not leaked, f"kids-excised ids in the ungated Ids table: {leaked[:5]!r}"
+    assert "#if !FAUNA_KIDS\nextension Ids {" in table
+
+
+def _pbx_target_configs(name: str) -> list[str]:
+    text = _PBXPROJ.read_text(encoding="utf-8")
+    target = re.search(
+        rf'/\* {re.escape(name)} \*/ = {{\n\t\t\tisa = PBXNativeTarget;.*?buildConfigurationList = (\w+)',
+        text, re.S)
+    assert target, f"no PBXNativeTarget {name!r}"
+    configs = re.search(rf"\t\t{target.group(1)} /\*.*?buildConfigurations = \(\n(.*?)\);", text, re.S)
+    ids = re.findall(r"(\w+) /\*", configs.group(1))
+    return [re.search(rf"\t\t{i} /\* \w+ \*/ = {{\n(.*?)\n\t\t}};", text, re.S).group(1) for i in ids]
+
+
+def test_the_ios_kids_target_is_its_own_identity_and_the_main_target_is_not_kids():
+    kids = _pbx_target_configs("Fauna-Kids-iOS")
+    assert len(kids) == 2
+    for config in kids:
+        assert "PRODUCT_BUNDLE_IDENTIFIER = social.fauna.faunakids;" in config
+        assert "FAUNA_KIDS FAUNA_EXCISE_PAYMENTS FAUNA_EXCISE_P2P_SHARE" in config
+        assert "Fauna-iOS/Resources/Info.plist" in config, (
+            "the kids target reads the main app's Info.plist so its version stays in lockstep"
+        )
+    for config in _pbx_target_configs("Fauna-iOS"):
+        assert "FAUNA_KIDS" not in config and "faunakids" not in config
+
+
+def test_the_apple_kids_witness_checks_both_columns():
+    body = _recipe("apple-kids-check")
+    assert "just apple-ffi-kids" in body and "just apple-ffi\n" in body, (
+        "apple-kids-check must rebuild the one xcframework staging slot before each column"
+    )
+    assert "archive kids Fauna-Kids-iOS" in body and "archive default Fauna-iOS" in body
+    assert "-D FAUNA_KIDS -D FAUNA_EXCISE_PAYMENTS -D FAUNA_EXCISE_P2P_SHARE" in body, (
+        "the kids archive must carry its conditions on the command line — a target's own "
+        "conditions do not reach the FaunaKit package"
+    )
+    assert "target/aarch64-apple-ios/release/libfauna_ffi.a" in body
+    assert "KIDS_ID='social.fauna.faunakids'" in body
+    ids = re.search(r"ID_PATS=\(([^)]*)\)", body)
+    assert ids and tuple(p.strip("'^") for p in ids.group(1).split()) == _KIDS_EXCISED_ID_PREFIXES
+    android_faces = re.search(r"FACE_PATS=\(([^)]*)\)", _recipe("android-kids-check")).group(1)
+    assert re.search(r"FACE_PATS=\(([^)]*)\)", body).group(1) == android_faces
+    assert "vacuous" in body
+
+
+def test_the_kids_app_sends_a_declared_only_age_claim():
+    """The armed iOS arm pins the MAIN App ID, and App Attest signs under the running
+    bundle's — a kids attestation would fail the check and refuse the admission."""
+    src = (_APPLE / "FaunaKit/Sources/FaunaKit/Core/StoreAgeClaim.swift").read_text(encoding="utf-8")
+    body = src.split("private func attestOrNil(", 1)[1]
+    gate = body.index("#if FAUNA_KIDS")
+    assert body.index("return nil", gate) < body.index("signals.attest(", gate)
+
+
+def test_the_kids_build_opens_no_outbound_link():
+    opener = (_APPLE / "FaunaKit/Sources/FaunaKit/Utilities/CrossPlatformUI.swift").read_text(encoding="utf-8")
+    body = opener.split("public enum OpenURL {", 1)[1]
+    assert body.index("#if FAUNA_KIDS") < body.index("return") < body.index("UIApplication.shared.open")
+    app = (_APPLE / "Fauna-iOS/App/FaunaApp.swift").read_text(encoding="utf-8")
+    assert re.search(
+        r"#if FAUNA_KIDS\n\s*\.environment\(\\\.openURL, OpenURLAction \{ _ in \.discarded \}\)\n\s*#endif",
+        app,
+    ), "the kids app root no longer refuses SwiftUI's own link taps"

@@ -31,18 +31,33 @@ use fauna_protocol::RpcRequester;
 use fauna_protocol::discovery::{NestInfoReply, NestInfoRequest, capability};
 use fauna_protocol::subscriptions::{
     ApproveRequestReply, ApproveRequestRequest, DelegateUploadReply, DelegateUploadRequest,
-    EncryptedKeyBlobUpload, KeyBlobGetReply, KeyBlobGetRequest, MineListReply, MineListRequest,
-    MineSubscription, OffersListRequest, PendingRequest, PostUnlockGetReply, PostUnlockGetRequest,
-    PostUnlockOffer, RejectRequestReply, RejectRequestRequest, RemoveSubscriberReply,
-    RemoveSubscriberRequest, RequestsListReply, RequestsListRequest, RotateKeyBlobReply,
-    RotateKeyBlobRequest, StatusGetReply, StatusGetRequest, SubscribeReply, SubscribeRequest,
-    SubscriberEntry, SubscribersListReply, SubscribersListRequest, TierAskingPrice,
-    TierCreateReply, TierCreateRequest, TierDeleteReply, TierDeleteRequest, TierItem,
-    TierUpdateReply, TierUpdateRequest, TiersListReply, TiersListRequest, UnsubscribeReply,
-    UnsubscribeRequest,
+    EncapsKeyPublishReply, EncapsKeyPublishRequest, EncryptedKeyBlobUpload, KeyBlobGetReply,
+    KeyBlobGetRequest, MineListReply, MineListRequest, MineSubscription, OffersListRequest,
+    PendingRequest, PostUnlockGetReply, PostUnlockGetRequest, PostUnlockOffer, RejectRequestReply,
+    RejectRequestRequest, RemoveSubscriberReply, RemoveSubscriberRequest, RequestsListReply,
+    RequestsListRequest, RotateKeyBlobReply, RotateKeyBlobRequest, StatusGetReply,
+    StatusGetRequest, SubscribeReply, SubscribeRequest, SubscriberEntry, SubscribersListReply,
+    SubscribersListRequest, TierAskingPrice, TierCreateReply, TierCreateRequest, TierDeleteReply,
+    TierDeleteRequest, TierItem, TierUpdateReply, TierUpdateRequest, TiersListReply,
+    TiersListRequest, UnsubscribeReply, UnsubscribeRequest,
 };
 
 pub use fauna_protocol::subscriptions;
+
+/// The `fauna.subscriptions.encaps_key.publish` request for `subscriber`: its
+/// identity-seed-derived ML-KEM-768 encapsulation key (`post-quantum.md`
+/// § surface B). One builder, so every caller — the session-start publish
+/// ([`SubscriptionsClient::publish_encaps_key`]) and the e2e harness's C-ABI
+/// seam — sends the same bytes.
+#[must_use]
+pub fn encaps_key_publish_request(subscriber: &ActorKeypair) -> EncapsKeyPublishRequest {
+    EncapsKeyPublishRequest {
+        mlkem_encaps_key: fauna_protocol::ByteBuf::from(
+            subscriber_mlkem_encaps_key(subscriber).to_vec(),
+        ),
+        extra: Default::default(),
+    }
+}
 
 pub mod custody;
 pub mod orchestration;
@@ -274,6 +289,27 @@ impl<R: RpcRequester> SubscriptionsClient<R> {
                 },
             )
             .await
+    }
+
+    /// `fauna.subscriptions.encaps_key.publish` — publish the caller's
+    /// **subscriber encapsulation-key registry entry** (`post-quantum.md`
+    /// § surface B): the identity-seed-derived ML-KEM-768 key an author wraps
+    /// hybrid `KeyBlob` entries to when the subscriber is not the one asking —
+    /// a third-party follow under `fauna:follow:write`
+    /// (`authorization-server.md` § Scope grammar → *The sixth arm*), which
+    /// the nest refuses while the entry is absent. Called at every session
+    /// start, the way the mail epoch schedule is refreshed: idempotent, every
+    /// device of the account derives the same bytes, and an identity
+    /// succession's successor publishes its own on its first session.
+    pub async fn publish_encaps_key(&self, subscriber: &ActorKeypair) -> Result<(), R::Error> {
+        let _: EncapsKeyPublishReply = self
+            .nest
+            .request(
+                "fauna.subscriptions.encaps_key.publish",
+                encaps_key_publish_request(subscriber),
+            )
+            .await?;
+        Ok(())
     }
 
     /// Whether the home nest advertises capability `token` in its
@@ -627,6 +663,7 @@ mod tests {
                 tier: None,
                 expires_at: None,
                 auto_approve: false,
+                follow_pending: false,
             }),
             "fauna.subscriptions.requests.list" => {
                 fauna_protocol::encode_canonical(&RequestsListReply {
@@ -669,6 +706,9 @@ mod tests {
                     blob_hash: ByteBuf::from(vec![0x01u8; 32]),
                     blob_data: ByteBuf::from(vec![0x02u8; 8]),
                 })
+            }
+            "fauna.subscriptions.encaps_key.publish" => {
+                fauna_protocol::encode_canonical(&EncapsKeyPublishReply::default())
             }
             "fauna.subscriptions.delegate.upload" => {
                 fauna_protocol::encode_canonical(&DelegateUploadReply {
@@ -891,6 +931,23 @@ mod tests {
         let req: ApproveRequestRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
         assert_eq!(req.request_id, 42);
         assert!(req.encrypted_upload.is_some());
+    }
+
+    #[test]
+    fn publish_encaps_key_sends_the_accounts_mlkem_encaps_key() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = SubscriptionsClient::new(rec.clone());
+        let subscriber = ActorKeypair::from_secret([0x5B; 32]);
+        block_on(client.publish_encaps_key(&subscriber)).expect("infallible mock");
+
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.subscriptions.encaps_key.publish");
+        let req: EncapsKeyPublishRequest =
+            fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(
+            req.mlkem_encaps_key.as_ref(),
+            subscriber_mlkem_encaps_key(&subscriber).as_slice()
+        );
     }
 
     #[test]

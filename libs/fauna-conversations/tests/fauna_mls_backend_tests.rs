@@ -23,9 +23,10 @@ use fauna_conversations::backend::{
     WelcomeNudge,
 };
 use fauna_conversations::backends::fauna_mls::{
-    FaunaMlsBackend, ingest_scheduling_welcome, ingest_welcome, join_folder_welcome, leave_folder,
-    poll_inbound_conv, poll_inbound_folder, poll_inbound_scheduling, redrive_parked_successions,
-    refill_evicted_attachments, settle_parked_successions,
+    FaunaMlsBackend, PARKED_PER_SLOT, ingest_scheduling_welcome, ingest_welcome,
+    join_folder_welcome, leave_folder, poll_inbound_conv, poll_inbound_folder,
+    poll_inbound_scheduling, redrive_parked_successions, refill_evicted_attachments,
+    settle_parked_successions,
 };
 use fauna_conversations::capabilities::derive_capabilities;
 use fauna_conversations::compose::{ComposeState, ResolveState, SendState};
@@ -77,6 +78,9 @@ struct MockNest {
     /// `put_last_resort_key_package`), so re-publishing on every login stays
     /// idempotent.
     last_resort: Mutex<HashMap<String, Vec<u8>>>,
+    /// Every actor id a `keypackage.count` named, in order — the count is
+    /// owner-only on the real nest, so a resolve must never put a peer here.
+    count_probes: Mutex<Vec<String>>,
     /// Every `welcome.deliver` call, in order.
     welcomes: Mutex<Vec<WelcomeCall>>,
     /// `channel_hex → {actor_hex}` — the nest's `actor_channels` routing
@@ -182,6 +186,15 @@ impl MockNest {
             .push_back(bytes);
     }
 
+    /// Give `actor_hex` the single reusable last-resort package (one-time pool
+    /// untouched) — the actor down to it that a count reads as `0`.
+    fn seed_last_resort(&self, actor_hex: &str, bytes: Vec<u8>) {
+        self.last_resort
+            .lock()
+            .unwrap()
+            .insert(actor_hex.to_string(), bytes);
+    }
+
     /// Attribute subsequent `keypackage_upload` calls to `actor_hex` (so
     /// `keypackage_count` reflects them, as the real per-actor queue would).
     fn set_upload_actor(&self, actor_hex: &str) {
@@ -231,6 +244,13 @@ impl MockNest {
             .get(actor_hex)
             .map(|q| q.len() as u64)
             .unwrap_or(0)
+    }
+
+    /// The nest's `has_usable_key_package` predicate — ≥1 one-time **or** the
+    /// last-resort package — behind both `by_handle`'s `addressable` bit and
+    /// `keypackage.addressable`.
+    fn addressable_for(&self, actor_hex: &str) -> bool {
+        self.keypackage_count_for(actor_hex) > 0 || self.last_resort_count_for(actor_hex) > 0
     }
 
     /// How many last-resort key packages this actor has on the (mock) nest —
@@ -449,13 +469,12 @@ impl ConversationsRpc for MockNest {
     }
 
     async fn keypackage_count(&self, actor_id_hex: String) -> Result<u64, ConvRpcError> {
-        Ok(self
-            .keypackages
-            .lock()
-            .unwrap()
-            .get(&actor_id_hex)
-            .map(|q| q.len() as u64)
-            .unwrap_or(0))
+        self.count_probes.lock().unwrap().push(actor_id_hex.clone());
+        Ok(self.keypackage_count_for(&actor_id_hex))
+    }
+
+    async fn keypackage_addressable(&self, actor_id_hex: String) -> Result<bool, ConvRpcError> {
+        Ok(self.addressable_for(&actor_id_hex))
     }
 
     async fn actor_by_handle(
@@ -469,9 +488,8 @@ impl ConversationsRpc for MockNest {
             fauna_conversations::backend::ResolvedHandle {
                 actor_id_hex: actor_hex.clone(),
                 echoed_domain: self.handle_domain.lock().unwrap().clone(),
-                // Same-nest reachability is decided by `resolve_reachable`
-                // (keypackage_count); mirror it here for an honest reply.
-                addressable: self.keypackage_count_for(actor_hex) > 0,
+                // The nest's `has_usable_key_package`: one-time OR last-resort.
+                addressable: self.addressable_for(actor_hex),
             }
         }))
     }
@@ -691,6 +709,9 @@ impl ConversationsRpc for OutdatedNest {
         Err(outdated_seam_error())
     }
     async fn keypackage_count(&self, _a: String) -> Result<u64, ConvRpcError> {
+        Err(outdated_seam_error())
+    }
+    async fn keypackage_addressable(&self, _a: String) -> Result<bool, ConvRpcError> {
         Err(outdated_seam_error())
     }
     async fn actor_by_handle(
@@ -1395,6 +1416,7 @@ async fn receive_loop_drains_scheduling_welcome_to_sink_without_a_thread() {
             access: None,
             home_nest_actor_id: None,
             set_name_seal: None,
+            residency: None,
             shared_by_handle: None,
             shared_by_domain: None,
         })])),
@@ -4572,6 +4594,190 @@ async fn a_refused_statement_is_parked_and_a_later_harvest_redrive_repoints_it()
     );
 }
 
+/// The slot's replacement policy (`identity-succession.md` § The succession
+/// statement → *The slot's replacement policy*): a parked statement is one the
+/// witness could not settle, so nothing tells the honest copy from a junk-signed
+/// one a fellow member posts for the same `old_actor_id` — and under *latest
+/// per slot* that one message overwrote the only copy this member will ever
+/// hold. The slot is a set that displaces nothing: the harvest re-drive still
+/// finds the honest statement behind the junk and re-points the row.
+#[tokio::test]
+async fn a_later_junk_signed_statement_does_not_displace_the_parked_honest_one() {
+    let SuccessionSetup {
+        alice,
+        channel_id,
+        nest,
+        bob_manager,
+        bob_backend,
+        bob_thread_id,
+        signed,
+        head,
+        successor,
+        successor_engine,
+    } = succession_receive_setup();
+    let alice_actor = alice.identity_actor_id();
+    let witness = Arc::new(SwitchWitness::default());
+    bob_backend.set_succession_witness(witness.clone());
+
+    run_add_successor(&alice, &successor_engine, &channel_id, &nest).await;
+    post_statement(&alice, &channel_id, &nest, &signed).await;
+    // Any member may carry a statement; this one names alice and was signed by
+    // no key of hers.
+    post_statement(
+        &alice,
+        &channel_id,
+        &nest,
+        &forged_statement(alice_actor, successor),
+    )
+    .await;
+    run_remove_old(&successor_engine, &channel_id, &nest, &alice_actor).await;
+    let mut after_seq = 0i64;
+    poll_inbound_conv(&bob_backend, &bob_manager, &channel_id, &mut after_seq, 0)
+        .await
+        .expect("poll ok");
+    let counts = bob_backend.succession_statement_counts();
+    assert_eq!((counts.seen, counts.parked, counts.park_full), (2, 2, 0));
+
+    witness.arm(head);
+    let redriven = redrive_parked_successions(&bob_backend, &bob_manager, &alice_actor).await;
+    assert_eq!(
+        redriven, 1,
+        "the honest statement must survive the junk one parked after it"
+    );
+    let detail = bob_manager.thread_detail(bob_thread_id).expect("thread");
+    assert!(
+        detail
+            .participants
+            .iter()
+            .any(|p| matches!(p, TypedAddress::Fauna { actor_id, .. } if *actor_id == successor)),
+        "the row re-points to the successor: {:?}",
+        detail.participants
+    );
+}
+
+/// The policy's one exception, and the hold it protects: a statement the
+/// witness VERIFIED, parked at the ceremony's midpoint for this group's
+/// remove-old commit, is never displaced by junk posted after it — the
+/// remove-old commit's re-drive still finds it and re-points the row.
+#[tokio::test]
+async fn a_verified_statement_awaiting_the_remove_old_commit_is_not_displaced_by_junk() {
+    let SuccessionSetup {
+        alice,
+        channel_id,
+        nest,
+        bob_manager,
+        bob_backend,
+        bob_thread_id,
+        signed,
+        head,
+        successor,
+        successor_engine,
+    } = succession_receive_setup();
+    let alice_actor = alice.identity_actor_id();
+    bob_backend.set_succession_witness(Arc::new(HeadWitness(head)));
+
+    run_add_successor(&alice, &successor_engine, &channel_id, &nest).await;
+    post_statement(&alice, &channel_id, &nest, &signed).await;
+    post_statement(
+        &alice,
+        &channel_id,
+        &nest,
+        &forged_statement(alice_actor, successor),
+    )
+    .await;
+    let mut after_seq = 0i64;
+    poll_inbound_conv(&bob_backend, &bob_manager, &channel_id, &mut after_seq, 0)
+        .await
+        .expect("poll ok");
+    let counts = bob_backend.succession_statement_counts();
+    assert_eq!(
+        (counts.awaiting_remove_old, counts.parked),
+        (1, 2),
+        "the verified hold and the refused junk are both parked"
+    );
+
+    run_remove_old(&successor_engine, &channel_id, &nest, &alice_actor).await;
+    poll_inbound_conv(&bob_backend, &bob_manager, &channel_id, &mut after_seq, 0)
+        .await
+        .expect("poll ok");
+    let detail = bob_manager.thread_detail(bob_thread_id).expect("thread");
+    assert!(
+        detail
+            .participants
+            .iter()
+            .any(|p| matches!(p, TypedAddress::Fauna { actor_id, .. } if *actor_id == successor)),
+        "the remove-old commit's re-drive re-points the row: {:?}",
+        detail.participants
+    );
+    assert_eq!(bob_backend.succession_statement_counts().repointed, 1);
+}
+
+/// The set's bound: a slot pre-filled with `PARKED_PER_SLOT` distinct junk
+/// statements refuses the next one (counted in `park_full`, the policy's own
+/// degrade), and still admits a statement the witness verified — the
+/// exception, which displaces an unverified entry — so the honest ceremony
+/// re-points at its remove-old commit.
+#[tokio::test]
+async fn a_full_slot_refuses_junk_and_still_admits_the_verified_hold() {
+    let SuccessionSetup {
+        alice,
+        channel_id,
+        nest,
+        bob_manager,
+        bob_backend,
+        bob_thread_id,
+        signed,
+        head,
+        successor,
+        successor_engine,
+    } = succession_receive_setup();
+    let alice_actor = alice.identity_actor_id();
+    bob_backend.set_succession_witness(Arc::new(HeadWitness(head)));
+
+    run_add_successor(&alice, &successor_engine, &channel_id, &nest).await;
+    for _ in 0..=PARKED_PER_SLOT {
+        post_statement(
+            &alice,
+            &channel_id,
+            &nest,
+            &forged_statement(alice_actor, successor),
+        )
+        .await;
+    }
+    let mut after_seq = 0i64;
+    poll_inbound_conv(&bob_backend, &bob_manager, &channel_id, &mut after_seq, 0)
+        .await
+        .expect("poll ok");
+    let counts = bob_backend.succession_statement_counts();
+    assert_eq!(
+        (counts.parked, counts.park_full),
+        (PARKED_PER_SLOT as u64, 1),
+        "a full slot refuses the next unverified statement, and says so"
+    );
+
+    post_statement(&alice, &channel_id, &nest, &signed).await;
+    run_remove_old(&successor_engine, &channel_id, &nest, &alice_actor).await;
+    poll_inbound_conv(&bob_backend, &bob_manager, &channel_id, &mut after_seq, 0)
+        .await
+        .expect("poll ok");
+    let counts = bob_backend.succession_statement_counts();
+    assert_eq!(counts.awaiting_remove_old, 1);
+    assert_eq!(
+        counts.park_full, 1,
+        "the verified hold was admitted, not refused"
+    );
+    assert_eq!(counts.repointed, 1);
+    let detail = bob_manager.thread_detail(bob_thread_id).expect("thread");
+    assert!(
+        detail
+            .participants
+            .iter()
+            .any(|p| matches!(p, TypedAddress::Fauna { actor_id, .. } if *actor_id == successor)),
+        "the honest ceremony re-points despite the pre-filled slot: {:?}",
+        detail.participants
+    );
+}
+
 /// The harvest wait's release (`identity-succession.md` § The succession
 /// statement → *the harvest wait*): a statement the witness held back because
 /// this session's harvest of the peer was still owed is PARKED like any other
@@ -5595,7 +5801,7 @@ async fn manager_remove_participant_surfaces_the_failure_on_the_page_error() {
 /// The remove's own truthfulness half, the mirror of the add's rollback. An
 /// `Err` out of `remove_participant` provably means the member is **still in
 /// the group**: both routes merge only on an accepted send (the ungated one
-/// clears the staged pending on failure, `fauna_mls.rs::evict_leaf_locked`; the
+/// clears the staged pending on failure, `fauna_mls.rs::evict_member_locked`; the
 /// gated one merges inside the rebase loop), so hiding their chip would render
 /// the same inverse-of-truth the add's rollback exists to prevent.
 #[tokio::test]
@@ -5706,8 +5912,44 @@ async fn manager_confirm_add_participant_oneonone_forks_snapshot_only() {
 // (`docs/goal/ui/conversations.md` § Where logic lives → "rail probe, MLS key
 // lookup"; § User actions `recipient-picker-input` → `resolve_recipient`). The
 // first, smallest-useful form: a 64-hex string IS the 32-byte actor key, so
-// `TypedAddress::Fauna` needs no handle→actor lookup — a non-destructive
-// `keypackage.count > 0` probe confirms the actor is a reachable Fauna peer.
+// `TypedAddress::Fauna` needs no handle→actor lookup — the non-destructive
+// `keypackage.addressable` boolean confirms the actor is a reachable Fauna peer
+// (never their count, which is owner-only — `federation.md` § Key packages —
+// privacy & exhaustion).
+
+/// An actor down to their last-resort package is reachable on BOTH forms: the
+/// boolean counts it, where a count probe read `0` and resolved `NotFound`
+/// although `keypackage.fetch` would serve them.
+#[tokio::test]
+async fn resolve_address_last_resort_only_peer_resolves() {
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let bob = MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap();
+    let bob_actor = bob.identity_actor_id();
+    let bob_hex = hex::encode(bob_actor.0);
+
+    let nest = Arc::new(MockNest::default());
+    nest.seed_handle("bob", &bob_hex, "nest.test");
+    nest.seed_last_resort(
+        &bob_hex,
+        bob.generate_last_resort_key_package_bytes().unwrap(),
+    );
+
+    let alice_actor = alice.identity_actor_id();
+    let backend = FaunaMlsBackend::new(alice, nest.clone(), "alice", alice_actor);
+
+    for typed in [bob_hex.as_str(), "bob", "bob@nest.test"] {
+        match backend.resolve_address(typed).await {
+            ResolveResult::Resolved(TypedAddress::Fauna { actor_id, .. }) => {
+                assert_eq!(actor_id, bob_actor, "{typed}");
+            }
+            other => panic!("{typed}: expected Resolved(Fauna), got {other:?}"),
+        }
+    }
+    assert!(
+        !nest.count_probes.lock().unwrap().contains(&bob_hex),
+        "a resolve never asks another actor's count (owner-only on the nest)"
+    );
+}
 
 /// A 64-hex actor id whose actor has published key packages resolves to a
 /// `TypedAddress::Fauna` (rail = FaunaMls), carrying the typed hex as the handle
@@ -5739,8 +5981,8 @@ async fn resolve_address_actor_id_hex_with_keypackages_resolves() {
 }
 
 /// A well-formed 64-hex actor id whose actor has *no* key packages on the nest is
-/// `NotFound` — `count == 0` means unreachable (no package to add them to a group
-/// with), so the manager's resolution chain falls through to other backends.
+/// `NotFound` — not addressable means unreachable (no package to add them to a
+/// group with), so the manager's resolution chain falls through to other backends.
 #[tokio::test]
 async fn resolve_address_actor_id_hex_no_keypackages_not_found() {
     let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
@@ -5886,8 +6128,8 @@ async fn resolve_address_handle_at_foreign_domain_not_promoted() {
 //
 // A typed `localpart@domain` whose domain is NOT this nest's resolves directly
 // against that peer nest via the seam's `actor_by_handle_remote`, with
-// reachability taken from the reply's `addressable` boolean (a foreign client
-// cannot run a `keypackage.count` probe — `federation.md` § Key packages). The
+// reachability taken from the reply's `addressable` boolean, as on the same-nest
+// handle arm (`federation.md` § Key packages). The
 // data plane (key-package fetch / Welcome) then routes through the home-nest
 // federation relay via `peer_domain` (→ the request's `nest_url`).
 
@@ -7556,6 +7798,7 @@ async fn session_receive_loop_ingests_a_pushed_welcome() {
             access: None,
             home_nest_actor_id: None,
             set_name_seal: None,
+            residency: None,
             shared_by_handle: None,
             shared_by_domain: None,
         })])),
@@ -7632,6 +7875,7 @@ impl InboxDrainSource for MockInboxDrain {
                     access: self.welcome.access.clone(),
                     home_nest_actor_id: self.welcome.home_nest_actor_id.clone(),
                     set_name_seal: None,
+                    residency: self.welcome.residency.clone(),
                     shared_by_handle: None,
                     shared_by_domain: None,
                 },
@@ -7694,6 +7938,7 @@ async fn session_receive_loop_drains_missed_welcome() {
             access: None,
             home_nest_actor_id: None,
             set_name_seal: None,
+            residency: None,
             shared_by_handle: None,
             shared_by_domain: None,
         },
@@ -9317,7 +9562,7 @@ async fn a_witness_refused_statement_parks_by_channel_and_re_stamps_on_the_harve
 /// `old_actor_id`s posts: structurally perfect, refused by any witness that
 /// holds alice's real head, and indistinguishable from the honest one to a
 /// witness that holds none.
-fn forged_folder_statement(
+fn forged_statement(
     old_actor_id: ActorId,
     new_actor_id: ActorId,
 ) -> fauna_core::recovery::SignedIdentitySuccession {
@@ -9516,6 +9761,128 @@ async fn the_hold_behind_a_parked_folder_statement_survives_a_relaunch() {
     );
 }
 
+/// The folder rail parks under the same replacement policy as the
+/// conversations rail (`identity-succession.md` § The succession statement →
+/// *The slot's replacement policy*): a junk statement naming the channel's
+/// owner, posted after the honest one, does not displace it, and the harvest
+/// re-drive re-stamps the marker from the honest copy.
+#[tokio::test]
+async fn a_later_junk_statement_does_not_displace_the_parked_folder_owner_statement() {
+    let s = folder_succession_setup();
+    let witness = Arc::new(SwitchWitness::default());
+    s.bob_backend.set_succession_witness(
+        Arc::clone(&witness) as Arc<dyn fauna_conversations::backend::SuccessionWitness>
+    );
+    let mut cursor = 0;
+
+    run_add_successor(&s.alice, &s.successor_engine, &s.channel, &s.nest).await;
+    post_statement(&s.alice, &s.channel, &s.nest, &s.signed).await;
+    post_statement(
+        &s.alice,
+        &s.channel,
+        &s.nest,
+        &forged_statement(s.alice_actor, s.successor),
+    )
+    .await;
+    poll_folder(&s, &mut cursor).await;
+    assert_eq!(s.bob_backend.succession_statement_counts().parked, 2);
+
+    witness.arm(s.head);
+    let manager = ConversationsManager::new();
+    let repointed = redrive_parked_successions(&s.bob_backend, &manager, &s.alice_actor).await;
+    assert_eq!(repointed, 1, "the honest statement survived the junk one");
+    assert_eq!(s.bob.folder_channel_owner(&s.channel), Some(s.successor));
+}
+
+/// The at-rest folder park rests the WHOLE set: a seat whose session ends with
+/// an honest and a junk statement parked for the owner holds both across the
+/// relaunch, and the sweep speaking for the owner re-stamps the marker from the
+/// honest one.
+#[tokio::test]
+async fn the_rested_folder_park_holds_the_whole_set_across_a_relaunch() {
+    let bob_secret = [55u8; 32];
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let s = folder_succession_setup_with(Arc::new(
+        MlsEngine::new(ActorKeypair::from_secret(bob_secret), tmp.path()).unwrap(),
+    ));
+    s.bob_backend
+        .set_succession_witness(Arc::new(SwitchWitness::default()));
+    s.bob_backend.arm_succession_harvest_wait().await;
+    let mut cursor = 0;
+
+    run_add_successor(&s.alice, &s.successor_engine, &s.channel, &s.nest).await;
+    post_statement(&s.alice, &s.channel, &s.nest, &s.signed).await;
+    post_statement(
+        &s.alice,
+        &s.channel,
+        &s.nest,
+        &forged_statement(s.alice_actor, s.successor),
+    )
+    .await;
+    run_remove_old(&s.successor_engine, &s.channel, &s.nest, &s.alice_actor).await;
+    let outcome = poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert_eq!((outcome.applied, outcome.stalled), (1, true));
+
+    let FolderSuccessionSetup {
+        alice_actor,
+        bob,
+        bob_backend,
+        channel,
+        nest,
+        successor,
+        head,
+        signed,
+        ..
+    } = s;
+    let rested = bob
+        .parked_folder_succession(&channel)
+        .expect("the park rests with the engine");
+    let rested: Vec<fauna_core::recovery::SignedIdentitySuccession> =
+        fauna_core::encoding::canonical_decode(&rested).expect("the rested value is the set");
+    assert_eq!(rested.len(), 2, "both statements rest");
+    assert!(rested.contains(&signed), "the honest one among them");
+    bob.save_state()
+        .expect("the session persisted what it walked");
+    drop(bob_backend);
+    drop(bob);
+
+    let bob = Arc::new(MlsEngine::new(ActorKeypair::from_secret(bob_secret), tmp.path()).unwrap());
+    let backend = Arc::new(FaunaMlsBackend::new(
+        bob.clone(),
+        nest.clone(),
+        "bob",
+        bob.identity_actor_id(),
+    ));
+    let witness = Arc::new(SwitchWitness::default());
+    backend.set_succession_witness(
+        Arc::clone(&witness) as Arc<dyn fauna_conversations::backend::SuccessionWitness>
+    );
+    backend.arm_succession_harvest_wait().await;
+    let mut cursor = 0;
+    let held = poll_inbound_folder(&backend, &channel, &mut cursor, 50)
+        .await
+        .expect("the folder poll walks");
+    assert!(
+        held.stalled,
+        "the relaunch still holds behind the rested set"
+    );
+
+    witness.arm(head);
+    let manager = ConversationsManager::new();
+    let repointed = redrive_parked_successions(&backend, &manager, &alice_actor).await;
+    assert_eq!(
+        repointed, 1,
+        "the honest rested statement re-stamps the marker"
+    );
+    assert_eq!(bob.folder_channel_owner(&channel), Some(successor));
+    assert!(
+        bob.parked_folder_succession(&channel).is_none(),
+        "the settle forgot the rested set"
+    );
+}
+
 /// The at-rest park's bound: the sweep speaking for the owner forgets the
 /// rested copy whatever it decided, so a forged statement costs at most one
 /// hold window per launch — the launch after the settle holds nothing.
@@ -9536,7 +9903,7 @@ async fn a_forged_statements_hold_does_not_recur_on_the_launch_after_the_settle(
         &s.alice,
         &s.channel,
         &s.nest,
-        &forged_folder_statement(s.alice_actor, s.successor),
+        &forged_statement(s.alice_actor, s.successor),
     )
     .await;
     let outcome = poll_inbound_folder(&s.bob_backend, &s.channel, &mut cursor, 50)
@@ -9625,7 +9992,7 @@ async fn a_forged_statement_holds_the_walk_only_until_the_harvest_settles_the_ow
     // An owner-authored add, the forgery, then an owner-authored commit the
     // forgery now stands in front of.
     run_add_successor(&s.alice, &s.successor_engine, &s.channel, &s.nest).await;
-    let forged = forged_folder_statement(s.alice_actor, s.successor);
+    let forged = forged_statement(s.alice_actor, s.successor);
     post_statement(&s.alice, &s.channel, &s.nest, &forged).await;
     let successor_leaf = s
         .alice
@@ -9682,7 +10049,7 @@ async fn a_forged_statement_holds_the_walk_only_until_the_harvest_settles_the_ow
         &s.alice,
         &s.channel,
         &s.nest,
-        &forged_folder_statement(s.alice_actor, carol.identity_actor_id()),
+        &forged_statement(s.alice_actor, carol.identity_actor_id()),
     )
     .await;
     run_add_successor(&s.alice, &carol, &s.channel, &s.nest).await;
@@ -9892,6 +10259,8 @@ struct MockFolderCustodySink {
     /// What `refetch_owed` answers next — spent by the asking, as the real
     /// sink's answer is.
     refetch_owed: Mutex<bool>,
+    /// Every foreign-set record a cross-nest join wrote, in order.
+    foreign: Mutex<Vec<fauna_core::data::ForeignFolder>>,
 }
 
 impl MockFolderCustodySink {
@@ -9901,7 +10270,11 @@ impl MockFolderCustodySink {
             received: Mutex::new(Vec::new()),
             moves: Mutex::new(Vec::new()),
             refetch_owed: Mutex::new(false),
+            foreign: Mutex::new(Vec::new()),
         }
+    }
+    fn foreign(&self) -> Vec<fauna_core::data::ForeignFolder> {
+        self.foreign.lock().unwrap().clone()
     }
     /// The sink's throttled check found the fetch re-owed (the nest's nonce
     /// echo moved, or the engine's host refused a row `signature_invalid`).
@@ -9944,6 +10317,50 @@ impl FolderCustodySink for MockFolderCustodySink {
     }
     async fn refetch_owed(&self, _channel_id: &[u8; 32]) -> bool {
         std::mem::take(&mut *self.refetch_owed.lock().unwrap())
+    }
+    async fn record_foreign_set(&self, record: fauna_core::data::ForeignFolder) -> bool {
+        self.foreign.lock().unwrap().push(record);
+        true
+    }
+}
+
+/// A cross-nest folder accept seeds the member's foreign-set record with the
+/// residency the Welcome relay carried — before any federated read
+/// (`file-sync.md` § Relay serving → *A member on another nest*, step (1);
+/// `federation.md` § … *The `residency` stamp*: absent means *not stated*,
+/// never *full*). The sink here serves no envelope, so no content-key read
+/// can stamp the record: whatever residency it holds came from the Welcome.
+#[tokio::test]
+async fn cross_nest_folder_join_seeds_the_record_with_the_welcomes_residency() {
+    for (stamp, want) in [
+        (Some("metadata_only"), Some(true)),
+        (Some("full"), Some(false)),
+        (None, None),
+        (Some("bogus"), None),
+    ] {
+        let (nest, bob, bob_actor, _alice_hex, welcome) = folder_welcome_setup().await;
+        let bob_backend = FaunaMlsBackend::new(bob, nest, "bob", bob_actor);
+        let sink = Arc::new(MockFolderCustodySink::new());
+        bob_backend.set_folder_custody_sink(sink.clone());
+        join_folder_welcome(
+            &bob_backend,
+            &welcome.channel_hex,
+            &welcome.welcome_bytes,
+            "https://home.example",
+            &FolderWelcomeContext {
+                residency: stamp.map(str::to_string),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("cross-nest join");
+        let records = sink.foreign();
+        assert_eq!(records.len(), 1, "the accept writes one foreign-set record");
+        assert_eq!(
+            records[0].residency.map(|r| r.metadata_only),
+            want,
+            "the Welcome's stamp {stamp:?} seeds the record"
+        );
     }
 }
 
@@ -10229,6 +10646,105 @@ async fn member_custody_ingest_refetches_on_a_quiet_poll_when_the_sink_owes_it()
         .await
         .expect("quiet poll");
     assert_eq!(sink.received().len(), 2, "one fetch per owed signal");
+}
+
+/// The owner seam a test registers: records each channel the walk asks it to
+/// converge, answering what `settles` says.
+struct MockEnvelopeOwner {
+    asked: Mutex<Vec<[u8; 32]>>,
+    settles: Mutex<bool>,
+}
+
+#[async_trait]
+impl fauna_conversations::backend::FolderEnvelopeOwner for MockEnvelopeOwner {
+    async fn converge_envelope(&self, channel_id: &[u8; 32]) -> bool {
+        self.asked.lock().unwrap().push(*channel_id);
+        *self.settles.lock().unwrap()
+    }
+}
+
+/// The owner's half of the envelope ordering (`mls-group-key-material.md`
+/// § Admitting a member, *Envelope ordering*): the envelope opens only at the
+/// epoch it was sealed at, so a takeover commit — a member's, or the owner's
+/// own — must be followed by an owner re-seal, mid-session, or every member
+/// stays unable to open it until the owner's next launch. The owner's folder
+/// walk asks its seam once per epoch move: after it applies a member's
+/// takeover, after this device's own commit merged outside the walk, and again
+/// after an answer that did not settle — and never on a quiet walk at an epoch
+/// already settled.
+#[tokio::test]
+async fn owner_folder_walk_asks_for_a_re_seal_once_per_epoch_move() {
+    let alice = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let carol = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+    let kps = carol.generate_key_packages(1).unwrap();
+    let (ch, welcome) = alice.create_group(&kps).unwrap();
+    carol
+        .join_from_welcome_bytes(&welcome.to_bytes().unwrap())
+        .unwrap();
+
+    let nest = Arc::new(MockNest::default());
+    let alice_backend = FaunaMlsBackend::new(
+        alice.clone(),
+        nest.clone(),
+        "alice",
+        alice.identity_actor_id(),
+    );
+    let owner = Arc::new(MockEnvelopeOwner {
+        asked: Mutex::new(Vec::new()),
+        settles: Mutex::new(true),
+    });
+    alice_backend.set_folder_envelope_owner(owner.clone());
+    let asked = || owner.asked.lock().unwrap().len();
+    let mut cursor = 0i64;
+
+    // The first walk of the session settles the channel at its epoch.
+    poll_inbound_folder(&alice_backend, &ch, &mut cursor, 0)
+        .await
+        .expect("first walk");
+    assert_eq!(asked(), 1, "the first walk asks once");
+    poll_inbound_folder(&alice_backend, &ch, &mut cursor, 0)
+        .await
+        .expect("quiet walk");
+    assert_eq!(asked(), 1, "a quiet walk at a settled epoch asks nothing");
+
+    // Carol's takeover lands on the log; the owner's walk applies it.
+    let takeover = carol.self_update(&ch).expect("carol stages a takeover");
+    carol.merge_pending_commit(&ch).unwrap();
+    nest.channel_send(
+        ch.to_string(),
+        ChannelEnvelope::Commit(takeover).to_bytes().unwrap(),
+        None,
+        vec![],
+    )
+    .await
+    .expect("the takeover sits on the log");
+    let outcome = poll_inbound_folder(&alice_backend, &ch, &mut cursor, 0)
+        .await
+        .expect("walk applying the member's takeover");
+    assert_eq!(outcome.applied, 1);
+    assert_eq!(asked(), 2, "the member's takeover is re-sealed over");
+
+    // The owner's own takeover merges outside the walk (the gate merges it);
+    // the next walk is quiet but the epoch moved.
+    alice.self_update(&ch).expect("alice stages her takeover");
+    alice.merge_pending_commit(&ch).unwrap();
+    *owner.settles.lock().unwrap() = false;
+    poll_inbound_folder(&alice_backend, &ch, &mut cursor, 0)
+        .await
+        .expect("quiet walk after the owner's own commit");
+    assert_eq!(asked(), 3, "the owner's own takeover is re-sealed over");
+
+    // That answer did not settle: the next walk asks again, then stops.
+    *owner.settles.lock().unwrap() = true;
+    poll_inbound_folder(&alice_backend, &ch, &mut cursor, 0)
+        .await
+        .expect("retry walk");
+    assert_eq!(asked(), 4, "an unsettled answer is asked again");
+    poll_inbound_folder(&alice_backend, &ch, &mut cursor, 0)
+        .await
+        .expect("quiet walk");
+    assert_eq!(asked(), 4, "and settled, the walk is quiet again");
+    assert!(owner.asked.lock().unwrap().iter().all(|c| *c == ch.0));
 }
 
 /// Rule-2 "round toward the safe side" on the folder poll cursor
@@ -14530,6 +15046,135 @@ async fn an_inviters_history_slice_gives_messages_and_neither_a_name_nor_provena
     }
 }
 
+/// Dave admitted under `full`; bob catches up and says `live` in dave's joined
+/// epoch (so dave reads it first-hand when he polls). Returns the room, dave's
+/// engine, the shaping template, the live id, the live seq and alice's address.
+async fn room_with_a_live_message_after_dave_joined() -> (
+    Governed,
+    Arc<MlsEngine>,
+    fauna_conversations::message::MessageSnapshot,
+    MessageId,
+    i64,
+    TypedAddress,
+) {
+    let (g, _alice, dave, template) = room_with_dave_admitted(HistoryPolicy::Full).await;
+    let ch = g.channel_id.to_string();
+    let alice_addr = fauna_addr("alice", g.alice.identity_actor_id());
+    catch_up(&g.bob, &g.nest, &g.channel_id);
+    let live_seq = g.nest.sent_envelopes(&ch).len() as i64 + 1;
+    post_raw(&g, &g.bob, ChannelMessageBody::Text("live".into())).await;
+    let live_id = MessageId(format!("conv:{ch}:{live_seq}"));
+    (g, dave, template, live_id, live_seq, alice_addr)
+}
+
+/// The inviter's slice restates a record the newcomer already read first-hand
+/// and tombstones it. `conversation-rooms.md` § History for joiners → *What a
+/// device accepts*: "the first copy of an id stands" — the live record keeps
+/// its body, its sender and its life, and the honest past folds beside it.
+/// Pins the `deleted_messages.retain(|id| !held(id))` line of the
+/// `HistorySlice` arm of `poll_inbound_conv`.
+#[tokio::test]
+async fn an_accepted_inviter_slice_tombstones_nothing_the_newcomer_read_first_hand() {
+    let (g, dave, template, live_id, _live_seq, alice_addr) =
+        room_with_a_live_message_after_dave_joined().await;
+    let ch = g.channel_id.to_string();
+    let mut slice = empty_channel_slice(&ch, "thread", alice_addr.clone());
+    slice.messages = vec![
+        carried(&template, format!("conv:{ch}:1"), alice_addr.clone(), "old"),
+        carried(&template, live_id.0.clone(), alice_addr, "FORGED"),
+    ];
+    slice.deleted_messages = [live_id.clone()].into_iter().collect();
+    post_slice(&g, &g.alice, &slice).await;
+
+    let dave = dave_seat(&g, &dave);
+    poll_all(&dave, &g.channel_id).await;
+    let d = dave.manager.thread_detail(dave.tid.clone()).unwrap();
+    let live = d
+        .messages
+        .iter()
+        .find(|m| m.message_id == live_id)
+        .expect("the live record folded");
+    assert_eq!(live.body, "live");
+    assert_eq!(
+        live.sender.person_actor_id(),
+        Some(g.bob.identity_actor_id()),
+        "sender"
+    );
+    assert!(
+        !live.deleted,
+        "the slice tombstones nothing dave read first-hand"
+    );
+    let mut b = bodies(&dave);
+    b.sort();
+    assert_eq!(
+        b,
+        vec!["live", "old"],
+        "the slice's honest past folds beside it"
+    );
+}
+
+/// The tombstone pin's twin for reactions. Dave holds the live message and no
+/// reaction log for it, so the manager's reseed (which fills a log only where
+/// none exists) would take the slice's log whole were the
+/// `reaction_log.retain(|id, _| !held(id))` line absent — the inviter painting
+/// pills on a record it has no standing over. Second arm: bob's real reaction
+/// lands after the slice, and only his pill shows.
+#[tokio::test]
+async fn an_accepted_inviter_slice_paints_no_pills_on_a_message_the_newcomer_read_first_hand() {
+    for bob_reacts_after in [false, true] {
+        let (g, dave, template, live_id, live_seq, alice_addr) =
+            room_with_a_live_message_after_dave_joined().await;
+        let ch = g.channel_id.to_string();
+        let mut slice = empty_channel_slice(&ch, "thread", alice_addr.clone());
+        slice.messages = vec![
+            carried(&template, format!("conv:{ch}:1"), alice_addr.clone(), "old"),
+            carried(&template, live_id.0.clone(), alice_addr, "FORGED"),
+        ];
+        slice.reaction_log.insert(
+            live_id.clone(),
+            vec![fauna_conversations::reactions::StampedReactionEvent {
+                reactor: g.alice.identity_actor_id(),
+                emoji: "🔥".into(),
+                op: ReactionOp::Add,
+                sent_at_ms: 1,
+            }],
+        );
+        post_slice(&g, &g.alice, &slice).await;
+        if bob_reacts_after {
+            post_raw(
+                &g,
+                &g.bob,
+                ChannelMessageBody::Reaction {
+                    target_seq: live_seq as u64,
+                    emoji: "👍".into(),
+                    op: ReactionOp::Add,
+                },
+            )
+            .await;
+        }
+
+        let dave = dave_seat(&g, &dave);
+        poll_all(&dave, &g.channel_id).await;
+        let d = dave.manager.thread_detail(dave.tid.clone()).unwrap();
+        let live = d
+            .messages
+            .iter()
+            .find(|m| m.message_id == live_id)
+            .expect("the live record folded");
+        assert_eq!(live.body, "live");
+        let pills: Vec<&str> = live.reactions.iter().map(|r| r.emoji.as_str()).collect();
+        let want: Vec<&str> = if bob_reacts_after {
+            vec!["👍"]
+        } else {
+            vec![]
+        };
+        assert_eq!(
+            pills, want,
+            "the slice paints no pill on a first-hand record (bob reacts after: {bob_reacts_after})"
+        );
+    }
+}
+
 /// The admission is for the epoch the newcomer joined at. An inviter who holds
 /// its slice back until the room has moved on — which is every long-standing
 /// member's inviter, for ever — has nothing left to hand over.
@@ -16125,6 +16770,12 @@ struct LiveFloor {
     /// room's birth salt beside them — empty for a floor that retains none.
     versions: Mutex<Vec<fauna_mls::room_policy::SignedRoomPolicy>>,
     salt: Mutex<Option<[u8; 32]>>,
+    /// The most versions one versioned read serves: `Some(n)` is a nest that
+    /// serves runs (capped at `n`), `None` one that predates the field and
+    /// answers every read with the one version asked for.
+    run_cap: Mutex<Option<usize>>,
+    /// How many versioned reads (single or run) the backend has made.
+    versioned_reads: std::sync::atomic::AtomicUsize,
 }
 
 impl LiveFloor {
@@ -16135,7 +16786,17 @@ impl LiveFloor {
             labelers: Mutex::new(None),
             versions: Mutex::new(Vec::new()),
             salt: Mutex::new(None),
+            run_cap: Mutex::new(None),
+            versioned_reads: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+    /// Serve runs of up to `cap` retained versions per versioned read.
+    fn serving_runs_of(&self, cap: usize) {
+        *self.run_cap.lock().unwrap() = Some(cap);
+    }
+    fn versioned_reads(&self) -> usize {
+        self.versioned_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
     /// Serve this signed policy back on every read.
     fn holding_policy(&self, signed: &fauna_mls::room_policy::SignedRoomPolicy) {
@@ -16233,6 +16894,8 @@ impl RoomRosterReader for LiveFloor {
         version: u64,
     ) -> fauna_conversations::backend::RoomPolicyVersionRead {
         use fauna_conversations::backend::RoomPolicyVersionRead;
+        self.versioned_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match self
             .versions
             .lock()
@@ -16244,6 +16907,35 @@ impl RoomRosterReader for LiveFloor {
                 birth_salt: *self.salt.lock().unwrap(),
             },
             None => RoomPolicyVersionRead::NotHeld,
+        }
+    }
+
+    async fn read_policy_versions(
+        &self,
+        _channel: String,
+        _home: Option<String>,
+        from: u64,
+        span: u32,
+    ) -> fauna_conversations::backend::RoomPolicyVersionsRead {
+        use fauna_conversations::backend::RoomPolicyVersionsRead;
+        self.versioned_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let take = (span as usize).min(self.run_cap.lock().unwrap().unwrap_or(1));
+        let policies: Vec<Vec<u8>> = self
+            .versions
+            .lock()
+            .unwrap()
+            .iter()
+            .skip((from as usize).saturating_sub(1))
+            .take(take)
+            .map(|signed| fauna_core::encoding::canonical_encode(signed).unwrap())
+            .collect();
+        if policies.is_empty() {
+            return RoomPolicyVersionsRead::NotHeld;
+        }
+        RoomPolicyVersionsRead::Served {
+            policies,
+            birth_salt: *self.salt.lock().unwrap(),
         }
     }
 }
@@ -17352,6 +18044,43 @@ async fn a_policy_that_does_not_verify_is_not_amendable() {
         "and nothing reached the nest — an unverified record must not be laundered into the \
          room's history under this account's signature"
     );
+}
+
+/// **A long policy chain anchors in one roster read per RUN, not per version**
+/// (`community-rooms.md` § Implementation status today, residual (c)): a nest
+/// serving runs of 4 anchors a 10-version chain in ceil(10 / 4) = 3 reads; a
+/// nest that predates the field answers every read with the one version asked
+/// for and the walk still anchors, a version a read — the fallback, pinned.
+/// Either way every link goes through the chain judge.
+#[tokio::test]
+async fn a_long_policy_chain_anchors_in_one_read_per_run() {
+    use fauna_mls::room_policy::RoomPolicy;
+
+    for (cap, reads) in [(Some(4), 3), (None, 10)] {
+        let nest = Arc::new(MockNest::default());
+        let (seat, _ceremony, floor) = policy_seat(&nest, "owner");
+        if let Some(cap) = cap {
+            floor.serving_runs_of(cap);
+        }
+        let birth = RoomPolicy::initial(seat.actor, Some("square".into()));
+        let current = RoomPolicy {
+            version: 10,
+            ..birth
+        };
+        let channel = floor.holding_chain_to(&seat, &current);
+        let anchored = seat
+            .backend
+            .read_room_policy(&channel)
+            .await
+            .expect("a served chain is no transport error")
+            .expect("the whole chain anchors");
+        assert_eq!(anchored.policy.version, 10, "{cap:?}: walked to the head");
+        assert_eq!(
+            floor.versioned_reads(),
+            reads,
+            "{cap:?}: roster reads spent anchoring ten versions"
+        );
+    }
 }
 
 /// **A device amends — and renders — only a current policy it has proven to be

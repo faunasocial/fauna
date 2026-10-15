@@ -39,6 +39,19 @@ internal static class OfflineGateExtensions
     /// </summary>
     internal static void FaunaGate(this Control control, string kind) =>
         OfflineGate.Shared.Declare(new ControlGate(control), kind);
+
+    /// <summary>
+    /// Withdraw this control's declaration (see <see cref="OfflineGate.Retract"/>).
+    /// For a control that actuates a wire kind only while the page is painting
+    /// that ceremony — never a way to dodge a gate the control always owes. Not a
+    /// declaration site, so the offline-gate-kinds checker has nothing to read
+    /// here (it scans for <c>FaunaGate(</c> calls with a kind).
+    /// </summary>
+    internal static void FaunaUngate(this Control control)
+    {
+        OfflineGate.Shared.Retract(control);
+        AutomationProperties.SetItemStatus(control, string.Empty);
+    }
 }
 
 /// <summary>

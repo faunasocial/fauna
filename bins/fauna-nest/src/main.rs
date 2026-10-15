@@ -461,6 +461,16 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
         cfg.nest.mode = env_mode;
     }
 
+    // The update-channel seed: the image tag the bundle was installed with
+    // (`nest/update-channel.md` § The channel as nest state). Read every boot
+    // like the FAUNA_MODE seed above; the `nest_update_channel` row, once an
+    // admin chooses, wins (`update_channel::resolve_update_channel`).
+    if let Ok(tag) = std::env::var("FAUNA_IMAGE_TAG")
+        && let Some(cfg) = Arc::get_mut(&mut nest_config)
+    {
+        cfg.nest.image_tag = Some(tag);
+    }
+
     // FAUNA_DATA_DIR (bucket-2 IPC, artifact-set — see `data_dir_db_path_override`)
     // relocates the nest's whole on-disk data layout to a system data-root when no
     // explicit `--db` flag is given. Applied here, in the same `Arc::get_mut`
@@ -838,6 +848,7 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
 
         Some((http01_config, challenge_state))
     } else {
+        fauna_nest::acme_http01::clear_issuance_errors_when_not_ordering(&acme_config.acme_dir);
         None
     };
 
@@ -931,6 +942,7 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
             push_service.clone(),
             services_json_path.clone(),
             sidecar_tokens.clone(),
+            acme_config.acme_dir.clone(),
         )
         .await?;
 
@@ -1000,28 +1012,29 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
             // a domainless, localhost/LAN, *or* public ACME nest alike.
             let floor_domain = nest_config.nest.domain.as_deref().filter(|d| !d.is_empty());
             let floor_label = floor_domain.unwrap_or("no domain (IP/identity-only nest)");
+            // It also watches for the on-disk trusted chain lapsing and re-serves the
+            // bridges and the relay the floor in its place (the lapse edge).
             app_state.spawn_scoped(fauna_nest::self_signed_cert::floor_renew_task(
                 acme_config.acme_dir.clone(),
                 floor_domain.map(str::to_string),
+                Some(std::sync::Arc::clone(&app_state)),
             ));
             tracing::info!("Self-signed TLS floor renew task started for {floor_label}");
 
             // At-risk renewal push (tls-certificates.md § C.4, mitigation 4). Only a
             // client-driven DNS-01 deployment (ACME HTTP-01 off) can't renew its own
-            // cert, so the nudge stays gated on `!acme_enabled` AND a **real** public
-            // domain — a localhost/IP/.local box or a domainless nest is happy on the
-            // floor, never nag it (same predicate the mail auto-domain net uses) — and
-            // a configured PushService (checked inside the task).
-            if !acme_enabled
-                && let Some(domain) = floor_domain
-                && fauna_provisioning::probe::resolve_handle_domain(domain).is_public_dns_name
-            {
+            // cert, so the nudge is gated on `!acme_enabled` here and on a configured
+            // PushService inside the task. The **real public domain** half of the
+            // gate is read per tick inside the task from the live identity domain —
+            // never `floor_domain`, the boot seed: every real nest boots domainless
+            // and learns its domain at the claim, so a boot-time domain gate would
+            // never open (same rule as the ACME lifecycle task below).
+            if !acme_enabled {
                 app_state.spawn_scoped(fauna_nest::cert_nudge::cert_at_risk_nudge_task(
                     app_state.clone(),
-                    domain.to_string(),
                     acme_config.acme_dir.clone(),
                 ));
-                tracing::info!("At-risk TLS renewal push task started for {domain}");
+                tracing::info!("At-risk TLS renewal push task started");
             }
         }
 
@@ -1235,12 +1248,17 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
                 // and export-session GCs are 30 days, so every job but the due-gated
                 // DKIM rotation stays a no-op at any cadence (the export orphan
                 // reclaim is race-free against a live export at any cadence).
-                // Production leaves it unset → 1 h.
+                // Production leaves it unset → 1 h. `test-hooks`-gated so the read is
+                // compiled out of the release binary (convention 15); the tier_3
+                // harness builds this binary with `test-hooks` by default.
+                #[cfg(feature = "test-hooks")]
                 let expiry_interval_secs = std::env::var("FAUNA_EXPIRY_INTERVAL_SECS")
                     .ok()
                     .and_then(|v| v.parse::<u64>().ok())
                     .filter(|&v| v > 0)
                     .unwrap_or(EXPIRY_INTERVAL_SECS);
+                #[cfg(not(feature = "test-hooks"))]
+                let expiry_interval_secs = EXPIRY_INTERVAL_SECS;
                 let mut interval =
                     tokio::time::interval(std::time::Duration::from_secs(expiry_interval_secs));
                 loop {
@@ -1288,12 +1306,13 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
                     //   1. mint — for every due domain with no rotation in flight,
                     //      provision a fresh `<YYYYMM>` key (sealed nest-side to the
                     //      approved MTA), so there is a newer selector to flip to;
-                    //   2. auto-flip — activate any newer selector that has aged past
-                    //      the 24 h peer-cache warmup, reusing the same flip primitive
-                    //      `force_rotate_dkim` uses + pushing `config_changed` so the
-                    //      bridge rebuilds live.
-                    // Mint before flip so a freshly-due domain starts its warmup this
-                    // tick; the flip lands a later tick once the new key has aged.
+                    //   2. auto-flip — look up each pending selector's TXT, stamp the
+                    //      first sighting of it published, and activate a newer selector
+                    //      seen published at least the 24 h peer-cache warmup ago,
+                    //      reusing the same flip primitive `force_rotate_dkim` uses +
+                    //      pushing `config_changed` so the bridge rebuilds live.
+                    // Mint before flip so a freshly-due domain's key exists this tick;
+                    // the flip lands a later tick, a day after its record is seen.
                     fauna_nest::bridge_routing_handlers::run_scheduled_dkim_rotation_mint(
                         &expiry_state,
                     )
@@ -1304,28 +1323,44 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
             });
         }
 
-        // Deliverability blocklist self-check (mail-deliverability.md § Blocklist
-        // self-check): a 24h sweep of the deployment's outbound IP against the DNSBL
-        // set, default-on. Aligned to ~03:00 UTC + a per-deployment random offset in
-        // [0, 60min) so the fleet's deployments don't query the DNSBLs in a
-        // synchronized storm. The sweep no-ops when mail isn't enabled.
+        // Deliverability blocklist self-check (mail-deliverability.md § The check):
+        // a daily sweep of the deployment's outbound IP against the DNSBL set,
+        // default-on, at 03:00 UTC plus a per-deployment offset in [0, 60min) — a
+        // fixed rule over the nest's public key, so the fleet's deployments don't
+        // query the DNSBLs in a synchronized storm and a restart keeps the moment.
+        // Due-driven on the mail clock (`outbound_now`) and restart-safe: the
+        // schedule's cover is seeded from the newest nest-run diagnostics row
+        // (`DailyPassSchedule`). The sweep no-ops when mail isn't enabled; the
+        // retention prunes riding it run regardless.
         {
             let blocklist_state = app_state.clone();
             app_state.spawn_scoped(async move {
-                const DAY: u64 = 86_400;
-                const TARGET_UTC_SECS: u64 = 3 * 3600; // 03:00 UTC
-                let now = fauna_core::data::Timestamp::now_secs_or_zero() as u64;
-                let into_day = now % DAY;
-                let to_target = if into_day < TARGET_UTC_SECS {
-                    TARGET_UTC_SECS - into_day
-                } else {
-                    DAY - into_day + TARGET_UTC_SECS
+                use fauna_nest::mail_deliverability::{
+                    DAILY_PASS_POLL_SECS, DailyPassSchedule, daily_pass_offset_secs,
                 };
-                let jitter = rand::random::<u64>() % 3600;
-                tokio::time::sleep(std::time::Duration::from_secs(to_target + jitter)).await;
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(DAY));
+                let offset =
+                    daily_pass_offset_secs(&blocklist_state.nest_identity.public_key_bytes());
+                let newest_nest_run = match blocklist_state.db.newest_nest_diagnostic_run_at().await
+                {
+                    Ok(at) => at,
+                    Err(e) => {
+                        tracing::warn!("daily pass: reading the newest nest run failed: {e}");
+                        None
+                    }
+                };
+                let mut schedule = DailyPassSchedule::at_boot(
+                    offset,
+                    blocklist_state.outbound_now(),
+                    newest_nest_run,
+                );
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_secs(DAILY_PASS_POLL_SECS));
                 loop {
                     interval.tick().await;
+                    if !schedule.due(blocklist_state.outbound_now()) {
+                        continue;
+                    }
+                    schedule.ran(blocklist_state.outbound_now());
                     fauna_nest::bridge_routing_handlers::run_scheduled_blocklist_self_check(
                         &blocklist_state,
                     )
@@ -1336,6 +1371,24 @@ async fn cmd_serve(args: ServeArgs) -> Result<()> {
                     // delete with no DNS/timing requirement — riding the existing
                     // 03:00-UTC sweep avoids a second alignment/jitter block.
                     fauna_nest::bridge_routing_handlers::run_spam_training_history_gc(
+                        &blocklist_state,
+                    )
+                    .await;
+                    // Same tick: prune inbound DMARC aggregate reports past
+                    // their 90-day retention (`dmarc-reporting.md` § Retention).
+                    fauna_nest::bridge_routing_handlers::run_dmarc_aggregate_report_gc(
+                        &blocklist_state,
+                    )
+                    .await;
+                    // And forensic reports past their 30-day retention
+                    // (`dmarc-reporting.md` § Forensic-report receive).
+                    fauna_nest::bridge_routing_handlers::run_dmarc_forensic_report_gc(
+                        &blocklist_state,
+                    )
+                    .await;
+                    // ...and inbound TLSRPT reports past their 90 days
+                    // (`smtp-server.md` § TLSRPT inbound report listener).
+                    fauna_nest::bridge_routing_handlers::run_tlsrpt_inbound_report_gc(
                         &blocklist_state,
                     )
                     .await;

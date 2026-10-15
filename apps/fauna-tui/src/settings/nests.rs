@@ -77,6 +77,10 @@ pub struct NestsState {
     /// The open mint form, if any (`nests.md` § Mint). `Some` only between
     /// `nest-trust-grant-mint-button` and confirm/re-hydrate.
     pub mint: Option<MintForm>,
+    /// The error a store-change re-read put on `error-message`, so the next
+    /// good re-read retires that one and never a gesture's
+    /// (`PageErrors::retire_own`).
+    pub read_error: Option<String>,
 }
 
 /// The open mint form's local state. Deliberately a single `Option`, not a
@@ -1094,6 +1098,7 @@ mod tests {
             mint_default_duration: TrustGrantDuration::OneOff,
             trust_backups: Vec::new(),
             trust_generations: Vec::new(),
+            trust_holders_unreachable: false,
         }
     }
 

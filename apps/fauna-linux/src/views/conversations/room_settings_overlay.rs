@@ -15,9 +15,10 @@
 //! file is a painter, and the seven apps cannot drift on the policy rules
 //! (priority #2; `conversation-rooms.md` § Roles and authorization).
 
+use super::room_labelers::{LabelerSeams, LabelerSection};
 use adw::prelude::*;
 use fauna_ui_ids as ids;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// The member-row repainter, held in a slot so it can hand ITSELF to each
@@ -163,11 +164,88 @@ fn member_row(
     row
 }
 
+/// `room-pending-invite[i]` + `room-pending-invite-withdraw-button[i]`, headed
+/// `conversations.unified.room_pending_invites_label`. Every row is one the
+/// nest served *because* this viewer may withdraw it, so the button is live on
+/// every row and no capability is consulted; the sentence is shared
+/// (`RoomPendingInviteSnapshot::text`) and `lapsed` is the driver's attribute.
+/// Withdrawing acts at once, outside Save's staged set, with no confirm
+/// (inviting again undoes it).
+fn paint_pending(pending_box: &gtk::Box, detail: &ThreadDetail, on_withdraw: &Rc<dyn Fn(String)>) {
+    while let Some(child) = pending_box.first_child() {
+        pending_box.remove(&child);
+    }
+    let pending = detail
+        .room
+        .as_ref()
+        .and_then(|room| room.pending_invites.as_deref())
+        .filter(|pending| !pending.is_empty());
+    let Some(pending) = pending else {
+        pending_box.set_visible(false);
+        return;
+    };
+    pending_box.set_visible(true);
+    let heading = gtk::Label::new(Some(
+        crate::i18n::strings::conversations::unified::ROOM_PENDING_INVITES_LABEL,
+    ));
+    heading.set_halign(gtk::Align::Start);
+    heading.add_css_class("heading");
+    pending_box.append(&heading);
+    for invite in pending {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let text = gtk::Label::new(Some(&invite.text()));
+        text.set_halign(gtk::Align::Start);
+        text.set_hexpand(true);
+        text.set_wrap(true);
+        text.set_xalign(0.0);
+        crate::testid::set_test_id(&text, ids::ROOM_PENDING_INVITE);
+        crate::testid::set_test_attr(
+            &text,
+            "lapsed",
+            if invite.lapsed { "true" } else { "false" },
+        );
+        row.append(&text);
+
+        let withdraw = gtk::Button::with_label(
+            crate::i18n::strings::conversations::unified::ROOM_PENDING_INVITE_WITHDRAW,
+        );
+        crate::testid::set_test_id(&withdraw, ids::ROOM_PENDING_INVITE_WITHDRAW_BUTTON);
+        crate::offline_gate::declare_wire_kind(&withdraw, "fauna.conversations.room.revoke_invite");
+        {
+            let on_withdraw = Rc::clone(on_withdraw);
+            let invitee = invite.invitee_actor_hex.clone();
+            withdraw.connect_clicked(move |_| on_withdraw(invitee.clone()));
+        }
+        row.append(&withdraw);
+        pending_box.append(&row);
+    }
+}
+
+/// The nest-read toggle's `checked` attribute and label, off the staged value.
+fn paint_nest_read(toggle: &gtk::ToggleButton, reads: bool) {
+    toggle.set_active(reads);
+    toggle.set_label(if reads {
+        crate::i18n::strings::conversations::unified::ROOM_NEST_READ_YES
+    } else {
+        crate::i18n::strings::conversations::unified::ROOM_NEST_READ_NO
+    });
+    crate::testid::set_test_attr(toggle, "checked", if reads { "true" } else { "false" });
+}
+
 /// A live editor: the caller keeps it to report a refusal (which leaves the
 /// editor open, its refused value still staged) or the all-landed close.
 pub struct RoomSettingsEditor {
     window: gtk::Window,
     error_label: gtk::Label,
+    pending_box: gtk::Box,
+    on_withdraw: Rc<dyn Fn(String)>,
+    leave_btn: gtk::Button,
+    /// The live `can_leave_room`, re-read at the confirm's open and not only
+    /// at paint (a greyed control must not be openable by a driver).
+    can_leave: Rc<Cell<bool>>,
+    /// Held so the section's weak self-references stay upgradable for as long
+    /// as the editor lives.
+    _labelers: Rc<LabelerSection>,
 }
 
 impl RoomSettingsEditor {
@@ -175,6 +253,23 @@ impl RoomSettingsEditor {
     /// IDs: "closes only when all landed").
     pub fn close(&self) {
         self.window.close();
+    }
+
+    /// Whether the editor's window is still up (Esc and Save-close destroy it).
+    pub fn is_open(&self) -> bool {
+        self.window.is_visible()
+    }
+
+    /// Repaint what stands pending from the LIVE detail. The editor is built
+    /// once from the detail at open, but the home nest serves the list after a
+    /// floor read and a withdrawal removes a row, so the section is rebuilt off
+    /// every snapshot tick rather than frozen at open. The whole section is
+    /// ABSENT while `pending_invites` is `None` (not served) or empty alike.
+    pub fn sync_live(&self, detail: &ThreadDetail) {
+        paint_pending(&self.pending_box, detail, &self.on_withdraw);
+        self.can_leave.set(detail.capabilities.can_leave_room);
+        self.leave_btn
+            .set_sensitive(detail.capabilities.can_leave_room);
     }
 
     /// A commit was refused. The editor STAYS OPEN with the refused value
@@ -195,12 +290,18 @@ impl RoomSettingsEditor {
 /// MessageDialog closes itself the moment a response fires, and this editor
 /// must outlive its own Save until every commit has landed.
 ///
+/// `on_leave` is the walk-out (`room-leave-confirm`): one manager call, outside
+/// Save's staged set. The editor closes itself first.
+///
 /// `None` on a policy-less room or a non-room (no policy to edit) — the button is
 /// greyed there, so this is the belt behind that gate.
-pub fn show<F: Fn(RoomSettingsDraft) + 'static>(
+pub fn show<F: Fn(RoomSettingsDraft) + 'static, W: Fn(String) + 'static, L: Fn() + 'static>(
     parent: &impl IsA<gtk::Widget>,
     detail: &ThreadDetail,
     on_save: F,
+    on_withdraw: W,
+    on_leave: L,
+    labelers: LabelerSeams,
 ) -> Option<Rc<RoomSettingsEditor>> {
     let seed = RoomSettingsDraft::seed(detail)?;
     let toplevel = parent.root().and_then(|r| r.downcast::<gtk::Window>().ok());
@@ -241,6 +342,11 @@ pub fn show<F: Fn(RoomSettingsDraft) + 'static>(
         ids::ROOM_JOIN_RULE_SELECT,
     );
     select_token(&join_rule_dd, draft.borrow().join_rule.token());
+    // Every policy control is greyed — never hidden — for a plain member, who
+    // opens this editor to read it and to leave (`ui/conversations.md`
+    // § Architectural rules 5).
+    let can_set_policy = detail.capabilities.can_set_policy;
+    join_rule_dd.set_sensitive(can_set_policy);
     join_rule_row.append(&join_rule_dd);
     content.append(&join_rule_row);
 
@@ -261,6 +367,7 @@ pub fn show<F: Fn(RoomSettingsDraft) + 'static>(
         ids::ROOM_HISTORY_POLICY_SELECT,
     );
     select_token(&history_dd, draft.borrow().history_policy.token());
+    history_dd.set_sensitive(can_set_policy);
     history_row.append(&history_dd);
     content.append(&history_row);
 
@@ -269,6 +376,45 @@ pub fn show<F: Fn(RoomSettingsDraft) + 'static>(
     // always read straight off the draft rather than tracked per widget.
     let members_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
     content.append(&members_box);
+
+    // The home nest's read, only where there is one to stage: a community room
+    // whose answer this device has read (`RoomSettingsDraft::nest_read`).
+    // Staged like the admin switches — Save commits it as a rotation.
+    if let Some(reads) = draft.borrow().nest_read {
+        let toggle = gtk::ToggleButton::new();
+        toggle.set_halign(gtk::Align::Start);
+        toggle.set_sensitive(detail.capabilities.can_set_policy);
+        crate::testid::set_test_id(&toggle, ids::ROOM_NEST_READ_TOGGLE);
+        paint_nest_read(&toggle, reads);
+        {
+            let draft = Rc::clone(&draft);
+            toggle.connect_clicked(move |btn| {
+                let mut d = draft.borrow_mut();
+                d.toggle_nest_read();
+                paint_nest_read(btn, d.nest_read.unwrap_or(false));
+            });
+        }
+        content.append(&toggle);
+    }
+
+    let on_withdraw: Rc<dyn Fn(String)> = Rc::new(on_withdraw);
+    let pending_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    paint_pending(&pending_box, detail, &on_withdraw);
+    content.append(&pending_box);
+
+    // The room's labeler set: staged like the rest, committed by Save. Absent
+    // where the draft carries no set. Its inspect view opens in place.
+    let labeler_section = LabelerSection::new(&draft, labelers, detail.capabilities.can_set_policy);
+    content.append(&labeler_section.root);
+    {
+        let weak = Rc::downgrade(&labeler_section);
+        window.connect_close_request(move |_| {
+            if let Some(section) = weak.upgrade() {
+                section.close();
+            }
+            glib::Propagation::Proceed
+        });
+    }
 
     let error_label = gtk::Label::new(None);
     error_label.set_halign(gtk::Align::Start);
@@ -322,7 +468,48 @@ pub fn show<F: Fn(RoomSettingsDraft) + 'static>(
     // Every edit Save issues is a policy commit on the channel — one constant
     // kind for all five, so the button itself declares it.
     crate::offline_gate::declare_wire_kind(&save_btn, "fauna.conversations.channel.send");
+    save_btn.set_sensitive(can_set_policy);
     content.append(&save_btn);
+
+    // The walk-out, below Save and outside the staged set: leaving is an
+    // immediate act, not a policy edit. Greyed for the owner, who hands the
+    // room over first; the capability is re-checked when the confirm opens.
+    let can_leave = Rc::new(Cell::new(detail.capabilities.can_leave_room));
+    let leave_btn =
+        gtk::Button::with_label(crate::i18n::strings::conversations::unified::ROOM_LEAVE);
+    leave_btn.set_halign(gtk::Align::End);
+    leave_btn.set_sensitive(detail.capabilities.can_leave_room);
+    crate::testid::set_test_id(&leave_btn, ids::ROOM_LEAVE_BUTTON);
+    {
+        let can_leave = Rc::clone(&can_leave);
+        let window = window.clone();
+        let label = detail.label.clone();
+        let on_leave = Rc::new(on_leave);
+        leave_btn.connect_clicked(move |btn| {
+            if !can_leave.get() {
+                return;
+            }
+            let window = window.clone();
+            let on_leave = Rc::clone(&on_leave);
+            crate::confirm_dialog::present_confirm(
+                btn,
+                crate::confirm_dialog::ConfirmSpec::new(
+                    crate::i18n::strings::conversations::unified::ROOM_LEAVE,
+                    crate::confirm_dialog::ConfirmBody::Text(&label),
+                    "leave",
+                    crate::i18n::strings::common::LEAVE,
+                    crate::confirm_dialog::CANCEL,
+                )
+                .with_confirm_id(ids::ROOM_LEAVE_CONFIRM)
+                .with_wire_kind("fauna.conversations.room.leave"),
+                move || {
+                    window.close();
+                    on_leave();
+                },
+            );
+        });
+    }
+    content.append(&leave_btn);
 
     {
         let draft = Rc::clone(&draft);
@@ -349,5 +536,10 @@ pub fn show<F: Fn(RoomSettingsDraft) + 'static>(
     Some(Rc::new(RoomSettingsEditor {
         window,
         error_label,
+        pending_box,
+        on_withdraw,
+        leave_btn,
+        can_leave,
+        _labelers: labeler_section,
     }))
 }

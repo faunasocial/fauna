@@ -86,6 +86,7 @@ foreign fauna-client-dns::acme_pure::order::AuthorizationStatus  # RFC 8555 auth
 local fauna-client-dns::VerifyStatus  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-client-dns::DnsStatus  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-client-dns::CertHealthState  # view model: crosses only FFI or wasm to the same build's UI
+local fauna-client-dns::CertIssuanceOrder  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-client-dns::DnsAction  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-client-mail-settings::*  # 38 enums; view model: crosses only FFI or wasm to the same build's UI
 local fauna-client-media::*  # 1 enum; view model: crosses only FFI or wasm to the same build's UI
@@ -177,7 +178,7 @@ locked fauna-core::mail_auth::SpfVerdict  # in-image mail bridge -> nest ingest 
 locked fauna-core::mail_auth::DmarcPolicy  # in-image mail bridge -> nest ingest (deny_unknown_fields container), flattened to strings before storage
 locked fauna-core::mail_auth::DmarcVerdict  # in-image mail bridge -> nest ingest (deny_unknown_fields container), flattened to strings before storage
 locked fauna-core::mail_auth::ArcVerdict  # in-image mail bridge -> nest ingest (deny_unknown_fields container), flattened to strings before storage
-locked fauna-core::mail_scan::ClamavVerdict  # in-image mail bridge -> nest ingest (deny_unknown_fields container), flattened to strings before storage
+open fauna-core::mail_scan::ClamavVerdict  # hand-written decode collapses an unknown kind, unit or carrying data, to `Unknown` (skip_serializing); app-decoded scan read (get_message_scan_result reply), an unknown kind scores no row; the in-image bridge never sends it, the nest refuses it at ingest and never stores it
 local fauna-core::markdown::MdDecorationKind  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
 locked fauna-core::nat_mode::NodeMode  # serde only in nest.toml; the wire fields are strings. config/default.toml seeds `mode = "public"` at first run and /data/nest.toml outlives an image downgrade, so a default that seeds any other variant needs a restrictive fallback first (no image writes an enum into an existing nest.toml; checked 2026-10-02)
 local fauna-core::notes::BlockKind  # never crosses a release boundary: built and consumed in one process, or carried as a string the reader projects
@@ -209,6 +210,8 @@ open fauna-core::subscription::types::KeyAccess  # signed key-access record; han
 
 # fauna-feed
 open fauna-feed::cues::CueVerdict  # sealed cue rollup, re-sealed whole by every device; `Other(String)` trains no example, is never contributed, counts no completion
+local fauna-feed::cue_tracker::ExposureEnd  # view model: the UI's exposure observation, fed to the rollup in-process; crosses only FFI or wasm to the same build's UI, never stored
+local fauna-feed::thread::ThreadStatus  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-feed::SourceKind  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-feed::personalization::TrainVerb  # view model: crosses only FFI or wasm to the same build's UI
 local fauna-feed::personalization::TrainResult  # view model: crosses only FFI or wasm to the same build's UI
@@ -230,6 +233,8 @@ closed-fixed fauna-ipc::sync::ResponseResult  # the Ok/Err envelope
 skip fauna-ipc::sync::ResponsePayload  # one reply frame; an undecodable reply fails its one call at once, typed; pinned by an_unreadable_reply_fails_its_call_at_once_typed_and_the_connection_survives
 open fauna-ipc::sync::CustodianReseedState  # carrying; unknown state reads as failed, never running
 open fauna-ipc::sync::CustodianReseedSetOutcome  # carrying; unknown outcome reads as refused
+open fauna-ipc::sync::CustodianRecoverState  # carrying; unknown state reads as failed, never running
+open fauna-ipc::sync::CustodianRecoverSetOutcome  # carrying; unknown outcome reads as refused, nothing claimed for the set
 skip fauna-ipc::sync::EventKind  # one event frame, skipped by the reader loop; pinned by an_event_of_an_unknown_kind_is_skipped_with_the_connection_intact
 open fauna-ipc::sync::LocationStatus  # carrying; unknown status renders as an error state, never Synced
 open fauna-ipc::sync::FileStatus  # collapsing; unknown status shows no badge and no menu
@@ -240,6 +245,8 @@ local fauna-launch-machine::*  # 5 enums; view model; the stored slots hold only
 # fauna-mail
 local fauna-mail::domain_rename::RenameState  # in-process value; the wire and stored forms are strings
 local fauna-mail::export::ExportFormat  # in-process value; the wire and stored forms are strings
+foreign fauna-mail::imap_client::oauth_device::Seconds  # Microsoft identity platform token lifetime, number-or-string shape
+local fauna-mail::imap_client::session::SpecialUse  # in-process value: the client's own IMAP LIST projection, read only by the same build's import wizard; never stored or sent
 local fauna-mail::scan::ClamavAction  # in-process value; the wire and stored forms are strings
 local fauna-mail::scan::ScanAction  # in-process value; the wire and stored forms are strings
 closed-ladder fauna-mail::segments::placement::MailPlacementRecord  # nest-only placement journal; the manifest version ladder refuses a newer file first (version-compatibility.md Dimension 1, 2026-08-24); a new record variant raises it
@@ -261,10 +268,12 @@ closed-ladder fauna-mls::wrapped_blob::format::SerKdfParams  # KDF selector unde
 # fauna-nest
 locked fauna-nest::config::SubmissionPolicy  # nest.toml; no image seeds or writes it (absent → Open), so only a hand edit could carry a value an older image cannot parse
 locked fauna-nest::config::AcmeMode  # nest.toml; no image seeds or writes it (absent → Http01, its one variant)
+skip fauna-nest::db::mail_import::ImportFold  # at rest in import_sessions.quota_holds; an undecodable blob folds to no holds and the progress write still lands (pinned: an_undecodable_quota_hold_folds_to_none_and_the_write_lands)
 closed-request fauna-nest::nest_link::protocol::ProxyCommand  # dormant: the storage worker has no production caller; re-rule before one ships
 skip fauna-nest::nest_link::protocol::WorkerMessage  # dormant, as ProxyCommand; the proxy read loop already skips an undecodable message
 closed-request fauna-nest::nest_link::protocol::PayloadKind  # dormant, inside ProxyCommand
 foreign fauna-nest::oauth_as_token::Wire  # JWT aud string-or-array shape (RFC 7519)
+local fauna-nest::rpc_hold_test_hook::Refusal  # test-only hook query value; the e2e harness that sends it ships in the same tree
 
 # fauna-onboarding-machine
 local fauna-onboarding-machine::nest_api::types::ProbeError  # view model or in-process error value; no reply decodes it
@@ -275,6 +284,7 @@ local fauna-onboarding-machine::nest_api::types::AgeNonceError  # view model or 
 local fauna-onboarding-machine::nest_api::types::RegisterError  # view model or in-process error value; no reply decodes it
 local fauna-onboarding-machine::nest_api::types::NatModeError  # view model or in-process error value; no reply decodes it
 local fauna-onboarding-machine::nest_api::types::RestoreSeedError  # view model or in-process error value; no reply decodes it
+local fauna-onboarding-machine::nest_api::types::LockAccountError  # view model or in-process error value; no reply decodes it
 local fauna-onboarding-machine::outcome::WizardOutcome  # view model or in-process error value; no reply decodes it
 local fauna-onboarding-machine::retire::RetirePhase  # view model or in-process error value; no reply decodes it
 local fauna-onboarding-machine::retire::TransferCodeState  # view model or in-process error value; no reply decodes it
@@ -331,6 +341,11 @@ locked fauna-protocol::bridge_routing::SubscribeMailboxStateReply  # decoded onl
 locked fauna-protocol::bridge_routing::MailboxStateEvent  # decoded only by the in-image bridge (rule 4's who-decodes split)
 locked fauna-protocol::bridge_routing::MoveSide  # decoded only by the in-image bridge (rule 4's who-decodes split)
 open fauna-protocol::bridge_routing::PutEventCiphertextReply  # #[serde(other, skip_serializing)] Unknown; app-decoded, an unknown outcome means written, state unknown: re-read
+open fauna-protocol::bridge_routing::ScanActionTaken  # #[serde(other, skip_serializing)] Unknown; app-decoded scan read, an unknown action shows a neutral verdict; the nest stores the column string and never stores Unknown
+locked fauna-protocol::bridge_routing::RecipientProcessor  # rides ResolveRecipientReply, decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::bridge_routing::ReportIngestOutcome  # MTA-class ingest reply, decoded only by the in-image bridge (rule 4's who-decodes split)
+locked fauna-protocol::bridge_routing::DmarcReportKind  # MTA-class ingest reply, decoded only by the in-image bridge (rule 4's who-decodes split)
+open fauna-protocol::bridge_routing::ClientImportOutcomeKind  # #[serde(other, skip_serializing)] Unknown; app->nest import outcome, an unknown kind counts as a failure
 locked fauna-protocol::bridge_routing::PlaceInboundInviteReply  # decoded only by the in-image bridge (rule 4's who-decodes split); carries #[serde(other)] Unknown
 open fauna-protocol::bridge_routing::ProvisionCalendarReply  # #[serde(other, skip_serializing)] Unknown; app-decoded, an unknown outcome: re-list
 open fauna-protocol::bridge_routing::QueryEventsReply  # #[serde(other, skip_serializing)] Unknown; app-decoded page, an unknown outcome is an error, never calendar-not-found
@@ -361,6 +376,7 @@ closed-request fauna-protocol::subscriptions::TierClearableField  # executed by 
 open fauna-protocol::subscriptions::SubscribeReply  # #[serde(other, skip_serializing)] Unknown: sent, state unknown, re-read the status
 open fauna-protocol::subscriptions::UnsubscribeReply  # as SubscribeReply
 open fauna-protocol::tls::CertHealthState  # #[serde(other, skip_serializing)] Unknown; the client projection reads it as OnFloorRenewNeeded (needs attention), so no app gains a case
+open fauna-protocol::tls::IssuanceOrder  # #[serde(other, skip_serializing)] Unknown; the client projection keeps the error and drops only its order label, rendered by one shared formatter, so no app switches over it
 closed-request fauna-protocol::web_app_origin::WebAppOrigin  # typed only in the admin set request (the reply carries a string); an unknown mode fails that one request's decode and is refused; pinned by an_unknown_mode_is_refused_at_decode
 locked fauna-protocol::wrapped_blob::BulkByteAccess  # decoded only by the in-image bridge (rule 4's who-decodes split)
 locked fauna-protocol::wrapped_blob::BulkByteMintPurpose  # decoded only by the in-image bridge (rule 4's who-decodes split)
@@ -368,7 +384,7 @@ open fauna-protocol::wrapped_blob::PutSpamModelOutcome  # #[serde(other, skip_se
 
 # fauna-provisioning
 foreign fauna-provisioning::bundled_api::IdRepr  # third-party provider API id, string or number
-local fauna-provisioning::cloud_init::UpdateChannel  # the provisioning wizard's own choice, held in-process; it leaves the app only as an image tag string
+local fauna-provisioning::update_channel::UpdateChannel  # the provisioning wizard's and the updater's choice, held in-process; it crosses the wire only as its id string (fauna-protocol update_channel) or an image tag
 local fauna-provisioning::probe::DomainStatus  # built in-process from provider replies; ids cross as strings
 local fauna-provisioning::progress::ProvisionStep  # built in-process from provider replies; ids cross as strings
 local fauna-provisioning::progress::OverallStatus  # built in-process from provider replies; ids cross as strings

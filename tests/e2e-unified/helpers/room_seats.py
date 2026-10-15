@@ -30,6 +30,7 @@ from conftest import (
     get_available_apps,
 )
 from drivers import create_driver
+from helpers.app_launch import app_launch_config
 from helpers.app_surface import skip_environment
 from helpers.connection import wait_until_online
 from tests.api import conv_api
@@ -103,9 +104,9 @@ def seat_app_path(request, app_name: str):
     new app joins in one place."""
     if app_name == "web":
         return None
-    if app_name == "ios":
-        return request.getfixturevalue("ios_setup")["app_path"]
-    return request.getfixturevalue(f"{app_name}_app_path")
+    # `app_path` only: each concurrent iOS seat takes its own udid from
+    # `_get_ios_seat_udid`, never `ios_setup`'s single simulator.
+    return app_launch_config(app_name, request)["app_path"]
 
 
 def _next_seat_ordinal(request) -> int:
@@ -241,6 +242,21 @@ def launch_seat(nest: dict, app_path, app_name: str, request, *, actor: dict | N
     # the same activation, which is what lets a room born with this seat in
     # it be governed rather than legacy.
     app.conversations.enable_real_faunamls()
+    # THE ADDRESSABILITY BARRIER. An active backend is not yet a reachable
+    # seat: the key-package upload is the activation's own async round-trip,
+    # and another seat's `real_resolve_send_new` asks the nest exactly this
+    # boolean (`fauna.conversations.keypackage.addressable`) to promote this
+    # seat's actor id to a chip. Resolving before the upload lands fails with
+    # "did not resolve to a chip" — seen once in the 2026-10-12 linux sweep on a
+    # loaded box, while the same fixture's fifteen other journeys passed. Read
+    # the nest's state, never a delay (convention 14); a pure read, so a test
+    # that later counts this seat's packages sees all of them.
+    wait_for(
+        "the seat's key packages reaching the nest (keypackage.addressable)",
+        lambda: conv_api.actor_addressable(nest["port"], actor, actor["actor_id_hex"]),
+        bool,
+        MESSAGE_BUDGET_S,
+    )
     return Seat(app=app, actor=actor)
 
 

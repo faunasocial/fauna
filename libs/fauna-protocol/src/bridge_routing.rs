@@ -49,6 +49,14 @@ pub enum ValidateRecipientReply {
         /// `#[serde(default)]` so an absent key decodes as `false` (non-role mail).
         #[serde(default)]
         is_role_address: bool,
+        /// The resolved actor's canonical handle — `None` when it has none.
+        /// The address asked about may be an exact alias, owned only on the
+        /// domain it names, where the handle is owned on every active local
+        /// domain: an AUTH-time caller (the MTA's submission fast path) holds
+        /// the session to THIS, never to the login's local part
+        /// (`mail-multidomain.md` § From: header ownership → *Per door*).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handle: Option<String>,
     },
     Reject {
         reason: String,
@@ -113,12 +121,21 @@ pub struct ResolveRecipientRequest {
     /// gated ward is *held* (never lost, never a bounce to `<>`).
     #[serde(default)]
     pub sender_address: String,
+    /// `true` when the caller asks only *who owns this address* — the MTA's
+    /// MAIL FROM ownership check, the CalDAV auto-schedule routing probe —
+    /// rather than delivering to it. A probe skips the owner's receive switch
+    /// (`mail.account.receive_enabled`, `mail-policy-config.md` § Tier 3): an
+    /// account that stopped receiving still owns, and sends from, its
+    /// addresses. Absent reads as `false` (a delivery).
+    #[serde(default)]
+    pub probe: bool,
 }
 
 /// One header the MDA stamps on the message before the user's filter rules
 /// run (`mail-aliases.md` § Kind 2/3/4 — `X-Fauna-Address-Suffix` /
 /// `X-Fauna-Address-Wildcard-Suffix` / `X-Fauna-Address-Catchall`). Exact
-/// matches stamp none.
+/// matches stamp no alias header; every resolved mailbox also carries the
+/// delivery stamps `X-Fauna-Delivered-To` + `X-Fauna-Spam-Threshold`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct StampedHeader {
     pub name: String,
@@ -178,6 +195,15 @@ pub enum ResolveRecipientReply {
     /// from `Reject` (no 4xx/5xx). Bare `unsubscribe@` with no token is a
     /// `Reject { smtp_code: 550 }`, not a `Discard`.
     Discard,
+    /// A reserved role address whose mail a nest processor consumes instead
+    /// of any mailbox (`dmarc-report@`, `dmarc-reporting.md` § Envelope-time
+    /// routing; `tlsrpt@`, `smtp-server.md` § TLSRPT inbound report
+    /// listener). The MTA accepts the RCPT, runs its normal
+    /// policy stack at DATA, then hands the message to the processor's ingest
+    /// kind — never to a mailbox, never rejected for want of one.
+    Processor {
+        processor: RecipientProcessor,
+    },
 }
 
 // ── Per-account alias user surface ──
@@ -345,7 +371,19 @@ pub struct UpdateAccountAliasRequest {
     pub pattern: String,
     #[serde(default)]
     pub controls: AliasControls,
+    /// The disposable "extend" (`mail-aliases.md` § Don't do these: "the user
+    /// can extend (edit) before expiry"): a new `expires_at` in epoch millis,
+    /// which must lie in the future (else `malformed`). `None` keeps the
+    /// stored expiry. Accepted only on a disposable alias that is still alive
+    /// — anything else is [`ALIAS_NOT_EXTENDABLE_CODE`], since a dead
+    /// disposable's token is free to be minted again.
+    #[serde(default)]
+    pub expires_at_ms: Option<u64>,
 }
+
+/// The `RpcError.code` `fauna.bridges.update_account_alias` returns when it is
+/// asked to move the expiry of an alias that is not a still-alive disposable.
+pub const ALIAS_NOT_EXTENDABLE_CODE: &str = "fauna.bridges.alias_not_extendable";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct UpdateAccountAliasReply {
@@ -907,6 +945,81 @@ pub struct SetSpamThresholdOverrideRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SetSpamThresholdOverrideReply {}
 
+// ── Per-account receive and send switches (Tier 3) ───────────────
+//
+// `docs/goal/behavior/mail-policy-config.md` § Tier 3 — the user's own
+// `mail.account.receive_enabled` and `mail.account.send_enabled`, both on by
+// default. Stored per-actor in `mail_account_settings` beside the other
+// per-account mail settings. Receive off → the resolver refuses mail to the
+// account's addresses with a 550 (role addresses excepted); send off → every
+// door the user's own act sends through refuses with
+// [`SEND_DISABLED_CODE`].
+
+/// The `RpcError.code` a send door returns when the sender has turned sending
+/// off (`mail.account.send_enabled = false`): `fauna.email.send`,
+/// `fauna.bridges.send_list_message`, and `fauna.bridges.check_submission_quota`
+/// on the authenticated SMTP path (the MTA maps it to `550 5.7.1`).
+pub const SEND_DISABLED_CODE: &str = "fauna.bridges.send_disabled";
+
+/// The `RpcError.code` `fauna.bridges.enqueue_outbound_mail` returns when the
+/// message's `From:` names an address on a domain the deployment signs for
+/// that the submitting actor (`on_behalf_of_actor`) does not own
+/// (`mail-multidomain.md` § From: header ownership). Permanent: the MTA maps
+/// it to `550 5.7.1`.
+pub const SENDER_NOT_OWNED_CODE: &str = "fauna.bridges.sender_not_owned";
+
+/// The `RpcError.code` `fauna.bridges.enqueue_outbound_mail` returns when a
+/// `BridgeMta` call does not prove its submitter: its `submission_token` (whose
+/// absence is malformed) is undecodable, names an actor other than
+/// `on_behalf_of_actor`, fails
+/// that actor's signature check, has expired, or names a credential no longer
+/// on file (`mail-multidomain.md` § From: header ownership → *Per door,
+/// nest-side*). Permanent: the MTA maps it to `550 5.7.1`.
+pub const SUBMITTER_NOT_PROVEN_CODE: &str = "fauna.bridges.submitter_not_proven";
+
+/// `fauna.bridges.get_mail_switches` (User) — `()` request; returns the
+/// calling actor's receive and send switches.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct GetMailSwitchesRequest {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GetMailSwitchesReply {
+    pub receive_enabled: bool,
+    pub send_enabled: bool,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4) — an app-callable kind, so client↔nest wire.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl Default for GetMailSwitchesReply {
+    /// Both on — the catalog default for an account that never set either.
+    fn default() -> Self {
+        Self {
+            receive_enabled: true,
+            send_enabled: true,
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+/// `fauna.bridges.set_mail_switches` (User) — overwrite whichever switch is
+/// `Some`; an absent one keeps its stored value.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SetMailSwitchesRequest {
+    #[serde(default)]
+    pub receive_enabled: Option<bool>,
+    #[serde(default)]
+    pub send_enabled: Option<bool>,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4) — an app-callable kind, so client↔nest wire.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SetMailSwitchesReply {}
+
 // ── Per-account forward rate cap (Tier 3) ────────────────────────
 //
 // `docs/goal/behavior/mail-forwarding.md` § Per-account forward rate-limit —
@@ -1240,6 +1353,9 @@ pub enum DmarcMode {
 }
 
 impl DmarcMode {
+    /// Every mode, in the RFC's own order of severity.
+    pub const ALL: [DmarcMode; 3] = [DmarcMode::None, DmarcMode::Quarantine, DmarcMode::Reject];
+
     /// The RFC 7489 tag value.
     pub fn as_tag(self) -> &'static str {
         match self {
@@ -1247,6 +1363,11 @@ impl DmarcMode {
             DmarcMode::Quarantine => "quarantine",
             DmarcMode::Reject => "reject",
         }
+    }
+
+    /// The mode an RFC 7489 tag value names; `None` for anything else.
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.as_tag() == tag)
     }
 }
 
@@ -1260,12 +1381,20 @@ pub enum DmarcAlignment {
 }
 
 impl DmarcAlignment {
+    /// Both modes, strict first (the shipped default).
+    pub const ALL: [DmarcAlignment; 2] = [DmarcAlignment::Strict, DmarcAlignment::Relaxed];
+
     /// The RFC 7489 tag value.
     pub fn as_tag(self) -> &'static str {
         match self {
             DmarcAlignment::Strict => "s",
             DmarcAlignment::Relaxed => "r",
         }
+    }
+
+    /// The alignment an RFC 7489 tag value names; `None` for anything else.
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.as_tag() == tag)
     }
 }
 
@@ -1288,6 +1417,14 @@ pub enum DmarcForensicOptions {
 }
 
 impl DmarcForensicOptions {
+    /// Every option, in the RFC's own tag order.
+    pub const ALL: [DmarcForensicOptions; 4] = [
+        DmarcForensicOptions::AllFail,
+        DmarcForensicOptions::AnyFailure,
+        DmarcForensicOptions::Dkim,
+        DmarcForensicOptions::Spf,
+    ];
+
     /// The RFC 7489 tag value.
     pub fn as_tag(self) -> &'static str {
         match self {
@@ -1297,6 +1434,162 @@ impl DmarcForensicOptions {
             DmarcForensicOptions::Spf => "s",
         }
     }
+
+    /// The option an RFC 7489 tag value names; `None` for anything else.
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.as_tag() == tag)
+    }
+}
+
+/// `mail.dmarc.aggregate_retention_days` default (`dmarc-reporting.md`
+/// § Retention): how long an inbound aggregate report is kept.
+pub const DMARC_AGGREGATE_RETENTION_DAYS_DEFAULT: u32 = 90;
+
+/// The longest aggregate retention `put_dmarc_policy` accepts — a year; a
+/// report older than that answers no question the admin pane asks.
+pub const DMARC_AGGREGATE_RETENTION_DAYS_MAX: u32 = 365;
+
+/// `mail.dmarc.forensic_retention_days` default (`dmarc-reporting.md`
+/// § Forensic-report receive → *Retention*): shorter than the aggregate's,
+/// because the payload carries third-party PII.
+pub const DMARC_FORENSIC_RETENTION_DAYS_DEFAULT: u32 = 30;
+
+/// The longest forensic retention `put_dmarc_policy` accepts (§ Forensic-report
+/// receive → *Retention*: the admin may extend to 90 d, no further — the
+/// payload is third-party PII).
+pub const DMARC_FORENSIC_RETENTION_DAYS_MAX: u32 = 90;
+
+/// The **effective** (override-or-default) deployment-wide DMARC policy the
+/// `fauna.bridges.get_dmarc_policy` admin read twin returns — the ten tags of
+/// the published `_dmarc.<domain>` record (`dmarc-reporting.md` § Record
+/// shape) plus the two inbound-report retentions (§ Retention, both), every
+/// `None` override resolved to its catalog default so each field is concrete.
+/// The `admin-mail` form hydrates from this before edit, then writes the whole
+/// sub-struct back via [`PutDmarcPolicyRequest`] (full PUT). Like the alias
+/// policy ([`AliasPolicy`]) these knobs are consumed nest-side (the DNS
+/// surface's record assembler + the daily prunes), never projected to the
+/// bridge, so they round-trip through their own kind pair rather than
+/// `get_mail_config`.
+///
+/// [`Default`] is **the one copy of the catalog default values** — the
+/// `dmarc-reporting.md` § Record shape table anchors here, and
+/// `fauna_mail::dmarc_publish::DmarcPublishPolicy::default()` derives from it
+/// (`fauna-mail` depends on this crate, never the other way round).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DmarcReportingPolicy {
+    /// `p=` (`mail.dmarc.policy_mode`).
+    pub policy_mode: DmarcMode,
+    /// `sp=` (`mail.dmarc.subdomain_policy_mode`).
+    pub subdomain_policy_mode: DmarcMode,
+    /// `pct=` (`mail.dmarc.pct`), `0`–`100`.
+    pub pct: u8,
+    /// `adkim=` (`mail.dmarc.adkim_mode`).
+    pub adkim_mode: DmarcAlignment,
+    /// `aspf=` (`mail.dmarc.aspf_mode`).
+    pub aspf_mode: DmarcAlignment,
+    /// `rua=` (`mail.dmarc.rua_destination`): `None` ⇒ the deployment-wide
+    /// processor `mailto:dmarc-report@<primary-domain>`.
+    pub rua_destination: Option<String>,
+    /// Whether `ruf=`/`fo=` are published at all (`mail.dmarc.ruf_publish`) —
+    /// the forensic-report opt-in, off by default (PII).
+    pub ruf_publish: bool,
+    /// `ruf=` (`mail.dmarc.ruf_destination`): `None` ⇒ the same processor
+    /// address as `rua`; only published when `ruf_publish` is set.
+    pub ruf_destination: Option<String>,
+    /// `fo=` (`mail.dmarc.fo_mode`); only published when `ruf_publish` is set.
+    pub fo_mode: DmarcForensicOptions,
+    /// `ri=` (`mail.dmarc.ri_seconds`).
+    pub ri_seconds: u32,
+    /// `mail.dmarc.aggregate_retention_days`.
+    pub aggregate_retention_days: u32,
+    /// `mail.dmarc.forensic_retention_days`.
+    pub forensic_retention_days: u32,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4). This kind is APP-callable,
+    /// so it is client↔nest wire and rule 4's in-image `strict` opt-out
+    /// does not reach it: within a major, an older peer must tolerate a
+    /// newer one's added field in BOTH directions
+    /// (version-compatibility.md § I2).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl Default for DmarcReportingPolicy {
+    /// `dmarc-reporting.md` § Record shape (the default-strict shipped
+    /// record) + § Retention / § Forensic-report receive → *Retention*.
+    fn default() -> Self {
+        Self {
+            policy_mode: DmarcMode::Reject,
+            subdomain_policy_mode: DmarcMode::Reject,
+            pct: 100,
+            adkim_mode: DmarcAlignment::Strict,
+            aspf_mode: DmarcAlignment::Strict,
+            rua_destination: None,
+            ruf_publish: false,
+            ruf_destination: None,
+            fo_mode: DmarcForensicOptions::AnyFailure,
+            ri_seconds: 86_400,
+            aggregate_retention_days: DMARC_AGGREGATE_RETENTION_DAYS_DEFAULT,
+            forensic_retention_days: DMARC_FORENSIC_RETENTION_DAYS_DEFAULT,
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+/// Admin write for the deployment-wide `mail.dmarc.*` catalog
+/// (`mail-policy-config.md` § DMARC; values owned by `dmarc-reporting.md`
+/// § Record shape and § Retention): one `Option<T>` per knob, `None` ⇒ the
+/// catalog default. Full PUT — the stored overrides are replaced as a whole,
+/// so an absent field clears any earlier override of it. Consumed nest-side
+/// (the record assembler behind `fauna.dns.list_records` / `verify_records`
+/// and the daily report prunes), never projected to the bridge. The nest
+/// refuses `pct > 100`, a destination that is not a `mailto:` URI, and a
+/// retention outside `1..=`[`DMARC_AGGREGATE_RETENTION_DAYS_MAX`] /
+/// `1..=`[`DMARC_FORENSIC_RETENTION_DAYS_MAX`] (`fauna.protocol.malformed`).
+/// Shares [`PutPolicyReply`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PutDmarcPolicyRequest {
+    pub policy_mode: Option<DmarcMode>,
+    pub subdomain_policy_mode: Option<DmarcMode>,
+    pub pct: Option<u8>,
+    pub adkim_mode: Option<DmarcAlignment>,
+    pub aspf_mode: Option<DmarcAlignment>,
+    /// A full `mailto:` URI; an empty string reads as `None` (the default
+    /// processor address), so a form may clear the field by blanking it.
+    pub rua_destination: Option<String>,
+    pub ruf_publish: Option<bool>,
+    /// As `rua_destination`.
+    pub ruf_destination: Option<String>,
+    pub fo_mode: Option<DmarcForensicOptions>,
+    pub ri_seconds: Option<u32>,
+    pub aggregate_retention_days: Option<u32>,
+    pub forensic_retention_days: Option<u32>,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4). This kind is APP-callable,
+    /// so it is client↔nest wire and rule 4's in-image `strict` opt-out
+    /// does not reach it: within a major, an older peer must tolerate a
+    /// newer one's added field in BOTH directions
+    /// (version-compatibility.md § I2).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Empty request for `fauna.bridges.get_dmarc_policy` — the **admin read twin**
+/// of `put_dmarc_policy` (mirrors [`GetAliasPolicyRequest`]); always returns
+/// the full effective [`DmarcReportingPolicy`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct GetDmarcPolicyRequest {
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4). This kind is APP-callable,
+    /// so it is client↔nest wire and rule 4's in-image `strict` opt-out
+    /// does not reach it: within a major, an older peer must tolerate a
+    /// newer one's added field in BOTH directions
+    /// (version-compatibility.md § I2).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 /// A per-domain DMARC override partial-record — the typed shape of the
@@ -2536,11 +2829,12 @@ impl Default for MassMailingPolicy {
     }
 }
 
-/// One active local domain's DKIM selector, projected to the MTA bridge in
-/// [`FetchConfigReply::dkim_selectors`]. The `selector` is the `s=` tag / the
-/// `<selector>._domainkey.<domain>` DNS label the nest signs under for that
-/// domain (`mail-multidomain.md` § Signing-key selection at outbound time);
-/// the bridge holds no key for it.
+/// One of an active local domain's two DKIM selectors, projected to the MTA
+/// bridge in [`FetchConfigReply::dkim_selectors`]. The `selector` is the `s=`
+/// tag / the `<selector>._domainkey.<domain>` DNS label one of the nest's two
+/// signatures carries for that domain — `<label>-rsa` or `<label>-ed25519`
+/// (`mail-multidomain.md` § Per-domain DKIM → *Key shape*, § Signing-key
+/// selection at outbound time); the bridge holds no key for it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DomainDkimSelector {
     pub domain: String,
@@ -2912,13 +3206,13 @@ pub struct PutAliasPolicyRequest {
     /// Per-account cap on user-added exact aliases (default 20). `Some(0)`
     /// forbids any beyond the signup canonical.
     pub exact_aliases_max: Option<u32>,
-    /// Full-replace the reserved local-part list (default the six role names
-    /// in `fauna_mail::aliases::DEFAULT_RESERVED_LOCAL_PARTS`: `postmaster`,
-    /// `abuse`, `noc`, `security`, `dmarc-report`, `tlsrpt` — `unsubscribe@`
-    /// is intentionally not reserved, it routes via a separate mechanism).
-    /// `Some(vec![])` clears the reservation (distinct from `None` = keep
-    /// default). Also the source the future admin-forwarder validator reads
-    /// (tracked separately).
+    /// Full-replace the admin's ADDITIONS to the reserved local-parts. The six
+    /// role names in `fauna_mail::aliases::DEFAULT_RESERVED_LOCAL_PARTS`
+    /// (`postmaster`, `abuse`, `noc`, `security`, `dmarc-report`, `tlsrpt`)
+    /// are a floor that stays reserved whatever this holds, so `None` and
+    /// `Some(vec![])` both mean "no additions" and a role name sent here is
+    /// harmless (`mail-aliases.md` § Reserved local-parts). `unsubscribe@` is
+    /// intentionally not reserved — it routes via a separate mechanism.
     pub reserved_local_parts: Option<Vec<String>>,
     /// `+suffix` sub-addressing on/off (default `true`).
     pub subaddressing_enabled: Option<bool>,
@@ -2971,8 +3265,10 @@ pub struct GetAliasPolicyRequest {
 pub struct AliasPolicy {
     /// Per-account cap on user-added exact aliases (catalog default 20).
     pub exact_aliases_max: u32,
-    /// Reserved local-part list — role addresses users cannot claim (catalog
-    /// default the six names in `fauna_mail::aliases::DEFAULT_RESERVED_LOCAL_PARTS`).
+    /// The admin's additions to the reserved local-parts — empty by default.
+    /// The six role names in `fauna_mail::aliases::DEFAULT_RESERVED_LOCAL_PARTS`
+    /// are reserved on top of these whatever the list holds, and are never
+    /// reported here: they are not the admin's to edit (`admin.md` § 6. Mail).
     pub reserved_local_parts: Vec<String>,
     /// `+suffix` sub-addressing enabled (catalog default `true`).
     pub subaddressing_enabled: bool,
@@ -2996,15 +3292,14 @@ impl Default for AliasPolicy {
         // since `fauna-protocol` must not depend on `fauna-mail`; see the
         // `AuthVerdicts`/`mail_scan` re-exports above for the same shape).
         use fauna_core::mail_aliases::{
-            DEFAULT_RESERVED_LOCAL_PARTS, EXACT_ALIASES_MAX_DEFAULT, SUBADDRESSING_ENABLED_DEFAULT,
+            EXACT_ALIASES_MAX_DEFAULT, SUBADDRESSING_ENABLED_DEFAULT,
             WILDCARD_PREFIX_ENABLED_DEFAULT,
         };
         Self {
             exact_aliases_max: EXACT_ALIASES_MAX_DEFAULT,
-            reserved_local_parts: DEFAULT_RESERVED_LOCAL_PARTS
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
+            // No admin additions: the six role names are a floor, not a
+            // default the admin's list replaces.
+            reserved_local_parts: Vec::new(),
             subaddressing_enabled: SUBADDRESSING_ENABLED_DEFAULT,
             wildcard_prefix_enabled: WILDCARD_PREFIX_ENABLED_DEFAULT,
             extra: BTreeMap::new(),
@@ -3121,7 +3416,8 @@ pub struct PublicMailMetadata {
 // missing UniFFI face. That is the whole ruling; it is written out here
 // rather than pointed at, so it cannot rot away from the code it explains.
 pub use fauna_core::mail_auth::{
-    ArcVerdict, AuthVerdicts, DkimVerdict, DmarcPolicy, DmarcVerdict, SpfVerdict,
+    ArcVerdict, AuthVerdicts, DkimAuthResult, DkimVerdict, DmarcObservation, DmarcPolicy,
+    DmarcVerdict, SpfVerdict,
 };
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -3467,6 +3763,580 @@ pub struct ReportRejectedScanReply {
     pub message_id: Vec<u8>,
 }
 
+/// What the nest did with a scanned message — the `message_scan_results.
+/// action_taken` column as a type (`mail-content-scanning.md` § Per-message
+/// scan-result storage). `RejectedMalware` appears only on reject-at-perimeter
+/// forensic rows, which belong to no recipient, so a user's own read never
+/// returns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanActionTaken {
+    Delivered,
+    RejectedMalware,
+    Junked,
+    Tagged,
+    /// An action a newer nest added that this app does not know: shown as a
+    /// neutral verdict. Never written.
+    #[serde(other, skip_serializing)]
+    Unknown,
+}
+
+impl ScanActionTaken {
+    /// The column spelling — identical to the serde name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Delivered => "delivered",
+            Self::RejectedMalware => "rejected_malware",
+            Self::Junked => "junked",
+            Self::Tagged => "tagged",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Parse the column spelling; `None` for anything else.
+    pub fn from_column(s: &str) -> Option<Self> {
+        [
+            Self::Delivered,
+            Self::RejectedMalware,
+            Self::Junked,
+            Self::Tagged,
+        ]
+        .into_iter()
+        .find(|a| a.as_str() == s)
+    }
+}
+
+/// `fauna.bridges.get_message_scan_result` (User) — the caller's own received
+/// message's perimeter scan verdict (`mail-content-scanning.md` § User sees
+/// their own message's row). Keyed by the 32-byte ingest `message_id` — the
+/// same id `fauna.email.inbox.fetch` hands the app as `InboxMessage.message_id`.
+/// Caller-scoped with no target actor: a message the caller did not receive, a
+/// forensic reject row (no recipient), and a message no scanner touched all
+/// answer the same `fauna.bridges.not_found`, so the reply never reveals
+/// whether someone else's message exists.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct GetMessageScanResultRequest {
+    #[serde(with = "serde_bytes")]
+    pub message_id: Vec<u8>,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): app-decoded client↔nest wire (the user's own scan read).
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// The scan row for one message, typed (the storage row's JSON columns are
+/// re-assembled into the same [`RspamdScore`] the ingest request carried).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GetMessageScanResultReply {
+    #[serde(with = "serde_bytes")]
+    pub message_id: Vec<u8>,
+    /// Unix seconds, nest clock.
+    pub received_at: i64,
+    /// Unix seconds, nest clock.
+    pub scanned_at: i64,
+    /// The stored verdict. The row keeps no clamd error text, so an
+    /// [`ClamavVerdict::Error`] comes back with an empty `detail`.
+    pub clamav_verdict: ClamavVerdict,
+    /// `None` when rspamd did not run for this message.
+    #[serde(default)]
+    pub rspamd_score: Option<RspamdScore>,
+    pub action_taken: ScanActionTaken,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): app-decoded client↔nest wire (the user's own scan read).
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+// ── DMARC report receive ─────────────────────────────────────────
+//
+// `docs/goal/behavior/dmarc-reporting.md` § Aggregate-report receive (RUA),
+// § Forensic-report receive (RUF) + § Wire shapes. The MTA diverts a message
+// addressed to the reserved `dmarc-report@` role address (a
+// `ResolveRecipientReply::Processor` RCPT) to `ingest_dmarc_report` instead of
+// a mailbox ingest; the nest tells an aggregate report from a forensic one and
+// stores each in its own table. The admin reads them back with
+// `list_dmarc_aggregate_reports` / `get_dmarc_aggregate_report` and
+// `list_dmarc_forensic_reports` / `get_dmarc_forensic_report`. Reports are
+// deployment data (the admin's monitoring signal), held in the nest's
+// plaintext floor.
+
+/// Which nest processor a `ResolveRecipientReply::Processor` RCPT is bound for.
+/// One variant per processor role address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecipientProcessor {
+    /// `dmarc-report@<local-domain>` → `fauna.bridges.ingest_dmarc_report`,
+    /// aggregate and forensic reports alike (the nest classifies).
+    DmarcReport,
+    /// `tlsrpt@<local-domain>` → `fauna.bridges.ingest_tlsrpt_report`
+    /// (`smtp-server.md` § TLSRPT inbound report listener).
+    TlsrptInbound,
+}
+
+/// The SMTP-transaction context of the mail that carried a report — kept as
+/// `source_envelope_blob` for forensic correlation (a report whose wrapper
+/// failed authentication is still ingested; the verdicts ride along).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+/// Version-locked: MTA-class, both ends in the nest image (transport.md § Schema and forward-compat
+/// discipline, rule 4), so `deny_unknown_fields`.
+#[serde(deny_unknown_fields)]
+pub struct ReportSourceEnvelope {
+    pub client_ip: String,
+    #[serde(default)]
+    pub helo: String,
+    /// The SMTP `MAIL FROM` reverse-path (empty for the null sender).
+    #[serde(default)]
+    pub mail_from: String,
+    /// SPF / DKIM / DMARC / ARC verdicts on the report-carrying message itself.
+    #[serde(default)]
+    pub auth_results: AuthVerdicts,
+}
+
+/// Request for `fauna.bridges.ingest_dmarc_report` (MTA-class).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+/// Version-locked: MTA-class, both ends in the nest image (transport.md § Schema and forward-compat
+/// discipline, rule 4), so `deny_unknown_fields`.
+#[serde(deny_unknown_fields)]
+pub struct IngestDmarcReportRequest {
+    /// The whole RFC 5322 message as received at DATA. The nest classifies it
+    /// (an RFC 5965 `multipart/report; report-type=feedback-report` is a
+    /// forensic report, anything else an aggregate one), then parses it with
+    /// `fauna_mail::dmarc_forensic` or `fauna_mail::dmarc_report`. The MTA
+    /// validates neither.
+    #[serde(with = "serde_bytes")]
+    pub raw_message: Vec<u8>,
+    pub source_envelope: ReportSourceEnvelope,
+    /// The MTA's accept instant for the transaction (Unix seconds).
+    pub received_at: i64,
+}
+
+/// What the nest did with one ingested report — shared by the DMARC aggregate
+/// and the TLSRPT ingest. Every outcome is a `250` on the SMTP wire
+/// (accept-on-malformed: `dmarc-reporting.md` § Architectural rules,
+/// `smtp-server.md` § TLSRPT inbound report listener); the outcome is for the
+/// MTA's log line and the tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportIngestOutcome {
+    Stored,
+    /// Already stored — a peer re-sent it; the first copy stands. An aggregate
+    /// report is the same `(submitter, our_domain, report_id)`; a forensic one
+    /// is the same message, byte for byte.
+    Duplicate,
+    /// DMARC aggregate: no report attachment, a container that does not
+    /// decompress, or XML that fails the RFC 7489 §A.1 required fields. DMARC
+    /// forensic: a wrapper that is not a valid RFC 5965 `auth-failure`
+    /// feedback report. TLSRPT: no report part, or JSON that fails the RFC 8460
+    /// §4.4 required fields.
+    Malformed,
+    /// Over the leg's compressed / decompressed size bounds (DMARC aggregate
+    /// 50 MiB / 500 MiB; the forensic size bound; TLSRPT 16 MiB / 64 MiB).
+    Oversize,
+    /// The report is about a domain that is not one of this nest's local
+    /// domains (`policy_published.domain`; for a forensic report its
+    /// `Reported-Domain`, else the reported message's `From:` domain; for
+    /// TLSRPT, none of its policies' `policy-domain`s).
+    WrongDomain,
+}
+
+/// Which DMARC report a `dmarc-report@` message turned out to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DmarcReportKind {
+    /// RFC 7489 §7.2 aggregate (`rua=`) report.
+    Aggregate,
+    /// RFC 7489 §7.3 / RFC 6591 forensic (`ruf=`) failure report.
+    Forensic,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Version-locked: MTA-class, both ends in the nest image (transport.md § Schema and forward-compat
+/// discipline, rule 4), so `deny_unknown_fields`.
+#[serde(deny_unknown_fields)]
+pub struct IngestDmarcReportReply {
+    pub outcome: ReportIngestOutcome,
+    pub kind: DmarcReportKind,
+}
+
+/// One `(value, message count)` bucket of a summary's top-N lists.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ReportCountEntry {
+    pub value: String,
+    pub count: u64,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire, and at rest in `parsed_summary_cbor`.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// The per-report index computed once at ingest (`parsed_summary_cbor`): what
+/// the admin's summary reads without re-parsing the archived XML.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DmarcAggregateSummary {
+    /// Number of `<record>` rows in the report.
+    pub record_count: u64,
+    /// Sum of every row's `count` — the messages the peer saw claiming us.
+    pub message_count: u64,
+    /// Messages per evaluated disposition.
+    pub disposition_none: u64,
+    pub disposition_quarantine: u64,
+    pub disposition_reject: u64,
+    /// Messages whose evaluated DKIM / SPF result was an aligned `pass`.
+    pub dkim_pass: u64,
+    pub spf_pass: u64,
+    /// Messages that passed DMARC (aligned DKIM or aligned SPF pass).
+    pub dmarc_pass: u64,
+    /// Top source IPs and `header_from` domains by message count, largest first.
+    pub top_source_ips: Vec<ReportCountEntry>,
+    pub top_header_from: Vec<ReportCountEntry>,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire, and at rest in `parsed_summary_cbor`.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// One stored aggregate report, as listed to the admin.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DmarcAggregateReportEntry {
+    /// Which of our domains the report is about (`policy_published.domain`).
+    pub our_domain: String,
+    /// `report_metadata.org_name` + `email`, joined.
+    pub submitter: String,
+    pub report_id: String,
+    pub begin_at: i64,
+    pub end_at: i64,
+    pub received_at: i64,
+    pub summary: DmarcAggregateSummary,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire, and at rest in `parsed_summary_cbor`.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// The envelope of one oversize aggregate report, kept minus its body for ops
+/// triage (`dmarc-reporting.md` § XML validation, step 1).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DmarcOversizeEntry {
+    pub received_at: i64,
+    pub client_ip: String,
+    #[serde(default)]
+    pub helo: String,
+    #[serde(default)]
+    pub mail_from: String,
+    /// SPF / DKIM / DMARC / ARC verdicts on the report-carrying message.
+    #[serde(default)]
+    pub auth_results: AuthVerdicts,
+    /// Size of the message as received, in bytes.
+    pub size_bytes: u64,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Request for `fauna.bridges.list_dmarc_aggregate_reports` (Admin-class).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ListDmarcAggregateReportsRequest {
+    /// Reports received within the last `window_days` days (0 is read as 1).
+    pub window_days: u32,
+    /// Restrict to one of our domains; `None` lists every domain.
+    #[serde(default)]
+    pub our_domain: Option<String>,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ListDmarcAggregateReportsReply {
+    /// Newest `received_at` first, at most the nest's page cap.
+    pub reports: Vec<DmarcAggregateReportEntry>,
+    /// `true` when more reports matched than the page cap returned.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Oversize reports dropped within the same window, newest first (at most
+    /// the page cap): the envelope only, for ops triage.
+    #[serde(default)]
+    pub oversize: Vec<DmarcOversizeEntry>,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Request for `fauna.bridges.get_dmarc_aggregate_report` (Admin-class): one
+/// report by its storage key, as a list entry names it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct GetDmarcAggregateReportRequest {
+    pub our_domain: String,
+    pub submitter: String,
+    pub report_id: String,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GetDmarcAggregateReportReply {
+    pub report: DmarcAggregateReportEntry,
+    /// The report's XML, gzipped — the archive the summary was computed from.
+    #[serde(with = "serde_bytes")]
+    pub payload_xml_gz: Vec<u8>,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// The best-effort index of one forensic report (`parsed_summary_cbor`),
+/// extracted at ingest from its RFC 5965 / RFC 6591 feedback fields and the
+/// reported message's headers. Any field may be empty — the inner shape is
+/// vendor-divergent (§ Format leniency). By the § Storage PII rule the index
+/// names no recipient of the reported message and carries no subject or body:
+/// those stay in the raw archive, which only `get_dmarc_forensic_report`
+/// returns.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DmarcForensicSummary {
+    /// `Auth-Failure:` — which mechanism failed (`dmarc`, `dkim`, `spf`, …).
+    #[serde(default)]
+    pub auth_failure: String,
+    /// `Source-IP:` — the host that sent the reported message.
+    #[serde(default)]
+    pub source_ip: String,
+    /// `Original-Mail-From:` — the reported message's envelope sender.
+    #[serde(default)]
+    pub original_mail_from: String,
+    /// The reported message's `From:` address.
+    #[serde(default)]
+    pub header_from: String,
+    /// `Arrival-Date:` as the reporter wrote it.
+    #[serde(default)]
+    pub arrival_date: String,
+    /// `Delivery-Result:` (`delivered`, `spam`, `policy`, `reject`, `other`).
+    #[serde(default)]
+    pub delivery_result: String,
+    /// `Identity-Alignment:` (`none`, `spf`, `dkim`, …).
+    #[serde(default)]
+    pub identity_alignment: String,
+    /// `DKIM-Domain:` — the `d=` of the failing signature.
+    #[serde(default)]
+    pub dkim_domain: String,
+    /// The reporter's `User-Agent:` field.
+    #[serde(default)]
+    pub user_agent: String,
+    /// The lenient inner parse found no reported message, or one without a
+    /// `Message-ID` (`dmarc_inbound_forensic_parse_partial_total`).
+    #[serde(default)]
+    pub partial: bool,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire, and at rest in `parsed_summary_cbor`.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// One stored forensic report, as listed to the admin.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DmarcForensicReportEntry {
+    /// The nest's row id — the key `get_dmarc_forensic_report` takes.
+    pub id: i64,
+    /// Which of our domains the reported message claimed.
+    pub our_domain: String,
+    /// The report mail's `From:` (else its envelope sender).
+    pub submitter: String,
+    pub received_at: i64,
+    /// The reported message's `Message-ID` (empty when the parse was partial).
+    pub reported_message_id: String,
+    /// `Arrival-Date:` as Unix seconds; 0 when absent or unparseable.
+    pub reported_arrival_date: i64,
+    pub summary: DmarcForensicSummary,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Request for `fauna.bridges.list_dmarc_forensic_reports` (Admin-class).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ListDmarcForensicReportsRequest {
+    /// Reports received within the last `window_days` days (0 is read as 1).
+    pub window_days: u32,
+    /// Restrict to one of our domains; `None` lists every domain.
+    #[serde(default)]
+    pub our_domain: Option<String>,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ListDmarcForensicReportsReply {
+    /// Newest `received_at` first, at most the nest's page cap.
+    pub reports: Vec<DmarcForensicReportEntry>,
+    /// `true` when more reports matched than the page cap returned.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Request for `fauna.bridges.get_dmarc_forensic_report` (Admin-class): one
+/// report by the id a list entry names.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct GetDmarcForensicReportRequest {
+    pub id: i64,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GetDmarcForensicReportReply {
+    pub report: DmarcForensicReportEntry,
+    /// The whole report mail as received, gzipped — recipient addresses and
+    /// all, which is why only this read returns it.
+    #[serde(with = "serde_bytes")]
+    pub payload_raw_gz: Vec<u8>,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+// ── TLSRPT inbound report receive ────────────────────────────────
+//
+// `docs/goal/behavior/smtp-server.md` § TLSRPT inbound report listener. The MTA
+// diverts a message addressed to the reserved `tlsrpt@` role address (a
+// `ResolveRecipientReply::Processor { TlsrptInbound }` RCPT) to
+// `ingest_tlsrpt_report` instead of a mailbox ingest; the admin reads the stored
+// reports back with `list_tlsrpt_inbound_reports` / `get_tlsrpt_inbound_report`.
+// The DMARC report leg's twin: same envelope, same outcomes, same storage
+// key shape. Deployment data in the nest's plaintext floor.
+
+/// Request for `fauna.bridges.ingest_tlsrpt_report` (MTA-class).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+/// Version-locked: MTA-class, both ends in the nest image (transport.md § Schema and forward-compat
+/// discipline, rule 4), so `deny_unknown_fields`.
+#[serde(deny_unknown_fields)]
+pub struct IngestTlsrptReportRequest {
+    /// The whole RFC 5322 message as received at DATA. The nest finds the
+    /// `application/tlsrpt+gzip` / `+json` part, bounds and decompresses it,
+    /// and parses the RFC 8460 JSON (`fauna_mail::tlsrpt_report`).
+    #[serde(with = "serde_bytes")]
+    pub raw_message: Vec<u8>,
+    pub source_envelope: ReportSourceEnvelope,
+    /// The MTA's accept instant for the transaction (Unix seconds).
+    pub received_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Version-locked: MTA-class, both ends in the nest image (transport.md § Schema and forward-compat
+/// discipline, rule 4), so `deny_unknown_fields`.
+#[serde(deny_unknown_fields)]
+pub struct IngestTlsrptReportReply {
+    pub outcome: ReportIngestOutcome,
+}
+
+/// The per-report index computed once at ingest (`parsed_summary_cbor`): what
+/// an admin read shows without re-parsing the archived JSON.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TlsrptReportSummary {
+    /// Number of `policies[]` entries in the report.
+    pub policy_count: u64,
+    /// Sum of every policy's `total-successful-session-count`.
+    pub successful_sessions: u64,
+    /// Sum of every policy's `total-failure-session-count`.
+    pub failed_sessions: u64,
+    /// Failed sessions per `result-type` (`certificate-expired`,
+    /// `starttls-not-supported`, …), largest first.
+    pub top_result_types: Vec<ReportCountEntry>,
+    /// Failed sessions per `sending-mta-ip`, largest first.
+    pub top_sending_ips: Vec<ReportCountEntry>,
+    /// Failed sessions per `receiving-mx-hostname`, largest first.
+    pub top_receiving_mx: Vec<ReportCountEntry>,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire, and at rest in `parsed_summary_cbor`.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// One stored TLSRPT report, as listed to the admin.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TlsrptInboundReportEntry {
+    /// Which of our domains the report is about — the first `policy-domain`
+    /// among its policies that this nest serves (stored as
+    /// `policy_published_domain`, `mail-multidomain.md` § Per-domain TLSRPT).
+    pub our_domain: String,
+    /// `organization-name` + `contact-info`, joined.
+    pub submitter: String,
+    pub report_id: String,
+    pub begin_at: i64,
+    pub end_at: i64,
+    pub received_at: i64,
+    pub summary: TlsrptReportSummary,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire, and at rest in `parsed_summary_cbor`.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Request for `fauna.bridges.list_tlsrpt_inbound_reports` (Admin-class).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ListTlsrptInboundReportsRequest {
+    /// Reports received within the last `window_days` days (0 is read as 1).
+    pub window_days: u32,
+    /// Restrict to one of our domains; `None` lists every domain.
+    #[serde(default)]
+    pub our_domain: Option<String>,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ListTlsrptInboundReportsReply {
+    /// Newest `received_at` first, at most the nest's page cap.
+    pub reports: Vec<TlsrptInboundReportEntry>,
+    /// `true` when more reports matched than the page cap returned.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Request for `fauna.bridges.get_tlsrpt_inbound_report` (Admin-class): one
+/// report by its storage key, as a list entry names it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct GetTlsrptInboundReportRequest {
+    pub our_domain: String,
+    pub submitter: String,
+    pub report_id: String,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GetTlsrptInboundReportReply {
+    pub report: TlsrptInboundReportEntry,
+    /// The report's JSON, gzipped — the archive the summary was computed from.
+    #[serde(with = "serde_bytes")]
+    pub payload_json_gz: Vec<u8>,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): admin-read client↔nest wire.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 // ── I4 Phase D.5 outbound queue (MTA bridge polls nest) ──────────
 //
 // `outbound_mail_queue` rows live in nest's `bins/fauna-nest/src/db/
@@ -3604,10 +4474,14 @@ pub struct MarkOutboundBouncedReply {
 /// the assigned row ids. Per goal doc § Outbound delivery: every
 /// external recipient gets its own retry curve.
 ///
-/// Two caller classes reach this (`bridge_method_allowlist.rs`):
-/// - **`BridgeMta`** (the SMTP submission gateway) — sender-unconstrained
-///   by design: the MTA AUTH'd an arbitrary local submitter and carries
-///   the verified `original_sender`. It leaves `on_behalf_of_actor` unset.
+/// Two caller classes reach this (`bridge_method_allowlist.rs`), and both
+/// MUST set `on_behalf_of_actor` to the actor the message is submitted for.
+/// nest holds the message's one `From:` mailbox to that actor under the
+/// ownership rule (`mail-multidomain.md` § From: header ownership) and refuses
+/// an unowned one with [`SENDER_NOT_OWNED_CODE`]:
+/// - **`BridgeMta`** (the SMTP submission gateway) — the MTA AUTH'd a local
+///   submitter and carries the verified `original_sender`; it sets
+///   `on_behalf_of_actor` to that AUTH'd actor.
 /// - **`BridgeMda`** (the server-side `calendar-auto-schedule` gateway,
 ///   caldav-server.md § Server-side auto-schedule) — **caller-scoped**:
 ///   it MUST set `on_behalf_of_actor` to the AUTH'd organizer it is
@@ -3625,10 +4499,10 @@ pub struct EnqueueOutboundMailRequest {
     pub recipients: Vec<String>,
     #[serde(with = "serde_bytes")]
     pub raw_message: Vec<u8>,
-    /// The organizer actor (32 bytes) a `BridgeMda` caller is fanning out
-    /// for. Required for the MDA path, omitted (`None`) by the MTA. nest
-    /// caller-scopes the MDA against it (see the struct doc). Omitted on
-    /// the wire when `None`, so the MTA's bytes are unchanged.
+    /// The actor (32 bytes) the message is submitted for: the MTA's AUTH'd
+    /// submitter, or the organizer a `BridgeMda` caller is fanning out for.
+    /// Required from both caller classes (see the struct doc); `None` is
+    /// refused as malformed.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_bytes")]
     pub on_behalf_of_actor: Option<Vec<u8>>,
     /// Set **iff** [`Self::raw_message`] is empty: the DKIM-signed body was over
@@ -3641,6 +4515,17 @@ pub struct EnqueueOutboundMailRequest {
     /// data-plane (`transport.md` rule 4), so `deny_unknown_fields` stays.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged_body: Option<StagedBodyRef>,
+    /// The submitter's proof, required of the `BridgeMta` class and absent for
+    /// the MDA: the canonical DAG-CBOR plaintext of the `SubmissionToken` the
+    /// user's primary client Ed25519-signed and SMTP AUTH unwrapped
+    /// (`smtp-server.md` § Ports, the per-credential submission-token blob).
+    /// nest accepts `on_behalf_of_actor` only when the token names that actor,
+    /// its signature verifies against it, it has not expired, and its
+    /// credential is still on file — else [`SUBMITTER_NOT_PROVEN_CODE`]
+    /// (`mail-multidomain.md` § From: header ownership → *Per door,
+    /// nest-side*, the enqueue door's submitter).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission_token: Option<ByteBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -3722,34 +4607,45 @@ pub struct DeliverSealedSchedulingReply {
 }
 
 /// `fauna.bridges.send_auto_reply` (BridgeMta) — the MTA perimeter, after a
-/// delivered message matched an `AutoReply` filter rule and passed the loop
-/// guard (`fauna_mail::filter::auto_reply_decision`), hands nest the
-/// already-composed + DKIM-signed reply bytes. nest atomically (1) checks +
-/// records the vacation rate limit so each `(recipient, envelope-sender)` pair
-/// gets at most one reply per `interval_hours` (`auto_reply_log`), and (2) if
-/// the slot is free, enqueues the reply into `outbound_mail_queue` with a **null
-/// envelope-from** (`MAIL FROM:<>`, RFC 3834 — an auto-reply must never be
-/// bounceable into a loop; the submission `enqueue_outbound_mail` path forbids a
-/// null sender, so this dedicated path owns it). nest derives the rate-limit key
-/// by hashing the lowercased envelope-from (BLAKE3) so the convention lives in
-/// one place and the raw sender never sits in `auto_reply_log`.
+/// recipient's local delivery commits and the vacation loop guard
+/// (`fauna_mail::filter::auto_reply_decision`) passed, names the reply it wants
+/// sent; the nest composes it. The request carries no message bytes
+/// (`mail-multidomain.md` § From: header ownership → *Per door, nest-side*, the
+/// auto-reply door): nest looks `rule_id` up among the recipient's own stored
+/// filters (a rule that is not there, or is not an `AutoReply`, refuses the
+/// call), holds `from_address` to the recipient, composes the reply from the
+/// stored rule's subject and body through the shared composer
+/// (`fauna_mail::outbound::autoreply::compose_auto_reply`, `Message-ID` minted
+/// nest-side), then atomically (1) checks + records the vacation rate limit so
+/// each `(recipient, envelope-sender)` pair gets at most one reply per the
+/// rule's `interval_hours` (`auto_reply_log`), and (2) if the slot is free,
+/// enqueues the reply into `outbound_mail_queue` with a **null envelope-from**
+/// (`MAIL FROM:<>`, RFC 3834 — an auto-reply must never be bounceable into a
+/// loop; the submission `enqueue_outbound_mail` path forbids a null sender, so
+/// this dedicated path owns it). nest derives the rate-limit key by hashing the
+/// lowercased envelope-from (BLAKE3) so the convention lives in one place and
+/// the raw sender never sits in `auto_reply_log`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct SendAutoReplyRequest {
-    /// The recipient actor the auto-reply is "from" (32 bytes).
+    /// The recipient actor whose vacation rule fired (32 bytes) — the reply's
+    /// author.
     #[serde(with = "serde_bytes")]
     pub recipient_actor_id: Vec<u8>,
     /// The envelope sender we are replying to (the outbound recipient). nest
-    /// hashes it to the rate-limit key and uses it as the queued row's recipient.
+    /// hashes it to the rate-limit key and uses it as the reply's `To:` and the
+    /// queued row's recipient.
     pub envelope_from: String,
-    /// The vacation interval from the matched action (RFC 5230 default 168 h);
-    /// nest clamps it to a sane floor/ceiling.
-    pub interval_hours: u32,
-    /// The reply's `Message-ID` (queue correlation / `original_msgid`).
-    pub original_msgid: String,
-    /// The composed + DKIM-signed RFC 5322 reply bytes.
-    #[serde(with = "serde_bytes")]
-    pub raw_message: Vec<u8>,
+    /// The address the MTA delivered the triggering message to — the reply's
+    /// `From:`. nest holds it to `recipient_actor_id`.
+    pub from_address: String,
+    /// The triggering message's `Message-ID` (with angle brackets), for the
+    /// reply's `In-Reply-To` / `References`; empty when it had none.
+    pub in_reply_to: String,
+    /// The id of the recipient's `AutoReply` filter rule that matched
+    /// (`EmailFilter.id`). The reply's subject, body and interval are that
+    /// stored rule's.
+    pub rule_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -3930,6 +4826,39 @@ pub struct ReportTlsAttemptRequest {
 #[serde(deny_unknown_fields)]
 pub struct ReportTlsAttemptReply {
     pub ok: bool,
+}
+
+// ── Outbound DMARC aggregate-report observation (MTA bridge → nest) ──
+
+/// Request for `fauna.bridges.report_dmarc_observation`. After the Go MTA
+/// verifies an inbound message (`fauna_mail::auth::verify_inbound_observed`)
+/// and before any enforcement gate acts on it, it reports what the message
+/// contributes to the outbound DMARC aggregate report of the domain it claims
+/// to be from (`docs/goal/behavior/dmarc-reporting.md` § Outbound
+/// aggregate-report sender). The nest derives the applied disposition from
+/// `dmarc` and its own inbound enforcement switches and counts the message
+/// into the day's buckets; once a day it reports to each peer that publishes
+/// a `rua=mailto:`. Best-effort on both ends, like `report_tls_attempt`.
+/// MTA-only.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ReportDmarcObservationRequest {
+    /// The connecting MTA's IP — the report row's `source_ip`.
+    pub client_ip: String,
+    /// The message's DMARC verdict — with the nest's enforcement switches,
+    /// the row's `policy_evaluated/disposition`.
+    pub dmarc: DmarcVerdict,
+    /// The identifiers and aligned results the report row carries.
+    pub observation: DmarcObservation,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ReportDmarcObservationReply {
+    /// `false` when the message was not counted (no From domain, a local
+    /// From domain, a cap reached, or outbound reports switched off) —
+    /// informational; the MTA proceeds either way.
+    pub counted: bool,
 }
 
 // ── I2b Phase-C.3 body-fetch + index-segments types ──────────────
@@ -4589,6 +5518,11 @@ pub struct ImportMessageReply {
 /// happen to agree.
 pub const MAX_BATCH_MESSAGES: usize = 32;
 
+/// The `Skipped` reason `import_message` answers a message the person's
+/// mailbox has no room for (`mailbox-migration.md` § Quota composition) — the
+/// one skip on which the importing client pauses and asks.
+pub const IMPORT_SKIP_QUOTA_EXCEEDED: &str = "quota_exceeded";
+
 /// § Batching: at most 16 MiB of body bytes per
 /// `fauna.bridges.import_message_batch` call. See [`MAX_BATCH_MESSAGES`] for
 /// why the ceiling has one owner.
@@ -4618,6 +5552,70 @@ pub struct ImportMessageBatchReply {
     pub imported_count: u64,
     pub skipped_count: u64,
     pub errored_count: u64,
+}
+
+/// Request for `fauna.bridges.record_import_outcomes` — the messages of one
+/// source mailbox the client decided about **without sending them**
+/// (`mailbox-migration.md` § Per-message flow step 1, § Failure handling →
+/// *Source-side errors*): a message over the user's own size limit, left
+/// unfetched, and one the source would not hand over. The nest folds them
+/// into the session's counters exactly as it folds a sent message's outcome —
+/// `too_large` into `skipped_count`, `source_unreadable` into
+/// `errored_count` — and advances the mailbox's resume cursor past them, so
+/// the counts survive a restart and a resumed walk does not meet them again.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RecordImportOutcomesRequest {
+    pub session_id: String,
+    /// The source mailbox every entry belongs to.
+    pub mailbox: String,
+    /// That mailbox's UIDVALIDITY — the cursor's namespace.
+    pub uid_validity: u32,
+    /// At most [`MAX_BATCH_MESSAGES`] entries.
+    pub outcomes: Vec<ClientImportOutcome>,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): the client-run import's client↔nest wire.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// One message [`RecordImportOutcomesRequest`] reports.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClientImportOutcome {
+    /// The message's source UID.
+    pub uid: u32,
+    pub kind: ClientImportOutcomeKind,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): the client-run import's client↔nest wire.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Why the client did not send a message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ClientImportOutcomeKind {
+    /// Over the user's own size limit (`RFC822.SIZE`, compared before the
+    /// body is fetched) — a skip.
+    TooLarge { size: u64 },
+    /// The source failed to hand the message over — a failure.
+    SourceUnreadable { reason: String },
+    /// A kind a newer client added that this nest does not know: counted as
+    /// a failure, the conservative reading. Never written.
+    #[serde(other, skip_serializing)]
+    Unknown,
+}
+
+/// Reply to `fauna.bridges.record_import_outcomes`: the session's counters
+/// after the call (the values the `BridgeImportProgress` push carries).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RecordImportOutcomesReply {
+    pub imported_count: u64,
+    pub skipped_count: u64,
+    pub errored_count: u64,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4): the client-run import's client↔nest wire.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 /// Wire view of one `import_sessions` row (`mailbox-migration.md`
@@ -4802,6 +5800,14 @@ pub struct ExportMailboxEntry {
     /// `ExportCiphertextMessage`.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub uid_validity: u32,
+    /// Σ sealed record bytes over the mailbox's live placements, sized through
+    /// the CARv2 segment index exactly as IMAP STATUS / QUOTA size them — the
+    /// confirm step's "estimated bytes" (`mail-export.md` § Wizard steps step 3).
+    /// Additive (2026-10-11); an older nest omits it and the wizard reads `0`.
+    /// An estimate, not the archive's size: the archive holds the opened
+    /// messages re-serialized in the chosen format.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub sealed_bytes: u64,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4). This kind is APP-callable,
@@ -5451,6 +6457,37 @@ pub struct GetQuotaReply {
     pub message_count_used: u32,
     pub storage_bytes_limit: u64,
     pub message_count_limit: u32,
+}
+
+/// `fauna.bridges.get_mail_quotas` (User) — `()` request; returns the CALLING
+/// actor's own two quotas for the `mail-settings` readout (`imap-server.md`
+/// § Composition with submission quota). Never carries an `actor_id`: the
+/// handler reads only the caller's numbers. `get_quota` stays the MDA's
+/// per-target read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct GetMailQuotasRequest {}
+
+/// Reply for `fauna.bridges.get_mail_quotas`. The mailbox half is the same
+/// usage and effective limit [`GetQuotaReply`] reports. The submission half is
+/// today's daily allowance, counted in RECIPIENTS that leave the deployment
+/// (one unit per accepted remote RCPT, `smtp-server.md` § Architectural
+/// rules) — never messages, and never conflated with the mailbox quota
+/// (`imap-server.md` § Composition with submission quota). Reading it debits
+/// nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct GetMailQuotasReply {
+    pub storage_bytes_used: u64,
+    pub storage_bytes_limit: u64,
+    pub message_count_used: u32,
+    pub message_count_limit: u32,
+    /// Recipient units spent today (UTC day bucket).
+    pub submission_used_today: u32,
+    /// The effective daily recipient allowance (`SubmissionPolicy.max_per_day`).
+    pub submission_max_per_day: u32,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4) — an app-callable kind, so client↔nest wire.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 // ── Spam-training labels + the sealed history op ─────────────────
@@ -8969,6 +10006,7 @@ mod tests {
                 label: "renamed".into(),
                 ..Default::default()
             },
+            expires_at_ms: Some(1_900_000_000_000),
         };
         let bytes = encode_canonical(&upd).unwrap();
         assert_eq!(upd, decode::<UpdateAccountAliasRequest>(&bytes).unwrap());
@@ -8994,6 +10032,7 @@ mod tests {
         let r = ValidateRecipientReply::Resolved {
             actor_id: vec![7u8; 32],
             is_role_address: true,
+            handle: Some("alice".into()),
         };
         let bytes = encode_canonical(&r).unwrap();
         assert_eq!(r, decode::<ValidateRecipientReply>(&bytes).unwrap());
@@ -9015,6 +10054,7 @@ mod tests {
             domain: "example.com".into(),
             sender_domain: "amazon.com".into(),
             sender_address: "seller@amazon.com".into(),
+            probe: true,
         };
         let bytes = encode_canonical(&r).unwrap();
         assert_eq!(r, decode::<ResolveRecipientRequest>(&bytes).unwrap());
@@ -9849,6 +10889,94 @@ mod tests {
             let bytes = encode_canonical(&d).unwrap();
             assert_eq!(d, decode::<SpamDisposition>(&bytes).unwrap());
         }
+    }
+
+    #[test]
+    fn get_message_scan_result_round_trips() {
+        let req = GetMessageScanResultRequest {
+            message_id: vec![4u8; 32],
+            extra: Default::default(),
+        };
+        let bytes = encode_canonical(&req).unwrap();
+        assert_eq!(req, decode::<GetMessageScanResultRequest>(&bytes).unwrap());
+        let reply = GetMessageScanResultReply {
+            message_id: vec![4u8; 32],
+            received_at: 1_700_000_000,
+            scanned_at: 1_700_000_001,
+            clamav_verdict: ClamavVerdict::Infected {
+                signature: "Eicar-Test-Signature".into(),
+            },
+            rspamd_score: Some(RspamdScore {
+                raw_milli: 2400,
+                scaled_milli: 1200,
+                flagged_rules: vec!["BAYES_HAM".into()],
+                breakdown: vec![RspamdRuleContribution {
+                    rule: "BAYES_HAM".into(),
+                    score_milli: -2900,
+                }],
+            }),
+            action_taken: ScanActionTaken::Junked,
+            extra: Default::default(),
+        };
+        let bytes = encode_canonical(&reply).unwrap();
+        assert_eq!(reply, decode::<GetMessageScanResultReply>(&bytes).unwrap());
+    }
+
+    #[test]
+    fn get_message_scan_result_reply_decodes_an_unknown_clamav_verdict_kind() {
+        // An app older than its nest meets a verdict kind it was not built
+        // with (transport.md § Schema and forward-compat discipline, rule 3):
+        // it reads `Unknown`, payload dropped, instead of failing the read.
+        #[derive(Serialize)]
+        #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+        enum NewerVerdict {
+            Quarantined { vault: String },
+            Deferred,
+        }
+        #[derive(Serialize)]
+        struct NewerReply {
+            #[serde(with = "serde_bytes")]
+            message_id: Vec<u8>,
+            received_at: i64,
+            scanned_at: i64,
+            clamav_verdict: NewerVerdict,
+            rspamd_score: Option<RspamdScore>,
+            action_taken: ScanActionTaken,
+        }
+        for verdict in [
+            NewerVerdict::Quarantined { vault: "v1".into() },
+            NewerVerdict::Deferred,
+        ] {
+            let bytes = encode_canonical(&NewerReply {
+                message_id: vec![4u8; 32],
+                received_at: 1_700_000_000,
+                scanned_at: 1_700_000_001,
+                clamav_verdict: verdict,
+                rspamd_score: None,
+                action_taken: ScanActionTaken::Delivered,
+            })
+            .unwrap();
+            let decoded = decode::<GetMessageScanResultReply>(&bytes).unwrap();
+            assert_eq!(decoded.clamav_verdict, ClamavVerdict::Unknown);
+            assert_eq!(decoded.action_taken, ScanActionTaken::Delivered);
+        }
+        // Never written: encoding it is an error, not a wire value.
+        assert!(encode_canonical(&ClamavVerdict::Unknown).is_err());
+    }
+
+    #[test]
+    fn scan_action_taken_column_spelling_is_the_serde_name() {
+        for a in [
+            ScanActionTaken::Delivered,
+            ScanActionTaken::RejectedMalware,
+            ScanActionTaken::Junked,
+            ScanActionTaken::Tagged,
+        ] {
+            assert_eq!(ScanActionTaken::from_column(a.as_str()), Some(a));
+            let bytes = encode_canonical(&a).unwrap();
+            assert_eq!(decode::<String>(&bytes).unwrap(), a.as_str());
+        }
+        assert_eq!(ScanActionTaken::from_column("bounced"), None);
     }
 
     #[test]
@@ -11922,6 +13050,36 @@ mod tests {
     }
 
     #[test]
+    fn enqueue_outbound_mail_submission_token_round_trips_as_a_byte_string() {
+        // The MTA's submitter proof (mail-multidomain.md § From: header
+        // ownership → *Per door, nest-side*): the token's canonical plaintext,
+        // a CBOR byte string the Go bridge's `[]byte` encodes; omitted when
+        // `None`, so the MDA's bytes carry no key.
+        let r = EnqueueOutboundMailRequest {
+            original_msgid: "m@example.com".into(),
+            original_sender: "alice@example.com".into(),
+            recipients: vec!["bob@dest.test".into()],
+            raw_message: b"body\r\n".to_vec(),
+            on_behalf_of_actor: Some(vec![7u8; 32]),
+            submission_token: Some(ByteBuf::from(vec![0xA5u8; 40])),
+            ..Default::default()
+        };
+        let bytes = encode_canonical(&r).unwrap();
+        assert_eq!(r, decode::<EnqueueOutboundMailRequest>(&bytes).unwrap());
+        // 0x58 0x28 = major type 2 (byte string), one-byte length 40.
+        assert!(
+            bytes.windows(2).any(|w| w == [0x58, 40]),
+            "submission_token must cross as a CBOR byte string"
+        );
+        let mda = EnqueueOutboundMailRequest {
+            submission_token: None,
+            ..r.clone()
+        };
+        let mda_bytes = encode_canonical(&mda).unwrap();
+        assert!(!mda_bytes.windows(16).any(|w| w == b"submission_token"));
+    }
+
+    #[test]
     fn staged_body_ref_round_trips_and_the_key_is_a_byte_string() {
         // The staged-envelope reference (smtp-server.md § Message size limits):
         // a distinct type from MailBodyRef carrying the one-shot AEAD key beside
@@ -12309,6 +13467,36 @@ mod tests {
         let r = ReportTlsAttemptReply { ok: true };
         let bytes = encode_canonical(&r).unwrap();
         assert_eq!(r, decode::<ReportTlsAttemptReply>(&bytes).unwrap());
+    }
+
+    #[test]
+    fn report_dmarc_observation_round_trips() {
+        let r = ReportDmarcObservationRequest {
+            client_ip: "192.0.2.1".into(),
+            dmarc: DmarcVerdict::Fail {
+                policy: DmarcPolicy::Reject,
+            },
+            observation: DmarcObservation {
+                header_from_domain: "peer.test".into(),
+                envelope_from_domain: "bounce.peer.test".into(),
+                dkim_aligned: false,
+                spf_aligned: true,
+                dkim_results: vec![DkimAuthResult {
+                    domain: "peer.test".into(),
+                    selector: "s1".into(),
+                    result: "fail".into(),
+                }],
+                spf_result: "pass".into(),
+            },
+        };
+        let bytes = encode_canonical(&r).unwrap();
+        assert_eq!(r, decode::<ReportDmarcObservationRequest>(&bytes).unwrap());
+        let reply = ReportDmarcObservationReply { counted: true };
+        let bytes = encode_canonical(&reply).unwrap();
+        assert_eq!(
+            reply,
+            decode::<ReportDmarcObservationReply>(&bytes).unwrap()
+        );
     }
 
     // ── I5 Phase D.6 — CREATE / DELETE / RENAME round-trip tests ──
@@ -12861,7 +14049,10 @@ mod tests {
         // in `fauna_core::mail_aliases` (no `fauna-mail` dep needed here).
         let d = AliasPolicy::default();
         assert_eq!(d.exact_aliases_max, 20);
-        assert_eq!(d.reserved_local_parts.len(), 6);
+        assert!(
+            d.reserved_local_parts.is_empty(),
+            "no admin additions by default"
+        );
         assert!(d.subaddressing_enabled);
         assert!(d.wildcard_prefix_enabled);
         let bytes = encode_canonical(&d).unwrap();
@@ -13145,6 +14336,42 @@ mod tests {
             decode::<ListDeliverabilityDiagnosticRunsReply>(&encode_canonical(&dreply).unwrap())
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn send_auto_reply_request_round_trips_and_carries_no_message_bytes() {
+        let req = SendAutoReplyRequest {
+            recipient_actor_id: vec![7u8; 32],
+            envelope_from: "carol@external.test".into(),
+            from_address: "alice@example.test".into(),
+            in_reply_to: "<m1@external.test>".into(),
+            rule_id: 42,
+        };
+        assert_eq!(
+            req,
+            decode::<SendAutoReplyRequest>(&encode_canonical(&req).unwrap()).unwrap()
+        );
+        // The MTA names the reply; it never authors it: a request carrying
+        // composed bytes is refused at decode.
+        #[derive(Serialize)]
+        struct WithBytes<'a> {
+            recipient_actor_id: serde_bytes::ByteBuf,
+            envelope_from: &'a str,
+            from_address: &'a str,
+            in_reply_to: &'a str,
+            rule_id: i64,
+            raw_message: serde_bytes::ByteBuf,
+        }
+        let smuggled = encode_canonical(&WithBytes {
+            recipient_actor_id: serde_bytes::ByteBuf::from(vec![7u8; 32]),
+            envelope_from: "carol@external.test",
+            from_address: "alice@example.test",
+            in_reply_to: "",
+            rule_id: 42,
+            raw_message: serde_bytes::ByteBuf::from(b"From: x\r\n\r\nhi".to_vec()),
+        })
+        .unwrap();
+        assert!(decode::<SendAutoReplyRequest>(&smuggled).is_err());
     }
 
     #[test]

@@ -588,7 +588,7 @@ impl OAuthAsRuntime {
             auth_codes: crate::oauth_as_ceremony::AuthCodeStore::new(),
             consent_wakes: crate::oauth_as_ceremony::ConsentWakes::new(),
             backchannel: crate::oauth_as_ceremony::BackchannelStore::new(),
-            permission_sets: crate::oauth_as_permission_sets::PermissionSetRequests::new(),
+            permission_sets: crate::oauth_as_permission_sets::new_requests(),
             fetcher,
         }
     }

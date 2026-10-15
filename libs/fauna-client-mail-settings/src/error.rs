@@ -79,6 +79,22 @@ pub enum DispatchError {
     UnknownCredential(String),
 }
 
+impl DispatchError {
+    /// A nest error answering a control the user pressed (a wizard's Start,
+    /// Pause, Resume, Cancel): a refusal surfaces as the nest's own sentence,
+    /// bare — the way mail settings shows its refusals, which never pass
+    /// through the seam — not behind [`NestError`]'s `nest rejected:` wrapper.
+    /// "Nest unreachable" keeps its wording: that text is the seam's, not the
+    /// nest's. The `#[from]` fold stays as it is for every other call, whose
+    /// rejection text may be the client's own context rather than a sentence.
+    pub(crate) fn refused_control(e: NestError) -> Self {
+        match e {
+            NestError::Rejected(sentence) => Self::InvalidState(sentence),
+            transient => Self::Nest(transient),
+        }
+    }
+}
+
 impl From<WrapError> for DispatchError {
     fn from(e: WrapError) -> Self {
         Self::Wrap(e.to_string())

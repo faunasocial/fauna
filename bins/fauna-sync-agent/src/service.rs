@@ -40,7 +40,13 @@ pub(crate) async fn run_agent_with_store(
     // Install-scoped TLS trust, BEFORE anything can dial a nest (the capability
     // restore below reconnects immediately). The agent is a read-only consumer
     // of the pins the interactive app minted — see `crate::trust`.
-    crate::trust::install_consumer_pin_store(data_dir);
+    //
+    // The data-root is resolved first, once: the `--data-dir` override (dev/CI)
+    // or the production split machine layout — refused, with the shared no-home
+    // reason, when no absolute home exists. Threaded into state so every handler
+    // reads and writes the same root this startup loads from.
+    let paths = SyncPaths::new(data_dir.map(|d| d.to_path_buf()))?;
+    crate::trust::install_consumer_pin_store(&paths.trust_dir());
 
     // Single-instance gate — FIRST, before restoring the capability or starting
     // engines. Without it a spawner racing a slow-binding agent (the convergence
@@ -77,11 +83,6 @@ pub(crate) async fn run_agent_with_store(
         Err(e) => return Err(e.into()),
     };
 
-    // Resolve the data-root once: the `--data-dir` override (dev/CI) or the
-    // production split machine layout. Threaded into state so every handler reads
-    // and writes the same root this startup loads from.
-    let paths = SyncPaths::new(data_dir.map(|d| d.to_path_buf()));
-
     // Restore the persisted capability. Loaded BEFORE the config: on macOS the
     // restored capability's actor decides the per-actor state scope, which
     // changes where the config itself lives.
@@ -94,7 +95,7 @@ pub(crate) async fn run_agent_with_store(
     // serve a signed-out account forever.
     let restored_cap = crate::credentials::restore_authorized_capability(&credentials);
 
-    // Per-actor state scoping (`file-sync.md` § Multi-account × File Provider,
+    // Per-actor state scoping (`on-demand-files-apple.md` § Multi-account × File Provider,
     // consequence 3): scope every state path to the restored capability's actor
     // (`apply_actor_scope` only scopes; nothing is adopted or copied). An
     // unprovisioned boot stays unscoped — it serves nothing until the app provisions,
@@ -139,7 +140,7 @@ pub(crate) async fn run_agent_with_store(
     }
 
     // The on-demand surface's boot reconcile, BEFORE any engine starts
-    // (`on-demand-files.md` § Linux FUSE binding, the lifecycle rule): answer the
+    // (`on-demand-files-linux.md` § Linux FUSE binding, the lifecycle rule): answer the
     // availability probe the status reply reports, and on linux lazily unmount
     // every leftover mount of this agent's FUSE binding at a configured on-demand
     // location — a ghost under a mount point would otherwise take a second mount
@@ -237,7 +238,16 @@ pub(crate) async fn run_agent_with_store(
         state.shutdown_tx.subscribe(),
     ));
 
-    // The content-key edge task (`on-demand-files.md` § Shared sets on a
+    // The push wake stand-in's banner arm (`common.md` § Push Notifications →
+    // *Transports*, ruled 2026-10-09): it rides the capability connection from
+    // provision on, never the account-store mount above, which waits on a
+    // signed-in enrollment. Beside the other app-dead hosts.
+    let push_arm_handle = tokio::spawn(crate::push_arm::host(
+        state.clone(),
+        state.shutdown_tx.subscribe(),
+    ));
+
+    // The content-key edge task (`on-demand-files-shared-sets.md` § Shared sets on a
     // capability host → *One mechanism*): this process resolves every set's
     // content keys from its holder's custody and re-resolves at its own edges —
     // every reconcile, the fleet-scope custody nudge, an engine's refresh edge, a
@@ -374,6 +384,7 @@ pub(crate) async fn run_agent_with_store(
         let _ = renewal_handle.await;
         let _ = custodian_handle.await;
         let _ = account_host_handle.await;
+        let _ = push_arm_handle.await;
         let _ = content_keys_handle.await;
         return Err(err);
     }
@@ -383,12 +394,13 @@ pub(crate) async fn run_agent_with_store(
     renewal_handle.await?;
     custodian_handle.await?;
     account_host_handle.await?;
+    push_arm_handle.await?;
     content_keys_handle.await?;
 
     Ok(())
 }
 
-/// Scope the shared [`SyncPaths`] to one actor's state subdir (`file-sync.md`
+/// Scope the shared [`SyncPaths`] to one actor's state subdir (`on-demand-files.md`
 /// § Multi-account × File Provider, consequence 3) — nothing is adopted into
 /// it: a state file sitting flat at the base is no account's. Returns whether the scope
 /// changed — the caller must then reload config, since the scope changes where
@@ -444,7 +456,7 @@ mod tests {
     #[test]
     fn apply_actor_scope_scopes_the_data_dir_override_too() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = SyncPaths::at(tmp.path().to_path_buf());
         let actor = [0xabu8; 32];
 
         assert!(

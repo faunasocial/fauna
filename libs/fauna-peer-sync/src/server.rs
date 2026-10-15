@@ -7,8 +7,10 @@
 //!
 //! A connection's serve set is **exactly** [`allowlisted_kinds`]:
 //! `fauna.peer.node_info` (the pre-witness probe), the admission exchange,
-//! `fauna.sync.changes.list`, `fauna.peer.sync.blocks.pull`, and
-//! `fauna.peer.sync.chunks.pull` (a sibling's file bodies). Nothing
+//! `fauna.sync.changes.list`, `fauna.peer.sync.blocks.pull`,
+//! `fauna.peer.sync.chunks.pull` (a sibling's file bodies), and the folder
+//! row pull `fauna.peer.sync.changes.list` + `fauna.peer.sync.manifests.get`
+//! (a sibling's folder rows and the manifests they name). Nothing
 //! else is mapped, so `PeerChannel::serve` answers every other kind
 //! `fauna.protocol.unknown_kind` — no config, capability-mint, admin, or
 //! key-material kind exists on this dispatcher, and class-2 state rides only
@@ -26,39 +28,33 @@
 //! contract). The file-row request (no `item_class` — the sync engine's own file
 //! pull) stays nest-mediated and is refused loudly.
 //!
-//! # The store owner thread
+//! # The store-serving half
 //!
-//! Handlers run on spawned tasks (`PeerChannel::serve`), which demand `Send`
-//! futures — and the store's sqlite backend is single-connection by design.
-//! So the serve side owns its **own** [`AccountStore`] on a dedicated OS
-//! thread (WAL + busy-wait is the store's own multi-connection posture —
-//! `SqliteBackend::open`'s contract), and handlers proxy through
-//! [`ServeStoreHandle`]'s message channel. This also keeps every store
-//! touch on one thread — the engine-singleton shape (§ Multi-instance
-//! concurrency) applied to the serve side.
+//! The feed serve and the store owner thread live in
+//! [`crate::store_serve`] — one implementation the custodian-NEST serve door
+//! calls too, so the two serve sides cannot drift. This module keeps only the
+//! peer channel's own half: admission, the block and chunk pulls, metering.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
-use anyhow::{Context, Result};
-use fauna_account_store::sqlite::SqliteBackend;
-use fauna_account_store::store::AccountStore;
-use fauna_account_store::types::{RelayRow, WriterId};
+use anyhow::Result;
 use fauna_core::data::ContentHash;
 use fauna_core::device_endpoints::DeviceEndpoints;
 use fauna_core::encoding::EmbedAsBytes;
 use fauna_peer_channel::{HandlerFactory, PeerHandlers, PeerNode, base_peer_handlers, from_value};
-use fauna_protocol::account_state::{ACCOUNT_STATE_SCOPE, ItemClass};
+use fauna_protocol::peer_row::{LocalShareChange, PeerChangeRow, serves_held_row};
 use fauna_protocol::peer_sync::{
     ERR_NOT_ADMITTED, ERR_OVER_QUOTA, ERR_UNSUPPORTED, ERR_WITNESS_REFUSED, KIND_PEER_SYNC_ADMIT,
-    KIND_PEER_SYNC_BLOCKS_PULL, KIND_PEER_SYNC_CHUNKS_PULL, PeerSyncAdmitReply,
-    PeerSyncAdmitRequest, PeerSyncBlock, PeerSyncBlocksPullReply, PeerSyncBlocksPullRequest,
-    PeerSyncChunk, PeerSyncChunksPullReply, PeerSyncChunksPullRequest,
+    KIND_PEER_SYNC_BLOCKS_PULL, KIND_PEER_SYNC_CHANGES_LIST, KIND_PEER_SYNC_CHUNKS_PULL,
+    KIND_PEER_SYNC_MANIFESTS_GET, PeerSyncAdmitReply, PeerSyncAdmitRequest, PeerSyncBlock,
+    PeerSyncBlocksPullReply, PeerSyncBlocksPullRequest, PeerSyncChangesListReply,
+    PeerSyncChangesListRequest, PeerSyncChunk, PeerSyncChunksPullReply, PeerSyncChunksPullRequest,
+    PeerSyncManifest, PeerSyncManifestsGetReply, PeerSyncManifestsGetRequest,
 };
-use fauna_protocol::sync::{SyncChange, SyncChangesListReply, SyncChangesListRequest};
+use fauna_protocol::sync::SyncChangesListRequest;
 use fauna_protocol::{RpcError, Value};
 use fauna_transport::{EndpointKey, PeerTransport};
-use tokio::sync::{mpsc, oneshot};
 
 use crate::admission::{
     AdmissionVerdict, AdmittedConnection, admitted_verdict, claimed_account, evaluate_witness,
@@ -132,147 +128,60 @@ pub type FileChunkFn = Arc<
         + Sync,
 >;
 
+/// The serve side's **folder row source**: a file-sync folder's change rows
+/// with `seq` strictly greater than `since`, in seq order, pending rows on the
+/// tail, at most `max_rows` — by the folder's `FolderRef` wire string. The
+/// host answers it from the folder's own state DB
+/// (`fauna_sync_engine::peer_share_store::SyncDbShareStore::changes_since`);
+/// a folder no engine here runs answers an empty page. The rows may include
+/// ones this side must not serve — the server applies the provenance ruling
+/// ([`fauna_protocol::peer_row::serves_held_row`]), so a host never encodes it.
+pub type FolderChangesFn = Arc<
+    dyn Fn(
+            String,
+            i64,
+            u32,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<Vec<LocalShareChange>>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+/// The serve side's **folder manifest source**: canonical `ChunkManifest`
+/// bytes the folder's replica retained, by the folder's `FolderRef` wire
+/// string and the manifest's content hash — `None` when it retains none.
+/// Self-verifying bytes only (the receiver re-hashes them); the share leg's
+/// re-derive fallback needs the M2 keys and stays there.
+pub type FolderManifestFn = Arc<
+    dyn Fn(
+            String,
+            [u8; 32],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<u8>>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// The kinds this dispatcher serves — the whole allowlist (rule 3). Public so
 /// the compliance test asserts the *set*, not a sample.
-pub const fn allowlisted_kinds() -> [&'static str; 5] {
+pub const fn allowlisted_kinds() -> [&'static str; 7] {
     [
         fauna_protocol::peer::KIND_PEER_NODE_INFO,
         KIND_PEER_SYNC_ADMIT,
         "fauna.sync.changes.list",
         KIND_PEER_SYNC_BLOCKS_PULL,
         KIND_PEER_SYNC_CHUNKS_PULL,
+        KIND_PEER_SYNC_CHANGES_LIST,
+        KIND_PEER_SYNC_MANIFESTS_GET,
     ]
 }
 
-/// Serve-page bounds, sized under the peer channel's 1 MiB frame
-/// (`fauna_peer_channel::MAX_FRAME_LEN`): a page stops at whichever cap it
-/// hits first. Rust constants — never a knob.
-const MAX_ROWS_PER_PAGE: u32 = 64;
-const MAX_ENTRY_BYTES_PER_PAGE: usize = 512 * 1024;
-/// The block-pull reply's byte budget (blocks over it are `deferred`).
+/// The block-pull reply's byte budget (blocks over it are `deferred`), sized
+/// under the peer channel's 1 MiB frame (`fauna_peer_channel::MAX_FRAME_LEN`).
+/// The feed page's own bounds live with the feed serve
+/// ([`crate::store_serve`]). A Rust constant — never a knob.
 const MAX_BLOCK_BYTES_PER_PULL: usize = 700 * 1024;
 
-// ── The store owner thread ───────────────────────────────────────────────────
-
-/// One block lookup the store thread answers: the block's index scope (for
-/// the verdict's scope enforcement) and its bytes when held.
-struct BlockLookup {
-    cid: ContentHash,
-    scope: Option<String>,
-    bytes: Option<Vec<u8>>,
-}
-
-enum StoreCmd {
-    RelayPage {
-        scope: String,
-        item_class: String,
-        frontier: Vec<(WriterId, u64)>,
-        limit: u32,
-        reply: oneshot::Sender<Result<Vec<RelayRow>>>,
-    },
-    Blocks {
-        cids: Vec<ContentHash>,
-        reply: oneshot::Sender<Result<Vec<BlockLookup>>>,
-    },
-}
-
-/// A handle to the serve side's store, owned by a dedicated thread (see the
-/// module docs). Cloneable; the thread exits when every handle is dropped.
-#[derive(Clone)]
-pub struct ServeStoreHandle {
-    tx: mpsc::Sender<StoreCmd>,
-}
-
-impl ServeStoreHandle {
-    /// Take ownership of `store` on a dedicated thread and answer commands
-    /// over a channel. The thread runs a current-thread tokio runtime, so the
-    /// store's AFIT futures never need to be `Send`.
-    pub fn spawn(store: AccountStore<SqliteBackend>) -> Self {
-        let (tx, mut rx) = mpsc::channel::<StoreCmd>(64);
-        std::thread::Builder::new()
-            .name("peer-sync-store".into())
-            .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .build()
-                    .expect("current-thread runtime for the peer-sync store");
-                rt.block_on(async move {
-                    while let Some(cmd) = rx.recv().await {
-                        match cmd {
-                            StoreCmd::RelayPage {
-                                scope,
-                                item_class,
-                                frontier,
-                                limit,
-                                reply,
-                            } => {
-                                let r = store
-                                    .relay_rows(&scope, &item_class, &frontier, limit)
-                                    .await;
-                                let _ = reply.send(r);
-                            }
-                            StoreCmd::Blocks { cids, reply } => {
-                                let mut out = Vec::with_capacity(cids.len());
-                                let mut err = None;
-                                for cid in cids {
-                                    let scope = match store.record(&cid).await {
-                                        Ok(entry) => entry.map(|e| e.scope),
-                                        Err(e) => {
-                                            err = Some(e);
-                                            break;
-                                        }
-                                    };
-                                    let bytes = match store.block(&cid).await {
-                                        Ok(b) => b,
-                                        Err(e) => {
-                                            err = Some(e);
-                                            break;
-                                        }
-                                    };
-                                    out.push(BlockLookup { cid, scope, bytes });
-                                }
-                                let _ = reply.send(match err {
-                                    None => Ok(out),
-                                    Some(e) => Err(e),
-                                });
-                            }
-                        }
-                    }
-                });
-            })
-            .expect("spawn peer-sync store thread");
-        Self { tx }
-    }
-
-    async fn relay_page(
-        &self,
-        scope: String,
-        item_class: String,
-        frontier: Vec<(WriterId, u64)>,
-        limit: u32,
-    ) -> Result<Vec<RelayRow>> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(StoreCmd::RelayPage {
-                scope,
-                item_class,
-                frontier,
-                limit,
-                reply,
-            })
-            .await
-            .context("peer-sync store thread is gone")?;
-        rx.await.context("peer-sync store thread dropped a reply")?
-    }
-
-    async fn blocks(&self, cids: Vec<ContentHash>) -> Result<Vec<BlockLookup>> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(StoreCmd::Blocks { cids, reply })
-            .await
-            .context("peer-sync store thread is gone")?;
-        rx.await.context("peer-sync store thread dropped a reply")?
-    }
-}
+pub use crate::store_serve::ServeStoreHandle;
 
 // ── The server ───────────────────────────────────────────────────────────────
 
@@ -313,6 +222,13 @@ pub struct PeerSyncServerConfig {
     /// `missing`, which sends the puller to the nest: a refusal would cost the
     /// same and say less.
     pub file_chunks: Option<FileChunkFn>,
+    /// Where `fauna.peer.sync.changes.list` reads a folder's rows
+    /// ([`FolderChangesFn`]). `None` — no file-sync engines here — answers an
+    /// empty page, never an error, as the chunk door answers `missing`.
+    pub folder_changes: Option<FolderChangesFn>,
+    /// Where `fauna.peer.sync.manifests.get` reads a folder's retained
+    /// manifests ([`FolderManifestFn`]). `None` answers every hash `missing`.
+    pub folder_manifests: Option<FolderManifestFn>,
     pub quotas: QuotaConfig,
     pub now: NowFn,
 }
@@ -446,6 +362,10 @@ impl PeerSyncServer {
         let pull_slot = Arc::clone(&verdict);
         let chunks_server = Arc::clone(self);
         let chunks_slot = Arc::clone(&verdict);
+        let rows_server = Arc::clone(self);
+        let rows_slot = Arc::clone(&verdict);
+        let manifests_server = Arc::clone(self);
+        let manifests_slot = Arc::clone(&verdict);
 
         base_peer_handlers(self.config.display_name.clone())
             .on(KIND_PEER_SYNC_ADMIT, move |req| {
@@ -467,6 +387,24 @@ impl PeerSyncServer {
                 let server = Arc::clone(&chunks_server);
                 let slot = Arc::clone(&chunks_slot);
                 async move { server.handle_chunks_pull(&peer, &slot, req.payload).await }
+            })
+            .on(KIND_PEER_SYNC_CHANGES_LIST, move |req| {
+                let server = Arc::clone(&rows_server);
+                let slot = Arc::clone(&rows_slot);
+                async move {
+                    server
+                        .handle_folder_changes_list(&peer, &slot, req.payload)
+                        .await
+                }
+            })
+            .on(KIND_PEER_SYNC_MANIFESTS_GET, move |req| {
+                let server = Arc::clone(&manifests_server);
+                let slot = Arc::clone(&manifests_slot);
+                async move {
+                    server
+                        .handle_folder_manifests_get(&peer, &slot, req.payload)
+                        .await
+                }
             })
     }
 
@@ -691,83 +629,13 @@ impl PeerSyncServer {
         payload: Value,
     ) -> Result<Value, RpcError> {
         let req: SyncChangesListRequest = from_value(&payload)?;
-        // The peer serve carries only the item-class arms; the
-        // file-row shape (no item_class, the engine's own file pull) is nest-mediated and refused here
-        // loudly — an empty page would read as "converged" to a walk.
-        let item_class = req.item_class.as_deref().ok_or_else(|| {
-            unsupported("the peer feed serves item-class arms only (state-entry, record-cid)")
-        })?;
-        let scope = match ItemClass::from_wire(item_class) {
-            Some(ItemClass::StateEntry) => req
-                .scope
-                .clone()
-                .unwrap_or_else(|| ACCOUNT_STATE_SCOPE.to_string()),
-            // A content walk names its scope: there is no default content
-            // scope to imply, and answering a scope-less request from an
-            // empty plane would read as "converged" to the walk — the same
-            // loud-refusal rule as the arm check above.
-            Some(ItemClass::RecordCid) => req.scope.clone().ok_or_else(|| {
-                unsupported("a record-cid walk names its content scope explicitly")
-            })?,
-            _ => {
-                return Err(unsupported(
-                    "this build's peer feed serves the state-entry and record-cid arms only",
-                ));
-            }
-        };
+        let (item_class, scope) =
+            crate::store_serve::changes_list_scope(&req).map_err(serve_refusal)?;
         let store = self.admitted_for(peer, slot, &scope)?;
-
-        let frontier: Vec<(WriterId, u64)> = match req.frontier {
-            Some(f) => f
-                .into_iter()
-                .filter_map(|(hex_writer, seq)| {
-                    let bytes: [u8; 32] = hex::decode(&hex_writer).ok()?.try_into().ok()?;
-                    Some((WriterId(bytes), u64::try_from(seq).ok()?))
-                })
-                .collect(),
-            // The feed contract (charter § Feeds and cursors): "an omitted
-            // frontier is `{nest: since}`" — the scalar-cursor form the
-            // one-writer content walk sends. The class-2 walk always sends an
-            // explicit frontier, so for state-entry this arm changes nothing.
-            None => vec![(
-                WriterId::NEST_SEQUENCER,
-                u64::try_from(req.since).unwrap_or(0),
-            )],
-        };
-
-        let rows = store
-            .relay_page(scope, item_class.to_string(), frontier, MAX_ROWS_PER_PAGE)
+        let reply = crate::store_serve::serve_changes_list(&store, item_class, scope, &req)
             .await
-            .map_err(internal)?;
-
-        // Trim to the frame budget; a truncated page is re-requested with the
-        // client's advanced frontier (the ordered-prefix-per-writer law keeps
-        // truncation safe at any point).
-        let mut changes = Vec::new();
-        let mut entry_bytes = 0usize;
-        for row in rows {
-            entry_bytes += row.entry.as_ref().map_or(0, Vec::len);
-            if !changes.is_empty() && entry_bytes > MAX_ENTRY_BYTES_PER_PAGE {
-                break;
-            }
-            changes.push(relay_row_to_change(row));
-        }
-        to_value(&SyncChangesListReply {
-            changes,
-            caller_access: None,
-            residency: None,
-            // Never echoed, and deliberately: a store serves `(writer,
-            // writer_seq)` order, with no cross-writer order a watermark could
-            // be a coordinate in — the ruling defers the store-served legs
-            // (account-sync-plane.md § Feeds and cursors → *Compaction is a
-            // serve-order watermark*). A requester's `held_through_seq` is
-            // therefore ignored here, which is exactly the no-watermark answer.
-            complete_through_seq: None,
-            retirable_through_seq: None,
-            replica_id: None,
-            extra: Default::default(),
-            signer_certs: Vec::new(),
-        })
+            .map_err(serve_refusal)?;
+        to_value(&reply)
     }
 
     async fn handle_blocks_pull(
@@ -848,17 +716,7 @@ impl PeerSyncServer {
         payload: Value,
     ) -> Result<Value, RpcError> {
         let req: PeerSyncChunksPullRequest = from_value(&payload)?;
-        let (verdict, _store) = self.admitted_connection(peer, slot)?;
-        let own_device = slot
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|a| a.device_key.is_some() && a.custody_grant_id.is_none());
-        if verdict.account != self.account || !own_device {
-            return Err(not_admitted(
-                "file bodies are served to a device of this account only",
-            ));
-        }
+        self.admitted_own_device(peer, slot)?;
         let mut wants = Vec::with_capacity(req.wants.len());
         for want in &req.wants {
             let key = <[u8; 32]>::try_from(want.store_key.as_ref())
@@ -899,6 +757,115 @@ impl PeerSyncServer {
         }
         to_value(&reply)
     }
+
+    /// The preflight of the three **folder doors** (`chunks.pull`,
+    /// `changes.list`, `manifests.get`): [`Self::admitted_connection`] — the
+    /// per-request severance checks included — plus the rule that a folder is
+    /// served to a device of THIS account only. A sibling of this account holds
+    /// the same folders; a custodian (a custody-grant verdict) and an owner
+    /// device dialing this machine as ITS custodian (a verdict for a custodied
+    /// account) hold account planes, not folders.
+    fn admitted_own_device(
+        &self,
+        peer: &EndpointKey,
+        slot: &Mutex<Option<AdmittedConnection>>,
+    ) -> Result<(), RpcError> {
+        let (verdict, _store) = self.admitted_connection(peer, slot)?;
+        let own_device = slot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|a| a.device_key.is_some() && a.custody_grant_id.is_none());
+        if verdict.account != self.account || !own_device {
+            return Err(not_admitted(
+                "a folder is served to a device of this account only",
+            ));
+        }
+        Ok(())
+    }
+
+    /// `fauna.peer.sync.changes.list` — one page of a folder's change rows for
+    /// a sibling (`p2p.md` § Same-account nest-down folder transfer). The serve
+    /// set is the row half's: the provenance ruling over the folder's own and
+    /// relayed rows, pending rows on the tail page, `more` a fact (one row past
+    /// the bound is asked for). Rows walk on any path — metadata-sized; only
+    /// chunk bodies keep the relay byte gate.
+    async fn handle_folder_changes_list(
+        &self,
+        peer: &EndpointKey,
+        slot: &Mutex<Option<AdmittedConnection>>,
+        payload: Value,
+    ) -> Result<Value, RpcError> {
+        let req: PeerSyncChangesListRequest = from_value(&payload)?;
+        self.admitted_own_device(peer, slot)?;
+        let page = crate::ranged::MAX_ROWS_PER_PAGE;
+        let rows = match &self.config.folder_changes {
+            Some(source) => source(req.folder.clone(), req.since, page + 1)
+                .await
+                .map_err(internal)?,
+            None => Vec::new(),
+        };
+        let more = rows.len() as u32 > page;
+        let own_actor_hex = hex::encode(self.account);
+        let changes = rows
+            .into_iter()
+            .take(page as usize)
+            .filter(|row| serves_held_row(row, &own_actor_hex))
+            .map(|row| PeerChangeRow {
+                change: row.change,
+                sequenced: row.sequenced,
+                signer_cert: row.signer_cert,
+                extra: Default::default(),
+            })
+            .collect();
+        to_value(&PeerSyncChangesListReply {
+            changes,
+            more,
+            extra: Default::default(),
+        })
+    }
+
+    /// `fauna.peer.sync.manifests.get` — a folder's retained manifests for a
+    /// sibling, by content hash. With no nest answering, the sibling that wrote
+    /// a row is the only source of the manifest it names. Served / missing /
+    /// deferred; a manifest over the reply budget is `deferred`, never
+    /// `missing`.
+    async fn handle_folder_manifests_get(
+        &self,
+        peer: &EndpointKey,
+        slot: &Mutex<Option<AdmittedConnection>>,
+        payload: Value,
+    ) -> Result<Value, RpcError> {
+        let req: PeerSyncManifestsGetRequest = from_value(&payload)?;
+        self.admitted_own_device(peer, slot)?;
+        let mut hashes = Vec::with_capacity(req.manifest_hashes.len());
+        for wanted in &req.manifest_hashes {
+            let hash = <[u8; 32]>::try_from(wanted.as_ref())
+                .map_err(|_| unsupported("a manifest hash must be exactly 32 bytes"))?;
+            hashes.push((hash, wanted));
+        }
+        let mut reply = PeerSyncManifestsGetReply::default();
+        let mut budget = crate::ranged::MAX_BODY_BYTES_PER_REPLY;
+        for (hash, wanted) in hashes {
+            let bytes = match &self.config.folder_manifests {
+                Some(source) => source(req.folder.clone(), hash).await,
+                None => None,
+            };
+            match bytes {
+                None => reply.missing.push(wanted.clone()),
+                Some(bytes) if bytes.len() > budget => reply.deferred.push(wanted.clone()),
+                Some(bytes) => {
+                    budget -= bytes.len();
+                    reply.manifests.push(PeerSyncManifest {
+                        hash: wanted.clone(),
+                        bytes: serde_bytes::ByteBuf::from(bytes),
+                        extra: Default::default(),
+                    });
+                }
+            }
+        }
+        to_value(&reply)
+    }
 }
 
 /// Bring the peer-sync node up — the **one** door to the leg's listener.
@@ -922,42 +889,6 @@ pub async fn start_peer_sync_node(
     Ok(PeerNode::start_with(transport, server.handler_factory()).await)
 }
 
-/// A relay row as the wire row the nest would have served — same slots, same
-/// meanings (`fauna_sync_engine::account_state_plane` reads them back with
-/// `row_coordinates` + `item_key_of`; `fauna_sync_engine::content_scope_plane`
-/// reads `seq` + `path_hash`).
-fn relay_row_to_change(row: RelayRow) -> SyncChange {
-    SyncChange {
-        // State-entry readers account (origin_writer, origin_seq) and never
-        // this slot — mirroring origin_seq keeps their error messages ("row
-        // at seq N") meaningful. Record-cid readers DO account it: their
-        // writer is the nest sequencer, whose relay `writer_seq` is the
-        // nest's own feed coordinate, so the mirror is exact there too.
-        seq: row.writer_seq as i64,
-        path_hash: hex::encode(&row.item_key),
-        manifest_hash: None,
-        size_bytes: row.entry.as_ref().map_or(0, |e| e.len() as i64),
-        change_type: row.op,
-        created_at: 0,
-        path: None,
-        device_id: None,
-        content_key_version: None,
-        thumbnail_hash: None,
-        author_actor_id: None,
-        path_sealed: None,
-        derived_through: None,
-        is_resolution: None,
-        is_retention: None,
-        item_class: Some(row.item_class),
-        origin_writer: Some(row.writer.to_hex()),
-        origin_seq: Some(row.writer_seq as i64),
-        entry: row.entry.map(serde_bytes::ByteBuf::from),
-        extra: Default::default(),
-        signature: None,
-        signer_key: None,
-    }
-}
-
 // ── Wire helpers + error shapes ──────────────────────────────────────────────
 
 /// The plane-scoped wrapper over the shared round-trip: only the encode-failure
@@ -977,6 +908,14 @@ fn over_quota() -> RpcError {
 
 fn unsupported(detail: &str) -> RpcError {
     RpcError::new(ERR_UNSUPPORTED, "error.peer_sync.unsupported").with_details_text(detail)
+}
+
+/// The shared feed serve's refusal, in this plane's vocabulary.
+fn serve_refusal(r: crate::store_serve::ServeRefusal) -> RpcError {
+    match r {
+        crate::store_serve::ServeRefusal::Unsupported(detail) => unsupported(detail),
+        crate::store_serve::ServeRefusal::Internal(e) => internal(e),
+    }
 }
 
 fn internal(e: anyhow::Error) -> RpcError {
@@ -1004,6 +943,9 @@ impl MeteredPlane for PeerSyncServer {
 mod tests {
     use super::*;
     use crate::admission::{AdmissionVerdict, AdmittedScopes};
+    use fauna_account_store::sqlite::SqliteBackend;
+    use fauna_account_store::store::AccountStore;
+    use fauna_account_store::types::WriterId;
 
     const ACCOUNT: [u8; 32] = [0xAA; 32];
 
@@ -1049,6 +991,8 @@ mod tests {
                 custody_revoked: None,
                 device_removed: None,
                 file_chunks: None,
+                folder_changes: None,
+                folder_manifests: None,
                 quotas: QuotaConfig::default(),
                 now: Arc::new(|| 5_000),
             },
@@ -1085,6 +1029,8 @@ mod tests {
                 custody_revoked: None,
                 device_removed: None,
                 file_chunks: None,
+                folder_changes: None,
+                folder_manifests: None,
                 quotas: QuotaConfig {
                     conns_per_window: 1,
                     ..QuotaConfig::default()
@@ -1181,6 +1127,31 @@ mod tests {
         device_removed: Option<DeviceRemovedFn>,
         file_chunks: Option<FileChunkFn>,
     ) -> (tempfile::TempDir, Arc<PeerSyncServer>, ActorKeypair) {
+        admit_server_sourced(
+            custody_revoked,
+            device_removed,
+            FolderSources {
+                chunks: file_chunks,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    /// The three folder doors' host sources.
+    #[derive(Default)]
+    struct FolderSources {
+        chunks: Option<FileChunkFn>,
+        changes: Option<FolderChangesFn>,
+        manifests: Option<FolderManifestFn>,
+    }
+
+    /// [`admit_server_with`] plus the folder doors' sources.
+    async fn admit_server_sourced(
+        custody_revoked: Option<CustodyRevocationFn>,
+        device_removed: Option<DeviceRemovedFn>,
+        sources: FolderSources,
+    ) -> (tempfile::TempDir, Arc<PeerSyncServer>, ActorKeypair) {
         let owner = ActorKeypair::from_secret([9u8; 32]);
         let account = owner.actor_id().0;
         let dir = tempfile::tempdir().unwrap();
@@ -1204,12 +1175,294 @@ mod tests {
                 own_witness_kind: WITNESS_DEVICE_AUTHORIZATION.to_string(),
                 custody_revoked,
                 device_removed,
-                file_chunks,
+                file_chunks: sources.chunks,
+                folder_changes: sources.changes,
+                folder_manifests: sources.manifests,
                 quotas: QuotaConfig::default(),
                 now: Arc::new(|| 5_000),
             },
         ));
         (dir, server, owner)
+    }
+
+    // ── fauna.peer.sync.changes.list / manifests.get ────────────────────────
+
+    /// A folder-row source for folder `"7"`: the rows a host's store would
+    /// answer, honouring `since` on the sequenced rows and `max_rows`, pending
+    /// rows (seq 0) on the tail — `SyncDbShareStore::changes_since`'s shape.
+    fn folder_rows(rows: Vec<LocalShareChange>) -> FolderChangesFn {
+        Arc::new(move |folder: String, since: i64, max_rows: u32| {
+            let page: Vec<LocalShareChange> = if folder == "7" {
+                let mut out: Vec<LocalShareChange> = rows
+                    .iter()
+                    .filter(|r| r.sequenced && r.change.seq > since)
+                    .cloned()
+                    .collect();
+                out.extend(rows.iter().filter(|r| !r.sequenced).cloned());
+                out.truncate(max_rows as usize);
+                out
+            } else {
+                Vec::new()
+            };
+            Box::pin(async move { Ok(page) })
+        })
+    }
+
+    fn own_row(seq: i64, sequenced: bool, actor_hex: &str) -> LocalShareChange {
+        LocalShareChange {
+            change: fauna_protocol::sync::SyncChange {
+                seq,
+                path: Some(format!("f{seq}.txt")),
+                author_actor_id: Some(actor_hex.to_string()),
+                ..Default::default()
+            },
+            sequenced,
+            locally_authored: true,
+            signer_cert: None,
+        }
+    }
+
+    fn rows_payload(folder: &str, since: i64) -> Value {
+        to_value(&PeerSyncChangesListRequest {
+            folder: folder.into(),
+            since,
+            extra: Default::default(),
+        })
+        .unwrap()
+    }
+
+    fn manifests_payload(folder: &str, hashes: &[[u8; 32]]) -> Value {
+        to_value(&PeerSyncManifestsGetRequest {
+            folder: folder.into(),
+            manifest_hashes: hashes
+                .iter()
+                .map(|h| serde_bytes::ByteBuf::from(h.to_vec()))
+                .collect(),
+            extra: Default::default(),
+        })
+        .unwrap()
+    }
+
+    /// A manifest source retaining `bytes` under `hash` in folder `"7"`.
+    fn one_manifest(entries: Vec<([u8; 32], Vec<u8>)>) -> FolderManifestFn {
+        Arc::new(move |folder: String, wanted: [u8; 32]| {
+            let hit = (folder == "7")
+                .then(|| entries.iter().find(|(h, _)| *h == wanted))
+                .flatten()
+                .map(|(_, b)| b.clone());
+            Box::pin(async move { hit })
+        })
+    }
+
+    async fn admitted_sibling(
+        server: &PeerSyncServer,
+        owner: &ActorKeypair,
+    ) -> (EndpointKey, Mutex<Option<AdmittedConnection>>) {
+        let device = [0x0Au8; 32];
+        let slot = Mutex::new(None);
+        let peer = EndpointKey::from_bytes(device);
+        server
+            .handle_admit(&peer, &slot, device_admit_payload(owner, device))
+            .await
+            .expect("a sibling admits");
+        (peer, slot)
+    }
+
+    /// A sibling pages a folder's rows: the page stops at the one bound both
+    /// legs read with `more` as a fact, the next page resumes from the cursor,
+    /// the pending rows ride the tail page unsequenced, and the provenance
+    /// ruling filters — an unsigned row of another writer is never served.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sibling_pulls_a_folders_row_page_with_pending_rows_on_the_tail() {
+        let owner = ActorKeypair::from_secret([9u8; 32]);
+        let me = hex::encode(owner.actor_id().0);
+        let page = crate::ranged::MAX_ROWS_PER_PAGE as i64;
+        let mut rows: Vec<LocalShareChange> =
+            (1..=page + 3).map(|s| own_row(s, true, &me)).collect();
+        rows.push(own_row(0, false, &me));
+        // An unsigned row relayed from another writer: nothing vouches for it.
+        let mut relayed = own_row(page + 4, true, &"ab".repeat(32));
+        relayed.locally_authored = false;
+        rows.push(relayed);
+        let (_dir, server, owner) = admit_server_sourced(
+            None,
+            None,
+            FolderSources {
+                changes: Some(folder_rows(rows)),
+                ..Default::default()
+            },
+        )
+        .await;
+        let (peer, slot) = admitted_sibling(&server, &owner).await;
+
+        let reply = server
+            .handle_folder_changes_list(&peer, &slot, rows_payload("7", 0))
+            .await
+            .expect("an admitted sibling pages the folder");
+        let reply: PeerSyncChangesListReply = from_value(&reply).unwrap();
+        assert_eq!(reply.changes.len(), page as usize);
+        assert!(reply.more, "a full page with rows behind it says so");
+        assert!(reply.changes.iter().all(|c| c.sequenced));
+
+        let reply = server
+            .handle_folder_changes_list(&peer, &slot, rows_payload("7", page))
+            .await
+            .unwrap();
+        let reply: PeerSyncChangesListReply = from_value(&reply).unwrap();
+        assert!(!reply.more, "the tail page is the last");
+        let seqs: Vec<i64> = reply.changes.iter().map(|c| c.change.seq).collect();
+        assert_eq!(
+            seqs,
+            vec![page + 1, page + 2, page + 3, 0],
+            "own rows to the tail, the pending row last, the unsigned relay withheld"
+        );
+        assert!(
+            !reply.changes[3].sequenced,
+            "a pending row serves unsequenced"
+        );
+
+        // A folder this host runs no engine for is an empty page, not an error.
+        let reply = server
+            .handle_folder_changes_list(&peer, &slot, rows_payload("8", 0))
+            .await
+            .unwrap();
+        let reply: PeerSyncChangesListReply = from_value(&reply).unwrap();
+        assert!(reply.changes.is_empty() && !reply.more);
+    }
+
+    /// The manifest door: a retained manifest is served, an unheld one is
+    /// `missing`, and one past the reply budget is `deferred`, never `missing`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sibling_is_served_retained_manifests_missing_and_deferred() {
+        let small = ([0x11u8; 32], vec![1u8; 64]);
+        let huge = (
+            [0x22u8; 32],
+            vec![2u8; crate::ranged::MAX_BODY_BYTES_PER_REPLY],
+        );
+        let absent = [0x33u8; 32];
+        let (_dir, server, owner) = admit_server_sourced(
+            None,
+            None,
+            FolderSources {
+                manifests: Some(one_manifest(vec![small.clone(), huge.clone()])),
+                ..Default::default()
+            },
+        )
+        .await;
+        let (peer, slot) = admitted_sibling(&server, &owner).await;
+        let reply = server
+            .handle_folder_manifests_get(
+                &peer,
+                &slot,
+                manifests_payload("7", &[small.0, absent, huge.0]),
+            )
+            .await
+            .expect("an admitted sibling fetches manifests");
+        let reply: PeerSyncManifestsGetReply = from_value(&reply).unwrap();
+        assert_eq!(reply.manifests.len(), 1);
+        assert_eq!(reply.manifests[0].bytes.as_ref(), small.1.as_slice());
+        assert_eq!(
+            reply.missing,
+            vec![serde_bytes::ByteBuf::from(absent.to_vec())]
+        );
+        assert_eq!(
+            reply.deferred,
+            vec![serde_bytes::ByteBuf::from(huge.0.to_vec())]
+        );
+
+        // No manifest source at all answers missing, never an error.
+        let (_d2, bare, owner2) = admit_server_sourced(None, None, FolderSources::default()).await;
+        let (peer2, slot2) = admitted_sibling(&bare, &owner2).await;
+        let reply = bare
+            .handle_folder_manifests_get(&peer2, &slot2, manifests_payload("7", &[small.0]))
+            .await
+            .unwrap();
+        let reply: PeerSyncManifestsGetReply = from_value(&reply).unwrap();
+        assert_eq!(reply.missing.len(), 1);
+    }
+
+    /// Folder rows and manifests go to this account's own devices only — a
+    /// custodian and a custodied account's device are refused at both doors —
+    /// and a removal severs a live sibling at its next row or manifest request.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn folder_rows_and_manifests_are_refused_to_a_custodian_a_custodied_fleet_and_a_removed_device()
+     {
+        let device = [0x0Au8; 32];
+        let removed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&removed);
+        let view: DeviceRemovedFn = Arc::new(move |_acct: &[u8; 32], key: &[u8; 32]| {
+            *key == device && flag.load(std::sync::atomic::Ordering::SeqCst)
+        });
+        let owner = ActorKeypair::from_secret([9u8; 32]);
+        let me = hex::encode(owner.actor_id().0);
+        let (_dir, server, owner) = admit_server_sourced(
+            Some(Arc::new(|_: &[u8]| false)),
+            Some(view),
+            FolderSources {
+                changes: Some(folder_rows(vec![own_row(1, true, &me)])),
+                manifests: Some(one_manifest(vec![([0x11; 32], vec![1])])),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        async fn both_refused(
+            server: &PeerSyncServer,
+            peer: &EndpointKey,
+            slot: &Mutex<Option<AdmittedConnection>>,
+            why: &str,
+        ) {
+            let err = server
+                .handle_folder_changes_list(peer, slot, rows_payload("7", 0))
+                .await
+                .expect_err(why);
+            assert_eq!(err.code, ERR_NOT_ADMITTED, "{why}: {err:?}");
+            let err = server
+                .handle_folder_manifests_get(peer, slot, manifests_payload("7", &[[0x11; 32]]))
+                .await
+                .expect_err(why);
+            assert_eq!(err.code, ERR_NOT_ADMITTED, "{why}: {err:?}");
+        }
+
+        // No admission at all.
+        let slot = Mutex::new(None);
+        both_refused(
+            &server,
+            &EndpointKey::from_bytes([0x44; 32]),
+            &slot,
+            "unadmitted",
+        )
+        .await;
+
+        // A custodian.
+        let custodian = [0xC5u8; 32];
+        let (payload, _) = custody_admit_payload(&owner, custodian);
+        let slot = Mutex::new(None);
+        let peer = EndpointKey::from_bytes(custodian);
+        server.handle_admit(&peer, &slot, payload).await.unwrap();
+        both_refused(&server, &peer, &slot, "a custodian holds no folders").await;
+
+        // A custodied account's device.
+        let other = ActorKeypair::from_secret([21u8; 32]);
+        let (_cdir, handle, _cid, _scope) = custodied_store(&hex::encode(other.actor_id().0)).await;
+        server.set_custodied(HashMap::from([(other.actor_id().0, served(handle))]));
+        let foreign = [0x0Fu8; 32];
+        let slot = Mutex::new(None);
+        let peer = EndpointKey::from_bytes(foreign);
+        server
+            .handle_admit(&peer, &slot, device_admit_payload(&other, foreign))
+            .await
+            .unwrap();
+        both_refused(&server, &peer, &slot, "another account's device").await;
+
+        // A sibling, served, then removed mid-connection.
+        let (peer, slot) = admitted_sibling(&server, &owner).await;
+        server
+            .handle_folder_changes_list(&peer, &slot, rows_payload("7", 0))
+            .await
+            .expect("an enrolled sibling is served");
+        removed.store(true, std::sync::atomic::Ordering::SeqCst);
+        both_refused(&server, &peer, &slot, "a removed sibling").await;
     }
 
     // ── fauna.peer.sync.chunks.pull ─────────────────────────────────────────

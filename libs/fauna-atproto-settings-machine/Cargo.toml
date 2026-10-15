@@ -37,7 +37,7 @@ rpc-glue = [
 # forwarder the ATProto chunk wires and the `serve` the core chunk answers with
 # (account-client-lifecycle.md § The account port, decision (c)). Pulls only
 # the thin transport crate — no plane, no store.
-account-port = ["dep:fauna-account-port"]
+account-port = ["dep:fauna-account-port", "fauna-client-config/account-port"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("e2e-agent"))'] }

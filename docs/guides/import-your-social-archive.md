@@ -23,7 +23,8 @@ after a few days, so save the zip file somewhere you can find it.
 Open **Settings → Import from other services** in Fauna and follow the six
 steps:
 
-1. **Source** — pick the service and read how to request the archive there.
+1. **Source** — pick the service and read how to request the archive there;
+   the step gives the address of the service's own download page.
 2. **Archive** — choose the zip you downloaded (on the terminal app, type its
    path). Fauna reads the archive's table of contents and shows what it holds.
 3. **What to import** — tick the categories you want. Posts, albums and events
@@ -35,8 +36,10 @@ steps:
    the archive, fill in a from and/or to date (written like 2019-06-30): both
    days are included in full, counted in UTC.
 4. **Confirm** — the totals, then **Start import**.
-5. **Importing** — watch the progress, pause or cancel at any time. What has
-   landed stays. You can even close the app: opening this page again picks the
+5. **Importing** — watch the progress for each kind of record, how long the
+   import has been running and about how long is left; pause or cancel at any
+   time. What has landed stays. A record the app cannot read is skipped and
+   listed, and never stops the rest. You can even close the app: opening this page again picks the
    import up where it stopped.
 6. **Done** — jump to your feed, review anything that was skipped, and find
    the archive itself under **Settings → Folders**.
@@ -47,6 +50,11 @@ steps:
 - A post that was *Friends only* is visible to the people who follow you. A
   post that was *Only me*, or whose audience the archive did not record, is
   visible only to you.
+- Your events land in your calendar, visible only to you, at their original
+  times and places and with your own reply: an event you went to reads
+  *Going*, one you declined *Declined*, one you marked interested
+  *Interested*. Events you hosted are yours as organizer; the other guests are
+  kept inside the archive, not added to the event.
 - The untouched archive rests in a sealed folder on your nest. Delete the
   folder whenever you like; the posts it produced are ordinary posts, deleted
   like any other.

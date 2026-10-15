@@ -178,6 +178,14 @@ pub struct InspectLabelerReply {
     /// client-side.
     #[serde(default)]
     pub artifact_kind: String,
+    /// The content kind the publisher declared (`post` | `mail`), mirrored from
+    /// the registry row beside `artifact_kind`. A subscriber's feed composes a
+    /// labeler only when this reads `post` — a `mail`-kind module met in a feed
+    /// stays inert (`content-moderation-and-ranking.md` § Tier-3 → *Where it
+    /// runs*, invariant (c)). Additive: an older nest omits it and it reads
+    /// empty, which no feed composes.
+    #[serde(default)]
+    pub content_kind: String,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).

@@ -10,6 +10,7 @@ pub mod cid;
 pub mod codec;
 pub mod envelope;
 pub mod error;
+mod path_track;
 
 pub use carried::CarriedValue;
 pub use cid::Cid;

@@ -33,6 +33,25 @@ const _: () = assert!(
         < ACCOUNT_RUNTIME_STOP_BUDGET.as_millis()
 );
 
+/// How long a **remove-account** spends on its nest half before erasing anyway
+/// (`apps/account-scoping.md` § Erasure follows scope → *Removing an account
+/// retires this machine from it, as a sign-out does*, decision 3): the
+/// sign-in as the removed account, the assembly of a runtime over its
+/// snapshot, and that runtime's sign-out stop — one budget for all three, as
+/// [`ACCOUNT_RUNTIME_STOP_BUDGET`] is one for a sign-out's stop.
+///
+/// The stop is a sign-out's own and takes a sign-out's own budget, the last
+/// [`ACCOUNT_RUNTIME_STOP_BUDGET`] of this one; what is left before it is the
+/// sign-in's connect and the assembly, which a sign-out never pays because its
+/// session and its runtime are already up. A nest that answers nothing in time
+/// leaves the enrollment standing until the user removes the device from
+/// another device's Devices page, and the removal proceeds.
+pub const REMOVED_ACCOUNT_RETIRE_BUDGET: Duration = Duration::from_secs(10);
+
+// The assembly half must be left something to run in.
+const _: () =
+    assert!(REMOVED_ACCOUNT_RETIRE_BUDGET.as_millis() > ACCOUNT_RUNTIME_STOP_BUDGET.as_millis());
+
 /// **Why** an account's runtime is being stopped — the one fact the stop
 /// cannot infer and must not guess, because the two answers differ in what
 /// the nest is told (`sync-agent-credentials.md` § Credential model → *The

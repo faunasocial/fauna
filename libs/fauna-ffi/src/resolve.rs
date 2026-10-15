@@ -106,6 +106,48 @@ pub async fn resolve_handle(
     Ok(vec![found.actor_id, found.handle, found.domain])
 }
 
+/// The Contacts Find User lookup with cross-nest peer discovery — the shared
+/// [`fauna_client_core::find_user::find_user_across_nests`] behind one export, so
+/// no native app re-derives the foreign-domain decision or the peer URL
+/// (`contacts.md` § Implementation status today → *Cross-nest knocks*;
+/// `federation.md` § Client-side peer discovery for a cross-nest knock). A typed
+/// `@domain` the home nest does not serve is dialed **directly** at
+/// `fauna_provisioning::probe::peer_nest_url`, never through [`resolve_nest`]'s
+/// nest-proxied hop (which refuses loopback / IP / `.local` authorities).
+///
+/// `home_url` is the client's own nest; `domain` the typed `@domain` qualifier
+/// (`None` for a bare handle). Returns a flat `[actor_id, handle, domain,
+/// nest_url]`: slots 1,2 name the TYPED address (see [`resolve_handle`]); slot 3 is
+/// the peer nest the actor resolved on — pass it as `fauna.inbox.send`'s
+/// `recipient_nest_url` — or empty when the actor lives on the home nest (send
+/// `null`). Any failure is an `Err`; the page shows its one find-error.
+///
+/// `async_runtime = "tokio"` — same reason as [`resolve_handle`].
+#[fauna_uniffi_async::export]
+pub async fn find_user(
+    home_url: String,
+    handle: String,
+    domain: Option<String>,
+) -> Result<Vec<String>, FfiError> {
+    let home = AnonymousNestClient::connect(&home_url)
+        .await
+        .map_err(|e| e.to_string())?;
+    let hit = fauna_client_core::find_user::find_user_across_nests(
+        &home,
+        &handle,
+        domain.as_deref(),
+        |d| fauna_provisioning::probe::peer_nest_url(Some(d.to_string())),
+        |url| async move { AnonymousNestClient::connect(&url).await },
+    )
+    .await?;
+    Ok(vec![
+        hit.found.actor_id,
+        hit.found.handle,
+        hit.found.domain,
+        hit.nest_url.unwrap_or_default(),
+    ])
+}
+
 /// UniFFI face of [`fauna_client_caldav::resolve_attendee_transport`] with the
 /// production [`AnonAttendeeDiscovery`] — classify ONE attendee CAL-ADDRESS into
 /// the rail its server-side auto-schedule iMIP must ride (`caldav-server.md`

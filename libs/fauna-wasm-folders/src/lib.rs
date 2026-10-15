@@ -14,7 +14,7 @@ use std::sync::Arc;
 use fauna_folders_machine::{
     DeviceOption, FolderWizardMachine as InnerMachine, FolderWizardObserver as InnerObserver,
 };
-use fauna_wasm_panic_hook::err_to_js;
+use fauna_wasm_panic_hook::{err_to_js, to_js};
 use wasm_bindgen::prelude::*;
 
 /// The i18n key for the custody **degraded** marker — the badge that rides a
@@ -39,8 +39,7 @@ pub fn custody_degraded_badge_key() -> String {
 /// or label map.
 #[wasm_bindgen(js_name = conflictPolicyOptions)]
 pub fn conflict_policy_options() -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_folders_machine::conflict_policy_options())
-        .map_err(err_to_js)
+    to_js(&fauna_folders_machine::conflict_policy_options()).map_err(err_to_js)
 }
 
 /// The canonical i18n label (`LocalizedText` `{ key, args }`) for a stored
@@ -48,8 +47,7 @@ pub fn conflict_policy_options() -> Result<JsValue, JsValue> {
 /// value degrades to `Auto`'s label, matching `ConflictPolicy::from_wire`.
 #[wasm_bindgen(js_name = conflictPolicyLabel)]
 pub fn conflict_policy_label(value: String) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_folders_machine::conflict_policy_label(&value))
-        .map_err(err_to_js)
+    to_js(&fauna_folders_machine::conflict_policy_label(&value)).map_err(err_to_js)
 }
 
 /// The canonical member-access picker option list (wire value + `LocalizedText`
@@ -59,7 +57,7 @@ pub fn conflict_policy_label(value: String) -> Result<JsValue, JsValue> {
 /// `label` via `resolveLocalized(...)` — no hand-rolled value list.
 #[wasm_bindgen(js_name = memberAccessOptions)]
 pub fn member_access_options() -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_folders_machine::member_access_options()).map_err(err_to_js)
+    to_js(&fauna_folders_machine::member_access_options()).map_err(err_to_js)
 }
 
 /// The canonical label for a stored member-access wire value (`"reader"` /
@@ -67,8 +65,7 @@ pub fn member_access_options() -> Result<JsValue, JsValue> {
 /// absent-row default). Mirrors `conflictPolicyLabel`.
 #[wasm_bindgen(js_name = memberAccessLabel)]
 pub fn member_access_label(value: String) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_folders_machine::member_access_label(&value))
-        .map_err(err_to_js)
+    to_js(&fauna_folders_machine::member_access_label(&value)).map_err(err_to_js)
 }
 
 /// The canonical `folder-audience-select` option list for ONE row —
@@ -86,8 +83,7 @@ pub fn member_access_label(value: String) -> Result<JsValue, JsValue> {
 /// that fails on click.
 #[wasm_bindgen(js_name = audienceOptions)]
 pub fn audience_options(bound: bool, current: String) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_folders_machine::audience_options(bound, &current))
-        .map_err(err_to_js)
+    to_js(&fauna_folders_machine::audience_options(bound, &current)).map_err(err_to_js)
 }
 
 /// The hint beside `folder-audience-select` (`LocalizedText`), on the same
@@ -97,8 +93,7 @@ pub fn audience_options(bound: bool, current: String) -> Result<JsValue, JsValue
 /// back.
 #[wasm_bindgen(js_name = audienceHint)]
 pub fn audience_hint(bound: bool, current: String) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_folders_machine::audience_hint(bound, &current))
-        .map_err(err_to_js)
+    to_js(&fauna_folders_machine::audience_hint(bound, &current)).map_err(err_to_js)
 }
 
 /// The audience value `folder-audience-select` should PAINT, given the stored
@@ -130,7 +125,7 @@ pub fn website_serve_hint(
     paywalled: bool,
     address_enabled: Option<bool>,
 ) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_folders_machine::website_serve_hint(
+    to_js(&fauna_folders_machine::website_serve_hint(
         &audience,
         paywalled,
         address_enabled,
@@ -153,7 +148,7 @@ pub fn writer_grant_reach(
     audience: String,
     paywalled: bool,
 ) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_folders_machine::writer_grant_reach(
+    to_js(&fauna_folders_machine::writer_grant_reach(
         &access, &audience, paywalled,
     ))
     .map_err(err_to_js)
@@ -165,7 +160,7 @@ pub fn writer_grant_reach(
 /// `memberAccessLabel`.
 #[wasm_bindgen(js_name = audienceLabel)]
 pub fn audience_label(value: String) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_folders_machine::audience_label(&value)).map_err(err_to_js)
+    to_js(&fauna_folders_machine::audience_label(&value)).map_err(err_to_js)
 }
 
 /// The `folder-nest-residency-select` picker: Full (default) then
@@ -174,7 +169,7 @@ pub fn audience_label(value: String) -> Result<JsValue, JsValue> {
 /// the flip to metadata-only is confirm-gated in the app, not withheld.
 #[wasm_bindgen(js_name = residencyOptions)]
 pub fn residency_options() -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_folders_machine::residency_options()).map_err(err_to_js)
+    to_js(&fauna_folders_machine::residency_options()).map_err(err_to_js)
 }
 
 /// The residency value `folder-nest-residency-select` should PAINT, given the
@@ -191,7 +186,7 @@ pub fn normalize_residency(value: String) -> String {
 /// fail-closed reading applied to the copy. Mirrors `audienceLabel`.
 #[wasm_bindgen(js_name = residencyLabel)]
 pub fn residency_label(value: String) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_folders_machine::residency_label(&value)).map_err(err_to_js)
+    to_js(&fauna_folders_machine::residency_label(&value)).map_err(err_to_js)
 }
 
 /// The hint beside `folder-nest-residency-select`, keyed on the same
@@ -200,8 +195,7 @@ pub fn residency_label(value: String) -> Result<JsValue, JsValue> {
 /// the availability cost it accepted.
 #[wasm_bindgen(js_name = residencyHint)]
 pub fn residency_hint(current: String) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_folders_machine::residency_hint(&current))
-        .map_err(err_to_js)
+    to_js(&fauna_folders_machine::residency_hint(&current)).map_err(err_to_js)
 }
 
 /// The canonical `folder-nest-snapshots-select` option list (wire value +
@@ -210,8 +204,7 @@ pub fn residency_hint(current: String) -> Result<JsValue, JsValue> {
 /// the default state leads, because it is where the knob rests and returns.
 #[wasm_bindgen(js_name = nestSnapshotsOptions)]
 pub fn nest_snapshots_options() -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_folders_machine::nest_snapshots_options())
-        .map_err(err_to_js)
+    to_js(&fauna_folders_machine::nest_snapshots_options()).map_err(err_to_js)
 }
 
 /// Seed the four `folder-nest-*` controls from a folder row's
@@ -235,7 +228,7 @@ pub fn nest_place_edit_from_row(
         quiet_secs.map(|s| s as i64),
         retention_policy,
     );
-    serde_wasm_bindgen::to_value(&edit).map_err(err_to_js)
+    to_js(&edit).map_err(err_to_js)
 }
 
 /// Seed the version-retention SIBLING pair (`folder-version-retention-count`/
@@ -253,7 +246,7 @@ pub fn version_retention_edit_from_bounds(
         max_versions_per_path as u32,
         max_age_days as u32,
     );
-    serde_wasm_bindgen::to_value(&edit).map_err(err_to_js)
+    to_js(&edit).map_err(err_to_js)
 }
 
 /// Project a device roster (`foldersMembers`) into the rows the device-place
@@ -271,8 +264,57 @@ pub fn place_rows(members: JsValue, devices: JsValue) -> Result<JsValue, JsValue
         serde_wasm_bindgen::from_value(members).map_err(err_to_js)?;
     let devices: Vec<fauna_devices_machine::DeviceSummary> =
         serde_wasm_bindgen::from_value(devices).map_err(err_to_js)?;
-    serde_wasm_bindgen::to_value(&fauna_devices_machine::place_rows(&members, &devices))
-        .map_err(err_to_js)
+    to_js(&fauna_devices_machine::place_rows(&members, &devices)).map_err(err_to_js)
+}
+
+/// The `folder-lease-status` line for one folder row (`LocalizedText`), or
+/// `undefined` while the folder is not lease-governed (`ui/folders.md` §
+/// Exclusive editing). Resolved once in shared Rust
+/// (`fauna_devices_machine::folder_lease_status`) so the SPA never re-derives
+/// the expiry rule or paints a raw device id. `folder` is a snapshot
+/// `FolderSummary`, `devices` is `DevicesSnapshot.devices`, `thisDeviceRow` is
+/// the row `device-this-mark-badge` marks. Read, never probed: the page must not
+/// call the lease acquire kind to find out.
+#[wasm_bindgen(js_name = folderLeaseStatus)]
+pub fn folder_lease_status(
+    folder: JsValue,
+    devices: JsValue,
+    this_device_row: Option<String>,
+) -> Result<JsValue, JsValue> {
+    let folder: fauna_devices_machine::FolderSummary =
+        serde_wasm_bindgen::from_value(folder).map_err(err_to_js)?;
+    let devices: Vec<fauna_devices_machine::DeviceSummary> =
+        serde_wasm_bindgen::from_value(devices).map_err(err_to_js)?;
+    let now_secs = (js_sys::Date::now() / 1000.0) as i64;
+    // `to_js` (`json_compatible`): a `LocalizedText`'s `args` is a map, and the default
+    // serializer hands JS a `Map` — `resolveLocalized` reads `args.device`.
+    to_js(&fauna_devices_machine::folder_lease_status(
+        &folder,
+        &devices,
+        this_device_row.as_deref(),
+        now_secs,
+    ))
+    .map_err(err_to_js)
+}
+
+/// Whether a folder row is public on the nest's say-so while its audience
+/// attestation does not verify under this seat — the paint condition for
+/// `folder-audience-unattested` and `folder-audience-reconfirm-button`
+/// (`ui/folders.md` § Audience and website serving). `folder` is a snapshot
+/// `FolderSummary`, `ownActorHex` the seat's own actor id; resolved in shared
+/// Rust (`fauna_devices_machine::folder_is_public_unverified`) so the SPA never
+/// re-derives the signature check. An id that does not parse answers `false`.
+#[wasm_bindgen(js_name = folderIsPublicUnverified)]
+pub fn folder_is_public_unverified(
+    folder: JsValue,
+    own_actor_hex: String,
+) -> Result<bool, JsValue> {
+    let folder: fauna_devices_machine::FolderSummary =
+        serde_wasm_bindgen::from_value(folder).map_err(err_to_js)?;
+    Ok(fauna_devices_machine::folder_is_public_unverified(
+        &folder,
+        &own_actor_hex,
+    ))
 }
 
 /// Flip ONE checkbox on a projected place row and return the WHOLE resulting
@@ -287,7 +329,7 @@ pub fn toggled_place_row(row: JsValue, flag: String) -> Result<JsValue, JsValue>
     let row: fauna_protocol::folders::PlaceRow =
         serde_wasm_bindgen::from_value(row).map_err(err_to_js)?;
     match fauna_protocol::folders::toggled(&row, &flag) {
-        Some(next) => serde_wasm_bindgen::to_value(&next).map_err(err_to_js),
+        Some(next) => to_js(&next).map_err(err_to_js),
         None => Ok(JsValue::NULL),
     }
 }
@@ -305,7 +347,7 @@ pub fn conflict_badge_label(
     resolved_at: Option<i64>,
     conflict_type: String,
 ) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_folders_machine::conflict_badge_label(
+    to_js(&fauna_folders_machine::conflict_badge_label(
         resolution.as_deref(),
         resolved_at,
         &conflict_type,
@@ -527,7 +569,7 @@ extern "C" {
     /// `WasmConversationsManager.foldersIsJoined`, because the per-actor
     /// `MlsEngine` lives in that bundle and a wasm object cannot cross between two
     /// wasm-pack modules — the JS callback IS the bridge. Only this impl is
-    /// per-app; the filter itself is centralized in `fauna-devices-machine`.
+    /// per-app; the filter itself is centralized in `fauna_protocol::member_rows`.
     pub type JsMlsQuery;
     #[wasm_bindgen(method, js_name = isJoinedSharedSet)]
     fn is_joined_shared_set(this: &JsMlsQuery, mls_group_id_hex: &str) -> bool;
@@ -680,6 +722,29 @@ impl DevicesMachine {
         Ok(())
     }
 
+    /// Hand the Devices machine the **paired predecessor chain** so a
+    /// successor's Folders page lists the sets it inherited
+    /// (`succession-aftermath.md` § Re-key scope, the `BackupKey` corpus row):
+    /// a succession re-seals nothing, so an owned set's name still rests under
+    /// the predecessor's owner root. Takes the successor's own `secretHex`, not
+    /// the retired keys, and walks the account registry here — the raw key never
+    /// enters JS (the shape `fauna-wasm-media`'s `setPredecessorBackupKeys`
+    /// shares, through `AccountRegistry::predecessor_chain_wire`). A no-op for
+    /// an identity that never succeeded. **Call it after `setLabelCustody`**: a
+    /// later `setLabelCustody` replaces the custody whole, chain included.
+    #[wasm_bindgen(js_name = setPredecessorChain)]
+    pub fn set_predecessor_chain(&self, secret_hex: String) -> Result<(), JsValue> {
+        let keypair = fauna_rpc_wasm::keypair_from_secret_hex(&secret_hex)?;
+        let registry = fauna_client_accounts::AccountRegistry::new(Arc::new(
+            fauna_client_accounts::LocalStorageSecretStore,
+        ));
+        let (ids, keys) = registry.predecessor_chain_wire(&keypair.actor_id_hex());
+        if !ids.is_empty() {
+            self.0.set_predecessor_chain(ids, keys);
+        }
+        Ok(())
+    }
+
     /// Wire the owner's identity key so `setFolderAudience(name, 'public')`
     /// carries the owner's signed attestation (`encryption-at-rest.md`
     /// § Readable classes → *The declassification is owner-ATTESTED*). Unwired,
@@ -703,8 +768,8 @@ impl DevicesMachine {
     /// the outcome, and the member group reads through it — the machine and
     /// adapter the six native apps run, the runtime answering from the core
     /// chunk (`account-client-lifecycle.md` § The client-side lifecycle →
-    /// *The account port*; `account-data-taxonomy.md` § *Fleet-scope
-    /// reclamation*, clause (4)). With no runtime serving this account the
+    /// *The account port*; `fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (4)). With no runtime serving this account the
     /// removal is refused and deletes nothing. Throws on an object that is
     /// not a port. Call it beside the other `set*` wiring calls, before the
     /// first `refresh()`.
@@ -814,7 +879,13 @@ impl DevicesMachine {
             );
             let view =
                 fauna_client_capabilities::custody_view::CustodyFacetView::from_snapshot(&facet);
-            serde_wasm_bindgen::to_value(&view).map_err(err_to_js)
+            // `json_compatible`: every `Option` crosses as `null`, which is
+            // the SPA's typed contract (`CustodyHolderRowView`'s `| null`
+            // fields). The default serializer hands `None` over as
+            // `undefined`, so `custodian_nest_url === null` held for no row:
+            // the Devices page painted no device-anchored custody at all and
+            // the Nests page's `!== null` took every one of them.
+            to_js(&view).map_err(err_to_js)
         }))
     }
 
@@ -922,7 +993,7 @@ impl DevicesMachine {
             .await
             .map_err(fauna_client_folders::follow_ops::follow_error_text)
             .map_err(|text| JsValue::from_str(&text))?;
-            serde_wasm_bindgen::to_value(&stored).map_err(err_to_js)
+            to_js(&stored).map_err(err_to_js)
         }))
     }
 
@@ -945,7 +1016,7 @@ impl DevicesMachine {
             let stored = fauna_client_config::save_unfollow(&*store, &home_nest_url, folder_id)
                 .await
                 .map_err(err_to_js)?;
-            serde_wasm_bindgen::to_value(&stored).map_err(err_to_js)
+            to_js(&stored).map_err(err_to_js)
         }))
     }
 
@@ -966,7 +1037,7 @@ impl DevicesMachine {
             let stored = fauna_client_config::load_followed_folders(&*store)
                 .await
                 .map_err(err_to_js)?;
-            serde_wasm_bindgen::to_value(&stored).map_err(err_to_js)
+            to_js(&stored).map_err(err_to_js)
         }))
     }
 
@@ -1143,6 +1214,19 @@ impl DevicesMachine {
         let inner = Arc::clone(&self.0);
         wasm_bindgen_futures::future_to_promise(async move {
             inner.set_folder_residency(name, residency).await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// Turn folder `name`'s exclusive editing on or off — the write behind
+    /// `folder-exclusive-editing-toggle` (owner row only; `ui/folders.md` §
+    /// Exclusive editing), then refresh. Non-optimistic: the toggle repaints
+    /// `FolderSummary.exclusive_editing` from the refreshed snapshot.
+    #[wasm_bindgen(js_name = setFolderExclusiveEditing)]
+    pub fn set_folder_exclusive_editing(&self, name: String, on: bool) -> js_sys::Promise {
+        let inner = Arc::clone(&self.0);
+        wasm_bindgen_futures::future_to_promise(async move {
+            inner.set_folder_exclusive_editing(name, on).await;
             Ok(JsValue::UNDEFINED)
         })
     }

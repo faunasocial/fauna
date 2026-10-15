@@ -66,11 +66,26 @@ internal sealed class FakeMailPolicyMachine : MailPolicyMachineFakeBase
             imap ?? DefaultImap(),
             outbound ?? DefaultOutbound(),
             alias ?? DefaultAlias(),
+            DefaultDmarc(),
             MailPolicyStatus.Idle,
             baselinePublishResult,
             baselineState,
             mailHealth,
             error);
+
+    public static DmarcPolicyView DefaultDmarc() => new(
+        @policyMode: "reject",
+        @subdomainPolicyMode: "reject",
+        @pct: 100,
+        @adkimMode: "s",
+        @aspfMode: "s",
+        @ruaDestination: null,
+        @rufPublish: false,
+        @rufDestination: null,
+        @foMode: "0",
+        @riSeconds: 86400,
+        @aggregateRetentionDays: 90,
+        @forensicRetentionDays: 30);
 
     public static SpamPolicyView DefaultSpam() => new(
         @maxScoreBeforeSpamFolder: 5,
@@ -238,6 +253,107 @@ public class AdminMailViewModelTests
         Assert.False(vm.AutoEnableMailForNewUsers);
     }
 
+    private static MailHealthView SampleHealth(string? delistUrl = null) => new(
+        @state: "blocklisted",
+        @checks: Enumerable.Range(0, 7)
+            .Select(i => new MailHealthCheckView(
+                @labelKey: $"admin.mail_page.health_check_{i}",
+                @state: i == 1 ? "fail" : "pass",
+                @detail: i < 5 ? $"detail-{i}" : ""))
+            .ToArray(),
+        @lastOutboundDeliveredAt: null,
+        @lastInboundAcceptedAt: 1_700_000_000L,
+        @delistUrl: delistUrl);
+
+    [Fact]
+    public async Task Load_WithoutAHealthReadout_HidesTheSection()
+    {
+        var vm = new AdminMailViewModel(new FakeMailPolicyMachine());
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Null(vm.Health);
+    }
+
+    [Fact]
+    public async Task Load_ProjectsTheSevenHealthRowsAndTheDelistUrl()
+    {
+        var fake = new FakeMailPolicyMachine
+        {
+            NextSnapshot = FakeMailPolicyMachine.Snap(
+                mailHealth: SampleHealth("https://check.example.test/")),
+        };
+        var vm = new AdminMailViewModel(fake, nowMs: () => 1_700_000_060_000L);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.NotNull(vm.Health);
+        Assert.Equal(7, vm.Health!.Checks.Count);
+        Assert.Equal("https://check.example.test/", vm.Health.DelistUrl);
+        // Rows 0-4 carry the nest's detail verbatim; rows 5-6 (the heartbeats) paint
+        // the stamp instead, so the empty detail the fold sends is never shown.
+        Assert.Equal("detail-0", vm.Health.Checks[0].Detail);
+        Assert.False(string.IsNullOrWhiteSpace(vm.Health.Checks[5].Detail));
+        Assert.False(string.IsNullOrWhiteSpace(vm.Health.Checks[6].Detail));
+        Assert.NotEqual(vm.Health.Checks[5].Detail, vm.Health.Checks[6].Detail);
+        Assert.NotEqual(vm.Health.Checks[0].State, vm.Health.Checks[1].State);
+    }
+
+    [Fact]
+    public async Task Load_WithNoListing_HasNoDelistUrl()
+    {
+        var fake = new FakeMailPolicyMachine { NextSnapshot = FakeMailPolicyMachine.Snap(mailHealth: SampleHealth()) };
+        var vm = new AdminMailViewModel(fake);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Null(vm.Health!.DelistUrl);
+    }
+
+    [Fact]
+    public async Task RecheckHealth_DispatchesTheAction()
+    {
+        var fake = new FakeMailPolicyMachine();
+        var vm = new AdminMailViewModel(fake);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        await vm.RecheckHealthAsync();
+
+        Assert.Contains(fake.Dispatched, a => a is MailPolicyAction.RecheckHealth);
+    }
+
+    [Fact]
+    public async Task WarmupReset_IsASameButtonTwoClickConfirm()
+    {
+        var fake = new FakeMailPolicyMachine { NextSnapshot = FakeMailPolicyMachine.Snap(mailHealth: SampleHealth()) };
+        var vm = new AdminMailViewModel(fake);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        // First press arms and dispatches nothing.
+        Assert.False(await vm.PressWarmupResetAsync());
+        Assert.True(vm.WarmupResetArmed);
+        Assert.DoesNotContain(fake.Dispatched, a => a is MailPolicyAction.ResetWarmup);
+
+        // Second press dispatches, and the re-read disarms.
+        Assert.True(await vm.PressWarmupResetAsync());
+        Assert.Contains(fake.Dispatched, a => a is MailPolicyAction.ResetWarmup);
+        Assert.False(vm.WarmupResetArmed);
+    }
+
+    [Fact]
+    public async Task WarmupReset_ArmedPressIsDisarmedByAnyReRead()
+    {
+        var fake = new FakeMailPolicyMachine { NextSnapshot = FakeMailPolicyMachine.Snap(mailHealth: SampleHealth()) };
+        var vm = new AdminMailViewModel(fake);
+        await vm.LoadCommand.ExecuteAsync(null);
+        await vm.PressWarmupResetAsync();
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.False(vm.WarmupResetArmed);
+        Assert.DoesNotContain(fake.Dispatched, a => a is MailPolicyAction.ResetWarmup);
+    }
+
     [Fact]
     public async Task SetAutoEnableMailForNewUsers_DispatchesFlag()
     {
@@ -384,6 +500,72 @@ public class AdminMailViewModelTests
         Assert.NotNull(vm.BaselinePublish);
         Assert.False(vm.BaselinePublish!.Published);
         Assert.Equal(2u, vm.BaselinePublish.Contributors);
+    }
+
+    [Fact]
+    public async Task PublishSpamBaseline_Deferred_ProjectsTheDeferredFlag()
+    {
+        // A delta-floor deferral also carries published = false; the VM must keep the
+        // flag so the page renders "waiting", never "too few contributors".
+        var fake = new FakeMailPolicyMachine();
+        var vm = new AdminMailViewModel(fake);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        fake.NextSnapshot = FakeMailPolicyMachine.Snap(
+            baselinePublishResult: new BaselinePublishView(
+                @published: false, @contributors: 3, @sampleCount: 0, @skippedContributors: 0, @deferred: true));
+
+        await vm.PublishSpamBaselineAsync();
+
+        Assert.NotNull(vm.BaselinePublish);
+        Assert.True(vm.BaselinePublish!.Deferred);
+        Assert.False(vm.BaselinePublish.Published);
+    }
+
+    [Fact]
+    public async Task Load_ProjectsBaselineState()
+    {
+        var fake = new FakeMailPolicyMachine
+        {
+            NextSnapshot = FakeMailPolicyMachine.Snap(
+                baselineState: new BaselineStateView(
+                    @published: true, @contributors: 3, @sampleCount: 42, @publishedAtMs: 1_700_000_000_000L,
+                    @skippedContributors: 0, @deferred: true, @standing: true)),
+        };
+        var vm = new AdminMailViewModel(fake);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.NotNull(vm.BaselineState);
+        Assert.True(vm.BaselineState!.Published);
+        Assert.Equal(3u, vm.BaselineState.Contributors);
+        Assert.Equal(1_700_000_000_000L, vm.BaselineState.PublishedAtMs);
+        Assert.True(vm.BaselineState.Deferred);
+        Assert.True(vm.BaselineState.Standing);
+    }
+
+    [Fact]
+    public async Task Load_WithoutBaselineState_ProjectsNull()
+    {
+        var vm = new AdminMailViewModel(new FakeMailPolicyMachine());
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Null(vm.BaselineState);
+    }
+
+    [Fact]
+    public async Task SetBaselineStandingPublish_DispatchesItsOwnAction()
+    {
+        // Its own gesture off the persisted group — never a SaveSpam draft.
+        var fake = new FakeMailPolicyMachine();
+        var vm = new AdminMailViewModel(fake);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        await vm.SetBaselineStandingPublishAsync(true);
+
+        Assert.Contains(fake.Dispatched, a => a is MailPolicyAction.SetBaselineStandingPublish { enabled: true });
+        Assert.DoesNotContain(fake.Dispatched, a => a is MailPolicyAction.SaveSpam);
     }
 
     [Fact]

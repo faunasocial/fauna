@@ -47,9 +47,18 @@ import pytest
 
 from helpers.app_surface import app_name, skip_unbuilt
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui]
+pytestmark = [
+    pytest.mark.tier_3,
+    pytest.mark.tui,
+    pytest.mark.linux,
+    pytest.mark.android,
+    pytest.mark.web,
+    pytest.mark.windows,
+    pytest.mark.macos,
+    pytest.mark.ios,
+]
 
-_BUILT_APPS = ("tui",)
+_BUILT_APPS = ("tui", "web", "linux", "android")
 
 # The console's + the queue's own wording (i18n, en.yaml) — the shared verdicts
 # every app renders (`fauna_client_moderation::{takedown,appeal}`).
@@ -57,6 +66,11 @@ WORKING = "Submitting…"
 DONE_TAKEDOWN = "Taken down. A tombstone is served in its place and the author can appeal."
 APPEAL_RECORDED = "Appeal recorded. An administrator will review it."
 APPEAL_BLOCKED_NO_REASON = "Enter a reason before submitting the appeal."
+# A takedown row's three facts: the `illegal` enforcement descriptor, a
+# definitive confidence (1.0), and the TakenDown action's label.
+TAKEDOWN_CATEGORY = "Illegal"
+TAKEDOWN_CONFIDENCE = "100%"
+TAKEDOWN_ACTION = "Removed under legal obligation"
 
 REFERENCE = "Court order 42/2026"
 REASON = "I hold the licence for this recording."
@@ -77,11 +91,7 @@ def _poll(check, budget_s, tag):
     raise AssertionError(f"{tag}: not reached within {budget_s}s")
 
 
-@pytest.mark.feature("moderation-queue")
-def test_the_author_appeals_a_takedown_through_the_app(admin_app):
-    """takedown → the queue's appeal handle → guard → reason → recorded → the
-    row survives, still appealable."""
-    app = admin_app
+def _require_built(app):
     if app_name(app.driver) not in _BUILT_APPS:
         skip_unbuilt(
             app.driver,
@@ -91,6 +101,14 @@ def test_the_author_appeals_a_takedown_through_the_app(admin_app):
             tracked="",
         )
 
+
+def _take_down_own_post(app, *, expect_appeal: bool = True):
+    """Post, take it down through the admin console, and wait for the author's
+    queue to gain exactly one ``TakenDown`` row. Returns the queue's row count
+    before the takedown (the session's admin outlives each test, so an earlier
+    test's decision may already be on record). ``expect_appeal`` also asserts
+    the row's appeal handle — the appeal journeys' premise, built on tui only
+    (``_BUILT_APPS``); a witness of the queue row alone passes ``False``."""
     token = uuid.uuid4().hex[:10]
     target_text = f"appeal target {token}"
 
@@ -102,18 +120,12 @@ def test_the_author_appeals_a_takedown_through_the_app(admin_app):
     assert row is not None, "the target post must land in feed state"
     post_id = row["post_id"]
 
-    # Author-side baseline: an empty queue, so every row asserted below is
-    # attributable to this takedown alone — and NO appeal handle exists yet,
-    # which is the whole point of the row this journey closes.
+    # Author-side baseline, so every row asserted below is attributable to
+    # this takedown alone: one more row and one more appeal handle.
     app.moderation.navigate()
     assert not app.has_error()
-    assert app.moderation.correction_count() == 0, (
-        "the queue must start empty — a pre-existing row would make the "
-        "post-takedown asserts vacuous"
-    )
-    assert app.moderation.appeal_count() == 0, (
-        "no decision has been made, so no appeal handle should be offered"
-    )
+    baseline_rows = app.moderation.correction_count()
+    baseline_appeals = app.moderation.appeal_count()
 
     # --- The takedown, through the console (the journey's premise, already
     # witnessed in full by test_admin_legal_takedown.py — driven here only far
@@ -149,13 +161,27 @@ def test_the_author_appeals_a_takedown_through_the_app(admin_app):
     # its appeal handle. Before this row that handle existed only on the wire.
     app.moderation.navigate()
     _poll(
-        lambda: app.moderation.correction_count() >= 1,
+        lambda: app.moderation.correction_count() > baseline_rows,
         _QUEUE_BUDGET_S,
         "the author's moderation queue gains the TakenDown row",
     )
-    assert app.moderation.appeal_count() == 1, (
-        "the nest-issued enforcement row must offer exactly one appeal handle"
+    assert app.moderation.correction_count() == baseline_rows + 1, (
+        "one takedown must add exactly one queue row"
     )
+    if expect_appeal:
+        assert app.moderation.appeal_count() == baseline_appeals + 1, (
+            "the nest-issued enforcement row must offer exactly one appeal handle"
+        )
+    return baseline_rows
+
+
+@pytest.mark.feature("moderation-queue")
+def test_the_author_appeals_a_takedown_through_the_app(admin_app):
+    """takedown → the queue's appeal handle → guard → reason → recorded → the
+    row survives, still appealable."""
+    app = admin_app
+    _require_built(app)
+    rows = _take_down_own_post(app) + 1
 
     # --- The guard, rendered: an appeal with no reason is not merely refused
     # by the nest — the form never offers the dispatch, and says why.
@@ -201,9 +227,37 @@ def test_the_author_appeals_a_takedown_through_the_app(admin_app):
     # --- Additive history (§ Persistence): the appeal does not erase the
     # decision. The row stays, and stays appealable — the user may appeal
     # again, and the audit trail carries every attempt.
-    assert app.moderation.correction_count() == 1, (
+    assert app.moderation.correction_count() == rows, (
         "an appeal is additive history — it must not remove the queue row"
     )
-    assert app.moderation.appeal_count() == 1, (
+    assert app.moderation.appeal_count() >= 1, (
         "the decision is still on record, so its handle is still offered"
+    )
+
+
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.android
+@pytest.mark.feature("moderation-queue")
+def test_a_queue_row_shows_its_category_confidence_and_action(admin_app):
+    """A nest-issued row shows what it was flagged as, how confident the flag
+    is, and the action taken (moderation.md § Layout & flow — badge +
+    confidence + the optional enforcement-action label). No appeal affordance
+    is read, so the appeal gate (`_require_built`) does not apply here."""
+    app = admin_app
+    _take_down_own_post(app, expect_appeal=False)
+
+    category = app.moderation.row_category(0)
+    confidence = app.moderation.row_confidence(0)
+    action = app.moderation.row_action(0)
+    facts = f"category={category!r} confidence={confidence!r} action={action!r}"
+    assert TAKEDOWN_CATEGORY in category, (
+        f"the row's badge must name what it was flagged as ({facts})"
+    )
+    assert confidence == TAKEDOWN_CONFIDENCE, (
+        f"the row must show the flag's confidence as a whole percent ({facts})"
+    )
+    assert action == TAKEDOWN_ACTION, (
+        f"the row must show the action taken on it ({facts})"
     )

@@ -575,12 +575,12 @@ def test_web_an_open_tab_quiets_its_own_row_and_no_other(nest_instance, spa_url)
 
     ``standalone_only``: the rows dial loopback listeners this process owns,
     which only a locally spawned test-hooks nest accepts and can reach."""
+    from helpers.push_dispatch import actor_client as _actor_client
+    from helpers.push_dispatch import PushEndpoint as _PushEndpoint
+    from helpers.push_dispatch import WebPushDevice as _Device
+    from helpers.push_dispatch import await_settled as _await_settled
     from tests.api.test_push_dispatch import (
-        _Device,
-        _PushEndpoint,
-        _actor_client,
         _announce,
-        _await_settled,
         _invite,
     )
     from tests.test_account_switcher_web import _auth_on_account_page

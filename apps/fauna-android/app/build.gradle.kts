@@ -40,8 +40,8 @@ android {
         // Owner: docs/goal/architecture/installers/android.md § Versioning.
         // versionName must equal [workspace.package] version in the root
         // Cargo.toml (product-version.md; version-lockstep merge gate).
-        versionCode = 103
-        versionName = "0.1.3"
+        versionCode = 104
+        versionName = "0.1.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -311,6 +311,17 @@ ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
 }
 
+// One Tink on the classpath, the Android build: the UnifiedPush connector depends on
+// `tink` (JVM, full protobuf-java), security-crypto on `tink-android` — the same classes
+// twice, which the duplicate-class check refuses.
+configurations.all {
+    resolutionStrategy.dependencySubstitution {
+        substitute(module("com.google.crypto.tink:tink"))
+            .using(module("com.google.crypto.tink:tink-android:1.17.0"))
+            .because("one Tink: the Android build of the version the UnifiedPush connector needs")
+    }
+}
+
 dependencies {
     // Compose
     val composeBom = platform("androidx.compose:compose-bom:2024.06.00")
@@ -380,6 +391,10 @@ dependencies {
 
     // Security (EncryptedSharedPreferences)
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    // UnifiedPush (push on android, the web-push transport). Its `tink` (the JVM build,
+    // with full protobuf-java) carries the same classes as the `tink-android` that
+    // security-crypto brings; the substitution below keeps one Tink, the Android build.
+    implementation("org.unifiedpush.android:connector:3.0.10")
 
     // Biometric re-auth for the multi-account switch gate (long-term-store.md
     // § Multi-account evolution → Per-account re-auth; Stage 2). BiometricPrompt

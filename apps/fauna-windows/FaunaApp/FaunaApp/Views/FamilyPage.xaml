@@ -330,6 +330,59 @@
                         </ItemsControl>
                     </StackPanel>
 
+                    <!-- ── The un-deny list (family-safety.md § The bridge-DM gate → The
+                         un-deny surface) — one family-blocked-peer-item per `block`-verdict
+                         peer of the SELECTED ward, each with its OWN
+                         family-blocked-peer-allow-button. Lives inside the per-ward editor
+                         for the same index-space reason as the device-mark list above. The
+                         button's Click handler reads its row from the button's own
+                         DataContext and hands that row WHOLE to the shared AllowBlockedPeer
+                         (rule (f)) — never an index into the list a refresh could reorder.
+                         The item text is the peer id: the only name this nest has for an
+                         external bridge peer (which is why the gate exists at all). -->
+                    <StackPanel Spacing="4">
+                        <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                                   Text="{loc:Localize Key=family/blocked_peers_heading}" />
+                        <TextBlock Text="{x:Bind ViewModel.BlockedPeersHint, Mode=OneWay}"
+                                   Opacity="0.7" TextWrapping="Wrap" />
+                        <TextBlock x:Name="NoBlockedPeersText"
+                                   Text="{loc:Localize Key=family/no_blocked_peers}"
+                                   Opacity="0.7" TextWrapping="Wrap" Visibility="Collapsed" />
+                        <ItemsControl x:Name="BlockedPeersList">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <StackPanel Spacing="4" />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="vm:FamilyBlockedPeerRow">
+                                    <!-- The allow button is a CHILD of this Grid, so a scoped
+                                         read resolves each row's own button. Name is the peer
+                                         id (the row's get_text) — a Grid root with no Name is
+                                         pruned from UI Automation. -->
+                                    <Grid Padding="10,8" ColumnSpacing="8"
+                                          AutomationProperties.AutomationId="{x:Bind ids:Ids.FamilyBlockedPeerItem}"
+                                          AutomationProperties.Name="{x:Bind PeerId}"
+                                          BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                          BorderThickness="1" CornerRadius="4">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0"
+                                                   Text="{x:Bind PeerId}"
+                                                   TextWrapping="Wrap"
+                                                   VerticalAlignment="Center" />
+                                        <Button Grid.Column="1"
+                                                AutomationProperties.AutomationId="{x:Bind ids:Ids.FamilyBlockedPeerAllowButton}"
+                                                Content="{loc:Localize Key=family/blocked_peer_allow}"
+                                                Click="AllowBlockedPeer_Click" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+
                     <!-- Pre-approve a contact for the selected ward. -->
                     <Grid ColumnSpacing="8">
                         <Grid.ColumnDefinitions>

@@ -321,6 +321,50 @@ pub async fn register_core(
     let mut guardian: Option<Vec<u8>> = None;
     let mut code_band: Option<String> = None;
     let mut membership_admission: Option<MembershipAdmission> = None;
+
+    if invite_code.is_none()
+        && mode == fauna_protocol::node_policy::RegistrationMode::InviteRequired
+    {
+        return Err(RegisterError::InviteRequired);
+    }
+
+    // The free-tier ceiling binds the self-service door whatever the mode
+    // (`public-mode.md` § Registration Modes → *What "regardless of mode"
+    // binds*): a no-code sign-up under `Open` and a code minted at `free` under
+    // `Open` or `InviteRequired` alike — under invite-only a code is the only
+    // way in, so without this arm the cap would never bind there. Checked
+    // BEFORE the code is consumed, so a cap refusal never burns a use and the
+    // same code admits once the admin raises the cap (the non-consuming peek,
+    // as for the age checks above; the same benign TOCTOU — a code's tier is
+    // immutable). A code the peek cannot find — spent, invalid, or a paid
+    // membership claim — is not a free admission: it takes no cap check, and
+    // the resolution below owns its refusal shape (a paid admission is outside
+    // the cap by ruling, `monetization.md` § Pillar 4). The count is the whole
+    // roster at `free`, the admin's own row included: the cap is checked at the
+    // door and never applied to the roster.
+    if let Some(max) = max_free_users {
+        let lands_at_free = match invite_code {
+            None => true,
+            Some(code) => match state.db.peek_invite_code(code).await {
+                Ok(grant) => grant.is_some_and(|g| g.tier == "free"),
+                Err(e) => {
+                    tracing::error!("invite code peek error: {e}");
+                    return Err(RegisterError::Internal("internal error".into()));
+                }
+            },
+        };
+        if lands_at_free {
+            match state.db.count_users_by_tier("free").await {
+                Ok(count) if count as u64 >= max => return Err(RegisterError::FreeLimitReached),
+                Err(e) => {
+                    tracing::error!("user count error: {e}");
+                    return Err(RegisterError::Internal("internal error".into()));
+                }
+                _ => {}
+            }
+        }
+    }
+
     let tier = if let Some(code) = invite_code {
         match state.db.validate_invite_code(code).await {
             Ok(Some(grant)) => {
@@ -333,9 +377,9 @@ pub async fn register_core(
                 // doubles as an invite code (monetization.md § Pillar 4 Rail C
                 // step 1). Consult the payment-claim store; a valid membership
                 // claim admits at the linked quota tier. Closed mode already
-                // refused this ceremony at the top gate; the free cap is bypassed
-                // because its check lives only in the no-invite branch below —
-                // paid/coded admissions are not free-tier accounts.
+                // refused this ceremony at the top gate, and the free cap above
+                // keyed on the peeked invite-code tier, which this code has
+                // none of — a paid admission is outside the cap by ruling.
                 match resolve_membership_claim(state, code, &actor_bytes).await? {
                     Some(admission) => {
                         let t = admission.admin_tier.clone();
@@ -355,21 +399,8 @@ pub async fn register_core(
             }
         }
     } else {
-        if mode == fauna_protocol::node_policy::RegistrationMode::InviteRequired {
-            return Err(RegisterError::InviteRequired);
-        }
-        // The free-tier ceiling is orthogonal to the mode — it caps free accounts
-        // in `Open` and `InviteRequired` alike (`public-mode.md` § Registration Modes).
-        if let Some(max) = max_free_users {
-            match state.db.count_users_by_tier("free").await {
-                Ok(count) if count as u64 >= max => return Err(RegisterError::FreeLimitReached),
-                Err(e) => {
-                    tracing::error!("user count error: {e}");
-                    return Err(RegisterError::Internal("internal error".into()));
-                }
-                _ => {}
-            }
-        }
+        // The mode gate and the free ceiling for this arm ran above, before
+        // any code could be consumed.
         "free".to_string()
     };
 
@@ -940,17 +971,26 @@ mod tests {
 
         let sk = SigningKey::from_bytes(&[11u8; 32]);
         let actor_hex = hex::encode(sk.verifying_key().as_bytes());
-        let ts = now_ms();
-        let sig = sign_register(&sk, "postmaster", "primary.example", ts);
-        let err = register_core(&state, &actor_hex, "postmaster", ts, &sig, None, None).await;
-        assert!(
-            matches!(
-                err,
-                Err(RegisterError::InvalidRequest("handle is reserved"))
-            ),
-            "a default-config nest must refuse a reserved handle, got {:?}",
-            err.as_ref().err()
-        );
+        // Every mail role name too: a handle is its owner's canonical address,
+        // and `noc`/`tlsrpt`/`dmarc-report` were once registrable on an open
+        // nest (`mail-aliases.md` § Reserved local-parts — the six are a floor).
+        for handle in fauna_mail::aliases::DEFAULT_RESERVED_LOCAL_PARTS
+            .iter()
+            .copied()
+            .chain(["admin"])
+        {
+            let ts = now_ms();
+            let sig = sign_register(&sk, handle, "primary.example", ts);
+            let err = register_core(&state, &actor_hex, handle, ts, &sig, None, None).await;
+            assert!(
+                matches!(
+                    err,
+                    Err(RegisterError::InvalidRequest("handle is reserved"))
+                ),
+                "a default-config nest must refuse the reserved handle {handle:?}, got {:?}",
+                err.as_ref().err()
+            );
+        }
 
         // Control: the same ceremony with an unreserved handle succeeds.
         let sk2 = SigningKey::from_bytes(&[12u8; 32]);

@@ -31,7 +31,7 @@
 //!   [`run_migrations`] *after* the reconcile, never in the block: in the block
 //!   it runs against the old table before the reconcile adds the column, and
 //!   every boot of a long-lived `/data` crashes with "no such column" (the
-//!   2026-08-03 example.com outage).
+//!   2026-08-03 live-nest outage).
 //! - **A column whose correct value is per-row** lands nullable with no default
 //!   plus a boot pass that derives each row's value — a `DEFAULT` is a constant
 //!   written onto every existing row (version-compatibility.md § Dimension 1).
@@ -132,7 +132,80 @@ use rusqlite::Connection;
 ///  above its own version is `Incompatible` to it. A database stamped with a
 ///  retired number is refused by [`check_genesis`] before its stamp is ever
 ///  read.
-pub const CURRENT_SCHEMA_VERSION: u32 = 125;
+///  126 = `folder_content_keys.digest` (2026-10-09): the envelope digest
+///  `fauna.folders.list` echoes (`writer-signed-change-records.md` ruling
+///  (7)(b)(ii) rule (6)(a)). Additive and nullable; a row put before it
+///  echoes none until its next put.
+///  127 = `payment_claim_codes.return_ref` + its `(author_id, provider,
+///  return_ref)` index (2026-10-09): the web paywall return door's lookup key
+///  (`monetization.md` § Pillar 2 → *Visitor entitlement doors* ruling (2)).
+///  Additive and nullable; a claim minted before it has none.
+///  128 = `mail_dkim_keys.published_seen_at` (2026-10-09): when the scheduled
+///  tick first saw the selector's TXT published — the DKIM flip's gate
+///  (`mail-multidomain.md` § Rotation → *The flip waits for publication*).
+///  Additive and nullable; a key minted before it is stamped on its next tick.
+///  129 = `outbound_mail_queue.warmup_held_until` + `warmup_dedup_key` +
+///  `warmup_envelope_key` and their partial index (2026-10-09): the warm-up's
+///  hold as a typed fact the sender's Sent read returns
+///  (`mail-deliverability.md` § Enforcement at submission time). Additive and
+///  nullable; a row queued before it reads as not held.
+///  130 = `dmarc_inbound_aggregate_reports` (2026-10-09): the inbound DMARC
+///  aggregate-report store (`dmarc-reporting.md` § Storage). A new table,
+///  additive; an older binary never reads it.
+///  131 = `hosted_plugins.manifest_jws` (2026-10-10): the install's verified
+///  manifest JWS, which a user's bind card carries (`third-party.md` § The
+///  principal model → *Hosted principals*). Additive and nullable; a plugin
+///  installed before it is bound only once the admin installs it again.
+///  132 = `subscriber_encaps_keys` + `third_party_principals.follow_window_start`
+///  / `follow_window_count` (2026-10-10): the subscriber encapsulation-key
+///  registry (`post-quantum.md` § surface B) and the follow arm's per-principal
+///  rate window (`authorization-server.md` § Scope grammar → *The sixth arm*).
+///  Additive: a new table, and two columns with constant defaults.
+///  133 = `atproto_oracle_principals` + `atproto_oracle_ops` (2026-10-10):
+///  the oracle's `atproto.service_auth` door's ceiling window and
+///  per-operation record (`key-material-hierarchy.md` § The oracle → *The
+///  bridge-held custodian*). New tables, additive; an older binary never
+///  reads them.
+///  134 = `folder_deposit_inbox.committed` + `upload_token` and the
+///  `folder_deposit_parts` table (2026-10-10): deposits larger than one message
+///  (`folder-deposit.md`). Additive; an item parked
+///  before it reads as a committed single-message deposit.
+///  135 = `mail_account_settings.receive_enabled` + `send_enabled`
+///  (2026-10-10): the user's own receive and send switches
+///  (`mail-policy-config.md` § Tier 3). Additive with constant defaults of 1:
+///  an account that existed before them keeps receiving and sending.
+///  136 = `dmarc_inbound_forensic_reports` (2026-10-11): the inbound DMARC
+///  forensic-report store (`dmarc-reporting.md` § Forensic-report receive →
+///  *Storage*). A new table, additive; an older binary never reads it.
+///  137 = `tlsrpt_inbound_reports` (2026-10-11): the inbound TLSRPT report
+///  store (`smtp-server.md` § TLSRPT inbound report listener). A new table,
+///  additive; an older binary never reads it.
+///  138 = `dmarc_outbound_aggregate_reports` (2026-10-11): the DMARC
+///  aggregate reports this nest sent peers (`dmarc-reporting.md` § Outbound
+///  aggregate-report sender). A new table, additive; an older binary never
+///  reads it.
+///  139 = `import_sessions.quota_holds` (2026-10-12): the per-mailbox hold
+///  that keeps a resume cursor short of a message a full mailbox turned away
+///  (`mailbox-migration.md` § Failure handling). Additive with a constant
+///  default of `'{}'`: a session that existed before it holds nothing.
+///  140 = `atproto_sessions.write_window_start` + `write_window_count` and
+///  `atproto_external_write_ops` (2026-10-12): the oracle's per-session
+///  ceiling and per-operation record at the `atproto.commit` door
+///  (`key-material-hierarchy.md` § *The oracle*). Additive: two columns with
+///  a constant default of 0 (an empty window) and a new table.
+///  141 = `nest_update_channel` (2026-10-13): the admin's update-channel
+///  choice (`nest/update-channel.md` § The channel as nest state). Additive: a
+///  new singleton table whose absent row is "no choice yet — follow the seed".
+///  142 = `dmarc_inbound_aggregate_oversize` (2026-10-13): the envelope of an
+///  oversize aggregate report, kept minus its body for ops triage
+///  (`dmarc-reporting.md` § XML validation, step 1). A new table, additive; an
+///  older binary never reads it.
+///  143 = `atproto_sessions.write_count` (2026-10-14): every external write a
+///  session applied, the oracle summary's lifetime count at the
+///  `atproto.commit` door (`key-material-hierarchy.md` § *The oracle*).
+///  Additive with a constant default of 0: a session that wrote before it
+///  counts from its next write.
+pub const CURRENT_SCHEMA_VERSION: u32 = 143;
 
 /// The oldest `schema_version` whose binary can still safely **operate** a DB
 /// this binary writes. Bump **only** on a non-additive/breaking change (the
@@ -348,7 +421,18 @@ pub(super) const MIGRATIONS_EMAIL: &str = "
         -- every non-forward row and on a forward enqueued before the column
         -- existed (read as unknown -- never as 'copy'). A succession burns
         -- only a 'copy' row (`successions.rs::rule_the_forwarding_family`).
-        forward_copy_mode TEXT
+        forward_copy_mode TEXT,
+        -- The fresh-IP warm-up's hold (mail-deliverability.md § Enforcement
+        -- at submission time): the instant the ramp releases this row (the
+        -- next 00:00 UTC at submission). NULL on every row the warm-up let
+        -- through and on every producer the warm-up never counts.
+        warmup_held_until INTEGER,
+        -- The held message's dedup pair (`fauna_mail::mail_dedup_keys`) as
+        -- computed over this row's raw message. The sender's Sent copy carries
+        -- the same pair in `actor_message_dedup` -- which is how the sender's
+        -- own Sent read finds the hold. NULL whenever warmup_held_until is.
+        warmup_dedup_key TEXT,
+        warmup_envelope_key TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_outbound_mail_queue_due
         ON outbound_mail_queue(status, next_attempt_at);
@@ -396,8 +480,8 @@ pub(super) const MIGRATIONS_EMAIL: &str = "
     -- Periodic + on-demand DNSBL self-check history per
     -- docs/goal/behavior/mail-deliverability.md § Blocklist self-check.
     -- One row per check (the 24h timer or an admin force-refresh); the
-    -- per-DNSBL outcome is a JSON object keyed by server. Retained 90 days
-    -- (mail.outbound.self_blocklist_retention_days).
+    -- per-DNSBL outcome is a JSON object keyed by server. Retained 90 days,
+    -- a constant (mail-deliverability.md § Storage).
     CREATE TABLE IF NOT EXISTS mail_outbound_self_blocklist_check (
         id           INTEGER PRIMARY KEY AUTOINCREMENT,
         checked_at   INTEGER NOT NULL,
@@ -555,7 +639,7 @@ pub(super) const MIGRATIONS_SYNC: &str = "
         PRIMARY KEY (actor_id, device_key, cert_actor_id)
     );
 
-    -- The class-2 feed's retention gate (account-data-taxonomy.md
+    -- The class-2 feed's retention gate (fleet-scope-reclamation.md
     -- § Fleet-scope reclamation, clause 1). Per (scope folder, walker), the
     -- highest held_through_seq that walker has claimed on the feed -- the
     -- serve-order watermark it banked. fauna.account.state.retire compacts a
@@ -830,6 +914,34 @@ pub(super) const MIGRATIONS_BACKUP_CUSTODY_GENERATIONS: &str = "
         ON backup_custody_generations(superseded_at);
     CREATE INDEX IF NOT EXISTS idx_backup_custody_gen_actor
         ON backup_custody_generations(uploader_actor);
+";
+
+/// `materialize_in_flight` — the in-flight marker of a re-seed's flip
+/// (`backup-destinations.md` § Third destination kind → *Re-seed* → *An
+/// interrupted flip completes on retry, whatever arrived since — the in-flight
+/// marker*). One row per `(actor, kind)` while `fauna.backup.custody.materialize`
+/// is between its first observable write and the one transaction that makes the
+/// corpus live, which deletes the row. While it stands the target is mid-flip,
+/// not lived-in: the retry asks no freshness question, and what is live outside
+/// `segment_ids` is post-gesture activity the retry keeps.
+///
+/// Why-recreatable: the row is the ceremony's durable decision point, never
+/// user data. The corpus it names stays in custody, so losing the row loses
+/// nothing the owner cannot get back — it only turns a retry over arrivals back
+/// into the ordinary empty-target refusal.
+///
+/// `segment_ids` is the dag-cbor `Vec<u32>` of the corpus's content segment ids,
+/// ascending; `journal` is `'adopt'` (a journaled kind) or `'none'` (posts).
+pub(super) const MIGRATIONS_MATERIALIZE_IN_FLIGHT: &str = "
+    CREATE TABLE IF NOT EXISTS materialize_in_flight (
+        actor_id    BLOB    NOT NULL,
+        kind        TEXT    NOT NULL,
+        set_name    TEXT    NOT NULL,
+        segment_ids BLOB    NOT NULL,
+        journal     TEXT    NOT NULL,
+        started_at  INTEGER NOT NULL,
+        PRIMARY KEY (actor_id, kind)
+    );
 ";
 
 pub(super) const MIGRATIONS_KEY_PACKAGES: &str = "
@@ -1533,7 +1645,13 @@ pub(super) const MIGRATIONS_FOLDER_CONTENT_KEYS: &str = "
         -- The owner-stamped generation floor for non-owner records (KMH § M2
         -- version floor). Monotonic: content_key.put only ever raises it (the
         -- greater of stored and new). Every put stamps it.
-        current_version INTEGER NOT NULL
+        current_version INTEGER NOT NULL,
+        -- blake3 over sealed as stored (the owner-signed bytes). Every put
+        -- writes it. fauna.folders.list echoes it as envelope_digest: a
+        -- member re-fetches the envelope when it moved (writer-signed change
+        -- records ruling (7)(b)(ii) rule (6)). NULL on a row put before it
+        -- existed: the echo then asserts nothing.
+        digest BLOB
     );
 ";
 
@@ -2152,6 +2270,137 @@ pub(super) const MIGRATIONS_SPAM_TRAINING_HISTORY: &str = "
         ON spam_training_history (actor_id, created_at DESC, history_id DESC);
 ";
 
+// Inbound DMARC aggregate reports (`dmarc-reporting.md` § Storage). One row per
+// report a peer MTA mailed to `dmarc-report@` that validated, keyed by
+// (submitter, our_domain, report_id) so a re-sent report is a no-op.
+// `payload_xml_gz` is the archive (re-parseable if the parser improves);
+// `parsed_summary_cbor` is the DAG-CBOR `DmarcAggregateSummary` index computed at
+// ingest; `source_envelope_blob` is the DAG-CBOR `ReportSourceEnvelope` of the
+// carrying mail. Deployment data in the plaintext floor (the admin's monitoring
+// signal, no user content). Rows are pruned after the 90-day retention by the
+// daily mail sweep — peers' telemetry about us, not user-irrecoverable data.
+pub(super) const MIGRATIONS_DMARC_INBOUND_AGGREGATE_REPORTS: &str = "
+    CREATE TABLE IF NOT EXISTS dmarc_inbound_aggregate_reports (
+        submitter            TEXT    NOT NULL,
+        our_domain           TEXT    NOT NULL,
+        report_id            TEXT    NOT NULL,
+        begin_at             INTEGER NOT NULL,
+        end_at               INTEGER NOT NULL,
+        received_at          INTEGER NOT NULL,
+        payload_xml_gz       BLOB    NOT NULL,
+        parsed_summary_cbor  BLOB    NOT NULL,
+        source_envelope_blob BLOB    NOT NULL,
+        PRIMARY KEY (submitter, our_domain, report_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_dmarc_inbound_aggregate_reports_received
+        ON dmarc_inbound_aggregate_reports (received_at DESC);
+";
+
+// Oversize inbound DMARC aggregate reports (`dmarc-reporting.md` § XML
+// validation, step 1): the rejected report's envelope minus its body, for ops
+// triage. One row per drop, keyed by a nest-minted `id`; `auth_results_json`
+// is the JSON `AuthVerdicts` of the carrying mail and `size_bytes` the size of
+// the message as received. Plain columns only — the body is never kept.
+// Deployment data in the plaintext floor (remote infrastructure, no account),
+// capped by row count at insert and pruned after the aggregate retention by
+// the daily mail sweep — peers' telemetry, not user-irrecoverable data.
+pub(super) const MIGRATIONS_DMARC_INBOUND_AGGREGATE_OVERSIZE: &str = "
+    CREATE TABLE IF NOT EXISTS dmarc_inbound_aggregate_oversize (
+        id                INTEGER PRIMARY KEY,
+        received_at       INTEGER NOT NULL,
+        client_ip         TEXT    NOT NULL,
+        helo              TEXT    NOT NULL,
+        mail_from         TEXT    NOT NULL,
+        auth_results_json TEXT    NOT NULL,
+        size_bytes        INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_dmarc_inbound_aggregate_oversize_received
+        ON dmarc_inbound_aggregate_oversize (received_at DESC);
+";
+
+// Inbound DMARC forensic reports (`dmarc-reporting.md` § Forensic-report
+// receive → *Storage*). One row per RFC 5965 `auth-failure` report a peer MTA
+// mailed to `dmarc-report@` whose wrapper validated. A forensic report has no
+// report id, so the row is keyed by a nest-minted `id` and a re-sent copy is
+// caught by `payload_sha256` (the SHA-256 of the message as received).
+// `payload_raw_gz` is the whole report mail gzipped — the only place the
+// reported message's recipients, subject and body rest;
+// `parsed_summary_cbor` is the DAG-CBOR `DmarcForensicSummary` index, which by
+// the § Storage PII rule names no recipient; `source_envelope_blob` is the
+// DAG-CBOR `ReportSourceEnvelope` of the carrying mail. Deployment data in the
+// plaintext floor (the admin's monitoring signal about forgeries of our own
+// domains, no account's content). Rows are pruned after the 30-day retention
+// by the daily mail sweep — peers' telemetry about us, not user-irrecoverable
+// data.
+pub(super) const MIGRATIONS_DMARC_INBOUND_FORENSIC_REPORTS: &str = "
+    CREATE TABLE IF NOT EXISTS dmarc_inbound_forensic_reports (
+        id                    INTEGER PRIMARY KEY,
+        submitter             TEXT    NOT NULL,
+        our_domain            TEXT    NOT NULL,
+        received_at           INTEGER NOT NULL,
+        reported_message_id   TEXT    NOT NULL,
+        reported_arrival_date INTEGER NOT NULL,
+        payload_sha256        BLOB    NOT NULL UNIQUE,
+        payload_raw_gz        BLOB    NOT NULL,
+        parsed_summary_cbor   BLOB    NOT NULL,
+        source_envelope_blob  BLOB    NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_dmarc_inbound_forensic_reports_received
+        ON dmarc_inbound_forensic_reports (received_at DESC);
+";
+
+// Inbound TLSRPT reports (`smtp-server.md` § TLSRPT inbound report listener) —
+// the DMARC aggregate store's twin. One row per RFC 8460 report a peer MTA
+// mailed to `tlsrpt@` that validated, keyed by (submitter,
+// policy_published_domain, report_id) so a re-sent report is a no-op.
+// `policy_published_domain` is the report's `policy-domain` that we serve, the
+// per-domain partition (`mail-multidomain.md` § Per-domain TLSRPT).
+// `payload_json_gz` is the archive; `parsed_summary_cbor` the DAG-CBOR
+// `TlsrptReportSummary` index; `source_envelope_blob` the DAG-CBOR
+// `ReportSourceEnvelope` of the carrying mail. Deployment data in the
+// plaintext floor (no user content), pruned after the 90-day retention by the
+// daily mail sweep — peers' telemetry about us, not user-irrecoverable data.
+pub(super) const MIGRATIONS_TLSRPT_INBOUND_REPORTS: &str = "
+    CREATE TABLE IF NOT EXISTS tlsrpt_inbound_reports (
+        submitter               TEXT    NOT NULL,
+        policy_published_domain TEXT    NOT NULL,
+        report_id               TEXT    NOT NULL,
+        begin_at                INTEGER NOT NULL,
+        end_at                  INTEGER NOT NULL,
+        received_at             INTEGER NOT NULL,
+        payload_json_gz         BLOB    NOT NULL,
+        parsed_summary_cbor     BLOB    NOT NULL,
+        source_envelope_blob    BLOB    NOT NULL,
+        PRIMARY KEY (submitter, policy_published_domain, report_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_tlsrpt_inbound_reports_received
+        ON tlsrpt_inbound_reports (received_at DESC);
+";
+
+// Outbound DMARC aggregate reports (`dmarc-reporting.md` § Outbound
+// aggregate-report sender, step 5). One row per report part per `rua=mailto:`
+// destination the daily pass queued, keyed by (report_id, destination) so a
+// re-run of the same pass is a no-op. `payload_xml_gz` is the report exactly as
+// sent, kept for the admin's inspection; `sent_at` is when it was handed to the
+// outbound queue (the queue owns delivery and its retries). Deployment data in
+// the plaintext floor — counts and remote IPs about peers' mail, no user
+// content — pruned after 7 days by the daily mail sweep; our own derived
+// telemetry, not user-irrecoverable data.
+pub(super) const MIGRATIONS_DMARC_OUTBOUND_AGGREGATE_REPORTS: &str = "
+    CREATE TABLE IF NOT EXISTS dmarc_outbound_aggregate_reports (
+        report_id       TEXT    NOT NULL,
+        peer_domain     TEXT    NOT NULL,
+        destination     TEXT    NOT NULL,
+        begin_at        INTEGER NOT NULL,
+        end_at          INTEGER NOT NULL,
+        sent_at         INTEGER NOT NULL,
+        payload_xml_gz  BLOB    NOT NULL,
+        PRIMARY KEY (report_id, destination)
+    );
+    CREATE INDEX IF NOT EXISTS idx_dmarc_outbound_aggregate_reports_sent
+        ON dmarc_outbound_aggregate_reports (sent_at);
+";
+
 // Deployment-baseline holder copies (`mail-spam.md` § Encrypted-mode
 // interaction, ratified 2026-07-13): an opt-in contributor's per-user spam
 // model, HPKE-sealed by their own client/agent to the aggregation holder's
@@ -2183,13 +2432,16 @@ pub(super) const MIGRATIONS_SPAM_MODEL_HOLDER_COPIES: &str = "
 // tier as `local_domains`/aliases/admin-forwarders; the separate-bridge-sealed
 // form is the deferred N1b upgrade). `forward_per_hour` is the per-account
 // forward rate cap (`mail.account.forward_per_hour`, default 100/h,
-// `mail-forwarding.md:168`); no write path yet.
+// `mail-forwarding.md:168`). `receive_enabled` / `send_enabled` are the user's
+// own receive and send switches (`mail-policy-config.md` § Tier 3), 1 = on.
 pub(super) const MIGRATIONS_MAIL_ACCOUNT_SETTINGS: &str = "
     CREATE TABLE IF NOT EXISTS mail_account_settings (
         actor_id         BLOB PRIMARY KEY,
         forward_all_to   TEXT,
         forward_per_hour INTEGER NOT NULL DEFAULT 100,
         spam_threshold_override INTEGER,
+        receive_enabled  INTEGER NOT NULL DEFAULT 1,
+        send_enabled     INTEGER NOT NULL DEFAULT 1,
         updated_at       INTEGER NOT NULL
     );
 ";
@@ -2375,6 +2627,21 @@ pub(super) const MIGRATIONS_SUBSCRIPTIONS: &str = "
     CREATE INDEX IF NOT EXISTS idx_subscribe_requests_author
         ON subscribe_requests (author_id);
 
+    -- The subscriber encapsulation-key registry (post-quantum.md § surface B:
+    -- the subscriber publishes its encapsulation key, a new registry entry). One row per
+    -- account: its identity-seed-derived 1184-byte ML-KEM-768 ek, written by
+    -- the account's own apps at session start
+    -- (`fauna.subscriptions.encaps_key.publish`) and read by the nest where
+    -- the subscriber is not the one asking -- a third-party follow under
+    -- `fauna:follow:write` (authorization-server.md § Scope grammar -> The
+    -- sixth arm), refused while the row is absent. Public by design; the
+    -- decapsulation half never leaves the account's devices.
+    CREATE TABLE IF NOT EXISTS subscriber_encaps_keys (
+        actor_id         BLOB PRIMARY KEY,
+        mlkem_encaps_key BLOB NOT NULL,
+        published_at     INTEGER NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS current_key_blobs (
         author_id    BLOB NOT NULL,
         tier_name    TEXT NOT NULL,
@@ -2418,9 +2685,16 @@ pub(super) const MIGRATIONS_PAYMENTS: &str = "
         created_at   INTEGER NOT NULL,
         redeemed_by  BLOB,
         redeemed_at  INTEGER,
-        -- Set when a refund/dispute lands before redemption; a voided claim
-        -- can no longer be redeemed (rows are kept for audit, never deleted).
+        -- Set when a refund/dispute lands, before or after redemption; a
+        -- voided claim can no longer be redeemed nor open the web paywall
+        -- (rows are kept for audit, never deleted).
         voided_at    INTEGER,
+        -- The provider's post-checkout reference (Stripe: the Checkout
+        -- Session id) — the web paywall return door's lookup key
+        -- (monetization.md § Pillar 2 → Visitor entitlement doors (2)).
+        -- NULL for manual claims and every non-checkout event. Its index is
+        -- created in `run_migrations`, after the reconcile adds the column.
+        return_ref   TEXT,
         UNIQUE (author_id, provider, external_ref)
     );
     CREATE INDEX IF NOT EXISTS idx_payment_claim_codes_author
@@ -2584,6 +2858,21 @@ pub(super) const MIGRATIONS_NEST_WEB_APP_ORIGIN: &str = "
         id      INTEGER PRIMARY KEY CHECK (id = 1),
         mode    TEXT NOT NULL,
         set_at  INTEGER NOT NULL
+    );
+";
+
+/// The admin's update-channel choice singleton (`db/node_policy.rs`) — which
+/// builds this box's updater follows (`nest/update-channel.md` § The channel as
+/// nest state). `channel` is an `UpdateChannel::id` (`stable` / `test` / `dev`),
+/// never an image tag. An **absent row** is no admin choice yet: the nest
+/// follows the `FAUNA_IMAGE_TAG` seed (a non-channel tag ⇒ pinned). Written by
+/// `fauna.admin.update_channel.set`; boot-resolved into the live
+/// `AppState.update_channel` ArcSwap.
+pub(super) const MIGRATIONS_NEST_UPDATE_CHANNEL: &str = "
+    CREATE TABLE IF NOT EXISTS nest_update_channel (
+        id       INTEGER PRIMARY KEY CHECK (id = 1),
+        channel  TEXT NOT NULL,
+        set_at   INTEGER NOT NULL
     );
 ";
 
@@ -3415,7 +3704,10 @@ pub(super) const MIGRATIONS_BRIDGE_ABSORPTION: &str = "
     -- (name, color, timezone, visibility, ...) is sealed under the owner's
     -- MLS read key — nest never reads it. ctag and highestmodseq are the
     -- plaintext-floor sync counters; they bump on every PUT / DELETE into
-    -- the calendar.
+    -- the calendar. pruned_modseq = the placement manifest's prune floor, set
+    -- only by a restore: below it the rebuilt bridge_caldav_expunged log is
+    -- incomplete and a sync-token is answered stale (caldav-server.md § Stale
+    -- sync-token handling).
     CREATE TABLE IF NOT EXISTS bridge_caldav_calendars (
         actor_id            BLOB NOT NULL,
         calendar_id         BLOB NOT NULL,
@@ -3423,6 +3715,7 @@ pub(super) const MIGRATIONS_BRIDGE_ABSORPTION: &str = "
         ctag                INTEGER NOT NULL DEFAULT 0,
         highestmodseq       INTEGER NOT NULL DEFAULT 1,
         created_at          INTEGER NOT NULL,
+        pruned_modseq       INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (actor_id, calendar_id)
     );
 
@@ -3489,6 +3782,7 @@ pub(super) const MIGRATIONS_BRIDGE_ABSORPTION: &str = "
 // book), so they are NEVER dropped/recreated (the no-user-data-loss invariant;
 // see `docs/goal/architecture/version-compatibility.md`).
 pub(super) const MIGRATIONS_BRIDGE_CARDDAV: &str = "
+    -- pruned_modseq: the restore-carried prune floor (the calendar twin's).
     CREATE TABLE IF NOT EXISTS bridge_carddav_addressbooks (
         actor_id            BLOB NOT NULL,
         addressbook_id      BLOB NOT NULL,
@@ -3496,6 +3790,7 @@ pub(super) const MIGRATIONS_BRIDGE_CARDDAV: &str = "
         ctag                INTEGER NOT NULL DEFAULT 0,
         highestmodseq       INTEGER NOT NULL DEFAULT 1,
         created_at          INTEGER NOT NULL,
+        pruned_modseq       INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (actor_id, addressbook_id)
     );
 
@@ -3755,8 +4050,41 @@ pub(super) const MIGRATIONS_CUSTODY_HOSTING: &str = "
         held_bytes         INTEGER NOT NULL DEFAULT 0,
         last_receipt_at    INTEGER NOT NULL DEFAULT 0,
         last_receipt_degraded INTEGER NOT NULL DEFAULT 0,
+        -- Unix seconds of the owner nest's last AUTHENTICATED refusal of
+        -- this row's custody handshake (`fauna.auth.not_registered` at the
+        -- pump's dial); 0 = not refused. The custodian-NEST serve door
+        -- refuses a marked row; a successful handshake or a host rewrite
+        -- clears it (`account-replica-posture.md` § the custodian-NEST serve
+        -- door, rulings 4 + 5). Additive (reconcile_added_columns).
+        owner_refused_at   INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (host_actor_id, grant_id)
     );
+";
+
+/// The **custodied-fleet register** — the custodian-NEST serve door's
+/// keyless nest-side record of which owner-fleet devices have handshaken here
+/// (`account-replica-posture.md` § Replica posture → *The custody grant +
+/// ceremony*, the custodian-NEST serve door bullet, ruling 3). One row per
+/// device key: the owner it belongs to and its root-signed
+/// `DeviceAuthorization` verbatim (a public certificate the owner signed — the
+/// precedent `custody_hosting.witness` sets), rewritten at every
+/// `fauna.auth.custodied_fleet_handshake`.
+///
+/// Nothing here is a session verdict: `CallerClass::CustodiedFleet` is
+/// re-derived per dispatch from this row AND the owner's live hosting rows
+/// (window open, not refused, device not excluded), so a removal or a revoke
+/// severs a live session at its next request. Dropped with the owner's last
+/// hosting row on this nest (the remove teardown) — derived state a device's
+/// next handshake recreates.
+pub(super) const MIGRATIONS_CUSTODY_HOSTING_FLEET: &str = "
+    CREATE TABLE IF NOT EXISTS custody_hosting_fleet (
+        device_key     BLOB    NOT NULL PRIMARY KEY,
+        owner_actor_id BLOB    NOT NULL,
+        witness        BLOB    NOT NULL,
+        admitted_at    INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_custody_hosting_fleet_owner
+        ON custody_hosting_fleet(owner_actor_id);
 ";
 
 /// Staged custody **receipts** — the owner-side half of stage (c)
@@ -4222,10 +4550,37 @@ pub(super) const MIGRATIONS_ATPROTO_PDS: &str = "
         -- is a replay -> the row is revoked (family kill). NULL means
         -- not-yet-rotated (current jti == session_id).
         current_refresh_jti BLOB,
+        -- The oracle's per-session ceiling at the `atproto.commit` door
+        -- (key-material-hierarchy.md § The oracle -> The ATProto classes ride
+        -- the protocol's own door): fauna_core::identity_op::RateWindow over
+        -- the external writes this session made, admitted in
+        -- ingest_external_write before the Fauna-side effect.
+        write_window_start INTEGER NOT NULL DEFAULT 0,
+        write_window_count INTEGER NOT NULL DEFAULT 0,
+        -- Every external write the session applied, ever: the oracle
+        -- summary's `requests_served` at the same door. The per-operation
+        -- record below keeps only the newest few, so it cannot count.
+        write_count INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (actor_id, session_id)
     );
     CREATE INDEX IF NOT EXISTS idx_atproto_sessions_credential
         ON atproto_sessions(actor_id, credential_id);
+
+    -- The oracle's per-operation record at the same door: one row per
+    -- external write a session applied, bounded to the newest
+    -- db::atproto_pds::EXTERNAL_WRITE_OPS_KEPT_PER_SESSION per session (the
+    -- nostr_oracle_ops shape). `rkey` is the key the write landed at.
+    CREATE TABLE IF NOT EXISTS atproto_external_write_ops (
+        id          INTEGER PRIMARY KEY,
+        actor_id    BLOB NOT NULL,
+        session_id  BLOB NOT NULL,
+        at          INTEGER NOT NULL,
+        action      TEXT NOT NULL,
+        collection  TEXT NOT NULL,
+        rkey        TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_atproto_external_write_ops_session
+        ON atproto_external_write_ops(actor_id, session_id, id);
 
     CREATE TABLE IF NOT EXISTS atproto_oauth_grants (
         actor_id     BLOB NOT NULL,
@@ -4277,7 +4632,11 @@ pub(super) const MIGRATIONS_ATPROTO_PDS: &str = "
     -- `atproto.service_auth` class is bounded by; `events_uri` is the
     -- manifest's validated `events_uri` (transport.md § Push events → Third-
     -- party event doors, the webhook), NULL for a document that declares
-    -- none. Revocation DELETEs the row (rule 4: one verb).
+    -- none; `declared_activitypub_peers` is the manifest's
+    -- `activitypub_peers` member as a JSON array of exact hostnames
+    -- (third-party.md § The manifest), '[]' for a document that declares
+    -- none -- the set the oracle's `activitypub.http_sig` class signs to.
+    -- Revocation DELETEs the row (rule 4: one verb).
     --
     -- A HOSTED plugin (third-party.md § The runner contract) has one INSTALL
     -- row under the reserved nest-owner actor (`NEST_OWNER_ACTOR`, all zero
@@ -4300,6 +4659,13 @@ pub(super) const MIGRATIONS_ATPROTO_PDS: &str = "
         declared_bridge TEXT,
         declared_service_auth TEXT NOT NULL DEFAULT '[]',
         events_uri     TEXT,
+        declared_activitypub_peers TEXT NOT NULL DEFAULT '[]',
+        -- The `fauna:follow:write` arm's rate ceiling: the principal's fixed
+        -- window over its follow writes (`fauna_core::identity_op::RateWindow`,
+        -- the oracle's constant), kept on the row so it binds across restarts
+        -- and dies with the principal.
+        follow_window_start INTEGER NOT NULL DEFAULT 0,
+        follow_window_count INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (actor_id, principal_id),
         UNIQUE (actor_id, client_id)
     );
@@ -4338,7 +4704,10 @@ pub(super) const MIGRATIONS_ATPROTO_PDS: &str = "
         ingress         TEXT NOT NULL DEFAULT '[]',
         settings_schema TEXT,
         installed_by    BLOB NOT NULL,
-        installed_at    INTEGER NOT NULL
+        installed_at    INTEGER NOT NULL,
+        -- The document's verified `fauna` manifest as its compact JWS: what
+        -- every user's bind card carries. NULL for an install before it.
+        manifest_jws    TEXT
     );
 
     -- A hosted plugin's own state scope: the key/value store behind its
@@ -4797,6 +5166,10 @@ const GENESIS_BLOCKS: &[(&str, &str)] = &[
     ),
     ("MIGRATIONS_CUSTODY_HOSTING", MIGRATIONS_CUSTODY_HOSTING),
     (
+        "MIGRATIONS_CUSTODY_HOSTING_FLEET",
+        MIGRATIONS_CUSTODY_HOSTING_FLEET,
+    ),
+    (
         "MIGRATIONS_CUSTODY_RECEIPTS_STAGED",
         MIGRATIONS_CUSTODY_RECEIPTS_STAGED,
     ),
@@ -4875,6 +5248,10 @@ const GENESIS_BLOCKS: &[(&str, &str)] = &[
         "MIGRATIONS_NEST_WEB_APP_ORIGIN",
         MIGRATIONS_NEST_WEB_APP_ORIGIN,
     ),
+    (
+        "MIGRATIONS_NEST_UPDATE_CHANNEL",
+        MIGRATIONS_NEST_UPDATE_CHANNEL,
+    ),
     ("MIGRATIONS_WEB_APEX_ACTOR", MIGRATIONS_WEB_APEX_ACTOR),
     (
         "MIGRATIONS_WEB_SUBDOMAIN_ENABLED",
@@ -4904,6 +5281,10 @@ const GENESIS_BLOCKS: &[(&str, &str)] = &[
     (
         "MIGRATIONS_BACKUP_CUSTODY_GENERATIONS",
         MIGRATIONS_BACKUP_CUSTODY_GENERATIONS,
+    ),
+    (
+        "MIGRATIONS_MATERIALIZE_IN_FLIGHT",
+        MIGRATIONS_MATERIALIZE_IN_FLIGHT,
     ),
     (
         "MIGRATIONS_FOLDER_CONTENT_KEYS",
@@ -4936,7 +5317,47 @@ const GENESIS_BLOCKS: &[(&str, &str)] = &[
         "MIGRATIONS_SPAM_BASELINE_DELTA",
         MIGRATIONS_SPAM_BASELINE_DELTA,
     ),
+    (
+        "MIGRATIONS_DMARC_INBOUND_AGGREGATE_REPORTS",
+        MIGRATIONS_DMARC_INBOUND_AGGREGATE_REPORTS,
+    ),
+    (
+        "MIGRATIONS_POST_AUTHOR_ORACLE",
+        MIGRATIONS_POST_AUTHOR_ORACLE,
+    ),
+    ("MIGRATIONS_ATPROTO_ORACLE", MIGRATIONS_ATPROTO_ORACLE),
+    (
+        "MIGRATIONS_DMARC_INBOUND_FORENSIC_REPORTS",
+        MIGRATIONS_DMARC_INBOUND_FORENSIC_REPORTS,
+    ),
+    (
+        "MIGRATIONS_TLSRPT_INBOUND_REPORTS",
+        MIGRATIONS_TLSRPT_INBOUND_REPORTS,
+    ),
+    (
+        "MIGRATIONS_DMARC_OUTBOUND_AGGREGATE_REPORTS",
+        MIGRATIONS_DMARC_OUTBOUND_AGGREGATE_REPORTS,
+    ),
+    (
+        "MIGRATIONS_DMARC_INBOUND_AGGREGATE_OVERSIZE",
+        MIGRATIONS_DMARC_INBOUND_AGGREGATE_OVERSIZE,
+    ),
 ];
+
+/// The test-injected crash point between genesis blocks (`GENESIS_CRASH_AFTER`
+/// names how many blocks apply before the crash); a no-op outside tests, where
+/// nothing reads the index.
+#[cfg(test)]
+fn genesis_crash_point(applied: usize) -> anyhow::Result<()> {
+    if GENESIS_CRASH_AFTER.with(|c| c.get()) == Some(applied) {
+        anyhow::bail!("injected crash after {applied} genesis block(s)");
+    }
+    Ok(())
+}
+#[cfg(not(test))]
+fn genesis_crash_point(_applied: usize) -> anyhow::Result<()> {
+    Ok(())
+}
 
 /// Apply the genesis (§ Genesis in the module doc): the unified content tables,
 /// then every block of [`GENESIS_BLOCKS`] in order.
@@ -4953,11 +5374,20 @@ fn apply_genesis(conn: &Connection) -> Result<()> {
         .context("enable foreign_keys")?;
     // The unified content tables come first: other blocks reference them.
     super::schema::apply_unified_schema(conn).context("apply the unified content schema")?;
-    for (block, sql) in GENESIS_BLOCKS {
+    for (applied, (block, sql)) in GENESIS_BLOCKS.iter().enumerate() {
+        genesis_crash_point(applied)?;
         conn.execute_batch(sql)
             .with_context(|| format!("apply genesis block {block}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Fault-injection seam: `apply_genesis` fails after this many blocks,
+    /// leaving exactly the partial schema a process death at that point leaves.
+    static GENESIS_CRASH_AFTER: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// The rows a nest database carries from its first boot: the built-in tiers,
@@ -5058,17 +5488,36 @@ fn seed_builtin_model_versions(conn: &Connection) -> Result<()> {
 /// still produces their input; a pass written for a database some earlier
 /// binary left behind does not belong here (§ Genesis).
 pub fn run_migrations(conn: &Connection) -> Result<()> {
-    apply_genesis(conn)?;
-    reconcile_added_columns(conn)?;
-    // A guarded one-shot step (§ Genesis, the non-additive bullet) goes here,
-    // keyed on the version the database was stamped with before this boot.
-    // None exists: the genesis is the only schema this line has had.
-    // The file-format mark `check_genesis` reads. Stamped on every boot (a
-    // header write, and a no-op once it holds this value).
+    // The file-format mark `check_genesis` reads, stamped BEFORE the genesis
+    // so a first boot that dies mid-genesis leaves a marked, partial schema
+    // the next boot's `CREATE … IF NOT EXISTS` blocks complete — never an
+    // unmarked non-empty file `check_genesis` refuses (an off-box-only brick,
+    // `nest/common.md` § Client-state recoverability). Stamped on every boot
+    // (a header write, and a no-op once it holds this value); every caller has
+    // passed `check_genesis` first, so it cannot mislabel a foreign file.
     conn.execute_batch(&format!(
         "PRAGMA application_id = {NEST_DB_APPLICATION_ID};"
     ))
     .context("stamp the nest database's application_id")?;
+    apply_genesis(conn)?;
+    reconcile_added_columns(conn)?;
+    // Indexes over columns the reconcile may just have added (§ Genesis, the
+    // index bullet: in a block they would run before the column exists).
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_payment_claim_codes_return_ref
+             ON payment_claim_codes (author_id, provider, return_ref);",
+    )
+    .context("create the payment claim return_ref index")?;
+    // Backs `CacheDb::warmup_holds_for_actor`, the Sent read's held-queue scan.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_outbound_mail_queue_warmup_held
+             ON outbound_mail_queue (warmup_held_until)
+             WHERE warmup_held_until IS NOT NULL;",
+    )
+    .context("create the outbound warm-up hold index")?;
+    // A guarded one-shot step (§ Genesis, the non-additive bullet) goes here,
+    // keyed on the version the database was stamped with before this boot.
+    // None exists: the genesis is the only schema this line has had.
     seed_genesis_rows(conn)?;
     // A code deploy that bumps a `scorer_version::*` constant advances the
     // registry here, firing the re-score obligation for content scored under
@@ -5079,7 +5528,7 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
     backfill_segment_records_changed_seq(conn)?;
     // Enqueue the rank fan-out rows a grant missed: the standing self-heal for
     // a crash between an approve and its fan-out enqueue.
-    reconcile_unlock_fanout_requests(conn)?;
+    reconcile_unlock_fanout_requests(conn, None)?;
     // The nest-computable hash companions a writer left unset (reserved
     // folders are inserted without a `name_hash`).
     reconcile_path_sealing_companions(conn)?;
@@ -5123,8 +5572,9 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 /// numbers (1..=78) were retired with the history the genesis replaced and
 /// would read as merely older than the genesis's own (§ Genesis). No migration exists
 /// for either, so the open fails loudly and writes nothing. The one mark-less
-/// file accepted is an EMPTY one: that is a nest's first boot, and the genesis
-/// about to run stamps it.
+/// file accepted is an EMPTY one: that is a nest's first boot, and
+/// [`run_migrations`] stamps it before the genesis applies, so a crash
+/// mid-genesis leaves a marked file, never one this check refuses.
 pub fn check_genesis(conn: &Connection) -> Result<()> {
     let application_id: i32 = conn
         .query_row("PRAGMA application_id", [], |r| r.get(0))
@@ -5334,7 +5784,17 @@ fn backfill_segment_records_changed_seq(conn: &Connection) -> Result<()> {
 /// unexpired qualifying subscription *is* the entitlement
 /// (`monetization.md:126`); revoking it means lapsing or removing the
 /// qualifying tier, not fighting the reconcile.
-fn reconcile_unlock_fanout_requests(conn: &Connection) -> Result<()> {
+///
+/// `only_author` scopes the sweep to one author (the
+/// `reconcile_lapsed_memberships(only_buyer)` shape): `None` is the boot
+/// sweep; `Some` is the edit-time cascade door `tiers.update` runs when a
+/// tier's rank moved (`monetization.md` § The unifying model → *A tier's rank
+/// is editable*, rule (3)) — the same query, so the same rules, never a copy.
+/// Returns the number of requests enqueued.
+pub(super) fn reconcile_unlock_fanout_requests(
+    conn: &Connection,
+    only_author: Option<&[u8; 32]>,
+) -> Result<usize> {
     let now = super::now_epoch_secs();
     // Candidate (target tier, subscriber) pairs, with the entitlement half of
     // the suppression carried as `holds_unexpired`. Readability — the other
@@ -5359,6 +5819,7 @@ fn reconcile_unlock_fanout_requests(conn: &Connection) -> Result<()> {
                JOIN subscribers s
                  ON s.author_id = r.author_id AND s.tier_name = r.name
               WHERE d.hidden = 0
+                AND (?2 IS NULL OR d.author_id = ?2)
                 AND (s.valid_until IS NULL OR s.valid_until > ?1)
                 AND NOT EXISTS (
                      SELECT 1 FROM subscribe_requests q
@@ -5371,20 +5832,24 @@ fn reconcile_unlock_fanout_requests(conn: &Connection) -> Result<()> {
         )
         .context("prepare unlock fan-out reconcile candidates")?;
     let candidates: Vec<(Vec<u8>, String, Vec<u8>, bool)> = stmt
-        .query_map(rusqlite::params![now], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get::<_, i64>(3)? != 0,
-            ))
-        })
+        .query_map(
+            rusqlite::params![now, only_author.map(|a| a.as_slice())],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get::<_, i64>(3)? != 0,
+                ))
+            },
+        )
         .context("query unlock fan-out reconcile candidates")?
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("collect unlock fan-out reconcile candidates")?;
     drop(stmt);
 
     let mut wrapped_for: Option<((Vec<u8>, String), std::collections::HashSet<[u8; 32]>)> = None;
+    let mut enqueued = 0;
     for (author_id, name, subscriber_id, holds_unexpired) in candidates {
         let (Ok(author), Ok(subscriber)) = (
             <[u8; 32]>::try_from(author_id.as_slice()),
@@ -5407,17 +5872,18 @@ fn reconcile_unlock_fanout_requests(conn: &Connection) -> Result<()> {
                 continue;
             }
         }
-        conn.execute(
-            "INSERT INTO subscribe_requests
-                 (author_id, subscriber_id, tier_name, created_at, kind,
-                  payment_entitled, valid_until)
-             VALUES (?1, ?2, ?3, ?4, 'subscribe', 1, NULL)
-             ON CONFLICT(author_id, subscriber_id, tier_name, kind) DO NOTHING",
-            rusqlite::params![author.as_slice(), subscriber.as_slice(), name, now],
-        )
-        .context("reconcile unlock fan-out requests")?;
+        enqueued += conn
+            .execute(
+                "INSERT INTO subscribe_requests
+                     (author_id, subscriber_id, tier_name, created_at, kind,
+                      payment_entitled, valid_until)
+                 VALUES (?1, ?2, ?3, ?4, 'subscribe', 1, NULL)
+                 ON CONFLICT(author_id, subscriber_id, tier_name, kind) DO NOTHING",
+                rusqlite::params![author.as_slice(), subscriber.as_slice(), name, now],
+            )
+            .context("reconcile unlock fan-out requests")?;
     }
-    Ok(())
+    Ok(enqueued)
 }
 
 /// Fill in the **hash companions** a writer left unset
@@ -6090,6 +6556,15 @@ pub(super) const MIGRATIONS_MAIL_POLICY: &str = "
         id             INTEGER PRIMARY KEY CHECK (id = 1),
         overrides_json TEXT NOT NULL
     );
+    -- The deployment-wide `mail.dmarc.*` catalog (`dmarc-reporting.md` § Record
+    -- shape + § Retention): the published record's tag overrides and the two
+    -- inbound-report retentions. NOT projected to the bridge — read nest-side by
+    -- the DNS surface's record assembler and the daily report prunes. The
+    -- per-domain partial lives on `mail_domains.dmarc_overrides`, not here.
+    CREATE TABLE IF NOT EXISTS mail_dmarc_policy (
+        id             INTEGER PRIMARY KEY CHECK (id = 1),
+        overrides_json TEXT NOT NULL
+    );
     -- Nest-side mass-mailing knobs (the `mail.outbound.list_*` Tier-2 ceilings,
     -- `mail-mass-mailing.md` § Per-list rate accounting). Read by the list-send
     -- quota check + the list/member CRUD validators; `MassMailingPolicy` is
@@ -6321,7 +6796,8 @@ pub(super) const MIGRATIONS_ACTOR_MAIL_SERVING: &str = "
 // nest-side): one row per client-driven import from a foreign IMAP source; the
 // row is the source of truth the progress UI renders from and the resume
 // protocol reads. `cursors` is a JSON object {mailbox: [last_uid, uidvalidity]}
-// (the per-mailbox resume cursor pair). Rows are ephemeral bookkeeping with a
+// (the per-mailbox resume cursor pair), held short of a quota refusal by
+// `quota_holds`. Rows are ephemeral bookkeeping with a
 // 30-day `expires_at` GC (the imported *messages* live in
 // `bridge_imap_messages`; dropping a session row loses only progress display),
 // lazily swept on the start/list entry points. The partial UNIQUE index is the
@@ -6356,7 +6832,12 @@ pub(super) const MIGRATIONS_IMPORT_SESSIONS: &str = "
         scope TEXT NOT NULL DEFAULT '[]',
         -- The scope step's since date. The empty string means unbounded
         -- (mailbox-migration.md § Wizard steps step 3).
-        date_from TEXT NOT NULL DEFAULT ''
+        date_from TEXT NOT NULL DEFAULT '',
+        -- Per-mailbox quota holds, a JSON object {mailbox: QuotaHold}: what
+        -- keeps a mailbox's cursor short of a message the full mailbox turned
+        -- away, and counts the re-walk it forces once (mailbox-migration.md
+        -- § Failure handling; `db/mail_import.rs::fold_mailbox`).
+        quota_holds TEXT NOT NULL DEFAULT '{}'
     );
     CREATE INDEX IF NOT EXISTS idx_import_sessions_actor
         ON import_sessions(actor_id, state);
@@ -7096,6 +7577,12 @@ pub(super) const MIGRATIONS_MAIL_DKIM_KEYS: &str = "
         -- held for the door that re-registers its domain and is no selector to
         -- any reader until then (mail_dkim_key.rs, `Carried keys`).
         carried_at       INTEGER,
+        -- Epoch-millis when the scheduled rotation tick first saw this
+        -- selector's TXT published and matching public_dns_value; NULL until
+        -- then. Never re-stamped, never cleared by a later miss. The scheduled
+        -- flip waits DKIM_ROTATION_CACHE_WARMUP_MS past it (mail-multidomain.md
+        -- § Rotation → The flip waits for publication).
+        published_seen_at INTEGER,
         PRIMARY KEY (domain, selector)
     );
 ";
@@ -7105,6 +7592,15 @@ pub(super) const MIGRATIONS_MAIL_DKIM_KEYS: &str = "
 /// sealed to the owner's recipient key, parked until a seat of the folder
 /// adopts it into an ordinary change row. Not a folder entry: nothing here is
 /// listed by `fauna.sync.files` or served.
+///
+/// A deposit larger than one message (`file-sync.md` § Third-party deposit
+/// ingress → *Deposits larger than one message*) is one inbox row plus its
+/// sealed parts in `folder_deposit_parts`. While the principal uploads, the row
+/// is STAGED: `committed = 0`, `sealed` empty, `upload_token` the random token
+/// the principal names, `received_at` its last activity (an idle staged upload
+/// expires). The commit writes the sealed header envelope and sets
+/// `committed = 1` in one statement, so a crash leaves either a staged upload
+/// no list shows or a whole item — never a half-adoptable one.
 pub(super) const MIGRATIONS_FOLDER_DEPOSIT_INBOX: &str = "
     -- `sealed` is a recipient-sealed DepositEnvelope (name, media type, bytes
     -- -- all content); the nest holds no key that opens it. `byte_length` is
@@ -7118,10 +7614,102 @@ pub(super) const MIGRATIONS_FOLDER_DEPOSIT_INBOX: &str = "
         principal_id BLOB NOT NULL,
         sealed       BLOB NOT NULL,
         byte_length  INTEGER NOT NULL,
-        received_at  INTEGER NOT NULL
+        received_at  INTEGER NOT NULL,
+        -- 0 while a larger deposit is still being uploaded (never listed).
+        committed    INTEGER NOT NULL DEFAULT 1,
+        -- The staged upload's random token. NULL for a single-message deposit.
+        upload_token BLOB
     );
     CREATE INDEX IF NOT EXISTS idx_folder_deposit_inbox_folder
         ON folder_deposit_inbox(folder_id, id);
+    -- One recipient-sealed DepositPart of a larger deposit. Goes with its item.
+    CREATE TABLE IF NOT EXISTS folder_deposit_parts (
+        deposit_id  INTEGER NOT NULL
+                    REFERENCES folder_deposit_inbox(id) ON DELETE CASCADE,
+        idx         INTEGER NOT NULL,
+        sealed      BLOB NOT NULL,
+        byte_length INTEGER NOT NULL,
+        PRIMARY KEY (deposit_id, idx)
+    );
+";
+
+/// The oracle's **posting custodian** (`key-material-hierarchy.md` § Audience:
+/// deployment infrastructure → *The oracle*, the `post.author` row; written
+/// only by `post_author_oracle.rs`). One table per custodian, as the Nostr and
+/// ActivityPub classes keep theirs; the owner's roster reads merge them.
+pub(super) const MIGRATIONS_POST_AUTHOR_ORACLE: &str = "
+    -- One row per (account, third-party principal) that has had a post
+    -- authored or retracted: the audit counters and the rate ceiling's fixed
+    -- window (`fauna_core::identity_op::RateWindow`). NOT the authority --
+    -- every request re-resolves the owner's live `identity.op` grant and the
+    -- account's authoring delegation. Deleted with the principal and at
+    -- succession.
+    CREATE TABLE IF NOT EXISTS post_author_principals (
+        actor_id      TEXT NOT NULL,
+        principal_id  BLOB NOT NULL,
+        last_used_at  INTEGER,
+        use_count     INTEGER NOT NULL DEFAULT 0,
+        window_start  INTEGER NOT NULL DEFAULT 0,
+        window_count  INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (actor_id, principal_id)
+    );
+
+    -- The per-operation record (the audit split) and the authorship ledger:
+    -- one row per post the custodian authored (`op` = 'create') or retracted
+    -- ('delete') for a principal; a delete is served only for a post a
+    -- 'create' row of the same principal names. `detail` is `<op> <post id
+    -- hex>`. Bounded to the newest `post_author_oracle::OPS_KEPT_PER_PRINCIPAL`
+    -- per principal.
+    CREATE TABLE IF NOT EXISTS post_author_ops (
+        id           INTEGER PRIMARY KEY,
+        actor_id     TEXT NOT NULL,
+        principal_id BLOB NOT NULL,
+        at           INTEGER NOT NULL,
+        class        TEXT NOT NULL,
+        op           TEXT NOT NULL,
+        post_id      BLOB NOT NULL,
+        detail       TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_post_author_ops_principal
+        ON post_author_ops(actor_id, principal_id, id);
+";
+
+/// The oracle's `atproto.service_auth` class at the nest's door
+/// (`key-material-hierarchy.md` § Audience: deployment infrastructure → *The
+/// oracle* → *The bridge-held custodian*; `atproto_oracle.rs`). One table pair
+/// per custodian, as the other classes keep theirs.
+pub(super) const MIGRATIONS_ATPROTO_ORACLE: &str = "
+    -- One row per (account, third-party principal) that has had a token
+    -- minted: the audit counters and the rate ceiling's fixed window
+    -- (fauna_core::identity_op::RateWindow). NOT the authority -- every
+    -- request re-resolves the principal row, its declared service_auth set and
+    -- the owner's live identity.op grant. Deleted with the principal, the
+    -- account, and at succession.
+    CREATE TABLE IF NOT EXISTS atproto_oracle_principals (
+        actor_id      TEXT NOT NULL,
+        principal_id  BLOB NOT NULL,
+        last_used_at  INTEGER,
+        use_count     INTEGER NOT NULL DEFAULT 0,
+        window_start  INTEGER NOT NULL DEFAULT 0,
+        window_count  INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (actor_id, principal_id)
+    );
+
+    -- The per-operation record (the audit split): one row per token the PDS
+    -- bridge minted for a principal -- the class and its detail
+    -- (`<aud> <lxm>`). Bounded to the newest
+    -- atproto_oracle::OPS_KEPT_PER_PRINCIPAL per principal; the grant
+    -- lifecycle itself is the client-signed GrantEvent log.
+    CREATE TABLE IF NOT EXISTS atproto_oracle_ops (
+        id           INTEGER PRIMARY KEY,
+        actor_id     TEXT NOT NULL,
+        principal_id BLOB NOT NULL,
+        at           INTEGER NOT NULL,
+        class        TEXT NOT NULL,
+        detail       TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_atproto_oracle_ops_principal
+        ON atproto_oracle_ops(actor_id, principal_id, id);
 ";
 
 #[cfg(test)]
@@ -7375,6 +7963,31 @@ mod tests {
             SchemaVerdict::UpgradeOrCurrent
         );
         check_genesis(&conn).expect("an empty file is a first boot, not a pre-genesis DB");
+    }
+
+    /// A first boot that dies mid-genesis (power loss, OOM kill) leaves a
+    /// database the next boot completes — never a `PreGenesisDatabase` brick
+    /// (`nest/common.md` § Client-state recoverability).
+    #[test]
+    fn a_crash_mid_first_boot_genesis_leaves_a_database_the_next_boot_completes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nest.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            check_genesis(&conn).unwrap();
+            GENESIS_CRASH_AFTER.with(|c| c.set(Some(3)));
+            let err = run_migrations(&conn).expect_err("the injected crash aborts the genesis");
+            GENESIS_CRASH_AFTER.with(|c| c.set(None));
+            assert!(format!("{err:#}").contains("injected crash"));
+        }
+        let db = crate::db::CacheDb::open(&path)
+            .expect("a half-applied first-boot genesis must not brick the nest");
+        drop(db);
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(
+            crate::db::genesis_shape::shape(&conn),
+            crate::db::genesis_shape::PINNED
+        );
     }
 
     /// The genesis marks its database, and a marked database is its own.
@@ -8200,8 +8813,8 @@ mod tests {
         )
         .unwrap();
 
-        reconcile_unlock_fanout_requests(&conn).unwrap();
-        reconcile_unlock_fanout_requests(&conn).unwrap();
+        reconcile_unlock_fanout_requests(&conn, None).unwrap();
+        reconcile_unlock_fanout_requests(&conn, None).unwrap();
 
         let (count, entitled): (i64, i64) = conn
             .query_row(
@@ -8247,10 +8860,10 @@ mod tests {
         )
         .unwrap();
 
-        reconcile_unlock_fanout_requests(&conn).unwrap();
+        reconcile_unlock_fanout_requests(&conn, None).unwrap();
         // Still idempotent — the pending-request guard, not the roster row, is
         // what keeps a re-run from duplicating.
-        reconcile_unlock_fanout_requests(&conn).unwrap();
+        reconcile_unlock_fanout_requests(&conn, None).unwrap();
 
         let count: i64 = conn
             .query_row(
@@ -8329,7 +8942,7 @@ mod tests {
         )
         .unwrap();
 
-        reconcile_unlock_fanout_requests(&conn).unwrap();
+        reconcile_unlock_fanout_requests(&conn, None).unwrap();
 
         let wrapped_rows: i64 = conn
             .query_row(
@@ -8398,9 +9011,9 @@ mod tests {
         )
         .unwrap();
 
-        reconcile_unlock_fanout_requests(&conn).unwrap();
+        reconcile_unlock_fanout_requests(&conn, None).unwrap();
         // Idempotent by construction — a second pass must add nothing.
-        reconcile_unlock_fanout_requests(&conn).unwrap();
+        reconcile_unlock_fanout_requests(&conn, None).unwrap();
 
         // Nothing designated is ever reached: post A is the designated→
         // designated edge from the post-B buyer, and neither the lapsed gold
@@ -8434,6 +9047,65 @@ mod tests {
         );
     }
 
+    /// The edit-time door's scope (`monetization.md` § The unifying model →
+    /// *A tier's rank is editable*, rule (3)): `Some(author)` heals that
+    /// author's missed fan-out and leaves another author's for the boot
+    /// sweep, which `None` still is.
+    #[test]
+    fn unlock_fanout_reconcile_scoped_to_an_author_leaves_other_authors_alone() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_genesis(&conn).unwrap();
+        let alice = [7u8; 32];
+        let bob = [9u8; 32];
+        let sub = vec![8u8; 32];
+        for author in [&alice, &bob] {
+            conn.execute(
+                "INSERT INTO subscription_tiers (author_id, name, rank, created_at, unlocks_post)
+                 VALUES (?1, 'silver', 1, 0, NULL), (?1, 'gold', 2, 0, NULL)",
+                rusqlite::params![author.as_slice()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO subscribers (author_id, subscriber_id, tier_name, approved_at)
+                 VALUES (?1, ?2, 'gold', 0)",
+                rusqlite::params![author.as_slice(), sub.as_slice()],
+            )
+            .unwrap();
+        }
+        let enqueued_for = |author: &[u8; 32]| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM subscribe_requests
+                  WHERE author_id = ?1 AND tier_name = 'silver' AND payment_entitled = 1",
+                rusqlite::params![author.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(
+            reconcile_unlock_fanout_requests(&conn, Some(&alice)).unwrap(),
+            1
+        );
+        assert_eq!(
+            enqueued_for(&alice),
+            1,
+            "the scoped author's grant is healed"
+        );
+        assert_eq!(enqueued_for(&bob), 0, "another author's is not this door's");
+        assert_eq!(
+            reconcile_unlock_fanout_requests(&conn, Some(&alice)).unwrap(),
+            0,
+            "a scoped re-run enqueues nothing twice"
+        );
+
+        reconcile_unlock_fanout_requests(&conn, None).unwrap();
+        assert_eq!(
+            enqueued_for(&bob),
+            1,
+            "the boot sweep still covers every author"
+        );
+    }
+
     /// Every boot re-runs this sweep, so
     /// if it ever selected a hidden target tier the hole arm A closes at
     /// grant-time would silently reopen on every restart. `backstage` sits at
@@ -8462,7 +9134,7 @@ mod tests {
         )
         .unwrap();
 
-        reconcile_unlock_fanout_requests(&conn).unwrap();
+        reconcile_unlock_fanout_requests(&conn, None).unwrap();
 
         let silver_count: i64 = conn
             .query_row(

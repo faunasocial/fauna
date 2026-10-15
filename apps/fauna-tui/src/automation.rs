@@ -684,14 +684,30 @@ fn state_json(app: &App, machine_result: Option<String>) -> Value {
             fauna_launch_machine::launch_clock::clock_offset_secs(),
             fauna_launch_machine::launch_clock::now_secs_or_zero(),
         ),
-        // The launch machine's bearer schedule on this app's own clock —
+        // The held session bearer's schedule on this app's own clock —
         // `{"expires_in_secs", "own_session_ids"}` (`fauna_e2e_agent::
         // LAUNCH_TOKEN_KEY`, which owns the contract). The wrong-clock REFRESH
         // witness reads it: a non-positive `expires_in_secs` right after a
-        // launch is the hot re-mint loop's signature. Plain field reads off the
-        // machine's snapshot (convention 11 corollary); TOP-level for the same
-        // cross-app-one-depth reason as `clock` above.
-        fauna_e2e_agent::LAUNCH_TOKEN_KEY: match &app.launch_machine {
+        // launch is the hot re-mint loop's signature. The SAME holder
+        // `launch_refresh_token` re-mints (`Session::bearer_machine`): the
+        // client's own cache when the session holds one — `null` ("cannot
+        // answer yet") while its mint is in flight — else the launch machine.
+        // Plain non-blocking reads (convention 11 corollary); TOP-level for the
+        // same cross-app-one-depth reason as `clock` above.
+        fauna_e2e_agent::LAUNCH_TOKEN_KEY: match app
+            .session
+            .as_ref()
+            .filter(|s| s.bearer_machine.is_none())
+        {
+            Some(session) => match session.client.auth().held_bearer_for_test() {
+                Some(held) => fauna_e2e_agent::launch_token_json(
+                    held.expires_at_secs,
+                    fauna_launch_machine::launch_clock::now_secs_or_zero(),
+                    &held.own_session_ids,
+                ),
+                None => serde_json::Value::Null,
+            },
+            None => match &app.launch_machine {
             Some(machine) => {
                 let expires_at_secs = match machine.snapshot().token {
                     fauna_launch_machine::TokenStatus::Valid { expires_at_secs } => {
@@ -706,6 +722,7 @@ fn state_json(app: &App, machine_result: Option<String>) -> Value {
                 )
             }
             None => fauna_e2e_agent::launch_token_json(None, 0, &[]),
+            },
         },
         // This app's transport connection — `{"state": word, "online": bool}`
         // (`fauna_e2e_agent::CONNECTION_KEY`, which owns the contract). TOP-level
@@ -942,6 +959,15 @@ fn state_json(app: &App, machine_result: Option<String>) -> Value {
     // is built.
     state[fauna_e2e_agent::DEVICES_REFRESHES_KEY] =
         fauna_devices_machine::devices_refreshes_json(app.settings.devices_refresh_counts());
+    // What the custody ceremony sink did with each received payload — the
+    // host-side barrier for the `custody_owner_resend_now` poke
+    // (`fauna_e2e_agent::CUSTODY_CEREMONY_INGEST_KEY`, which owns the
+    // contract). Five atomic loads in shared Rust; zeros before any payload.
+    state[fauna_e2e_agent::CUSTODY_CEREMONY_INGEST_KEY] = custody_ceremony_ingest_json();
+    // The admin Held-Custody page's `{answered, row_count}` — whether the
+    // registry read has ANSWERED, read off the loop while the nav's awaited
+    // read is held at the nest (`admin::custody_hosting::state_json`).
+    state["data"]["admin_custody_hosting"] = crate::admin::custody_hosting_state_json(&app.admin);
     state
 }
 
@@ -977,6 +1003,23 @@ fn account_pump_cycles_json(app: &App) -> Value {
     // builder publishes as `(0, 0)`; a convention-11 refusal is the key being
     // absent, never a zero.
     fauna_client_account_runtime::account_pump_cycles_json(app.settings.account_store.as_ref())
+}
+
+/// The `custody_ceremony_ingest` state value
+/// (`fauna_e2e_agent::CUSTODY_CEREMONY_INGEST_KEY`), extracted like
+/// [`account_pump_cycles_json`] — five atomic loads, no I/O. The shape is the
+/// shared `fauna_e2e_agent::custody_ceremony_ingest_json`, which linux and the
+/// UniFFI face build through too.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+fn custody_ceremony_ingest_json() -> Value {
+    let c = fauna_client_conversations::custody_ceremony_ingest_counts();
+    fauna_e2e_agent::custody_ceremony_ingest_json(
+        c.seen,
+        c.moved,
+        c.duplicate,
+        c.refused,
+        c.uncaptured,
+    )
 }
 
 /// [`fauna_e2e_agent::SHARE_SERVE_TALLY_KEY`]'s body, or `null` on a build
@@ -1428,10 +1471,26 @@ pub async fn perform(app: &mut App, registry: &Registry, req: &ElementReq) -> Va
             }
             json!({ "ok": true })
         }
+        // `Escape` is the tui's back key: ui.yaml gives the feed's post detail,
+        // its thread page, the conversations sub-pages and the dialogs no
+        // dismiss element, so Esc is the one way any user leaves them. It runs
+        // the user's own keystroke through `App::handle_key` — the keymap's
+        // innermost-first Esc arms decide what closes, exactly as for a human —
+        // and the named element anchors it: Escape over something this frame
+        // did not paint is refused, never a blind keystroke (point 11).
+        ElementKind::Key if req.arg == "Escape" => {
+            if registry.matches(id, scope).nth(req.index).is_none() {
+                return json!({ "error": "not found" });
+            }
+            app.handle_key(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Esc,
+            ));
+            json!({ "ok": true })
+        }
         ElementKind::Key => json!({
             "error": format!(
                 "press_key {:?} is not driven on the tui client — only Enter, the \
-                 keyboard activation of an actuable element",
+                 keyboard activation of an actuable element, and Escape, the back key",
                 req.arg
             ),
         }),
@@ -1689,16 +1748,25 @@ async fn dispatch_command(
         // `feed_inject_posts` this command's whole purpose is to change what
         // happens later in the journey, so a silently-unarmed pause would show
         // up as an unexplained assertion failure several steps downstream.
-        "archive_import_pause_after" => {
+        //
+        // `archive_import_hold_after` is its pause/cancel-journey twin: the run
+        // stays Running with N records settled until the user's own Pause or
+        // Cancel gesture arrives, so the click cannot lose a race to the end
+        // of a small import.
+        "archive_import_pause_after" | "archive_import_hold_after" => {
             let records = payload.get("records").and_then(|v| v.as_u64()).unwrap_or(0);
             let Some(machine) = crate::settings::archive_import_machine(&app.settings) else {
                 app.report_failed_agent_command(
-                    "archive_import_pause_after",
+                    action,
                     "no archive-import machine (pre-auth, or the glue refused)",
                 );
                 return recognized(true);
             };
-            machine.set_test_pause_after_records(records);
+            if action == "archive_import_hold_after" {
+                machine.set_test_hold_after_records(records);
+            } else {
+                machine.set_test_pause_after_records(records);
+            }
             recognized(true)
         }
         // The feed twin of `conversations_inject_page_error` above — there is no
@@ -1780,6 +1848,66 @@ async fn dispatch_command(
                 }
             }
         }
+        // Read the live engagement-cue engine's verdict for one item, and
+        // whether the engine has hydrated from the nest yet — how a second
+        // seat witnesses that it starts from the rollup the first collected.
+        // `{content_id}` → `{hydrated, verdict}` (`verdict` kebab-case or null;
+        // pre-auth reads as not hydrated). See
+        // `fauna_feed::FeedManager::cue_verdict_for_test`.
+        "feed_cue_verdict_for_test" => {
+            let content_id = payload
+                .get("content_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let (hydrated, verdict) = match app.feed.manager.as_ref() {
+                Some(manager) => manager.cue_verdict_for_test(content_id),
+                None => (false, None),
+            };
+            CommandResult {
+                recognized: true,
+                machine_result: Some(
+                    json!({ "hydrated": hydrated, "verdict": verdict }).to_string(),
+                ),
+            }
+        }
+        // The engagement-cue capture's test clock (`crate::feed::cues`,
+        // § The test clock): convention 14's fake clock for the two cue rules
+        // bounded from ABOVE — a skip (seen under `CUE_SKIP_MS`) and a
+        // fast-scroll burst (exposures ending under `CUE_BURST_MIN_GAP_MS`
+        // apart) — which a sleep can only make flaky. Unlike the offset
+        // clocks below, this one is FROZEN: between advances no time passes
+        // at all, so the agent's own round-trip latency cannot leak into a
+        // dwell. `freeze` pins both clocks at their real readings, `advance`
+        // moves both by `ms` (at most one sample's credit cap — the draw
+        // after the request lands it), `thaw` returns to the real clocks.
+        // A refused advance is a loud `{"error"}` result, never a silent no-op
+        // (convention 11).
+        "feed_cue_clock_freeze" => {
+            app.feed.cue_capture.freeze_clock_for_test();
+            recognized(true)
+        }
+        "feed_cue_clock_thaw" => {
+            app.feed.cue_capture.thaw_clock_for_test();
+            recognized(true)
+        }
+        "feed_cue_clock_advance" => {
+            let ms = payload.get("ms").and_then(|v| v.as_u64()).unwrap_or(0);
+            let outcome = match app.feed.cue_capture.advance_clock_for_test(ms) {
+                Ok(()) => json!({ "ok": true }),
+                Err(e) => json!({ "error": e }),
+            };
+            CommandResult {
+                recognized: true,
+                machine_result: Some(outcome.to_string()),
+            }
+        }
+        // What the capture holds after the latest draw: the exposures in
+        // progress plus the measured cards and painted band — how a journey
+        // steers a scroll to the step where exactly one card leaves view.
+        "feed_cue_probe" => CommandResult {
+            recognized: true,
+            machine_result: Some(app.feed.cue_capture.probe_for_test().to_string()),
+        },
         // Flush the ward's batched Guardian Notify report now, instead of
         // waiting out the 60 s `LOCK_TICK` that normally carries it — the other
         // leg of the same tick as `screen_time_heartbeat` below, and the same
@@ -1876,6 +2004,25 @@ async fn dispatch_command(
                 recognized(true)
             }
         },
+        // The custody owner sends again: every granted ceremony re-posts its
+        // newest sent step through the shared body (the deliver re-signed by
+        // the drive's own signing site), recording nothing. No gesture re-sends,
+        // so this is `devices` outcome 15's trigger. Fire-and-forget — the
+        // barrier is the HOST's `custody_ceremony_ingest` counts.
+        // `fauna_e2e_agent::CUSTODY_OWNER_RESEND_NOW` owns the contract.
+        fauna_e2e_agent::CUSTODY_OWNER_RESEND_NOW => {
+            match crate::settings::custody_ctx_of(&app.settings) {
+                Some(ctx) => fauna_client_custody::spawn_owner_resend(
+                    ctx.secret,
+                    app.conversations.real_session.clone(),
+                    app.settings.account_store.clone(),
+                ),
+                None => {
+                    tracing::info!("[agent] custody_owner_resend_now: no session yet (pre-auth)")
+                }
+            }
+            recognized(true)
+        }
         // Drive the ward's screen-time heartbeat forward by `minutes` of
         // simulated foreground use, then flush a report, so a tier_3 test can
         // exhaust a daily budget without depending on wall-clock time. This is
@@ -2192,10 +2339,17 @@ async fn dispatch_command(
         // `call_machine_method` uses — JSON-serialized in `machine_result`
         // for `machine_method_result_json` to decode.
         "device_set_state" => {
-            let device_id_hex = payload
-                .get("device_id_hex")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
+            // Convention 11's bad-payload clause: a missing or mistyped id is a
+            // loud refusal naming the field, never folded into `{"found":
+            // false}` — a typo'd key would read as "the row is NOT there", a
+            // vacuous green for every absence assertion. No result is set.
+            let Some(device_id_hex) = payload.get("device_id_hex").and_then(|v| v.as_str()) else {
+                app.report_failed_agent_command(
+                    "device_set_state",
+                    "needs a `device_id_hex` string",
+                );
+                return recognized(true);
+            };
             let value = fauna_client_account_runtime::device_set_state_json(
                 app.settings.account_store.as_ref(),
                 device_id_hex,
@@ -2479,13 +2633,42 @@ async fn dispatch_command(
             }
             recognized(true)
         }
+        // Contract: `fauna_e2e_agent::AUTO_RENEW_WAKE` — end the current
+        // session's certificate auto-renew wait, so the production tick runs its
+        // next pass now (`admin::spawn_auto_renew_cadence`).
+        fauna_e2e_agent::AUTO_RENEW_WAKE => {
+            if app.authenticated() {
+                app.admin.auto_renew_wake.wake();
+            } else {
+                // Convention 11: no session means no tick to wake.
+                app.report_refused_agent_command(
+                    "auto_renew_wake (no authenticated session, so no auto-renew tick to wake)",
+                );
+            }
+            recognized(true)
+        }
+        // The session's HELD bearer, whichever holds it: the launch machine
+        // when it was `Online` at `establish` (`LaunchMachineBearer`, whose
+        // `notify_401` is the machine's refresh), else the client's own
+        // `WsChallengeBearer` cache — the e2e session patch's case, where the
+        // machine is not `Online` and a `machine.refresh_token()` would no-op.
+        // Clear + re-mint through the client's `AuthClient` is the same shape
+        // `FfiNestClient::refresh_held_bearer_for_test` takes on the UniFFI
+        // apps, and it keeps the predecessor id in the own set either way
+        // (`devices.md` § The client's own session).
         fauna_e2e_agent::LAUNCH_REFRESH_TOKEN => {
-            match app.launch_machine.clone() {
-                Some(machine) => machine.refresh_token().await,
-                // Convention 11: never silently dropped — no machine means the
-                // app never ran the launch routing (a bypass-seeded session).
+            match app.session.as_ref().map(|s| Arc::clone(&s.client)) {
+                Some(client) => {
+                    client.auth().clear_token().await;
+                    // Convention 11: a re-mint that did not land must not ack
+                    // as one.
+                    if let Err(e) = client.auth().ensure_auth().await {
+                        app.report_failed_agent_command("launch_refresh_token", &e.to_string());
+                    }
+                }
+                // Convention 11: never silently dropped.
                 None => app.report_refused_agent_command(
-                    "launch_refresh_token (no launch machine in this session)",
+                    "launch_refresh_token (no authenticated session, so no held bearer)",
                 ),
             }
             recognized(true)
@@ -3663,6 +3846,60 @@ mod tests {
         );
     }
 
+    /// `auto_renew_wake` with no session has no tick to wake: refused loudly
+    /// (convention 11); with one it reaches the current session's tick only.
+    #[tokio::test]
+    async fn an_auto_renew_wake_is_refused_pre_auth_and_reaches_only_the_current_tick() {
+        let mut app = test_app();
+        let result = apply_command(
+            &mut app,
+            &test_tx(),
+            fauna_e2e_agent::AUTO_RENEW_WAKE,
+            &Value::Null,
+            "",
+            "",
+            &Value::Null,
+            &Value::Null,
+        )
+        .await;
+        assert!(result.recognized);
+        let shown = app.error_line_text().unwrap_or_default();
+        assert!(
+            shown.contains("auto_renew_wake"),
+            "the refusal must surface: {shown:?}"
+        );
+
+        let mut app = authed_app();
+        let departed = app.admin.auto_renew_wake.clone();
+        // What `admin::init` does for the next session.
+        app.admin.auto_renew_wake = crate::loop_wake::LoopWake::default();
+        let current = app.admin.auto_renew_wake.clone();
+        apply_command(
+            &mut app,
+            &test_tx(),
+            fauna_e2e_agent::AUTO_RENEW_WAKE,
+            &Value::Null,
+            "",
+            "",
+            &Value::Null,
+            &Value::Null,
+        )
+        .await;
+        assert_eq!(
+            app.error_line_text(),
+            None,
+            "an honoured wake surfaces nothing"
+        );
+        assert!(
+            current.take_pending_wake().await,
+            "the current tick must be woken"
+        );
+        assert!(
+            !departed.take_pending_wake().await,
+            "a departed session's tick must never be the one woken"
+        );
+    }
+
     /// A pace that did not parse leaves the production pace in force, so it must
     /// fail loudly rather than ack; with no session there is no client to pace.
     #[tokio::test]
@@ -3854,6 +4091,34 @@ mod tests {
         let reply = run(perform(&mut app, &registry, &enter));
         assert_eq!(reply, json!({ "ok": true }));
         assert_eq!(app.page, Page::Events);
+    }
+
+    /// `press_key(id, "Escape")` is the user's back key run through
+    /// `App::handle_key` — here it leaves a settings sub-page for the rail, as
+    /// the keymap's Esc arm does — and it needs a painted anchor: Escape over
+    /// an id this frame did not paint is refused and moves nothing.
+    #[test]
+    fn escape_is_the_back_key_over_a_painted_element() {
+        let mut app = authed_app();
+        app.page = Page::Settings;
+        app.settings.sub = crate::settings::SubPage::Encryption;
+        let registry = frame_registry(&app);
+
+        let mut missing = req(ElementKind::Key, "no-such-id");
+        missing.arg = "Escape".to_string();
+        assert_eq!(
+            run(perform(&mut app, &registry, &missing)),
+            json!({ "error": "not found" })
+        );
+        assert_eq!(app.settings.sub, crate::settings::SubPage::Encryption);
+
+        let mut esc = req(ElementKind::Key, "page-heading");
+        esc.arg = "Escape".to_string();
+        assert_eq!(
+            run(perform(&mut app, &registry, &esc)),
+            json!({ "ok": true })
+        );
+        assert_eq!(app.settings.sub, crate::settings::SubPage::Root);
     }
 
     /// Any other named key has no consumer on tui and is refused loudly, never
@@ -4739,7 +5004,7 @@ mod tests {
     /// invisible shim elements" rule, pinned so a new page can't invent one.
     #[test]
     fn wizard_pages_register_only_ui_yaml_ids() {
-        let cases: [(OnboardingStep, &[&str]); 10] = [
+        let cases: [(OnboardingStep, &[&str]); 11] = [
             // The phrase-only identity restore. `recovery-entry-account-field`
             // is a ui.yaml `optional_element` and is always painted here: a
             // terminal cannot scan the QR whose payload would otherwise carry
@@ -4767,6 +5032,22 @@ mod tests {
                     // Identity). Both must paint — the standing warning about
                     // their labels only means something if both are here.
                     "restore-from-recovery-kit-button",
+                    // The third optional entry: the signed-out lock door
+                    // (`ui/sessions.md` § The signed-out door).
+                    "emergency-lockout-entry-button",
+                ],
+            ),
+            // The signed-out lock door itself: two existing fields, the three
+            // leg-1 lock elements, its own back button.
+            (
+                OnboardingStep::EmergencyLockoutEntry,
+                &[
+                    "paste-secret-field",
+                    "recovery-entry-account-field",
+                    "sessions-lockout-warning",
+                    "sessions-lockout-confirm-field",
+                    "sessions-lockout-button",
+                    "emergency-lockout-back-button",
                 ],
             ),
             (

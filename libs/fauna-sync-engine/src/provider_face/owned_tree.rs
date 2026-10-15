@@ -1,7 +1,7 @@
 //! The owned-tree operations — what the OS does for apple's File Provider,
 //! written once for a provider that owns its tree.
 //!
-//! `docs/goal/behavior/on-demand-files.md` § Android SAF DocumentsProvider
+//! `docs/goal/behavior/on-demand-files-android.md` § Android SAF DocumentsProvider
 //! binding owns the rules; this module is their shared-Rust home. On apple the
 //! OS keeps the replica, re-drives an un-acked change and evicts under
 //! pressure. A SAF `DocumentsProvider` has no OS doing any of that, so the
@@ -612,13 +612,7 @@ impl OwnedTree {
         reconcile: &crate::engine::OverlayReconcile,
     ) -> Result<()> {
         for rel in &reconcile.confirmed {
-            if check_rel(rel).is_err() || self.writers.borrow().contains_key(rel) {
-                continue;
-            }
-            let kept = self.path_in(BodyRoot::Kept, rel);
-            if kept.is_file() && engine.is_dehydration_safe(rel) {
-                self.move_into(&kept, BodyRoot::Cache, rel)?;
-            }
+            self.demote_recorded(engine, rel)?;
         }
         for body in &reconcile.superseded {
             let rel = body.path.as_str();
@@ -633,6 +627,35 @@ impl OwnedTree {
             if hex::encode(disk.digest()) == body.content_hash {
                 remove_if_present(&kept)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Settle the third-party deposits a refresh's adoption pass landed
+    /// (`on-demand-files-apple.md` § Apple File Provider binding →
+    /// *Third-party deposit adoption on a capability host*): the engine wrote
+    /// each into the kept root (its `watch_dir`) and recorded it, so the body
+    /// is a recorded one and leaves the kept root for the cache root on the
+    /// engine's own dehydration proof, like any recorded write — the start
+    /// sweep never reads it as a write intent. A body a writer holds open, or
+    /// one the proof does not cover, stays for the sweep.
+    pub fn settle_adopted<E: ProviderEngine>(&self, engine: &E, landed: &[String]) -> Result<()> {
+        for rel in landed {
+            self.demote_recorded(engine, rel)?;
+        }
+        Ok(())
+    }
+
+    /// Move `rel`'s kept-root body to the cache root when the engine proves
+    /// it is the recorded head and no writer holds it open; otherwise leave
+    /// it where it is.
+    fn demote_recorded<E: ProviderEngine>(&self, engine: &E, rel: &str) -> Result<()> {
+        if check_rel(rel).is_err() || self.writers.borrow().contains_key(rel) {
+            return Ok(());
+        }
+        let kept = self.path_in(BodyRoot::Kept, rel);
+        if kept.is_file() && engine.is_dehydration_safe(rel) {
+            self.move_into(&kept, BodyRoot::Cache, rel)?;
         }
         Ok(())
     }

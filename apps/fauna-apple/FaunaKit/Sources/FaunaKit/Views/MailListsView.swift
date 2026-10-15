@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The user-facing **mail-lists** page (`docs/goal/behavior/mail-mass-mailing.md`),
@@ -381,3 +384,4 @@ struct MailListAddSheet: View {
         if let e = vm.errorMessage { error = e } else { dismiss() }
     }
 }
+#endif // !FAUNA_KIDS

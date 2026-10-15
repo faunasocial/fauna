@@ -2,7 +2,7 @@
 
 Owns: email-filters
 Status: ratified
-Authority: the user-defined mail filter engine — the v1 condition set, the action set and its multi-action composition precedence, which mailboxes a `FileInto` may target, `continue`/first-match-wins ordering, the `fauna.email.filters.*` CRUD wire surface, and the pre-seal perimeter evaluation point; defers the `Forward` action's protocol mechanics to `behavior/mail-forwarding.md`, the spam score the `SpamScoreAtLeast` condition reads to `behavior/mail-spam.md`, the perimeter that evaluates the rules to `behavior/smtp-server.md` § Inbound pipeline, the per-app filter dialog rollout to `ui/settings.md` § Where logic lives, and which surviving rules an identity succession carries across (kept/removed disposition + the un-adjudicated-until-reviewed marking) to `behavior/succession-aftermath.md` § Re-key scope + § Adjudicating what the aftermath carries across. On conflict in element IDs or per-page element scope, `tests/e2e-unified/ui.yaml` wins.
+Authority: the user-defined mail filter engine — the v1 condition set, the action set and its multi-action composition precedence, which mailboxes a `FileInto` may target, `continue`/first-match-wins ordering, the `fauna.email.filters.*` CRUD wire surface, the per-account auto-respond setting as one match-all `AutoReply` rule, and the pre-seal perimeter evaluation point; defers the `Forward` action's protocol mechanics to `behavior/mail-forwarding.md`, the spam score the `SpamScoreAtLeast` condition reads to `behavior/mail-spam.md`, the perimeter that evaluates the rules to `behavior/smtp-server.md` § Inbound pipeline, the per-app filter dialog rollout to `ui/settings.md` § Where logic lives, and which surviving rules an identity succession carries across (kept/removed disposition + the un-adjudicated-until-reviewed marking) to `behavior/succession-aftermath.md` § Re-key scope + § Adjudicating what the aftermath carries across. On conflict in element IDs or per-page element scope, `tests/e2e-unified/ui.yaml` wins.
 
 > **Audience:** the nest + Go MTA work wiring rule evaluation, and the app work building the filter dialogs.
 > **Split provenance:** carved out of `behavior/smtp-server.md` on 2026-08-03 (that doc was
@@ -159,6 +159,8 @@ ending at the first non-`continue` match (or the last rule).
   `Auto-Submitted: auto-replied`, `In-Reply-To` / `References` set to the
   triggering message, `From:` the recipient's address, and DKIM-signed under the
   recipient's domain via the existing outbound signer (it is outbound from us).
+  The nest composes it from its own stored copy of the rule; the MTA names the
+  rule, never the reply's bytes.
   It is **suppressed** (RFC 5230 §4.4/§4.6, RFC 3834) when: the envelope sender
   is null (it's a bounce); the message is itself automated (`Auto-Submitted` ≠
   `no`); it is list/bulk mail (`List-*` headers or `Precedence: bulk|list|junk`,
@@ -197,6 +199,16 @@ encrypted-mode compatibility) live in `docs/goal/behavior/mail-forwarding.md`;
 this section names the action, that doc spells out the wire behavior
 when the action fires.
 
+### The auto-respond setting
+
+The per-account auto-respond toggle and message (`mail-policy-config.md` § Tier 3) are not state of their own: they are a shared-Rust facade (`fauna_client_email::EmailClient::autorespond_{get,set,clear}`) over **one `AutoReply` filter rule**, so the reply is sent by the perimeter evaluation above and by nothing else. The nest holds no auto-respond field and no marker; there is no second enforcement path.
+
+**The rule's shape.** Zero conditions under `all` (vacuously true — it matches every message; zero conditions under `any` match nothing and are not the setting), action `AutoReply`, `continue_on_match: true` and priority `i32::MIN`. Non-terminal and sorted first, it never shadows a user's rule and no user rule — terminal or not — can shadow it; the reply composes with whatever placement the user's own rules then decide (a `Discard`/`Reject` later in the chain still suppresses it, per the composition rules above). Its `name` (`Auto-respond`), `subject` (`Automatic reply`) and `interval_hours` (168 — seven days, the Sieve `vacation` default) are hard-coded constants in that crate, not knobs: the setting is one toggle and one message, the message being the action's `body`.
+
+**Recognised by shape, not by name.** Any rule with zero conditions under `all` and an `AutoReply` action IS the setting — it does exactly what the toggle means, whoever built it. Read reports on, with the body of the first such rule in evaluation order (`priority ASC, id ASC`), else off with an empty message. Setting a message creates the rule when none exists; otherwise it rewrites the first one to the canonical shape above (keeping its id) and deletes any further ones, so the account ends with exactly one. Turning it off deletes every such rule — a filter has no disabled state, so the message goes with the rule and an app re-collects it the next time the toggle is turned on. An `AutoReply` rule *with* conditions (a reply only to certain senders, built by a raw `fauna.email.filters.*` call) is the user's own rule: the facade neither reads nor touches it.
+
+**In the filter list.** The rule is listed like any other — hiding a rule that acts on the user's mail would hide what their mail does — with its name and the `Auto-reply` action label (`filter_action_label`), and, like every rule the shared form cannot represent (`filter_is_editable` is false for an `AutoReply` action), without an edit affordance on any app; the toggle and message on `mail-settings` are where it is edited. Deleting it from the list is turning auto-respond off. A distinct "managed by auto-respond" treatment in the list would need new ui.yaml ids and is not ruled.
+
 **Implementation status today.** The CRUD surface (`fauna.email.filters.*`,
 `email_filters` table, `fauna-client-email`) is live and conformance-tested;
 the shared evaluator `fauna_mail::filter::evaluate` + the spam-score condition
@@ -222,12 +234,18 @@ other apps following).
 wired**: the MTA stashes a matched `AutoReply` and, after the recipient's local
 delivery commits, applies the loop guard
 (`fauna_mail::filter::auto_reply_decision` — null-sender / `Auto-Submitted` ≠ no /
-list-bulk / our-own-domain / recipient-in-To-Cc), composes the reply
-(`fauna_mail::outbound::autoreply::compose_auto_reply`), DKIM-signs it via the
-shared outbound signer, and calls `fauna.bridges.send_auto_reply`, which
-atomically claims the `(recipient, sender)` rate-limit slot (`auto_reply_log`)
-and — if free — enqueues the reply into `outbound_mail_queue` with a null
-envelope-from. A `Discard`/`Reject` earlier in the chain suppresses it (no
+list-bulk / our-own-domain / recipient-in-To-Cc) — and never replies for a
+recipient reached through a role address such as `postmaster@` (`smtp-server.md`
+§ abuse@ / postmaster@ role-address routing; suppressed as
+`reason="role_address"`) — and calls `fauna.bridges.send_auto_reply` naming the
+recipient, the delivered-to address, the triggering sender and `Message-ID`, and
+the matched rule's id. The nest composes the reply from its own stored copy of
+that rule (`fauna_mail::outbound::autoreply::compose_auto_reply`; a rule id that
+is not the recipient's `AutoReply` is refused — the door's rule is
+`mail-multidomain.md` § From: header ownership → *Per door, nest-side*), claims
+the `(recipient, sender)` rate-limit slot (`auto_reply_log`) atomically and — if
+free — enqueues the reply into `outbound_mail_queue` with a null envelope-from;
+it signs it at the outbound hand-out like every queued message. A `Discard`/`Reject` earlier in the chain suppresses it (no
 delivery → no reply). Metrics: `smtp_inbound_autoreply_sent_total`,
 `smtp_inbound_autoreply_suppressed_total{reason}`. Each
 layer is unit/integration-covered (nest placement, the Go enum decode, the
@@ -260,3 +278,5 @@ in-crate placement test beside the custom-folder one, and
 `conformance_email_filters.rs`. No app dialog collects a `FileInto` yet
 (`describe_filter_action` returns `None` for it), so only a raw
 `fauna.email.filters.*` call could ever have stored such a rule.
+
+**The auto-respond facade is built** (2026-10-12): `fauna_client_email::autorespond` implements § The auto-respond setting, crate-tested for on, off, editing the message, read-back, a hand-built conditional `AutoReply` left alone and hand-built match-all rules adopted and collapsed to one. It is not yet exposed over UniFFI or wasm, and no app renders the toggle: the `mail-settings` ids for it wait on the user's approval.

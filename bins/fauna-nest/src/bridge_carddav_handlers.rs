@@ -12,11 +12,13 @@
 //!   - `sync_addressbook_since`
 //!   - `delete_addressbook`
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use fauna_contacts::segments::CardFloorMetadata;
 use fauna_contacts::segments::placement::CardPlacementRecord;
 use fauna_protocol::{
+    RpcError,
     bridge_routing::{
         AddressbookEntry, CardEntry, DeleteAddressbookReply, DeleteAddressbookRequest,
         DeleteCardReply, DeleteCardRequest, ExpungedCardEntry, ListAddressbooksReply,
@@ -444,176 +446,198 @@ fn put_card_ciphertext_handler() -> crate::rpc_router::RpcHandler {
             )
             .map_err(|_| malformed("encrypted_index_hint is not a sealed recipient envelope"))?;
 
-            // The shared storage quota — the card twin of
-            // `store_sealed_event`'s pre-check (`caldav-server.md` § QUOTA →
-            // § Enforcement points), before the segment append so a refusal
-            // writes nothing.
-            let replaced = state
-                .db
-                .carddav_card_ciphertext_size(&target, &book, &req.uid_hash)
-                .await
-                .map_err(internal)?;
-            crate::bridge_imap_handlers::enforce_dav_write_quota(
-                &state,
-                &target,
-                req.ciphertext_size,
-                replaced,
-            )
-            .await?;
-
-            let now = now_epoch_secs();
-
-            // S6.6 content cutover — exact twin of `put_event_ciphertext_handler`
-            // (see its comment for why the segment append must precede the row,
-            // and why `card_id` is derived here rather than inside the DAO).
-            let card_id = derive_carddav_card_id(&target, req.timestamp, &req.encrypted_body);
-            // `created_at: now` (→ the row's `received_at`) MUST stay
-            // server-assigned — the orphan reaper's in-flight watermark keys
-            // on it (see the calendar twin's comment); `req.timestamp` goes
-            // to `internal_date` only.
-            let floor = CardFloorMetadata {
-                addressbook_id: book,
-                card_id,
-                uid_hash: req.uid_hash.clone(),
-                ciphertext_size: req.ciphertext_size,
-                internal_date: req.timestamp,
-                created_at: now,
-                ..Default::default()
-            };
-            let record_cid = crate::segments::card::ensure_in_segment(
-                &state.card_segments,
-                &state.db,
-                &target,
-                &sealed_body,
-                &sealed_hint,
-                &floor,
-            )
-            .await
-            .map_err(internal)?;
-
-            let outcome = state
-                .db
-                .replace_carddav_card_by_uid(
-                    &target,
-                    &book,
-                    &req.uid_hash,
-                    req.if_match.as_deref(),
-                    &card_id,
-                    &record_cid,
-                    &req.encrypted_index_hint,
-                    req.encrypted_fauna_ext.as_deref(),
-                    req.timestamp,
-                    req.ciphertext_size,
-                    now,
-                )
-                .await
-                .map_err(internal)?;
-
-            let reply = match outcome {
-                ReplaceCarddavCardOutcome::Created {
-                    card_id,
-                    etag,
-                    modseq,
-                    encrypted_fauna_ext,
-                } => {
-                    // Spec § D7 (PutCard record shape): `addressbook_id` +
-                    // `uid_hash` + `etag` + `modseq` + `ciphertext_size`. The
-                    // manifest apply dedups on (addressbook_id, uid_hash) and
-                    // bumps the address book's highestmodseq (twin of the
-                    // CalDAV PutEvent wiring; commit-then-append). No emit on
-                    // Idempotent / PreconditionFailed / AddressbookMissing.
-                    let record = CardPlacementRecord::PutCard {
-                        addressbook_id: book,
-                        uid_hash: req
-                            .uid_hash
-                            .as_slice()
-                            .try_into()
-                            .expect("uid_hash validated to length 32 above"),
-                        etag: etag.clone(),
-                        modseq: modseq as u64,
-                        ciphertext_size: req.ciphertext_size,
-                        // v2 (S6.9): the content-record id (the placement→
-                        // content join restore needs) + the row's EFFECTIVE
-                        // sidecar — the DAO's value, not the request's (a MUA
-                        // write preserves the prior row's sidecar).
-                        card_id,
-                        encrypted_fauna_ext: encrypted_fauna_ext.clone(),
-                    };
-                    state
-                        .card_placement
-                        .append_event(&target, &record)
-                        .await
-                        .map_err(placement_journal_diverged)?;
-                    notify_addressbook_changed(&state, &target, &book);
-                    PutCardCiphertextReply::Created {
-                        card_id: card_id.to_vec(),
-                        etag,
-                        modseq,
-                    }
-                }
-                ReplaceCarddavCardOutcome::Updated {
-                    card_id,
-                    etag,
-                    modseq,
-                    encrypted_fauna_ext,
-                } => {
-                    // See Created arm: same PutCard record shape + atomicity
-                    // contract. Updated differs only in the DB row being
-                    // replaced (a tombstone for the prior card_id recorded in
-                    // the same SQLite tx) — neither alters the placement shape.
-                    let record = CardPlacementRecord::PutCard {
-                        addressbook_id: book,
-                        uid_hash: req
-                            .uid_hash
-                            .as_slice()
-                            .try_into()
-                            .expect("uid_hash validated to length 32 above"),
-                        etag: etag.clone(),
-                        modseq: modseq as u64,
-                        ciphertext_size: req.ciphertext_size,
-                        // v2 (S6.9): the content-record id (the placement→
-                        // content join restore needs) + the row's EFFECTIVE
-                        // sidecar — the DAO's value, not the request's (a MUA
-                        // write preserves the prior row's sidecar).
-                        card_id,
-                        encrypted_fauna_ext: encrypted_fauna_ext.clone(),
-                    };
-                    state
-                        .card_placement
-                        .append_event(&target, &record)
-                        .await
-                        .map_err(placement_journal_diverged)?;
-                    notify_addressbook_changed(&state, &target, &book);
-                    PutCardCiphertextReply::Updated {
-                        card_id: card_id.to_vec(),
-                        etag,
-                        modseq,
-                    }
-                }
-                // Idempotent transport retry: the new body hashes to the same card_id as the
-                // prior row, so no bump was done. The wire shape has no Idempotent variant;
-                // reporting Updated is semantically coherent because the row state already
-                // matches what the caller intended — the caller can use the returned etag
-                // for subsequent conditional requests without distinguishing new-update from retry.
-                ReplaceCarddavCardOutcome::Idempotent {
-                    card_id,
-                    etag,
-                    modseq,
-                    encrypted_fauna_ext: _,
-                } => PutCardCiphertextReply::Updated {
-                    card_id: card_id.to_vec(),
-                    etag,
-                    modseq,
-                },
-                ReplaceCarddavCardOutcome::PreconditionFailed { current_etag } => {
-                    PutCardCiphertextReply::PreconditionFailed { current_etag }
-                }
-                ReplaceCarddavCardOutcome::AddressbookMissing => {
-                    PutCardCiphertextReply::AddressbookNotFound
-                }
-            };
+            let reply =
+                store_sealed_card(&state, target, book, &req, sealed_body, sealed_hint).await?;
             encode_reply(&reply)
         })
+    })
+}
+
+/// Store one sealed card body into `target`'s address book `book` — the
+/// durable half of `put_card_ciphertext`, and the card twin of
+/// [`crate::bridge_caldav_handlers::store_sealed_event`]: the segment append
+/// first, then the row, then the placement journal and the change
+/// notification. The caller has already authorized the write and proven both
+/// halves sealed.
+///
+/// `pub` for the reason [`crate::nest_sync_worker::place_relayed_record`] is:
+/// a tier_3 harness that needs a card filed the way production files one
+/// calls this rather than a lookalike (`tests/nest_backup_coordinator.rs`).
+pub async fn store_sealed_card(
+    state: &Arc<AppState>,
+    target: [u8; 32],
+    book: [u8; 32],
+    req: &PutCardCiphertextRequest,
+    sealed_body: fauna_mls::wrapped_blob::SealedRecordBytes,
+    sealed_hint: fauna_mls::wrapped_blob::SealedRecordBytes,
+) -> Result<PutCardCiphertextReply, RpcError> {
+    // The shared storage quota — the card twin of
+    // `store_sealed_event`'s pre-check (`caldav-server.md` § QUOTA →
+    // § Enforcement points), before the segment append so a refusal
+    // writes nothing.
+    let replaced = state
+        .db
+        .carddav_card_ciphertext_size(&target, &book, &req.uid_hash)
+        .await
+        .map_err(internal)?;
+    crate::bridge_imap_handlers::enforce_dav_write_quota(
+        state,
+        &target,
+        req.ciphertext_size,
+        replaced,
+    )
+    .await?;
+
+    let now = now_epoch_secs();
+
+    // S6.6 content cutover — exact twin of `put_event_ciphertext_handler`
+    // (see its comment for why the segment append must precede the row,
+    // and why `card_id` is derived here rather than inside the DAO).
+    let card_id = derive_carddav_card_id(&target, req.timestamp, &req.encrypted_body);
+    // `created_at: now` (→ the row's `received_at`) MUST stay
+    // server-assigned — the orphan reaper's in-flight watermark keys
+    // on it (see the calendar twin's comment); `req.timestamp` goes
+    // to `internal_date` only.
+    let floor = CardFloorMetadata {
+        addressbook_id: book,
+        card_id,
+        uid_hash: req.uid_hash.clone(),
+        ciphertext_size: req.ciphertext_size,
+        internal_date: req.timestamp,
+        created_at: now,
+        ..Default::default()
+    };
+    let record_cid = crate::segments::card::ensure_in_segment(
+        &state.card_segments,
+        &state.db,
+        &target,
+        &sealed_body,
+        &sealed_hint,
+        &floor,
+    )
+    .await
+    .map_err(internal)?;
+
+    let outcome = state
+        .db
+        .replace_carddav_card_by_uid(
+            &target,
+            &book,
+            &req.uid_hash,
+            req.if_match.as_deref(),
+            &card_id,
+            &record_cid,
+            &req.encrypted_index_hint,
+            req.encrypted_fauna_ext.as_deref(),
+            req.timestamp,
+            req.ciphertext_size,
+            now,
+        )
+        .await
+        .map_err(internal)?;
+
+    Ok(match outcome {
+        ReplaceCarddavCardOutcome::Created {
+            card_id,
+            etag,
+            modseq,
+            encrypted_fauna_ext,
+        } => {
+            // Spec § D7 (PutCard record shape): `addressbook_id` +
+            // `uid_hash` + `etag` + `modseq` + `ciphertext_size`. The
+            // manifest apply dedups on (addressbook_id, uid_hash) and
+            // bumps the address book's highestmodseq (twin of the
+            // CalDAV PutEvent wiring; commit-then-append). No emit on
+            // Idempotent / PreconditionFailed / AddressbookMissing.
+            let record = CardPlacementRecord::PutCard {
+                addressbook_id: book,
+                uid_hash: req
+                    .uid_hash
+                    .as_slice()
+                    .try_into()
+                    .expect("uid_hash validated to length 32 above"),
+                etag: etag.clone(),
+                modseq: modseq as u64,
+                ciphertext_size: req.ciphertext_size,
+                // v2 (S6.9): the content-record id (the placement→
+                // content join restore needs) + the row's EFFECTIVE
+                // sidecar — the DAO's value, not the request's (a MUA
+                // write preserves the prior row's sidecar).
+                card_id,
+                encrypted_fauna_ext: encrypted_fauna_ext.clone(),
+            };
+            state
+                .card_placement
+                .append_event(&target, &record)
+                .await
+                .map_err(placement_journal_diverged)?;
+            notify_addressbook_changed(state, &target, &book);
+            PutCardCiphertextReply::Created {
+                card_id: card_id.to_vec(),
+                etag,
+                modseq,
+            }
+        }
+        ReplaceCarddavCardOutcome::Updated {
+            card_id,
+            etag,
+            modseq,
+            encrypted_fauna_ext,
+        } => {
+            // See Created arm: same PutCard record shape + atomicity
+            // contract. Updated differs only in the DB row being
+            // replaced (a tombstone for the prior card_id recorded in
+            // the same SQLite tx) — neither alters the placement shape.
+            let record = CardPlacementRecord::PutCard {
+                addressbook_id: book,
+                uid_hash: req
+                    .uid_hash
+                    .as_slice()
+                    .try_into()
+                    .expect("uid_hash validated to length 32 above"),
+                etag: etag.clone(),
+                modseq: modseq as u64,
+                ciphertext_size: req.ciphertext_size,
+                // v2 (S6.9): the content-record id (the placement→
+                // content join restore needs) + the row's EFFECTIVE
+                // sidecar — the DAO's value, not the request's (a MUA
+                // write preserves the prior row's sidecar).
+                card_id,
+                encrypted_fauna_ext: encrypted_fauna_ext.clone(),
+            };
+            state
+                .card_placement
+                .append_event(&target, &record)
+                .await
+                .map_err(placement_journal_diverged)?;
+            notify_addressbook_changed(state, &target, &book);
+            PutCardCiphertextReply::Updated {
+                card_id: card_id.to_vec(),
+                etag,
+                modseq,
+            }
+        }
+        // Idempotent transport retry: the new body hashes to the same card_id as the
+        // prior row, so no bump was done. The wire shape has no Idempotent variant;
+        // reporting Updated is semantically coherent because the row state already
+        // matches what the caller intended — the caller can use the returned etag
+        // for subsequent conditional requests without distinguishing new-update from retry.
+        ReplaceCarddavCardOutcome::Idempotent {
+            card_id,
+            etag,
+            modseq,
+            encrypted_fauna_ext: _,
+        } => PutCardCiphertextReply::Updated {
+            card_id: card_id.to_vec(),
+            etag,
+            modseq,
+        },
+        ReplaceCarddavCardOutcome::PreconditionFailed { current_etag } => {
+            PutCardCiphertextReply::PreconditionFailed { current_etag }
+        }
+        ReplaceCarddavCardOutcome::AddressbookMissing => {
+            PutCardCiphertextReply::AddressbookNotFound
+        }
     })
 }
 
@@ -853,7 +877,9 @@ fn sync_addressbook_since_handler() -> crate::rpc_router::RpcHandler {
             // branch above — retention expiry is expected, not forensic, so
             // NO bridge_restore_divergence row is written. A full sync
             // (since_modseq == 0) asks for everything and can never be stale,
-            // so the check is scoped to incremental syncs.
+            // so the check is scoped to incremental syncs. The same check
+            // answers stale below the address book's restore-carried prune
+            // floor, where the rebuilt log has lost such a tombstone outright.
             if since_modseq > 0 {
                 // The retention window is the *effective* deployment policy
                 // (catalog ⊕ admin `put_imap_policy` override) with the
@@ -4070,6 +4096,142 @@ mod tests {
         assert_eq!(
             count, 0,
             "past-retention stale must NOT write a divergence row"
+        );
+    }
+
+    /// carddav-server.md § Sync model (the CalDAV stale-token rule): a token
+    /// that predates a pruned tombstone gets `stale: true`, never a partial
+    /// `expunged` list — the twin of the calendar test. Only a restore (which
+    /// rebuilds `bridge_carddav_expunged` from the pruned placement manifest)
+    /// can lose a tombstone; the per-addressbook prune floor rides it.
+    #[tokio::test]
+    async fn sync_addressbook_since_after_restore_is_stale_below_the_prune_floor() {
+        let state = fixture_state().await;
+        let mda = [0x5au8; 32];
+        approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
+        let actor = [0x5bu8; 32];
+        let book_id = [0x5cu8; 32];
+        let (uid_a, uid_b) = ([0x5du8; 32], [0x5eu8; 32]);
+        provision_one(&state, &mda, &actor, &book_id).await;
+        for uid in [uid_a, uid_b] {
+            let body = sealed(b"vcard");
+            let payload = make_put_payload(
+                &actor,
+                &book_id,
+                &uid,
+                &body,
+                &sealed(b"hint"),
+                1_700_000_000,
+                None,
+            );
+            put_card_ciphertext_handler()(state.clone(), mda, payload)
+                .await
+                .expect("put ok");
+        }
+        // The client's sync checkpoint: both cards present.
+        let token0 = state
+            .db
+            .carddav_addressbook_highestmodseq(&actor, &book_id)
+            .await
+            .unwrap()
+            .expect("addressbook exists");
+        let delete = |uid: [u8; 32]| {
+            let state = state.clone();
+            async move {
+                delete_card_handler()(
+                    state,
+                    mda,
+                    make_delete_payload(&actor, &book_id, &uid, None),
+                )
+                .await
+                .expect("delete ok");
+            }
+        };
+        let sync = |token: String| {
+            let state = state.clone();
+            async move {
+                let bytes = sync_addressbook_since_handler()(
+                    state,
+                    mda,
+                    make_sync_payload(&actor, &book_id, &token, 0),
+                )
+                .await
+                .expect("sync ok");
+                match fauna_cbor::decode_strict(&bytes).unwrap() {
+                    SyncAddressbookSinceReply::Ok {
+                        stale, expunged, ..
+                    } => (stale, expunged.len()),
+                    other => panic!("expected Ok, got {other:?}"),
+                }
+            }
+        };
+
+        delete(uid_a).await;
+        // Age A's manifest tombstone past the retention window; the next
+        // DELETE piggybacks the prune. The live table keeps its fresh stamp.
+        state
+            .card_placement
+            .update_manifest(&actor, |m| {
+                for t in &mut m.tombstones {
+                    t.deleted_at = 1;
+                }
+                true
+            })
+            .await
+            .unwrap();
+        delete(uid_b).await;
+
+        let manifest = state.card_placement.current_manifest(&actor).await.unwrap();
+        assert!(
+            !manifest.tombstones.iter().any(|t| t.uid_hash == uid_a),
+            "A's aged tombstone was pruned from the manifest"
+        );
+        let floor = manifest
+            .addressbooks
+            .iter()
+            .find(|b| b.addressbook_id == book_id)
+            .expect("addressbook state")
+            .pruned_modseq;
+        assert!(
+            floor > token0 as u64,
+            "the prune floor is A's tombstone modseq"
+        );
+
+        // Live path unchanged: the live table still holds both tombstones.
+        assert_eq!(sync(token0.to_string()).await, (false, 2));
+
+        // Restore the address book from the (pruned) manifest, as the
+        // snapshot restore does (`filesync_handlers::rebuild_card_rows_from_disk`).
+        {
+            let conn = state.db.conn().await;
+            let tx = conn.unchecked_transaction().unwrap();
+            for table in [
+                "bridge_carddav_cards",
+                "bridge_carddav_addressbooks",
+                "bridge_carddav_expunged",
+            ] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE actor_id = ?1"),
+                    rusqlite::params![actor.as_slice()],
+                )
+                .unwrap();
+            }
+            crate::restore::card::replay_card_manifest_into_sqlite(&tx, &actor, &manifest).unwrap();
+            crate::restore::card::replay_card_tombstones_into_sqlite(&tx, &actor, &manifest)
+                .unwrap();
+            tx.commit().unwrap();
+        }
+
+        assert_eq!(
+            sync(token0.to_string()).await,
+            (true, 0),
+            "a token older than the pruned tombstone must be told stale, \
+             not handed B's tombstone alone"
+        );
+        assert_eq!(
+            sync(floor.to_string()).await,
+            (false, 1),
+            "at the floor the rebuilt log is complete: B's tombstone only"
         );
     }
 

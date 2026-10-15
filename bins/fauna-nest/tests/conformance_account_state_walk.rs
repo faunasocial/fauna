@@ -2473,17 +2473,37 @@ async fn the_retained_bundle_bridges_the_unkeyed_window_and_drops_on_shred() {
     else {
         panic!("the mint is live before the shred");
     };
-    // Authored by A, a verified member — an unauthored shred drops no key
-    // (`account-data-taxonomy.md` § *Fleet-scope reclamation* → *the
-    // authored shred*; the plane's own tier_1 tests pin that half).
-    let shred = fauna_core::generation::sign_shred(&signing_key(0x0A), core, 9_000).unwrap();
-    plane_fleet(&a, &rpc, &keys, &signing_key(0x0A))
+    // Authored by A, a verified member: the marker into the mint row and A's
+    // attestation into its own shred cell — a marker alone drops no key
+    // (`fleet-scope-reclamation.md` § *Fleet-scope reclamation* → *the
+    // authored shred*, *the shred cell*; the plane's own tier_1 tests pin
+    // that half).
+    let marker = fauna_core::generation::GenerationMintRecord::Shredded {
+        core,
+        shredded_at_ms: 9_000,
+        shredded_by: signing_key(0x0A).verifying_key().to_bytes(),
+    };
+    let cell = fauna_core::generation::sign_shred(&signing_key(0x0A), &generation, 9_000);
+    let a_key = signing_key(0x0A);
+    let a_fleet = plane_fleet(&a, &rpc, &keys, &a_key);
+    a_fleet
         .put(
             &ItemId {
                 kind: KIND_GENERATION_MINT.into(),
                 key: fauna_core::hex32::encode(&generation),
             },
-            fauna_core::encoding::canonical_encode(&shred).unwrap(),
+            fauna_core::encoding::canonical_encode(&marker).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+    a_fleet
+        .put(
+            &ItemId {
+                kind: fauna_protocol::merge_policy::KIND_GENERATION_SHRED.into(),
+                key: fauna_core::generation::shred_cell_key(&generation, &cell.shredded_by),
+            },
+            fauna_core::encoding::canonical_encode(&cell).unwrap(),
             None,
         )
         .await
@@ -3923,8 +3943,8 @@ async fn an_excluding_descendant_cannot_retire_the_tip_an_honest_device_seals_un
     );
 }
 
-// ── Fleet-scope reclamation (charter § The generation machinery → *Fleet-scope
-// reclamation*) ────────────────────────────
+// ── Fleet-scope reclamation (`fleet-scope-reclamation.md`
+// § *Fleet-scope reclamation*) ────────────────────────────
 
 /// A device's retained-key bundle — what the T10 slot carries in production
 /// (`principal_bundle`), which the resolver consults once a consumed top-up
@@ -4429,8 +4449,10 @@ async fn reclamation_sweep(fleet: u16, cycles: u16, rounds: usize, sample_at: u1
     // 1(c)): a sibling's row the nest has retired, still in this replica's
     // relay plane, is refused once per replica and its copy retired — only
     // the rows this replica cannot call dead from its own merged state (a
-    // shredded generation's mint row, a sibling's superseded row it could not
-    // yet call covered), since a dead row is never sent (ruling 1(b)).
+    // shredded generation's mint row and its shred cell, the mint row's
+    // company — `fleet-scope-reclamation.md` § *the shred cell* — and a
+    // sibling's superseded row it could not yet call covered), since a dead
+    // row is never sent (ruling 1(b)).
     eprintln!(
         "reclamation sweep: the publish diff sent {diff_puts} puts over {cycles} cycles, \
          {diff_refused} refused, {diff_dead} skipped as dead"
@@ -4441,7 +4463,7 @@ async fn reclamation_sweep(fleet: u16, cycles: u16, rounds: usize, sample_at: u1
         "the publish diff landed {} rows on a nest that already holds the fleet's rows",
         diff_puts - diff_refused
     );
-    let refused_cap = usize::from(cycles) * usize::from(fleet) * 2;
+    let refused_cap = usize::from(cycles) * usize::from(fleet) * 3;
     assert!(
         diff_refused <= refused_cap,
         "the publish diff's learning path is not bounded: {diff_refused} refused puts over \
@@ -4502,8 +4524,8 @@ async fn reclamation_sweep(fleet: u16, cycles: u16, rounds: usize, sample_at: u1
     // retired itself, are forgotten here once dead everywhere — the relay
     // plane is never told about another writer's retirements, so without the
     // forget every tip change leaves one row per member per sealed item here
-    // for good (`account-data-taxonomy.md` § The generation machinery →
-    // *Fleet-scope reclamation*).
+    // for good (`fleet-scope-reclamation.md`
+    // § *Fleet-scope reclamation*).
     let current: Vec<[u8; 32]> = seats.iter().map(Seat::id).collect();
     let (relay_at_end, census) = relay_census(&seats[0], &current).await;
     assert!(
@@ -4754,8 +4776,8 @@ async fn a_64_device_fleet_survives_200_sign_out_cycles_at_a_steady_live_entry_c
 
 /// **A member's row statement reaches a sibling's removal facts — sealed,
 /// through the real nest, and it is what the removal resolves from**
-/// (`account-data-taxonomy.md` § The generation machinery → *Fleet-scope
-/// reclamation*, clause (4), *The removal target*). Seat 1 states the nest row
+/// (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (4), *The removal target*). Seat 1 states the nest row
 /// it enrolled on, on its own generation-sealed device-endpoints entry; seat 0
 /// walks. Removing that row then resolves to seat 1 **whatever principal the
 /// nest's roster puts on it** — seat 0's own (the hit arm: the caller is not
@@ -5329,31 +5351,27 @@ async fn is_shredded(seat: &Seat, generation: &[u8; 32]) -> bool {
         })
 }
 
-/// Does `seat`'s merged state read `generation` as an AUTHORED shred at its
-/// current fleet view — the one row that licenses dropping the generation's
-/// key from the retained bundle (`account-data-taxonomy.md` § Fleet-scope
-/// reclamation → *the authored shred*)?
+/// Does `seat`'s merged state hold an AUTHORED shred cell for `generation`
+/// at its current fleet view — the one row that licenses dropping the
+/// generation's key from the retained bundle (`fleet-scope-reclamation.md`
+/// § Fleet-scope reclamation → *the authored shred*, *the shred cell*)?
 async fn is_authored_shred(seat: &Seat, generation: &[u8; 32]) -> bool {
-    let Some(record) = seat
+    let cells = seat
         .store
-        .state(KIND_GENERATION_MINT, &fauna_core::hex32::encode(generation))
+        .states_of_kind(fauna_protocol::merge_policy::KIND_GENERATION_SHRED)
         .await
-        .unwrap()
-        .and_then(|e| {
-            fauna_core::encoding::canonical_decode::<fauna_core::generation::GenerationMintRecord>(
-                &e.value,
-            )
-            .ok()
-        })
-    else {
-        return false;
-    };
+        .unwrap();
     let view = fauna_sync_engine::fleet_removal::fleet_view(&seat.store, seat.trust())
         .await
         .unwrap();
-    record
-        .shred_is_authored(&view)
-        .is_ok_and(|id| id == *generation)
+    fauna_core::generation::authored_shred_generations(
+        &view,
+        cells
+            .iter()
+            .filter(|e| !e.tombstone)
+            .map(|e| (e.key.as_str(), e.value.as_slice())),
+    )
+    .contains(generation)
 }
 
 /// **The control.** A stays: its device-endpoints row and the account's
@@ -5466,8 +5484,8 @@ async fn a_single_device_sign_out_and_back_in_keeps_the_reception_key_and_its_es
 }
 
 /// **The let-go — a dead generation's rows are retired by the user's act, and
-/// a live sibling's are untouched** (`account-data-taxonomy.md` § The
-/// generation machinery → *Fleet-scope reclamation*, clause (3)(j)).
+/// a live sibling's are untouched** (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (3)(j)).
 ///
 /// A, the account's only device, seals the account's reception, rotation,
 /// period and folder keys under generation 1 and is gone; A′ signs in seedless
@@ -5684,8 +5702,8 @@ async fn a_single_device_sign_in_recovers_its_generation_from_escrow_and_holds_t
     // open only under it or under a generation A′'s hand-over minted from it.
     // The key rides the retained bundle until generation 1's AUTHORED shred —
     // the reclaim pass signs the shred it writes, and an authored shred is the
-    // one row that drops the key (`account-data-taxonomy.md` § Fleet-scope
-    // reclamation → *the authored shred*). So "still held" is pinned only
+    // one row that drops the key (`fleet-scope-reclamation.md`
+    // § Fleet-scope reclamation → *the authored shred*). So "still held" is pinned only
     // while no authored shred stands.
     assert!(
         in_bundle || authored_shred,
@@ -5953,8 +5971,8 @@ async fn a_successors_first_mint_supersedes_the_carried_generation_and_a_late_se
             .sum::<usize>(),
         a_endpoints.map(|e| e.tombstone),
     );
-    // `account-data-taxonomy.md` § The generation machinery → *Fleet-scope
-    // reclamation*, clause (3)(g): the hand-over arm re-seals the
+    // `fleet-scope-reclamation.md`
+    // § *Fleet-scope reclamation*, clause (3)(g): the hand-over arm re-seals the
     // account-level rows under the tip, and the let-go arm retires the
     // predecessor DEVICE's own device-endpoints row — its writer is no
     // member under the successor and no removal names it — so nothing rests
@@ -6009,8 +6027,8 @@ async fn a_successors_first_mint_supersedes_the_carried_generation_and_a_late_se
 }
 
 /// **Clause (3)(i) with a predecessor fleet of three devices**
-/// (`account-data-taxonomy.md` § The generation machinery → *Fleet-scope
-/// reclamation*, clause (3)(i); measured at 12 live rows before the arm and
+/// (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (3)(i); measured at 12 live rows before the arm and
 /// clause (3)(g)'s let-go were built).
 ///
 /// Three predecessor devices on one generation, every grant revoked at the
@@ -6341,8 +6359,8 @@ async fn an_unkeyed_successor_keys_a_pre_succession_generation_from_the_kept_wra
     } = an_unkeyed_successor().await;
     // U keyed g1 from the kept wrap; the key rides U's retained bundle until
     // g1's AUTHORED shred, which the reclaim pass below writes and which is
-    // the one row that drops it (`account-data-taxonomy.md` § Fleet-scope
-    // reclamation → *the authored shred*). The keying itself is pinned by the
+    // the one row that drops it (`fleet-scope-reclamation.md`
+    // § Fleet-scope reclamation → *the authored shred*). The keying itself is pinned by the
     // carried mint record (next assert) and the reads at the end.
     let in_bundle = u.custody.0.lock().unwrap().contains_key(&g1);
     assert!(
@@ -6980,7 +6998,7 @@ async fn a_seed_holder_that_never_enrolls_reads_the_deployment_seeds_with_the_co
 
 // ── The capability host's plane read (decision 1′) ──────────────────────────
 //
-// `on-demand-files.md` § Shared sets on a capability host, decision 1′: a
+// `on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 1′: a
 // process that hosts no account store reads the fleet-only
 // `fauna.state.folder-keys` through a throwaway fleet replica keyed as the
 // enrolled device it is a process of — the machine principal's inline wraps

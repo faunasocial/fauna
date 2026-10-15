@@ -110,6 +110,44 @@ pub fn build_spf_record(domain: &str, spf_body: &str) -> DnsRecord {
     txt(domain.to_string(), spf_body)
 }
 
+/// The suffix the RSA-2048 key's DKIM selector carries after its label.
+pub const DKIM_RSA_SELECTOR_SUFFIX: &str = "-rsa";
+/// The suffix the Ed25519 key's DKIM selector carries after its label.
+pub const DKIM_ED25519_SELECTOR_SUFFIX: &str = "-ed25519";
+
+/// The two DKIM selectors one selector label publishes under
+/// (`mail-multidomain.md` § Per-domain DKIM → *Key shape*): every message is
+/// signed twice, RSA-2048 and Ed25519, and each public key sits at its own
+/// `<selector>._domainkey.<domain>` name — never two TXT records at one name.
+/// A domain carries one label (`default`, then `<YYYYMM>` at each rotation);
+/// both algorithms rotate together under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DkimSelectorPair {
+    /// `<label>-rsa`.
+    pub rsa: String,
+    /// `<label>-ed25519`.
+    pub ed25519: String,
+}
+
+/// The [`DkimSelectorPair`] a selector label publishes under. The one
+/// derivation every mint, signer and reader shares.
+pub fn dkim_selector_pair(label: &str) -> DkimSelectorPair {
+    DkimSelectorPair {
+        rsa: format!("{label}{DKIM_RSA_SELECTOR_SUFFIX}"),
+        ed25519: format!("{label}{DKIM_ED25519_SELECTOR_SUFFIX}"),
+    }
+}
+
+/// The label a DKIM selector belongs to — the inverse of
+/// [`dkim_selector_pair`]. `None` for a name that carries neither suffix (or
+/// nothing before it).
+pub fn dkim_selector_label(selector: &str) -> Option<&str> {
+    selector
+        .strip_suffix(DKIM_RSA_SELECTOR_SUFFIX)
+        .or_else(|| selector.strip_suffix(DKIM_ED25519_SELECTOR_SUFFIX))
+        .filter(|label| !label.is_empty())
+}
+
 /// `<selector>._domainkey.<domain> TXT "<public_dns_value>"` — frames the
 /// **stored** DKIM public DNS value (`mail_dkim_keys.public_dns_value` /
 /// onboarding's `cloud_init` `public_dns_value`, the full `v=DKIM1; k=…; p=…`
@@ -352,6 +390,18 @@ mod tests {
     use super::*;
     #[cfg(feature = "multidomain")]
     use crate::outbound::mta_sts::{MtaStsMode, MtaStsPolicy, assemble_policy_body};
+
+    /// One label yields the two algorithm selectors, and each maps back.
+    #[test]
+    fn a_dkim_label_derives_its_selector_pair_and_back() {
+        let pair = dkim_selector_pair("202610");
+        assert_eq!(pair.rsa, "202610-rsa");
+        assert_eq!(pair.ed25519, "202610-ed25519");
+        assert_eq!(dkim_selector_label(&pair.rsa), Some("202610"));
+        assert_eq!(dkim_selector_label(&pair.ed25519), Some("202610"));
+        assert_eq!(dkim_selector_label("default"), None);
+        assert_eq!(dkim_selector_label("-rsa"), None);
+    }
 
     #[test]
     fn default_spf_body_is_softfail() {

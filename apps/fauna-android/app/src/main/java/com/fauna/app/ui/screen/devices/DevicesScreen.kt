@@ -3,6 +3,8 @@ package com.fauna.app.ui.screen.devices
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -15,23 +17,32 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.core.HexUtil
 import com.fauna.app.ui.components.CopyButton
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.components.TokenSelect
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.custodyHeldBytesText
 import com.fauna.app.ui.util.custodyReceiptStatusText
+import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.resolveLocalizedNested
+import com.fauna.app.ui.viewmodel.CustodyGesture
 import com.fauna.app.ui.viewmodel.DevicesVM
 import com.fauna.ffi.shortId
 import uniffi.fauna_devices_machine.DeviceSummary
 import uniffi.fauna_devices_machine.DevicesSnapshot
+import uniffi.fauna_devices_machine.FleetMemberSummary
 import social.fauna.generated.Ids
+import uniffi.fauna_client_capabilities.CustodyHeldRowView
+import uniffi.fauna_client_capabilities.CustodyMintCandidateView
+import uniffi.fauna_client_capabilities.CustodyOfferRowView
 
 /**
  * Settings → Devices (`docs/goal/ui/devices.md`): the device **roster only**.
@@ -61,6 +72,12 @@ fun DevicesRosterScreen(
 ) {
     val snapshot by vm.snapshot.collectAsState()
     val custodyRows by vm.custodyRows.collectAsState()
+    val custodyHeld by vm.custodyHeld.collectAsState()
+    val custodyOffers by vm.custodyOffers.collectAsState()
+    val custodyOfferTargets by vm.custodyOfferTargets.collectAsState()
+    val keylessPrincipals by vm.keylessPrincipals.collectAsState()
+    val mintCandidates by vm.mintCandidates.collectAsState()
+    val memberRemovePending by vm.memberRemovePending.collectAsState()
     val sharingError by vm.sharingError.collectAsState()
     val enrollmentNotice by vm.enrollmentNotice.collectAsState()
     val appMessages = LocalAppMessages.current
@@ -119,13 +136,25 @@ fun DevicesRosterScreen(
                     com.fauna.ffi.devicePlaceLabel(originates, accepts, appliesDeletes),
                 ).orEmpty()
             },
+            keylessPrincipals = keylessPrincipals,
             custodyRows = custodyRows,
-            onRevokeCustody = vm::revokeCustody,
+            custodyHeld = custodyHeld,
+            custodyOffers = custodyOffers,
+            custodyOfferTargets = custodyOfferTargets,
+            mintCandidates = mintCandidates,
+            onCustodyGesture = vm::runCustodyGesture,
             // Both custody lines are resolved out here and injected as plain
             // strings — the `conflictBadgeLabels` idiom that keeps the stateless
             // Content free of FFI calls under the Compose test harness.
             receiptStatusLine = { receipt -> custodyReceiptStatusText(context, receipt) },
             heldBytesLine = { receipt -> custodyHeldBytesText(context, receipt) },
+            memberRemovePending = memberRemovePending,
+            onMemberArm = vm::armMemberRemoval,
+            onMemberCancel = vm::cancelMemberRemoval,
+            onMemberConfirm = vm::confirmMemberRemoval,
+            // The shared absolute-local timestamp door, injected so the stateless
+            // Content stays FFI-free under Robolectric (the `statusLabel` idiom).
+            memberEnrolledAt = { ms -> com.fauna.ffi.formatUnixLocalMs(ms) },
         )
     }
 }
@@ -154,19 +183,40 @@ fun DevicesRosterContent(
     // (originates, accepts, appliesDeletes) through the SAME labels the create
     // wizard's place checkboxes carry, resolved nested.
     placeLabel: (Boolean, Boolean, Boolean) -> String,
-    // ── T16 custody facet, owner side (devices.md § Custody facet, piece 2) ──
-    // The shared fold's owner-side rows, straight off the boundary — NOT
+    // ── T16 custody facet (devices.md § Custody facet, pieces 1–3 + the mint) ──
+    // Piece 1: the enrolled principals the shared `keyless_posture` rule marks
+    // relay-only — a roster card whose `principal` is in here wears
+    // `device-keyless-posture-badge`.
+    keylessPrincipals: Set<String> = emptySet(),
+    // The shared fold's three row families, straight off the boundary — NOT
     // `DevicesSnapshot` state (the facet folds the `fauna.state.custody-ceremony` entries the keyless
-    // machine cannot read), which is why they arrive as their own parameter.
+    // machine cannot read), which is why they arrive as their own parameters.
     custodyRows: List<uniffi.fauna_client_capabilities.CustodyHolderRowView> = emptyList(),
-    // Revoke, carrying the row's grant id + accept-bound custodian key — never a
-    // row index, which a refold can re-point at a different custody.
-    onRevokeCustody: (ByteArray, ByteArray?) -> Unit = { _, _ -> },
+    custodyHeld: List<CustodyHeldRowView> = emptyList(),
+    custodyOffers: List<CustodyOfferRowView> = emptyList(),
+    // The offers (lowercase-hex grant id) whose card renders the target select —
+    // the shared `custody_offer_shows_target_select` answer, never a row field.
+    custodyOfferTargets: Set<String> = emptySet(),
+    // The mint flow: null = closed, else the host options it is open over.
+    mintCandidates: List<CustodyMintCandidateView>? = null,
+    // Every custody control's one sink — each gesture carries its grant id,
+    // never a row index, which a refold can re-point at a different custody.
+    onCustodyGesture: (CustodyGesture) -> Unit = {},
     // The two custody lines, already resolved (same injection reasoning as
     // [statusLabel]): the three-state receipt status, and held-bytes-against-budget
     // with the degraded marker riding it.
     receiptStatusLine: (uniffi.fauna_client_capabilities.CustodyReceiptRowView) -> String = { "" },
     heldBytesLine: (uniffi.fauna_client_capabilities.CustodyReceiptRowView) -> String = { "" },
+    // ── Members without a matching entry (devices.md § Members without a matching entry) ──
+    // The armed card's fleet id (`FleetMemberSummary.deviceId`), or null — keyed,
+    // never positional; the VM owns it.
+    memberRemovePending: String? = null,
+    onMemberArm: (String) -> Unit = {},
+    onMemberCancel: () -> Unit = {},
+    onMemberConfirm: (String) -> Unit = {},
+    // `{when}` for `device-member-enrolled-at`: the shared absolute-local
+    // timestamp door over `enrolledAtMs`, injected like [statusLabel].
+    memberEnrolledAt: (Long) -> String = { "" },
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -195,6 +245,27 @@ fun DevicesRosterContent(
                 DeviceCard(
                     device, index, localDeviceId, onRemoveDevice, onSetP2pParticipation,
                     statusLabel, placeLabel,
+                    keyless = device.principal?.let { it in keylessPrincipals } == true,
+                    ownFingerprint = snapshot?.ownFingerprint,
+                )
+            }
+        }
+        // The member group: signed-in fleet devices no roster row accounts for.
+        // Renders NOTHING while empty — no title, no note.
+        val members = snapshot?.members.orEmpty()
+        if (members.isNotEmpty()) {
+            SectionHeader(stringResource(R.string.devices_members_title))
+            Text(
+                stringResource(R.string.devices_member_note),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(Ids.DEVICE_MEMBER_NOTE),
+            )
+            members.forEach { member ->
+                MemberCard(
+                    member,
+                    armed = memberRemovePending == member.deviceId,
+                    onMemberArm, onMemberCancel, onMemberConfirm, memberEnrolledAt,
                 )
             }
         }
@@ -210,22 +281,249 @@ fun DevicesRosterContent(
         if (custodyDeviceRows.isNotEmpty()) {
             SectionHeader(stringResource(R.string.devices_custody_holder_section))
             custodyDeviceRows.forEach { row ->
-                CustodyHolderCard(row, onRevokeCustody, receiptStatusLine, heldBytesLine)
+                CustodyHolderCard(
+                    row,
+                    { grantId, holder -> onCustodyGesture(CustodyGesture.Revoke(grantId, holder)) },
+                    receiptStatusLine,
+                    heldBytesLine,
+                )
             }
+        }
+        // The host side — "what I hold for others" — then the offers waiting on
+        // this account's consent, then the ask: the facet's order, below the
+        // roster (none of these are this account's devices). Each group is
+        // hidden while empty, as above.
+        if (custodyHeld.isNotEmpty()) {
+            SectionHeader(stringResource(R.string.devices_custody_held_section))
+            custodyHeld.forEach { row -> CustodyHeldCard(row, heldBytesLine, onCustodyGesture) }
+        }
+        // The cards carry their own titles ("‹owner› asks this device…"), so
+        // the group needs no header.
+        custodyOffers.forEach { offer ->
+            CustodyOfferCard(
+                offer,
+                showsTarget = HexUtil.bytesToHex(offer.grantId) in custodyOfferTargets,
+                onCustodyGesture,
+            )
+        }
+        CustodyMintFlow(mintCandidates, onCustodyGesture)
+    }
+}
+
+/**
+ * One `custody-held-card` — a custody this device holds for another account
+ * (`devices.md` § Custody facet, piece 3): the owner, the scope, the metered
+ * bytes against the budget, the budget input, stop and remove. Every control is
+ * live — each raises one [CustodyGesture] the VM runs through the shared
+ * `run_custody_act` and answers on `error-message`.
+ */
+@Composable
+private fun CustodyHeldCard(
+    row: CustodyHeldRowView,
+    heldBytesLine: (uniffi.fauna_client_capabilities.CustodyReceiptRowView) -> String,
+    onCustodyGesture: (CustodyGesture) -> Unit,
+) {
+    // The budget input seeds from the shared `budget_draft` text and re-seeds on
+    // every fold that changes it (a committed budget, a re-folded registry row),
+    // so a stale local draft never outlives the persisted cap.
+    val seed = localized(row.budgetDraft).orEmpty()
+    var draft by remember(HexUtil.bytesToHex(row.grantId), seed) { mutableStateOf(seed) }
+    val commit = { onCustodyGesture(CustodyGesture.SetBudget(row.grantId, draft)) }
+    Card(modifier = Modifier.fillMaxWidth().testTag(Ids.CUSTODY_HELD_CARD)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                stringResource(R.string.devices_custody_held_owner)
+                    .replace("{owner}", shortId(HexUtil.bytesToHex(row.owner))),
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.testTag(Ids.CUSTODY_HELD_OWNER),
+            )
+            val scopes = row.scopes
+            Text(
+                if (scopes != null && !scopes.wholeAccount) {
+                    scopes.scopes.joinToString(", ")
+                } else {
+                    stringResource(R.string.devices_custody_held_scope_account)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(Ids.CUSTODY_HELD_SCOPE),
+            )
+            Text(
+                heldBytesLine(row.receipt),
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag(Ids.CUSTODY_HELD_BYTES),
+            )
+            // Commit on the keyboard's Done — a single-line field also performs
+            // its IME action on a hardware Enter, which is the commit the e2e
+            // driver presses (`drivers/android.py::COMMIT_ON_ENTER_INPUTS`).
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { draft = it },
+                label = { Text(stringResource(R.string.devices_custody_budget_label)) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { commit() }),
+                modifier = Modifier.fillMaxWidth().testTag(Ids.CUSTODY_HELD_BUDGET_INPUT),
+            )
+            // The reclaim is a nest call (OnlineOnly), so offline it greys with the
+            // shared reason; stop/budget are not gated here.
+            val removeGate = faunaGate("fauna.custody.hosting.remove")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // Stopping pauses the hold; it does not free the space. Once
+                // stopped the control says so and disables — the bytes stay
+                // until the custody is removed.
+                OutlinedButton(
+                    onClick = { onCustodyGesture(CustodyGesture.Stop(row.grantId)) },
+                    enabled = !row.stopped,
+                    modifier = Modifier.testTag(Ids.CUSTODY_HELD_STOP_BUTTON),
+                ) {
+                    Text(
+                        stringResource(
+                            if (row.stopped) R.string.devices_custody_stopped_bytes_remain
+                            else R.string.devices_custody_stop,
+                        ),
+                    )
+                }
+                // Always available, stopped or not: stop is the pause and this
+                // is the reclaim.
+                TextButton(
+                    onClick = { onCustodyGesture(CustodyGesture.Remove(row.grantId)) },
+                    enabled = removeGate.enabled,
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                    modifier = Modifier.testTag(Ids.CUSTODY_HELD_REMOVE_BUTTON),
+                ) { Text(stringResource(R.string.devices_custody_remove)) }
+            }
+            DisabledControlReasonText(removeGate.reason)
+        }
+    }
+}
+
+/**
+ * One `custody-offer-card` — the consent surface (`devices.md` § Custody facet,
+ * piece 3). The floor copy is REQUIRED before accept: what this device would see
+ * — the shape, never the content. The target select renders ONLY where
+ * [showsTarget] (the shared `custody_offer_shows_target_select` answer) says so —
+ * absent otherwise, never disabled — and the accept then binds what it picks.
+ */
+@Composable
+private fun CustodyOfferCard(
+    offer: CustodyOfferRowView,
+    showsTarget: Boolean,
+    onCustodyGesture: (CustodyGesture) -> Unit,
+) {
+    var onNest by remember(HexUtil.bytesToHex(offer.grantId)) { mutableStateOf(false) }
+    Card(modifier = Modifier.fillMaxWidth().testTag(Ids.CUSTODY_OFFER_CARD)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                stringResource(R.string.devices_custody_offer_title)
+                    .replace("{owner}", shortId(HexUtil.bytesToHex(offer.owner))),
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Text(
+                stringResource(R.string.devices_custody_offer_floor),
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag(Ids.CUSTODY_OFFER_FLOOR_NOTE),
+            )
+            if (showsTarget) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        stringResource(R.string.devices_custody_offer_target_label),
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(end = 8.dp),
+                    )
+                    TokenSelect(
+                        testTagValue = Ids.CUSTODY_OFFER_TARGET_SELECT,
+                        selected = if (onNest) TARGET_NEST else TARGET_DEVICE,
+                        options = listOf(
+                            TARGET_DEVICE to stringResource(R.string.devices_custody_offer_target_device),
+                            TARGET_NEST to stringResource(R.string.devices_custody_offer_target_nest),
+                        ),
+                        onSelect = { onNest = it == TARGET_NEST },
+                    )
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    // Where the select is absent the accept binds this device.
+                    onClick = {
+                        onCustodyGesture(CustodyGesture.Accept(offer.grantId, showsTarget && onNest))
+                    },
+                    modifier = Modifier.testTag(Ids.CUSTODY_OFFER_ACCEPT_BUTTON),
+                ) { Text(stringResource(R.string.devices_custody_offer_accept)) }
+                TextButton(
+                    onClick = { onCustodyGesture(CustodyGesture.Decline(offer.grantId)) },
+                    modifier = Modifier.testTag(Ids.CUSTODY_OFFER_DECLINE_BUTTON),
+                ) { Text(stringResource(R.string.devices_custody_offer_decline)) }
+            }
+        }
+    }
+}
+
+/** The target select's two tokens — this device (the default) or my nest. */
+private const val TARGET_DEVICE = "device"
+private const val TARGET_NEST = "nest"
+
+/**
+ * The offer-initiation flow (`custody-mint-*`): the button, and — once the VM has
+ * read the candidates ([candidates] non-null) — the host select, the REQUIRED
+ * floor copy, confirm and cancel. v1 offers the Account scope with the default
+ * window over an EXISTING 1:1 conversation, so the options are those
+ * conversations. Each option's token is the host's lowercase-hex actor id, its
+ * label the conversation's own; confirm is live only once a host is chosen (a
+ * control that cannot succeed is not offered).
+ */
+@Composable
+private fun CustodyMintFlow(
+    candidates: List<CustodyMintCandidateView>?,
+    onCustodyGesture: (CustodyGesture) -> Unit,
+) {
+    OutlinedButton(
+        onClick = { onCustodyGesture(CustodyGesture.MintOpen) },
+        modifier = Modifier.testTag(Ids.CUSTODY_MINT_BUTTON),
+    ) { Text(stringResource(R.string.devices_custody_mint_button)) }
+    if (candidates == null) return
+    // Re-opening over a new candidate list starts from the placeholder again.
+    var chosen by remember(candidates) { mutableStateOf("") }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            stringResource(R.string.devices_custody_mint_host_label),
+            style = MaterialTheme.typography.bodySmall,
+        )
+        TokenSelect(
+            testTagValue = Ids.CUSTODY_MINT_HOST_SELECT,
+            selected = chosen,
+            options = listOf("" to stringResource(R.string.devices_custody_mint_host_placeholder)) +
+                candidates.map { HexUtil.bytesToHex(it.host) to it.label },
+            onSelect = { chosen = it },
+        )
+        Text(
+            stringResource(R.string.devices_custody_mint_floor),
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.testTag(Ids.CUSTODY_MINT_FLOOR_NOTE),
+        )
+        val pick = candidates.firstOrNull { HexUtil.bytesToHex(it.host) == chosen }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                // Passed back unchanged — the page picks a row, it never
+                // assembles a channel.
+                onClick = { pick?.let { onCustodyGesture(CustodyGesture.Mint(it.host, it.channelHex)) } },
+                enabled = pick != null,
+                modifier = Modifier.testTag(Ids.CUSTODY_MINT_CONFIRM_BUTTON),
+            ) { Text(stringResource(R.string.devices_custody_mint_confirm)) }
+            TextButton(
+                onClick = { onCustodyGesture(CustodyGesture.MintCancel) },
+                modifier = Modifier.testTag(Ids.CUSTODY_MINT_CANCEL_BUTTON),
+            ) { Text(stringResource(R.string.common_cancel)) }
         }
     }
 }
 
 /**
  * One `custody-holder-card` — a cross-account custodian device holding sealed
- * copies of this account's planes (`devices.md` § Custody facet, piece 2).
- *
- * Piece 2 only, and that is a prerequisite fact rather than a shortcut: pieces 1
- * (keyless-posture badge) and 3 (the held-for-others card with its budget input
- * and stop control) both need the W3 (account-data-plane.md § Workstreams) account store, which reaches no UniFFI app
- * yet — so the boundary exports neither store-writing gesture, and a card
- * offering controls that cannot succeed is exactly what the ratified piece 3
- * forbids.
+ * copies of this account's planes (`devices.md` § Custody facet, piece 2). The
+ * host-side families (piece 3) and the mint render below it, from the same fold.
  */
 @Composable
 private fun CustodyHolderCard(
@@ -288,6 +586,62 @@ private fun CustodyHolderCard(
     }
 }
 
+/**
+ * One `device-member-card` — a verified fleet member no roster row accounts for.
+ * Shows only what the fleet record asserts: the shared-rendered fingerprint and
+ * the self-asserted enrollment instant. Removal is two-step and key-addressed:
+ * the remove button arms THIS card (its confirm/cancel pair replaces the button),
+ * confirm hands back the member's fleet id.
+ */
+@Composable
+private fun MemberCard(
+    member: FleetMemberSummary,
+    armed: Boolean,
+    onArm: (String) -> Unit,
+    onCancel: () -> Unit,
+    onConfirm: (String) -> Unit,
+    enrolledAt: (Long) -> String,
+) {
+    Card(modifier = Modifier.fillMaxWidth().testTag(Ids.DEVICE_MEMBER_CARD)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                // The fingerprint arrives rendered (`fleet_fingerprint`) — never a local formatter.
+                stringResource(R.string.devices_member_fingerprint)
+                    .replace("{fingerprint}", member.fingerprint),
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.testTag(Ids.DEVICE_MEMBER_FINGERPRINT),
+            )
+            Text(
+                stringResource(R.string.devices_member_enrolled_at)
+                    .replace("{when}", enrolledAt(member.enrolledAtMs)),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(Ids.DEVICE_MEMBER_ENROLLED_AT),
+            )
+            if (armed) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { onConfirm(member.deviceId) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                        ),
+                        modifier = Modifier.testTag(Ids.DEVICE_MEMBER_REMOVE_CONFIRM_BUTTON),
+                    ) { Text(stringResource(R.string.devices_member_remove_confirm)) }
+                    TextButton(
+                        onClick = onCancel,
+                        modifier = Modifier.testTag(Ids.DEVICE_MEMBER_REMOVE_CANCEL_BUTTON),
+                    ) { Text(stringResource(R.string.common_cancel)) }
+                }
+            } else {
+                OutlinedButton(
+                    onClick = { onArm(member.deviceId) },
+                    modifier = Modifier.testTag(Ids.DEVICE_MEMBER_REMOVE_BUTTON),
+                ) { Text(stringResource(R.string.common_remove)) }
+            }
+        }
+    }
+}
+
 @Composable
 private fun DeviceCard(
     device: DeviceSummary,
@@ -297,6 +651,10 @@ private fun DeviceCard(
     onSetP2pParticipation: (Int, Boolean) -> Unit,
     statusLabel: (Boolean) -> String,
     placeLabel: (Boolean, Boolean, Boolean) -> String,
+    keyless: Boolean = false,
+    // This device's own fleet fingerprint (`DevicesSnapshot.ownFingerprint`),
+    // painted beside `device-this-mark-badge` on the marked row only.
+    ownFingerprint: String? = null,
 ) {
     var showRemoveDialog by remember(device.deviceId) { mutableStateOf(false) }
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.DEVICE_CARD)) {
@@ -329,6 +687,19 @@ private fun DeviceCard(
                     modifier = Modifier.testTag(Ids.DEVICE_GUARDIAN_MARK_BADGE),
                 )
             }
+            // Piece 1 of the custody facet (`devices.md` § Custody facet): an
+            // own device enrolled relay-only wears the DERIVED posture — a fact,
+            // never a toggle. The shared `keyless_posture` rule decides
+            // ([DevicesVM.keylessPrincipals]); every unknown reads as "not
+            // keyless", so the marker never rests on a guess.
+            if (keyless) {
+                Text(
+                    stringResource(R.string.devices_keyless_posture_badge),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag(Ids.DEVICE_KEYLESS_POSTURE_BADGE),
+                )
+            }
             // Not mutually exclusive with the guardian badge above — a
             // guardian marking their own enrolled device can legitimately
             // carry both (`devices.md` § This-device marker).
@@ -339,6 +710,17 @@ private fun DeviceCard(
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.testTag(Ids.DEVICE_THIS_MARK_BADGE),
                 )
+                // Beside the marker, the user's half of the comparison the member
+                // group asks for; absent while the snapshot carries none.
+                if (ownFingerprint != null) {
+                    Text(
+                        stringResource(R.string.devices_own_fingerprint)
+                            .replace("{fingerprint}", ownFingerprint),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag(Ids.DEVICE_OWN_FINGERPRINT),
+                    )
+                }
             }
             // One `device-folder-role-badge` chip per folder this device
             // carries, stating its place in that set (`DeviceSummary.folders`,

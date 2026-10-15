@@ -54,8 +54,8 @@ public class MockNestHttpClient : INestHttpClient
         return Task.CompletedTask;
     }
 
-    // GetNodeInfoAsync removed — version moved to fauna.admin.status
-    // (MockNestRpcClient.AdminStatusAsync).
+    // GetNodeInfoAsync removed — the version rides the shared card set
+    // (MockNestRpcClient.AdminDashboardSnapshotAsync).
 
     // Direct/group send + conversation list/detail + community-group HTTP mocks
     // removed with the dead INestHttpClient methods (conversations run through
@@ -120,7 +120,7 @@ public class MockNestHttpClient : INestHttpClient
 
     // ── Admin ──
     // Stats + is-admin gate moved to the WS-RPC plane (MockNestRpcClient:
-    // AdminStatsAsync / AmIAdminAsync).
+    // AdminDashboardSnapshotAsync / AmIAdminAsync).
 
     // ── Blobs ──
 
@@ -146,6 +146,8 @@ public class MockNestHttpClient : INestHttpClient
         RecordCall("GetContent");
         return Task.FromResult(NextBlobBytes);
     }
+
+    public string NestUrl { get; set; } = "http://nest.test:8080";
 
     public List<(byte[] Data, UploadAudience Audience)> UploadBlobCalls { get; } = new();
     public string NextUploadedBlobHash { get; set; } = "00" + new string('0', 62); // valid 64-char hex

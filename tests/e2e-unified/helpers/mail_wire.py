@@ -21,12 +21,16 @@ inbound→imap handle) works.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import re
 import socket
 import ssl
 import time
 import urllib.request
+
+from helpers.budgets import MAIL_OUTBOUND_CYCLE_S
+from helpers.waiting import wait_until
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -94,6 +98,20 @@ class _SmtpConn:
 
     def send_raw(self, data: bytes) -> None:
         self._sock.sendall(data)
+
+
+def _read_final_reply(conn: _SmtpConn, deadline: float) -> str:
+    """Read reply lines until a non-continuation arrives — WITHOUT asserting a code.
+
+    `_SmtpConn.expect` asserts the code it was handed; a test that must
+    *discover* the server's verdict (deliver, defer, refuse) — or poll it while
+    an admin change hot-applies — reads the final line with this instead.
+    """
+    while True:
+        line = conn.recv_line(deadline)
+        if len(line) >= 4 and line[3] == "-":
+            continue
+        return line
 
 
 def _connect_smtp_starttls(mx_port: int, server_name: str, deadline: float) -> _SmtpConn:
@@ -235,6 +253,160 @@ def _poke_outbound_bridge(nest_url: str) -> int:
 # ─────────────────────────────────────────────────────────────────────────
 # IMAP wire (IMAPS / IMAP+STARTTLS)
 # ─────────────────────────────────────────────────────────────────────────
+
+
+def outbound_clock(nest_url: str, **body) -> int:
+    """Set (`set=<epoch>`, `set=0` back to the real clock) or move
+    (`advance=<secs>`) the nest's outbound clock — the one every queue time and
+    the warm-up day are read on — via `POST /api/v1/test/outbound/clock`
+    (`test-hooks`); returns the clock's new value. Any value but `set=0` leaves
+    the clock FROZEN there."""
+    req = urllib.request.Request(
+        f"{nest_url}/api/v1/test/outbound/clock", data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=5.0) as resp:
+        return json.loads(resp.read().decode())["clock"]
+
+
+def outbound_clock_now(nest_url: str) -> tuple[int, bool]:
+    """Read the nest's outbound clock without leaving it changed: returns
+    `(now, frozen)`. The hook has no read form, so this freezes the clock at its
+    current value and, when that value is the real clock (unfrozen before),
+    un-freezes it again. A test that moves the clock hands `(now, frozen)` to
+    `restore_outbound_clock` on the way out, so the session-scoped nest's later
+    tests see the clock they would have seen."""
+    now = outbound_clock(nest_url, advance=0)
+    frozen = abs(now - time.time()) > 2
+    if not frozen:
+        outbound_clock(nest_url, set=0)
+    return now, frozen
+
+
+def restore_outbound_clock(nest_url: str, prior: tuple[int, bool]) -> None:
+    """Put the outbound clock back as `outbound_clock_now` found it."""
+    now, frozen = prior
+    outbound_clock(nest_url, set=now if frozen else 0)
+
+
+def outbound_queue(nest_url: str) -> list:
+    """Snapshot nest's `outbound_mail_queue` rows (any status), ordered by id.
+
+    `GET /api/v1/test/outbound/queue`, same `test-hooks` gate. Projects
+    scheduling state only — `attempt_count`, `next_attempt_at`,
+    `delay_warned_at`, `status` — never message bodies.
+    """
+    req = urllib.request.Request(f"{nest_url}/api/v1/test/outbound/queue", method="GET")
+    with urllib.request.urlopen(req, timeout=5.0) as resp:
+        assert resp.status == 200, f"outbound queue hook returned {resp.status}"
+        return json.loads(resp.read().decode())["rows"]
+
+
+def outbound_msgid_key(msgid: str) -> str:
+    """A Message-ID normalized for comparison against `original_msgid`.
+
+    ⚠ The queue stores the two provenances of a msgid differently, and the
+    difference is invisible until an assertion silently never matches: a msgid
+    **parsed from a message header** is stored bare (`t12bounce-…@fauna.test`),
+    while one nest **mints itself** keeps its angle brackets (`<delay-…>`,
+    `<bounce-…>` — see `_count_delay_warning_rows`). Callers hold the header
+    form, so normalizing both sides is what makes a lookup work for either.
+    """
+    return msgid.strip().lstrip("<").rstrip(">")
+
+
+@contextlib.contextmanager
+def outbound_clock_on_real_time(nest_url: str):
+    """Put the outbound clock on the real clock for the block; restore it after."""
+    prior = outbound_clock_now(nest_url)
+    outbound_clock(nest_url, set=0)
+    try:
+        yield
+    finally:
+        restore_outbound_clock(nest_url, prior)
+
+
+def outbound_row(nest_url: str, token: str, rcpt: str):
+    """The queue row of the message tagged `token` (its Message-ID is
+    `<token@domain>`, `submit_one_message`) for `rcpt`, or None."""
+    return next(
+        (r for r in outbound_queue(nest_url)
+         if outbound_msgid_key(r["original_msgid"]).split("@", 1)[0] == token
+         and r["recipient"] == rcpt),
+        None,
+    )
+
+
+def await_outbound_row(nest_url: str, token: str, rcpt: str, want, what: str) -> dict:
+    """Wait until `outbound_row(...)` exists and satisfies `want`; return it."""
+    def _matching():
+        row = outbound_row(nest_url, token, rcpt)
+        return row if row is not None and want(row) else None
+
+    return wait_until(
+        _matching,
+        MAIL_OUTBOUND_CYCLE_S,
+        diagnose=lambda: f"{what}: row is {outbound_row(nest_url, token, rcpt)!r}",
+    )
+
+
+def outbound_attempt_at(nest_url: str, token: str, rcpt: str, at: int) -> dict:
+    """Move the clock to `at`, run a drain cycle now, and return the row once
+    that attempt is recorded (its count advanced, or it went terminal)."""
+    before = outbound_row(nest_url, token, rcpt)
+    assert before is not None and before["status"] == "pending", before
+    outbound_clock(nest_url, set=at)
+    _poke_outbound_bridge(nest_url)
+    return await_outbound_row(
+        nest_url, token, rcpt,
+        lambda r: r["attempt_count"] > before["attempt_count"] or r["status"] != "pending",
+        f"an attempt at clock {at}",
+    )
+
+def await_outbound_terminal(nest_url: str, msgid: str, recipient: str) -> dict:
+    """Barrier: wait until the queue row for `(msgid, recipient)` is terminal.
+
+    The causal anchor every "the DSN must NOT be relayed out" guard rests on
+    (`e2e-conventions.md` § convention 14 — negative asserts anchor to causal
+    order, never to a settle window). nest's `mark_outbound_bounced` handler
+    runs the **entire** NDR generation before it flips the row off `pending`,
+    and `submit_outbound` — the single chokepoint where a DSN could ever be
+    enqueued for MX relay — is inside that span:
+
+      * to-sender NDR: `submit_outbound` (`outbound_bounce.rs:174-200`) then
+        `mark_outbound_bounced_with_reason` (`:206`);
+      * forwarder NDR: `seal_and_ingest_local` (`:321-337`) then
+        `mark_outbound_bounced_with_reason` (`:343`);
+      * both of the handler's own fallback arms mark the row bounced too
+        (`bridge_routing_handlers.rs:6300-6330`), so the status leaves
+        `pending` on every path.
+
+    So a row observed terminal proves that message's relay decision has already
+    been made, and any row it would have enqueued is **already in the queue**.
+    "No DSN was relayed out" becomes a statement about state rather than about
+    elapsed time — and it is strictly stronger than reading the stub MX, which
+    could only see a relayed DSN after a further outbound drain cycle (the
+    worker's `PollInterval` is 30 s, so the 2 s settle windows this replaced
+    could not reliably have caught the regression at all).
+
+    Returns the terminal row, so a caller can assert on the status it reached.
+    """
+    return wait_until(
+        lambda: next(
+            (
+                row
+                for row in outbound_queue(nest_url)
+                if outbound_msgid_key(row["original_msgid"]) == outbound_msgid_key(msgid)
+                and row["recipient"] == recipient
+                and row["status"] != "pending"
+            ),
+            None,
+        ),
+        MAIL_OUTBOUND_CYCLE_S,
+        diagnose=lambda: (
+            f"no terminal outbound row for msgid={msgid!r} recipient={recipient!r}; "
+            f"queue={[(r['original_msgid'], r['recipient'], r['status']) for r in outbound_queue(nest_url)]}"
+        ),
+    )
 
 
 def _recv_line(sock: socket.socket, buf: bytearray, deadline: float) -> str:
@@ -553,6 +725,15 @@ def dkim_signature_tag(raw: bytes, tag: str) -> str | None:
     #1/#4 — one DKIM parser, not a copy per test) so the process-level MTA test
     and the docker deploy round-trip tests share it.
     """
+    tags = dkim_signature_tags(raw, tag)
+    return tags[0] if tags else None
+
+
+def dkim_signature_tags(raw: bytes, tag: str) -> list[str | None]:
+    """The value of ``<tag>=`` from EVERY DKIM-Signature header, in header
+    order (``None`` for a signature without it). The nest signs each message
+    twice — RSA first, then Ed25519 (`mail-multidomain.md` § Per-domain DKIM →
+    *Key shape*) — so ``s=`` reads ``["<label>-rsa", "<label>-ed25519"]``."""
     text = raw.decode("latin-1", "replace")
     hdr_end = text.find("\r\n\r\n")
     if hdr_end < 0:
@@ -564,13 +745,61 @@ def dkim_signature_tag(raw: bytes, tag: str) -> str | None:
             logical[-1] += line
         else:
             logical.append(line)
+    values: list[str | None] = []
     for h in logical:
         if h.lower().startswith("dkim-signature:"):
+            value = None
             for part in h.split(":", 1)[1].split(";"):
                 part = part.strip()
                 if part.startswith(tag + "="):
-                    return part[len(tag) + 1 :].strip()
-    return None
+                    value = part[len(tag) + 1 :].strip()
+                    break
+            values.append(value)
+    return values
+
+
+def dkim_selector_pair(label: str) -> list[str]:
+    """The two DKIM selectors a selector label publishes under, in signing
+    order — the test-side twin of shared Rust's
+    ``fauna_mail::dns::per_domain::dkim_selector_pair``."""
+    return [f"{label}-rsa", f"{label}-ed25519"]
+
+
+def verify_each_dkim_signature(
+    raw: bytes, domain: str, records: dict[str, str]
+) -> tuple[list[str], list[bytes]]:
+    """Verify EVERY DKIM-Signature on ``raw`` independently with dkimpy (an
+    independent verifier, never our signer) and return ``(selectors whose
+    signature verified, every name dkimpy queried)``.
+
+    ``records`` maps a selector to the TXT value published at
+    ``<selector>._domainkey.<domain>`` — the nest's ``list_dkim_selectors``
+    values. The dkimpy ``dnsfunc`` answers ONLY those aligned names, so a
+    signature with a misaligned ``d=``/``s=`` queries a name nobody answers
+    and fails. A caller asserts the verified list equals the selectors it
+    expects (both of a label's, RSA first) — the in-CI proxy for a receiver's
+    ``dkim=pass`` on each algorithm.
+    """
+    import dkim  # dkimpy — independent verifier; fleet venv dep
+
+    by_name = {
+        f"{selector}._domainkey.{domain}.".encode(): value
+        for selector, value in records.items()
+    }
+    queries: list[bytes] = []
+
+    def dnsfunc(name, timeout=5):
+        queries.append(name)
+        return by_name.get(name)
+
+    verifier = dkim.DKIM(raw)
+    selectors = dkim_signature_tags(raw, "s")
+    verified = [
+        selector
+        for idx, selector in enumerate(selectors)
+        if verifier.verify(idx=idx, dnsfunc=dnsfunc)
+    ]
+    return verified, queries
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -655,3 +884,79 @@ def build_reply_message(
         lines.append(f"References: {orig_msgid}")
     lines += ["", f"Reply body carrying {reply_nonce} from the external side."]
     return reply_to, ("\r\n".join(lines) + "\r\n").encode()
+
+
+def _mx_accepts(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1.0):
+            return True
+    except OSError:
+        return False
+
+
+def _open_mail_gate_and_wait_for_the_mta(handle, budget_s: float = 120.0) -> None:
+    """The admin opens the deployment's mail gate; return once the MTA serves.
+
+    A venue starts with the gate shut, and the admin's act has TWO possible
+    outcomes depending on a race this setup cannot see. The MTA is spawned
+    without waiting to serve, and its first config fetch may land after the
+    gate opens: it then serves at once and never exits. Or it has already
+    idled: then it exits for rebind, and the venue's `rebind_after_enable`
+    plays the supervisor. Either outcome is observable through the venue's own
+    methods (the listener accepting, or `assert_mta_running` failing), so the
+    wait ends on whichever state the MTA reaches. Waiting only for the exit
+    timed out against an MTA that was already serving.
+    """
+    from helpers.waiting import wait_until
+
+    handle.admin_opens_mail_gate()
+
+    def _state():
+        if _mx_accepts(handle.mx_port):
+            return "serving"
+        try:
+            handle.assert_mta_running()
+        except AssertionError:
+            return "exited"
+        return None
+
+    state = wait_until(
+        _state,
+        budget_s,
+        interval=0.5,
+        diagnose=lambda: f"the MTA neither served nor exited for rebind; {handle.bridge_log_hint('mta')}",
+    )
+    if state == "exited":
+        handle.rebind_after_enable(mda=False)
+
+
+def submit_one_message(handle, rcpt: str, token: str, extra_rcpts=()) -> None:
+    """AUTH PLAIN on 465 as the fixture's sender; one message tagged `token`,
+    to `rcpt` and any `extra_rcpts` in one transaction."""
+    domain = handle.domain
+    sender = f"{handle.submission_sender_local}@{domain}"
+    auth_plain = base64.b64encode(
+        b"\x00" + sender.encode() + b"\x00" + handle.submission_credential
+    ).decode()
+    body = "\r\n".join([
+        f"From: Sender <{sender}>",
+        f"To: {rcpt}",
+        f"Subject: mail health {token}",
+        f"Message-ID: <{token}@{domain}>",
+        "MIME-Version: 1.0",
+        "Content-Type: text/plain; charset=utf-8",
+        "",
+        f"mail health e2e marker {token}.",
+    ]) + "\r\n"
+    deadline = time.monotonic() + 30.0
+    with _connect_submission_tls(handle.submission_port_465, domain) as conn:
+        conn.expect("220", deadline)
+        conn.cmd(f"EHLO {domain}", "250", deadline)
+        conn.cmd(f"AUTH PLAIN {auth_plain}", "235", deadline)
+        conn.cmd(f"MAIL FROM:<{sender}>", "250", deadline)
+        for r in (rcpt, *extra_rcpts):
+            conn.cmd(f"RCPT TO:<{r}>", "250", deadline)
+        conn.cmd("DATA", "354", deadline)
+        conn.send_raw(body.encode())
+        conn.cmd(".", "250", deadline)
+        conn.cmd("QUIT", "221", deadline)

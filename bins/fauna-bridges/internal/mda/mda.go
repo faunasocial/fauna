@@ -314,10 +314,7 @@ func Run(ctx context.Context, deps Deps) error {
 		return fmt.Errorf("mda.Run: TLSProvider is nil (CalDAV + IMAP listeners require terminated TLS)")
 	}
 
-	tlsConfig := &tls.Config{
-		GetCertificate: deps.TLSProvider.GetCertificate,
-		MinVersion:     tls.VersionTLS12,
-	}
+	tlsConfig := bridgetls.HardenedServerConfig(deps.TLSProvider.GetCertificate)
 
 	// listenerCtx cancels every bound listener together — a sibling serve
 	// error, the parent ctx, or a rebind-on-toggle (the config reloader's

@@ -126,12 +126,22 @@
     </label>
     {#if view.show_include_text}
       <label class="checkbox">
-        <input type="checkbox" data-testid={IDS.REPORT_INCLUDE_TEXT_CHECKBOX} bind:checked={form.include_text} />
+        <input
+          type="checkbox"
+          data-testid={IDS.REPORT_INCLUDE_TEXT_CHECKBOX}
+          data-checked={form.include_text ? 'true' : 'false'}
+          bind:checked={form.include_text}
+        />
         {resolveLocalized(view.include_text_label)}
       </label>
     {/if}
     <label class="checkbox">
-      <input type="checkbox" data-testid={IDS.REPORT_BLOCK_AUTHOR_CHECKBOX} bind:checked={form.block_author} />
+      <input
+        type="checkbox"
+        data-testid={IDS.REPORT_BLOCK_AUTHOR_CHECKBOX}
+        data-checked={form.block_author ? 'true' : 'false'}
+        bind:checked={form.block_author}
+      />
       {resolveLocalized(view.block_author_label)}
     </label>
     {#if !view.can_submit && view.blocked_reason}

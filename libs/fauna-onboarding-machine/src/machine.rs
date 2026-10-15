@@ -11,7 +11,7 @@ use fauna_provisioning::{Capability, PROVIDERS};
 
 use crate::cancel::CancelFlag;
 use crate::error::OnboardingError;
-use crate::nest_api::RestoreSeedError;
+use crate::nest_api::{LockAccountError, RestoreSeedError};
 use crate::observer::OnboardingObserver;
 use crate::outcome::WizardOutcome;
 use crate::snapshots::{
@@ -297,6 +297,13 @@ pub struct OnboardingMachine {
     pub(crate) nest_api: Arc<dyn crate::nest_api::NestApi>,
     handle_check: Mutex<HandleCheckSnapshot>,
     invite_request: Mutex<InviteRequestSnapshot>,
+    /// The age band the verified OOB code carries (`InviteCodeVerification::
+    /// age_band`), held beside `invite_request` rather than on
+    /// `OobCodeState::Valid` — a new field on a UniFFI enum variant breaks the
+    /// apple shells' positional pattern binds. Read only to derive
+    /// `InviteRequestSnapshot::supervised_notice`, so it can never outlive a
+    /// `Valid` state: every OOB transition rewrites it.
+    oob_age_band: Mutex<Option<String>>,
     claim_code: Mutex<ClaimCodeSnapshot>,
     /// Snapshot for the `nat_mode_choice` page — the single, terminal
     /// admin-path setup step, reached on claim completion.
@@ -674,6 +681,7 @@ impl OnboardingMachine {
             nest_resolve_override,
             handle_check: Mutex::new(HandleCheckSnapshot::idle()),
             invite_request: Mutex::new(InviteRequestSnapshot::idle()),
+            oob_age_band: Mutex::new(None),
             claim_code: Mutex::new(ClaimCodeSnapshot::idle()),
             nat_mode: Mutex::new(NatModeSnapshot::idle()),
             awaiting_manual_dns: Mutex::new(AwaitingManualDnsSnapshot::idle()),
@@ -692,7 +700,8 @@ impl OnboardingMachine {
             nest_expected_identity,
             inherits_dial_override,
             recovery_config_reader: RwLock::new(crate::recovery_config::production_reader(
-                fauna_account_plane::deployment_seed_recovery::StoreRoot::platform(),
+                fauna_account_plane::deployment_seed_recovery::StoreRoot::platform()
+                    .map_err(|e| format!("{e:#}")),
             )),
             pending_provision: RwLock::new(None),
             provision_reach_ipv4: RwLock::new(None),
@@ -1475,6 +1484,99 @@ impl OnboardingMachine {
         }
     }
 
+    /// `emergency-lockout-entry-button` on `identity_choice` — the signed-out
+    /// lock door (`ui/sessions.md` § Layout & flow → *The signed-out door*).
+    /// Routes to the `emergency_lockout_entry` step. Clears the in-flight
+    /// recovery intent like [`Self::begin_recovery_entry`]: the door is a
+    /// pre-identity ceremony of its own, not a branch of either recovery.
+    pub fn begin_emergency_lockout_entry(&self) {
+        self.mutate(|s| {
+            Self::clear_recovery(s);
+            s.error_message = None;
+            s.step = OnboardingStep::EmergencyLockoutEntry;
+        });
+    }
+
+    /// `sessions-lockout-button` on `emergency_lockout_entry` — lock the account
+    /// the pasted identity secret names for the nest's fixed 24 hours
+    /// (`devices.md` § The signed-out door).
+    ///
+    /// `secret_input` is `paste-secret-field` verbatim — the identity-secret
+    /// grammar of `identity_import` (a 64-hex secret or a `fauna://identity`
+    /// URI), **not** the recovery-kit grammar. The nest is resolved from the
+    /// typed account's domain ([`Self::current_handle`], or the URI's `handle=`
+    /// when nothing is typed) exactly as `recovery_entry` resolves it.
+    /// `confirm_word` is `sessions-lockout-confirm-field`, checked here so all
+    /// seven apps refuse a wrong word identically.
+    ///
+    /// **Persists nothing**: the secret is read, used for one call and dropped;
+    /// no identity slot is filled. On [`EmergencyLockoutOutcome::Locked`] the
+    /// wizard returns to `identity_choice` with the typed account cleared; every
+    /// other outcome stays on the step. The machine holds no string table, so the
+    /// client renders [`EmergencyLockoutOutcome::message`].
+    pub async fn submit_emergency_lockout(
+        &self,
+        secret_input: String,
+        confirm_word: String,
+    ) -> EmergencyLockoutOutcome {
+        self.clear_error();
+
+        if confirm_word != fauna_client_recovery::ceremony::LOCKOUT_CONFIRM_WORD {
+            return self.fail_emergency_lockout(EmergencyLockoutOutcome::WrongConfirmWord);
+        }
+        let Some(imported) = fauna_core::identity_qr::parse_import_input(&secret_input) else {
+            return self.fail_emergency_lockout(EmergencyLockoutOutcome::InvalidSecret);
+        };
+
+        let typed = self.current_handle();
+        let typed = typed.trim();
+        let account = if typed.is_empty() {
+            imported.handle.clone()
+        } else {
+            Some(typed.to_string())
+        };
+        let Some(account) = account else {
+            return self.fail_emergency_lockout(EmergencyLockoutOutcome::AccountNeeded);
+        };
+        let Some(domain) = parse_handle_domain(&account) else {
+            return self.fail_emergency_lockout(EmergencyLockoutOutcome::AccountMalformed);
+        };
+
+        let base_url = self.resolve_restore_target(&domain).await;
+        match self
+            .nest_api
+            .lock_account_with_seed(&base_url, &imported.secret)
+            .await
+        {
+            Ok(locked_until) => {
+                self.reset_handle_check();
+                self.mutate(|s| {
+                    s.handle = String::new();
+                    s.error_message = None;
+                    s.step = OnboardingStep::IdentityChoice;
+                });
+                EmergencyLockoutOutcome::Locked { locked_until }
+            }
+            Err(e) => self.fail_emergency_lockout(match e {
+                LockAccountError::Superseded { .. } => EmergencyLockoutOutcome::Superseded,
+                LockAccountError::Refused { reason }
+                | LockAccountError::IdentityMismatch { reason } => {
+                    EmergencyLockoutOutcome::Refused { reason }
+                }
+                LockAccountError::Transient { reason } => {
+                    EmergencyLockoutOutcome::Unreachable { reason }
+                }
+            }),
+        }
+    }
+
+    /// Log a refused lock and hand the outcome back unchanged. Never logs the
+    /// secret — only the outcome variant.
+    fn fail_emergency_lockout(&self, outcome: EmergencyLockoutOutcome) -> EmergencyLockoutOutcome {
+        tracing::warn!(target: "fauna_onboarding", "emergency lockout refused: {outcome:?}");
+        outcome
+    }
+
     /// Log a refused restore and hand the outcome back unchanged.
     ///
     /// The step is left alone on purpose: every refusal here is something the
@@ -1798,7 +1900,7 @@ impl OnboardingMachine {
             }
         };
         let creds = snap.dns.creds.clone();
-        let handle_domain = snap.handle_domain().map(str::to_string);
+        let handle_domain = snap.handle_domain();
         let domain_status = self.domain_status();
         let existing_contact = snap.dns.contact.clone();
 
@@ -1914,7 +2016,7 @@ impl OnboardingMachine {
             // zone, which is all this status asserts
             // (`onboarding-provisioning.md` § 4).
             if let Some(domain) = s.handle_domain()
-                && covering_zone(domain, &s.dns.current_zones).is_some()
+                && covering_zone(&domain, &s.dns.current_zones).is_some()
             {
                 return ProviderStatus::ProviderHasDomain;
             }
@@ -2043,7 +2145,7 @@ impl OnboardingMachine {
     /// Set the `vps-config-mail-mode-toggle`: whether the box provisions the mail
     /// subsystem. `true` = a mail box (clamd/rspamd scanner sidecars + mail ports
     /// `{25,465,587,993}`; needs a `mem_gb ≥ 2`
-    /// plan); `false` = a social-only box (lean nest+watchtower compose, viable on
+    /// plan); `false` = a social-only box (lean nest+updater compose, viable on
     /// the 1 GB tier — but it cannot later enable mail without a VPS resize). The
     /// decision must live here at `vps_config`, not the post-claim §3b
     /// enable-email checkbox, because cloud-init must know mail-intent (and the
@@ -2704,6 +2806,13 @@ impl OnboardingMachine {
                 // recovery-entry-back-button → identity_choice (ui.yaml
                 // `recovery_entry`).
                 OnboardingStep::RecoveryEntry => OnboardingStep::IdentityChoice,
+                // emergency-lockout-back-button → identity_choice (ui.yaml
+                // `emergency_lockout_entry`). Drops the typed account: the
+                // door keeps nothing between visits.
+                OnboardingStep::EmergencyLockoutEntry => {
+                    s.handle = String::new();
+                    OnboardingStep::IdentityChoice
+                }
                 // Terminal states — back stays put. (`NatModeChoice` has no
                 // Back by design: the admin is already server-committed —
                 // onboarding.md § 3b-bis / ui.yaml `nat_mode_choice`.
@@ -2903,6 +3012,19 @@ impl OnboardingMachine {
                 claim.attestation.as_ref().map(|a| a.platform.as_str()),
             )
         });
+        // `invite-code-supervised-notice` likewise: the guardian off the
+        // verified code, the band the code was minted with riding the same
+        // sentence (`family-safety.md` § App surface → *Age-band surfaces*).
+        snap.supervised_notice = match &snap.out_of_band_code_state {
+            crate::snapshots::OobCodeState::Valid {
+                supervised_by: Some(guardian),
+                ..
+            } => Some(fauna_protocol::age::supervised_notice(
+                guardian,
+                self.oob_age_band.lock().unwrap().as_deref(),
+            )),
+            _ => None,
+        };
         snap
     }
 
@@ -2957,8 +3079,8 @@ impl OnboardingMachine {
     pub fn set_store_container_dir(&self, store_container_dir: Option<String>) {
         use fauna_account_plane::deployment_seed_recovery::StoreRoot;
         let root = match store_container_dir {
-            Some(dir) => StoreRoot::at(dir),
-            None => StoreRoot::platform(),
+            Some(dir) => Ok(StoreRoot::at(dir)),
+            None => StoreRoot::platform().map_err(|e| format!("{e:#}")),
         };
         *self.recovery_config_reader.write().unwrap() =
             crate::recovery_config::production_reader(root);
@@ -3167,7 +3289,7 @@ impl OnboardingMachine {
             return self.with_state(|s| s.step);
         }
         let nest_url = self.with_state(|s| {
-            let domain = s.handle_domain().unwrap_or_default().to_string();
+            let domain = s.handle_domain().unwrap_or_default();
             format!("https://{domain}")
         });
         // `nest_url` is the box's *identity* URL — the domain, never the reach
@@ -3573,7 +3695,7 @@ impl OnboardingMachine {
         // Phase 1: Parse format.
         self.set_phase(
             HandleCheckPhase::Parsing,
-            "handle_check.phase.parsing",
+            "onboarding.handle_check.phase.parsing",
             HashMap::new(),
         );
         if self.cancel.is_raised() {
@@ -3582,7 +3704,7 @@ impl OnboardingMachine {
         let Some(domain) = parse_handle_domain(&handle) else {
             self.complete(
                 HandleCheckOutcome::FormatInvalid,
-                "handle_check.outcome.format_invalid",
+                "onboarding.handle_check.outcome.format_invalid",
                 HashMap::new(),
             );
             return;
@@ -3611,7 +3733,7 @@ impl OnboardingMachine {
             // Phase 2: DNS NS lookup.
             self.set_phase(
                 HandleCheckPhase::DnsLookup,
-                "handle_check.phase.dns_lookup",
+                "onboarding.handle_check.phase.dns_lookup",
                 HashMap::new(),
             );
             if self.cancel.is_raised() {
@@ -3631,7 +3753,7 @@ impl OnboardingMachine {
             if !dns.tld_valid {
                 return self.complete(
                     HandleCheckOutcome::TldInvalid,
-                    "handle_check.outcome.tld_invalid",
+                    "onboarding.handle_check.outcome.tld_invalid",
                     HashMap::from([(
                         "tld".to_string(),
                         domain.rsplit('.').next().unwrap_or_default().to_string(),
@@ -3661,7 +3783,7 @@ impl OnboardingMachine {
                         buyable_via_provider: buyable,
                         price: None,
                     },
-                    "handle_check.outcome.domain_available_inside_zone",
+                    "onboarding.handle_check.outcome.domain_available_inside_zone",
                     HashMap::from([
                         ("domain".to_string(), domain.clone()),
                         ("zone".to_string(), zone),
@@ -3672,7 +3794,7 @@ impl OnboardingMachine {
                 // Phase 2a: optional price lookup.
                 self.set_phase(
                     HandleCheckPhase::PriceLookup,
-                    "handle_check.phase.price_lookup",
+                    "onboarding.handle_check.phase.price_lookup",
                     HashMap::new(),
                 );
                 if self.cancel.is_raised() {
@@ -3696,15 +3818,15 @@ impl OnboardingMachine {
                             quote.currency.clone(),
                         ),
                     );
-                    "handle_check.outcome.domain_available_priced"
+                    "onboarding.handle_check.outcome.domain_available_priced"
                 } else if !buyable {
                     args.insert(
                         "tld".to_string(),
                         domain.rsplit('.').next().unwrap_or_default().to_string(),
                     );
-                    "handle_check.outcome.domain_available_not_buyable_via_provider"
+                    "onboarding.handle_check.outcome.domain_available_not_buyable_via_provider"
                 } else {
-                    "handle_check.outcome.domain_available_unpriced"
+                    "onboarding.handle_check.outcome.domain_available_unpriced"
                 };
                 return self.complete(
                     HandleCheckOutcome::DomainAvailable {
@@ -3752,7 +3874,7 @@ impl OnboardingMachine {
         // Phase 3: Nest health probe.
         self.set_phase(
             HandleCheckPhase::NestProbe,
-            "handle_check.phase.nest_probe",
+            "onboarding.handle_check.phase.nest_probe",
             HashMap::from([("domain".to_string(), domain.clone())]),
         );
         if self.cancel.is_raised() {
@@ -3775,7 +3897,7 @@ impl OnboardingMachine {
                 snap.phase = HandleCheckPhase::Complete;
                 snap.outcome = HandleCheckOutcome::RegisteredNoNest;
                 snap.message = LocalizedText {
-                    key: "handle_check.outcome.registered_no_nest".into(),
+                    key: "onboarding.handle_check.outcome.registered_no_nest".into(),
                     args: HashMap::from([("domain".to_string(), domain.clone())]),
                 };
                 snap.continue_enabled = false; // user must check the checkbox
@@ -3813,7 +3935,7 @@ impl OnboardingMachine {
         // "we couldn't auth").
         self.set_phase(
             HandleCheckPhase::ChallengeResponse,
-            "handle_check.phase.challenge_response",
+            "onboarding.handle_check.phase.challenge_response",
             HashMap::new(),
         );
         if self.cancel.is_raised() {
@@ -3843,12 +3965,12 @@ impl OnboardingMachine {
                 // showing the literal placeholders.
                 let (key, args) = if matches {
                     (
-                        "handle_check.outcome.already_on_nest_handle_matches",
+                        "onboarding.handle_check.outcome.already_on_nest_handle_matches",
                         HashMap::from([("handle".to_string(), handle.clone())]),
                     )
                 } else {
                     (
-                        "handle_check.outcome.already_on_nest_handle_differs",
+                        "onboarding.handle_check.outcome.already_on_nest_handle_differs",
                         HashMap::from([
                             ("domain".to_string(), domain.clone()),
                             ("old_handle".to_string(), cur.clone().unwrap_or_default()),
@@ -3903,13 +4025,13 @@ impl OnboardingMachine {
                 if claimed {
                     self.complete(
                         HandleCheckOutcome::NestRunningUserUnregistered,
-                        "handle_check.outcome.user_unregistered",
+                        "onboarding.handle_check.outcome.user_unregistered",
                         HashMap::from([("domain".to_string(), domain.clone())]),
                     );
                 } else {
                     self.complete(
                         HandleCheckOutcome::UnregisteredUnclaimedNest,
-                        "handle_check.outcome.unregistered_unclaimed_nest",
+                        "onboarding.handle_check.outcome.unregistered_unclaimed_nest",
                         HashMap::from([("domain".to_string(), domain.clone())]),
                     );
                 }
@@ -3932,13 +4054,19 @@ impl OnboardingMachine {
                 false,
                 "signature mismatch".into(),
             ),
-            // The nest booted a degraded "needs-update" mode
-            // (fauna.nest.outdated) — terminal here; the fix is updating the
-            // nest, not a retry (version-compatibility.md Dim 4).
-            SilentChallengeOutcome::NeedsUpdate { message: _ } => self.complete_probe_error(
+            // A version skew — terminal here, no retry clears it
+            // (version-compatibility.md Dim 4). The nest booted a degraded
+            // "needs-update" mode (fauna.nest.outdated; the fix is updating the
+            // nest), or refused this app's subprotocol (the 426; the fix is
+            // updating the app, and the person reads the localized "your app is
+            // out of date" text as the cause).
+            SilentChallengeOutcome::NeedsUpdate { message, outdated } => self.complete_probe_error(
                 HandleCheckPhase::ChallengeResponse,
                 false,
-                "nest outdated".into(),
+                match outdated {
+                    crate::nest_api::OutdatedSide::Nest => "nest outdated".into(),
+                    crate::nest_api::OutdatedSide::App => message,
+                },
             ),
             // The typed identity verdict (security.md § Pre-claim surfacing): `WsNestApi::core` graduates the
             // challenge's fresh connection and maps a pin-related failure (a
@@ -4028,9 +4156,9 @@ impl OnboardingMachine {
     ) {
         use crate::snapshots::HandleCheckOutcome;
         let key = if transient {
-            "handle_check.error.transient"
+            "onboarding.handle_check.error.transient"
         } else {
-            "handle_check.error.terminal"
+            "onboarding.handle_check.error.terminal"
         };
         let mut snap = self.handle_check.lock().unwrap();
         snap.phase = crate::snapshots::HandleCheckPhase::Complete;
@@ -4491,12 +4619,15 @@ impl OnboardingMachine {
     ///   interstitial, mirroring the awaiting-DNS surface's auto-proceed.
     /// - **not registered** → the request is genuinely gone: terminal
     ///   `invite.error.not_found`, on which the per-app glue deletes the slot.
-    /// - **couldn't tell** (unreachable, degraded nest, unusable secret) → stay
-    ///   `PendingReview` and let the next poll tick ask again. Deliberately NOT
-    ///   an `Error` state: `recheck_invite_status` only proceeds from
-    ///   `PendingReview`, so writing any error here would wedge the poll
-    ///   permanently — a dropped connection would strand a live request behind a
-    ///   terminal, slot-deleting screen.
+    /// - **couldn't reach the nest** (`Transient` only) → stay `PendingReview`
+    ///   and let the next poll tick ask again. Deliberately NOT an `Error`
+    ///   state: `recheck_invite_status` only proceeds from `PendingReview`, so
+    ///   writing an error for a dropped connection would strand a live request
+    ///   behind a terminal, slot-deleting screen.
+    /// - **a typed verdict** (identity changed, superseded, locked, needs
+    ///   update, invalid secret) → terminal `Rechecking` error: no retry clears
+    ///   it, and `security.md` § Pre-claim surfacing says a consumer that
+    ///   retries without a human must stop.
     async fn resolve_not_found_recheck(
         &self,
         nest_url: &str,
@@ -4531,9 +4662,39 @@ impl OnboardingMachine {
                 false,
                 "invite.error.not_found".into(),
             ),
-            // Restore the pending state the recheck's `Rechecking` spinner
+            // Every typed verdict below is terminal (security.md § Pre-claim
+            // surfacing): this poll is a retry-without-a-human consumer, and a
+            // verdict folded into `PendingReview` would render as an
+            // indefinite "pending review". Causes mirror the Almost-ready
+            // probe's arms. No re-trust affordance on any of them.
+            SilentChallengeOutcome::IdentityChanged { .. } => self.invite_error(
+                ErrorContext::Rechecking,
+                false,
+                "nest identity changed".into(),
+            ),
+            SilentChallengeOutcome::Superseded { .. } => self.invite_error(
+                ErrorContext::Rechecking,
+                false,
+                "identity superseded".into(),
+            ),
+            SilentChallengeOutcome::Locked { .. } => {
+                self.invite_error(ErrorContext::Rechecking, false, "account locked".into())
+            }
+            SilentChallengeOutcome::SecretInvalid { error: _ } => {
+                self.invite_error(ErrorContext::Rechecking, false, "signature mismatch".into())
+            }
+            SilentChallengeOutcome::NeedsUpdate { message, outdated } => self.invite_error(
+                ErrorContext::Rechecking,
+                false,
+                match outdated {
+                    crate::nest_api::OutdatedSide::Nest => "nest outdated".into(),
+                    crate::nest_api::OutdatedSide::App => message,
+                },
+            ),
+            // Only a probe that cannot reach the nest keeps the poll going:
+            // restore the pending state the recheck's `Rechecking` spinner
             // replaced, so the page renders as pending and the poll continues.
-            _ => {
+            SilentChallengeOutcome::Transient { error: _ } => {
                 {
                     let mut snap = self.invite_request.lock().unwrap();
                     if let InviteRequestState::Rechecking = snap.state {
@@ -4553,13 +4714,18 @@ impl OnboardingMachine {
     pub async fn verify_oob_invite_code(&self, code: String) {
         use crate::snapshots::OobCodeState;
         self.invite_request.lock().unwrap().out_of_band_code_state = OobCodeState::Verifying;
+        *self.oob_age_band.lock().unwrap() = None;
         self.observer.on_changed();
         let nest_url = self.effective_nest_url();
+        let mut age_band = None;
         let next = match self.nest_api.verify_invite_code(&nest_url, &code).await {
-            Ok(v) => OobCodeState::Valid {
-                invite_id: v.invite_id,
-                supervised_by: v.supervised_by,
-            },
+            Ok(v) => {
+                age_band = v.age_band;
+                OobCodeState::Valid {
+                    invite_id: v.invite_id,
+                    supervised_by: v.supervised_by,
+                }
+            }
             Err(crate::nest_api::InviteCodeError::Invalid { reason }) => {
                 OobCodeState::Invalid { reason }
             }
@@ -4578,6 +4744,7 @@ impl OnboardingMachine {
         {
             let mut req = self.invite_request.lock().unwrap();
             req.out_of_band_code_state = next;
+            *self.oob_age_band.lock().unwrap() = age_band;
             // continue_enabled must track the SAME condition redeem_invite()
             // routes on — recomputed here, not just set true on Valid, so a
             // later re-check that comes back Invalid/Error correctly reverts it.
@@ -4833,6 +5000,7 @@ impl OnboardingMachine {
             out_of_band_code_state: OobCodeState::Idle,
             oob_message: LocalizedText::default(),
             age_notice: None,
+            supervised_notice: None,
         };
     }
 
@@ -4881,11 +5049,16 @@ impl OnboardingMachine {
         cause: String,
     ) -> OnboardingStep {
         use crate::snapshots::InviteRequestState;
-        self.invite_request.lock().unwrap().state = InviteRequestState::Error {
+        let mut snap = self.invite_request.lock().unwrap();
+        snap.state = InviteRequestState::Error {
             transient,
             context: ctx,
             cause,
         };
+        // The recheck affordance belongs to `PendingReview` alone (every other
+        // writer sets `recheck_visible` from that match): an error ends the poll.
+        snap.recheck_visible = false;
+        drop(snap);
         self.observer.on_changed();
         self.state.lock().unwrap().step
     }
@@ -5614,6 +5787,17 @@ impl OnboardingMachine {
                 );
                 return ClaimOutcome::Failed { cause: reason };
             }
+            // The box runs a nest too new for this app (its 426): no amount of
+            // polling changes that until the app is updated — terminal, never
+            // `NotYet` (version-compatibility.md Dim 4).
+            Err(ProbeError::AppOutdated { reason }) => {
+                tracing::warn!(
+                    target: "fauna_onboarding",
+                    nest_url,
+                    "claim_provisioned_box: the nest refused this app's subprotocol — terminal"
+                );
+                return ClaimOutcome::Failed { cause: reason };
+            }
             // Not reachable yet (still booting, or — on the surface's path — DNS
             // has not propagated). Keep polling.
             //
@@ -5671,8 +5855,12 @@ impl OnboardingMachine {
                 // The nest booted a degraded "needs-update" mode
                 // (fauna.nest.outdated) — terminal; the fix is updating the
                 // nest, not a retry (version-compatibility.md Dim 4).
-                SilentChallengeOutcome::NeedsUpdate { message: _ } => ClaimOutcome::Failed {
-                    cause: "nest outdated".into(),
+                SilentChallengeOutcome::NeedsUpdate { message, outdated } => ClaimOutcome::Failed {
+                    cause: match outdated {
+                        crate::nest_api::OutdatedSide::Nest => "nest outdated".into(),
+                        // The app is the side to update (the nest's 426).
+                        crate::nest_api::OutdatedSide::App => message,
+                    },
                 },
                 // The secret isn't a valid 32-byte Ed25519 key. Terminal.
                 SilentChallengeOutcome::SecretInvalid { error: _ } => ClaimOutcome::Failed {
@@ -6417,7 +6605,7 @@ impl OnboardingMachine {
     fn handle_targets_real_domain(&self) -> bool {
         self.with_state(|s| match s.handle_domain() {
             Some(domain) => {
-                fauna_provisioning::probe::resolve_handle_domain(domain).is_public_dns_name
+                fauna_provisioning::probe::resolve_handle_domain(&domain).is_public_dns_name
             }
             None => false,
         })
@@ -6436,7 +6624,7 @@ impl OnboardingMachine {
     fn handle_targets_private_network(&self) -> bool {
         self.with_state(|s| match s.handle_domain() {
             Some(domain) => {
-                let (host, _port) = fauna_provisioning::probe::split_host_port(domain);
+                let (host, _port) = fauna_provisioning::probe::split_host_port(&domain);
                 fauna_core::resolve::is_private_network_target(host)
             }
             None => false,
@@ -7455,6 +7643,81 @@ impl RecoveryEntryOutcome {
     }
 }
 
+/// What [`OnboardingMachine::submit_emergency_lockout`] produced — one variant
+/// per thing the user can do next, each with the `onboarding.emergency_lockout.*`
+/// key (or `sessions.lockout_wrong_word`) its [`Self::message`] resolves.
+/// `uniffi::Enum` for the same reason as [`RecoveryEntryOutcome`]: it is the
+/// return type of an exported method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum EmergencyLockoutOutcome {
+    /// The nest locked the account until `locked_until` (Unix seconds). The
+    /// wizard is back on `identity_choice`. Key `locked` (arg `until`).
+    Locked { locked_until: i64 },
+    /// The confirm field did not hold exactly `LOCK`; nothing was sent.
+    WrongConfirmWord,
+    /// The pasted text is not an identity secret (a recovery kit is not one);
+    /// nothing was sent. Key `invalid_secret`.
+    InvalidSecret,
+    /// Neither the account field nor the pasted payload named an account, so no
+    /// nest can be found. Key `account_needed`.
+    AccountNeeded,
+    /// The account was named but is not `user@domain`. Key `account_malformed`.
+    AccountMalformed,
+    /// The identity was succeeded: the account already moved to a new key, so
+    /// there is nothing to lock. Key `superseded`.
+    Superseded,
+    /// The nest declined. Key `refused` (arg `reason`).
+    Refused { reason: String },
+    /// The nest could not be reached; a retry is worth offering. Key
+    /// `unreachable` (arg `reason`).
+    Unreachable { reason: String },
+}
+
+impl EmergencyLockoutOutcome {
+    /// The line a client renders for this outcome: on `error-message` for a
+    /// refusal, as the confirmation for [`Self::Locked`], so all seven apps say
+    /// the same thing.
+    ///
+    /// `unlock_time` is [`Self::Locked`]'s `locked_until` already rendered by
+    /// the client — the shared `format_unix_local` on the native apps, the
+    /// browser's own formatter on web (`format_unix_local` is native-only: it
+    /// needs the OS timezone database, and this crate builds for wasm32). The
+    /// machine cannot render it for them; it is ignored by every other outcome.
+    pub fn message(&self, unlock_time: &str) -> LocalizedText {
+        const P: &str = "onboarding.emergency_lockout.";
+        let key = |k: &str| format!("{P}{k}");
+        match self {
+            Self::Locked { .. } => LocalizedText::key_arg(key("locked"), "until", unlock_time),
+            Self::WrongConfirmWord => LocalizedText::key_arg(
+                "sessions.lockout_wrong_word".to_string(),
+                "word",
+                fauna_client_recovery::ceremony::LOCKOUT_CONFIRM_WORD,
+            ),
+            Self::InvalidSecret => LocalizedText::key(key("invalid_secret")),
+            Self::AccountNeeded => LocalizedText::key(key("account_needed")),
+            Self::AccountMalformed => LocalizedText::key(key("account_malformed")),
+            Self::Superseded => LocalizedText::key(key("superseded")),
+            Self::Refused { reason } => LocalizedText::key_arg(key("refused"), "reason", reason),
+            Self::Unreachable { reason } => {
+                LocalizedText::key_arg(key("unreachable"), "reason", reason)
+            }
+        }
+    }
+}
+
+/// [`EmergencyLockoutOutcome::message`] as a free function — the UniFFI door the
+/// FFI apps (android, apple, windows) render the signed-out lock's answer
+/// through. `unlock_time` is the already-rendered `Locked` time (the shared
+/// `format_unix_local`); every other outcome ignores it.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn emergency_lockout_outcome_message(
+    outcome: EmergencyLockoutOutcome,
+    unlock_time: String,
+) -> LocalizedText {
+    outcome.message(&unlock_time)
+}
+
 /// [`RecoveryEntryOutcome::message`] as a free function — the UniFFI door the
 /// FFI apps (android, apple, windows) render the restore's answer through, so
 /// they read the same table tui, linux and web do instead of re-deriving it.
@@ -7756,7 +8019,7 @@ fn stash_provisioning_result(
         s.is_loading = false;
         match &result {
             Ok(NextStep::DnsPostInstructions) => {
-                let domain = s.handle_domain().unwrap_or_default().to_string();
+                let domain = s.handle_domain().unwrap_or_default();
                 s.nest_url = format!("https://{domain}");
                 s.error_message = None;
             }
@@ -7882,13 +8145,13 @@ impl OnboardingMachine {
         snapshot: &State,
     ) -> Result<(String, String), OnboardingError> {
         if !snapshot.recovery_intent {
-            let domain = snapshot
-                .handle_domain()
-                .ok_or_else(|| OnboardingError::InvalidTransition {
-                    from: "vps_config".into(),
-                    reason: "handle has no domain part".into(),
-                })?
-                .to_string();
+            let domain =
+                snapshot
+                    .handle_domain()
+                    .ok_or_else(|| OnboardingError::InvalidTransition {
+                        from: "vps_config".into(),
+                        reason: "handle has no domain part".into(),
+                    })?;
             return Ok((domain, fauna_provisioning::generate_deployment_seed()));
         }
 
@@ -8122,7 +8385,7 @@ async fn run_provisioning_inner(
     // `vps-config-mail-mode-toggle` choice if set, else the handle's real-domain
     // default (mail ON for a real registerable domain — the same predicate that
     // seeds the §3b enable-email default). A social-only box (`false`) provisions
-    // a lean nest+watchtower compose with no scanner sidecars, viable on the 1 GB
+    // a lean nest+updater compose with no scanner sidecars, viable on the 1 GB
     // VPS tier; it cannot later enable mail without a resize (a documented
     // constraint). `docs/goal/behavior/onboarding.md` §5.
     let enable_mail = snapshot.vps.enable_mail.unwrap_or_else(|| {
@@ -8145,7 +8408,7 @@ async fn run_provisioning_inner(
     //   the rebuilt box re-presents the same identity every TOFU-pinned client
     //   already trusts.
     // `image_tag` is bucket-1 IPC, not a human config surface: production always
-    // provisions `latest` (the closed-alpha channel Watchtower tracks), and the
+    // provisions `latest` (the closed-alpha channel the updater tracks), and the
     // live-provision e2e pins a specific image via `set_provision_image_tag`
     // (from `FAUNA_E2E_IMAGE_TAG`). Read the slot rather than the bare literal.
     // An unset slot — every production run — means the tag is the one the
@@ -8168,7 +8431,6 @@ async fn run_provisioning_inner(
     let params = fauna_provisioning::cloud_init::CloudInitParams {
         domain: domain.clone(),
         image_tag,
-        watchtower_poll: 60,
         claim_code: claim_code.clone(),
         enable_mail,
         deployment_seed: Some(deployment_seed),
@@ -8478,7 +8740,7 @@ fn dispatch_provider_id(s: &str) -> Option<fauna_provisioning::ProviderId> {
 /// domain is dialled: `a@b@c` used to yield `b@c`, a string a URL parser reads
 /// as userinfo `b@` plus host `c`, so the wizard displayed one nest and
 /// connected to another (`security.md` § Transport trust).
-fn parse_handle_domain(handle: &str) -> Option<String> {
+pub(crate) fn parse_handle_domain(handle: &str) -> Option<String> {
     match fauna_core::resolve::parse_handle(handle) {
         fauna_core::resolve::HandleForm::Named { domain, .. } => Some(domain),
         _ => None,
@@ -11432,6 +11694,7 @@ mod tests {
             out_of_band_code_state: OobCodeState::Idle,
             oob_message: LocalizedText::default(),
             age_notice: None,
+            supervised_notice: None,
         });
 
         let _ = machine.wizard_submit_invite_request().await;
@@ -11789,6 +12052,7 @@ mod tests {
         fake.set_verify_invite_code_response(Ok(InviteCodeVerification {
             invite_id: "inv-1".into(),
             supervised_by: Some("guardian1".into()),
+            age_band: None,
         }));
         let observer = std::sync::Arc::new(NullObserver) as std::sync::Arc<dyn OnboardingObserver>;
         let machine = OnboardingMachine::with_nest_api(
@@ -11815,6 +12079,58 @@ mod tests {
         );
     }
 
+    /// `invite-code-supervised-notice` is derived in the machine: a supervised
+    /// code minted with an age band names the band in the same sentence
+    /// (`family-safety.md` § App surface → *Age-band surfaces*), a band-less
+    /// one keeps the guardian-only sentence, an ordinary code has no notice —
+    /// and a re-check that drops the band never leaves the old one behind.
+    #[tokio::test]
+    async fn verify_oob_invite_code_derives_the_supervised_notice_with_its_band() {
+        use crate::nest_api::InviteCodeVerification;
+        use crate::observer::NullObserver;
+
+        let fake = std::sync::Arc::new(crate::nest_api::FakeNestApi::new());
+        let observer = std::sync::Arc::new(NullObserver) as std::sync::Arc<dyn OnboardingObserver>;
+        let machine = OnboardingMachine::with_nest_api(
+            observer,
+            fake.clone() as std::sync::Arc<dyn crate::nest_api::NestApi>,
+        );
+        machine.set_nest_url("https://nest.example".into());
+        let verify = |supervised_by: Option<&str>, age_band: Option<&str>| {
+            fake.set_verify_invite_code_response(Ok(InviteCodeVerification {
+                invite_id: "inv-1".into(),
+                supervised_by: supervised_by.map(Into::into),
+                age_band: age_band.map(Into::into),
+            }));
+        };
+
+        verify(Some("guardian1"), Some("13-15"));
+        machine.verify_oob_invite_code("code-123".into()).await;
+        let notice = machine
+            .invite_request_snapshot()
+            .supervised_notice
+            .expect("a supervised code carries the notice");
+        assert_eq!(notice.key, "family.supervised_notice_onboarding_band");
+        assert_eq!(notice.args["guardian"], "guardian1");
+        assert_eq!(notice.args["band"], "family.age_band.teen_13_15");
+
+        verify(Some("guardian1"), None);
+        machine.verify_oob_invite_code("code-123".into()).await;
+        let notice = machine
+            .invite_request_snapshot()
+            .supervised_notice
+            .expect("a supervised code carries the notice");
+        assert_eq!(notice.key, "family.supervised_notice_onboarding");
+        assert!(
+            !notice.args.contains_key("band"),
+            "the old band must not linger"
+        );
+
+        verify(None, None);
+        machine.verify_oob_invite_code("code-123".into()).await;
+        assert_eq!(machine.invite_request_snapshot().supervised_notice, None);
+    }
+
     /// The reverse transition: a previously-valid OOB code re-checked to
     /// Invalid must revert `continue_enabled` to false (absent an independent
     /// Approved/PendingReview top-level state) — a stale `true` would let the
@@ -11828,6 +12144,7 @@ mod tests {
         fake.set_verify_invite_code_response(Ok(InviteCodeVerification {
             invite_id: "inv-1".into(),
             supervised_by: None,
+            age_band: None,
         }));
         let observer = std::sync::Arc::new(NullObserver) as std::sync::Arc<dyn OnboardingObserver>;
         let machine = OnboardingMachine::with_nest_api(
@@ -11891,6 +12208,7 @@ mod tests {
         fake.set_verify_invite_code_response(Ok(InviteCodeVerification {
             invite_id: "inv-1".into(),
             supervised_by: None,
+            age_band: None,
         }));
         let observer = std::sync::Arc::new(NullObserver) as std::sync::Arc<dyn OnboardingObserver>;
         let machine = OnboardingMachine::with_nest_api(

@@ -42,6 +42,7 @@ pub mod conflicts;
 pub mod custody;
 pub mod folders;
 pub mod location_binding;
+pub mod members;
 pub mod roster;
 pub mod wizard;
 
@@ -63,6 +64,11 @@ pub struct DevicesFoldersHandles {
     /// store's enrolled row, refusal and keyed set), for the settings shell's
     /// re-select edge — the page's map hook covers arriving from elsewhere.
     pub devices_nav_refresh: Rc<dyn Fn()>,
+    /// The Folders sub-page's WebDAV serve-capability re-read (its map hook
+    /// runs it too) — the store-change notice re-drives it while the page is
+    /// open, since the capability rides the account store's mail key
+    /// (`crate::store_surfaces`).
+    pub folders_serve_refresh: Rc<dyn Fn()>,
     /// Folder list box — kept so app.rs's `FolderMembersLoaded` dispatch can
     /// populate the lazy-loaded member roster into the right expander row (the
     /// member roster is a row-detail WS-RPC read the `DevicesMachine` doesn't own).
@@ -126,7 +132,7 @@ impl DevicesObserver for GtkDevicesObserver {
 /// does (`ChannelId::from_group_id` over a plain-`hex` decode — openMLS group ids are
 /// variable length, so NOT `hex32`). Pre-login (no session) → `false` (withheld); the
 /// list re-filters on the next `refresh()` once the session is live.
-struct LinuxMlsQuery;
+pub(crate) struct LinuxMlsQuery;
 
 impl MlsQuery for LinuxMlsQuery {
     fn is_joined_shared_set(&self, mls_group_id_hex: &str) -> bool {
@@ -167,6 +173,9 @@ struct DevicesShell {
     /// offer initiation) — every family below the roster, each group hidden
     /// until the facet hydrate finds something for it.
     custody: Rc<custody::CustodyView>,
+    /// The member group (`ui/devices.md` § Members without a matching entry) —
+    /// below the roster, hidden while `snapshot.members` is empty.
+    members: Rc<members::MemberView>,
     error_label: gtk::Label,
 }
 
@@ -174,12 +183,16 @@ fn build_devices_shell(actor_id: Option<&str>) -> DevicesShell {
     let identity_group = roster::build_identity_section(actor_id);
     let (devices_group, device_list_box) = roster::build_devices_section();
     let custody = custody::CustodyView::build();
+    let members = members::MemberView::build();
     let error_label = error_label();
     let content = crate::views::layout::page_box(24);
     content.append(&page_heading(devices::TITLE)); // "Devices"
     content.append(&error_label);
     content.append(&identity_group);
     content.append(&devices_group);
+    // Signed-in devices no roster row accounts for: a separately-labelled
+    // group, never intermixed with the roster's `device-card` rows.
+    members.append_to(&content);
     // The custody families sit BELOW the roster: they are not this account's
     // devices, and the facet is explicit that the groups never intermix
     // (`ui/devices.md` § Custody facet — "a distinctly-labeled group").
@@ -188,6 +201,7 @@ fn build_devices_shell(actor_id: Option<&str>) -> DevicesShell {
         content,
         device_list_box,
         custody,
+        members,
         error_label,
     }
 }
@@ -284,6 +298,8 @@ fn build_folders_shell(fauna_client: Option<&Rc<FaunaClient>>) -> FoldersShell {
 /// Widgets + state the render loop rewrites on every observer tick.
 struct RenderCtx {
     device_list_box: gtk::ListBox,
+    /// The Devices sub-page's member group (arm state lives in the view).
+    members: Rc<members::MemberView>,
     folder_list_box: gtk::ListBox,
     /// The "Folders you follow" rows — repainted from `snapshot.followed`, a
     /// list SEPARATE from `folder_list_box` (a followed folder is not a
@@ -295,6 +311,10 @@ struct RenderCtx {
     /// is painted onto both so a gesture failure surfaces wherever the user is.
     devices_error_label: gtk::Label,
     folders_error_label: gtk::Label,
+    /// The follow-family failure the Folders label holds beneath
+    /// `snapshot.error` — follow runs outside the machine, so the snapshot
+    /// never carries it ([`folders::FollowErrorSlot`]).
+    follow_error: folders::FollowErrorSlot,
     /// Device-local folder↔folder map (the in-process engine's source of truth),
     /// read per-set when rendering each `folder-row`'s nested binding.
     location_map: Rc<RefCell<Vec<LocationBinding>>>,
@@ -533,9 +553,8 @@ pub fn current_refresh_counts() -> Option<(u64, u64, u64)> {
 
 /// Wire the fleet-scope removal door (`devices.md` § Removing a Device) — the
 /// shared adapter, unconditional: it reads this process's handle fresh per
-/// call, and refuses the removal while there is none. Pulled out of
-/// [`build_devices_and_folders_pages`] into a plain fn so a test can pin it
-/// against a machine built without a GTK context.
+/// call, and refuses the removal while there is none. Called by
+/// [`build_wired_devices_machine`], the one place the seat's machine is wired.
 fn wire_fleet_removal(machine: &DevicesMachine) {
     machine.set_fleet_removal(Arc::new(
         fauna_client_account_runtime::fleet_removal::RuntimeFleetRemoval::new(
@@ -554,6 +573,27 @@ fn wire_fleet_removal(machine: &DevicesMachine) {
             fauna_client_account_runtime::p2p_participation::EngineHolderNudgeSlot::seat(),
         ),
     ));
+}
+
+/// Build the page machine and wire everything that needs no GTK context or
+/// `FaunaClient`: the member-row join-filter and the fleet-scope doors.
+/// [`build_devices_and_folders_pages`] calls this and a test calls it too, so a
+/// pin on the result reds when the builder stops wiring (the `fauna-ffi`
+/// `build_devices_machine` shape).
+fn build_wired_devices_machine(
+    nest: Arc<fauna_client::NestClient>,
+    custody: Option<Arc<dyn fauna_client_folders::FolderKeyStore>>,
+    observer: Arc<dyn DevicesObserver>,
+) -> Arc<DevicesMachine> {
+    let machine = build_devices_machine(nest, custody, observer);
+    // Wire the B3 member-row join-filter: the centralized
+    // `DevicesMachine` filter delegates to this per-app `MlsQuery` to drop
+    // shared-with-me rows this client has not MLS-joined. Until wired the machine is
+    // fail-safe (drops all member rows), so this MUST precede the first refresh for a
+    // joined shared set to render.
+    machine.set_mls_query(Arc::new(LinuxMlsQuery));
+    wire_fleet_removal(&machine);
+    machine
 }
 
 /// Build the **Devices** + **Folders** sub-pages over one shared
@@ -585,7 +625,7 @@ pub fn build_devices_and_folders_pages(
     // ── Machine + observer wiring ───────────────────────────────────────
     let (tx, rx) = crate::async_helper::snapshot_wake_channel();
     let observer: Arc<dyn DevicesObserver> = Arc::new(GtkDevicesObserver { tx });
-    let machine = build_devices_machine(
+    let machine = build_wired_devices_machine(
         Arc::clone(fauna_client.nest_rpc()),
         Some(crate::account_runtime::folder_key_store()),
         observer,
@@ -596,13 +636,6 @@ pub fn build_devices_and_folders_pages(
     // owner key the Media page's byte download already uses (`client.rs`'s
     // own `label_custody` doc comment: a second resolver here could drift).
     machine.set_label_custody(fauna_client.label_custody());
-    // Wire the B3 member-row join-filter: the centralized
-    // `DevicesMachine` filter delegates to this per-app `MlsQuery` to drop
-    // shared-with-me rows this client has not MLS-joined. Until wired the machine is
-    // fail-safe (drops all member rows), so this MUST precede the first refresh for a
-    // joined shared set to render.
-    machine.set_mls_query(Arc::new(LinuxMlsQuery));
-    wire_fleet_removal(&machine);
     // Wire the foreign-set (cross-nest) list source (Phase 2 client read-side):
     // sets shared from ANOTHER nest have no row in the own nest's list, so the
     // machine unions in the member's own `fauna.state.folder-keys` records (written at
@@ -666,23 +699,23 @@ pub fn build_devices_and_folders_pages(
     // ── Render loop ─────────────────────────────────────────────────────
     // The follow form's two buttons need the authenticated client + the machine,
     // so they are wired here rather than at build time (the `folder-add-button`
-    // idiom). Errors land on the Folders sub-page's own `error-message`.
-    folders::wire_followed_section(
-        &fshell.followed,
-        &machine,
-        fauna_client,
-        &fshell.error_label,
-    );
+    // idiom). Errors land on the Folders sub-page's own `error-message`, held in
+    // its slot so the next snapshot render cannot wipe them.
+    let follow_error = folders::FollowErrorSlot::new(&fshell.error_label);
+    folders::wire_followed_section(&fshell.followed, &machine, fauna_client, &follow_error);
 
     let custody_view = Rc::clone(&dshell.custody);
+    let member_view = Rc::clone(&dshell.members);
     let ctx = Rc::new(RenderCtx {
         device_list_box: dshell.device_list_box,
+        members: dshell.members,
         folder_list_box: fshell.folder_list_box.clone(),
         followed_list_box: fshell.followed.list.clone(),
         conflicts_group: fshell.conflicts_group,
         conflict_list_box: fshell.conflict_list_box,
         devices_error_label: dshell.error_label,
         folders_error_label: fshell.error_label,
+        follow_error: follow_error.clone(),
         location_map: Rc::clone(&location_map),
         can_serve_webdav: Cell::new(false),
         own_tiers: RefCell::new(Vec::new()),
@@ -727,6 +760,10 @@ pub fn build_devices_and_folders_pages(
                 ctx.can_serve_webdav.get(),
                 &ctx.own_tiers.borrow(),
                 snap.website_address_enabled,
+                folders::LeaseCtx {
+                    devices: &snap.devices,
+                    this_device_row: lease_this_row(&ctx).as_deref(),
+                },
                 #[cfg(feature = "p2p-share")]
                 &ctx.group_scopes.borrow(),
             );
@@ -746,6 +783,9 @@ pub fn build_devices_and_folders_pages(
             handle.spawn(async move { machine.refresh().await });
         });
     }
+    // A visit replaces the held follow failure, as it replaces the machine's
+    // error through the refresh above.
+    folders_page.connect_map(move |_| follow_error.clear());
 
     // The Devices sub-page's page-level reads (the custody facet, and the
     // account store's enrolled row / refusal / keyed set) run on EVERY nav
@@ -835,12 +875,13 @@ pub fn build_devices_and_folders_pages(
     // nav, not once at build, so enabling mail elsewhere and coming back re-enables
     // the toggles without a restart. Re-renders only when the answer actually
     // changed, so a nav doesn't rebuild the list (which would collapse any expanded
-    // row) for nothing.
-    {
+    // row) for nothing — which is also what makes it safe for the store-change
+    // notice to re-drive while the page is open (a level, not an event).
+    let folders_serve_refresh: NavHook = {
         let machine = Arc::clone(&machine);
         let ctx = Rc::clone(&ctx);
         let fauna_client = Rc::clone(fauna_client);
-        folders_page.connect_map(move |_| {
+        Rc::new(move || {
             let ctx = Rc::clone(&ctx);
             let machine = Arc::clone(&machine);
             let fauna_client = Rc::clone(&fauna_client);
@@ -862,12 +903,20 @@ pub fn build_devices_and_folders_pages(
                         can_serve,
                         &ctx.own_tiers.borrow(),
                         snap.website_address_enabled,
+                        folders::LeaseCtx {
+                            devices: &snap.devices,
+                            this_device_row: lease_this_row(&ctx).as_deref(),
+                        },
                         #[cfg(feature = "p2p-share")]
                         &ctx.group_scopes.borrow(),
                     );
                 },
             );
-        });
+        })
+    };
+    {
+        let refresh = Rc::clone(&folders_serve_refresh);
+        folders_page.connect_map(move |_| refresh());
     }
 
     // Re-read WHICH ROW THIS MACHINE ENROLLED ON whenever the Devices sub-page
@@ -935,9 +984,17 @@ pub fn build_devices_and_folders_pages(
                         &machine,
                         this_row.as_deref(),
                         ctx.keyed_principals.borrow().as_ref(),
+                        snap.own_fingerprint.as_deref(),
                     );
                 },
             );
+        }));
+    }
+    // A fresh visit never opens on a pending member-removal confirm.
+    {
+        let machine = Arc::clone(&machine);
+        devices_nav_hooks.borrow_mut().push(Rc::new(move || {
+            member_view.disarm(&machine);
         }));
     }
     let devices_nav_refresh: Rc<dyn Fn()> = {
@@ -987,6 +1044,10 @@ pub fn build_devices_and_folders_pages(
                         ctx.can_serve_webdav.get(),
                         &ctx.own_tiers.borrow(),
                         snap.website_address_enabled,
+                        folders::LeaseCtx {
+                            devices: &snap.devices,
+                            this_device_row: lease_this_row(&ctx).as_deref(),
+                        },
                         #[cfg(feature = "p2p-share")]
                         &ctx.group_scopes.borrow(),
                     );
@@ -1023,6 +1084,10 @@ pub fn build_devices_and_folders_pages(
                 ctx.can_serve_webdav.get(),
                 &ctx.own_tiers.borrow(),
                 snap.website_address_enabled,
+                folders::LeaseCtx {
+                    devices: &snap.devices,
+                    this_device_row: lease_this_row(&ctx).as_deref(),
+                },
                 &ctx.group_scopes.borrow(),
             );
         })
@@ -1082,6 +1147,7 @@ pub fn build_devices_and_folders_pages(
         repaint_group_scopes,
         devices_machine: Arc::clone(&machine),
         devices_nav_refresh,
+        folders_serve_refresh,
     };
     (devices_page, folders_page, handles)
 }
@@ -1102,6 +1168,17 @@ fn mark_this_device_row(machine: &DevicesMachine, ctx: &RenderCtx) -> Option<Str
     this_row
 }
 
+/// The row `folder-lease-status` names as "this device" — the same
+/// [`fauna_devices_machine::this_device_row`] answer `device-this-mark-badge`
+/// reads, without [`mark_this_device_row`]'s machine write (a folder-list
+/// repaint is not a Devices hydrate).
+fn lease_this_row(ctx: &RenderCtx) -> Option<String> {
+    fauna_devices_machine::this_device_row(
+        ctx.enrolled_device_row.borrow().as_deref(),
+        ctx.local_device_id.as_deref(),
+    )
+}
+
 /// Re-render both sub-pages off a fresh `DevicesSnapshot`, and drive the wizard
 /// dialog lifecycle (the wizard lives on the Folders sub-page).
 fn render_pages(
@@ -1117,7 +1194,9 @@ fn render_pages(
         machine,
         this_row.as_deref(),
         ctx.keyed_principals.borrow().as_ref(),
+        snap.own_fingerprint.as_deref(),
     );
+    ctx.members.update(&snap.members, machine);
     folders::update_folder_list(
         &ctx.folder_list_box,
         &snap.folders,
@@ -1127,13 +1206,17 @@ fn render_pages(
         ctx.can_serve_webdav.get(),
         &ctx.own_tiers.borrow(),
         snap.website_address_enabled,
+        folders::LeaseCtx {
+            devices: &snap.devices,
+            this_device_row: this_row.as_deref(),
+        },
         #[cfg(feature = "p2p-share")]
         &ctx.group_scopes.borrow(),
     );
     folders::update_followed_list(
         &ctx.followed_list_box,
         &snap.followed,
-        folders::unfollow_handler(machine, &ctx.folders_error_label),
+        folders::unfollow_handler(machine, &ctx.follow_error),
     );
     conflicts::update_conflict_list(
         &ctx.conflicts_group,
@@ -1148,7 +1231,8 @@ fn render_pages(
     // the cap still binds; the Folders label paints the gesture error alone.
     let devices_text = devices_error_text(ctx, &snap);
     crate::settings::render_error_label(&ctx.devices_error_label, devices_text.as_deref());
-    crate::settings::render_error_label(&ctx.folders_error_label, text.as_deref());
+    let folders_text = text.or_else(|| ctx.follow_error.held());
+    crate::settings::render_error_label(&ctx.folders_error_label, folders_text.as_deref());
 
     // ── Wizard lifecycle ────────────────────────────────────────────────
     match snap.wizard.as_ref().map(|w| w.step) {
@@ -1197,25 +1281,29 @@ mod tests {
 
     /// The page machine actually carries the fleet-removal door
     /// [`build_devices_and_folders_pages`] wires — not only that the shared
-    /// adapter itself refuses correctly (`fleet_removal.rs`'s own pins).
-    /// `crate::account_runtime::handle` answers `None` outside a running
-    /// account runtime, so the door refuses unconditionally here too, no GTK
-    /// context required.
+    /// adapter itself refuses correctly (`fleet_removal.rs`'s own pins). The
+    /// machine comes from [`build_wired_devices_machine`], the fn the page
+    /// builder calls. `crate::account_runtime::handle` answers `None` outside a
+    /// running account runtime, so the door refuses unconditionally here too,
+    /// no GTK context required.
     ///
     /// Mutation: drop the `wire_fleet_removal(&machine)` call in
-    /// `build_devices_and_folders_pages` → `fleet_removal()` answers `None` →
-    /// this pin reds (`cargo test -p fauna-linux --bins`).
+    /// `build_wired_devices_machine` → `fleet_removal()` answers `None` → this
+    /// pin reds (`cargo test -p fauna-linux --bins`). The page builder has no
+    /// wiring call of its own to drop: it takes its machine from that fn.
     #[tokio::test]
     async fn the_page_machine_carries_the_fleet_removal_door() {
-        let machine = DevicesMachine::new(
+        let machine = build_wired_devices_machine(
+            fauna_client::NestClient::new(
+                "http://127.0.0.1:1".to_string(),
+                fauna_core::identity::ActorKeypair::generate(),
+            ),
+            None,
             Arc::new(NullObserver) as Arc<dyn DevicesObserver>,
-            Arc::new(fauna_devices_machine::FakeDevicesNestApi::new()),
-            Arc::new(fauna_devices_machine::FakeWizardFactory::new()),
         );
-        wire_fleet_removal(&machine);
         let door = machine
             .fleet_removal()
-            .expect("wire_fleet_removal must wire the door");
+            .expect("build_wired_devices_machine must wire the door");
         let refusal = door
             .resolve_removal("aa", Some([0x11; 32]))
             .await
@@ -1241,6 +1329,94 @@ mod tests {
                     "missing widget id {id:?}; have {names:?}",
                 );
             }
+        });
+    }
+
+    /// The member group (`ui/devices.md` § Members without a matching entry)
+    /// paints nothing while `members` is empty, renders the card family when
+    /// populated, arms THAT card only (confirm/cancel pair replaces its remove
+    /// button), and cancel disarms with nothing written. The arm state is the
+    /// card's fleet id, so a member vanishing from the list disarms too.
+    #[test]
+    fn member_group_hides_when_empty_and_arms_one_card_by_id() {
+        use fauna_devices_machine::FleetMemberSummary;
+
+        fn member(byte: u8) -> FleetMemberSummary {
+            FleetMemberSummary {
+                fingerprint: fauna_core::format::fleet_fingerprint(&[byte; 32]),
+                device_id: fauna_core::hex32::encode(&[byte; 32]),
+                enrolled_at_ms: 1_700_000_000_000,
+            }
+        }
+        fn click(root: &gtk::Box, id: &str) {
+            crate::testid::find_by_test_id(root, id)
+                .unwrap_or_else(|| panic!("no {id}"))
+                .downcast::<gtk::Button>()
+                .unwrap()
+                .emit_clicked();
+        }
+        fn count(root: &gtk::Box, id: &str) -> usize {
+            widget_names(root).iter().filter(|n| *n == id).count()
+        }
+
+        crate::testid::run_on_gtk_thread(|| {
+            let machine = Arc::new(DevicesMachine::new(
+                Arc::new(NullObserver) as Arc<dyn DevicesObserver>,
+                Arc::new(fauna_devices_machine::FakeDevicesNestApi::new()),
+                Arc::new(fauna_devices_machine::FakeWizardFactory::new()),
+            ));
+            let shell = build_devices_shell(None);
+
+            shell.members.update(&[], &machine);
+            assert!(!shell.members.group.is_visible(), "empty → hidden");
+            assert_eq!(count(&shell.content, "device-member-card"), 0);
+
+            shell.members.update(&[member(1), member(2)], &machine);
+            assert!(shell.members.group.is_visible(), "populated → visible");
+            assert_eq!(count(&shell.content, "device-member-card"), 2);
+            for id in [
+                "device-member-note",
+                "device-member-fingerprint",
+                "device-member-enrolled-at",
+            ] {
+                assert!(count(&shell.content, id) >= 1, "missing {id}");
+            }
+            assert_eq!(count(&shell.content, "device-member-remove-button"), 2);
+            assert_eq!(
+                count(&shell.content, "device-member-remove-confirm-button"),
+                0
+            );
+
+            // Arming reveals the pair on ONE card; the other keeps its button.
+            click(&shell.content, "device-member-remove-button");
+            assert_eq!(count(&shell.content, "device-member-remove-button"), 1);
+            assert_eq!(
+                count(&shell.content, "device-member-remove-confirm-button"),
+                1
+            );
+            assert_eq!(
+                count(&shell.content, "device-member-remove-cancel-button"),
+                1
+            );
+
+            // Cancel disarms: no pair, both remove buttons back.
+            click(&shell.content, "device-member-remove-cancel-button");
+            assert_eq!(count(&shell.content, "device-member-remove-button"), 2);
+            assert_eq!(
+                count(&shell.content, "device-member-remove-confirm-button"),
+                0
+            );
+
+            // The armed member leaving the list disarms — the arm is the id,
+            // never a position the next card could inherit.
+            click(&shell.content, "device-member-remove-button");
+            shell.members.update(&[member(2)], &machine);
+            assert_eq!(
+                count(&shell.content, "device-member-remove-confirm-button"),
+                0,
+                "an armed id that no longer lists must not arm a neighbour",
+            );
+            assert_eq!(count(&shell.content, "device-member-remove-button"), 1);
         });
     }
 

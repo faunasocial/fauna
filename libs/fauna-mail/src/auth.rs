@@ -15,7 +15,8 @@
 //! `the_verdict_types_have_exactly_one_definition` in `tests/auth_tests.rs`).
 
 pub use fauna_core::mail_auth::{
-    ArcVerdict, AuthVerdicts, DkimVerdict, DmarcPolicy, DmarcVerdict, SpfVerdict,
+    ArcVerdict, AuthVerdicts, DkimAuthResult, DkimVerdict, DmarcObservation, DmarcPolicy,
+    DmarcVerdict, InboundAuthOutcome, SpfVerdict,
 };
 
 // ── AuthError ─────────────────────────────────────────────────────────────────
@@ -59,6 +60,32 @@ pub async fn verify_inbound(
     let auth_msg = AuthenticatedMessage::parse(raw).ok_or(AuthError::Unparseable)?;
     let resolver = MessageAuthenticator::new_system_conf()
         .map_err(|e| AuthError::ResolverInit(e.to_string()))?;
+    Ok(
+        verify_parsed(&resolver, &auth_msg, mail_from, client_ip, client_helo)
+            .await
+            .verdicts,
+    )
+}
+
+/// Verify SPF, DKIM, DMARC, and ARC for an inbound message, and return the
+/// DMARC aggregate-report observation beside the verdicts.
+///
+/// The same pipeline and inputs as `verify_inbound`; the observation carries
+/// what an RFC 7489 aggregate report needs and the verdicts flatten away (the
+/// From and envelope domains, the aligned DKIM and SPF results, each DKIM
+/// signature's raw result). The MTA calls this one at the SMTP perimeter.
+#[cfg_attr(feature = "uniffi", fauna_uniffi_async::export)]
+pub async fn verify_inbound_observed(
+    raw: &[u8],
+    mail_from: &str,
+    client_ip: &str,
+    client_helo: &str,
+) -> Result<InboundAuthOutcome, AuthError> {
+    use mail_auth::{AuthenticatedMessage, MessageAuthenticator};
+
+    let auth_msg = AuthenticatedMessage::parse(raw).ok_or(AuthError::Unparseable)?;
+    let resolver = MessageAuthenticator::new_system_conf()
+        .map_err(|e| AuthError::ResolverInit(e.to_string()))?;
     Ok(verify_parsed(&resolver, &auth_msg, mail_from, client_ip, client_helo).await)
 }
 
@@ -79,6 +106,23 @@ pub async fn verify_inbound_with(
     client_helo: &str,
 ) -> Result<AuthVerdicts, AuthError> {
     let auth_msg = mail_auth::AuthenticatedMessage::parse(raw).ok_or(AuthError::Unparseable)?;
+    Ok(
+        verify_parsed(resolver, &auth_msg, mail_from, client_ip, client_helo)
+            .await
+            .verdicts,
+    )
+}
+
+/// [`verify_inbound_observed`] over a caller-supplied authenticator — the
+/// hermetic-test seam, as [`verify_inbound_with`] is for `verify_inbound`.
+pub async fn verify_inbound_observed_with(
+    resolver: &mail_auth::MessageAuthenticator,
+    raw: &[u8],
+    mail_from: &str,
+    client_ip: &str,
+    client_helo: &str,
+) -> Result<InboundAuthOutcome, AuthError> {
+    let auth_msg = mail_auth::AuthenticatedMessage::parse(raw).ok_or(AuthError::Unparseable)?;
     Ok(verify_parsed(resolver, &auth_msg, mail_from, client_ip, client_helo).await)
 }
 
@@ -89,7 +133,7 @@ async fn verify_parsed(
     mail_from: &str,
     client_ip: &str,
     client_helo: &str,
-) -> AuthVerdicts {
+) -> InboundAuthOutcome {
     use mail_auth::{dmarc::verify::DmarcParameters, spf::verify::SpfParameters};
     use std::net::IpAddr;
 
@@ -130,11 +174,64 @@ async fn verify_parsed(
     let arc_output = resolver.verify_arc(auth_msg).await;
     let arc = arc_verdict_from(&arc_output);
 
-    AuthVerdicts {
-        dkim,
-        spf,
-        dmarc,
-        arc,
+    let observation = DmarcObservation {
+        header_from_domain: auth_msg
+            .from
+            .first()
+            .and_then(|addr| addr.rsplit_once('@'))
+            .map(|(_, d)| d.to_ascii_lowercase())
+            .unwrap_or_default(),
+        envelope_from_domain: mail_from_domain.to_ascii_lowercase(),
+        dkim_aligned: *dmarc_output.dkim_result() == mail_auth::DmarcResult::Pass,
+        spf_aligned: *dmarc_output.spf_result() == mail_auth::DmarcResult::Pass,
+        dkim_results: dkim_output
+            .iter()
+            .filter_map(|o| {
+                let sig = o.signature()?;
+                Some(DkimAuthResult {
+                    domain: sig.d.to_ascii_lowercase(),
+                    selector: sig.s.clone(),
+                    result: dkim_result_token(o.result()).to_string(),
+                })
+            })
+            .collect(),
+        spf_result: spf_result_token(spf).to_string(),
+    };
+
+    InboundAuthOutcome {
+        verdicts: AuthVerdicts {
+            dkim,
+            spf,
+            dmarc,
+            arc,
+        },
+        observation,
+    }
+}
+
+/// RFC 7489 §A.1 `DKIMResultType` token for one signature's result.
+fn dkim_result_token(r: &mail_auth::DkimResult) -> &'static str {
+    use mail_auth::DkimResult;
+    match r {
+        DkimResult::Pass => "pass",
+        DkimResult::Neutral(_) => "neutral",
+        DkimResult::Fail(_) => "fail",
+        DkimResult::PermError(_) => "permerror",
+        DkimResult::TempError(_) => "temperror",
+        DkimResult::None => "none",
+    }
+}
+
+/// RFC 7489 §A.1 `SPFResultType` token for an SPF verdict.
+fn spf_result_token(v: SpfVerdict) -> &'static str {
+    match v {
+        SpfVerdict::None => "none",
+        SpfVerdict::Pass => "pass",
+        SpfVerdict::Fail => "fail",
+        SpfVerdict::SoftFail => "softfail",
+        SpfVerdict::Neutral => "neutral",
+        SpfVerdict::PermError => "permerror",
+        SpfVerdict::TempError => "temperror",
     }
 }
 

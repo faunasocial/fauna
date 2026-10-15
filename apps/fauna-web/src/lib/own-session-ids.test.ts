@@ -75,3 +75,21 @@ Deno.test('an unnamed session is not an own session', () => {
   eq(own.idsAt(1_000_000_000), [], 'nothing recorded');
   eq(own.currentAt(1_000_000_000), null, 'no current');
 });
+
+Deno.test('an older id recorded late never displaces a newer one as current', () => {
+  // Web's launch token is minted by the launch machine and recorded when the
+  // launch path primes the cache — which can be AFTER `getAuthToken` already
+  // minted (and recorded) a newer bearer. "Current" is the keep-id of sign out
+  // everywhere else: naming the older one would end the newer session, the
+  // one the tab's socket rides. Every own token has the same lifetime, so the
+  // later deadline is the later mint.
+  const own = new OwnSessionIds();
+  own.record('newer0000000000a', 1_000_003_800);
+  own.record('older0000000000b', 1_000_003_700);
+  eq(own.currentAt(1_000_000_000), 'newer0000000000a', 'the newer mint stays current');
+  eq(
+    own.idsAt(1_000_000_000),
+    ['older0000000000b', 'newer0000000000a'],
+    'both are own, oldest first',
+  );
+});

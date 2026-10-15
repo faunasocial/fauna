@@ -22,38 +22,20 @@ Process safety: the agent processes are this test's own children
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
-from contextlib import contextmanager
 
 import pytest
 
 from helpers import sync_agent_ipc as ipc
 from helpers.budgets import UI_SETTLE_S
 from helpers.waiting import wait_until
-from helpers.windows_sync_agent import request, running_agent
+from helpers.windows_sync_agent import attach_once, request, running_agent
+from helpers.windows_toast import registered_identity
 
 pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.skipif(sys.platform != "win32", reason="the windows agent's WinRT toast sink"),
 ]
-
-_AUMID_KEY = r"HKCU\Software\Classes\AppUserModelId"
-
-
-@contextmanager
-def _registered_identity(tag: str):
-    """A per-run unpackaged toast identity, unregistered on exit."""
-    aumid = f"Fauna.AgentSinkE2e.{tag}.{os.getpid()}"
-    key = rf"{_AUMID_KEY}\{aumid}"
-    subprocess.run(
-        ["reg", "add", key, "/v", "DisplayName", "/t", "REG_SZ", "/d", "Fauna e2e", "/f"],
-        check=True, capture_output=True,
-    )
-    try:
-        yield aumid
-    finally:
-        subprocess.run(["reg", "delete", key, "/f"], capture_output=True)
 
 
 def _pipe(tag: str) -> str:
@@ -79,23 +61,17 @@ def _probed_sink(pipe: str):
     return seen[-1]
 
 
-def _attach(pipe: str, identity: str) -> None:
-    request(pipe, {"id": 1, "method": {"AttachApp": {
-        "app": "windows", "notification_identity": identity,
-    }}})
-
-
 def test_the_identity_an_app_attaches_with_is_the_sink_and_outlives_an_agent_restart(
     sync_agent_binary, tmp_path
 ):
     pipe = _pipe("restart")
     data_dir = tmp_path / "agent"
     data_dir.mkdir()
-    with _registered_identity("restart") as aumid:
+    with registered_identity("restart") as aumid:
         with running_agent(sync_agent_binary, pipe, data_dir, tmp_path / "first.log"):
             assert _probed_sink(pipe) is False, "no app has named an identity to post under"
             # The attach adopts the identity before it replies.
-            _attach(pipe, aumid)
+            attach_once(pipe, aumid)
             assert _sink(pipe) is True, "the app's registered identity is a sink"
 
         # A restarted agent — the app closed — still posts under the app's identity.
@@ -109,5 +85,5 @@ def test_an_identity_with_no_toast_registration_is_no_sink(sync_agent_binary, tm
     data_dir.mkdir()
     with running_agent(sync_agent_binary, pipe, data_dir, tmp_path / "agent.log"):
         _probed_sink(pipe)
-        _attach(pipe, f"Fauna.AgentSinkE2e.unregistered.{os.getpid()}")
+        attach_once(pipe, f"Fauna.AgentSinkE2e.unregistered.{os.getpid()}")
         assert _sink(pipe) is False

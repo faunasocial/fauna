@@ -29,6 +29,13 @@ object ValueFormat {
         resolveLocalized(context, com.fauna.ffi.byteSize(bytes.toULong())) ?: ""
 
     /**
+     * Coarse d/h/m duration ("5d 2h 30m") for an elapsed-seconds count, from the
+     * shared `fauna_core::format::duration_secs` decision.
+     */
+    fun durationSecs(context: Context, secs: ULong): String =
+        resolveLocalized(context, com.fauna.ffi.durationSecs(secs)) ?: ""
+
+    /**
      * Relative timestamp for recent items ("just now", "5m ago", "2h ago",
      * "3d ago"); for items ≥ 7 days old the shared decision returns no localized
      * form and we render an absolute date with the platform's locale-aware
@@ -104,6 +111,34 @@ object ValueFormat {
      * `format_unix_local` call. `secs` is unix **seconds**.
      */
     fun absoluteLocal(secs: Long): String = com.fauna.ffi.formatUnixLocal(secs)
+
+    /**
+     * A `family-approval-item` row's text: who the item is from (the shared
+     * `approvalDisplayText`, or the localized no-sender label) and, for a held
+     * mail, when it arrived — "stranger@example.com · 14:03". Which kinds carry
+     * a time and the bucketing are shared Rust
+     * (`fauna_core::format::approval_timestamp_display`, the
+     * `conversationTimestamp` buckets over the entry's `created_at` seconds);
+     * this only joins and renders, as tui's `approval_item_text`.
+     */
+    fun approvalRowText(
+        context: Context,
+        entry: com.fauna.ffi.FfiFamilyApprovalEntry,
+        nowMs: Long = System.currentTimeMillis(),
+    ): String {
+        val who = com.fauna.ffi.approvalDisplayText(entry)
+            ?: context.getString(com.fauna.app.R.string.family_approval_no_sender)
+        val display = com.fauna.ffi.approvalTimestampDisplay(
+            entry, nowMs, DeviceOffset.utcOffsetSeconds(),
+        ) ?: return who
+        val whenText = display.clock
+            ?: display.localized?.let { resolveLocalized(context, it) }
+            ?: display.absoluteEpochMs?.let {
+                DateFormat.getDateInstance(DateFormat.SHORT).format(Date(it))
+            }
+            ?: return who
+        return "$who · $whenText"
+    }
 
     fun conversationTimestamp(context: Context, epochMillis: Long): String {
         val offsetSeconds = DeviceOffset.utcOffsetSeconds()

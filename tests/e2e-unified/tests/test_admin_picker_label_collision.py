@@ -26,13 +26,10 @@ text and reading the same text back proves nothing about the rest of the
 list — whereas listing every painted option catches a same-text collision
 directly.
 
-Wires ``PlatformDriver.option_texts`` (new — reads a synthesized ``"options"``
-``get_attr``: a JSON array of everything a picker currently painted) for
-**web** and **tui** only, the two apps with an open regression gap;
-linux/android/apple/windows already carry their own real-build-site pin for
-at least part of this property (``admin.md`` § 2's landed history) and can
-adopt ``option_texts`` if/when their own gap is filed — mirrors
-``test_admin_role_address.py``'s own android note.
+Reads ``PlatformDriver.option_texts`` (a synthesized ``"options"``
+``get_attr``: a JSON array of everything a picker currently painted). Every
+app builds these pickers with ``fauna_client_admin::admin_picker_option``, so
+the label is shared and each app's column is a witness of that one call.
 """
 
 import secrets
@@ -45,7 +42,16 @@ from common.auth import register_user
 from helpers.budgets import RPC_ROUNDTRIP_S
 from helpers.waiting import wait_until
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.web, pytest.mark.tui]
+pytestmark = [
+    pytest.mark.tier_3,
+    pytest.mark.tui,
+    pytest.mark.linux,
+    pytest.mark.web,
+    pytest.mark.macos,
+    pytest.mark.ios,
+    pytest.mark.windows,
+    pytest.mark.android,
+]
 
 
 def _admin_client(nest_instance) -> WsRpcAdminClient:

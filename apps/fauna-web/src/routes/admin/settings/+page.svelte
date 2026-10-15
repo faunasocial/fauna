@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { identity } from '$lib/store';
+  import { connectionStatus, identity } from '$lib/store';
+  import { makeOfflineGate } from '$lib/offline-gate';
   import {
-    adminTiersList, adminTiersUpdate, type AdminTier,
+    adminTiersList, adminTiersUpdate, adminTiersCreate, type AdminTier,
     adminMembershipTiersList, adminMembershipTiersSet, adminMembershipTiersClear,
     type AdminMembershipTier,
     subscriptionsTiersList,
@@ -10,7 +11,7 @@
   import MessageBanner from '$lib/components/MessageBanner.svelte';
   import { t } from '$lib/i18n/strings';
   import { byteSize } from '$lib/value-format';
-  import { parseCap } from '$lib/wasm';
+  import { defaultLapseTier, offlineAffordance, parseCap } from '$lib/wasm';
   import { IDS } from '$lib/generated/uiIds';
 
   // admin-settings — renamed "Tiers" (admin.md § Admin IA redesign, 2026-06-04).
@@ -35,6 +36,16 @@
   type TierDraft = { inbox: string; storage: string; devices: string; blobSize: string; feeds: string };
   let drafts = $state<Record<string, TierDraft>>({});
   let savingTier = $state<string | null>(null);
+
+  // `fauna.admin.tiers.create` is OnlineOnly (`fauna_protocol::offline_class`):
+  // the shared verdict greys the add button while the nest is unreachable.
+  const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
+
+  // The add-a-tier form's drafts (admin.md § 3 → *Defining a new tier*): a name
+  // plus the same five raw-i64 cap texts a row edits, empty until typed.
+  let addName = $state('');
+  let addCaps = $state<TierDraft>({ inbox: '', storage: '', devices: '', blobSize: '', feeds: '' });
+  let addingTier = $state(false);
 
   // The caught value as the `{message}` every admin page-error string carries
   // (ui/README.md § Copy comprehensibility — the banner must name the gesture AND
@@ -87,7 +98,7 @@
       next[name] = {
         tierName: name,
         adminTier: existing?.admin_tier ?? (tiers[0]?.name ?? ''),
-        lapseTier: existing?.lapse_tier ?? 'free',
+        lapseTier: existing?.lapse_tier ?? defaultLapseTier(),
       };
     }
     membershipDrafts = next;
@@ -202,6 +213,40 @@
       savingTier = null;
     }
   }
+
+  // Define a new tier via `fauna.admin.tiers.create`. Name-trim + every cap
+  // through the shared `parse_cap` (a blank or fractional cap is refused, a
+  // negative clamps to 0) — refused locally on the banner; a nest refusal
+  // (empty/duplicate name) is worded through `add_tier_error`. The form clears
+  // only after the create lands, so a refused name keeps what was typed.
+  async function addTier() {
+    const id = $identity;
+    if (!id?.secretHex) return;
+    const name = addName.trim();
+    if (!name) {
+      error = t.admin.settings_page.add_tier_error_empty_name;
+      return;
+    }
+    const caps = [addCaps.inbox, addCaps.storage, addCaps.devices, addCaps.blobSize, addCaps.feeds]
+      .map((c) => parseCap(c));
+    if (caps.some((c) => c == null)) {
+      error = t.admin.settings_page.add_tier_error_invalid_cap;
+      return;
+    }
+    const [inbox, storage, devices, blobSize, feeds] = caps as number[];
+    addingTier = true;
+    error = '';
+    try {
+      await adminTiersCreate(id.secretHex, name, inbox, storage, devices, blobSize, feeds);
+      addName = '';
+      addCaps = { inbox: '', storage: '', devices: '', blobSize: '', feeds: '' };
+      await loadTiers();
+    } catch (e) {
+      error = t.admin.settings_page.add_tier_error({ message: detail(e) });
+    } finally {
+      addingTier = false;
+    }
+  }
 </script>
 
 <h1 data-testid={IDS.ADMIN_SETTINGS_HEADING}>{t.admin.settings_page.title}</h1>
@@ -274,6 +319,66 @@
       </div>
     </div>
   {/if}
+
+  <!-- Define a new tier (admin.md § 3): shown whether or not any tier exists, so
+       a fresh box can get its first one. -->
+  <div class="tier-item tier-add" data-testid={IDS.ADMIN_SETTINGS_TIER_ADD_SECTION}>
+    <span class="tier-name">{t.admin.settings_page.add_tier_section}</span>
+    <label class="cap">
+      <span class="cap-label">{t.admin.settings_page.add_tier_name}</span>
+      <input
+        class="cap-input" type="text"
+        data-testid={IDS.ADMIN_SETTINGS_TIER_ADD_NAME_INPUT}
+        bind:value={addName}
+      />
+    </label>
+    <label class="cap">
+      <span class="cap-label">{t.admin.settings_page.cap_inbox_bytes}</span>
+      <input
+        class="cap-input" type="text" inputmode="numeric"
+        data-testid={IDS.ADMIN_SETTINGS_TIER_CAP_INBOX}
+        bind:value={addCaps.inbox}
+      />
+    </label>
+    <label class="cap">
+      <span class="cap-label">{t.admin.settings_page.cap_storage_bytes}</span>
+      <input
+        class="cap-input" type="text" inputmode="numeric"
+        data-testid={IDS.ADMIN_SETTINGS_TIER_CAP_STORAGE}
+        bind:value={addCaps.storage}
+      />
+    </label>
+    <label class="cap">
+      <span class="cap-label">{t.admin.settings_page.cap_devices}</span>
+      <input
+        class="cap-input" type="text" inputmode="numeric"
+        data-testid={IDS.ADMIN_SETTINGS_TIER_CAP_DEVICES}
+        bind:value={addCaps.devices}
+      />
+    </label>
+    <label class="cap">
+      <span class="cap-label">{t.admin.settings_page.cap_blob_size}</span>
+      <input
+        class="cap-input" type="text" inputmode="numeric"
+        data-testid={IDS.ADMIN_SETTINGS_TIER_CAP_BLOB_SIZE}
+        bind:value={addCaps.blobSize}
+      />
+    </label>
+    <label class="cap">
+      <span class="cap-label">{t.admin.settings_page.cap_feeds}</span>
+      <input
+        class="cap-input" type="text" inputmode="numeric"
+        data-testid={IDS.ADMIN_SETTINGS_TIER_CAP_FEEDS}
+        bind:value={addCaps.feeds}
+      />
+    </label>
+    <button
+      class="tier-save-btn"
+      data-testid={IDS.ADMIN_SETTINGS_TIER_ADD_BUTTON}
+      use:offlineGate={{ kind: 'fauna.admin.tiers.create', disabled: addingTier }}
+      onclick={addTier}
+    >{addingTier ? t.common.loading : t.admin.settings_page.add_tier}</button>
+  </div>
 </section>
 
 <!-- Membership designations (monetization.md § Pillar 4): a link editor over
@@ -359,6 +464,9 @@
     padding: 0.75rem;
     border: 1px solid var(--border);
     border-radius: 8px;
+  }
+  .tier-add {
+    margin-top: 0.75rem;
   }
   .tier-name {
     font-weight: 600;

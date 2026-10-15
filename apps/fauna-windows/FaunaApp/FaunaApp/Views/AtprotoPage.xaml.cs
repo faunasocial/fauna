@@ -296,6 +296,12 @@ public sealed partial class AtprotoPage : Page, IAsyncLoadedPage
             {
                 DeleteConfirmLines.Children.Add(new TextBlock { Text = line, TextWrapping = TextWrapping.Wrap });
             }
+            DeleteRetireIdentity.IsChecked = _vm.DeleteRetireIdentitySelected;
+            DeleteRetireIdentity.IsEnabled = _vm.DeleteRetireIdentityEnabled;
+            // The wire spelling in the slot the driver's get_attr(id, "state") reads.
+            AutomationProperties.SetHelpText(DeleteRetireIdentity, _vm.DeleteRetireIdentityState);
+            DeleteRetireIdentityReason.Text = _vm.DeleteRetireIdentityReason ?? string.Empty;
+            DeleteRetireIdentityReason.Visibility = Vis(_vm.DeleteRetireIdentityReason is not null);
             DeleteConfirmBtn.IsEnabled = _vm.DeleteConfirmActionsEnabled;
             DeleteCancelBtn.IsEnabled = _vm.DeleteConfirmActionsEnabled;
 
@@ -422,6 +428,15 @@ public sealed partial class AtprotoPage : Page, IAsyncLoadedPage
         ApplyVm();
     }
 
+    /// <summary>The Linked panel's card offered the ward's feed-source ask for a refused
+    /// link (family-safety.md § Feed-source approvals → App affordance) — the same ask
+    /// the Bridges page sends, through the same view model method.</summary>
+    private async void LinkedBridgeSourceAsk_Click(object? sender, SourceAskEventArgs e)
+    {
+        if (_applying || _linkedVm is null) return;
+        await _linkedVm.AskSourceAsync(e.Triple, e.Label);
+    }
+
     /// <summary>Open the contest confirm card (`atproto-contest`) — a sync,
     /// pure-local machine mutation; no wire call.</summary>
     private void Contest_Click(object sender, RoutedEventArgs e)
@@ -496,6 +511,13 @@ public sealed partial class AtprotoPage : Page, IAsyncLoadedPage
         if (_applying || _vm is null) return;
         if (sender is not FrameworkElement { Tag: string method }) return;
         _vm.SetDidMethod(method);
+        ApplyVm();
+    }
+
+    private void DeleteRetireIdentity_Click(object sender, RoutedEventArgs e)
+    {
+        if (_applying || _vm is null) return;
+        _vm.SetDeleteRetireIdentity(DeleteRetireIdentity.IsChecked == true);
         ApplyVm();
     }
 

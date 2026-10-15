@@ -23,6 +23,21 @@ import {
   buildKnockPayload,
   staleSurfacesForPushKind,
   staleSurfacesOnReconnect,
+  featureAuthoredRows as wasmFeatureAuthoredRows,
+  sessionsLoad as wasmSessionsLoad,
+  sessionsRevoke as wasmSessionsRevoke,
+  sessionsRevokeOthers as wasmSessionsRevokeOthers,
+  sessionsLockout as wasmSessionsLockout,
+  succeedStolenIdentityLockedWasm,
+  type SessionsInput,
+  type SessionsPage,
+  openFeaturePolicyEditor,
+  featureAuthoredRowsForWard as wasmFeatureAuthoredRowsForWard,
+  openFeaturePolicyEditorForWard,
+  type BareFeatureAuthoringTier,
+  type AuthoredRow,
+  type PolicyEditorHandle,
+  type PolicyEditorVerdict,
   type LogEntry,
   type BackupAuditAlertReason,
   type StaleSurfaces,
@@ -36,7 +51,7 @@ import { guardSingletonBuild } from './singleton-build';
 import { resetActorScopedState } from './actorScope';
 import { nodeUrl, storedNestUrl, getAuthToken } from './api';
 import { mailExportSavePort } from './mail-export-save';
-import { SignInRefusedError } from './auth-errors';
+import { AppOutdatedError, NestOutdatedError, SignInRefusedError } from './auth-errors';
 import { escalateIfTerminalAuthVerdict } from './post-auth-escalation';
 import { hexToBytes } from './hex';
 import type { SharedRpcPort } from '../../static/fauna_wasm.js';
@@ -612,20 +627,63 @@ async function getClient(secretHex: string): Promise<WsRpcClient> {
   return client;
 }
 
+/** Drop the WS-RPC singleton outright — whatever its key — so the next call
+ *  builds a fresh client. The singleton's one teardown door outside the key
+ *  change: like that site it runs the canonical drop, because everything built
+ *  over the retired client wraps a transport `close()` has latched dead.
+ *
+ *  Why a key-independent door exists: a client can die for a reason its key
+ *  never sees. The onboarding `LoggedIn` terminal is the case that made it — an identity committed before its account exists
+ *  can have its client stopped for good by the box it is about to claim
+ *  (`fauna.auth.not_registered`, which stops the reconnect loop), and the claim
+ *  changes neither the actor nor the nest URL, so `getClient` would hand that
+ *  stopped client to every first signed-in call. Once the account exists, a
+ *  client built before it is stale by construction. Sign-out is the other
+ *  teardown that owes this.
+ *
+ *  An in-flight build is superseded by the generation bump, so it retires
+ *  itself when it lands (`getClient`'s supersede arm). Idempotent. */
+export function retireRpcClient(): void {
+  const stale = client;
+  client = null;
+  clientPromise = null;
+  clientActorId = null;
+  clientNodeUrl = null;
+  clientGeneration += 1;
+  if (stale) retireClient(stale);
+  resetActorScopedState();
+}
+
 const CONNECT_TIMEOUT_MS = 15_000;
 
 /** The error a stopped client's calls fail with — typed when the stop is a
- *  session-ending verdict. The loop stops on the nest's sign-in refusal
+ *  session-ending verdict. The loop stops on the nest's sign-in refusal, on a
+ *  nest that restarted degraded, or on a 4426 close naming this app too old
  *  (`sessionEndingVerdict()`, the wasm twin of native
- *  `NestClientError::session_ending_verdict`), and that verdict routes to the
- *  launch surface (`security.md` § Post-auth surfacing). `getAuthToken` has
- *  normally escalated it already, as the refusal's first witness; this is the
- *  second, and the escalation's latch makes a repeat a no-op. */
+ *  `NestClientError::session_ending_verdict`), and each verdict routes
+ *  to the launch surface (`security.md` § Post-auth surfacing;
+ *  `version-compatibility.md` § Dimension 4), whose launch machine lands the
+ *  previously-signed-in row or the non-retry `needs_update` state on its own
+ *  challenge. `getAuthToken` has normally escalated it already, as the
+ *  verdict's first witness; this is the second, and the escalation's latch
+ *  makes a repeat a no-op. */
 function stoppedError(c: WsRpcClient, stop: string): Error {
-  if (c.sessionEndingVerdict() !== 'sign_in_refused') return new Error(stop);
-  const refused = new SignInRefusedError(nodeUrl());
-  escalateIfTerminalAuthVerdict(refused);
-  return refused;
+  let verdict: Error;
+  switch (c.sessionEndingVerdict()) {
+    case 'sign_in_refused':
+      verdict = new SignInRefusedError(nodeUrl());
+      break;
+    case 'nest_outdated':
+      verdict = new NestOutdatedError(stop);
+      break;
+    case 'app_outdated':
+      verdict = new AppOutdatedError(stop);
+      break;
+    default:
+      return new Error(stop);
+  }
+  escalateIfTerminalAuthVerdict(verdict);
+  return verdict;
 }
 
 /** Wait for the reconnect loop to bring the socket up before issuing a
@@ -688,10 +746,12 @@ export type { SharedRpcPort };
  * never a wasm-bindgen object, per the chunk discipline.
  *
  * Every method resolves the CURRENT singleton on each call rather than
- * capturing the client it was built over: `getClient` re-keys on an
- * identity or nest change and retires the old client, and a machine that
- * outlives that swap (the devices session memo, the atproto singleton) must
- * follow the socket, not hold a retired one. A request issued in a reconnect
+ * capturing the client it was built over: `getClient` re-keys on a nest
+ * change and retires the old client, and a machine that outlives that swap
+ * (the devices session memo, the atproto singleton) must follow the socket,
+ * not hold a retired one. An IDENTITY change is the opposite: the port was
+ * minted for one actor, so `request` refuses once that actor is no longer the
+ * current one instead of re-keying the socket back to it. A request issued in a reconnect
  * gap waits it out inside the wasm client (`dispatcher_within_deadline`,
  * bounded by the kind's deadline) exactly as the core's own requests do — so
  * a chunk's gesture is exactly as connected as the `connection-status`
@@ -703,6 +763,18 @@ export async function sharedRpcPort(secretHex: string): Promise<SharedRpcPort> {
   await getClient(secretHex);
   return {
     request: async (kind: string, idempotencyKey: Uint8Array, payload: Uint8Array) => {
+      // A port is minted for ONE actor. Once the identity has moved on, a call
+      // through it must refuse: `getClient(secretHex)` would otherwise re-key
+      // the singleton back to the retired actor, retiring the CURRENT
+      // identity's client (and its canonical drop) and dialling the old one.
+      const mine = actorIdFromSecret(secretHex);
+      const current = get(identity);
+      if (
+        (clientActorId !== null && clientActorId !== mine) ||
+        (current && actorIdFromSecret(current.secretHex) !== mine)
+      ) {
+        throw new Error('shared rpc port refused: it was built for an identity that is no longer current');
+      }
       const c = await getClient(secretHex);
       return c.requestRaw(kind, idempotencyKey, payload);
     },
@@ -1326,6 +1398,96 @@ export function featuresRows(secretHex: string): Promise<FeatureRow[]> {
   return call(secretHex, (c) => c.featuresRows());
 }
 
+// ── The Status page's node leg ──────────────────────────────────────────
+//
+// `ui/status.md` § State & data shape: the nest's own `fauna.nest.info` reply
+// narrowed to `{domain, version}` by the shared `StatusClient::node()`. The
+// element texts come from `statusTextRaw` (`$lib/wasm`), never derived here.
+
+/** Mirrors shared Rust `fauna_client_status::NodeLeg`. */
+export interface NodeLeg {
+  domain: string;
+  version: string;
+}
+
+export function statusNode(secretHex: string): Promise<NodeLeg> {
+  return call(secretHex, (c) => c.statusNode());
+}
+
+// Settings → Sessions (`ui/sessions.md`): the wasm twin's four acts over the
+// session's live client. `input` is re-built by the caller on every call — the
+// own ids must be read at call time, never off a painted list.
+
+export function sessionsLoad(secretHex: string, input: SessionsInput): Promise<SessionsPage> {
+  return call(secretHex, (c) => wasmSessionsLoad(c, input));
+}
+
+export function sessionsRevoke(
+  secretHex: string,
+  input: SessionsInput,
+  tokenId: string,
+): Promise<SessionsPage> {
+  return call(secretHex, (c) => wasmSessionsRevoke(c, input, tokenId));
+}
+
+export function sessionsRevokeOthers(secretHex: string, input: SessionsInput): Promise<SessionsPage> {
+  return call(secretHex, (c) => wasmSessionsRevokeOthers(c, input));
+}
+
+export function sessionsLockout(
+  secretHex: string,
+  input: SessionsInput,
+  confirmWord: string,
+): Promise<SessionsPage> {
+  return call(secretHex, (c) => wasmSessionsLockout(c, input, confirmWord));
+}
+
+// The authoring half (`dynamic-features.md` § Authoring surfaces): the shared
+// `PolicyEditor` view-model over wasm. These only hand it the live client; the
+// draft, the parser and the write kind are shared Rust.
+
+export function featureAuthoredRows(
+  secretHex: string,
+  tier: BareFeatureAuthoringTier,
+): Promise<AuthoredRow[]> {
+  return call(secretHex, (c) => wasmFeatureAuthoredRows(c, tier));
+}
+
+export function featureEditorOpen(
+  secretHex: string,
+  tier: BareFeatureAuthoringTier,
+  feature: string,
+): Promise<PolicyEditorHandle> {
+  return call(secretHex, (c) => openFeaturePolicyEditor(c, tier, feature));
+}
+
+/** The guardian host's rows for one ward (`ward` = the ward's actor id bytes). */
+export function featureAuthoredRowsForWard(
+  secretHex: string,
+  ward: Uint8Array,
+): Promise<AuthoredRow[]> {
+  return call(secretHex, (c) => wasmFeatureAuthoredRowsForWard(c, ward));
+}
+
+/** Open the editor over one member at the guardian tier for `ward`. */
+export function featureEditorOpenForWard(
+  secretHex: string,
+  ward: Uint8Array,
+  feature: string,
+): Promise<PolicyEditorHandle> {
+  return call(secretHex, (c) => openFeaturePolicyEditorForWard(c, ward, feature));
+}
+
+/** Save (or, with `remove`, clear) the open editor's document. Resolves to the
+ *  shared verdict; a nest refusal rejects. */
+export function featureEditorWrite(
+  secretHex: string,
+  editor: PolicyEditorHandle,
+  remove: boolean,
+): Promise<PolicyEditorVerdict> {
+  return call(secretHex, (c) => (remove ? editor.remove(c) : editor.save(c)));
+}
+
 export function accountAmIAdmin(secretHex: string): Promise<boolean> {
   return call(secretHex, (c) => c.accountAmIAdmin());
 }
@@ -1654,17 +1816,47 @@ export async function successionSweepCopy(secretHex: string): Promise<SweepCopy 
   return c.successionSweepCopy(secretHex) as SweepCopy | null;
 }
 
-/** `recovery-kit-sweep-retry-button`'s press — the sentence to paint, never
- *  null: the button must answer in words on every press, because its render
- *  gate is unfinished work rather than "this device can retry".
+/** `recovery-kit-sweep-retry-button`'s press — the browser's sweep retry, over
+ *  the retired leaf parked in this identity's own replica plane
+ *  (`succession-propagation.md` § Propagation → *Own device fleet*, the
+ *  retired-leaf sub-bullet). Resolves to the SHARED sentence to paint, or
+ *  `null` when the press swept: its words are then the sweep's own lines, so
+ *  re-read `successionSweepCopy`. The button must answer in words on every
+ *  press, because its render gate is unfinished work rather than "this device
+ *  can retry".
  *
- *  On web the answer is always the member-side remedy (the retired identity's
- *  MLS state rests in the nest replica behind revoked bearers, so no browser
- *  ever holds it), and it is the SHARED sentence — a native device without that
- *  history says the same words. */
-export async function successionSweepRetry(secretHex: string): Promise<LocalizedText> {
-  const c = await getClient(secretHex);
-  return c.successionSweepRetry() as LocalizedText;
+ *  `conversations` is the LIVE manager: the successor's half of the sweep joins
+ *  its engine in place, and is lent, never handed over. Without one the press
+ *  answers in words — web never builds a second engine to sweep with. */
+export function successionSweepRetry(
+  secretHex: string,
+  conversations?: WasmConversationsManager | null,
+): Promise<LocalizedText | null> {
+  return call(secretHex, (c) =>
+    (conversations
+      ? c.successionSweepRetry(secretHex, conversations)
+      : c.successionSweepRetryNoEngine(secretHex)) as Promise<LocalizedText | null>,
+  );
+}
+
+/** Discharge the group sweep a relaunch adoption owes — the unbidden press of
+ *  `recovery-kit-sweep-retry-button` (`succession-propagation.md` § Propagation
+ *  → *Own device fleet*, the relaunch-adoption clause), over the same driver
+ *  and the same lent manager as `successionSweepRetry`. Claims once; `null`
+ *  when nothing was owed, else `{ message }` — the press's sentence for
+ *  `error-message`, or `null` on a sweep that ran. Either way the report it
+ *  parks is the one `successionSweepCopy` then reads. */
+export function dischargeOwedSuccessionSweep(
+  secretHex: string,
+  conversations?: WasmConversationsManager | null,
+): Promise<{ message: LocalizedText | null } | null> {
+  return call(secretHex, (c) =>
+    (conversations
+      ? c.dischargeOwedSuccessionSweep(secretHex, conversations)
+      : c.dischargeOwedSuccessionSweepNoEngine(secretHex)) as Promise<{
+      message: LocalizedText | null;
+    } | null>,
+  );
 }
 
 /** What the succession ceremony landed (`identity-stolen-button`). */
@@ -1731,17 +1923,31 @@ export function succeedIdentityWithHeldKit(
   phrase: string,
   conversations?: WasmConversationsManager | null,
 ): Promise<StolenOutcome> {
-  return call(
-    secretHex,
-    (c) =>
-      c.succeedIdentityWithHeldKit(
-        secretHex,
-        phrase,
-        storedNestUrl(),
-        nodeUrl(),
-        conversations ?? undefined,
-      ) as Promise<StolenOutcome>,
+  // The manager is lent, never handed over: wasm borrows it, so this module's
+  // handle stays live for the leave-door drafts flush. No manager → the
+  // ceremony's no-engine export (wasm-bindgen has no optional borrow).
+  return call(secretHex, (c) =>
+    (conversations
+      ? c.succeedIdentityWithHeldKit(secretHex, phrase, storedNestUrl(), nodeUrl(), conversations)
+      : c.succeedIdentityWithHeldKitNoEngine(
+          secretHex,
+          phrase,
+          storedNestUrl(),
+          nodeUrl(),
+        )) as Promise<StolenOutcome>,
   );
+}
+
+/** `identity-stolen-button` on the locked launch surface's
+ *  `identity_stolen_entry` step — the same ceremony as
+ *  `succeedIdentityWithHeldKit`, run with NO session: a locked account mints
+ *  no bearer, so it rides an anonymous connection of its own and never goes
+ *  through `call` (`ui/sessions.md` § Layout & flow → *The locked surface*).
+ *  The two nest URLs are resolved here for the reason they are above. No
+ *  conversations engine runs on the launch route, so the sweep is the
+ *  no-engine arm. */
+export function succeedStolenIdentityLocked(secretHex: string, phrase: string): Promise<StolenOutcome> {
+  return succeedStolenIdentityLockedWasm(secretHex, phrase, storedNestUrl(), nodeUrl());
 }
 
 /** Reply from `fauna.admin.factory_reset`. The `claim_code` is the freshly
@@ -1930,8 +2136,10 @@ export function adminUsersCreate(
   actorId: Uint8Array,
   tier: string,
   handle?: string,
+  guardianActor?: Uint8Array,
 ): Promise<void> {
-  return call(secretHex, (c) => c.adminUsersCreate(actorId, tier, handle) as Promise<void>);
+  // No age band from the Admit section (`admin-users-admit-age-band-select` is unapproved).
+  return call(secretHex, (c) => c.adminUsersCreate(actorId, tier, handle, guardianActor, undefined) as Promise<void>);
 }
 
 // Grant/revoke the admin role (`admin-users-make-admin-button` /
@@ -1945,6 +2153,47 @@ export function adminAdminsAdd(secretHex: string, actorId: Uint8Array): Promise<
 
 export function adminAdminsRemove(secretHex: string, actorId: Uint8Array): Promise<void> {
   return call(secretHex, (c) => c.adminAdminsRemove(actorId) as Promise<void>);
+}
+
+// ── fauna.admin.pending_actions.list + fauna.pending_actions.{approve,cancel}
+// (`admin.md` § Pending admin actions) — the Users hub's standing co-admin
+// approve / veto section (`admin-users-pending-section`). tui twin:
+// `apps/fauna-tui/src/admin/users.rs::pending_section`.
+
+/** One cross-actor pending action (`AdminPendingActionSummary` on the wire). */
+export interface AdminPendingAction {
+  id: number;
+  actor_id: Uint8Array | number[];
+  action_type: string;
+  target: string | null;
+  status: string;
+  created_at: number;
+  execute_after: number;
+  requires_quorum: number;
+  approvals: string[];
+}
+
+interface AdminPendingActionsListReply {
+  actions: AdminPendingAction[];
+}
+
+/** `fauna.admin.pending_actions.list`, narrowed to still-`pending` rows (the
+ *  console offers approve / cancel only on a live action). */
+export function adminPendingActionsList(secretHex: string): Promise<AdminPendingAction[]> {
+  return call(secretHex, async (c) => {
+    const reply = (await c.adminPendingActionsList()) as AdminPendingActionsListReply;
+    return reply.actions.filter((a) => a.status === 'pending');
+  });
+}
+
+/** Add this admin's approval (`admin-pending-action-approve-button`). */
+export function adminPendingActionApprove(secretHex: string, id: number): Promise<void> {
+  return call(secretHex, (c) => c.adminPendingActionApprove(id) as Promise<void>);
+}
+
+/** Cancel an admin action (`admin-pending-action-cancel-button`). */
+export function adminPendingActionCancel(secretHex: string, id: number): Promise<void> {
+  return call(secretHex, (c) => c.adminPendingActionCancel(id) as Promise<void>);
 }
 
 // Deployment-seed rotation (`admin-nest-seed-rotate-*`, box-recovery.md §
@@ -2062,6 +2311,28 @@ export function moderationLegalTakedown(
   );
 }
 
+export interface ModerationAppealReply {
+  status: string;
+  content_id: string;
+}
+
+/** `fauna.moderation.appeal` — appeal the enforcement decision recorded against
+ *  `contentId` (a moderation-queue server row's own id, captured when the form
+ *  opened; `moderation.md` § Legal takedown — the transparency triple's second
+ *  leg). Gate the dispatch through `appealFormView` (`$lib/wasm`). The reply is
+ *  recorded for review, never granted; a refusal rejects for `appealVerdict` to
+ *  word. */
+export function moderationAppeal(
+  secretHex: string,
+  contentId: string,
+  reason: string,
+): Promise<ModerationAppealReply> {
+  return call(
+    secretHex,
+    (c) => c.moderationAppeal(contentId, reason) as Promise<ModerationAppealReply>,
+  );
+}
+
 // ── User-initiated reporting (`moderation.md` § User-initiated reporting) —
 // the five client calls and the reporter-side hide. The sheet's decisions are
 // `$lib/wasm`'s `reportSheetView` & co.; these only dispatch.
@@ -2153,6 +2424,34 @@ export function adminTiersUpdate(
   );
 }
 
+/** `fauna.admin.tiers.create` — define a new tier (the admin-settings add-a-tier
+ *  form; admin.md § 3 → *Defining a new tier*). Caps are already validated by
+ *  the caller through the shared `parse_cap`. An empty name is
+ *  `fauna.admin.invalid_params`, a duplicate `fauna.admin.conflict`; the caller
+ *  refetches `adminTiersList` after. */
+export function adminTiersCreate(
+  secretHex: string,
+  name: string,
+  maxInboxBytes: number,
+  maxStorageBytes: number,
+  maxDevices: number,
+  maxBlobSize: number,
+  maxFeeds: number,
+): Promise<void> {
+  return call(
+    secretHex,
+    (c) =>
+      c.adminTiersCreate(
+        name,
+        maxInboxBytes,
+        maxStorageBytes,
+        maxDevices,
+        maxBlobSize,
+        maxFeeds,
+      ) as Promise<void>,
+  );
+}
+
 // Membership designations (monetization.md § Pillar 4) — a link editor over the
 // admin's own subscription tiers, never a third tier list. `tier_name` names a
 // row in `subscriptionsTiersList` (the admin's own tiers); `admin_tier` /
@@ -2200,8 +2499,8 @@ export function adminMembershipTiersClear(secretHex: string, tierName: string): 
 // vestigial bridge toggle; admin.md § N Nest). Over the WS-RPC
 // `fauna.admin.services.{list,update}` kinds — replaces the deprecated
 // /admin/api/services HTTP twin (removed 2026-06-04). The last `/admin/api/*`
-// web twin, /admin/api/stats, migrated here as `adminStats` 2026-06-06 and the
-// `admin-api.ts` module was deleted (no HTTP `/admin/api/*` calls remain).
+// web twin, /admin/api/stats, migrated here 2026-06-06 and the `admin-api.ts`
+// module was deleted (no HTTP `/admin/api/*` calls remain).
 
 /** The nest service-enable flags (`fauna.admin.services.list` → AdminServiceFlags). */
 export interface AdminServiceFlags {
@@ -2213,21 +2512,24 @@ export function adminServicesList(secretHex: string): Promise<AdminServiceFlags>
   return call(secretHex, (c) => c.adminServicesList() as Promise<AdminServiceFlags>);
 }
 
-/** `fauna.admin.stats` → the deployment counters for the admin dashboard.
- *  Mirrors `fauna_protocol::admin::AdminStatsReply` field-by-field. Replaces the
- *  deleted HTTP `/admin/api/stats` twin; email/TLS status come from
- *  `setupStatus`, the running version from `fetchNestInfo`. */
-export interface AdminStats {
-  total_users: number;
-  users_by_tier: [string, number][];
-  suspended_users: number;
-  total_inbox_bytes: number;
-  total_storage_bytes: number;
-  ws_connections: number;
+/** One dashboard card: `label`/`value` are `LocalizedText` the page resolves
+ *  with `resolveLocalized`. */
+export interface AdminStatCard {
+  label: LocalizedText;
+  value: LocalizedText;
 }
 
-export function adminStats(secretHex: string): Promise<AdminStats> {
-  return call(secretHex, (c) => c.adminStats() as Promise<AdminStats>);
+/** The admin dashboard's one card set (`admin.md` § 1. Dashboard → *The card
+ *  set*), folded in shared Rust from five tolerated reads. `error` is the first
+ *  failed read's detail; the cards the other reads produced are still present. */
+export interface AdminDashboardSnapshot {
+  stats: AdminStatCard[];
+  error: string | null;
+}
+
+/** `adminDashboardSnapshot()` — never rejects; a failed read rides `error`. */
+export function adminDashboardSnapshot(secretHex: string): Promise<AdminDashboardSnapshot> {
+  return call(secretHex, (c) => c.adminDashboardSnapshot() as Promise<AdminDashboardSnapshot>);
 }
 
 /** `fauna.admin.services.update` — flip one service flag (`pairing` is the only
@@ -2334,6 +2636,33 @@ export function adminRegionStatus(secretHex: string): Promise<AdminRegionView> {
  *  feature-policy document nest-side. */
 export function adminSetRegion(secretHex: string, region: string | undefined): Promise<void> {
   return call(secretHex, (c) => c.adminSetRegion(region) as Promise<void>);
+}
+
+/** Every word `admin-nest-web-app-origin-*` paints, already chosen by the
+ *  shared `fauna_client_admin::admin_web_app_origin_view` fold (admin.md § N
+ *  Nest → Web-app origin). Mirrors `AdminWebAppOriginView` field-by-field. */
+export interface AdminWebAppOriginView {
+  selected: 'bundled' | 'central' | null;
+  status: LocalizedText;
+  scope: LocalizedText;
+  can_set: boolean;
+  central_label: LocalizedText;
+}
+
+/** `fauna.admin.web_app_origin.get` folded through the shared view — an older
+ *  nest's unknown-kind answer resolves the "predates the choice" view. */
+export function adminWebAppOriginStatus(secretHex: string): Promise<AdminWebAppOriginView> {
+  return call(secretHex, (c) => c.adminWebAppOriginStatus() as Promise<AdminWebAppOriginView>);
+}
+
+/** `fauna.admin.web_app_origin.set` (`admin-nest-web-app-origin-save-button`) —
+ *  resolves the fold of the nest's own reply, so the save repaints with no
+ *  second read. */
+export function adminSetWebAppOrigin(
+  secretHex: string,
+  mode: 'bundled' | 'central',
+): Promise<AdminWebAppOriginView> {
+  return call(secretHex, (c) => c.adminSetWebAppOrigin(mode) as Promise<AdminWebAppOriginView>);
 }
 
 // Invite codes (Section 2 — mint/list/delete).
@@ -2634,14 +2963,20 @@ export function conversationsManager(
 // reads. The peer-token factory is the Nests page's own (`linkedNestsMachine`
 // below): the runtime connects to each linked replica nest with it
 // (`account-sync-plane.md` § The bind leg, ruling 4).
+// `stillWanted` is asked right before the call enters wasm — after the
+// connection wait, where a stop can land — so a start a stop superseded never
+// claims an install (`$lib/account-runtime`, *Order is the contract*).
 export function startAccountRuntime(
   secretHex: string,
   manager: WasmConversationsManager,
+  stillWanted: () => boolean = () => true,
 ): Promise<void> {
   const peerTokenProviderFactory = (peerUrl: string) => (forceRefresh: boolean) =>
     getAuthToken(secretHex, peerUrl, forceRefresh);
   return call(secretHex, (c) =>
-    c.startAccountRuntime(manager, hexToBytes(secretHex), nodeUrl(), peerTokenProviderFactory),
+    stillWanted()
+      ? c.startAccountRuntime(manager, hexToBytes(secretHex), nodeUrl(), peerTokenProviderFactory)
+      : Promise.reject(new Error('account runtime: superseded by a stop before it began')),
   );
 }
 
@@ -2838,6 +3173,38 @@ export function spamThresholdOverrideSet(
   value: number | null,
 ): Promise<number | null> {
   return call(secretHex, (c) => c.spamThresholdOverrideSet(value) as Promise<number | null>);
+}
+
+// ── Per-account Forwarding (mail-forwarding.md § Per-account "forward all",
+// § Per-account forward rate-limit) — the
+// mail-settings page's two inputs. ──
+
+/** `fauna.bridges.get_forward_all_to` → the forward-all address, or `null`
+ *  when forwarding is off. */
+export function forwardAllToGet(secretHex: string): Promise<string | null> {
+  return call(secretHex, (c) => c.forwardAllToGet() as Promise<string | null>);
+}
+
+/** `fauna.bridges.set_forward_all_to` (`null` clears) → the persisted address
+ *  the nest confirmed on the re-read, never the local edit. */
+export function forwardAllToSet(secretHex: string, address: string | null): Promise<string | null> {
+  return call(secretHex, (c) => c.forwardAllToSet(address) as Promise<string | null>);
+}
+
+/** The hourly forwarding limit and the admin ceiling it may not pass. */
+export interface ForwardPerHour {
+  value: number;
+  ceiling: number;
+}
+
+/** `fauna.bridges.get_forward_per_hour` → `{ value, ceiling }`. */
+export function forwardPerHourGet(secretHex: string): Promise<ForwardPerHour> {
+  return call(secretHex, (c) => c.forwardPerHourGet() as Promise<ForwardPerHour>);
+}
+
+/** `fauna.bridges.set_forward_per_hour` → the persisted `{ value, ceiling }`. */
+export function forwardPerHourSet(secretHex: string, value: number): Promise<ForwardPerHour> {
+  return call(secretHex, (c) => c.forwardPerHourSet(value) as Promise<ForwardPerHour>);
 }
 
 /** `fauna.email.apply_spam_disposition` → `{ watermarked, moved_to_junk }`.
@@ -3593,6 +3960,34 @@ export function fetchRestoreHistory(secretHex: string): Promise<RestoreHistoryRo
   return call(secretHex, (c) => c.snapshotListRestoreHistory());
 }
 
+/** One snapshot file's decrypted bytes — the web leg of the shared snapshot
+ *  entry reader (`ui/backups.md` § Where logic lives → *Single-file byte
+ *  download*): the entry, sealed or plaintext, licensed by the signed change
+ *  row of its set that named it under its path — read over this connection,
+ *  before any byte — then opened under the owner key. `manifestHash` takes
+ *  the wire value in either shape the decoder
+ *  produces; `folder` / `folderHash` are the open detail's. The caller saves
+ *  the bytes as a browser blob download. */
+export function downloadSnapshotFileBytes(
+  secretHex: string,
+  manifestHash: Uint8Array | number[],
+  relativePath: string,
+  nestUrl: string,
+  folder: string,
+  folderHash: string | null,
+): Promise<Uint8Array> {
+  return call(secretHex, (c) =>
+    c.downloadSnapshotFileBytes(
+      new Uint8Array(manifestHash),
+      relativePath,
+      secretHex,
+      nestUrl,
+      folder,
+      folderHash ?? undefined,
+    ),
+  );
+}
+
 export function fetchRestoreDivergence(
   secretHex: string,
   snapshotId: number,
@@ -3942,6 +4337,10 @@ export interface BackupDestinationStatus {
    *  self-audit. Read **with** `audit_state`, never instead of it — a failure
    *  leaves this stamp at the previous pass. */
   last_audit_passed_at?: number | null;
+  /** Nest rows only: `"ok"` / `"refused"` — whether the destination lets this
+   *  box write the backup. Pass it through to `backupBacklogText` untouched: a
+   *  refused writer is a state, never a lag. `null` on a client-device row. */
+  writer_state?: string | null;
 }
 
 export function backupDestinationStatus(
@@ -3976,6 +4375,37 @@ export interface DestinationAuditRow {
    *  entry; each is **opaque**, straight into `backupAuditAlertText`. Read it
    *  through `auditAlertReasons` (`$lib/backup-audit-alerts`). */
   alert_reasons: BackupAuditAlertReason[];
+  /** Whether this row's fifth-reason banner carries
+   *  `backup-audit-recover-button` — the shared `recover_offered` answer at the
+   *  pass's `now` (a regressed **nest** destination; a browser is never a
+   *  custodian). Read through `auditAlertBanners`, never re-derived. */
+  recover_offered: boolean;
+}
+
+/** The `backup-audit-recover-result` view's content: the shared verdict bit
+ *  and the shared result lines, verdict first — each a `LocalizedText` to
+ *  resolve with `resolveLocalizedNested` (a line's set name and remedy are
+ *  themselves keys). */
+export interface RecoveryResult {
+  whole: boolean;
+  lines: LocalizedText[];
+}
+
+/**
+ * Run the recovery from `destinationId` into the owner's nest — the confirm of
+ * `backup-audit-recover-button` (`ui/backups.md` § Audit-alert surface, the
+ * fifth reason). One call into shared Rust: the leg lands the destination's
+ * copy over this page's own sessions, the source's verb recovers by record,
+ * then the duties clear the notice. Run `backupAuditRunPass` again afterwards
+ * so the cleared notice is read from the store, never assumed. Rejects with a
+ * message for a run that never reached the shared driver or that it stopped —
+ * nothing the owner can lose: a re-run resumes.
+ */
+export function backupRecoverFromDestination(
+  secretHex: string,
+  destinationId: string,
+): Promise<RecoveryResult> {
+  return call(secretHex, (c) => c.backupRecoverFromDestination(secretHex, destinationId));
 }
 
 /**
@@ -4020,15 +4450,13 @@ export type DeploymentSeedCustodyOutcome =
   | 'bound_unresolved'
   | 'store_not_ready';
 
-/** The warning a run owes the admin when custody ends unconfirmed:
- *  `mismatch` (the box handed off a seed that does not derive to its bound
- *  identity) or `failed` (anything else unconfirmed — retried at the next
- *  edge). */
-export type DeploymentSeedCustodyWarning = 'mismatch' | 'failed';
-
+/** `onWarning` receives the warning a run owes the admin when custody ends
+ *  unconfirmed — the shared `fauna_client_config::custody_leg_warning`, which
+ *  the caller only renders (`resolveLocalized`); the choice between the
+ *  warnings is made in Rust. */
 export function selfHealDeploymentSeedCustody(
   secretHex: string,
-  onWarning: (warning: DeploymentSeedCustodyWarning) => void,
+  onWarning: (warning: LocalizedText) => void,
 ): Promise<DeploymentSeedCustodyOutcome> {
   return call(secretHex, (c) =>
     c.selfHealDeploymentSeedCustody(secretHex, onWarning),
@@ -4360,14 +4788,11 @@ export interface SubscriptionMine {
   author_id: string; // hex
   tier: string;
   status: string; // "active" | "pending"
-  handle: string | null; // creator handle if the nest resolved one, else null
-  /**
-   * The `subscription-mine-author` label: `handle` when non-blank, else the full
-   * hex `author_id`. Pre-computed by the shared chooser in the wasm transcribe —
-   * render verbatim, never re-derive the fallback here.
-   * See `docs/goal/behavior/value-formatting.md` § Subscription author label.
-   */
-  author_display: string;
+  // creator handle if the nest resolved one, else null. The
+  // `subscription-mine-author` label is the private overlay face's
+  // `subscriptionAuthorLabel(handle, author_id)` — never derived here
+  // (`docs/goal/behavior/value-formatting.md` § Subscription author label).
+  handle: string | null;
 }
 
 /** The calling actor's subscriptions across every creator (`mine.list`). */
@@ -4432,6 +4857,18 @@ export function subscriptionsSubscribePublishingEk(
         tier,
       ) as Promise<SubscriptionSubscribeOutcome>,
   );
+}
+
+/**
+ * Publish the account's subscriber encapsulation-key registry entry
+ * (`post-quantum.md` § surface B) over the shared
+ * `SubscriptionsClient::publish_encaps_key`: idempotent, fired at the same
+ * universal post-auth point as `refreshMailEpochSchedule`. The web twin of
+ * linux `FaunaClient::publish_subscriber_encaps_key`. Best-effort — the caller
+ * should catch and log, never surface to the user.
+ */
+export function publishSubscriberEncapsKey(secretHex: string): Promise<void> {
+  return call(secretHex, (c) => c.subscriptionsPublishEncapsKey(secretHex)) as Promise<void>;
 }
 
 /** The viewer's current status for `authorIdHex` (`status.get`; tier=null when none). */

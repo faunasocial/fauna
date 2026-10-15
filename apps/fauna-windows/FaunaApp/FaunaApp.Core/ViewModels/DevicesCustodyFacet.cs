@@ -89,6 +89,44 @@ internal sealed class DevicesCustodyFacet
         }
     }
 
+    /// <summary>The store-change re-read (<c>account-runtime.md</c> § A runtime's
+    /// own pump is a source of the notice too, part 4): fold the facet again WITHOUT
+    /// a ceremony drive pass (the drive is the page's load edge, never a notice's).
+    /// Answers <c>true</c> only when the fold changed what the cards show, so the
+    /// page repaints nothing — and discards no typed budget draft — for an answer it
+    /// already paints. A <c>null</c> fold or a failed read keeps the painted facet;
+    /// <see cref="Error"/> (a gesture's message) is never touched. Never throws.</summary>
+    public async Task<bool> ReloadAsync(INestRpcClient rpc)
+    {
+        try
+        {
+            if (await rpc.CustodyFacetLoadAsync() is not { } facet) return false;
+            if (Facet is { } held && Signature(held) == Signature(facet)) return false;
+            await AdoptAsync(rpc, facet);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("DevicesCustodyFacet", $"[custody] reload failed: {ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>A content signature of a fold (the generated rows carry byte
+    /// arrays, which a record compares by reference). A fold that cannot be
+    /// serialized never equals another, so it errs toward a repaint.</summary>
+    private static string Signature(CustodyFacetView facet)
+    {
+        try
+        {
+            return System.Text.Json.JsonSerializer.Serialize(facet);
+        }
+        catch (Exception)
+        {
+            return Guid.NewGuid().ToString("N");
+        }
+    }
+
     /// <summary>Re-read piece 1's posture for the roster's principals, in order
     /// (the shared <c>keyless_posture</c> join). A failed read keeps the last
     /// answer. Never throws.</summary>

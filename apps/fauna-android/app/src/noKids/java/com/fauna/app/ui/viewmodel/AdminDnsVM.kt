@@ -18,6 +18,7 @@ import uniffi.fauna_client_dns.DnsManagementMachine
 import uniffi.fauna_client_dns.DnsStatus
 import uniffi.fauna_client_dns.DomainView
 import uniffi.fauna_client_dns.PendingCertIssue
+import uniffi.fauna_client_mail_settings.DomainDmarcPolicy
 import uniffi.fauna_client_mail_settings.LocalDomainAction
 import uniffi.fauna_client_mail_settings.LocalDomainMachine
 import uniffi.fauna_client_mail_settings.LocalDomainStatus
@@ -137,6 +138,15 @@ class AdminDnsVM @Inject constructor(
         }
     }
 
+    /** One tick of the open page's background re-check (the screen's timer):
+     *  the shared `background_recheck` re-reads the matrix and verifies it,
+     *  re-publishing a managed record public DNS no longer serves. No working
+     *  flag — a tick the admin did not ask for never disables the page. */
+    suspend fun backgroundRecheck() {
+        dnsMachine?.backgroundRecheck()
+        publish()
+    }
+
     fun addDomain(domain: String) = dispatchLd(
         LocalDomainAction.AddDomain(
             domain = domain,
@@ -201,6 +211,19 @@ class AdminDnsVM @Inject constructor(
             domain = domain,
             role = role,
             actorId = actorIdHex?.let { HexUtil.hexToBytes(it) },
+        ),
+    )
+
+    /** Set one domain's published DMARC policy (`p=` and `sp=` together;
+     *  dmarc-reporting.md § Multi-domain deployments). Only `dmarcPolicy` is set,
+     *  so no other per-domain knob is touched; `reject` is the default. */
+    fun setDmarcPolicy(domain: String, policy: DomainDmarcPolicy) = dispatchLd(
+        LocalDomainAction.UpdateConfig(
+            domain = domain,
+            mtaStsMaxAgeSeconds = null,
+            mtaStsCertMode = null,
+            spfRecord = null,
+            dmarcPolicy = policy,
         ),
     )
 

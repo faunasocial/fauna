@@ -14,10 +14,15 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
@@ -102,15 +107,24 @@ fun CopyableRow(
     onCopied: () -> Unit = {},
 ) {
     val copy = rememberCopyToClipboard()
+    // The row's `copied` attribute (its `stateDescription`) is the exact string
+    // handed to the clipboard, never re-derived — the driver-facing witness of a
+    // copy, since no driver reads the OS clipboard (same shape as the Profile
+    // `profile-actor-id-copy-btn`). Keyed on the value, so it starts empty.
+    var copied by remember(fullValue) { mutableStateOf("") }
     Row(
         modifier = modifier
             .fillMaxWidth()
             .clickable {
                 copy(fullValue)
+                copied = fullValue
                 onCopied()
             }
             .padding(vertical = 4.dp)
-            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier),
+            .then(
+                if (testTag != null) Modifier.testTag(testTag).semantics { stateDescription = copied }
+                else Modifier
+            ),
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Text(label, style = MaterialTheme.typography.bodyMedium)

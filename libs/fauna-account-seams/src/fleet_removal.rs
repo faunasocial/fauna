@@ -2,8 +2,8 @@
 //! ([`fauna_devices_machine::FleetRemoval`]) — the remove-device action's
 //! second leg beside `fauna.sync.devices.delete`
 //! (`docs/goal/behavior/devices.md` § Removing a Device;
-//! `docs/goal/architecture/account-data-taxonomy.md` § The generation
-//! machinery → *Fleet-scope reclamation*, clause (4)).
+//! `docs/goal/architecture/fleet-scope-reclamation.md`
+//! § *Fleet-scope reclamation*, clause (4)).
 //!
 //! # Why it lives here and not in each app
 //!

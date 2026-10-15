@@ -4,7 +4,7 @@ import Foundation
 /// A set's identity on this device for one account — the File Provider domain
 /// identifier, and the key of the device registries that ride on it (the
 /// staging root, the on-demand-toggle preference, the domain-owner record).
-/// `on-demand-files.md` § Apple File Provider binding, *the actor-scoped
+/// `on-demand-files-apple.md` § Apple File Provider binding, *the actor-scoped
 /// device identity*: a bare `FolderRef` is unique per NEST, not per device —
 /// two accounts on two nests routinely both own `local:1` — so a device-wide
 /// registry keyed by the bare ref hands one account's presence to the other.

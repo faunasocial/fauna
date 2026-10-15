@@ -156,7 +156,7 @@ pub struct PendingActionRow {
     pub target: Option<String>,
     /// Optional JSON payload with action-specific parameters.
     pub payload: Option<String>,
-    /// Current status: "pending", "executed", "cancelled", "expired".
+    /// Current status: "pending", "executing" (mid-run), "executed", "cancelled", "expired".
     pub status: String,
     pub created_at: i64,
     pub execute_after: i64,
@@ -1245,6 +1245,18 @@ async fn release_claim(state: &Arc<AppState>, id: i64) {
     }
 }
 
+/// Boot reconcile, run by [`start_executor`] before the first tick: a row a
+/// crash left claimed (`executing`) goes back to the queue, never stranded
+/// (`nest/common.md` § Client-state recoverability). Pinned at its call site
+/// by `claim_tests::the_executor_requeues_a_crash_left_claim_at_boot`.
+async fn boot_reconcile(state: &Arc<AppState>) {
+    match state.db.requeue_stranded_pending_actions().await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("pending action executor: re-queued {n} stranded claims"),
+        Err(e) => tracing::warn!("pending action executor: boot re-queue failed: {e}"),
+    }
+}
+
 /// Spawn a background tokio task that ticks every 60 seconds and processes
 /// all ready pending actions.
 ///
@@ -1253,14 +1265,7 @@ async fn release_claim(state: &Arc<AppState>, id: i64) {
 /// in `state.auth.token_store` and `state.ws`.
 pub fn start_executor(state: Arc<AppState>) {
     state.clone().spawn_scoped(async move {
-        // Boot reconcile, before the first tick: a row a crash left claimed
-        // (`executing`) goes back to the queue, never stranded
-        // (`nest/common.md` § Client-state recoverability).
-        match state.db.requeue_stranded_pending_actions().await {
-            Ok(0) => {}
-            Ok(n) => tracing::info!("pending action executor: re-queued {n} stranded claims"),
-            Err(e) => tracing::warn!("pending action executor: boot re-queue failed: {e}"),
-        }
+        boot_reconcile(&state).await;
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
@@ -1834,6 +1839,38 @@ mod claim_tests {
         let row = state.db.get_pending_action(id).await.unwrap().unwrap();
         assert_eq!(row.status, "pending");
         assert_eq!(execute_ready_actions(&state).await.unwrap(), 1);
+        assert_eq!(
+            state.db.get_handle(&creator).await.unwrap().as_deref(),
+            Some("renamed")
+        );
+    }
+
+    /// The WIRING of the boot reconcile, not just its SQL: `start_executor`
+    /// itself requeues the crash-left claim before its first (immediate) tick,
+    /// which then runs it. Dropping the call from `start_executor` leaves the
+    /// row `executing` for good and this goes red.
+    #[tokio::test]
+    async fn the_executor_requeues_a_crash_left_claim_at_boot() {
+        let creator = [0x45u8; 32];
+        let state = state_with_handle(&creator, "original").await;
+        let id = due_handle_change(&state, &creator).await;
+        state.db.claim_pending_action(id).await.unwrap().unwrap();
+
+        start_executor(state.clone());
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let row = state.db.get_pending_action(id).await.unwrap().unwrap();
+            if row.status == "executed" {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the crash-left claim was never re-run (status={})",
+                row.status
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
         assert_eq!(
             state.db.get_handle(&creator).await.unwrap().as_deref(),
             Some("renamed")

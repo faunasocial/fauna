@@ -602,6 +602,7 @@ async fn a_designated_tiers_paid_entitlement_rides_the_unchanged_waist() {
         tier: "unlock-a".into(),
         valid_until_secs: None,
         external_ref: "pay_unlock_1".into(),
+        return_ref: None,
     };
     let applied = payment_core::apply_payment(&state, &entitlement)
         .await

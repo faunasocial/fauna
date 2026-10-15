@@ -203,6 +203,7 @@ fn verification(invite_id: &str) -> InviteCodeVerification {
     InviteCodeVerification {
         invite_id: invite_id.into(),
         supervised_by: None,
+        age_band: None,
     }
 }
 

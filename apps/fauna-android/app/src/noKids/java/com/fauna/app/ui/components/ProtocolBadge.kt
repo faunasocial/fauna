@@ -10,6 +10,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.fauna.ffi.classifySources
 import social.fauna.generated.Ids
+import uniffi.fauna_core.BridgeIdentitySnapshot
 
 /**
  * Render one `protocol-badge` per classified post source.
@@ -23,15 +24,21 @@ import social.fauna.generated.Ids
  * so the feed badge and the rail can't drift (render-model.md § Deltas → D5). An empty or
  * unknown-only-empty field renders no badge; a multi-source post renders one badge per
  * origin.
+ *
+ * [bridgeRoster] is the feed snapshot's `bridgeRoster`: a token naming a listed bridge is
+ * that bridge's badge, which paints its declared label beside the glyph (`paintsLabel`;
+ * `ui/feed.md` § Implementation status today, `SourceKind::Bridged`) — a first-party
+ * badge stays its glyph alone.
  */
 @Composable
-fun ProtocolBadge(source: String, modifier: Modifier = Modifier) {
-    val badges = classifySources(source)
+fun ProtocolBadge(source: String, bridgeRoster: List<BridgeIdentitySnapshot>, modifier: Modifier = Modifier) {
+    val badges = classifySources(source, bridgeRoster)
     if (badges.isEmpty()) return
     Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
         for (badge in badges) {
+            val glyph = sourceGlyphEmoji(badge.glyph)
             Text(
-                sourceGlyphEmoji(badge.glyph),
+                if (badge.paintsLabel) "$glyph ${badge.label}" else glyph,
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.testTag(Ids.PROTOCOL_BADGE),
             )

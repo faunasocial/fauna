@@ -262,11 +262,12 @@ async fn tier_pricing_is_gated_but_a_free_tier_is_not() {
     deny(&state, &author, GatedFeature::Payments).await;
 
     // The control: an unpriced tier still lands under a full payments deny.
-    create_free_tier(&router, &state, author, "followers").await;
+    // Not `followers`: that reserved name holds rank 0 only.
+    create_free_tier(&router, &state, author, "silver").await;
     assert!(
         state
             .db
-            .get_subscription_tier(&author, "followers")
+            .get_subscription_tier(&author, "silver")
             .await
             .unwrap()
             .is_some()
@@ -428,6 +429,7 @@ async fn web_paywall_designation_is_gated_but_clearing_it_is_not() {
         "fauna.folders.set_web_paywall",
         author,
         FolderSetWebPaywallRequest {
+            folder_id: None,
             name: "site".into(),
             tier: Some("gold".into()),
             name_hash: None,
@@ -445,6 +447,7 @@ async fn web_paywall_designation_is_gated_but_clearing_it_is_not() {
         "fauna.folders.set_web_paywall",
         author,
         FolderSetWebPaywallRequest {
+            folder_id: None,
             name: "site".into(),
             tier: None,
             name_hash: None,

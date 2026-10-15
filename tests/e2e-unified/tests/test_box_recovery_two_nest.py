@@ -17,7 +17,7 @@ seed-map fan-out and no device-local replica for this kind:
   into the device's own account store, which the plane publishes to the bound
   nest. Its outcome is an INFO line — ``custody leg: captured`` (a new row) or
   ``custody leg: held`` (the fold already had one) — which these tests wait on
-  positively (``_CUSTODY_LEG_NEEDLES``), never a sleep.
+  positively (``CUSTODY_LEG_NEEDLES``), never a sleep.
 - **The pre-login reads go through one resolver** (§ (b) The reads): the
   ``nest_recovery`` box list and the launch-retry ``launch-recover-button``
   read this device's OWN account store (the local read) joined with a cold
@@ -32,7 +32,7 @@ is the lead app, so it is listed first. Linux's launch glue is ``main.rs`` +
 {launch,recovery}.rs`` (``route()`` maps the settled ``LaunchPhase`` onto the
 same element IDs, ``fetch_launch_recover_boxes`` reads the same resolver).
 Both write the credential file in the registry shape alone (the per-actor
-``fauna/{actor}/*`` slots); the readiness barrier (``_has_identity_secret``)
+``fauna/{actor}/*`` slots); the readiness barrier (``has_identity_secret``)
 matches only ``*/secret`` and the ``nest_url`` surgery only ``*/nest_url``.
 
 **T2** — a fresh device holding only the identity seed lists BOTH boxes by
@@ -105,12 +105,19 @@ each one's self-hosted recovery command — box A's seed and box B's own.
   BrowserContext of its own. T2–T4 stay native: they turn on a stored nest
   URL edited between launches, a TCP proxy and a launch-retry surface.
 
+**T6** — a rotated-away identity is never offered for recovery (§ Custody
+after rotation; tui, the lead app — the exclusion is shared Rust): the device
+claims a box, custodies its seed, rotates the box through ``admin-nest``, and
+after the box dies its ``nest_recovery`` list — read from the device's own
+store, which holds BOTH the successor's entry and the predecessor's marked one
+— offers exactly one box, the successor.
+
 Harness notes:
 
 - Credentials in e2e are a JSON file, not libsecret
   (``FAUNA_E2E_CREDENTIAL_DIR``), and launch routes on the registry's
   per-actor ``fauna/{actor}/*`` rows alone — the ``nest_url`` surgery edits
-  ``fauna/{actor}/nest_url`` (``_nest_url_keys`` below).
+  ``fauna/{actor}/nest_url`` (``nest_url_keys`` below).
 - The device's account store lives under the launch's XDG dirs
   (``StoreRoot::platform``), so reusing the SAME ``xdg_base`` across launches
   is what carries the custodied row into that device's next launch.
@@ -122,8 +129,6 @@ Harness notes:
 from __future__ import annotations
 
 import contextlib
-import json
-import os
 import secrets
 import socket
 import sys
@@ -146,20 +151,27 @@ from actions import ActionLayer  # noqa: E402
 from conftest import (  # noqa: E402
     _apply_r14_trust_env,
     _nest_id_hex,
-    _resolve_cli_binary,
-    _resolve_linux_binary,
-    APP_PATHS,
-    _repo_root,
-    _resolve_windows_app,
     _seeded_environment,
-    browser_origins_to_allow,
     get_available_apps,
 )
 from common.auth import claim_admin  # noqa: E402
 from common.nest import stop_nest  # noqa: E402
 from drivers import create_driver  # noqa: E402
-from helpers import nest_mode as nm  # noqa: E402
 from helpers.waiting import await_account_runtime_assembled  # noqa: E402
+from helpers.box_recovery_launch import (  # noqa: E402
+    LINKED_CUSTODY_NEEDLES,
+    LOGGED_IN_MARKERS,
+    app_path_for,
+    claim_fresh_identity,
+    clear_stored_nest_url,
+    drive_handle_check_and_claim,
+    rewrite_stored_node_url,
+    rust_log,
+    start_boxes,
+    wait_for_authed_app_or_fail,
+    wait_for_custody_leg,
+    wait_for_log_containing_any,
+)
 
 # Client-parametrized (box-recovery.md § Recovery UI (step 4): the launch
 # surfaces are a tui + linux owe). Both apps drive this identical flow — each
@@ -176,336 +188,23 @@ _TWO_NEST_APPS = [c for c in ("tui", "linux") if c in get_available_apps()]
 # T5 adds web: its device needs no edited credential file, proxy or
 # launch-retry surface, so a browser tab can sit in the seat (`_LinkedSeat`).
 _LINKED_APPS = _TWO_NEST_APPS + [c for c in ("web",) if c in get_available_apps()]
-# T4 (the dead-saved-nest launch entry) also runs on windows and macos: its one
-# nest and its same-device relaunch need only the driver's own state-root +
-# credential-dir pinning (`local_appdata` / `home`), no proxy or edited credential
-# file. The windows and macos glue used to read ONLY the saved nest, so the
-# button never appeared exactly when it was needed. (iOS has no launch-retry
-# surface at all, so it is not a witness.)
+# T4 (the dead-saved-nest launch entry) also runs on windows, macos and android:
+# its one nest and its same-device relaunch need only the driver's own state-root
+# + credential-dir pinning (`local_appdata` / `home`; android's filesDir already
+# survives a relaunch), no proxy or edited credential file. The windows and macos
+# glue used to read ONLY the saved nest, so the button never appeared exactly when
+# it was needed; android's launch-retry surface reads the same shared
+# `RecoverableBoxes.load` join. (iOS has no launch-retry surface at all, so it is
+# not a witness.)
 _DEAD_NEST_APPS = _TWO_NEST_APPS + [
-    c for c in ("windows", "macos") if c in get_available_apps()]
+    c for c in ("windows", "macos", "android") if c in get_available_apps()]
 if not (_LINKED_APPS or _DEAD_NEST_APPS):
     pytest.skip(
-        "drives the real tui/linux/web/windows/macos onboarding wizard across live nests",
+        "drives the real tui/linux/web/windows/macos/android onboarding wizard across live nests",
         allow_module_level=True,
     )
 
 pytestmark = pytest.mark.tier_3
-
-# The client's own tracing target, for RUST_LOG — linux's crate is
-# `fauna-desktop`, tui's is `fauna-tui`. Raised to debug so a red diagnoses
-# itself (launch routing, the resolver's per-source failures).
-# windows has no app crate of its own (its glue is C#), so its tracing target is
-# the FFI crate; so does macos (its glue is Swift over the same FFI).
-_RUST_LOG_TARGET = {
-    "linux": "fauna_desktop", "tui": "fauna_tui",
-    "windows": "fauna_ffi", "macos": "fauna_ffi",
-}
-
-# The custody leg runs in the shared runtime crate, not the app crate, so its
-# target is named explicitly. Its `NotAdmin` outcome and the mark reconcile's
-# deferral log at debug!, which is why it is raised to debug too: at plain
-# info a leg that ran and found "not an admin" is indistinguishable from one
-# that never ran.
-_CUSTODY_LEG_TARGET = "fauna_client_account_runtime"
-
-# The custody leg's two confirmed outcomes (`deployment_seeds::run_custody_leg`,
-# both INFO): `captured` merged a new row, `held` found the fold already
-# holding one. Either means this box's row rests in the device's own account
-# store. Its unconfirmed outcome (WARN) is `_CUSTODY_LEG_UNCONFIRMED`, read into
-# the failure message rather than waited on.
-_CUSTODY_LEG_NEEDLES = (
-    "deployment seed custodied off-box on the account plane (custody leg: captured)",
-    "deployment seed already custodied off-box on the account plane (custody leg: held)",
-)
-_CUSTODY_LEG_UNCONFIRMED = "deployment-seed custody leg: custody unconfirmed"
-
-
-# The custody leg over a LINKED nest runs inside the account runtime's pass
-# (`fauna_account_plane::account_driver::pass::linked_custody`): `captured` is
-# INFO, `held` — a pass that found the row already there — is DEBUG, so the
-# pass module is raised to debug for the launches that wait on either.
-_LINKED_CUSTODY_TARGET = "fauna_account_plane::account_driver::pass"
-_LINKED_CUSTODY_NEEDLES = (
-    "(linked custody leg: captured)",
-    "(linked custody leg: held)",
-)
-
-
-def _rust_log(client: str) -> str:
-    """RUST_LOG for one launch: info everywhere, debug on the app's own crate,
-    on the custody leg's crate and on the pass that runs its linked arm."""
-    return (
-        f"info,{_RUST_LOG_TARGET[client]}=debug,{_CUSTODY_LEG_TARGET}=debug,"
-        f"{_LINKED_CUSTODY_TARGET}=debug"
-    )
-
-# The authed app shell has mounted once any main-view landmark is visible
-# (mirrors test_mail_enable_at_admin_claim.py's _LOGGED_IN_MARKERS). Both
-# apps under test register both IDs — linux `feed/mod.rs` + tab bar, tui
-# `feed/mod.rs:618` + `pages.rs:108` — so the check is client-uniform.
-_LOGGED_IN_MARKERS = ("feed-view", "feed-tab")
-
-
-def _app_path(client: str) -> str:
-    """The built debug binary for `client`, or skip if it isn't built."""
-    if client == "linux":
-        path = _resolve_linux_binary()
-        hint = "cargo build -p fauna-linux --bin fauna-desktop"
-    elif client == "windows":
-        path = _resolve_windows_app()
-        hint = "just windows-debug"
-    elif client == "macos":
-        path = _repo_root / APP_PATHS["macos"]
-        if not path.exists():
-            path = None
-        hint = "just mac-debug"
-    else:  # tui
-        path = _resolve_cli_binary()
-        hint = "cargo build -p fauna-tui"
-    if not path:
-        pytest.skip(f"{client} app not built — run '{hint}' first")
-    return str(path)
-
-
-def _start_boxes(request, nest_mode, tmp_path_factory, *labels,
-                 browser: bool = False) -> tuple[list, object]:
-    """Start one nest per `labels` through the run's own provider, unclaimed and
-    TLS-serving. Returns `(nests, stop_all)`.
-
-    `browser=True` is the shape a web seat dials (`provision_target_nest`'s):
-    plain HTTP, since a browser refuses a harness nest's self-signed
-    certificate, and the SPA's origin on the nest's CORS allow-list, since the
-    page reaches these boxes round its own proxy.
-
-    Routed rather than self-spawned (`testing.md` § Default app and nest mode,
-    ruling (1)): these two journeys used to call `common.start_nest` directly,
-    which is a *local binary* and therefore excluded them from every mode but
-    standalone — while the binary here is entirely incidental. What the tests
-    actually need of a box is that it serves TLS, starts unclaimed, and can be
-    stopped, and all three are contract keys every provider answers. The nest's
-    own `port` and `claim_code` are read off the handle for the same reason:
-    both used to be harness-side constants (`find_free_port()` and
-    `common.nest.CLAIM_CODE`), and a container's are neither.
-    """
-    provider = nm.provider_for(nest_mode)
-    # Lazily, and only where a local binary is what fills the slot — DECLARING
-    # `nest_binary` would put it back in these tests' fixture closure, which is
-    # exactly what marks a test standalone-only (`nest_surface.NEST_BINARY_FIXTURES`).
-    nest_binary = (
-        request.getfixturevalue("nest_binary")
-        if nm.builds_local_nest(nest_mode) else None
-    )
-    options = (
-        {"cors_origins": browser_origins_to_allow(request)} if browser
-        else {"serve_tls": True}
-    )
-    nests, cleanups = [], []
-    try:
-        for label in labels:
-            nest, cleanup = provider.start(
-                nest_binary, tmp_path_factory, label,
-                unclaimed=True, **options,
-            )
-            nests.append(nest)
-            cleanups.append(cleanup)
-    except BaseException:
-        for cleanup in reversed(cleanups):
-            cleanup()
-        raise
-
-    def stop_all() -> None:
-        for cleanup in reversed(cleanups):
-            cleanup()
-
-    return nests, stop_all
-
-
-def _nest_url_keys(data: dict) -> list[str]:
-    """Every key holding a nest_url-shaped value: the registry's per-actor
-    `fauna/{actor}/nest_url` row launch routes on."""
-    return [k for k in data if k.endswith("/nest_url")]
-
-
-def _has_identity_secret(data: dict) -> bool:
-    """The claim has written this identity's secret to the credential file —
-    the per-actor `fauna/{actor}/secret` slot both apps write at claim time."""
-    return any(k.endswith("/secret") for k in data)
-
-
-def _clear_stored_nest_url(creds_dir: str, keyring_app: str) -> None:
-    """Strip every nest_url-shaped key, keeping the identity secret intact, so
-    the NEXT launch's Case-3 routing (identity present, `nest_url` absent, no
-    pending invite) lands directly on `handle_entry` instead of
-    silent-challenging the just-claimed box."""
-    path = Path(creds_dir) / f"{keyring_app}.json"
-    deadline = time.monotonic() + 10.0
-    data: dict = {}
-    while time.monotonic() < deadline:
-        try:
-            data = json.loads(path.read_text())
-        except Exception:
-            data = {}
-        if _has_identity_secret(data):
-            break
-        time.sleep(0.2)
-    assert _has_identity_secret(data), (
-        f"expected the claim to have written an identity secret to {path}, "
-        f"found: {data}"
-    )
-    keys = _nest_url_keys(data)
-    assert keys, f"expected a stored nest_url key in {path}, found: {data}"
-    cleared = {k: v for k, v in data.items() if k not in keys}
-    path.write_text(json.dumps(cleared, indent=2))
-    os.chmod(path, 0o600)
-
-
-def _rewrite_stored_node_url(creds_dir: str, keyring_app: str, new_url: str) -> str:
-    """Point every stored nest_url-shaped key at `new_url` (keeping the
-    identity + everything else). Returns the ORIGINAL url (pre-rewrite) so
-    the caller can sanity-check it."""
-    path = Path(creds_dir) / f"{keyring_app}.json"
-    data = json.loads(path.read_text())
-    keys = _nest_url_keys(data)
-    assert keys, f"expected a stored nest_url key in {path}, found: {data}"
-    originals = {data[k] for k in keys}
-    assert len(originals) == 1, (
-        f"expected every nest_url-shaped key to agree before rewriting, got: {originals}"
-    )
-    for k in keys:
-        data[k] = new_url
-    path.write_text(json.dumps(data, indent=2))
-    os.chmod(path, 0o600)
-    return next(iter(originals))
-
-
-def _wait_for_authed_app_or_fail(app, markers=_LOGGED_IN_MARKERS) -> None:
-    """Click through nat_mode_choice / launch-retry until a main-view landmark
-    renders, or fail with the launch error + accessibility tree. Mirrors
-    test_mail_enable_at_admin_claim.py's `_drive_admin_claim_to_logged_in`
-    tail loop (shared prior art, not re-derived).
-
-    `markers` widens the landmark set for a caller that knows where the app
-    comes back: a reloaded browser tab returns to the page it was on."""
-    deadline = time.monotonic() + 120.0
-    while time.monotonic() < deadline:
-        if any(app.driver.is_visible(m) for m in markers):
-            return
-        try:
-            app.onboarding.finish_nat_mode()
-        except Exception:
-            pass
-        for btn in ("launch-retry-button",):
-            try:
-                if app.driver.is_visible(btn):
-                    app.driver.click(btn)
-            except Exception:
-                pass
-        time.sleep(2.0)
-
-    err = ""
-    for eid in ("launch-transient-error", "error-message"):
-        try:
-            if app.driver.is_visible(eid):
-                err = app.driver.get_text(eid)
-                break
-        except Exception:
-            pass
-    try:
-        tree = app.driver.tree()
-    except Exception as e:  # pragma: no cover - diagnostic only
-        tree = f"(tree dump failed: {e})"
-    try:
-        # Distinct lines in first-seen order, not a raw tail: this loop clicks
-        # Retry every two seconds, so a stuck launch fills any tail with the
-        # same three lines and pushes out the one that says why.
-        distinct = dict.fromkeys(
-            line[:400] for line in app.driver.app_stderr_text().splitlines())
-        log = "\n".join(distinct)[-20000:]
-    except Exception as e:  # pragma: no cover - diagnostic only
-        log = f"(app log read failed: {e})"
-    pytest.fail(
-        "admin never reached the authed app after claim + nat_mode_choice. "
-        f"launch error: {err!r}\n--- accessibility tree ---\n{tree}"
-        f"\n--- app log tail ---\n{log}"
-    )
-
-
-def _wait_for_log_containing_any(driver, needles, timeout: float = 20.0) -> str:
-    """Poll this launch's `app.err` until ANY of `needles` appears, returning
-    the full log text once found (or failing with the log tail on timeout).
-
-    A positive wait on the state the log reports, never a blind sleep
-    (e2e-conventions.md point 14): `timeout` is a ceiling on a hung run, not
-    the thing the assertion depends on."""
-    needles = tuple(needles)
-    deadline = time.monotonic() + timeout
-    text = ""
-    while time.monotonic() < deadline:
-        text = driver.app_stderr_text()
-        if any(n in text for n in needles):
-            return text
-        time.sleep(0.3)
-    unconfirmed = (
-        "\n(the custody leg DID run and ended unconfirmed — see its WARN line)"
-        if _CUSTODY_LEG_UNCONFIRMED in text else ""
-    )
-    # 20k, not 4k: the 4k window cut off the START of the post-auth window — the
-    # very part that says whether the custody task ever ran — and a rerun cannot
-    # recover it, because pytest GCs the tmp tree holding this launch's own
-    # `app.err` (measured 2026-09-02: this failure's evidence was lost twice
-    # exactly that way, on consecutive runs).
-    pytest.fail(
-        f"timed out waiting for any of {needles!r} in app log{unconfirmed}:\n"
-        f"{text[-20000:]}"
-    )
-
-
-def _wait_for_custody_leg(driver, timeout: float = 60.0) -> str:
-    """Wait until the custody leg reports this launch's bound box custodied on
-    the account plane (`captured` or `held`).
-
-    The leg runs in the background off the store-ready and post-auth edges —
-    the UI reaching feed-view does NOT mean it has fetched the seed, merged the
-    row into the device's own account store and handed it to the plane.
-    Tearing the driver down on the UI signal races that write against process
-    teardown, and every later launch of this device (T4's dead-nest local read)
-    or of a sibling (T2's cold read) reads what it wrote."""
-    return _wait_for_log_containing_any(driver, _CUSTODY_LEG_NEEDLES, timeout=timeout)
-
-
-def _drive_handle_check_and_claim(app, typed_handle: str, claim_code: str) -> None:
-    """From handle_entry (identity already loaded): resolve `typed_handle`
-    against an UNCLAIMED nest, submit its own claim code, and ride the wizard to
-    the authenticated app.
-
-    `claim_code` is a parameter rather than `common.nest.CLAIM_CODE` because the
-    code is a property of the NEST, not of the harness: standalone writes a fixed
-    one into its data dir, while the docker provider mints a fresh one per
-    container and publishes it on the handle. Reading it off the nest is what
-    lets these journeys run in either mode.
-    """
-    ob = app.onboarding
-    ob.fill_handle(typed_handle)
-    ob.run_handle_check(timeout=45)  # real local-nest probe, no injection
-    ob.submit_handle()
-
-    app.driver.wait_for("claim-code-input", timeout=45)
-    app.driver.clear_and_type("claim-code-input", claim_code)
-    app.driver.click("claim-code-submit-button")
-
-    _wait_for_authed_app_or_fail(app)
-
-
-def _claim_fresh_identity(app, secret_hex: str, typed_handle: str,
-                          claim_code: str) -> None:
-    """From identity_choice: import `secret_hex` as a brand-new identity, then
-    claim the nest `typed_handle` resolves to."""
-    ob = app.onboarding
-    ob.navigate_to_status()
-    ob.import_key(secret_hex)  # -> handle_entry
-    _drive_handle_check_and_claim(app, typed_handle, claim_code)
-
 
 class _FirstConnectionRefusingProxy:
     """A raw byte-forwarding TCP proxy that REFUSES its first `refuse_first`
@@ -615,8 +314,8 @@ def test_two_nest_fan_out_fires_and_fresh_device_recovers_both_boxes(
     on it.) Only the observable is asserted — both rows listed — never a
     mechanism (no log line, no file).
     """
-    app_path = _app_path(client)
-    (nest_a, nest_b), stop_boxes = _start_boxes(
+    app_path = app_path_for(client)
+    (nest_a, nest_b), stop_boxes = start_boxes(
         request, nest_mode, tmp_path_factory, "box-recovery-a", "box-recovery-b")
     try:
         port_a = nest_a["port"]
@@ -638,7 +337,7 @@ def test_two_nest_fan_out_fires_and_fresh_device_recovers_both_boxes(
                 # Both boxes this identity claims, named at launch: the escrow
                 # trust set is fixed when the account runtime assembles.
                 **_seeded_environment(request, nest_a, nest_b),
-                "RUST_LOG": _rust_log(client),
+                "RUST_LOG": rust_log(client),
             },
         }
 
@@ -648,16 +347,16 @@ def test_two_nest_fan_out_fires_and_fresh_device_recovers_both_boxes(
         driver1.launch(h1_config)
         try:
             app1 = ActionLayer(driver1)
-            _claim_fresh_identity(app1, secret_hex, handle_a,
+            claim_fresh_identity(app1, secret_hex, handle_a,
                                   nest_a["claim_code"])
             # Not an assertion on the mechanism — a teardown barrier: feed-view
             # rendering does not mean the background custody leg has written.
-            _wait_for_custody_leg(driver1)
+            wait_for_custody_leg(driver1)
         finally:
             driver1.teardown()
 
         # ---- Between launches: clear H1's stored nest_url, keep the identity ----
-        _clear_stored_nest_url(creds_h1, keyring_h1)
+        clear_stored_nest_url(creds_h1, keyring_h1)
 
         # ---- Launch 2 (same H1 -> Case 3 -> handle_entry): claim B. The
         # custody leg lands B's row; the bind leg (not built) is what would
@@ -666,10 +365,10 @@ def test_two_nest_fan_out_fires_and_fresh_device_recovers_both_boxes(
         driver1b.launch(h1_config)
         try:
             app1b = ActionLayer(driver1b)
-            _drive_handle_check_and_claim(app1b, handle_b,
+            drive_handle_check_and_claim(app1b, handle_b,
                                           nest_b["claim_code"])
             # Same teardown barrier, for B's row.
-            _wait_for_custody_leg(driver1b)
+            wait_for_custody_leg(driver1b)
         finally:
             driver1b.teardown()
 
@@ -680,7 +379,7 @@ def test_two_nest_fan_out_fires_and_fresh_device_recovers_both_boxes(
             "app_path": app_path,
             "environment": {
                 **_seeded_environment(request, nest_a, nest_b),
-                "RUST_LOG": _rust_log(client),
+                "RUST_LOG": rust_log(client),
             },
         })
         try:
@@ -744,8 +443,8 @@ def test_launch_recover_button_appears_on_a_reachable_custodied_nest(
     the saved nest answers the read, so both halves hold the row; T4 is the
     dead-nest twin, where only the local half can.
     """
-    app_path = _app_path(client)
-    (nest_b,), stop_boxes = _start_boxes(
+    app_path = app_path_for(client)
+    (nest_b,), stop_boxes = start_boxes(
         request, nest_mode, tmp_path_factory, "box-recovery-t3")
     try:
         port_b = nest_b["port"]
@@ -762,7 +461,7 @@ def test_launch_recover_button_appears_on_a_reachable_custodied_nest(
             "credential_dir": creds_h1,
             "keyring_app": keyring_h1,
             "environment": {**_seeded_environment(request, nest_b),
-                            "RUST_LOG": _rust_log(client)},
+                            "RUST_LOG": rust_log(client)},
         }
 
         # ---- Launch 1: fresh identity, claim B directly. The custody leg
@@ -772,11 +471,11 @@ def test_launch_recover_button_appears_on_a_reachable_custodied_nest(
         driver1.launch(h1_config)
         try:
             app1 = ActionLayer(driver1)
-            _claim_fresh_identity(app1, secret_hex, handle_b,
+            claim_fresh_identity(app1, secret_hex, handle_b,
                                   nest_b["claim_code"])
             # The custody leg runs in the background; launch 2 reads the row it
             # writes, so it must have landed before teardown.
-            _wait_for_custody_leg(driver1)
+            wait_for_custody_leg(driver1)
         finally:
             driver1.teardown()
 
@@ -785,7 +484,7 @@ def test_launch_recover_button_appears_on_a_reachable_custodied_nest(
         # every later one to the real, never-restarted, always-healthy nest B. ----
         proxy = _FirstConnectionRefusingProxy(target_port=port_b)
         try:
-            original_url = _rewrite_stored_node_url(
+            original_url = rewrite_stored_node_url(
                 creds_h1, keyring_h1, f"https://127.0.0.1:{proxy.port}",
             )
             assert f":{port_b}" in original_url, (
@@ -859,8 +558,8 @@ def test_launch_recover_button_appears_when_the_saved_nest_is_dead(
     challenge reaches nothing → Transient → launch-retry; the resolver's cold
     read fails too, so only the local read can answer.
     """
-    app_path = _app_path(client)
-    (nest_a,), stop_boxes = _start_boxes(
+    app_path = app_path_for(client)
+    (nest_a,), stop_boxes = start_boxes(
         request, nest_mode, tmp_path_factory, "box-recovery-t4")
     try:
         port_a = nest_a["port"]
@@ -877,7 +576,7 @@ def test_launch_recover_button_appears_when_the_saved_nest_is_dead(
             "credential_dir": creds_h1,
             "keyring_app": keyring_h1,
             "environment": {**_seeded_environment(request, nest_a),
-                            "RUST_LOG": _rust_log(client)},
+                            "RUST_LOG": rust_log(client)},
         }
         if client == "windows":
             # Both launches are driver instances of the SAME device: pin the
@@ -896,6 +595,11 @@ def test_launch_recover_button_appears_when_the_saved_nest_is_dead(
             # separate install and launch 2 would boot a signed-out device.
             h1_config["home"] = str(tmp_path / "h1-home")
             h1_config["credential_dir"] = creds_h1
+        if client == "android":
+            # The app's filesDir (and so the account store launch 1 custodied
+            # into) already survives a relaunch; the one thing that would replace
+            # it is the launch's own credential-seed overwrite, so withhold it.
+            h1_config["preserve_store"] = True
 
         # ---- Launch 1: fresh identity, claim A. The custody leg merges A's
         # row into this device's own account store. ----
@@ -903,11 +607,11 @@ def test_launch_recover_button_appears_when_the_saved_nest_is_dead(
         driver1.launch(h1_config)
         try:
             app1 = ActionLayer(driver1)
-            _claim_fresh_identity(app1, secret_hex, handle_a,
+            claim_fresh_identity(app1, secret_hex, handle_a,
                                   nest_a["claim_code"])
             # The row launch 2 must find locally: wait for the leg's own
             # confirmed outcome before tearing the device down.
-            _wait_for_custody_leg(driver1)
+            wait_for_custody_leg(driver1)
         finally:
             driver1.teardown()
 
@@ -1016,7 +720,7 @@ class _LinkedSeat:
         self._tmp_path = tmp_path
         self._nest_a = nest_a
         self._nest_b = nest_b
-        self._app_path = None if self.browser else _app_path(client)
+        self.app_path_for = None if self.browser else app_path_for(client)
 
     def _h1_config(self) -> dict:
         """H1's launch config, the same store on every launch. Both boxes are
@@ -1030,13 +734,13 @@ class _LinkedSeat:
                 "environment": environment,
             }
         return {
-            "app_path": self._app_path,
+            "app_path": self.app_path_for,
             "xdg_base": str(self._tmp_path / "h1-xdg"),
             "credential_dir": str(self._tmp_path / "h1-creds"),
             "keyring_app": "fauna-e2e-box-recovery-t5",
             "environment": {
                 **environment,
-                "RUST_LOG": _rust_log(self.client),
+                "RUST_LOG": rust_log(self.client),
             },
         }
 
@@ -1057,7 +761,7 @@ class _LinkedSeat:
         reload re-runs the leg at its store-ready edge — and the fresh device's
         box list is the observable either way."""
         if not self.browser:
-            _wait_for_custody_leg(driver)
+            wait_for_custody_leg(driver)
 
     def relaunch(self, driver):
         """H1 again over the same store, still bound to A: the relaunch's
@@ -1077,8 +781,8 @@ class _LinkedSeat:
         absences prove nothing (`log_scope_across_relaunch`); there the fresh
         device's poll is the wait."""
         if not self.browser:
-            _wait_for_log_containing_any(
-                driver, _LINKED_CUSTODY_NEEDLES, timeout=120.0)
+            wait_for_log_containing_any(
+                driver, LINKED_CUSTODY_NEEDLES, timeout=120.0)
 
     def fresh_device(self, holder):
         """A device with no store that reaches only box B, on identity_choice."""
@@ -1088,10 +792,10 @@ class _LinkedSeat:
             return twin
         driver = create_driver(self.client)
         driver.launch({
-            "app_path": self._app_path,
+            "app_path": self.app_path_for,
             "environment": {
                 **_seeded_environment(self._request, self._nest_a, self._nest_b),
-                "RUST_LOG": _rust_log(self.client),
+                "RUST_LOG": rust_log(self.client),
             },
         })
         return driver
@@ -1106,8 +810,6 @@ def _fresh_device_resolves_row(seat, secret_hex, handle, row: int, *,
 
     `holder` is the still-running device whose pass completes that nest's
     replica; its log tail is read into a failure."""
-    from nacl.signing import SigningKey
-
     driver = seat.fresh_device(holder)
     try:
         app = ActionLayer(driver)
@@ -1129,32 +831,40 @@ def _fresh_device_resolves_row(seat, secret_hex, handle, row: int, *,
             f"{holder.app_stderr_text()[-8000:]}"
         )
 
-        app.click(f"recover-box-item-{row}")
-        app.click("recover-method-selfhosted-button")
-        app.driver.wait_for("recover-selfhosted-command", timeout=30)
-
-        def _command_seeds() -> list[str]:
-            command = app.driver.get_text("recover-selfhosted-command") or ""
-            return [
-                token for token in command.replace("=", " ").split()
-                if len(token) == 64
-                and all(c in "0123456789abcdef" for c in token.lower())
-            ]
-
-        # The page paints a placeholder until the resolver answers the selected
-        # box's seed: poll the element, bounded against a hang.
-        deadline = time.monotonic() + 60.0
-        seeds = _command_seeds()
-        while not seeds and time.monotonic() < deadline:
-            time.sleep(0.5)
-            seeds = _command_seeds()
-        assert len(seeds) == 1, (
-            f"row {row}'s self-hosted command should carry exactly one seed: "
-            f"{len(seeds)} found ({app.driver.diagnose('recover-selfhosted-command')})"
-        )
-        return bytes(SigningKey(bytes.fromhex(seeds[0])).verify_key).hex()
+        return _resolve_row_nest_id(app, row)
     finally:
         driver.teardown()
+
+
+def _resolve_row_nest_id(app, row: int) -> str:
+    """On `nest_recovery`: pick row `row`, resolve its self-hosted command and
+    return the nest id (hex) the command's seed derives to."""
+    from nacl.signing import SigningKey
+
+    app.click(f"recover-box-item-{row}")
+    app.click("recover-method-selfhosted-button")
+    app.driver.wait_for("recover-selfhosted-command", timeout=30)
+
+    def _command_seeds() -> list[str]:
+        command = app.driver.get_text("recover-selfhosted-command") or ""
+        return [
+            token for token in command.replace("=", " ").split()
+            if len(token) == 64
+            and all(c in "0123456789abcdef" for c in token.lower())
+        ]
+
+    # The page paints a placeholder until the resolver answers the selected
+    # box's seed: poll the element, bounded against a hang.
+    deadline = time.monotonic() + 60.0
+    seeds = _command_seeds()
+    while not seeds and time.monotonic() < deadline:
+        time.sleep(0.5)
+        seeds = _command_seeds()
+    assert len(seeds) == 1, (
+        f"row {row}'s self-hosted command should carry exactly one seed: "
+        f"{len(seeds)} found ({app.driver.diagnose('recover-selfhosted-command')})"
+    )
+    return bytes(SigningKey(bytes.fromhex(seeds[0])).verify_key).hex()
 
 
 @pytest.mark.parametrize("client", _LINKED_APPS)
@@ -1187,8 +897,8 @@ def test_linking_a_box_custodies_it_and_a_fresh_device_recovers_both(
     from nacl.signing import SigningKey
 
     if client != "web":
-        _app_path(client)  # skip before any box starts when the app is unbuilt
-    (nest_a, nest_b), stop_boxes = _start_boxes(
+        app_path_for(client)  # skip before any box starts when the app is unbuilt
+    (nest_a, nest_b), stop_boxes = start_boxes(
         request, nest_mode, tmp_path_factory, "box-recovery-a", "box-recovery-b",
         browser=client == "web")
     try:
@@ -1210,7 +920,7 @@ def test_linking_a_box_custodies_it_and_a_fresh_device_recovers_both(
         driver1 = seat.launch()
         try:
             app1 = ActionLayer(driver1)
-            _claim_fresh_identity(app1, secret_hex, handle_a,
+            claim_fresh_identity(app1, secret_hex, handle_a,
                                   nest_a["claim_code"])
             seat.await_bound_custody(driver1)
 
@@ -1235,9 +945,9 @@ def test_linking_a_box_custodies_it_and_a_fresh_device_recovers_both(
         try:
             # A native relaunch lands on the feed; a reloaded tab comes back on
             # the Nests page it linked from, whose shell shows no feed landmark.
-            _wait_for_authed_app_or_fail(
+            wait_for_authed_app_or_fail(
                 ActionLayer(driver1b),
-                markers=_LOGGED_IN_MARKERS + ("nests-add-button",))
+                markers=LOGGED_IN_MARKERS + ("nests-add-button",))
             # Assembled in either role: the app runs the linked leg whether it
             # or its sync agent holds the engine (the seed-leg role).
             await_account_runtime_assembled(driver1b)
@@ -1264,5 +974,173 @@ def test_linking_a_box_custodies_it_and_a_fresh_device_recovers_both(
             )
         finally:
             driver1b.teardown()
+    finally:
+        stop_boxes()
+
+
+# T6's rotation surface (`ui.yaml` § admin_nest) and the shared verdict's
+# success wording (i18n `admin.nest_page.rotate_seed_done`, en.yaml) — the
+# same ids and string `test_nest_rotation_admin_journey.py` drives.
+_ROTATE_ARM = "admin-nest-seed-rotate-button"
+_ROTATE_ROSTER_ITEM_0 = "admin-nest-seed-rotate-roster-item-0"
+_ROTATE_CONFIRM = "admin-nest-seed-rotate-confirm-button"
+_ROTATE_STATUS = "admin-nest-seed-rotate-status"
+_ROTATE_WORKING = "Rotating the deployment identity…"
+_ROTATE_DONE = "Deployment identity rotated. Apps re-trust this nest automatically."
+# T6 runs on tui, the lead app for both surfaces it crosses: the exclusion it
+# witnesses is shared Rust (`recoverable_boxes`), so one app proves it.
+_ROTATED_APPS = [c for c in ("tui",) if c in get_available_apps()]
+
+
+def _poll_until(check, budget_s: float, tag: str, detail=None) -> None:
+    """Deadline-poll `check` until truthy (convention 14); the failure names
+    the budget and what `detail()` reads off the app at that moment."""
+    deadline = time.monotonic() + budget_s
+    while time.monotonic() < deadline:
+        if check():
+            return
+        time.sleep(0.25)
+    seen = ""
+    if detail is not None:
+        try:
+            seen = f" — app shows: {detail()!r}"
+        except Exception as e:  # noqa: BLE001 — diagnosis must not mask the failure
+            seen = f" — (could not read the app: {e})"
+    pytest.fail(f"{tag}: not reached within {budget_s}s{seen}")
+
+
+def _rotate_through_the_app(driver, port: int) -> tuple[str, str]:
+    """Drive the deployment-seed rotation on `admin-nest` to its clean
+    verdict and return `(predecessor_id, successor_id)` as hex.
+
+    The clean verdict (`rotate_seed_done`, not the `done_unmarked` caveat) is
+    what says the ceremony's mark step landed: this device's own store now
+    holds the predecessor's entry marked `superseded_by` the successor
+    (`box-recovery.md` § Custody after rotation)."""
+    before = _nest_id_hex(port).lower()
+    driver.set_state({
+        "nav": {"stack": [{"view": "admin"}, {"view": "admin", "id": "admin-nest"}]},
+    })
+    _poll_until(lambda: driver.count(_ROTATE_ARM) > 0, 30.0,
+                "admin-nest renders the rotate section")
+    driver.click(_ROTATE_ARM)
+    _poll_until(lambda: driver.count(_ROTATE_ROSTER_ITEM_0) > 0, 30.0,
+                "the rotation's roster listing resolves")
+    # The drive merges the successor's custody row through the account store
+    # before dispatch and refuses without one: wait for the store as state.
+    await_account_runtime_assembled(driver)
+    _poll_until(lambda: driver.is_enabled(_ROTATE_CONFIRM), 30.0,
+                "the rotation confirm is live once the inheritors are named")
+    driver.click(_ROTATE_CONFIRM)
+
+    def _status() -> str:
+        return driver.get_text(_ROTATE_STATUS) if driver.count(_ROTATE_STATUS) else ""
+
+    _poll_until(
+        lambda: _status() not in ("", _ROTATE_WORKING), 180.0,
+        "the rotation reports its verdict", detail=_status)
+    verdict = _status()
+    assert verdict == _ROTATE_DONE, (
+        "the rotation must end on the clean verdict — the caveat wording means "
+        "the predecessor was never marked, which leaves this test nothing to "
+        f"witness: {verdict!r}"
+    )
+    # The box adopts the successor in-process (§ Adoption by the running
+    # process); poll until it serves it, tolerating the re-enter window.
+    served = {}
+
+    def _serving_successor() -> bool:
+        try:
+            served["id"] = _nest_id_hex(port).lower()
+        except Exception:  # noqa: BLE001 — the re-enter window's error shape varies
+            return False
+        return served["id"] != before
+
+    _poll_until(_serving_successor, 60.0, "the box serves the successor",
+                detail=lambda: served.get("id"))
+    return before, served["id"]
+
+
+@pytest.mark.parametrize("client", _ROTATED_APPS)
+@pytest.mark.feature("recover-a-lost-nest")
+def test_a_rotated_away_identity_is_never_offered_for_recovery(
+    client, nest_mode, tmp_path, tmp_path_factory, request
+):
+    """T6: after the admin rotates a box's deployment identity, the recovery
+    surface offers the successor and never the identity rotated away.
+
+    box-recovery.md § Custody after rotation: the predecessor's custody entry
+    is marked `superseded_by`, never deleted, and "the recovery UI must be
+    structurally unable to offer it" — the exclusion lives at the resolution
+    point (`recoverable_boxes`), which every box list reads through.
+
+    Flow (T4's surviving-device shape): device H1 claims the box, the custody
+    leg captures the predecessor's seed, then H1 rotates the box through the
+    app's own `admin-nest` surface — the ceremony's client drive merges the
+    successor's entry and marks the predecessor's. The box then dies, and H1's
+    relaunch reaches `nest_recovery` through `launch-recover-button`, where the
+    list comes from H1's own store alone (the cold read of a dead box fails).
+    That store holds BOTH entries, so a resolution point that offered a
+    superseded entry would list two rows: the assert is exactly one row, whose
+    self-hosted command carries the successor's seed.
+    """
+    app_path = app_path_for(client)
+    (nest,), stop_boxes = start_boxes(
+        request, nest_mode, tmp_path_factory, "box-recovery-t6")
+    try:
+        port = nest["port"]
+        secret_hex = secrets.token_hex(32)
+        handle = f"admin{secrets.token_hex(3)}@127.0.0.1:{port}"
+        h1_config = {
+            "app_path": app_path,
+            "xdg_base": str(tmp_path / "h1-xdg"),
+            "credential_dir": str(tmp_path / "h1-creds"),
+            "keyring_app": "fauna-e2e-box-recovery-t6",
+            "environment": {**_seeded_environment(request, nest),
+                            "RUST_LOG": rust_log(client)},
+        }
+
+        # ---- Launch 1: claim the box, custody its seed, rotate it. ----
+        driver1 = create_driver(client)
+        driver1.launch(h1_config)
+        try:
+            app1 = ActionLayer(driver1)
+            claim_fresh_identity(app1, secret_hex, handle, nest["claim_code"])
+            wait_for_custody_leg(driver1)
+            predecessor, successor = _rotate_through_the_app(driver1, port)
+            # The relaunch's escrow trust names the identity the box serves now.
+            h1_config["environment"] = {**_seeded_environment(request, nest),
+                                        "RUST_LOG": rust_log(client)}
+        finally:
+            driver1.teardown()
+
+        # ---- The box dies; its cold read can answer nothing from here on. ----
+        stop_nest(nest, graceful=True)
+
+        # ---- Launch 2 (same H1): launch-retry -> launch-recover-button ->
+        # nest_recovery, listed from H1's own store. ----
+        driver2 = create_driver(client)
+        driver2.launch(h1_config)
+        try:
+            app2 = ActionLayer(driver2)
+            app2.driver.wait_for("launch-recover-button", timeout=60)
+            app2.click("launch-recover-button")
+            app2.driver.wait_for("recover-back-button", timeout=30)
+            app2.driver.wait_for("recover-box-item-0", timeout=30)
+            labels = _recover_box_labels(app2)
+            assert len(labels) == 1, (
+                "nest_recovery must offer the successor alone — this device's "
+                "store also holds the rotated-away predecessor "
+                f"({predecessor[:8]}…), marked superseded, which the resolution "
+                f"point must exclude: listed {len(labels)} ({labels!r})"
+            )
+            offered = _resolve_row_nest_id(app2, 0).lower()
+            assert offered == successor, (
+                "the one box offered must be the successor "
+                f"({successor[:8]}…), never the identity rotated away "
+                f"({predecessor[:8]}…): its command carries {offered[:8]}…"
+            )
+        finally:
+            driver2.teardown()
     finally:
         stop_boxes()

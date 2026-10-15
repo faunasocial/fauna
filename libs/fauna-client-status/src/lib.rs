@@ -37,7 +37,7 @@
 
 use fauna_core::localized::LocalizedText;
 use fauna_protocol::RpcRequester;
-use fauna_protocol::discovery::{NestInfoReply, NestInfoRequest};
+use fauna_protocol::discovery::NestInfoReply;
 use serde::{Deserialize, Serialize};
 
 /// How many hex characters of the build commit `status-build-sha` shows —
@@ -70,6 +70,17 @@ impl From<NestInfoReply> for NodeLeg {
         Self {
             domain: reply.domain,
             version: reply.version,
+        }
+    }
+}
+
+/// The borrowed twin, for a caller that keeps the reply for its other legs
+/// ([`StatusClient::nest_info`]).
+impl From<&NestInfoReply> for NodeLeg {
+    fn from(reply: &NestInfoReply) -> Self {
+        Self {
+            domain: reply.domain.clone(),
+            version: reply.version.clone(),
         }
     }
 }
@@ -172,11 +183,21 @@ impl<R: RpcRequester> StatusClient<R> {
 
     /// `fauna.nest.info` → [`NodeLeg`]. Pure read, no parameters.
     pub async fn node(&self) -> Result<NodeLeg, R::Error> {
-        let reply: NestInfoReply = self
-            .nest
-            .request("fauna.nest.info", NestInfoRequest::default())
-            .await?;
-        Ok(reply.into())
+        Ok(self.nest_info().await?.into())
+    }
+
+    /// The whole `fauna.nest.info` reply, for a surface load whose other legs
+    /// want it too: the node leg (`NodeLeg::from(&reply)`) and the
+    /// feature-limits legs (`FeaturesClient::rows_with` /
+    /// `authored_surface_with` over `reply.capabilities`) share one read
+    /// instead of drawing one each on the actor's pre-identity discovery
+    /// budget (`anonymous_rate_limit::DISCOVERY_MAX_EVENTS`, 60 / 60 s).
+    ///
+    /// Read through [`fauna_protocol::read_nest_info`]: on a transport that
+    /// keeps the per-connection memo (native `NestClient`, wasm `WsRpcClient`)
+    /// the reply is read once per connection, whichever reader asks first.
+    pub async fn nest_info(&self) -> Result<NestInfoReply, R::Error> {
+        fauna_protocol::read_nest_info(&self.nest).await
     }
 }
 
@@ -184,7 +205,7 @@ impl<R: RpcRequester> StatusClient<R> {
 /// (the leg is not loaded or does not apply); `Some` is the bare value — the
 /// human label beside it is the app's, from the shared `status.*` / `common.*`
 /// strings, and never part of the element text.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct StatusText {
     pub node_domain: Option<String>,
     pub node_version: Option<String>,
@@ -232,9 +253,11 @@ where
     }
 }
 
-/// The whole projection in one call — what a native Rust app paints from.
-#[cfg(feature = "local-clock")]
-pub fn render<F, S>(snapshot: &StatusSnapshot, now_ms: i64, lookup: F) -> StatusText
+/// The clock-free projection — every text except `status-sync-last` (the one
+/// that reads "how long ago", so needs `now`), which stays `None`. What a wasm
+/// caller takes: it has no OS clock behind `local-clock` and no local sync
+/// agent, so its snapshot carries `sync: None` and nothing is missing.
+pub fn render_static<F, S>(snapshot: &StatusSnapshot, lookup: F) -> StatusText
 where
     F: Fn(&str) -> Option<S>,
     S: AsRef<str>,
@@ -246,13 +269,27 @@ where
             .sync
             .as_ref()
             .map(|leg| sync_pending_text(leg, &lookup)),
+        sync_last: None,
+        mls_key_packages: snapshot.mls.map(|m| m.key_packages.to_string()),
+        mls_channels: snapshot.mls.map(|m| m.channels.to_string()),
+        build_sha: snapshot.build.abbreviated(),
+    }
+}
+
+/// The whole projection in one call — what a native Rust app paints from:
+/// [`render_static`] plus the relative `status-sync-last`.
+#[cfg(feature = "local-clock")]
+pub fn render<F, S>(snapshot: &StatusSnapshot, now_ms: i64, lookup: F) -> StatusText
+where
+    F: Fn(&str) -> Option<S>,
+    S: AsRef<str>,
+{
+    StatusText {
         sync_last: snapshot
             .sync
             .as_ref()
             .map(|leg| sync_last_text(leg, now_ms, &lookup)),
-        mls_key_packages: snapshot.mls.map(|m| m.key_packages.to_string()),
-        mls_channels: snapshot.mls.map(|m| m.channels.to_string()),
-        build_sha: snapshot.build.abbreviated(),
+        ..render_static(snapshot, &lookup)
     }
 }
 
@@ -261,6 +298,7 @@ mod tests {
     use super::*;
     use fauna_client_testkit::{RecordingRequester, block_on};
     use fauna_i18n::strings::lookup;
+    use fauna_protocol::discovery::NestInfoRequest;
 
     const FULL_SHA: &str = "4c1b9f52624c1b9f52624c1b9f52624c1b9f5262";
 
@@ -292,6 +330,20 @@ mod tests {
         assert_eq!(kind, "fauna.nest.info");
         let sent: NestInfoRequest = fauna_protocol::decode_strict(&payload).unwrap();
         assert_eq!(sent, NestInfoRequest::default());
+    }
+
+    #[test]
+    fn nest_info_is_one_read_the_node_leg_projects_from() {
+        let nest = RecordingRequester::new(reply);
+        let info = block_on(StatusClient::new(&nest).nest_info()).unwrap();
+        assert_eq!(nest.kinds(), vec!["fauna.nest.info"]);
+        assert_eq!(
+            NodeLeg::from(&info),
+            NodeLeg {
+                domain: "nest.example".into(),
+                version: "0.1.2".into(),
+            }
+        );
     }
 
     #[test]
@@ -344,6 +396,32 @@ mod tests {
         );
         assert_ne!(text, never);
         assert!(!text.is_empty());
+    }
+
+    #[test]
+    fn the_clock_free_projection_is_the_full_one_minus_sync_last() {
+        let snapshot = StatusSnapshot {
+            node: Some(NodeLeg {
+                domain: "nest.example".into(),
+                version: "0.1.2".into(),
+            }),
+            sync: Some(SyncLeg::default()),
+            mls: Some(MlsLeg {
+                key_packages: 20,
+                channels: 2,
+            }),
+            build: BuildLeg::from_stamp(Some(FULL_SHA)),
+        };
+        let full = render(&snapshot, 1_700_000_000_000, lookup);
+        let clock_free = render_static(&snapshot, lookup);
+        assert_eq!(clock_free.sync_last, None);
+        assert_eq!(
+            clock_free,
+            StatusText {
+                sync_last: None,
+                ..full
+            }
+        );
     }
 
     #[test]

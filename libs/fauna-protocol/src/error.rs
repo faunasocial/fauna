@@ -237,6 +237,71 @@ impl RpcError {
     /// CardDAV, the Go MTA `552 5.2.2`.
     pub const CODE_BRIDGES_OVER_QUOTA: &'static str = "fauna.bridges.over_quota";
 
+    /// The bridged reply/quote/interact doors' refusals (`feed.md`
+    /// § Interaction bar → *Reply and quote on a bridged post*): one code per
+    /// remedy, a remedy being what to change AND on which page. Minted by the
+    /// nest's three interact doors through `ApiError::refused`, rendered by
+    /// [`Self::localized`]'s exact-code arms — one spelling at both ends.
+    pub const CODE_ACTIVITYPUB_NOT_LINKED: &'static str = "fauna.activitypub.not_linked";
+    /// The linked fediverse account is switched off (`activitypub.md`
+    /// § Reply and quote → *The door*).
+    pub const CODE_ACTIVITYPUB_SWITCHED_OFF: &'static str = "fauna.activitypub.switched_off";
+    /// No admitted Bluesky account — unlinked or below the linked-account
+    /// level; one code for both, the remedy is the same (`bridges.md`
+    /// § Cross-posting → *Reply and quote — the unified shape*).
+    pub const CODE_BLUESKY_NOT_LINKED: &'static str = "fauna.bluesky.not_linked";
+    /// `bluesky.feed.thread`: Bluesky answered that the post is gone
+    /// (`bridges.md` § Bluesky-native thread view).
+    pub const CODE_BLUESKY_NOT_FOUND: &'static str = "fauna.bluesky.not_found";
+    /// `bluesky.feed.thread`: a block between the linked account and the
+    /// post's author withholds it.
+    pub const CODE_BLUESKY_BLOCKED: &'static str = "fauna.bluesky.blocked";
+    /// `bluesky.feed.thread`: the linked session could not be restored, or
+    /// Bluesky did not answer.
+    pub const CODE_BLUESKY_UPSTREAM: &'static str = "fauna.bluesky.upstream";
+    /// No linked Nostr identity (`nostr.md` § Replying to and quoting a nostr
+    /// note → *The door*).
+    pub const CODE_NOSTR_NOT_LINKED: &'static str = "fauna.nostr.not_linked";
+    /// The Nostr identity has no custodial key the nest can sign with.
+    pub const CODE_NOSTR_NO_CUSTODIAL_KEY: &'static str = "fauna.nostr.no_custodial_key";
+    /// No relay configured — one code across `publish_signed`, the
+    /// conversation leg and every interact arm (`nostr.md` § Errors & edge
+    /// cases, the never-default rule).
+    pub const CODE_NOSTR_NO_RELAYS_CONFIGURED: &'static str = "fauna.nostr.no_relays_configured";
+    /// Publishing replies is switched off on the Nostr page.
+    pub const CODE_NOSTR_REPLIES_OFF: &'static str = "fauna.nostr.replies_off";
+
+    /// The content-residency serving refusals (`file-sync.md` § Content
+    /// residency, the *v1 scope cuts* bullet): metadata-only is refused
+    /// pairwise against website serving, WebDAV serving and a paywall, whichever
+    /// side moves second. One code per remedy — the three "turn this off first"
+    /// refusals of the residency flip, and one "set residency back to full
+    /// first" for any serving surface moving onto a metadata-only folder.
+    /// Minted by the nest's folder update and paywall doors through
+    /// `rpc_errors::typed_refusal`, rendered by [`Self::localized`]'s
+    /// exact-code arms.
+    pub const CODE_FOLDERS_RESIDENCY_BLOCKED_BY_WEBSITE: &'static str =
+        "fauna.folders.residency_blocked_by_website";
+    /// The residency flip on a WebDAV-served folder.
+    pub const CODE_FOLDERS_RESIDENCY_BLOCKED_BY_WEBDAV: &'static str =
+        "fauna.folders.residency_blocked_by_webdav";
+    /// The residency flip on a paywalled folder.
+    pub const CODE_FOLDERS_RESIDENCY_BLOCKED_BY_PAYWALL: &'static str =
+        "fauna.folders.residency_blocked_by_paywall";
+    /// Website serving, WebDAV serving or a paywall turned on for a
+    /// metadata-only folder — one remedy for all three.
+    pub const CODE_FOLDERS_METADATA_ONLY_CANNOT_SERVE: &'static str =
+        "fauna.folders.metadata_only_cannot_serve";
+    /// The residency flip on a `public`-audience folder: its followers read
+    /// its content from the nest (`file-sync.md` § Content residency, the
+    /// fifth *v1 scope cuts* refusal).
+    pub const CODE_FOLDERS_RESIDENCY_BLOCKED_BY_PUBLIC: &'static str =
+        "fauna.folders.residency_blocked_by_public";
+    /// The `public` audience set on a metadata-only folder — its content does
+    /// not rest on the nest, so there is nothing to publish.
+    pub const CODE_FOLDERS_METADATA_ONLY_CANNOT_GO_PUBLIC: &'static str =
+        "fauna.folders.metadata_only_cannot_go_public";
+
     /// The storage-quota refusal of every custody-recording door, and the
     /// ratified honest outcome of a re-seed whose corpus outgrows the fresh
     /// nest's quota (`backup-destinations.md` § Re-seed, phase 2) — raised in
@@ -664,6 +729,26 @@ impl RpcError {
             "fauna.bridges.forward_target_on_local_domain" => {
                 error::bridges::FORWARD_TARGET_ON_LOCAL_DOMAIN
             }
+            // The sender's own send switch is off (`mail-policy-config.md`
+            // § Tier 3) — the remedy is the switch, so the sentence names it.
+            crate::bridge_routing::SEND_DISABLED_CODE => error::bridges::SEND_DISABLED,
+            // An expiry move on an alias that is not a still-alive disposable
+            // (`mail-aliases.md` § Don't do these) — the remedy is a new one.
+            crate::bridge_routing::ALIAS_NOT_EXTENDABLE_CODE => {
+                error::bridges::ALIAS_NOT_EXTENDABLE
+            }
+            // An address already held, or a reserved name, refused at an alias
+            // or forwarder create (`admin.md` § Errors & edge cases: refused on
+            // the page with the reason) — permanent for that name, so the
+            // sentence says why rather than "please try again".
+            "fauna.bridges.conflicts_with_existing_alias" => {
+                error::bridges::CONFLICTS_WITH_EXISTING_ALIAS
+            }
+            "fauna.bridges.reserved_local_part" => error::bridges::RESERVED_LOCAL_PART,
+            // A second import of an account with a live one, from any device
+            // (`mailbox-migration.md` § Architectural rules): the refusal says
+            // where the import already is and what ends it.
+            "fauna.bridges.import_source_locked" => error::bridges::IMPORT_SOURCE_LOCKED,
             // The bridged reply/quote doors (`feed.md` § Interaction bar →
             // *Reply and quote on a bridged post*, ratified 2026-10-08): a
             // refusal is the affordance's inline failure, and the reason only
@@ -674,16 +759,46 @@ impl RpcError {
             // string; an app older than a code renders the generic fallback
             // and composes nothing, the same inline failure as before the
             // codes existed. All stay `Rejected` in `action()`.
-            "fauna.activitypub.not_linked" => error::activitypub::NOT_LINKED,
-            "fauna.activitypub.switched_off" => error::activitypub::SWITCHED_OFF,
-            "fauna.bluesky.not_linked" => error::bluesky::NOT_LINKED,
-            "fauna.nostr.not_linked" => error::nostr::NOT_LINKED,
-            "fauna.nostr.no_custodial_key" => error::nostr::NO_CUSTODIAL_KEY,
+            Self::CODE_ACTIVITYPUB_NOT_LINKED => error::activitypub::NOT_LINKED,
+            Self::CODE_ACTIVITYPUB_SWITCHED_OFF => error::activitypub::SWITCHED_OFF,
+            Self::CODE_BLUESKY_NOT_LINKED => error::bluesky::NOT_LINKED,
+            // The thread page's refusals (`bridges.md` § Bluesky-native thread
+            // view): which one it is — gone, blocked, or Bluesky unreachable —
+            // is the reason only the nest knows, and each has its own remedy.
+            Self::CODE_BLUESKY_NOT_FOUND => error::bluesky::NOT_FOUND,
+            Self::CODE_BLUESKY_BLOCKED => error::bluesky::BLOCKED,
+            Self::CODE_BLUESKY_UPSTREAM => error::bluesky::UPSTREAM,
+            Self::CODE_NOSTR_NOT_LINKED => error::nostr::NOT_LINKED,
+            Self::CODE_NOSTR_NO_CUSTODIAL_KEY => error::nostr::NO_CUSTODIAL_KEY,
             // Also minted by `nostr.events.publish_signed` and a Nostr
             // conversation leg's send (the never-default rule, `nostr.md`
             // § Errors & edge cases): one arm covers every caller.
-            "fauna.nostr.no_relays_configured" => error::nostr::NO_RELAYS_CONFIGURED,
-            "fauna.nostr.replies_off" => error::nostr::REPLIES_OFF,
+            Self::CODE_NOSTR_NO_RELAYS_CONFIGURED => error::nostr::NO_RELAYS_CONFIGURED,
+            Self::CODE_NOSTR_REPLIES_OFF => error::nostr::REPLIES_OFF,
+            // The content-residency serving refusals (`file-sync.md` § Content
+            // residency, *v1 scope cuts*; the guide promises "Fauna will tell
+            // you to turn serving off first"). Until these arms existed all six
+            // refusal sites minted `fauna.folders.invalid_request` with the
+            // repair in log-only `details`, so every app painted the generic
+            // fallback. All stay `Rejected` in `action()`.
+            Self::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_WEBSITE => {
+                error::folders::RESIDENCY_BLOCKED_BY_WEBSITE
+            }
+            Self::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_WEBDAV => {
+                error::folders::RESIDENCY_BLOCKED_BY_WEBDAV
+            }
+            Self::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_PAYWALL => {
+                error::folders::RESIDENCY_BLOCKED_BY_PAYWALL
+            }
+            Self::CODE_FOLDERS_METADATA_ONLY_CANNOT_SERVE => {
+                error::folders::METADATA_ONLY_CANNOT_SERVE
+            }
+            Self::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_PUBLIC => {
+                error::folders::RESIDENCY_BLOCKED_BY_PUBLIC
+            }
+            Self::CODE_FOLDERS_METADATA_ONLY_CANNOT_GO_PUBLIC => {
+                error::folders::METADATA_ONLY_CANNOT_GO_PUBLIC
+            }
             // Tier 2: the namespaced families. Never widen this into a
             // `_ => lookup(&self.message.key)`; see this method's doc comment.
             _ => self.localized_family(),
@@ -1218,6 +1333,52 @@ mod tests {
         assert_eq!(err.action(), RpcErrorAction::Rejected);
     }
 
+    /// A second import of an account already being imported says so, on
+    /// whichever device it is tried (`mailbox-migration.md` § Architectural
+    /// rules), never the generic fallback, and is not retried.
+    #[test]
+    fn a_locked_import_source_says_it_is_already_being_imported() {
+        let err = RpcError::new(
+            "fauna.bridges.import_source_locked",
+            "error.bridges.import_source_locked",
+        );
+        assert_eq!(
+            err.localized(),
+            fauna_i18n::strings::error::bridges::IMPORT_SOURCE_LOCKED
+        );
+        assert!(err.localized().contains("already being imported"));
+        assert_eq!(err.action(), RpcErrorAction::Rejected);
+    }
+
+    /// An address already held, or a reserved name, refused at an alias or
+    /// forwarder create says why (`admin.md` § Errors & edge cases), never the
+    /// generic "please try again".
+    #[test]
+    fn a_held_or_reserved_address_says_why() {
+        use fauna_i18n::strings::error::bridges;
+        for (code, key, want) in [
+            (
+                "fauna.bridges.conflicts_with_existing_alias",
+                "error.bridges.conflicts_with_existing_alias",
+                bridges::CONFLICTS_WITH_EXISTING_ALIAS,
+            ),
+            (
+                "fauna.bridges.reserved_local_part",
+                "error.bridges.reserved_local_part",
+                bridges::RESERVED_LOCAL_PART,
+            ),
+        ] {
+            let err = RpcError::new(code, key);
+            assert_eq!(err.localized(), want, "{code}");
+            assert_ne!(
+                err.localized(),
+                fauna_i18n::strings::error::UNEXPECTED,
+                "{code}"
+            );
+            assert_eq!(err.action(), RpcErrorAction::Rejected, "{code}");
+        }
+    }
+
     /// A write past the account's one storage allowance — mail, calendar and
     /// contacts alike (`caldav-server.md` § QUOTA → § Enforcement points) —
     /// renders its own storage-full sentence, never the generic fallback, and
@@ -1231,6 +1392,57 @@ mod tests {
         );
         assert!(err.localized().contains("storage is full"));
         assert_eq!(err.action(), RpcErrorAction::Rejected);
+    }
+
+    /// Each content-residency serving refusal renders its own sentence naming
+    /// the repair (`file-sync.md` § Content residency, *v1 scope cuts*) —
+    /// never the generic fallback — and is never retried.
+    #[test]
+    fn a_residency_serving_refusal_names_the_repair() {
+        use fauna_i18n::strings::error::folders;
+        for (code, want, repair) in [
+            (
+                RpcError::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_WEBSITE,
+                folders::RESIDENCY_BLOCKED_BY_WEBSITE,
+                "Turn off website serving",
+            ),
+            (
+                RpcError::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_WEBDAV,
+                folders::RESIDENCY_BLOCKED_BY_WEBDAV,
+                "Turn off WebDAV serving",
+            ),
+            (
+                RpcError::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_PAYWALL,
+                folders::RESIDENCY_BLOCKED_BY_PAYWALL,
+                "Remove the paywall",
+            ),
+            (
+                RpcError::CODE_FOLDERS_METADATA_ONLY_CANNOT_SERVE,
+                folders::METADATA_ONLY_CANNOT_SERVE,
+                "set it back to full",
+            ),
+            (
+                RpcError::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_PUBLIC,
+                folders::RESIDENCY_BLOCKED_BY_PUBLIC,
+                "private or shared first",
+            ),
+            (
+                RpcError::CODE_FOLDERS_METADATA_ONLY_CANNOT_GO_PUBLIC,
+                folders::METADATA_ONLY_CANNOT_GO_PUBLIC,
+                "back to full first",
+            ),
+        ] {
+            let key = format!("error.{}", code.strip_prefix("fauna.").unwrap());
+            let err = RpcError::new(code, key);
+            assert_eq!(err.localized(), want, "{code}");
+            assert!(err.localized().contains(repair), "{code}");
+            assert_ne!(
+                err.localized(),
+                fauna_i18n::strings::error::UNEXPECTED,
+                "{code}"
+            );
+            assert_eq!(err.action(), RpcErrorAction::Rejected, "{code}");
+        }
     }
 
     #[test]
@@ -1494,5 +1706,27 @@ mod tests {
             );
             assert_eq!(err.action(), RpcErrorAction::Rejected, "{code}");
         }
+    }
+
+    /// The Bluesky thread page's three refusals (`bridges.md` § Bluesky-native
+    /// thread view) each say which it is — gone, blocked, unreachable — never
+    /// the generic fallback; the thread witness reads "no longer on Bluesky"
+    /// off `error-message`.
+    #[test]
+    fn bluesky_thread_refusals_say_which_and_stay_rejected() {
+        use fauna_i18n::strings::error;
+        let cases = [
+            (RpcError::CODE_BLUESKY_NOT_FOUND, error::bluesky::NOT_FOUND),
+            (RpcError::CODE_BLUESKY_BLOCKED, error::bluesky::BLOCKED),
+            (RpcError::CODE_BLUESKY_UPSTREAM, error::bluesky::UPSTREAM),
+        ];
+        for (code, expected) in cases {
+            let err = RpcError::new(code, "error.x");
+            assert_eq!(err.localized(), expected, "{code}");
+            assert_ne!(err.localized(), error::UNEXPECTED, "{code}");
+            assert_eq!(err.action(), RpcErrorAction::Rejected, "{code}");
+        }
+        assert!(error::bluesky::NOT_FOUND.contains("no longer on Bluesky"));
+        assert!(error::bluesky::UPSTREAM.contains("AT Protocol page"));
     }
 }

@@ -7,6 +7,7 @@ allocation for all Docker-based e2e tests.
 import contextlib
 import datetime
 import email.message
+import email.policy
 import email.utils
 import functools
 import json
@@ -14,6 +15,7 @@ import os
 import secrets
 import socket
 import ssl
+import struct
 import subprocess
 import sys
 import time
@@ -157,7 +159,7 @@ def docker_build(repo_root: Path) -> str:
     **This helper does not build the nest image, by design** — the same rule the
     nest-mode axis's ``_DockerProvider`` already states, now applied to the tier_4
     suite that used to contradict it. Building ``ghcr.io/faunasocial/nest`` belongs
-    to the self-hosted runner via ``build-nest-image.yml`` (``build-system.md``
+    to GitHub-hosted runners via ``build-nest-image.yml`` (``image-pipeline.md``
     § Image tags & channels): the three dev VMs share one physical host, so a build
     here starves every sibling session — the standing user stop of 2026-06-13.
 
@@ -197,7 +199,7 @@ def docker_build(repo_root: Path) -> str:
             f"not present on this machine. This helper deliberately does NOT "
             f"build it: building the nest image on a dev VM is forbidden — the "
             f"dev VMs share one physical host and the build starves them "
-            f"(build-system.md § Image tags & channels; the 2026-06-13 user "
+            f"(image-pipeline.md § Image tags & channels; the 2026-06-13 user "
             f"stop). Either\n"
             f"  • docker pull ghcr.io/faunasocial/nest:latest, then retag it "
             f"{IMAGE_TAG!r}, or\n"
@@ -335,6 +337,46 @@ def _note_booted_artifact(container_name: str, resp) -> None:
         pass
 
 
+def authed_ws(port: int, actor_id_hex: str, token: str) -> "websocket.WebSocket":
+    """Open the authenticated WS-RPC socket to a docker-published nest.
+
+    Self-signed bootstrap cert → verify off. The *authenticated* endpoint binds
+    the actor, so the connection is counted in the nest's registry and the
+    shutdown drain waits for it to close + flush its 1001 before the process
+    exits (an anonymous connection isn't counted, so its 1001 could race the
+    exit — see `ws::GRACEFUL_SHUTDOWN_TIMEOUT`)."""
+    import websocket  # from websocket-client
+
+    return websocket.create_connection(
+        f"wss://127.0.0.1:{port}/api/v1/ws/{actor_id_hex}",
+        subprotocols=["fauna.v1", f"bearer.{token}"],
+        sslopt={"cert_reqs": ssl.CERT_NONE},
+        timeout=10,
+    )
+
+
+def read_close_code(ws: "websocket.WebSocket", timeout: float = 20.0) -> int | None:
+    """Read frames until the server's Close frame; return its 2-byte status code
+    (None if the socket dropped without one)."""
+    import websocket  # from websocket-client
+
+    ws.settimeout(timeout)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            frame = ws.recv_frame()
+        except websocket.WebSocketTimeoutException:
+            continue
+        except (websocket.WebSocketConnectionClosedException, OSError):
+            break
+        if frame is None:
+            continue
+        if frame.opcode == websocket.ABNF.OPCODE_CLOSE:
+            return struct.unpack("!H", frame.data[:2])[0] if len(frame.data) >= 2 else None
+        # ignore binary / ping / pong frames
+    return None
+
+
 def generate_claim_code() -> str:
     """Generate a 40-bit claim code in the shared display format.
 
@@ -399,7 +441,7 @@ def assert_s6_service_up(container_name: str, service: str):
 
 
 def claim_admin_api(port: int, claim_code: str, handle: str | None = "admin",
-                    mail_domain: str | None = None) -> dict:
+                    mail_domain: str | None = None, signing_key=None) -> dict:
     """Claim admin on a nest via the ``fauna.auth.claim_admin`` WS-RPC kind.
 
     A thin wrapper over ``common.auth.claim_admin`` — the ONE admin contract
@@ -415,6 +457,10 @@ def claim_admin_api(port: int, claim_code: str, handle: str | None = "admin",
     handle-less ``ClaimAdminRequest`` fail to decode → ``fauna.protocol.malformed``)
     and becomes the email local-part; it defaults to ``"admin"``. Pass ``None``
     only to deliberately omit it (e.g. a negative decode test).
+
+    ``signing_key`` (a PyNaCl ``SigningKey``) claims with an existing identity
+    instead of a fresh one — the one person who claims both boxes of a
+    home-with-relay deployment from the same app.
 
     ``mail_domain`` is the **domained claim** the domainless-boot model turns on:
     a real (non-local) domain carried here becomes the primary ``mail_domains``
@@ -440,6 +486,7 @@ def claim_admin_api(port: int, claim_code: str, handle: str | None = "admin",
         base_url=f"https://127.0.0.1:{port}",
         handle=handle,
         mail_domain=mail_domain,
+        signing_key=signing_key,
     )
 
 
@@ -498,6 +545,7 @@ def start_container_with_ports(
     labels: dict | None = None,
     publish_host: str = "127.0.0.1",
     udp_port_map: dict[int, int] | None = None,
+    ip: str | None = None,
 ) -> str:
     """Start a fauna-nest container mapping container_port→host_port.
 
@@ -564,6 +612,12 @@ def start_container_with_ports(
     ``udp_port_map`` publishes UDP ports the same way (``port_map`` is TCP) —
     the relay's address-discovery port is the one UDP port the image serves.
 
+    ``ip`` pins the container's address on ``network`` (``docker run --ip``),
+    which docker allows only on a network created with a ``subnet``
+    (:func:`create_network`). The IP bridge witness needs the address BEFORE
+    the nest boots, to plant the host-published ``host-addresses`` file its
+    first lifecycle tick reads.
+
     ``labels`` are ``docker run --label`` pairs. The nest-mode axis stamps every
     container it starts with ``fauna-e2e=1`` and ``fauna-e2e-run=<run id>``
     (``testing.md`` § Default app and nest mode, ruling (4)): convention 9 reaps
@@ -579,6 +633,8 @@ def start_container_with_ports(
         cmd.extend(["-v", f"{data_volume}:/data"])
     if network:
         cmd.extend(["--network", network])
+    if ip:
+        cmd.extend(["--ip", ip])
     if dns:
         cmd.extend(["--dns", dns])
     for host_path, container_path in (mounts or []):
@@ -598,6 +654,19 @@ def start_container_with_ports(
     if result.returncode != 0:
         raise RuntimeError(f"docker run failed:\n{result.stderr}")
     return result.stdout.strip()
+
+
+def remove_data_dir(path: str) -> None:
+    """Delete a host directory a container used as ``data_volume``. The image's
+    root-run init leaves root-owned entries in it (``/data/keys``), which the
+    harness's own uid cannot remove, so the delete runs in a throwaway root
+    container over the same bind mount, then the emptied directory goes."""
+    subprocess.run(
+        ["docker", "run", "--rm", "--user", "0", "--entrypoint", "find",
+         "-v", f"{path}:/d", IMAGE_TAG, "/d", "-mindepth", "1", "-delete"],
+        capture_output=True, timeout=60,
+    )
+    subprocess.run(["rm", "-rf", path], capture_output=True, timeout=30)
 
 
 def wait_for_smtp_banner(host: str, port: int, timeout: float = 30.0):
@@ -1183,7 +1252,7 @@ def enforce_mail_perimeter(nest, *, domain: str, cross_container_peer: bool = Fa
          DMARC-fail/``p=reject`` message at DATA with ``550 5.7.1``.
 
     The caller MUST also (a) commit the storage mode — **Encrypted** for full prod
-    parity, the example.com default — and (b) publish a passing SPF + ``_dmarc …
+    parity, the production default — and (b) publish a passing SPF + ``_dmarc …
     p=reject`` for every sender domain via :func:`publish_passing_mail_dns`, so the
     enforced gate is cleared by a genuine auth pass, not a no-policy pass.
 
@@ -1294,8 +1363,22 @@ def ensure_image(image: str) -> None:
         raise RuntimeError(f"docker pull {image} failed:\n{r.stderr[-600:]}")
 
 
-def create_network(name: str, labels: dict | None = None) -> None:
+def create_network(
+    name: str, labels: dict | None = None, subnet: str | None = None,
+    internal: bool = False,
+) -> None:
     """Create a user-defined network, replacing any existing one of that name.
+
+    ``internal`` makes it ``docker network create --internal``: nothing on it
+    routes anywhere else — not to the host's outside, not to another network —
+    so two containers on two internal networks have no path between them except
+    through a container attached to both (the relay witness's "no direct path").
+
+    ``subnet`` (CIDR) gives the network a user-configured subnet, the
+    precondition for pinning a container's address with
+    ``start_container_with_ports(ip=...)``. A subnet that overlaps another
+    docker network fails the create (``RuntimeError``) — callers pick one per
+    run and retry.
 
     ``labels`` mirror ``start_container_with_ports``' — the nest-mode axis stamps
     its per-run network with the same owner pair its containers carry, so the
@@ -1306,10 +1389,35 @@ def create_network(name: str, labels: dict | None = None) -> None:
     cmd = ["docker", "network", "create"]
     for k, v in (labels or {}).items():
         cmd.extend(["--label", f"{k}={v}"])
+    if subnet:
+        cmd.extend(["--subnet", subnet])
+    if internal:
+        cmd.append("--internal")
     cmd.append(name)
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"docker network create {name} failed: {r.stderr}")
+
+
+def create_subnet_network(name: str, **kwargs) -> "ipaddress.IPv4Network":
+    """:func:`create_network` with a configured /24, so a container's address on
+    it can be pinned (``start_container_with_ports(ip=...)``). Overlap with
+    another docker network fails the create; retries over random candidates in
+    10.200.0.0/13. ``kwargs`` pass through (``labels``, ``internal``)."""
+    import ipaddress
+    import random
+
+    last = None
+    for _ in range(12):
+        subnet = ipaddress.IPv4Network(
+            f"10.{random.randint(200, 207)}.{random.randint(0, 255)}.0/24"
+        )
+        try:
+            create_network(name, subnet=str(subnet), **kwargs)
+            return subnet
+        except RuntimeError as e:
+            last = e
+    raise RuntimeError(f"no free /24 for {name}: {last}")
 
 
 def remove_network(name: str) -> None:
@@ -1406,9 +1514,11 @@ def start_fake_dns_sidecar(
     a_records: dict[str, str] | None = None,
     records_dir: str | None = None,
     port: int = 53,
+    log_queries: bool = False,
+    publish_port: int | None = None,
 ) -> str:
     """Run `fakes/fake_dns` as a sidecar container on `network`, serving the given
-    TXT/A records on UDP `port`. Returns the sidecar's container IP — pass it to
+    TXT/A records on `port`, UDP and TCP. Returns the sidecar's container IP — pass it to
     `start_container_with_ports(dns=...)` so the nest's resolver
     (`verify_inbound`'s `new_system_conf()`, no env override) reads the published
     policy through docker's embedded forwarder.
@@ -1423,10 +1533,22 @@ def start_fake_dns_sidecar(
     records. The two-box SMTP-relay test uses it to publish each box's A/SPF
     records AFTER the boxes start (so it can fill in their container IPs) via
     `write_dns_records(records_dir, ...)` — natural MX/A resolution then routes
-    box→box over the production `LiveMXResolver` path (no `mta_mx_override`)."""
+    box→box over the production `LiveMXResolver` path (no `mta_mx_override`).
+
+    `log_queries` makes the fake print each query it receives to the sidecar's
+    `docker logs` (`FakeDns`'s own docstring).
+
+    `publish_port` (optional) also publishes `port` to `127.0.0.1:<publish_port>`
+    on the host, TCP and UDP alike (`start_container_with_ports`' shape) — the
+    ACME stack's name server, which every app reaches at the dev VM's loopback
+    and an android venue run through its TCP-only reverse
+    (`e2e-automation-surface-gating.md` § The ACME directory seed → *The name
+    server's reach*)."""
     ensure_image(SCANNER_SIDECAR_IMAGE)
     remove_container(name)
     records_kw = ", records_path='/dns/records.json'" if records_dir else ""
+    if log_queries:
+        records_kw += ", log_queries=True"
     snippet = (
         f"import sys, time; sys.path.insert(0, '/fakes'); "
         f"from fake_dns import FakeDns; "
@@ -1436,15 +1558,19 @@ def start_fake_dns_sidecar(
     mounts = ["-v", f"{fakes_dir}:/fakes:ro"]
     if records_dir:
         mounts += ["-v", f"{records_dir}:/dns:ro"]
+    publish = []
+    if publish_port is not None:
+        publish = ["-p", f"127.0.0.1:{publish_port}:{port}",
+                   "-p", f"127.0.0.1:{publish_port}:{port}/udp"]
     r = subprocess.run(
         ["docker", "run", "-d", *fence_cpuset_args(), "--name", name, "--network", network,
-         *mounts, SCANNER_SIDECAR_IMAGE,
+         *mounts, *publish, SCANNER_SIDECAR_IMAGE,
          "python", "-c", snippet],
         capture_output=True, text=True, timeout=60,
     )
     if r.returncode != 0:
         raise RuntimeError(f"start fake_dns sidecar {name} failed: {r.stderr}")
-    # The UDP socket binds in FakeDns.__init__, so a still-running container after
+    # Both sockets bind in FakeDns.__init__, so a still-running container after
     # a beat means it's listening (the nest queries it minutes later, at DATA).
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
@@ -1459,7 +1585,9 @@ def start_fake_dns_sidecar(
 
 def write_dns_records(records_dir: str, *, txt: dict[str, str] | None = None,
                       a: dict[str, str] | None = None,
-                      mx: dict[str, str] | None = None) -> None:
+                      mx: dict[str, str] | None = None,
+                      ptr: dict[str, str] | None = None,
+                      servfail: list[str] | None = None) -> None:
     """Publish DNS records to a `records_dir`-backed fake_dns sidecar (started with
     `start_fake_dns_sidecar(records_dir=...)`). Writes `<records_dir>/records.json`
     atomically (temp + `os.replace`) so the bind-mounted sidecar never reads a
@@ -1467,8 +1595,13 @@ def write_dns_records(records_dir: str, *, txt: dict[str, str] | None = None,
     query. Use after the containers are up to fill in their learned container IPs
     (A records) — the chicken-and-egg the two-box relay can't solve at boot.
     `mx` maps a domain to `"<pref> <exchange>"` (or a bare exchange) for the
-    outbound `LookupMX` next-hop; pair it with an A record for the exchange."""
-    payload = json.dumps({"txt": txt or {}, "a": a or {}, "mx": mx or {}})
+    outbound `LookupMX` next-hop; pair it with an A record for the exchange.
+    `ptr` maps a dotted-quad IPv4 to its reverse name; an address left out has
+    none (NXDOMAIN) — the mail perimeter's reverse-name witnesses. `servfail`
+    names answer SERVFAIL whatever the type — a lookup that cannot be answered,
+    the mail perimeter's fail-open witness."""
+    payload = json.dumps({"txt": txt or {}, "a": a or {}, "mx": mx or {}, "ptr": ptr or {},
+                          "servfail": servfail or []})
     tmp = os.path.join(records_dir, f".records.{os.getpid()}.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(payload)
@@ -1513,9 +1646,16 @@ def deliver_inbound_loopback_curl(
     rcpt_to: str,
     subject: str,
     body_text: str,
+    extra_headers: dict[str, str] | None = None,
+    server_name: str | None = None,
 ) -> str:
     """Deliver one inbound message to the MTA on port 25 **from inside the
     container over loopback**, via the image's ``curl`` (STARTTLS).
+
+    ``server_name`` dials the MTA by that mail host instead of ``127.0.0.1``
+    (still pinned to the loopback with ``--resolve``), so the STARTTLS
+    handshake carries it as SNI — the shape of a peer delivering to an MX
+    target it resolved, e.g. ``mail.<old primary>`` during a rename's grace.
 
     Why loopback-via-exec rather than the host SMTP client: the MTA's inbound
     perimeter (``internal/mta/policy.go``) runs DNS-dependent checks — HELO
@@ -1536,6 +1676,9 @@ def deliver_inbound_loopback_curl(
     (``test_mail_security_accept.py``, ``test_mail_deploy_bidirectional_round_trip.py``).
     Port 25 demands STARTTLS (``--ssl-reqd``); the self-signed cert is accepted with ``-k``.
 
+    ``extra_headers`` are added to the message as written — e.g.
+    ``X-Test-Rspamd-Score``, which the fake rspamd scores the message by.
+
     Returns the Message-ID for the read-back assertion.
     """
     msg_id = f"<{uuid.uuid4().hex}@e2e.test>"
@@ -1545,19 +1688,29 @@ def deliver_inbound_loopback_curl(
     msg["Subject"] = subject
     msg["Message-ID"] = msg_id
     msg["Date"] = email.utils.formatdate(localtime=False, usegmt=True)
+    for k, v in (extra_headers or {}).items():
+        msg[k] = v
     msg.set_content(body_text)
 
+    # `--verbose` writes the SMTP dialogue (never the uploaded body) to stderr,
+    # so a refusal names the server's own reply rather than curl's summary of it.
+    target = ["--url", "smtp://127.0.0.1:25"]
+    if server_name:
+        target = ["--resolve", f"{server_name}:25:127.0.0.1",
+                  "--url", f"smtp://{server_name}:25"]
     proc = subprocess.run(
-        ["docker", "exec", "-i", name, "curl", "--silent", "--show-error",
-         "--ssl-reqd", "-k", "--url", "smtp://127.0.0.1:25",
+        ["docker", "exec", "-i", name, "curl", "--silent", "--show-error", "--verbose",
+         "--ssl-reqd", "-k", *target,
          "--mail-from", mail_from, "--mail-rcpt", rcpt_to, "-T", "-"],
-        input=msg.as_bytes(),
+        input=msg.as_bytes(policy=email.policy.SMTP),  # CRLF: the SMTP wire form
         capture_output=True, timeout=60,
     )
     if proc.returncode != 0:
+        dialogue = [ln for ln in proc.stderr.decode(errors="replace").splitlines()
+                    if ln.startswith(("<", ">", "curl:"))]
         raise RuntimeError(
-            f"inbound curl delivery failed (exit {proc.returncode}): "
-            f"{proc.stderr.decode(errors='replace')}"
+            f"inbound curl delivery failed (exit {proc.returncode}); SMTP dialogue:\n  "
+            + "\n  ".join(dialogue[-20:])
         )
     return msg_id
 
@@ -1600,7 +1753,7 @@ def deliver_inbound_attempt_loopback_curl(
         ["docker", "exec", "-i", name, "curl", "--verbose", "--show-error",
          "--ssl-reqd", "-k", "--url", "smtp://127.0.0.1:25",
          "--mail-from", mail_from, "--mail-rcpt", rcpt_to, "-T", "-"],
-        input=msg.as_bytes(),
+        input=msg.as_bytes(policy=email.policy.SMTP),  # CRLF: the SMTP wire form
         capture_output=True, timeout=60,
     )
     combined = (proc.stdout.decode(errors="replace")
@@ -1716,14 +1869,16 @@ def unauth_submission_mail_code(host: str, port: int, *, implicit_tls: bool,
 
 def imap_fetch_only_inbox_message(host: str, port: int, server_name: str,
                                   username: str, password: str,
-                                  timeout: float = 90.0) -> bytes:
+                                  timeout: float = 90.0, *,
+                                  mailbox: str = "INBOX") -> bytes:
     """Drive raw-socket IMAPS (the go-imap fork is IMAP4rev2-only, which
     `imaplib` rejects): AUTHENTICATE PLAIN → poll SELECT INBOX until ≥1 EXISTS →
     UID FETCH BODY[] the message → return the decrypted RFC 5322 bytes. The MDA
     decrypts server-side from the snapshot it unwrapped at AUTH, so the client
     sees plaintext. For a freshly-provisioned recipient there is exactly one
     inbound message; return it. Raises TimeoutError with the last seen INBOX
-    count on miss.
+    count on miss. `mailbox` reads another folder the same way — `"Junk"` for a
+    message the spam gate filed there.
 
     Polls on ONE held connection: AUTHENTICATE PLAIN once, then re-SELECT INBOX
     each second until EXISTS≥1. A fresh AUTH happens only on a *connection* error
@@ -1762,9 +1917,9 @@ def imap_fetch_only_inbox_message(host: str, port: int, server_name: str,
 
                 seq += 1
                 sel_tag = f"s{seq}"
-                sock.sendall(f"{sel_tag} SELECT INBOX\r\n".encode())
+                sock.sendall(f"{sel_tag} SELECT {mailbox}\r\n".encode())
                 status, untagged = _imap_read_tagged(sock, buf, sel_tag, deadline)
-                assert status == "OK", f"SELECT INBOX failed: {status}: {untagged!r}"
+                assert status == "OK", f"SELECT {mailbox} failed: {status}: {untagged!r}"
                 exists = [ln for ln in untagged if ln.upper().endswith("EXISTS")]
                 last_count = int(exists[0].split()[1]) if exists else 0
 
@@ -1796,9 +1951,75 @@ def imap_fetch_only_inbox_message(host: str, port: int, server_name: str,
             except OSError:
                 pass
     raise TimeoutError(
-        f"IMAP did not surface an INBOX message for {username} on {host}:{port} "
-        f"within {timeout}s (last INBOX count={last_count}, last error: {last_err})"
+        f"IMAP did not surface a {mailbox} message for {username} on {host}:{port} "
+        f"within {timeout}s (last {mailbox} count={last_count}, last error: {last_err})"
     )
+
+
+def imap_wait_for_subject(host: str, port: int, server_name: str,
+                          username: str, password: str, subject: str, *,
+                          mailbox: str = "INBOX", timeout: float = 120.0) -> bytes:
+    """Wait for the message whose Subject contains ``subject`` to be in
+    ``mailbox``, and return it whole (``BODY.PEEK[]``) — for a mailbox that
+    holds more than one message, where :func:`imap_fetch_only_inbox_message`'s
+    "the first one" is not an answer. One held connection, re-SELECT each
+    second (that function's reason: each AUTH costs a rate-limited nest RPC).
+    Raises TimeoutError naming the subjects it did see."""
+    from helpers.mail_wire import (
+        _imap_auth_plain, _imap_fetch_body_cmd, _imap_read_tagged, _imaps_connect_addr,
+    )
+
+    deadline = time.monotonic() + timeout
+    seen: list[str] = []
+    last_err: Exception | None = None
+    sock = buf = None
+    seq = 0
+    try:
+        while time.monotonic() < deadline:
+            try:
+                if sock is None:
+                    sock, buf = _imaps_connect_addr(host, port, server_name, deadline)
+                    status = _imap_auth_plain(sock, buf, "a0", username, password, deadline)
+                    assert status == "OK", f"AUTH PLAIN must succeed for {username}; got {status}"
+                seq += 1
+                sock.sendall(f"s{seq} SELECT {mailbox}\r\n".encode())
+                status, untagged = _imap_read_tagged(sock, buf, f"s{seq}", deadline)
+                assert status == "OK", f"SELECT {mailbox} failed: {status}: {untagged!r}"
+                exists = [ln for ln in untagged if ln.upper().endswith("EXISTS")]
+                count = int(exists[0].split()[1]) if exists else 0
+                seen = []
+                for n in range(1, count + 1):
+                    seq += 1
+                    _st, head = _imap_fetch_body_cmd(
+                        sock, buf, f"h{seq}",
+                        f"FETCH {n} BODY.PEEK[HEADER.FIELDS (SUBJECT)]", deadline)
+                    line = (head or b"").decode("utf-8", errors="replace").strip()
+                    seen.append(line)
+                    if subject in line:
+                        seq += 1
+                        _st, body = _imap_fetch_body_cmd(
+                            sock, buf, f"f{seq}", f"FETCH {n} BODY.PEEK[]", deadline)
+                        if body is not None:
+                            return body
+            except (ssl.SSLError, OSError, AssertionError) as e:
+                last_err = e
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                    sock = buf = None
+            time.sleep(1.0)  # sleep-ok: poll interval of a deadline-bounded re-SELECT on one held connection (each re-AUTH costs a rate-limited nest RPC)
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+    raise TimeoutError(
+        f"no message with Subject containing {subject!r} reached {mailbox} for "
+        f"{username} on {host}:{port} within {timeout}s (subjects seen: {seen}; "
+        f"last error: {last_err})")
 
 
 # ── Outbound submission round-trip wire (the send half) ─────────────────────
@@ -2068,7 +2289,8 @@ def add_user_pairing(nest, *, actor_id: bytes, signing_key: bytes,
 
 def provision_relay_user(public_nest, private_nest, run_seal_helper, *,
                          domain: str, local_part: str, password: str,
-                         home_owner: dict | None = None) -> dict:
+                         home_owner: dict | None = None,
+                         owner_admins_public: bool = False) -> dict:
     """Provision ONE user (one actor identity + one MSEK) across BOTH boxes so the
     public box can *receive* inbound (its MTA seals to the recipient) and both
     MDAs can *serve* it decrypted over IMAP — the public box transiently (until
@@ -2085,7 +2307,11 @@ def provision_relay_user(public_nest, private_nest, run_seal_helper, *,
     may dial its relay at a private address: the address guard exempts a
     pairing row's URL only when the row's actor is an admin of the private
     nest (``private-mode.md`` § Pairing Flow). Omitted, a fresh actor is
-    created on the public box and registered on the private one."""
+    created on the public box and registered on the private one.
+
+    ``owner_admins_public`` says ``home_owner`` also claimed the public box (one
+    person claiming both boxes from one app), so it is already that box's admin
+    and is not registered there a second time."""
     import base64
     import secrets
 
@@ -2101,9 +2327,10 @@ def provision_relay_user(public_nest, private_nest, run_seal_helper, *,
     if home_owner is not None:
         actor_id = home_owner["actor_id_bytes"]
         signing_key = bytes(home_owner["signing_key"])
-        register_user(public_nest["port"], home_owner["actor_id_hex"],
-                      admin_signing_key=public_nest["admin"]["signing_key"],
-                      base_url=public_nest["url"])
+        if not owner_admins_public:
+            register_user(public_nest["port"], home_owner["actor_id_hex"],
+                          admin_signing_key=public_nest["admin"]["signing_key"],
+                          base_url=public_nest["url"])
     else:
         actor = create_actor_and_register(
             public_nest["port"], admin_signing_key=public_nest["admin"]["signing_key"],
@@ -2325,7 +2552,7 @@ def sni_https_request(host_port: int, sni: str, method: str, path: str,
     return status, headers, body
 
 
-def make_ca_issued_leaf_pem(names: list[str]) -> tuple[bytes, bytes]:
+def make_ca_issued_leaf_pem(names: list[str], *, expired: bool = False) -> tuple[bytes, bytes]:
     """A leaf signed by a throwaway CA (issuer DN ≠ subject DN → ``is_floor``
     false) covering ``names``. Returns ``(fullchain_pem [leaf+CA], leaf_key_pem)``.
     The nest only inspects issuer-vs-subject to decide floor-ness — no real trust
@@ -2334,7 +2561,11 @@ def make_ca_issued_leaf_pem(names: list[str]) -> tuple[bytes, bytes]:
 
     Shared by every cert-honesty tier_4 test (DANE-TLSA withdrawal,
     MTA-STS floor→trusted) — the floor→trusted flip is the same trigger; keep it
-    here, not duplicated per module (priority #2)."""
+    here, not duplicated per module (priority #2).
+
+    ``expired=True`` dates the leaf's whole validity window in the past (the CA
+    stays valid): a trusted cert that has lapsed, which the nest must stop
+    serving in favour of its floor (``tls-certificates.md`` § The two-layer model)."""
     import datetime
 
     from cryptography import x509
@@ -2367,8 +2598,8 @@ def make_ca_issued_leaf_pem(names: list[str]) -> tuple[bytes, bytes]:
         .issuer_name(ca_name)  # issuer (CA) != subject (leaf) → not the self-signed floor
         .public_key(leaf_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(not_before)
-        .not_valid_after(not_after)
+        .not_valid_before(now - datetime.timedelta(days=90) if expired else not_before)
+        .not_valid_after(now - datetime.timedelta(days=1) if expired else not_after)
         .add_extension(
             x509.SubjectAlternativeName([x509.DNSName(n) for n in names]), critical=False
         )

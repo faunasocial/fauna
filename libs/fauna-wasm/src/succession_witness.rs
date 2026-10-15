@@ -126,25 +126,13 @@ pub(crate) async fn walk_at_nest_url(
 
 #[async_trait::async_trait(?Send)]
 impl SuccessionChainSource for WebSuccessionChainSource {
-    async fn walk_from_domain(
-        &self,
-        handle_domain: &str,
-        old: ActorId,
-        known_head: Option<ChainHead>,
-    ) -> Option<VerifiedSuccession> {
-        walk_at_nest_url(&fauna_core::web::apex_url(handle_domain), old, known_head)
-            .await
-            .successor()
-    }
-
     async fn walk_line_from_domain(
         &self,
         handle_domain: &str,
         old: ActorId,
         known_head: Option<ChainHead>,
     ) -> Option<Vec<VerifiedSuccession>> {
-        // The same dial and the same whole-walk bound as the terminal walk
-        // above: only what the shared body returns differs.
+        // Dial the apex, bounded by the whole-walk budget.
         let url = fauna_core::web::apex_url(handle_domain);
         let anon = fauna_rpc_wasm::AnonymousWsRpcClient::connect(&url).ok()?;
         let walked = std::pin::pin!(fauna_client_recovery::walk_line(anon, old, known_head));

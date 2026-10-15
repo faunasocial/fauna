@@ -1,10 +1,101 @@
 use crate::i18n::strings::common;
 use adw::prelude::*;
+use fauna_client_notifications::NotificationDestination;
 use fauna_ui_ids as ids;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+/// The shared decision's answer for each painted row, index-for-index with the
+/// list box's rows — read at activation time so a click never re-derives it.
+pub type Destinations = Rc<RefCell<Vec<Option<NotificationDestination>>>>;
 
 pub struct NotificationHandles {
     pub count_badge: gtk::Label,
     pub list_box: gtk::ListBox,
+    pub destinations: Destinations,
+}
+
+/// Whether a row with this destination is offered as a control. The shared
+/// decision's answer minus its one app-local subtraction: `Family` only while
+/// the family tab is gated in (tui's `navigable()` shape) — a control into a
+/// page the sidebar hides would be a dead end.
+fn navigable(dest: &Option<NotificationDestination>, family_gated_in: bool) -> bool {
+    match dest {
+        None => false,
+        Some(NotificationDestination::Family) => family_gated_in,
+        Some(_) => true,
+    }
+}
+
+/// Re-derive every row's `activatable` flag from its stored destination and the
+/// current family gate. A row with no destination is plain text, never a
+/// control that silently does nothing; rerun when the gate moves, because
+/// `fauna.family.status` can land after the first notifications paint.
+pub fn sync_activatable(
+    list_box: &gtk::ListBox,
+    destinations: &Destinations,
+    family_gated_in: bool,
+) {
+    for (i, dest) in destinations.borrow().iter().enumerate() {
+        if let Some(row) = list_box.row_at_index(i as i32) {
+            row.set_activatable(navigable(dest, family_gated_in));
+        }
+    }
+}
+
+/// The cross-page navigation a `notification-item` activation dispatches into,
+/// one per [`NotificationDestination`] arm — each routed into the destination
+/// page's own gesture, as a direct click there would (`notifications.md`
+/// § Deep-link destinations; mirrors tui's `open_notification`).
+pub struct NotificationNav {
+    /// The main content stack, switched to the destination page.
+    pub stack: gtk::Stack,
+    /// Opens the Feed post-detail pane for a post named only by id — the same
+    /// door a `search-result-item` uses; it also resolves a post the timeline
+    /// never loaded.
+    pub open_post_detail: Rc<dyn Fn(String)>,
+    /// Switches Contacts to its People segment, which lists the pending knocks.
+    pub switch_to_people_segment: Rc<dyn Fn()>,
+    /// The sidebar, for the Family gate and its selection.
+    pub sidebar_list_box: gtk::ListBox,
+}
+
+/// Wire row activation on the notifications list.
+pub fn connect_row_activation(
+    list_box: &gtk::ListBox,
+    destinations: &Destinations,
+    nav: NotificationNav,
+) {
+    let destinations = Rc::clone(destinations);
+    list_box.connect_row_activated(move |_, row| {
+        let idx = row.index().max(0) as usize;
+        let dest = destinations.borrow().get(idx).cloned().flatten();
+        let gated = crate::views::sidebar::family_sidebar_row_shown(&nav.sidebar_list_box);
+        if !navigable(&dest, gated) {
+            return;
+        }
+        match dest {
+            Some(NotificationDestination::Post { post_id }) => {
+                nav.stack.set_visible_child_name("feed");
+                (nav.open_post_detail)(post_id);
+            }
+            Some(NotificationDestination::Knock { .. }) => {
+                nav.stack.set_visible_child_name("contacts");
+                (nav.switch_to_people_segment)();
+            }
+            Some(NotificationDestination::Family) => {
+                nav.stack.set_visible_child_name("family");
+                let family_index = crate::views::sidebar::SidebarItem::ALL.len() as i32 + 1;
+                if let Some(row) = nav.sidebar_list_box.row_at_index(family_index) {
+                    nav.sidebar_list_box.select_row(Some(&row));
+                }
+            }
+            Some(NotificationDestination::External { url }) => {
+                crate::url_opener::open(&url);
+            }
+            None => {}
+        }
+    });
 }
 
 pub fn build_notifications_view() -> (gtk::Box, NotificationHandles) {
@@ -54,6 +145,7 @@ pub fn build_notifications_view() -> (gtk::Box, NotificationHandles) {
     let handles = NotificationHandles {
         count_badge,
         list_box,
+        destinations: Rc::new(RefCell::new(Vec::new())),
     };
     (outer, handles)
 }
@@ -81,11 +173,12 @@ pub fn build_notifications_view() -> (gtk::Box, NotificationHandles) {
 pub fn update_notifications_list(
     list_box: &gtk::ListBox,
     count_badge: &gtk::Label,
+    destinations: &Destinations,
+    family_gated_in: bool,
     items: &[fauna_client_notifications::notifications::NotifItem],
 ) -> u32 {
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(list_box);
+    let mut painted = Vec::with_capacity(items.len());
 
     let mut unread = 0u32;
     for item in items {
@@ -97,8 +190,13 @@ pub fn update_notifications_list(
             &crate::i18n::notification_text(item),
             &crate::client::format_epoch_us(item.created_at),
         );
+        // Where the row leads is shared Rust's call, never a local type table.
+        let dest = fauna_client_notifications::notification_destination(item);
+        row.set_activatable(navigable(&dest, family_gated_in));
+        painted.push(dest);
         list_box.append(&row);
     }
+    *destinations.borrow_mut() = painted;
 
     count_badge.set_text(&common::unread_count(&unread.to_string()));
     unread

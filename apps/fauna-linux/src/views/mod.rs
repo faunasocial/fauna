@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod admin_pending_actions;
 pub mod backups;
 pub mod bridges;
 pub mod contacts;

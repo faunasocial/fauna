@@ -38,6 +38,16 @@ internal sealed class MockNestRpcClient : INestRpcClient
     public void RaiseReconnected() => Reconnected?.Invoke();
 
     /// <inheritdoc />
+    public event Action? StoreChanged;
+    /// <summary>Test hook: simulate the shared store-change notice (raises
+    /// <see cref="StoreChanged"/> synchronously, as the production relay does on
+    /// the UI thread).</summary>
+    public void RaiseStoreChanged() => StoreChanged?.Invoke();
+    /// <summary>How many handlers are subscribed to <see cref="StoreChanged"/> —
+    /// pins that a page which left no longer listens.</summary>
+    public int StoreChangedSubscribers => StoreChanged?.GetInvocationList().Length ?? 0;
+
+    /// <inheritdoc />
     public event Action<FfiKnock>? KnockReceived;
     /// <summary>Test hook: simulate an inbound knock push (raises
     /// <see cref="KnockReceived"/> with <paramref name="knock"/>).</summary>
@@ -58,6 +68,12 @@ internal sealed class MockNestRpcClient : INestRpcClient
     /// <paramref name="addressbookId"/>).</summary>
     public void RaiseAddressBookPushChanged(string actorId, string addressbookId) =>
         AddressBookPushChanged?.Invoke(actorId, addressbookId);
+
+    /// <inheritdoc />
+    public event Action? MailSpamPushChanged;
+    /// <summary>Test hook: simulate a spam-model-changed push (raises
+    /// <see cref="MailSpamPushChanged"/>).</summary>
+    public void RaiseMailSpamPushChanged() => MailSpamPushChanged?.Invoke();
 
     /// <inheritdoc />
     public event Action<string>? FolderChangedPushed;
@@ -112,8 +128,10 @@ internal sealed class MockNestRpcClient : INestRpcClient
     /// <summary>When set, <see cref="ReportHostAddressAsync"/> throws it (the
     /// report-path fault the reporter must swallow), independent of the gate.</summary>
     public string? NextReportHostAddressError { get; set; }
-    public FfiAdminStats? NextAdminStats { get; set; }
-    public FfiAdminStatus? NextAdminStatus { get; set; }
+    /// <summary>The <c>admin_dashboard_snapshot()</c> reply — the shared card
+    /// set (no cards, no error by default).</summary>
+    public FfiAdminDashboardSnapshot NextAdminDashboardSnapshot { get; set; } =
+        new(Array.Empty<FfiStatCard>(), null);
     public string? NextError { get; set; }
 
     // ── Configurable admin replies (FFI returns arrays = IReadOnlyList<T>) ──
@@ -222,18 +240,11 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextHostAddressOutcome);
     }
 
-    public Task<FfiAdminStats> AdminStatsAsync()
+    public Task<FfiAdminDashboardSnapshot> AdminDashboardSnapshotAsync()
     {
-        _calls.Add("AdminStats");
+        _calls.Add("AdminDashboardSnapshot");
         Throw();
-        return Task.FromResult(NextAdminStats ?? MakeAdminStats());
-    }
-
-    public Task<FfiAdminStatus> AdminStatusAsync()
-    {
-        _calls.Add("AdminStatus");
-        Throw();
-        return Task.FromResult(NextAdminStatus ?? MakeAdminStatus());
+        return Task.FromResult(NextAdminDashboardSnapshot);
     }
 
     // ── encrypted CalDAV store (FfiCaldavClient) ────────────────────────
@@ -250,6 +261,27 @@ internal sealed class MockNestRpcClient : INestRpcClient
         _calls.Add("CaldavCreateCalendar");
         Throw();
         return Task.CompletedTask;
+    }
+
+    public FfiIcsImportResult NextCaldavImportResult { get; set; } = new(0, 0);
+    public string NextCaldavExportIcs { get; set; } = "";
+    public (string CalendarIdHex, string IcsText)? LastCaldavImport { get; private set; }
+    public string? LastCaldavExportCalendar { get; private set; }
+
+    public Task<FfiIcsImportResult> CaldavImportCalendarIcsAsync(string calendarIdHex, string icsText)
+    {
+        _calls.Add("CaldavImportCalendarIcs");
+        Throw();
+        LastCaldavImport = (calendarIdHex, icsText);
+        return Task.FromResult(NextCaldavImportResult);
+    }
+
+    public Task<string> CaldavExportCalendarIcsAsync(string calendarIdHex)
+    {
+        _calls.Add("CaldavExportCalendarIcs");
+        Throw();
+        LastCaldavExportCalendar = calendarIdHex;
+        return Task.FromResult(NextCaldavExportIcs);
     }
 
     public async Task<IReadOnlyList<FfiCalEvent>> CaldavQueryEventsAsync(string calendarIdHex)
@@ -377,6 +409,16 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextFeatureRows);
     }
 
+    /// The `status.node` fixture — defaults to a nest that answers.
+    public FfiNodeLeg NextStatusNode { get; set; } = new FfiNodeLeg("nest.example.com", "1.2.3");
+
+    public Task<FfiNodeLeg> StatusNodeAsync()
+    {
+        _calls.Add("StatusNode");
+        Throw();
+        return Task.FromResult(NextStatusNode);
+    }
+
     public Task AccountDeleteAsync()
     {
         _calls.Add("AccountDelete");
@@ -420,10 +462,18 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextBridges);
     }
 
+    /// <summary>When set, <see cref="BridgesLinkAsync"/> records the call then throws it —
+    /// e.g. the typed <c>FfiException.GuardianApprovalRequired</c> a supervised ward's
+    /// refused link gets (the feed-source ask is offered on it alone).</summary>
+    public Exception? NextLinkException { get; set; }
+    /// <summary>The same, for <see cref="BridgesAddFollowAsync"/>.</summary>
+    public Exception? NextAddFollowException { get; set; }
+
     public Task BridgesLinkAsync(string bridgeId, string mode, IReadOnlyDictionary<string, string> fields)
     {
         _calls.Add("BridgesLink");
         LastLink = (bridgeId, mode, fields);
+        if (NextLinkException is not null) throw NextLinkException;
         return Task.CompletedTask;
     }
 
@@ -479,6 +529,7 @@ internal sealed class MockNestRpcClient : INestRpcClient
     public Task BridgesAddFollowAsync(string bridgeId, string id, string? petname)
     {
         _calls.Add("BridgesAddFollow");
+        if (NextAddFollowException is not null) throw NextAddFollowException;
         return Task.CompletedTask;
     }
 
@@ -713,11 +764,19 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.CompletedTask;
     }
 
-    public Task SendKnockAsync(string actorId)
+    /// <summary>Last knock's <c>recipient_nest_url</c> (<c>null</c> = this nest).</summary>
+    public string? LastKnockRoute { get; private set; }
+    /// <summary>When set, <see cref="SendKnockAsync"/> throws it — e.g. the typed
+    /// <c>FfiException.GuardianApprovalRequired</c> the ward's ask is offered on.</summary>
+    public Exception? NextKnockException { get; set; }
+
+    public Task SendKnockAsync(string actorId, string? recipientNestUrl = null)
     {
         _calls.Add("SendKnock");
         LastKnockSent = actorId;
+        LastKnockRoute = recipientNestUrl;
         Throw();
+        if (NextKnockException is not null) throw NextKnockException;
         return Task.CompletedTask;
     }
 
@@ -906,6 +965,18 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.CompletedTask;
     }
 
+    /// Last <c>fauna.admin.tiers.create</c> args (name + the five raw-i64 caps).
+    public (string Name, long Inbox, long Storage, long Devices, long BlobSize, long Feeds)? LastTierCreate { get; private set; }
+
+    public Task AdminTiersCreateAsync(
+        string name, long maxInboxBytes, long maxStorageBytes, long maxDevices, long maxBlobSize, long maxFeeds)
+    {
+        _calls.Add("AdminTiersCreate");
+        LastTierCreate = (name, maxInboxBytes, maxStorageBytes, maxDevices, maxBlobSize, maxFeeds);
+        Throw();
+        return Task.CompletedTask;
+    }
+
     public (FfiRegistrationMode mode, ulong? maxFreeUsers)? LastRegistrationModeSet { get; private set; }
 
     public Task AdminSetRegistrationModeAsync(FfiRegistrationMode mode, ulong? maxFreeUsers)
@@ -964,6 +1035,31 @@ internal sealed class MockNestRpcClient : INestRpcClient
         _calls.Add("AdminInviteRequestsList");
         Throw();
         return Task.FromResult<IReadOnlyList<FfiAdminInviteRequest>>(NextAdminInviteRequests);
+    }
+
+    /// <summary>Configurable fixture for <see cref="AdminPendingActionsListAsync"/>.</summary>
+    public IReadOnlyList<FfiAdminPendingAction> NextAdminPendingActions { get; set; } =
+        Array.Empty<FfiAdminPendingAction>();
+
+    public Task<IReadOnlyList<FfiAdminPendingAction>> AdminPendingActionsListAsync()
+    {
+        _calls.Add("AdminPendingActionsList");
+        Throw();
+        return Task.FromResult(NextAdminPendingActions);
+    }
+
+    public Task AdminPendingActionApproveAsync(long id)
+    {
+        _calls.Add("AdminPendingActionApprove");
+        Throw();
+        return Task.CompletedTask;
+    }
+
+    public Task AdminPendingActionCancelAsync(long id)
+    {
+        _calls.Add("AdminPendingActionCancel");
+        Throw();
+        return Task.CompletedTask;
     }
 
     public Task<FfiAdminInviteRequestApproveReply> AdminInviteRequestsApproveAsync(long id, string? tier, string? label, byte[]? guardianActorId = null, string? ageBand = null)
@@ -1047,6 +1143,38 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.CompletedTask;
     }
 
+    /// The <c>fauna.admin.web_app_origin.get</c> fixture (bundled, settable).
+    public FfiAdminWebAppOriginView NextWebAppOriginView { get; set; } = new(
+        FfiWebAppOrigin.Bundled,
+        new LocalizedText("admin.nest_page.web_app_origin_status_bundled", new()),
+        new LocalizedText("admin.nest_page.web_app_origin_scope", new()),
+        true,
+        new LocalizedText("admin.nest_page.web_app_origin_central", new()));
+    /// Every <c>fauna.admin.web_app_origin.set</c> arg, in call order. The set
+    /// answers a view selecting that mode (the real reply folds the stored one).
+    public List<FfiWebAppOrigin> WebAppOriginSetCalls { get; } = new();
+
+    /// Fail only the web-app origin read (the section is best-effort, so the rest
+    /// of the page must still load).
+    public bool NextWebAppOriginReadError { get; set; }
+
+    public Task<FfiAdminWebAppOriginView> AdminWebAppOriginStatusAsync()
+    {
+        _calls.Add("AdminWebAppOriginStatus");
+        Throw();
+        if (NextWebAppOriginReadError) throw new InvalidOperationException("origin read failed");
+        return Task.FromResult(NextWebAppOriginView);
+    }
+
+    public Task<FfiAdminWebAppOriginView> SetWebAppOriginAsync(FfiWebAppOrigin mode)
+    {
+        _calls.Add("SetWebAppOrigin");
+        WebAppOriginSetCalls.Add(mode);
+        Throw();
+        NextWebAppOriginView = NextWebAppOriginView with { selected = mode };
+        return Task.FromResult(NextWebAppOriginView);
+    }
+
     /// The seed-rotation roster fixture (default: a confirmable single-inheritor
     /// roster — the ordinary case).
     public FfiSeedRotationConfirmView NextSeedRotateRoster { get; set; } = new(
@@ -1074,20 +1202,22 @@ internal sealed class MockNestRpcClient : INestRpcClient
     }
 
     // ── Post-auth passes over the session's one connection ──────────────
-    /// What <see cref="SelfHealDeploymentSeedCustodyAsync"/> answers; null = it
-    /// throws (a custody the leg could not confirm).
-    public FfiDeploymentSeedSelfHeal? NextDeploymentSeedSelfHeal { get; set; } =
-        new FfiDeploymentSeedSelfHeal.AlreadyCustodied();
+    /// What <see cref="SelfHealDeploymentSeedCustodyAsync"/> answers (null =
+    /// nothing owed, the steady state).
+    public LocalizedText? NextDeploymentSeedWarning { get; set; }
+    /// When set, <see cref="SelfHealDeploymentSeedCustodyAsync"/> throws — a leg
+    /// the glue could not even reach.
+    public bool DeploymentSeedCustodyThrows { get; set; }
     /// Completes <see cref="RunCriticalAlertSweepLoopAsync"/> — the loop otherwise
     /// runs until the test sets it, like the real one until identity teardown.
     public TaskCompletionSource CriticalAlertSweepLoopEnds { get; } = new();
 
-    public Task<FfiDeploymentSeedSelfHeal> SelfHealDeploymentSeedCustodyAsync()
+    public Task<LocalizedText?> SelfHealDeploymentSeedCustodyAsync()
     {
         _calls.Add("SelfHealDeploymentSeedCustody");
-        return NextDeploymentSeedSelfHeal is { } outcome
-            ? Task.FromResult(outcome)
-            : throw new InvalidOperationException("self-heal failed");
+        return DeploymentSeedCustodyThrows
+            ? throw new InvalidOperationException("self-heal failed")
+            : Task.FromResult(NextDeploymentSeedWarning);
     }
 
     public Task RunCriticalAlertSweepAsync()
@@ -1225,22 +1355,12 @@ internal sealed class MockNestRpcClient : INestRpcClient
 
     /// The <c>fauna.moderation.actions</c> queue fixture (empty = nothing flagged).
     public IReadOnlyList<FfiObligationAction> NextModerationActions { get; set; } = new List<FfiObligationAction>();
-    /// Last <c>fauna.moderation.train</c> args, for asserting the "ham" correction.
-    public (string ContentId, string Verdict)? LastTrain { get; private set; }
 
     public Task<IReadOnlyList<FfiObligationAction>> ModerationActionsAsync()
     {
         _calls.Add("ModerationActions");
         Throw();
         return Task.FromResult(NextModerationActions);
-    }
-
-    public Task ModerationTrainAsync(string contentId, string verdict)
-    {
-        _calls.Add("ModerationTrain");
-        LastTrain = (contentId, verdict);
-        Throw();
-        return Task.CompletedTask;
     }
 
     // ── fauna.moderation.abuse_report.* (user-initiated reporting) ──────
@@ -1375,6 +1495,50 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextSpamThresholdOverride);
     }
 
+    /// The <c>fauna.bridges.get_forward_all_to</c> fixture.
+    public string? NextForwardAllTo { get; set; }
+    /// Last <c>fauna.bridges.set_forward_all_to</c> arg; <c>ForwardAllToSetCalls</c> counts sends.
+    public string? LastForwardAllToSet { get; private set; }
+    public int ForwardAllToSetCalls { get; private set; }
+    /// The <c>fauna.bridges.get_forward_per_hour</c> fixture (value + admin ceiling).
+    public ForwardPerHour NextForwardPerHour { get; set; } = new(100, 500);
+    public uint? LastForwardPerHourSet { get; private set; }
+    public int ForwardPerHourSetCalls { get; private set; }
+
+    public Task<string?> ForwardAllToGetAsync()
+    {
+        _calls.Add("ForwardAllToGet");
+        Throw();
+        return Task.FromResult(NextForwardAllTo);
+    }
+
+    public Task<string?> ForwardAllToSetAsync(string? address)
+    {
+        _calls.Add("ForwardAllToSet");
+        ForwardAllToSetCalls++;
+        LastForwardAllToSet = address;
+        Throw();
+        NextForwardAllTo = address;
+        return Task.FromResult(NextForwardAllTo);
+    }
+
+    public Task<ForwardPerHour> ForwardPerHourGetAsync()
+    {
+        _calls.Add("ForwardPerHourGet");
+        Throw();
+        return Task.FromResult(NextForwardPerHour);
+    }
+
+    public Task<ForwardPerHour> ForwardPerHourSetAsync(uint value)
+    {
+        _calls.Add("ForwardPerHourSet");
+        ForwardPerHourSetCalls++;
+        LastForwardPerHourSet = value;
+        Throw();
+        NextForwardPerHour = NextForwardPerHour with { value = value };
+        return Task.FromResult(NextForwardPerHour);
+    }
+
     // ── Layer-B signal sharing (engagement-cues.md § Layer B) ───────────
     // Rides the (mock) shared FfiFeedManager, not FfiModerationClient — but the
     // mock has no live manager to fake (BuildFeedManagerAsync below is
@@ -1505,6 +1669,37 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.CompletedTask;
     }
 
+    /// <summary>Last <c>fauna.family.contact.request</c> peer (hex).</summary>
+    public string? LastFamilyContactRequest { get; private set; }
+    /// <summary>Last <c>fauna.family.feed_source.request</c> args.</summary>
+    public (string BridgeId, string Operation, string Target, string Label)? LastFamilyFeedSourceRequest { get; private set; }
+    /// <summary>Every <c>AllowBlockedPeer</c> call, in order — each carries the whole row.</summary>
+    public List<(byte[] SupervisedActorId, FfiFamilyBlockedPeer Peer)> FamilyAllowBlockedPeerCalls { get; } = new();
+
+    public Task FamilyContactRequestAsync(string peerActorIdHex)
+    {
+        _calls.Add("FamilyContactRequest");
+        LastFamilyContactRequest = peerActorIdHex;
+        Throw();
+        return Task.CompletedTask;
+    }
+
+    public Task FamilyFeedSourceRequestAsync(string bridgeId, string operation, string target, string label)
+    {
+        _calls.Add("FamilyFeedSourceRequest");
+        LastFamilyFeedSourceRequest = (bridgeId, operation, target, label);
+        Throw();
+        return Task.CompletedTask;
+    }
+
+    public Task FamilyAllowBlockedPeerAsync(byte[] supervisedActorId, FfiFamilyBlockedPeer peer)
+    {
+        _calls.Add("FamilyAllowBlockedPeer");
+        FamilyAllowBlockedPeerCalls.Add((supervisedActorId, peer));
+        Throw();
+        return Task.CompletedTask;
+    }
+
     public Task FamilyGraduateAsync(byte[] supervisedActorId)
     {
         _calls.Add("FamilyGraduate");
@@ -1561,17 +1756,6 @@ internal sealed class MockNestRpcClient : INestRpcClient
         LastFamilyDeviceMark = (supervisedActorId, deviceId, marked);
         Throw();
         return Task.CompletedTask;
-    }
-
-    /// The <c>fauna.posts.get</c> body-text fixture keyed by content_id (a moderation
-    /// server-row spam train fetches the post body via this). Missing key ⇒ null.
-    public Dictionary<string, string> NextPostBody { get; set; } = new();
-
-    public Task<string?> PostBodyTextAsync(string contentId)
-    {
-        _calls.Add("PostBodyText");
-        Throw();
-        return Task.FromResult(NextPostBody.TryGetValue(contentId, out var b) ? b : null);
     }
 
     // ── fauna.folders.* ───────────────────────────────────────────────
@@ -1699,10 +1883,13 @@ internal sealed class MockNestRpcClient : INestRpcClient
     /// Last <c>folders_serve_set</c> args (name, mls group id hex, enable).
     public (string Name, string? MlsGroupIdHex, bool Enable)? LastFolderServeSet { get; private set; }
 
-    public Task<uint> FoldersServeSetAsync(ConversationsSession session, string name, string? mlsGroupIdHex, bool enable)
+    public string? LastFolderServeSetDeviceId { get; private set; }
+
+    public Task<uint> FoldersServeSetAsync(ConversationsSession session, string name, string? mlsGroupIdHex, bool enable, string? deviceIdHex = null)
     {
         _calls.Add("FoldersServeSet");
         LastFolderServeSet = (name, mlsGroupIdHex, enable);
+        LastFolderServeSetDeviceId = deviceIdHex;
         Throw();
         return Task.FromResult(NextServeSetResult);
     }
@@ -1785,6 +1972,18 @@ internal sealed class MockNestRpcClient : INestRpcClient
         _calls.Add("OfflineShareBindSeat");
         throw new NotSupportedException(
             "MockNestRpcClient cannot bind a live FfiCeremonySeat (needs a live FfiNestClient).");
+    }
+
+    /// <summary>The plane needs a live sync-agent provisioner and FfiNestClient; the
+    /// model's start path is exercised against this mock only for its best-effort
+    /// contract (a throw is logged, never propagated).</summary>
+    public Task StartSharePlaneAsync(
+        FfiSyncAgentProvisioner provisioner, string spoolDir, FfiSharePlaneListener listener)
+    {
+        _calls.Add("StartSharePlane");
+        Throw();
+        throw new NotSupportedException(
+            "MockNestRpcClient cannot start a live share plane (needs a live FfiNestClient).");
     }
 
     /// Last <c>offline_share_initiate</c> peer-code-input arg.
@@ -2192,14 +2391,50 @@ internal sealed class MockNestRpcClient : INestRpcClient
     public string? LastAuditStatePath { get; private set; }
     public string? LastAuditSyncStateDir { get; private set; }
 
+    /// The own-custodian value the last `BackupAuditRunPassAsync` carried.
+    public FfiOwnCustodianStore? LastAuditOwnCustodian { get; private set; }
+
     public Task<IReadOnlyList<FfiDestinationAuditRow>> BackupAuditRunPassAsync(
-        string statePath, string? syncStateDir)
+        string statePath, string? syncStateDir, FfiOwnCustodianStore? ownCustodian = null)
     {
         _calls.Add("BackupAuditRunPass");
         LastAuditStatePath = statePath;
         LastAuditSyncStateDir = syncStateDir;
+        LastAuditOwnCustodian = ownCustodian;
         Throw();
         return Task.FromResult(NextAuditRows);
+    }
+
+    /// What the next `BackupRecoverFromDestinationAsync` returns, and the args of
+    /// every run (tests pin that one confirm runs the face exactly once).
+    public FfiRecoveryResult NextRecoveryResult { get; set; }
+        = new FfiRecoveryResult(@whole: true, @lines: new[] { "Everything your nest lost is back." });
+    public List<(string DeviceIdHex, string DestinationId, string StatePath)> RecoverRuns { get; } = new();
+
+    /// When set, a recovery run waits on it (models a run still in flight).
+    public TaskCompletionSource? RecoverGate { get; set; }
+
+    public async Task<FfiRecoveryResult> BackupRecoverFromDestinationAsync(
+        string deviceIdHex, string destinationId, string statePath)
+    {
+        _calls.Add("BackupRecoverFromDestination");
+        RecoverRuns.Add((deviceIdHex, destinationId, statePath));
+        Throw();
+        if (RecoverGate is { } gate) await gate.Task;
+        return NextRecoveryResult;
+    }
+
+    /// Count of own-store (agent verb) recoveries; the agent derives the key and
+    /// grants first, so the mock records only that the verb ran.
+    public int OwnStoreRecoverRuns { get; private set; }
+
+    public async Task<FfiRecoveryResult> RecoverOwnCustodianStoreAsync(IFfiSyncAgentProvisioner agent)
+    {
+        _calls.Add("RecoverOwnCustodianStore");
+        OwnStoreRecoverRuns++;
+        Throw();
+        if (RecoverGate is { } gate) await gate.Task;
+        return NextRecoveryResult;
     }
 
     /// Whether the next `BackupAuditObserve` call reports the high-water advanced.
@@ -3213,19 +3448,6 @@ internal sealed class MockNestRpcClient : INestRpcClient
     public static FfiAdminTier MakeAdminTier(string name) =>
         new FfiAdminTier(name, 0, 0, 0, 0, 0);
 
-    /// A <c>fauna.admin.stats</c> fixture (the admin dashboard's summary row).
-    public static FfiAdminStats MakeAdminStats(
-        long totalUsers = 0, FfiAdminTierCount[]? usersByTier = null, long suspendedUsers = 0,
-        long totalInboxBytes = 0, long totalStorageBytes = 0, long wsConnections = 0) =>
-        new FfiAdminStats(
-            totalUsers, usersByTier ?? Array.Empty<FfiAdminTierCount>(), suspendedUsers,
-            totalInboxBytes, totalStorageBytes, wsConnections);
-
-    /// A <c>fauna.admin.status</c> fixture (version + optional pending update).
-    public static FfiAdminStatus MakeAdminStatus(
-        string version = "0.0.0", FfiAdminUpdateAvailable? updateAvailable = null) =>
-        new FfiAdminStatus(version, updateAvailable);
-
     /// A <c>fauna.admin.users.list</c> reply fixture.
     public static FfiAdminUsersListReply MakeAdminUsersListReply(FfiAdminUser[]? users = null, long total = 0) =>
         new FfiAdminUsersListReply(users ?? Array.Empty<FfiAdminUser>(), total);
@@ -3281,6 +3503,16 @@ internal sealed class MockNestRpcClient : INestRpcClient
         new FfiAdminInviteRequest(
             id, Convert.FromHexString(actorIdHex), handle, message, status,
             status == "pending", 0, null, null, null, null, null);
+
+    /// <summary>One <c>fauna.admin.pending_actions.list</c> row (admin.md § Pending admin
+    /// actions); the Rust-derived <c>description</c> / <c>actorShort</c> are fixture strings.</summary>
+    public static FfiAdminPendingAction MakeAdminPendingAction(
+        long id, string actorIdHex, string description = "Grant the admin role",
+        string status = "pending", long requiresQuorum = 1, string[]? approvals = null) =>
+        new FfiAdminPendingAction(
+            id, Convert.FromHexString(actorIdHex), actorIdHex[..12] + "…", "admin.add", null,
+            description, status, status == "pending", 0, 1_700_000_000, requiresQuorum,
+            approvals ?? Array.Empty<string>());
 
     // ── CardDAV Address Book (contacts.md § Address Book segment; slice 4b) ──
 
@@ -3388,6 +3620,18 @@ internal sealed class MockNestRpcClient : INestRpcClient
         return Task.FromResult(NextMintedKit);
     }
 
+    /// <summary>The URI the mock builds; null throws like a refusing builder.</summary>
+    public string? NextKitDisplayUri { get; set; }
+
+    public Task<string> RecoveryKitDisplayUriAsync(string kitSecretHex)
+    {
+        _calls.Add("RecoveryKitDisplayUri");
+        Throw();
+        return NextKitDisplayUri is { } uri
+            ? Task.FromResult(uri)
+            : throw new InvalidOperationException("no display URI for the mock");
+    }
+
     public Task<FfiMintedKit> RecoveryRequestSeedAloneReplacementAsync()
     {
         _calls.Add("RecoveryRequestSeedAloneReplacement");
@@ -3417,6 +3661,35 @@ internal sealed class MockNestRpcClient : INestRpcClient
         LastSuccessionKitInput = kitInput;
         Throw();
         return Task.FromResult(NextStolenOutcome);
+    }
+
+    /// <summary>What <see cref="RecoveryDeadGenerationsAsync"/> hands back; nothing
+    /// dead by default — the state of every account that never lost a key.</summary>
+    public FfiDeadGenerations NextDeadGenerations { get; set; } =
+        new(Array.Empty<byte[]>(), null);
+
+    /// <summary>What <see cref="RecoveryLetGoAsync"/> reports.</summary>
+    public FfiLetGoOutcome NextLetGoOutcome { get; set; } =
+        new(0, false, new FfiDeadGenerations(Array.Empty<byte[]>(), null));
+
+    public byte[][]? LastLetGoGenerationIds { get; private set; }
+
+    /// <summary>Deliberately ignores <see cref="NextError"/>: the door it stands
+    /// for is never <c>Err</c> (a dead read that cannot be taken answers empty),
+    /// so a mock that threw here would let a view model grow a failure arm the
+    /// real call never reaches.</summary>
+    public Task<FfiDeadGenerations> RecoveryDeadGenerationsAsync()
+    {
+        _calls.Add("RecoveryDeadGenerations");
+        return Task.FromResult(NextDeadGenerations);
+    }
+
+    public Task<FfiLetGoOutcome> RecoveryLetGoAsync(byte[][] generationIds)
+    {
+        _calls.Add("RecoveryLetGo");
+        LastLetGoGenerationIds = generationIds;
+        Throw();
+        return Task.FromResult(NextLetGoOutcome);
     }
 
     /// <summary>
@@ -3538,6 +3811,17 @@ internal sealed class MockNestRpcClient : INestRpcClient
         LastCustodyRevoke = (grantId, holder);
         Throw();
         return Task.FromResult(NextCustodyActOutcome);
+    }
+
+    /// <summary>What <see cref="CustodyEscrowHoldersAsync"/> returns (null =
+    /// unreadable this pass, the default).</summary>
+    public IReadOnlyList<string>? NextEscrowHolders { get; set; }
+
+    public Task<IReadOnlyList<string>?> CustodyEscrowHoldersAsync()
+    {
+        _calls.Add("CustodyEscrowHolders");
+        Throw();
+        return Task.FromResult(NextEscrowHolders);
     }
 
     public Task CustodyDriveAsync(ConversationsSession session)

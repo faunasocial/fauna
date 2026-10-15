@@ -1,6 +1,18 @@
+import re
+import secrets
+import sqlite3
 import time
 
 import pytest
+from nacl.signing import SigningKey
+
+from clients.ws_rpc_admin_client import WsRpcAdminClient
+from common.auth import register_user
+from helpers import budgets
+from helpers.app_surface import skip_environment
+from helpers.rpc_hold import refuse_rpc, release_rpc_hold
+from helpers.waiting import wait_until
+from i18n.strings import S
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 
@@ -95,7 +107,10 @@ def test_settings_tier_define_new(admin_app):
         "inbox": "111000", "storage": "222000", "devices": "64",
         "blob-size": "333000", "feeds": "1000",
     }
-    admin_app.admin.edit_new_tier_name("e2e-harness")
+    # A per-run name: the nest outlives one app of a cross-app sweep, so a fixed
+    # name would meet the previous app's tier (`fauna.admin.conflict`).
+    new_name = f"e2e-harness-{secrets.token_hex(3)}"
+    admin_app.admin.edit_new_tier_name(new_name)
     for cap, value in caps.items():
         admin_app.admin.edit_new_tier_cap(cap, value)
     admin_app.admin.add_tier()
@@ -107,7 +122,7 @@ def test_settings_tier_define_new(admin_app):
         f"the new tier did not appear after create+refetch. "
         f"rows: {admin_app.admin.tier_names()!r}. error: {admin_app.error_text()!r}"
     )
-    index = admin_app.admin.tier_names().index("e2e-harness")
+    index = admin_app.admin.tier_names().index(new_name)
     for cap, value in caps.items():
         assert admin_app.admin.tier_cap_value(cap, index=index).strip() == value, (
             f"cap {cap!r} of the new tier did not persist"
@@ -166,6 +181,276 @@ def test_admin_dashboard_version(admin_app):
     admin_app.admin.navigate_dashboard()
     value = admin_app.admin.dashboard_card_value("Version")
     assert len(value) > 0
+
+
+_SIZE = re.compile(r"([\d.,]+)\s*(B|KB|MB|GB|TB)\b")
+_UNIT = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
+
+
+def _storage_card(admin) -> tuple[str, str]:
+    """The (label, value) of the card that shows the members' stored files.
+
+    On the shared card set (`admin.md` § 1. Dashboard → *The card set*) that is
+    the *File Storage* part beside Total Storage, which is inbox + files. An app
+    still on its own cards shows the files counter alone under its first
+    storage label ("Total Storage Used", "Total Storage", …), so that label is
+    the fallback."""
+    count = admin.driver.count("admin-stat-card-label")
+    cards = [
+        (
+            admin.driver.get_text("admin-stat-card-label", index=i) or "",
+            admin.driver.get_text("admin-stat-card-value", index=i) or "",
+        )
+        for i in range(count)
+    ]
+    for label, value in cards:
+        if label == S.admin.dashboard.file_storage:
+            return label, value
+    for label, value in cards:
+        if "storage" in label.lower():
+            return label, value
+    return "", ""
+
+
+def _dashboard_cards(admin) -> list[tuple[str, str]]:
+    """Every painted `admin-stat-card` as (label, value), in order."""
+    count = admin.driver.count("admin-stat-card-label")
+    return [
+        (
+            admin.driver.get_text("admin-stat-card-label", index=i) or "",
+            admin.driver.get_text("admin-stat-card-value", index=i) or "",
+        )
+        for i in range(count)
+    ]
+
+
+def _size_bytes(value: str) -> float:
+    m = _SIZE.search(value)
+    assert m, f"{value!r} should read as a size"
+    return float(m.group(1).replace(",", "")) * _UNIT[m.group(2)]
+
+
+@pytest.mark.feature("admin-dashboard")
+def test_admin_dashboard_shows_the_one_card_set(admin_app, nest_instance):
+    """admin.md § 1. Dashboard → *The card set*: the dashboard shows the one
+    ruled set, in order — members, suspended members, a card per tier, total
+    storage with its inbox and files parts, live connections, mail, secure
+    connections, the domain, the version and registration — and each card
+    carries what the nest itself answers on the read behind it.
+
+    A member is admitted, moved to a second tier and suspended first, so the
+    suspended card and the per-tier cards carry non-trivial values. The nest's
+    own answers are read over the admin control plane after the dashboard has
+    loaded, and the painted set must match them card for card."""
+    sk = SigningKey.generate()
+    actor_id = bytes(sk.verify_key)
+    register_user(
+        nest_instance["port"],
+        actor_id.hex(),
+        base_url=nest_instance["url"],
+        admin_signing_key=nest_instance["admin"]["signing_key"],
+        handle=f"dashcard{secrets.token_hex(3)}",
+        label="dashboard-card-member",
+    )
+    admin = nest_instance["admin"]
+    with WsRpcAdminClient(
+        nest_instance["url"],
+        actor_id=bytes(admin["signing_key"].verify_key),
+        signing_key=bytes(admin["signing_key"]),
+    ) as client:
+        client.call(
+            "fauna.admin.users.update",
+            {"actor_id": actor_id, "tier": "personal", "label": "dashboard-card-member"},
+        )
+        client.call(
+            "fauna.admin.users.suspend",
+            {"actor_id": actor_id, "category": "other", "reason": "dashboard card set e2e"},
+        )
+
+        admin_app.admin.navigate_dashboard()
+        cards = wait_until(
+            lambda: (c := _dashboard_cards(admin_app.admin))
+            and any(label == S.admin.dashboard.registration for label, _ in c)
+            and c,
+            budgets.RPC_ROUNDTRIP_S,
+            diagnose=lambda: f"the card set did not finish loading: "
+            f"{_dashboard_cards(admin_app.admin)!r}; error: {admin_app.error_text()!r}",
+        )
+
+        stats = client.call("fauna.admin.stats", {})
+        status = client.call("fauna.admin.status", {})
+        setup = client.call("fauna.setup.status", {})
+        info = client.call("fauna.nest.info", {})
+        try:
+            mail_state = client.call("fauna.bridges.mail_health", {})["state"]
+        except Exception:  # noqa: BLE001 — a failed read drops its own card
+            mail_state = None
+
+    tiers = [(str(name), int(count)) for name, count in stats["users_by_tier"]]
+    assert stats["suspended_users"] >= 1 and len(tiers) >= 2, (
+        f"the seed should leave a suspended member and two tiers: {stats!r}"
+    )
+    d = S.admin.dashboard
+    expected_labels = (
+        [S.admin.view.registered_users, d.suspended]
+        + [name for name, _ in tiers]
+        + [d.total_storage, d.inbox_storage, d.file_storage, d.connections]
+        + ([d.mail] if mail_state is not None else [])
+        + [d.secure_connections, d.nest_domain, d.version, d.registration]
+    )
+    assert [label for label, _ in cards] == expected_labels, (
+        f"the painted card set {cards!r} is not the ruled set {expected_labels!r}"
+    )
+    value = dict(cards)
+    assert value[S.admin.view.registered_users] == str(stats["total_users"])
+    assert value[d.suspended] == str(stats["suspended_users"])
+    for name, count in tiers:
+        assert value[name] == str(count), f"tier {name!r}: {value[name]!r} vs {count}"
+    inbox, files = stats["total_inbox_bytes"], stats["total_storage_bytes"]
+    for label, want in (
+        (d.total_storage, inbox + files),
+        (d.inbox_storage, inbox),
+        (d.file_storage, files),
+    ):
+        shown = _size_bytes(value[label])
+        assert abs(shown - want) <= max(0.05 * want, 1), (
+            f"the {label!r} card reads {value[label]!r}; the nest holds {want} B"
+        )
+    assert int(value[d.connections]) >= 1, "the app's own connection is live"
+    if mail_state is not None:
+        assert value[d.mail] == getattr(
+            S.admin.mail_page,
+            f"health_state_{mail_state}",
+            S.admin.mail_page.health_state_unknown,
+        ), f"mail card {value[d.mail]!r} for state {mail_state!r}"
+    assert value[d.secure_connections] == (
+        d.secure_on if setup["tls_active"] else d.secure_off
+    )
+    assert value[d.nest_domain] == info["domain"]
+    assert value[d.version] == status["version"]
+    assert value[d.registration] == getattr(
+        S.admin.users_page, f"registration_mode_{setup['registration_mode']}"
+    ), "registration reads as its own mode, never an open/closed pair"
+
+
+@pytest.mark.parametrize(
+    "kind,dropped",
+    [
+        ("fauna.bridges.mail_health", lambda d: [d.mail]),
+        ("fauna.setup.status", lambda d: [d.secure_connections, d.registration]),
+    ],
+    ids=["mail-health", "setup-status"],
+)
+@pytest.mark.feature("admin-dashboard")
+def test_a_failed_dashboard_read_drops_only_its_own_cards(
+    admin_app, nest_instance, kind, dropped
+):
+    """admin.md § 1. Dashboard: one of the five reads behind the cards is turned
+    away; the page shows the error, the cards that read feeds are gone and every
+    other card is still there. The nest refuses the kind (`rpc-hold` refuse
+    hook) for exactly this window and answers it again afterwards."""
+    d = S.admin.dashboard
+    gone = dropped(d)
+    port = nest_instance["port"]
+
+    admin_app.admin.navigate_dashboard()
+    full = wait_until(
+        lambda: (c := _dashboard_cards(admin_app.admin))
+        and any(label == d.registration for label, _ in c)
+        and [label for label, _ in c],
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"the baseline dashboard never loaded: "
+        f"{_dashboard_cards(admin_app.admin)!r}; error: {admin_app.error_text()!r}",
+    )
+    assert all(label in full for label in gone), (full, gone)
+
+    refuse_rpc(port, kind)
+    try:
+        # The dashboard re-reads on every entry. Leave the shell and come back
+        # the way a person does (entering lands on the dashboard), so no other
+        # admin page's load can answer after the dashboard's and clear its error.
+        admin_app.admin.leave_admin()
+        admin_app.driver.wait_for("admin-tab", timeout=budgets.RPC_ROUNDTRIP_S)
+        admin_app.admin.enter_by_click()
+        wait_until(
+            lambda: admin_app.error_text() or None,
+            budgets.RPC_ROUNDTRIP_S,
+            diagnose=lambda: "the refused read never surfaced an error: "
+            f"cards={_dashboard_cards(admin_app.admin)!r}",
+        )
+        kept = [label for label in full if label not in gone]
+        shown = wait_until(
+            lambda: (c := [label for label, _ in _dashboard_cards(admin_app.admin)])
+            and kept[0] in c
+            and c,
+            budgets.RPC_ROUNDTRIP_S,
+            diagnose=lambda: f"the other cards never came back: "
+            f"{_dashboard_cards(admin_app.admin)!r}",
+        )
+        assert [label for label in shown if label in gone] == [], (
+            f"the refused read's cards must be dropped: {shown!r}"
+        )
+        assert [label for label in shown] == kept, (
+            f"every other card stays, in order: shown {shown!r}, expected {kept!r}"
+        )
+    finally:
+        release_rpc_hold(port, kind)
+
+
+@pytest.mark.feature("admin-dashboard")
+def test_admin_dashboard_shows_the_storage_the_nest_holds(admin_app, nest_instance):
+    """admin.md § 1. Dashboard: the dashboard shows how much storage the nest
+    is using. Seven MiB is planted on the admin's own storage counter, so the
+    card has a number it can only show by reading the nest: re-entering the
+    dashboard (it re-reads on entry, no client cache), the storage card reads
+    a size within a few percent of what the nest now holds. The counter is put
+    back afterwards so no later test meets a full quota."""
+    db_path = nest_instance.get("db_path")
+    if not db_path:
+        skip_environment("the storage counter is planted in the nest's database, "
+                         "which this nest mode does not expose")
+    admin_id = bytes(nest_instance["admin"]["signing_key"].verify_key)
+    planted = 7 * 1024**2
+    conn = sqlite3.connect(db_path, timeout=10.0)
+    try:
+        before = conn.execute(
+            "SELECT COALESCE(SUM(storage_bytes_used), 0) FROM users"
+        ).fetchone()[0]
+        (own,) = conn.execute(
+            "SELECT storage_bytes_used FROM users WHERE actor_id = ?", (admin_id,)
+        ).fetchone()
+        conn.execute(
+            "UPDATE users SET storage_bytes_used = ? WHERE actor_id = ?",
+            (own + planted, admin_id),
+        )
+        conn.commit()
+        try:
+            # Leave and re-enter: the fixture may already stand on the dashboard,
+            # and an app that routes to the page it is on does not re-read.
+            admin_app.admin.navigate_users()
+            admin_app.admin.navigate_dashboard()
+            label, value = wait_until(
+                lambda: (card := _storage_card(admin_app.admin))[1] and card,
+                budgets.RPC_ROUNDTRIP_S,
+                diagnose=lambda: f"no storage card: "
+                f"{admin_app.driver.diagnose('admin-stat-card-label')}",
+            )
+            m = _SIZE.search(value)
+            assert m, f"the {label!r} card should read as a size, got {value!r}"
+            shown = float(m.group(1).replace(",", "")) * _UNIT[m.group(2)]
+            expected = before + planted
+            assert abs(shown - expected) <= 0.05 * expected, (
+                f"the {label!r} card reads {value!r} (~{shown:.0f} B); the nest "
+                f"holds ~{expected} B in members' storage"
+            )
+        finally:
+            conn.execute(
+                "UPDATE users SET storage_bytes_used = ? WHERE actor_id = ?",
+                (own, admin_id),
+            )
+            conn.commit()
+    finally:
+        conn.close()
 
 
 @pytest.mark.feature("admin-users")

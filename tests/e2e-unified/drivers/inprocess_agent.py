@@ -295,7 +295,7 @@ class InProcessAgentDriver(HttpBridgeDriver):
         config = getattr(self, "_launch_config", None)
         if config is None:
             return False
-        self.teardown()
+        self._stop_app()
         try:
             self.launch(config)
             return True

@@ -375,6 +375,11 @@ static void call_UniffiForeignFutureCompleteVoid(
 uint64_t uniffi_fauna_mail_fn_func_verify_inbound(RustBuffer raw, RustBuffer mail_from, RustBuffer client_ip, RustBuffer client_helo
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_FN_FUNC_VERIFY_INBOUND_OBSERVED
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_FN_FUNC_VERIFY_INBOUND_OBSERVED
+uint64_t uniffi_fauna_mail_fn_func_verify_inbound_observed(RustBuffer raw, RustBuffer mail_from, RustBuffer client_ip, RustBuffer client_helo
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_FN_FUNC_JOIN_SEALED_MAIL_BODY
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_FN_FUNC_JOIN_SEALED_MAIL_BODY
 RustBuffer uniffi_fauna_mail_fn_func_join_sealed_mail_body(RustBuffer chunks, RustCallStatus *out_status
@@ -494,11 +499,6 @@ RustBuffer uniffi_fauna_mail_fn_func_lookup_kind(RustBuffer kind, RustCallStatus
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_FN_FUNC_NEW_FAUNA_MSGID_LOCAL
 RustBuffer uniffi_fauna_mail_fn_func_new_fauna_msgid_local(RustCallStatus *out_status
     
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_FN_FUNC_COMPOSE_AUTO_REPLY
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_FN_FUNC_COMPOSE_AUTO_REPLY
-RustBuffer uniffi_fauna_mail_fn_func_compose_auto_reply(RustBuffer msg, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_FN_FUNC_PARSE_RFC5322
@@ -881,6 +881,12 @@ uint16_t uniffi_fauna_mail_checksum_func_verify_inbound(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_CHECKSUM_FUNC_VERIFY_INBOUND_OBSERVED
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_CHECKSUM_FUNC_VERIFY_INBOUND_OBSERVED
+uint16_t uniffi_fauna_mail_checksum_func_verify_inbound_observed(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_CHECKSUM_FUNC_JOIN_SEALED_MAIL_BODY
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_CHECKSUM_FUNC_JOIN_SEALED_MAIL_BODY
 uint16_t uniffi_fauna_mail_checksum_func_join_sealed_mail_body(void
@@ -1022,12 +1028,6 @@ uint16_t uniffi_fauna_mail_checksum_func_lookup_kind(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_CHECKSUM_FUNC_NEW_FAUNA_MSGID_LOCAL
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_CHECKSUM_FUNC_NEW_FAUNA_MSGID_LOCAL
 uint16_t uniffi_fauna_mail_checksum_func_new_fauna_msgid_local(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_CHECKSUM_FUNC_COMPOSE_AUTO_REPLY
-#define UNIFFI_FFIDEF_UNIFFI_FAUNA_MAIL_CHECKSUM_FUNC_COMPOSE_AUTO_REPLY
-uint16_t uniffi_fauna_mail_checksum_func_compose_auto_reply(void
     
 );
 #endif

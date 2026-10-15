@@ -113,6 +113,25 @@ pub(crate) enum State {
     Locked {
         locked_until_secs: u64,
     },
+    /// One side of a version skew needs updating (`version-compatibility.md`
+    /// § Dimension 4), met by the launch arm or a mid-session refresh:
+    /// `outdated` says which — the nest (`fauna.nest.outdated`, its degraded
+    /// needs-update boot; no retry clears it until a newer nest binary is
+    /// deployed) or this app (the nest refused its subprotocol with HTTP 426;
+    /// no retry clears it until the app is updated). Terminal either way.
+    ///
+    /// Projects to `LaunchPhase::Offline { transient: false }` — the phase every
+    /// app already renders as its non-retry update surface, with the localized
+    /// copy in `last_error` — for [`State::Superseded`]'s exhaustive-switch
+    /// reason. Its own state rather than a bare terminal offline so the
+    /// verdict stays readable (`LaunchMachine::needs_update`), which is what
+    /// lets `fauna_nest_http::LaunchMachineBearer` carry it to the reconnect
+    /// supervisor typed instead of as "LaunchMachine not Online" — and keeps
+    /// the side, so the bearer names the right verdict (`ApiError::NestOutdated`
+    /// vs `ApiError::SubprotocolMismatch`).
+    NeedsUpdate {
+        outdated: crate::auth::OutdatedSide,
+    },
 }
 
 impl State {
@@ -148,6 +167,9 @@ impl State {
             State::SignInRefused => LaunchPhase::Offline { transient: false },
             // Same shape — the unlock time rides `locked_until_secs`.
             State::Locked { .. } => LaunchPhase::Offline { transient: false },
+            // Same phase as before it had a state of its own: the apps' update
+            // surface, the localized copy in `last_error`.
+            State::NeedsUpdate { .. } => LaunchPhase::Offline { transient: false },
         }
     }
 
@@ -164,6 +186,15 @@ impl State {
     /// refusal (`LaunchSnapshot::sign_in_refused`). `false` in every other state.
     pub(crate) fn sign_in_refused(&self) -> bool {
         matches!(self, State::SignInRefused)
+    }
+
+    /// The side to update when the machine is parked on a needs-update
+    /// verdict; `None` in every other state.
+    pub(crate) fn needs_update(&self) -> Option<crate::auth::OutdatedSide> {
+        match self {
+            State::NeedsUpdate { outdated } => Some(*outdated),
+            _ => None,
+        }
     }
 
     /// The successor this identity was succeeded by, when the machine has

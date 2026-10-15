@@ -8,6 +8,7 @@
 //! the identical bare `FeatureStatusItem`.
 
 use fauna_core::feature_gate::{FeaturePolicy, RuleTier, UsageCounters, effective_policy};
+use fauna_protocol::discovery::capability;
 use fauna_protocol::features::FeatureStatusItem;
 
 use crate::{FeatureRow, GatedFeature, feature_row};
@@ -27,5 +28,11 @@ pub fn item(feature: GatedFeature, authored: &[(RuleTier, FeaturePolicy)]) -> Fe
 /// A `zaps` row as the shared crate composes it — never hand-built, so a
 /// test exercises the same `affordance` the page reads.
 pub fn zaps_row(authored: &[(RuleTier, FeaturePolicy)]) -> FeatureRow {
-    feature_row(&item(GatedFeature::Zaps, authored), &[])
+    feature_row(
+        &item(GatedFeature::Zaps, authored),
+        // A nest that advertises the plane: without the token the shared view
+        // model hides the row (`capability_token(Zaps)`), which is the nest-
+        // without-zaps case, not the policy cases these fixtures exercise.
+        &[capability::ZAPS.to_string()],
+    )
 }

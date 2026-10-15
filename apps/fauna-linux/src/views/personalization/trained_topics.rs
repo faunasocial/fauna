@@ -26,7 +26,7 @@
 //! key inert, § Delete semantics).
 
 use fauna_ui_ids as ids;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -80,6 +80,14 @@ struct Ctx {
     /// The wired publish sheet a row's publish button opens. Set once, at
     /// [`wire`] — the sheet needs the same client this facet holds.
     publish: RefCell<Option<Rc<PublishSheet>>>,
+    /// The rows last built. A re-read answering the same rebuilds nothing —
+    /// the store-change notice re-drives [`TrainedTopics::refresh`] while the
+    /// page is open (a level, not an event).
+    painted: RefCell<Option<Vec<TrainedTopicRow>>>,
+    /// Whether the page error label holds this facet's failed READ, the one
+    /// message a later successful read retires; a gesture's error stays until
+    /// the next gesture.
+    read_error_shown: Cell<bool>,
 }
 
 /// Build the facet's static widget tree — every static ui.yaml ID present, no
@@ -168,6 +176,8 @@ pub fn wire(
         error_label,
         renaming: RefCell::new(None),
         publish: RefCell::new(Some(publish)),
+        painted: RefCell::new(None),
+        read_error_shown: Cell::new(false),
     });
 
     {
@@ -200,15 +210,38 @@ impl TrainedTopics {
                 // RPC (transport.md § Request lifecycle step 3's note).
                 hydrate_with_retry(|| load_rows(store.clone(), nest.clone())).await
             },
-            move |result| apply(&ctx_render, result),
+            move |result| apply_read(&ctx_render, result),
         );
     }
 }
 
+/// Render a READ (the page's map, or the store-change notice). Unlike a
+/// gesture's [`apply`] it leaves the create button alone — a commit may be in
+/// flight — and retires only its own read error: a level, never an event.
+fn apply_read(ctx: &Rc<Ctx>, result: FacetResult) {
+    match result {
+        Ok(rows) => {
+            if ctx.read_error_shown.replace(false) && !sheet_open(ctx) {
+                crate::settings::render_error_label(&ctx.error_label, None);
+            }
+            render_rows(ctx, &rows);
+        }
+        Err(msg) => {
+            crate::settings::render_error_label(&ctx.error_label, Some(&msg));
+            ctx.read_error_shown.set(true);
+        }
+    }
+}
+
 /// Commit the name-input: a rename when a row retargeted it, else a create.
+/// A blank buffer is refused here, before the round trip, with the shared
+/// [`TrainedTopicsError::BlankName`] sentence — the one tui paints — never a
+/// silent no-op that leaves the user wondering why nothing was created.
 fn submit(ctx: &Rc<Ctx>) {
     let name = ctx.w.input.text().trim().to_string();
     if name.is_empty() {
+        let refusal = localize(TrainedTopicsError::BlankName);
+        crate::settings::render_error_label(&ctx.error_label, Some(&refusal));
         return;
     }
     let renaming = ctx.renaming.borrow().clone();
@@ -242,6 +275,7 @@ fn submit(ctx: &Rc<Ctx>) {
 /// Render a load/mutation outcome (GTK main thread).
 fn apply(ctx: &Rc<Ctx>, result: FacetResult) {
     ctx.w.create_button.set_sensitive(true);
+    ctx.read_error_shown.set(false);
     match result {
         Ok(rows) => {
             // An unrelated gesture's success (the engagement toggle folds
@@ -250,12 +284,7 @@ fn apply(ctx: &Rc<Ctx>, result: FacetResult) {
             // `PublishSheet::is_open`. While the sheet is open its own
             // lifecycle owns the shared page error label: a submit success
             // clears it, and a fresh re-open retires a stale one.
-            let sheet_open = ctx
-                .publish
-                .borrow()
-                .as_ref()
-                .is_some_and(|sheet| sheet.is_open());
-            if !sheet_open {
+            if !sheet_open(ctx) {
                 crate::settings::render_error_label(&ctx.error_label, None);
             }
             render_rows(ctx, &rows);
@@ -264,8 +293,22 @@ fn apply(ctx: &Rc<Ctx>, result: FacetResult) {
     }
 }
 
-/// Rebuild the `personalization-trained-factor-item` rows.
+/// Whether the publish sheet is open — while it is, its own lifecycle owns
+/// the shared page error label (`PublishSheet::is_open`).
+fn sheet_open(ctx: &Rc<Ctx>) -> bool {
+    ctx.publish
+        .borrow()
+        .as_ref()
+        .is_some_and(|sheet| sheet.is_open())
+}
+
+/// Rebuild the `personalization-trained-factor-item` rows; rows equal to the
+/// ones already painted rebuild nothing.
 fn render_rows(ctx: &Rc<Ctx>, rows: &[TrainedTopicRow]) {
+    if ctx.painted.borrow().as_deref() == Some(rows) {
+        return;
+    }
+    *ctx.painted.borrow_mut() = Some(rows.to_vec());
     while let Some(child) = ctx.w.list.first_child() {
         ctx.w.list.remove(&child);
     }

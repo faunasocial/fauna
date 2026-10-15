@@ -220,6 +220,30 @@ class ApiActor:
             "author_id": bytes(author_id),
         })
 
+    def unsubscribe(self, author_id: bytes) -> dict:
+        """Leave `author_id`'s paid tiers (`fauna.subscriptions.unsubscribe`):
+        ``{"outcome": "queued", "request_id": N}`` — the removal is the
+        author's client's to commit."""
+        return self._ws_call("fauna.subscriptions.unsubscribe", {
+            "author_id": bytes(author_id),
+        })
+
+    def subscription_mine_list(self) -> list:
+        """The caller's own subscriptions across every creator
+        (`fauna.subscriptions.mine.list`): one entry per ``(author_id, tier)``."""
+        return self._ws_call("fauna.subscriptions.mine.list", {})["subscriptions"]
+
+    def publish_encaps_key(self) -> dict:
+        """Publish this account's subscriber encapsulation-key registry entry
+        (`fauna.subscriptions.encaps_key.publish`) — what every app sends at
+        session start (`post-quantum.md` § surface B), built by the same shared
+        builder through the C-ABI."""
+        from fauna_ffi import build_encaps_key_publish
+        return self._ws_call(
+            "fauna.subscriptions.encaps_key.publish",
+            build_encaps_key_publish(self.secret_bytes),
+        )
+
     def subscription_key_blob(self, author_id: bytes, tier_name: str) -> dict:
         """Fetch the current broadcast KeyBlob for `(author_id, tier_name)`
         (`fauna.subscriptions.key_blob.get`): ``{"version": N, "blob_hash":
@@ -272,13 +296,86 @@ class ApiActor:
         the reserved `followers` tier. Fine for render-only seeding (offers
         lists, pending badges); NEVER for a test that needs a grant to
         materialize — those must have the author's app create the tier
-        (`monetization.md` § Pillar 1 → the headless-author corollary)."""
+        (`monetization.md` § Pillar 1 → the headless-author corollary), or
+        keep the key themselves via :meth:`subscription_create_tier_with_key`."""
+        reply, _period_key = self.subscription_create_tier_with_key(
+            name, rank=rank, auto_approve=auto_approve, price_hint=price_hint)
+        return reply
+
+    def subscription_create_tier_with_key(
+        self, name: str, *, rank: int = 1, auto_approve: bool = False,
+        price_hint: str | None = None, unlocks_post: str | None = None,
+    ) -> tuple[dict, bytes]:
+        """Create a tier as :meth:`subscription_create_tier` does, but KEEP the
+        fresh period key and return it beside the reply — the custody an
+        author's app holds (`key-material-hierarchy.md` § *Client-minted at-rest
+        custody*), so this actor can later complete a grant itself with
+        :meth:`subscription_grant_pending`. `unlocks_post` (a 64-hex post id)
+        makes it a per-post unlock tier (`monetization.md` § Per-post
+        pay-to-unlock)."""
         from fauna_ffi import build_tier_birth_upload
+        period_key = os.urandom(32)
         payload: dict = {
             "name": name, "rank": rank, "auto_approve": auto_approve,
             "encrypted_upload": build_tier_birth_upload(
-                self.secret_bytes, name, os.urandom(32)),
+                self.secret_bytes, name, period_key),
         }
         if price_hint is not None:
             payload["price_hint"] = price_hint
-        return self._ws_call("fauna.subscriptions.tiers.create", payload)
+        if unlocks_post is not None:
+            payload["unlocks_post"] = unlocks_post
+        return self._ws_call("fauna.subscriptions.tiers.create", payload), period_key
+
+    def subscription_grant_pending(
+        self, tier_name: str, period_key: bytes, subscriber_id: bytes,
+    ) -> dict:
+        """Complete `subscriber_id`'s pending subscribe request for
+        `tier_name` the way an author's app drain pump does: mint a `KeyBlob`
+        over the tier's current roster plus the subscriber under the kept
+        `period_key` and upload it through `fauna.subscriptions.requests.approve`
+        (the nest only ever enqueues a grant — `monetization.md` § Pillar 1 →
+        the headless-author corollary). Mirrors `conformance_payments.rs`'s
+        `author_client_approves`. Returns the approve reply; raises
+        `AssertionError` when no such request is pending."""
+        from fauna_ffi import build_tier_roster_upload
+        want = bytes(subscriber_id)
+        pending = [
+            r for r in self.subscription_requests_list()
+            if r.get("kind") == "subscribe" and r.get("tier_name") == tier_name
+            and bytes(r.get("subscriber_id")) == want
+        ]
+        assert pending, (
+            f"no pending subscribe request for {want.hex()} on {tier_name!r}: "
+            f"{self.subscription_requests_list()!r}"
+        )
+        current = self.subscription_subscribers_list(tier_name)
+        roster = [bytes(s["subscriber_id"]) for s in current]
+        if want not in roster:
+            roster.append(want)
+        # Each subscriber's published ML-KEM key, as the drain pump reads it:
+        # the roster row's, else the pending request's — that entry wraps
+        # hybrid (X-Wing), every other classical.
+        eks = {
+            bytes(r["subscriber_id"]): bytes(r["mlkem_encaps_key"])
+            for r in [*current, pending[0]]
+            if r.get("mlkem_encaps_key")
+        }
+        upload = build_tier_roster_upload(
+            self.secret_bytes, tier_name, period_key, _next_rotated_at(), roster, eks)
+        return self._ws_call("fauna.subscriptions.requests.approve", {
+            "request_id": pending[0]["request_id"],
+            "encrypted_upload": upload,
+        })
+
+
+_LAST_ROTATED_AT = 0
+
+
+def _next_rotated_at() -> int:
+    """A `rotated_at` (epoch microseconds) past every one this process has
+    minted, and past the birth blob's (stamped "now" at tier create) — the
+    nest refuses an upload that does not advance it (`stale_rotation`)."""
+    import time
+    global _LAST_ROTATED_AT
+    _LAST_ROTATED_AT = max(time.time_ns() // 1000, _LAST_ROTATED_AT + 1)
+    return _LAST_ROTATED_AT

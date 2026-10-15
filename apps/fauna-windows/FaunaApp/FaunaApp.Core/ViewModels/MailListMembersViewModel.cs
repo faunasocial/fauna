@@ -71,6 +71,10 @@ public partial class MailListMembersViewModel : ObservableObject
     /// <summary><c>mail-list-members-summary</c> — "N subscribed · M unsubscribed".</summary>
     [ObservableProperty] private string _summary = string.Empty;
 
+    /// <summary><c>mail-list-members-import-result</c> — "{added} added · {existed} already
+    /// subscribed · {invalid} invalid" after a batch import; empty = nothing to show.</summary>
+    [ObservableProperty] private string _importTally = string.Empty;
+
     /// <summary>The list's members (one <c>mail-list-members-list</c> row each).</summary>
     public ObservableCollection<MailListMemberRow> Members { get; } = new();
 
@@ -114,9 +118,24 @@ public partial class MailListMembersViewModel : ObservableObject
     public Task AddMemberAsync(string address)
         => DispatchAsync(new MailListMembersAction.AddMember(address));
 
-    /// <summary>Batch-import addresses (one per line; the machine parses + tallies).</summary>
-    public Task BatchImportAsync(string addresses)
-        => DispatchAsync(new MailListMembersAction.BatchImport(addresses));
+    /// <summary>Batch-import addresses (one per line; the machine parses + tallies). The
+    /// tally lands in <see cref="ImportTally"/> (<c>mail-list-members-import-result</c>).</summary>
+    public async Task BatchImportAsync(string addresses)
+    {
+        ImportTally = string.Empty;
+        await DispatchAsync(new MailListMembersAction.BatchImport(addresses));
+        if (_machine.Snapshot().lastImport is { } tally)
+        {
+            // windows resw is flat → substitute the named placeholders in C#.
+            ImportTally = Strings.Get("mail_lists/import_result")
+                .Replace("{added}", tally.added.ToString())
+                .Replace("{existed}", tally.skippedDuplicate.ToString())
+                .Replace("{invalid}", tally.skippedInvalid.ToString());
+        }
+    }
+
+    /// <summary>Forget the last import's tally (the import sheet reopening clears it).</summary>
+    public void ClearImportTally() => ImportTally = string.Empty;
 
     /// <summary>Unsubscribe one member (manual; sets unsubscribed_at).</summary>
     public Task UnsubscribeAsync(string address)

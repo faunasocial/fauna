@@ -20,10 +20,12 @@ pub mod message_bubble;
 // picker IDs; folders.md § Sharing reuses the conversations recipient-picker).
 pub mod recipient_picker;
 mod rename_overlay;
+mod room_labelers;
 mod room_settings_overlay;
 mod subject_divider;
 mod thread_header;
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use adw::prelude::*;
@@ -51,7 +53,7 @@ pub fn build_conversations_view(
     // a different account than the one this process serves on a bound
     // (secondary) launch (`account-scoping.md:818-837`).
     let actor_id_hex = client.actor_id().unwrap_or_default();
-    let list_pane = list::ConversationList::new(manager.clone(), actor_id_hex);
+    let list_pane = list::ConversationList::new(manager.clone(), actor_id_hex, rt.clone());
     let detail_pane = detail::ConversationDetail::new(manager.clone(), client, rt, member_reviews);
 
     // Wrap in NavigationSplitView (mirrors the previous layout shape).
@@ -92,16 +94,38 @@ pub fn build_conversations_view(
             // (the rebuild destroyed it), exit: dropping `list_pane`/`detail_pane`
             // closes our now-orphaned dialog and frees the observer, leaving only
             // the live window's observer attached.
+            let panes = Rc::new((list_pane, detail_pane));
+            // A change to the reporter-side hide list (a report just filed, or
+            // the list landing after sign-in) is a render source outside the
+            // manager's snapshot: re-render the open thread through the same
+            // path, with the same self-terminating guard.
+            {
+                let panes = Rc::clone(&panes);
+                let manager = manager.clone();
+                let mut was_rooted = false;
+                crate::async_helper::spawn_wake_loop(
+                    crate::report::subscribe_repaint(),
+                    move || {
+                        if panes.1.root.root().is_some() {
+                            was_rooted = true;
+                        } else if was_rooted {
+                            return glib::ControlFlow::Break;
+                        }
+                        refresh(&manager, &panes.0, &panes.1);
+                        glib::ControlFlow::Continue
+                    },
+                );
+            }
             let mut was_rooted = false;
             // A closed channel (sender dropped) shouldn't happen — the loop's
             // exit on it is the right behavior either way.
             crate::async_helper::spawn_wake_loop(rx, move || {
-                if detail_pane.root.root().is_some() {
+                if panes.1.root.root().is_some() {
                     was_rooted = true;
                 } else if was_rooted {
                     return glib::ControlFlow::Break;
                 }
-                refresh(&manager, &list_pane, &detail_pane);
+                refresh(&manager, &panes.0, &panes.1);
                 glib::ControlFlow::Continue
             });
         }
@@ -120,6 +144,7 @@ fn refresh(
         .selected_thread_id
         .as_ref()
         .and_then(|id| manager.thread_detail(id.clone()));
+    list_pane.render_invitations(&snap.room_invitations);
     list_pane.render(
         &snap.threads,
         snap.selected_thread_id.as_ref().map(|i| i.0.as_str()),
@@ -134,6 +159,7 @@ fn refresh(
         active_detail.as_ref(),
         self_handle,
         manager.engine_served_elsewhere(),
+        manager.engine_state_needs_newer_app(),
         manager.receive_stopped(),
         manager.unopenable_mail_count(),
     );

@@ -182,10 +182,12 @@ pub(crate) fn become_session_instance(
 /// like every other seat's, never joined onto the base.
 fn with_serving_bases<T>(f: impl FnOnce(fauna_client_accounts::ServingBases<'_>) -> T) -> T {
     let base = install_state_base();
-    let store_root = fauna_sync_engine::root::StoreRoot::platform();
+    let store_root = fauna_sync_engine::root::StoreRoot::platform()
+        .inspect_err(|e| tracing::error!("[account-scope] no account-store root: {e:#}"))
+        .ok();
     f(fauna_client_accounts::ServingBases {
         state_base: base.as_deref(),
-        store_root: Some(store_root.base()),
+        store_root: store_root.as_ref().map(|root| root.base()),
     })
 }
 
@@ -251,17 +253,52 @@ fn all_accounts_erase_blocked_under(
     fauna_client_accounts::sign_out_blocked(registry, bases, &swept)
 }
 
-/// Remove one account from this install — the local half of the
-/// `account-remove-button` gesture, in the only order that is safe to refuse
-/// part-way through: **ask, then drop the registry entry, then erase.**
+/// What a remove-account still owes once its registry step has landed: the
+/// nest half over the snapshot the removal took ([`Self::removed`]), then the
+/// erase of the account's scopes ([`Self::erase`]) — in that order, since the
+/// nest half assembles over the account's still-present store
+/// (`account-scoping.md` § Erasure follows scope → *Removing an account
+/// retires this machine from it, as a sign-out does*, decision 1). Twin of
+/// tui's `account_scope::RemovalOwed`.
+pub(crate) struct RemovalOwed {
+    /// The removed account's slots, in memory — what the nest half signs in
+    /// and assembles with. Zeroized when the last holder drops it.
+    pub(crate) removed: std::sync::Arc<fauna_client_accounts::RemovedAccountCredentials>,
+    /// The base the erase sweeps; `None` when the process has no config dir,
+    /// as [`erase_all_known_accounts`]'s no-op.
+    fauna_base: Option<PathBuf>,
+}
+
+impl RemovalOwed {
+    /// Erase the removed account's scopes — the gesture's last step, run once
+    /// its nest half has finished (or found nothing to do).
+    pub(crate) fn erase(self) {
+        if let Some(fauna_base) = &self.fauna_base {
+            erase_under(fauna_base, self.removed.actor_id());
+        }
+    }
+}
+
+/// Remove one account from this install — the `account-remove-button`
+/// gesture, in the only order that is safe to refuse part-way through:
+/// **ask, then drop the registry entry, then retire, then erase**
+/// (`account-scoping.md` § Erasure follows scope → *Removing an account
+/// retires this machine from it, as a sign-out does*). Twin of tui's
+/// `account_scope::remove_account`.
 ///
-/// The question comes first because both later steps destroy something a
+/// The question comes first because every later step destroys something a
 /// refusal cannot give back: the registry removal drops the account's secret
-/// slots, and the erase unlinks the scope a live sibling is running out of
+/// slots, the retirement ends this machine's grant on the account's nest, and
+/// the erase unlinks the scope a live sibling is running out of
 /// (`account-scoping.md` § Concurrent instances → *An erase refuses while a
-/// sibling serves the account*). The scope is erased only after the registry
-/// removal succeeds (§ Serialized switching, "Erasure follows scope"). Twin of
-/// tui's `account_scope::remove_account`.
+/// sibling serves the account*). The registry removal is the one decision
+/// point and lands before anything awaits; the slots the retirement needs are
+/// taken into memory in the same mutation
+/// (`AccountRegistry::remove_with_snapshot`).
+///
+/// Returns as soon as the registry step lands — the switcher row goes then.
+/// The nest half and the erase behind it run as a stop
+/// ([`crate::account_runtime::finish_removal`]).
 ///
 /// `Err` is the line for the Account page's `error-message`: the shared
 /// refusal ([`fauna_client_accounts::remove_account_blocked_copy`]) or the
@@ -270,7 +307,7 @@ pub(crate) fn remove_account(actor_id_hex: &str) -> Result<(), String> {
     let registry = crate::account_registry();
     let fauna_base = install_state_base();
     let serving_here = fauna_client_accounts::process_session_account();
-    with_serving_bases(|bases| {
+    let owed = with_serving_bases(|bases| {
         remove_account_under(
             &registry,
             serving_here.as_deref(),
@@ -278,7 +315,9 @@ pub(crate) fn remove_account(actor_id_hex: &str) -> Result<(), String> {
             fauna_base.as_deref(),
             actor_id_hex,
         )
-    })
+    })?;
+    crate::account_runtime::finish_removal(owed);
+    Ok(())
 }
 
 /// The pure half of [`remove_account`], every base passed in — same
@@ -291,24 +330,24 @@ fn remove_account_under(
     bases: fauna_client_accounts::ServingBases<'_>,
     fauna_base: Option<&Path>,
     actor_id_hex: &str,
-) -> Result<(), String> {
+) -> Result<RemovalOwed, String> {
     if let Some(blocked) =
         fauna_client_accounts::remove_account_blocked_as(serving_here, bases, actor_id_hex)
     {
         tracing::warn!("[settings/account] remove-account REFUSED ({blocked:?}) — {actor_id_hex}");
         return Err(blocked.copy().resolve(crate::i18n::strings::lookup));
     }
-    registry.remove(actor_id_hex).map_err(|e| {
+    let removed = registry.remove_with_snapshot(actor_id_hex).map_err(|e| {
         tracing::error!("[settings/account] remove account failed: {e:#}");
         crate::i18n::strings::onboarding::session_error::remove_account(&e.to_string())
     })?;
     // Erasure follows scope (account-scoping.md § Serialized switching):
     // removing an account erases its local account-scoped state, not only the
-    // registry entry.
-    if let Some(fauna_base) = fauna_base {
-        erase_under(fauna_base, actor_id_hex);
-    }
-    Ok(())
+    // registry entry — once the nest half is done with its store.
+    Ok(RemovalOwed {
+        removed: std::sync::Arc::new(removed),
+        fauna_base: fauna_base.map(Path::to_path_buf),
+    })
 }
 
 /// Is `actor_id_hex` served by a live instance right now?
@@ -1012,7 +1051,8 @@ mod tests {
                 seats.linux(),
                 Some(&seats.fauna_base),
                 &actor
-            ),
+            )
+            .map(RemovalOwed::erase),
             Err(crate::i18n::strings::settings::REMOVE_ACCOUNT_BLOCKED_OTHER_WINDOW.to_string()),
             "the shared remove-account refusal, for the page's error line"
         );
@@ -1039,7 +1079,8 @@ mod tests {
                 seats.linux(),
                 Some(&seats.fauna_base),
                 &actor
-            ),
+            )
+            .map(RemovalOwed::erase),
             Ok(()),
             "with the sibling gone, the remove goes through"
         );
@@ -1062,7 +1103,8 @@ mod tests {
                 seats.linux(),
                 Some(&seats.fauna_base),
                 &actor
-            ),
+            )
+            .map(RemovalOwed::erase),
             Ok(())
         );
     }
@@ -1091,7 +1133,8 @@ mod tests {
                 seats.linux(),
                 Some(&seats.fauna_base),
                 &served_here,
-            ),
+            )
+            .map(RemovalOwed::erase),
             Err(crate::i18n::strings::settings::REMOVE_ACCOUNT_BLOCKED_THIS_WINDOW.to_string()),
             "the served-here refusal, for the page's error line"
         );
@@ -1251,6 +1294,7 @@ mod tests {
                     Some(&seats.fauna_base),
                     actor_id,
                 )
+                .map(RemovalOwed::erase)
             };
 
             let error_label = gtk::Label::new(None);
@@ -1344,6 +1388,10 @@ mod tests {
                 set_phase: std::rc::Rc::new(|_| {}),
                 set_recover_boxes: std::rc::Rc::new(|_| {}),
                 error_label: error_label.clone(),
+                phase: std::rc::Rc::new(std::cell::RefCell::new(
+                    crate::views::launch::LaunchPhase::Launching,
+                )),
+                settle_stolen: std::rc::Rc::new(|_| {}),
             };
             let view_holder = std::rc::Rc::new(std::cell::RefCell::new(Some(view)));
 

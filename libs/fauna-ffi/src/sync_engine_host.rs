@@ -180,7 +180,7 @@ pub(crate) struct HostContext {
     credential: EngineCredential,
     /// The account's folder-key custody every build of this host reads — the
     /// seat's store on the in-process app host, the capability host's cold
-    /// fleet replica on the app-dead one (`on-demand-files.md` § Shared sets on
+    /// fleet replica on the app-dead one (`on-demand-files-shared-sets.md` § Shared sets on
     /// a capability host, decision 1′).
     folder_keys: Arc<dyn fauna_client_folders::FolderKeyReader>,
     /// What this host does with a set the account may only read: the
@@ -266,9 +266,9 @@ impl HostContext {
         &self.nest_rpc
     }
 
-    /// Where this host's per-set state DBs live — what the share plane's
-    /// serve half opens its own read connection under.
-    #[cfg(all(feature = "file-provider-host", feature = "p2p-share"))]
+    /// Where this host's per-set state DBs live — what the serve half (the
+    /// relay's and the share plane's) opens its own read connection under.
+    #[cfg(feature = "file-provider-host")]
     pub(crate) fn state_dir(&self) -> &Path {
         &self.state_dir
     }
@@ -554,15 +554,21 @@ async fn restore(
     }
 
     let files = snapshot_files_to_restore(&snapshot.files)?;
+    let set = fauna_client_snapshots::SnapshotSet::of(&snapshot);
 
+    // The snapshot reader's nonce source: this seat's custody — the resolver
+    // the listing read above already rendered sealed paths through.
+    let snapshot_nonces = crate::snapshots_client::folder_key_resolver(&ctx.nest_rpc, &secret)
+        .map(fauna_client_sync::SetNonceSource::Resolver);
     let engine = build_restore_engine(
         Arc::clone(&ctx.auth),
         Arc::clone(&ctx.nest_rpc),
         ctx.device_id,
         secret_hex,
+        snapshot_nonces,
     );
     let summary = engine
-        .restore_snapshot_files_to_dir(&files, &output_dir)
+        .restore_snapshot_files_to_dir(&set, &files, &output_dir)
         .await
         .map_err(|e| format!("restore snapshot {snapshot_id}: {e:#}"))?;
 
@@ -610,9 +616,6 @@ pub(crate) fn snapshot_files_to_restore(
             Ok(SnapshotFileToRestore {
                 relative_path: f.path.clone(),
                 manifest_hash: ContentHash::from_digest_raw(raw),
-                // Owner folder backup snapshots seal under the owner `BackupKey`
-                // (no M2 content-key generation), matching `cmd_restore`.
-                content_key_version: None,
             })
         })
         .collect()
@@ -662,7 +665,7 @@ fn file_states(state_dir: &Path, folder_ref: FolderRef) -> Result<Vec<FfiSyncFil
 
 /// [`FfiSyncEngineHost::file_states`] as a free function over an explicit
 /// state dir — the **steward read** the macOS app makes into the app-group
-/// container for its File-Provider-bound sets (`on-demand-files.md` § Apple
+/// container for its File-Provider-bound sets (`on-demand-files-apple.md` § Apple
 /// File Provider binding, *state unification*: macOS has two consent domains,
 /// the extension hosts FP-bound sets in the container, the app's own host runs
 /// in the user domain, and the Media-badge fold spans both). The host object
@@ -802,7 +805,7 @@ pub(crate) fn file_provider_host_context(
         )),
         folder_keys,
         // Control-inverted: no directory the user can write behind the engine,
-        // so a reader's set is served read-only (`on-demand-files.md` § Shared
+        // so a reader's set is served read-only (`on-demand-files-shared-sets.md` § Shared
         // sets on a capability host, decision 3).
         reader_hosting: fauna_sync_engine::engine_lifecycle::ReaderHosting::ReadOnly,
         predecessors,
@@ -972,7 +975,6 @@ mod tests {
             ContentHash::from_digest_raw([1u8; 32]),
             "raw 32-byte manifest_hash resolves to the right ContentHash"
         );
-        assert!(out.iter().all(|f| f.content_key_version.is_none()));
     }
 
     /// A corrupt listing (manifest hash not 32 bytes) is a hard error, never a

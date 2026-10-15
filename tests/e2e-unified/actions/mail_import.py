@@ -80,6 +80,12 @@ class MailImportActions:
         """Gmail/iCloud only — see the module docs' per-provider table."""
         self.driver.clear_and_type("mail-import-source-app-password", value)
 
+    def app_password_help(self) -> str:
+        """The app-password field's explanation (Gmail/iCloud): that the
+        provider wants an app password and where to make one — the field's
+        ``help`` attribute (§ Wizard steps step 1)."""
+        return self.driver.get_attr("mail-import-source-app-password", "help") or ""
+
     def set_host(self, value: str) -> None:
         """Generic/Outlook-fallback only."""
         self.driver.clear_and_type("mail-import-source-host", value)
@@ -153,8 +159,16 @@ class MailImportActions:
     def set_date_from(self, value: str) -> None:
         self.driver.clear_and_type("mail-import-scope-date-from", value)
 
+    def date_from_value(self) -> str:
+        """The Scope step's since-date field as the app shows it."""
+        return self.driver.get_text("mail-import-scope-date-from")
+
     def set_max_size_mb(self, value: str) -> None:
         self.driver.clear_and_type("mail-import-scope-max-size", value)
+
+    def max_size_value(self) -> str:
+        """The Scope step's max-message-size field (MB) as the app shows it."""
+        return self.driver.get_text("mail-import-scope-max-size")
 
     def scope_next(self) -> None:
         """Step 2→3: Scope→Confirm."""
@@ -216,8 +230,31 @@ class MailImportActions:
         self.driver.click("mail-import-cancel-button")  # arm
         self.driver.click("mail-import-cancel-button")  # confirm
 
+    def press_cancel(self) -> None:
+        """One press of Cancel — the first arms the confirm, the second
+        cancels. Split from :meth:`cancel` for the test that watches the
+        confirm in between."""
+        self.driver.click("mail-import-cancel-button")
+
+    def cancel_label(self) -> str:
+        """The Cancel button's current label: "Cancel", or the confirm
+        question once it is armed."""
+        return self._text_or_empty("mail-import-cancel-button")
+
+    def progress_fraction(self) -> float:
+        """The progress bar's filled fraction, 0.0–1.0, from its ``fraction``
+        attribute (the bar's text is a per-app rendering)."""
+        return float(self.driver.get_attr("mail-import-progress-bar", "fraction"))
+
     def mailbox_progress_count(self) -> int:
         return self.driver.count("mail-import-mailbox-progress-list-item-name")
+
+    def mailbox_progress(self) -> dict[str, str]:
+        """``{mailbox: its progress text}`` — the per-mailbox rows of the
+        Progress step (`mail_export.py`'s twin, keyed by name)."""
+        names = self.driver.get_texts("mail-import-mailbox-progress-list-item-name")
+        progress = self.driver.get_texts("mail-import-mailbox-progress-list-item-progress")
+        return dict(zip(names, progress))
 
     # ── step 5 — done ────────────────────────────────────────────────────
 

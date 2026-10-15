@@ -69,6 +69,13 @@ class AtprotoVM @Inject constructor(
         host.refreshSnapshot()
     }
 
+    /** The delete card's terminal "also retire my identity" opt-in — card state
+     *  on the machine, not a gesture; nothing is sent until the confirm. */
+    fun setDeleteRetireIdentity(enabled: Boolean) {
+        host.machine()?.setDeleteRetireIdentity(enabled)
+        host.refreshSnapshot()
+    }
+
     fun setExternalAppsEnabled(enabled: Boolean) = dispatch { it.setExternalAppsEnabled(enabled) }
 
     /**

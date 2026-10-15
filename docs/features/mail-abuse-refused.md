@@ -31,45 +31,45 @@ Stamped 2026-10-01 at dc4b94e0f1.
    - `tests/e2e-unified/tests/platform/docker/test_mail_rate_limit_burst.py::test_imap_reconnect_storm_trips_rate_limit`
    - `tests/e2e-unified/tests/platform/docker/test_mail_rate_limit_burst.py::test_caldav_burst_stays_under_rate_limit_via_cache`
 5. [nest] Mail that fails its sender domain's checks, where that domain asks for quarantine and not rejection, is accepted and filed as spam instead of being refused — `docs/goal/behavior/smtp-server.md` § Inbound policy stack
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_a_quarantine_policy_failure_is_accepted_and_filed_as_spam`
 6. [nest] Mail from a server its sender domain says may not send for it is refused when the domain publishes no policy of its own that decides the matter, while a softer or neutral answer is never refused — `docs/goal/behavior/smtp-server.md` § Error / tempfail strategy
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_an_spf_hard_fail_is_refused_and_a_softer_answer_never_is`
 7. [nest] A sending server that greets with an empty or garbled name, with the name every machine calls itself, or with a bare single-word name is refused — `docs/goal/behavior/smtp-server.md` § Architectural rules
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_an_empty_garbled_localhost_or_single_word_greeting_is_refused`
 8. [nest] A sending server that greets with your nest's own name is refused as an impersonation — `docs/goal/behavior/smtp-server.md` § HELO / EHLO syntactic + identity validation
    - (none)
 9. [nest] Mail whose sender address names a domain that does not exist is refused, and a sender address with no domain at all is refused as invalid — `docs/goal/behavior/smtp-server.md` § Architectural rules
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_a_sender_domain_that_does_not_exist_or_is_missing_is_refused`
 10. [nest] When a lookup the checks depend on cannot be answered, mail is not refused for that reason; the nest accepts it instead of turning a legitimate sender away — `docs/goal/behavior/smtp-server.md` § Error / tempfail strategy
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_a_lookup_that_cannot_be_answered_never_refuses_mail`
 11. [nest] With nothing chosen, a server listed on the well-known public spam blocklist is refused as soon as it connects — `docs/goal/behavior/smtp-server.md` § Architectural rules
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_the_default_blocklist_refuses_a_listed_server_at_the_door`
 12. [nest] With nothing chosen, a server that opens more than ten connections in a minute is told to try again later — `docs/goal/behavior/smtp-server.md` § Connection-time limits
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_default_connection_rate_tells_the_eleventh_connection_in_a_minute_to_retry`
 13. [nest] One sending address cannot hold more than half of the server's incoming-mail connections at once; further connections from it are closed — `docs/goal/behavior/smtp-server.md` § Connection-time limits
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_one_address_cannot_hold_more_than_half_the_incoming_connections`
 14. [nest] One sending address cannot push more than about fifty messages an hour through the incoming-mail port — `docs/goal/behavior/smtp-server.md` § Connection-time limits
-   - (none)
+   - `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_one_address_cannot_push_more_than_fifty_messages_an_hour`
 15. [nest] A single connection cannot address one message to more than a hundred recipients — `docs/goal/behavior/smtp-server.md` § Connection-time limits
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_one_message_cannot_be_addressed_to_more_than_a_hundred_recipients`
 16. [nest] A sending server that keeps making refused requests gets slower and slower answers, while a well-behaved sender is never slowed — `docs/goal/behavior/smtp-server.md` § Connection-time limits
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_refused_requests_are_answered_ever_more_slowly_and_a_clean_sender_never_is`
 17. [nest] A sending server that goes silent for half a minute in the middle of a conversation is disconnected, so slow senders cannot tie the server up — `docs/goal/behavior/smtp-server.md` § Connection-time limits
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_sender_silent_for_half_a_minute_mid_conversation_is_disconnected`
 18. [nest] A message with an absurd number or size of header lines is refused before anything reads it — `docs/goal/behavior/smtp-server.md` § Architectural rules
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_message_with_an_absurd_number_or_size_of_header_lines_is_refused`
 19. [nest] A message carrying no sender line, or more than one, is refused, whether it arrives from outside or is sent from a mail app — `docs/goal/behavior/smtp-server.md` § Error / tempfail strategy
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_message_without_exactly_one_from_line_is_refused_inbound_and_from_a_mail_app`
 20. [nest] A sender cannot plant the nest's own delivery marks in a message to steer how it is filed or which of your addresses it seems to have reached; the copy you read carries only the marks your nest wrote — `docs/goal/behavior/smtp-server.md` § Architectural rules
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_inbound_stamps.py::test_a_sender_cannot_plant_the_nests_delivery_marks`
 21. [nest] A sender cannot smuggle a second, hidden message inside one by using unusual line endings — `docs/goal/behavior/smtp-server.md` § Architectural rules
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_unusual_line_endings_cannot_smuggle_a_second_message`
 22. [nest] The incoming-mail port never accepts a sign-in, so it cannot be used to guess passwords — `docs/goal/behavior/smtp-server.md` § Auth on each port
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_the_incoming_mail_port_never_accepts_a_sign_in`
 23. [nest] While the malware scanner is unavailable, incoming mail is put off so the sender retries later; it is never delivered unscanned — `docs/goal/behavior/mail-content-scanning.md` § Don't do these
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_while_the_malware_scanner_is_down_mail_is_put_off_never_delivered_unscanned`
 24. [nest] Clean mail reaches you carrying the result of its scan — `docs/goal/behavior/mail-content-scanning.md` § How the result is sealed
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_inbound_stamps.py::test_clean_mail_reaches_you_carrying_the_result_of_its_scan`
 
 ## Status
 
@@ -95,24 +95,24 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_scan_clean_delivers` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_rate_limit_burst.py::test_imap_reconnect_storm_trips_rate_limit` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_rate_limit_burst.py::test_caldav_burst_stays_under_rate_limit_via_cache` | nest (linux): passed |
-| 5 | nest | (none) | — |
-| 6 | nest | (none) | — |
-| 7 | nest | (none) | — |
+| 5 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_a_quarantine_policy_failure_is_accepted_and_filed_as_spam` | nest (linux): passed |
+| 6 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_an_spf_hard_fail_is_refused_and_a_softer_answer_never_is` | nest (linux): passed |
+| 7 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_an_empty_garbled_localhost_or_single_word_greeting_is_refused` | nest (linux): passed |
 | 8 | nest | (none) | — |
-| 9 | nest | (none) | — |
-| 10 | nest | (none) | — |
-| 11 | nest | (none) | — |
-| 12 | nest | (none) | — |
-| 13 | nest | (none) | — |
-| 14 | nest | (none) | — |
-| 15 | nest | (none) | — |
-| 16 | nest | (none) | — |
-| 17 | nest | (none) | — |
-| 18 | nest | (none) | — |
-| 19 | nest | (none) | — |
-| 20 | nest | (none) | — |
-| 21 | nest | (none) | — |
-| 22 | nest | (none) | — |
-| 23 | nest | (none) | — |
-| 24 | nest | (none) | — |
+| 9 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_a_sender_domain_that_does_not_exist_or_is_missing_is_refused` | nest (linux): passed |
+| 10 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_a_lookup_that_cannot_be_answered_never_refuses_mail` | nest (linux): passed |
+| 11 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_the_default_blocklist_refuses_a_listed_server_at_the_door` | nest (linux): passed |
+| 12 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_default_connection_rate_tells_the_eleventh_connection_in_a_minute_to_retry` | nest (linux): passed |
+| 13 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_one_address_cannot_hold_more_than_half_the_incoming_connections` | nest (linux): passed |
+| 14 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_one_address_cannot_push_more_than_fifty_messages_an_hour` | nest (linux): passed |
+| 15 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_one_message_cannot_be_addressed_to_more_than_a_hundred_recipients` | nest (linux): passed |
+| 16 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_refused_requests_are_answered_ever_more_slowly_and_a_clean_sender_never_is` | nest (linux): passed |
+| 17 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_sender_silent_for_half_a_minute_mid_conversation_is_disconnected` | nest (linux): passed |
+| 18 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_message_with_an_absurd_number_or_size_of_header_lines_is_refused` | nest (linux): passed |
+| 19 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_a_message_without_exactly_one_from_line_is_refused_inbound_and_from_a_mail_app` | nest (linux): passed |
+| 20 | nest | `tests/e2e-unified/tests/test_mail_inbound_stamps.py::test_a_sender_cannot_plant_the_nests_delivery_marks` | nest (linux): passed |
+| 21 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_unusual_line_endings_cannot_smuggle_a_second_message` | nest (linux): passed |
+| 22 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_the_incoming_mail_port_never_accepts_a_sign_in` | nest (linux): passed |
+| 23 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_while_the_malware_scanner_is_down_mail_is_put_off_never_delivered_unscanned` | nest (linux): passed |
+| 24 | nest | `tests/e2e-unified/tests/test_mail_inbound_stamps.py::test_clean_mail_reaches_you_carrying_the_result_of_its_scan` | nest (linux): passed |
 <!-- features-render:end -->

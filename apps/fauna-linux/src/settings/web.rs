@@ -95,16 +95,34 @@ pub(crate) fn ensure_hydrated(
             fauna_client_web::read_web_page(&web, handle.as_deref().unwrap_or("")).await
         },
         move |res| {
-            if !crate::actor_scope::poll_still_current(generation) {
-                return;
-            }
-            WEB_PAGE_HYDRATING.with(|f| f.set(false));
-            if let Ok(read) = res {
-                CACHED_WEB_PAGE.with(|c| *c.borrow_mut() = Some(read));
+            if land_ensure_hydrated(crate::actor_scope::poll_still_current, generation, res) {
                 on_ready();
             }
         },
     );
+}
+
+/// The landing of [`ensure_hydrated`]'s read. A stale landing (an actor change
+/// since `generation`) touches neither the latch nor the cache — see the
+/// identity-seam note above. Returns whether the cache was seeded, i.e.
+/// whether the caller's `on_ready` repaint is owed. See [`land_unpublished`]
+/// for why `still_current` is a parameter.
+fn land_ensure_hydrated(
+    still_current: impl Fn(u64) -> bool,
+    generation: u64,
+    res: Result<WebPageRead, String>,
+) -> bool {
+    if !still_current(generation) {
+        return false;
+    }
+    WEB_PAGE_HYDRATING.with(|f| f.set(false));
+    match res {
+        Ok(read) => {
+            CACHED_WEB_PAGE.with(|c| *c.borrow_mut() = Some(read));
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 #[derive(Clone)]
@@ -324,19 +342,32 @@ fn hydrate(ctx: &Rc<WebCtx>) {
             fauna_client_web::read_web_page(&web, handle.as_deref().unwrap_or("")).await
         },
         move |res| {
-            // The identity seam: a read spawned for the outgoing actor must not
-            // paint the incoming actor's Settings → Web page or seed its cache
-            // (`actor_scope.rs`).
-            if !crate::actor_scope::poll_still_current(generation) {
+            if !land_hydrated(crate::actor_scope::poll_still_current, generation, &res) {
                 return;
-            }
-            if let Ok(read) = &res {
-                CACHED_WEB_PAGE.with(|c| *c.borrow_mut() = Some(read.clone()));
             }
             render(&ctx_render, res);
             ctx_render.w.published_group.set_visible(true);
         },
     );
+}
+
+/// The cache half of the `hydrate` landing. The identity seam: a read spawned
+/// for the outgoing actor must not paint the incoming actor's Settings → Web
+/// page or seed its cache (`actor_scope.rs`). Returns whether the landing is
+/// still current (the caller paints only then). See [`land_unpublished`] for
+/// why `still_current` is a parameter.
+fn land_hydrated(
+    still_current: impl Fn(u64) -> bool,
+    generation: u64,
+    res: &Result<WebPageRead, String>,
+) -> bool {
+    if !still_current(generation) {
+        return false;
+    }
+    if let Ok(read) = res {
+        CACHED_WEB_PAGE.with(|c| *c.borrow_mut() = Some(read.clone()));
+    }
+    true
 }
 
 /// Flip the opt-in, then re-project from the nest's echoed state — reusing the
@@ -354,34 +385,48 @@ fn set_enabled(ctx: &Rc<WebCtx>, enabled: bool) {
                 .map_err(|e| e.to_string())
         },
         move |res| {
-            // The identity seam: an echo landing after an actor change must not
-            // fold into the incoming actor's cache or repaint their page.
-            if !crate::actor_scope::poll_still_current(generation) {
+            let Some(read) =
+                land_set_enabled(crate::actor_scope::poll_still_current, generation, res)
+            else {
                 return;
-            }
-            let read = match res {
-                Ok(echoed) => CACHED_WEB_PAGE.with(|c| {
-                    let mut c = c.borrow_mut();
-                    let (handle, _, _) = crate::client::load_account_cache();
-                    if let Some(cur) = c.as_mut() {
-                        cur.view = fauna_client_web::subdomain_view(
-                            echoed,
-                            handle.as_deref().filter(|h| !h.is_empty()),
-                            &cur.serving_domain,
-                        );
-                        Ok(cur.clone())
-                    } else {
-                        // Flipping requires the page to already be hydrated —
-                        // the toggle is inert until then — so this arm should
-                        // be unreachable; degrade honestly rather than guess.
-                        Err("web hosting state not loaded yet".to_string())
-                    }
-                }),
-                Err(e) => Err(format!("set web hosting: {e}")),
             };
             render(&ctx_render, read);
         },
     );
+}
+
+/// The cache half of the `set_enabled` landing. The identity seam: an echo
+/// landing after an actor change must not fold into the incoming actor's cache
+/// or repaint their page — `None` means stale, paint nothing. See
+/// [`land_unpublished`] for why `still_current` is a parameter.
+fn land_set_enabled(
+    still_current: impl Fn(u64) -> bool,
+    generation: u64,
+    res: Result<bool, String>,
+) -> Option<Result<WebPageRead, String>> {
+    if !still_current(generation) {
+        return None;
+    }
+    Some(match res {
+        Ok(echoed) => CACHED_WEB_PAGE.with(|c| {
+            let mut c = c.borrow_mut();
+            let (handle, _, _) = crate::client::load_account_cache();
+            if let Some(cur) = c.as_mut() {
+                cur.view = fauna_client_web::subdomain_view(
+                    echoed,
+                    handle.as_deref().filter(|h| !h.is_empty()),
+                    &cur.serving_domain,
+                );
+                Ok(cur.clone())
+            } else {
+                // Flipping requires the page to already be hydrated —
+                // the toggle is inert until then — so this arm should
+                // be unreachable; degrade honestly rather than guess.
+                Err("web hosting state not loaded yet".to_string())
+            }
+        }),
+        Err(e) => Err(format!("set web hosting: {e}")),
+    })
 }
 
 fn render(ctx: &Rc<WebCtx>, res: Result<WebPageRead, String>) {
@@ -613,23 +658,12 @@ fn unpublish(ctx: &Rc<WebCtx>, post_id: Vec<u8>) {
                 .map_err(|e| format!("reload published posts: {e}"))
         },
         move |res| {
-            // The identity seam: a takedown confirmation landing after an actor
-            // change must not fold its posts into the incoming actor's cache.
-            if !crate::actor_scope::poll_still_current(generation) {
+            if !land_unpublished(crate::actor_scope::poll_still_current, generation, &res) {
                 return;
             }
             match res {
                 Ok(site) => {
                     clear_error(&ctx_render.w);
-                    // The whole answer, not just the rows: a takedown can be
-                    // what restores (or blanks) the rendered pages, and the
-                    // status line must follow the same read.
-                    CACHED_WEB_PAGE.with(|c| {
-                        if let Some(cur) = c.borrow_mut().as_mut() {
-                            cur.posts = site.posts.clone();
-                            cur.rendered_pages_down = site.rendered_pages_down;
-                        }
-                    });
                     ctx_render
                         .w
                         .render_status
@@ -642,12 +676,63 @@ fn unpublish(ctx: &Rc<WebCtx>, post_id: Vec<u8>) {
     );
 }
 
+/// The cache half of the `unpublish` landing. The identity seam: a takedown
+/// confirmation landing after an actor change must not fold its posts into the
+/// incoming actor's cache. Returns whether the landing is still current (the
+/// caller paints only then); on `Ok` it folds the whole answer, not just the
+/// rows — a takedown can be what restores (or blanks) the rendered pages, and
+/// the status line must follow the same read.
+///
+/// `still_current` is `actor_scope::poll_still_current` in production; the
+/// landings take it as a parameter so a test can state "stale" without
+/// bumping the process-global generation under its parallel siblings.
+fn land_unpublished(
+    still_current: impl Fn(u64) -> bool,
+    generation: u64,
+    res: &Result<fauna_client_web::PublishedSite, String>,
+) -> bool {
+    if !still_current(generation) {
+        return false;
+    }
+    if let Ok(site) = res {
+        CACHED_WEB_PAGE.with(|c| {
+            if let Some(cur) = c.borrow_mut().as_mut() {
+                cur.posts = site.posts.clone();
+                cur.rendered_pages_down = site.rendered_pages_down;
+            }
+        });
+    }
+    true
+}
+
 fn show_error(w: &WebWidgets, msg: &str) {
     super::render_error_label(&w.error_label, Some(msg));
 }
 
 fn clear_error(w: &WebWidgets) {
     super::render_error_label(&w.error_label, None);
+}
+
+#[cfg(test)]
+fn sample_read() -> WebPageRead {
+    WebPageRead {
+        view: fauna_client_web::SubdomainView {
+            enabled: true,
+            url: Some("https://example.test/".to_string()),
+            disabled_reason: None,
+        },
+        serving_domain: "example.test".to_string(),
+        domains: Vec::new(),
+        posts: Vec::new(),
+        rendered_pages_down: false,
+    }
+}
+
+/// Fill the origin cache as a hydrated outgoing actor would — for the tests
+/// that drive the canonical drop (`actor_scope.rs`) and the landings below.
+#[cfg(test)]
+pub(crate) fn seed_cache_for_test() {
+    CACHED_WEB_PAGE.with(|c| *c.borrow_mut() = Some(sample_read()));
 }
 
 #[cfg(test)]
@@ -673,18 +758,7 @@ mod tests {
     /// the corresponding assertion fails.
     #[test]
     fn clear_for_actor_change_drops_the_cache_and_the_hydrating_latch() {
-        let sample = WebPageRead {
-            view: fauna_client_web::SubdomainView {
-                enabled: true,
-                url: Some("https://example.test/".to_string()),
-                disabled_reason: None,
-            },
-            serving_domain: "example.test".to_string(),
-            domains: Vec::new(),
-            posts: Vec::new(),
-            rendered_pages_down: false,
-        };
-        CACHED_WEB_PAGE.with(|c| *c.borrow_mut() = Some(sample));
+        seed_cache_for_test();
         WEB_PAGE_HYDRATING.with(|f| f.set(true));
 
         clear_for_actor_change();
@@ -697,5 +771,97 @@ mod tests {
             !WEB_PAGE_HYDRATING.with(|f| f.get()),
             "an account switch must not leave the latch stuck for the incoming actor"
         );
+    }
+
+    fn stale(_generation: u64) -> bool {
+        false
+    }
+
+    fn current(_generation: u64) -> bool {
+        true
+    }
+
+    fn landed_read() -> WebPageRead {
+        let mut read = sample_read();
+        read.serving_domain = "incoming.test".to_string();
+        read
+    }
+
+    /// **Each landing's generation guard is witnessed** (`account-scoping.md`
+    /// § The scoping taxonomy → the in-flight landing rule): a landing from before an actor change writes
+    /// nothing, and the same landing while current does — so deleting a
+    /// guard's early return reddens exactly its own test.
+    #[test]
+    fn a_stale_ensure_hydrated_landing_leaves_the_latch_and_cache_alone() {
+        clear_for_actor_change();
+        WEB_PAGE_HYDRATING.with(|f| f.set(true));
+
+        assert!(!land_ensure_hydrated(stale, 0, Ok(landed_read())));
+        assert!(
+            WEB_PAGE_HYDRATING.with(|f| f.get()),
+            "a stale landing cleared the incoming actor's in-flight latch"
+        );
+        assert!(
+            CACHED_WEB_PAGE.with(|c| c.borrow().is_none()),
+            "a stale landing seeded the incoming actor's cache"
+        );
+
+        assert!(land_ensure_hydrated(current, 0, Ok(landed_read())));
+        assert!(!WEB_PAGE_HYDRATING.with(|f| f.get()));
+        assert!(CACHED_WEB_PAGE.with(|c| c.borrow().is_some()));
+        clear_for_actor_change();
+    }
+
+    #[test]
+    fn a_stale_hydrate_landing_does_not_seed_the_cache() {
+        clear_for_actor_change();
+
+        assert!(!land_hydrated(stale, 0, &Ok(landed_read())));
+        assert!(
+            CACHED_WEB_PAGE.with(|c| c.borrow().is_none()),
+            "a stale hydrate landing seeded the incoming actor's cache"
+        );
+
+        assert!(land_hydrated(current, 0, &Ok(landed_read())));
+        assert!(CACHED_WEB_PAGE.with(|c| c.borrow().is_some()));
+        clear_for_actor_change();
+    }
+
+    #[test]
+    fn a_stale_set_enabled_echo_does_not_fold_into_the_cache() {
+        seed_cache_for_test();
+
+        assert!(land_set_enabled(stale, 0, Ok(false)).is_none());
+        assert!(
+            CACHED_WEB_PAGE.with(|c| c.borrow().as_ref().is_some_and(|r| r.view.enabled)),
+            "a stale echo rewrote the incoming actor's cached toggle"
+        );
+
+        let read = land_set_enabled(current, 0, Ok(false))
+            .expect("a current landing paints")
+            .expect("a hydrated cache folds the echo");
+        assert!(!read.view.enabled);
+        clear_for_actor_change();
+    }
+
+    #[test]
+    fn a_stale_unpublish_landing_does_not_fold_posts_into_the_cache() {
+        seed_cache_for_test();
+        let site = fauna_client_web::PublishedSite {
+            posts: Vec::new(),
+            rendered_pages_down: true,
+        };
+
+        assert!(!land_unpublished(stale, 0, &Ok(site.clone())));
+        assert!(
+            CACHED_WEB_PAGE.with(|c| c.borrow().as_ref().is_some_and(|r| !r.rendered_pages_down)),
+            "a stale takedown confirmation rewrote the incoming actor's cache"
+        );
+
+        assert!(land_unpublished(current, 0, &Ok(site)));
+        assert!(
+            CACHED_WEB_PAGE.with(|c| c.borrow().as_ref().is_some_and(|r| r.rendered_pages_down))
+        );
+        clear_for_actor_change();
     }
 }

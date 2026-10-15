@@ -207,9 +207,16 @@ fn nip11_info_response(state: &AppState) -> Response {
     // advertise the hard-coded `fauna.social` placeholder as its own relay name
     // until a restart.
     let domain = state.handle_domain_if_set();
+    // Coarsened to `major.minor` like every anonymous version surface
+    // (`version-compatibility.md` § Dimension 3): this document answers any
+    // stranger, and the exact build stays admin-side.
     let info = nip11::fauna_relay_info(
         domain.as_deref().unwrap_or("fauna.social"),
-        env!("CARGO_PKG_VERSION"),
+        concat!(
+            env!("CARGO_PKG_VERSION_MAJOR"),
+            ".",
+            env!("CARGO_PKG_VERSION_MINOR")
+        ),
     );
     (
         StatusCode::OK,
@@ -548,8 +555,18 @@ pub async fn handle_zap_receipt_inbox(
             // write ingress A uses, so downstream consumers inherit the trust
             // guarantee structurally whichever door the receipt came through.
             let conn = state.db.conn().await;
-            crate::nostr::zap_ingest::record_zap_as(&conn, &zap, purchased.as_deref());
+            let newly = crate::nostr::zap_ingest::record_zap_as(&conn, &zap, purchased.as_deref());
             drop(conn);
+            // A credited tip rings the post's author — the same shared
+            // decision ingress A makes, after the record and outside the conn.
+            crate::nostr::zap_ingest::notify_tip(
+                state,
+                &zap,
+                subject.as_ref(),
+                purchased.as_deref(),
+                newly,
+            )
+            .await;
             let _ = state.nostr.relay_tx.send(NostrRelayEvent {
                 event_json: wire,
                 author_pubkey: event.pubkey.clone(),

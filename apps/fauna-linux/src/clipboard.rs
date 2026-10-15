@@ -92,7 +92,9 @@ pub fn copy_button_dynamic(get_text: impl Fn() -> String + 'static) -> gtk::Butt
 /// copy-button contract a test reads, since no driver reads the OS clipboard.
 pub fn copy_and_confirm(btn: &gtk::Button, text: &str) {
     copy_text(text);
-    crate::testid::set_test_attr(btn, "copied", text);
+    // Free text, not a CSS-class token: a copied value carries spaces and
+    // semicolons (a DNS record's `v=spf1 …`).
+    crate::testid::set_test_attr_text(btn, "copied", text);
     tracing::info!("{}", strings::settings::account_page::COPIED_CLIPBOARD);
     btn.set_label(strings::settings::account_page::COPIED_CLIPBOARD);
     let btn_weak = btn.downgrade();

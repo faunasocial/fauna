@@ -98,6 +98,81 @@ for (const [name, url] of Object.entries(RAILS)) {
   });
 }
 
+// ── Every `webPage` write goes through the seam ───────────────────────────────
+//
+// `web-publish.ts` is a RAIL (above), but `webPage` is a shared writable store,
+// and `WebSettingsSection.svelte` used to write it directly in three places,
+// each after awaits and with no capture — a read started as A that landed after
+// an in-heap actor change repopulated the store `resetWebPage` had just nulled,
+// and B's feed ⋯-menu built B's links on A's origin. The
+// rail test cannot see a component, so the writes now live in `web-publish.ts`
+// (`setWebPage`/`patchWebPage`, which take the caller's predicate), and these
+// pin both halves: nobody else writes the store, and each component handler
+// that calls a writer has captured its own generation and hands it over.
+
+function* srcFiles(dir: URL): Generator<URL> {
+  for (const e of Deno.readDirSync(dir)) {
+    const u = new URL(e.name + (e.isDirectory ? "/" : ""), dir);
+    if (e.isDirectory) yield* srcFiles(u);
+    else if (/\.(ts|svelte)$/.test(e.name)) yield u;
+  }
+}
+
+Deno.test("no webPage store write exists outside web-publish.ts", () => {
+  const offenders: string[] = [];
+  for (const u of srcFiles(new URL("../", import.meta.url))) {
+    if (u.pathname.endsWith("/lib/web-publish.ts")) continue;
+    if (u.pathname.endsWith(".test.ts")) continue;
+    if (/\bwebPage\s*\.\s*(set|update)\s*\(/.test(stripComments(Deno.readTextFileSync(u)))) {
+      offenders.push(u.pathname);
+    }
+  }
+  if (offenders.length) {
+    throw new Error(
+      `webPage is written outside the web-publish.ts seam: ${offenders.join(", ")} — ` +
+        `use setWebPage/patchWebPage with the handler's own sameActorSince() predicate`,
+    );
+  }
+});
+
+/** The text of `async function <name>(…) { … }` up to the next top-level
+ *  function — crude, like the rest of this file. */
+function handlerBody(src: string, name: string): string {
+  const start = src.search(new RegExp(`async function ${name}\\(`));
+  if (start < 0) throw new Error(`WebSettingsSection has no async function ${name}`);
+  const rest = src.slice(start + 1);
+  const next = rest.search(/\n {2}(async )?function |\n<\/script>/);
+  return src.slice(start, next < 0 ? undefined : start + 1 + next);
+}
+
+for (const name of ["hydrate", "onToggle", "unpublish"]) {
+  Deno.test(`WebSettingsSection.${name} guards its own webPage write`, () => {
+    const src = stripComments(
+      Deno.readTextFileSync(new URL("./components/WebSettingsSection.svelte", import.meta.url)),
+    );
+    const body = handlerBody(src, name);
+    const capture = body.indexOf("sameActorSince()");
+    const firstAwait = body.indexOf("await ");
+    if (capture < 0 || (firstAwait >= 0 && capture > firstAwait)) {
+      throw new Error(`${name} must capture sameActorSince() before its first await`);
+    }
+    if (!/\b(setWebPage|patchWebPage)\([\s\S]*?stillThisActor/.test(body)) {
+      throw new Error(`${name} must hand its own stillThisActor to setWebPage/patchWebPage`);
+    }
+  });
+}
+
+Deno.test("web-publish.ts exports the guarded writers and checks the predicate in each", () => {
+  const src = sourceOf(RAILS["web-publish.ts"]);
+  for (const fn of ["setWebPage", "patchWebPage"]) {
+    const at = src.search(new RegExp(`export function ${fn}\\(`));
+    if (at < 0) throw new Error(`web-publish.ts must export ${fn}`);
+    if (!/stillThisActor\(\)/.test(src.slice(at, at + 400))) {
+      throw new Error(`${fn} must consult stillThisActor() before writing the store`);
+    }
+  }
+});
+
 // The seam itself must keep bumping on the drop — the half that makes every
 // check above mean anything. Read from source for the same reason: importing
 // actorScope.ts is fine (actorScope.test.ts does), but this one assertion is

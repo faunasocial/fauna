@@ -23,7 +23,12 @@ import threading
 import cbor2
 import pytest
 
-from helpers.sync_agent_ipc_unix import SyncAgentClient, send_request, wait_for_socket
+from helpers.sync_agent_ipc_unix import (
+    SyncAgentClient,
+    reconcile_account_runtime,
+    send_request,
+    wait_for_socket,
+)
 
 pytestmark = pytest.mark.tier_1
 
@@ -48,11 +53,15 @@ def _read_request_frame(conn: socket.socket) -> dict | None:
 class _FakeAgent:
     """Binds a real unix socket, accepts connections on a background thread,
     and answers each request with the next canned response from `responses`
-    (one entry per expected request, in order)."""
+    (one entry per expected request, in order), each preceded by
+    `events_before_reply` pushed event frames — the agent broadcasts its events
+    to every open connection, a request's own included."""
 
-    def __init__(self, socket_path: str, responses: list[dict]):
+    def __init__(self, socket_path: str, responses: list[dict],
+                 events_before_reply: list[dict] = ()):
         self.socket_path = socket_path
         self._responses = list(responses)
+        self._events = list(events_before_reply)
         self._requests: list[dict] = []
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.bind(socket_path)
@@ -74,6 +83,8 @@ class _FakeAgent:
                     continue  # a wait_for_socket probe — not a real request
                 self._requests.append(req)
                 resp = self._responses[len(self._requests) - 1]
+                for event in self._events:
+                    conn.sendall(_encode_response(event))
                 conn.sendall(_encode_response(resp))
 
     def join(self, timeout: float = 5.0) -> None:
@@ -116,8 +127,8 @@ def short_tmp_dir():
 def fake_agent(short_tmp_dir):
     made: list[_FakeAgent] = []
 
-    def _make(responses: list[dict]) -> _FakeAgent:
-        agent = _FakeAgent(f"{short_tmp_dir}/sync-agent.sock", responses)
+    def _make(responses: list[dict], events_before_reply: list[dict] = ()) -> _FakeAgent:
+        agent = _FakeAgent(f"{short_tmp_dir}/sync-agent.sock", responses, events_before_reply)
         agent.start()
         made.append(agent)
         return agent
@@ -195,7 +206,7 @@ def test_provision_raises_on_err_response(fake_agent):
         client.provision(
             backup_key=b"\x00" * 32,
             actor_id=b"\x11" * 32,
-            nest_url="https://example.com",
+            nest_url="https://example.net",
             device_id="dev-1",
             bearer_token="tok",
             bearer_expires_at=None,
@@ -206,3 +217,17 @@ def test_provision_raises_on_err_response(fake_agent):
 def test_send_request_reports_a_missing_socket(short_tmp_dir):
     with pytest.raises(OSError):
         send_request(f"{short_tmp_dir}/nobody-home.sock", b"\x00\x00\x00\x00", timeout=1.0)
+
+
+def test_reconcile_account_runtime_skips_pushed_events_to_its_reply(fake_agent):
+    """The account-pass nudge's reply comes after a whole `reconcile_now`, so
+    the agent's broadcast events (`SyncProgress`, …) can reach the connection
+    first; the transport skips them to the Response rather than reading an
+    event as the reply."""
+    agent = fake_agent(
+        [{"id": 1, "result": {"Ok": "Empty"}}],
+        events_before_reply=[{"event": {"SyncProgress": {"files_pending": 1}}}] * 2,
+    )
+    reconcile_account_runtime(agent.socket_path, 1, timeout=2.0)
+    agent.join()
+    assert agent._requests == [{"id": 1, "method": "ReconcileAccountRuntime"}]

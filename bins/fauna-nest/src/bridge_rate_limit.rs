@@ -113,6 +113,31 @@ impl Limiter {
         target_actor_id: &[u8; 32],
         credential_id: &str,
     ) -> bool {
+        self.check_with_max(
+            bridge_actor_id,
+            target_actor_id,
+            credential_id,
+            self.config.max_events,
+        )
+    }
+
+    /// The configured per-window event budget — what [`Self::check`] admits.
+    pub fn max_events(&self) -> u32 {
+        self.config.max_events
+    }
+
+    /// [`Self::check`] against `max_events` in place of the configured budget,
+    /// over the same window. For a limiter whose callers carry a budget per
+    /// bucket family (the federation channel's per-kind budget,
+    /// `federation_router::FederationRouter::max_events`): the window stays one
+    /// number, so [`Self::sweep`]'s cutoff is right for every bucket.
+    pub fn check_with_max(
+        &self,
+        bridge_actor_id: &[u8; 32],
+        target_actor_id: &[u8; 32],
+        credential_id: &str,
+        max_events: u32,
+    ) -> bool {
         let key: BucketKey = (
             *bridge_actor_id,
             *target_actor_id,
@@ -122,7 +147,7 @@ impl Limiter {
         let mut entry = self.buckets.entry(key).or_default();
         let cutoff = now.checked_sub(self.config.window).unwrap_or(now);
         entry.events.retain(|t| *t > cutoff);
-        if entry.events.len() as u32 >= self.config.max_events {
+        if entry.events.len() as u32 >= max_events {
             return false;
         }
         entry.events.push(now);

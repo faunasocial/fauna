@@ -28,7 +28,7 @@
 //! here ever fails a request).
 //!
 //! The same harness pins the seed-less build's custody load
-//! (`on-demand-files.md` § Shared sets on a capability host, decisions 1 and
+//! (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decisions 1 and
 //! 2): a capability host holding only the `BackupKey` reads its account's
 //! folder-keys custody itself, for a bound set's generations and for retired serve
 //! custody alike, and records the row facts its re-resolve edges compare — and
@@ -314,7 +314,7 @@ async fn build_engine_threads_a_retired_generation_for_a_once_stamped_group_less
 }
 
 /// The same wiring on a seed-less capability host: its custody load under the
-/// `BackupKey` alone (`on-demand-files.md` § Shared sets on a capability host,
+/// `BackupKey` alone (`on-demand-files-shared-sets.md` § Shared sets on a capability host,
 /// decision 1) is the load retired serve custody rides, so the once-served
 /// set's back-catalogue re-seals there too.
 #[tokio::test]
@@ -709,7 +709,7 @@ async fn build_engine_refuses_a_ref_the_nest_does_not_list_even_beside_a_same_na
     supervisor.abort();
 }
 
-// ── The cross-nest arm (`on-demand-files.md` § Shared sets on a capability host
+// ── The cross-nest arm (`on-demand-files-shared-sets.md` § Shared sets on a capability host
 //    → *One mechanism*, question 2: one builder, custody is the row) ──
 
 /// The raw group of the cross-nest set these tests build, and its channel.
@@ -950,7 +950,7 @@ async fn the_cross_nest_edge_reads_custody_and_rebuilds_on_a_rotation() {
     supervisor.abort();
 }
 
-// ── Shared sets on a capability host (`on-demand-files.md` § Shared sets on a
+// ── Shared sets on a capability host (`on-demand-files-shared-sets.md` § Shared sets on a
 //    capability host, decisions 1 and 2) ──
 
 /// Build a BOUND set on the seed-less credential — the `BackupKey` alone, with
@@ -1062,7 +1062,7 @@ async fn a_seedless_build_behind_the_floor_holds_its_seals_and_keeps_re_resolvin
     );
 }
 
-// ── The federated floor (`on-demand-files.md` § Shared sets on a capability
+// ── The federated floor (`on-demand-files-shared-sets.md` § Shared sets on a capability
 //    host → *One mechanism*, question 2: the foreign record carries the set's
 //    `content_key_floor`, refreshed from every federated content-key read) ──
 

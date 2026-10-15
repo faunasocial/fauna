@@ -422,15 +422,26 @@ impl OwnSessionIds {
     /// This is what `keep_token_id` is read from, at call time and never from a
     /// previously painted list: a renewal between paint and press must not name
     /// a dead token (`devices.md` § The client's own session).
+    ///
+    /// A `None` clock read answers `None` — *cannot say*. ⚠ This is the
+    /// **opposite** direction from [`Self::prune`] and [`Self::ids_at`], on
+    /// purpose: those annotate a display, where keeping a dead id is cheap and
+    /// dropping a live one is not; this feeds a destructive control, and the
+    /// nest ends **every** session of the actor when `keep_token_id` matches
+    /// none of them, so naming a possibly-expired id would sign the user out
+    /// here too. Callers refuse (`NoOwnSession`) rather than guess. Do not
+    /// "unify" the two directions. Consequently `is_empty_at(None)` is `true`.
     pub fn current_at(&self, now: Option<u64>) -> Option<String> {
+        let now = now?;
         self.entries
             .iter()
             .rev()
-            .find(|e| now.is_none_or(|now| e.expires_at > now))
+            .find(|e| e.expires_at > now)
             .map(|e| e.id.clone())
     }
 
-    /// True while the set holds no live id.
+    /// True while the set holds no live id (so also under a blind clock, which
+    /// cannot prove one).
     pub fn is_empty_at(&self, now: Option<u64>) -> bool {
         self.current_at(now).is_none()
     }
@@ -672,6 +683,82 @@ pub struct CustodyHandshakeRequest {
 
 // The reply is [`HandshakeReply`], like the device handshake's.
 
+// ── fauna.auth.custodied_fleet_handshake (owner-fleet restore-read mint) ────
+
+/// The pre-identity kind that mints an OWNER-FLEET device's restore-read
+/// bearer at a **custodian nest** — the custodian-NEST serve door's admission
+/// (`account-replica-posture.md` § Replica posture → *The custody grant +
+/// ceremony*, the custodian-NEST serve door bullet, ruling 2). Additive
+/// 2026-10-09.
+///
+/// The custody handshake's shape, fleet-shaped: proof of possession by the
+/// DEVICE principal key, the device's inline root-signed
+/// `DeviceAuthorization` (verified under the owner it names), and at least one
+/// hosting row on the receiving nest for that owner whose witness window is
+/// open. The minted bearer's actor is the **device key** — never the owner —
+/// and its class is confined to the four read doors; every revocable fact is
+/// re-derived from rows on each dispatch.
+pub const CUSTODIED_FLEET_HANDSHAKE_KIND: &str = "fauna.auth.custodied_fleet_handshake";
+
+/// The exact bytes a `fauna.auth.custodied_fleet_handshake` request signs (and
+/// the nest verifies): `CUSTODIED_FLEET_HANDSHAKE_V1 ‖ owner_actor_id ‖
+/// device_key ‖ timestamp_be ‖ nest_id ‖ nonce` — the
+/// [`custody_handshake_signed_message`] layout under its own domain tag, so a
+/// custody PoP can never replay as a fleet PoP. Single source of the
+/// signed-message contract for the device-side signer and the nest verifier.
+pub fn custodied_fleet_handshake_signed_message(
+    owner_actor_id: &[u8; 32],
+    device_key: &[u8; 32],
+    timestamp_ms: u64,
+    nest_id: &[u8; 32],
+    nonce: &[u8],
+) -> Vec<u8> {
+    let mut body = Vec::with_capacity(104 + nonce.len());
+    body.extend_from_slice(owner_actor_id);
+    body.extend_from_slice(device_key);
+    body.extend_from_slice(&timestamp_ms.to_be_bytes());
+    body.extend_from_slice(nest_id);
+    body.extend_from_slice(nonce);
+    crate::sig_domain::domain_separated(crate::sig_domain::CUSTODIED_FLEET_HANDSHAKE_V1, &body)
+}
+
+/// Custodied-fleet handshake. Signed message is
+/// [`custodied_fleet_handshake_signed_message`]; the timestamp must be within
+/// ±30 s of server time, the signing key is the owner device's principal key
+/// (the key `authorization.device_key` names), the `DeviceAuthorization` must
+/// verify under `owner_actor_id` against that key, and the receiving nest must
+/// hold a window-open hosting row for that owner. Mints an ordinary session
+/// bearer whose actor is `device_key`. The request names the owner only to
+/// bind the signature; the door resolves the custodied account from the
+/// device's own row on every request (no `of_owner` rides a request).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CustodiedFleetHandshakeRequest {
+    /// 64-char hex of the custodied OWNER's 32-byte actor id — the account the
+    /// device belongs to.
+    pub owner_actor_id: String,
+    /// 64-char hex of the owner device's principal public key — the key the
+    /// PoP signature proves and the `DeviceAuthorization` must name.
+    pub device_key: String,
+    /// Milliseconds since the Unix epoch (the signed `timestamp_be`).
+    pub timestamp: u64,
+    /// 128-char hex of the 64-byte Ed25519 signature by `device_key` over
+    /// [`custodied_fleet_handshake_signed_message`].
+    pub signature: String,
+    /// Fresh per-request 32-byte random nonce — mandatory (replay-guard
+    /// uniquifier), the device-handshake shape.
+    pub client_nonce: ByteBuf,
+    /// The device's root-signed `DeviceAuthorization`, carried inline —
+    /// self-contained carriage, the admission seam's rule.
+    pub authorization: fauna_core::encoding::EmbedAsBytes,
+    /// 64-char hex of the receiving nest's identity, bound into `signature`
+    /// — same contract as [`HandshakeRequest::nest_id`].
+    pub nest_id: String,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+// The reply is [`HandshakeReply`], like the custody handshake's.
+
 // ── fauna.auth.nest_handshake (pre-identity nest-identity handshake) ─────────
 
 /// The pre-identity nest-identity handshake kind — the client asks the nest to
@@ -860,6 +947,41 @@ impl Default for VerifyReply {
     }
 }
 
+/// The account identity one `fauna.auth.verify` reply confirmed — the
+/// [`VerifyReply`]'s `handle`, `domain` and `tier`, kept beside the token it
+/// came with rather than dropped at the mint.
+///
+/// **Why it rides the mint.** The silent challenge is the mint for every bearer
+/// an app holds (`login.md` § When to use which), and its reply already carries
+/// these three fields. Until 2026-10-08 every native mint threw them away, so
+/// tui, linux and apple ran a second, independent challenge at sign-in just to
+/// learn them — a full `challenge`/`verify` for the actor whose session client
+/// was minting at the same instant (`transport-connection.md` § The dial
+/// budget). The session client now publishes its latest mint's identity on a
+/// watch (`fauna_nest_http::BearerSource::subscribe_self_identity`) and the
+/// apps read it there.
+///
+/// `domain` is the **handle's** domain as the nest reports it, never the
+/// dialled host (`conversations.md` § *Self-address: live, never baked*).
+/// `handle` is empty when the account has none yet.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MintedIdentity {
+    pub handle: String,
+    pub domain: String,
+    pub tier: String,
+}
+
+impl VerifyReply {
+    /// The identity this reply confirmed (see [`MintedIdentity`]).
+    pub fn identity(&self) -> MintedIdentity {
+        MintedIdentity {
+            handle: self.handle.clone(),
+            domain: self.domain.clone(),
+            tier: self.tier.clone(),
+        }
+    }
+}
+
 // ── Silent-challenge ceremony (fauna.auth.challenge + fauna.auth.verify) ─────
 //
 // The generic two-round-trip challenge/verify ceremony, written **once** here
@@ -881,6 +1003,28 @@ impl Default for VerifyReply {
 // `login.md` § When to use which assigns no app-held bearer to it — every app
 // mint, launch and refresh alike, is this ceremony (`challenge_verify` below;
 // `fauna_anon_client::mint_bearer_over_silent_challenge` for a held bearer).
+
+/// Which side of a version skew must be updated before the pair can talk again
+/// (`version-compatibility.md` § Dimension 4).
+///
+/// Two values rather than one "update needed" flag because the two are different
+/// verdicts with different remedies and different text: a nest that is behind
+/// waits on its admin deploying a newer binary (`SessionEndingVerdict::
+/// NestOutdated`, "this nest needs to be updated"), an app that is behind waits
+/// on its user updating the app (`SessionEndingVerdict::AppOutdated`, "your app
+/// is out of date"). Every reader that only needs "terminal, show the update
+/// surface" matches `NeedsUpdate { .. }` and ignores it; the reader that carries
+/// the verdict onward — `fauna_nest_http::LaunchMachineBearer` — must not
+/// conflate them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutdatedSide {
+    /// The nest is behind: `fauna.nest.outdated`, its degraded needs-update boot.
+    Nest,
+    /// This app is behind: the nest refused its subprotocol — the pre-upgrade
+    /// HTTP 426, or the 4426 close that ends a completed upgrade
+    /// (`transport-connection.md` § Connection lifecycle).
+    App,
+}
 
 /// Outcome of a silent-challenge attempt. Maps 1:1 to the failure-mode
 /// fallbacks in `docs/goal/behavior/onboarding.md` lines 248–252.
@@ -904,13 +1048,18 @@ pub enum SilentChallengeOutcome {
     /// disconnect, connect refused, or an expired/consumed nonce (retryable —
     /// a retry gets a fresh nonce).
     Transient { error: String },
-    /// `fauna.nest.outdated` — the nest booted a degraded "needs-update" mode and
-    /// can't serve until it is updated (version-compatibility.md Dim 4). The
-    /// secret is fine; **not** retryable. `message` is the localized actionable
-    /// banner. Distinguished from [`Self::Transient`] so the launch machine
-    /// surfaces an update prompt rather than spinning a retry loop. Can arrive at
-    /// either ceremony round-trip (the degraded nest rejects every RPC).
-    NeedsUpdate { message: String },
+    /// A version skew no retry clears (version-compatibility.md Dim 4): either
+    /// the nest is behind — `fauna.nest.outdated`, its degraded "needs-update"
+    /// boot, which can arrive at either ceremony round-trip — or this app is —
+    /// the nest refused the app's subprotocol before the upgrade (HTTP 426).
+    /// `outdated` names which; `message` is the localized actionable banner for
+    /// that side. The secret is fine; **not** retryable. Distinguished from
+    /// [`Self::Transient`] so the launch machine surfaces an update prompt
+    /// rather than spinning a retry loop.
+    NeedsUpdate {
+        message: String,
+        outdated: OutdatedSide,
+    },
     /// The supplied secret isn't a 32-byte Ed25519 key. Terminal.
     SecretInvalid { error: String },
     /// `fauna.auth.superseded` — this identity was succeeded, and the account
@@ -1180,10 +1329,20 @@ pub fn silent_challenge_error<E>(e: &E) -> SilentChallengeOutcome
 where
     E: crate::RpcErrorClass + std::fmt::Display,
 {
+    // The nest refused this app's subprotocol: the app is too old for it, a
+    // verdict no retry clears — read through the typed predicate, never the
+    // error's text.
+    if e.is_subprotocol_mismatch() {
+        return SilentChallengeOutcome::NeedsUpdate {
+            message: fauna_i18n::strings::errors::SUBPROTOCOL_MISMATCH.to_string(),
+            outdated: OutdatedSide::App,
+        };
+    }
     match e.as_rpc_error() {
         Some(rpc) if rpc.code == crate::RpcError::CODE_NEST_OUTDATED => {
             SilentChallengeOutcome::NeedsUpdate {
                 message: rpc.localized().to_string(),
+                outdated: OutdatedSide::Nest,
             }
         }
         // The identity was succeeded. Read the successor off the refusal rather
@@ -1268,6 +1427,21 @@ mod tests {
         assert_eq!(own.ids_at(None).len(), 2);
         own.prune(Some(1_000_000_200));
         assert_eq!(own.ids_at(None), vec!["bbbbbbbbbbbbbbbb".to_string()]);
+    }
+
+    #[test]
+    fn a_blind_clock_names_no_current_id_even_though_it_prunes_and_lists_everything() {
+        let mut own = OwnSessionIds::default();
+        own.record("deaddeaddeaddead", 1_000_000_100);
+        own.prune(None);
+        // The display-side methods stay permissive under a blind clock...
+        assert_eq!(own.ids_at(None), vec!["deaddeaddeaddead".to_string()]);
+        // ...but `keep_token_id`'s source must not name a possibly-dead token:
+        // the nest ends every session when it matches none of them.
+        assert_eq!(own.current_at(None), None);
+        assert!(own.is_empty_at(None));
+        // Control: with a readable clock the same id is simply expired.
+        assert_eq!(own.current_at(Some(1_900_000_000)), None);
     }
 
     #[test]
@@ -1392,6 +1566,16 @@ mod tests {
         );
         // Same layout, different tag — the standing tag-per-context rule.
         assert_ne!(d, c);
+        // The fleet twin: same layout as the custody PoP, its own tag, so a
+        // custody signature never replays as a fleet one.
+        let f = custodied_fleet_handshake_signed_message(&actor, &key, ts, &nest_a, &nonce);
+        assert!(f.starts_with(crate::sig_domain::CUSTODIED_FLEET_HANDSHAKE_V1));
+        assert_ne!(
+            f,
+            custodied_fleet_handshake_signed_message(&actor, &key, ts, &nest_b, &nonce)
+        );
+        assert_ne!(f, c);
+        assert_ne!(f, d);
     }
 
     #[test]
@@ -2045,8 +2229,9 @@ mod tests {
             responses.insert(CHALLENGE_KIND, Err(RpcError::nest_outdated()));
             let m = MockRequester { responses };
             match run_silent_challenge(&m, &SECRET, &NEST).await {
-                SilentChallengeOutcome::NeedsUpdate { message } => {
+                SilentChallengeOutcome::NeedsUpdate { message, outdated } => {
                     assert_eq!(message, RpcError::nest_outdated().localized());
+                    assert_eq!(outdated, OutdatedSide::Nest);
                 }
                 other => panic!("expected NeedsUpdate, got {other:?}"),
             }
@@ -2059,11 +2244,48 @@ mod tests {
             responses.insert(VERIFY_KIND, Err(RpcError::nest_outdated()));
             let m = MockRequester { responses };
             match run_silent_challenge(&m, &SECRET, &NEST).await {
-                SilentChallengeOutcome::NeedsUpdate { message } => {
+                SilentChallengeOutcome::NeedsUpdate { message, outdated } => {
                     assert_eq!(message, RpcError::nest_outdated().localized());
+                    assert_eq!(outdated, OutdatedSide::Nest);
                 }
                 other => panic!("expected NeedsUpdate, got {other:?}"),
             }
+        }
+
+        /// A transport error the nest's subprotocol refusal produced — the 426,
+        /// or the 4426 close ending a completed upgrade — is the app being too
+        /// old: `NeedsUpdate` naming `App`, read through the typed predicate
+        /// (`transport-connection.md` § Connection lifecycle, the 4426
+        /// paragraph), never the retryable `Transient` a blip earns.
+        #[test]
+        fn a_subprotocol_mismatch_is_needs_update_naming_the_app() {
+            #[derive(Debug)]
+            struct Mismatch;
+            impl std::fmt::Display for Mismatch {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("not the text the classifier reads")
+                }
+            }
+            impl RpcErrorClass for Mismatch {
+                fn is_rejection(&self) -> bool {
+                    false
+                }
+                fn is_subprotocol_mismatch(&self) -> bool {
+                    true
+                }
+            }
+            match silent_challenge_error(&Mismatch) {
+                SilentChallengeOutcome::NeedsUpdate { message, outdated } => {
+                    assert_eq!(message, fauna_i18n::strings::errors::SUBPROTOCOL_MISMATCH);
+                    assert_eq!(outdated, OutdatedSide::App);
+                }
+                other => panic!("expected NeedsUpdate, got {other:?}"),
+            }
+            // The negative control: an ordinary transport fault stays retryable.
+            assert!(matches!(
+                silent_challenge_error(&MockErr::Transport("blip".into())),
+                SilentChallengeOutcome::Transient { .. }
+            ));
         }
 
         #[tokio::test]

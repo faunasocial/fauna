@@ -45,9 +45,11 @@ The load-bearing invariants pinned here
 import importlib.util
 import os
 import re
+import struct
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+import zipfile
 
 import pytest
 
@@ -501,3 +503,184 @@ class TestStorePackageBuildScript:
                 version="0.1.1.0",
                 arch="x64",
             )
+
+
+# ── Grading a packed upload (`build-store-package.py --grade`) ────────────────────
+#
+# What the Store-upload workflow runs on each package before it hands it over, and
+# what a hand build runs too (installers/windows.md § Store distribution (MSIX)).
+# The packer SETS identity from its arguments; the grade reads the PACKAGE back and
+# compares it with what the caller says a real upload carries. Synthetic MSIX zips
+# and synthetic PE images, so the grades are proven on every machine; the real
+# payload is graded by the workflow's own job.
+
+GRADE_IDENTITY = "FaunaSocialTest.FaunaGradeTest"
+GRADE_PUBLISHER = "CN=00000000-0000-0000-0000-000000000000"
+_MACHINE = {"x64": 0x8664, "arm64": 0xAA64, "x86": 0x14C}
+
+
+def _pe(machine, cor_flags=None):
+    """A minimal PE32+ image: one section, and a CLR header when `cor_flags` is set."""
+    opt_size = 112 + 16 * 8
+    data = bytearray(0x400)
+    data[0:2] = b"MZ"
+    struct.pack_into("<I", data, 0x3C, 0x40)
+    data[0x40:0x44] = b"PE\0\0"
+    struct.pack_into("<HH", data, 0x44, machine, 1)            # Machine, NumberOfSections
+    struct.pack_into("<H", data, 0x44 + 16, opt_size)          # SizeOfOptionalHeader
+    opt = 0x58
+    struct.pack_into("<H", data, opt, 0x20B)                   # PE32+
+    dirs = opt + 112
+    struct.pack_into("<I", data, dirs - 4, 16)                 # NumberOfRvaAndSizes
+    if cor_flags is not None:
+        struct.pack_into("<II", data, dirs + 14 * 8, 0x1000, 72)   # CLR runtime header
+        struct.pack_into("<I", data, 0x200 + 16, cor_flags)        # its Flags
+    struct.pack_into("<IIII", data, opt + opt_size + 8, 0x200, 0x1000, 0x200, 0x200)
+    return bytes(data)
+
+
+def _manifest_xml(name=GRADE_IDENTITY, publisher=GRADE_PUBLISHER, version="0.1.1.0",
+                  arch="x64", capabilities=("runFullTrust",)):
+    caps = "".join(f'<rescap:Capability Name="{c}"/>' for c in capabilities)
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        f'<Package xmlns="{NS["pkg"]}" xmlns:rescap="{NS["rescap"]}">'
+        f'<Identity Name="{name}" Publisher="{publisher}" Version="{version}" '
+        f'ProcessorArchitecture="{arch}"/>'
+        f"<Capabilities>{caps}</Capabilities></Package>"
+    )
+
+
+def _msix(tmp_path, arch="x64", manifest=None, extra=None):
+    """A package-shaped zip carrying the four payload binaries built for `arch`."""
+    pe = _pe(_MACHINE[arch])
+    entries = {
+        "AppxManifest.xml": manifest if manifest is not None else _manifest_xml(arch=arch),
+        "App/FaunaApp.exe": pe,
+        "App/fauna_ffi.dll": pe,
+        "fauna-sync-agent.exe": pe,
+        "fauna_shell.dll": pe,
+    }
+    entries.update(extra or {})
+    path = tmp_path / f"Fauna-Store-{arch}.msix"
+    with zipfile.ZipFile(path, "w") as z:
+        for name, body in entries.items():
+            z.writestr(name, body)
+    return str(path)
+
+
+class TestStorePackageGrade:
+    def _grade(self, builder, path, arch="x64", version="0.1.1.0"):
+        return builder.grade_package(path, arch, GRADE_IDENTITY, GRADE_PUBLISHER, version)
+
+    @pytest.mark.parametrize("arch", ["x64", "arm64"])
+    def test_a_well_formed_package_grades_clean(self, builder, tmp_path, arch):
+        assert self._grade(builder, _msix(tmp_path, arch=arch), arch=arch) == []
+
+    @pytest.mark.parametrize("field,value", [
+        ("name", "FaunaSocial.FaunaDev"),
+        ("publisher", "CN=Fauna Dev"),
+        ("version", "0.1.0.0"),
+        ("arch", "arm64"),
+    ])
+    def test_an_identity_that_is_not_the_uploads_is_refused(self, builder, tmp_path,
+                                                           field, value):
+        problems = self._grade(builder, _msix(tmp_path, manifest=_manifest_xml(**{field: value})))
+        assert any("identity" in p.lower() for p in problems), problems
+
+    @pytest.mark.parametrize("caps", [("runFullTrust", "unvirtualizedResources"), ()])
+    def test_run_full_trust_is_the_only_capability(self, builder, tmp_path, caps):
+        problems = self._grade(builder, _msix(tmp_path, manifest=_manifest_xml(capabilities=caps)))
+        assert any("capabilit" in p.lower() for p in problems), problems
+
+    def test_a_pe_of_another_arch_is_refused(self, builder, tmp_path):
+        """An x64 binary inside the arm64 package: the slip the 2026-10-10 hand builds
+        graded by eye. The grade reads every PE's machine type."""
+        path = _msix(tmp_path, arch="arm64", extra={"App/stray.dll": _pe(_MACHINE["x64"])})
+        problems = self._grade(builder, path, arch="arm64")
+        assert any("App/stray.dll" in p for p in problems), problems
+
+    def test_an_il_only_managed_assembly_is_arch_neutral(self, builder, tmp_path):
+        """AnyCPU .NET assemblies carry the i386 machine type plus the ILONLY flag;
+        they run on either arch, so they are not a stray binary."""
+        path = _msix(tmp_path, arch="arm64",
+                     extra={"App/Managed.dll": _pe(_MACHINE["x86"], cor_flags=0x1)})
+        assert self._grade(builder, path, arch="arm64") == []
+
+    def test_a_32bit_required_managed_assembly_is_refused(self, builder, tmp_path):
+        path = _msix(tmp_path, extra={"App/X86Only.dll": _pe(_MACHINE["x86"], cor_flags=0x3)})
+        assert any("App/X86Only.dll" in p for p in self._grade(builder, path))
+
+    def test_a_native_x86_binary_is_refused(self, builder, tmp_path):
+        path = _msix(tmp_path, extra={"App/helper.exe": _pe(_MACHINE["x86"])})
+        assert any("App/helper.exe" in p for p in self._grade(builder, path))
+
+    def test_a_binary_that_is_not_a_pe_is_refused(self, builder, tmp_path):
+        path = _msix(tmp_path, extra={"App/broken.dll": b"not a portable executable"})
+        assert any("App/broken.dll" in p for p in self._grade(builder, path))
+
+    def test_debug_symbols_are_refused(self, builder, tmp_path):
+        path = _msix(tmp_path, extra={"App/FaunaApp.pdb": b"symbols"})
+        assert any(".pdb" in p for p in self._grade(builder, path))
+
+    def test_the_automation_surface_is_refused(self, builder, tmp_path):
+        """The packer refuses a test-flavour payload at staging; the grade re-reads
+        the PACKAGE, so one packed with the opt-out still cannot pass."""
+        app = _pe(_MACHINE["x86"], cor_flags=0x1) + b"FaunaApp.Testing\x00"
+        path = _msix(tmp_path, extra={"App/FaunaApp.dll": app})
+        assert any("automation surface" in p for p in self._grade(builder, path))
+
+
+class TestStorePackageFlavourGrade:
+    """The Store package is the `store-safe` flavour (installers/windows.md § Store
+    distribution, the flavour paragraph, owner ruling 2026-10-14): its native core
+    carries no payments plane, and zaps and peer-to-peer sharing go with it. The
+    grade reads the packaged fauna_ffi.dll for the names `just
+    windows-store-safe-check` scans in its native column."""
+
+    def _grade(self, builder, path, flavour):
+        return builder.grade_package(path, "x64", GRADE_IDENTITY, GRADE_PUBLISHER,
+                                     "0.1.1.0", flavour=flavour)
+
+    def _ffi(self, *carried):
+        return _pe(_MACHINE["x64"]) + b"".join(s + b"\x00" for s in carried)
+
+    def test_the_store_flavour_is_the_default(self, builder, tmp_path):
+        """A grade that names no flavour grades the ruled one, so a hand re-run
+        cannot pass a full package by omission."""
+        path = _msix(tmp_path, extra={"App/fauna_ffi.dll": self._ffi(b"fauna.payments.invoice")})
+        problems = builder.grade_package(path, "x64", GRADE_IDENTITY, GRADE_PUBLISHER, "0.1.1.0")
+        assert any("fauna.payments." in p for p in problems), problems
+
+    def test_an_excised_core_grades_clean(self, builder, tmp_path):
+        path = _msix(tmp_path, extra={"App/fauna_ffi.dll": self._ffi(b"fauna.feed.post")})
+        assert self._grade(builder, path, "store-safe") == []
+
+    @pytest.mark.parametrize("carried", [
+        b"fauna.payments.invoice", b"fauna.tips.send", b"fauna.nostr.zap_signers.list",
+        b"uniffi_fauna_ffi_fn_func_offline_share_begin", b"FfiSharePlaneView",
+    ])
+    def test_a_core_carrying_an_excised_plane_is_refused(self, builder, tmp_path, carried):
+        path = _msix(tmp_path, extra={"App/fauna_ffi.dll": self._ffi(carried)})
+        problems = self._grade(builder, path, "store-safe")
+        assert any("App/fauna_ffi.dll" in p and "store-safe" in p for p in problems), problems
+
+    def test_a_package_without_its_core_is_refused(self, builder, tmp_path):
+        """No fauna_ffi.dll is an empty scan, which every absence check would read
+        as a clean excision."""
+        path = _msix(tmp_path)
+        with zipfile.ZipFile(path) as z:
+            kept = {n: z.read(n) for n in z.namelist() if n != "App/fauna_ffi.dll"}
+        with zipfile.ZipFile(path, "w") as z:
+            for name, body in kept.items():
+                z.writestr(name, body)
+        problems = self._grade(builder, path, "store-safe")
+        assert any("App/fauna_ffi.dll" in p and "missing" in p for p in problems), problems
+
+    def test_the_full_flavour_keeps_the_payments_plane(self, builder, tmp_path):
+        path = _msix(tmp_path, extra={"App/fauna_ffi.dll": self._ffi(b"fauna.payments.invoice")})
+        assert self._grade(builder, path, "full") == []
+
+    def test_an_unknown_flavour_is_refused(self, builder, tmp_path):
+        with pytest.raises(ValueError):
+            self._grade(builder, _msix(tmp_path), "kids-safe")

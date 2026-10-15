@@ -51,9 +51,9 @@ const DID_KEY_PREFIX: &str = "did:key:z";
 const ED25519_MULTICODEC: [u8; 2] = [0xED, 0x01];
 
 /// Every top-level member of the extension object (`third-party.md` § The
-/// manifest). This module reads `version`, `publisher`, `kinds`, `bridge` and
-/// `service_auth`; the rest are known members other slices interpret, kept
-/// verbatim.
+/// manifest). This module reads `version`, `publisher`, `kinds`, `bridge`,
+/// `ingress`, `events_uri`, `service_auth` and `activitypub_peers`; the rest
+/// are known members other slices interpret, kept verbatim.
 const PAYLOAD_MEMBERS: &[&str] = &[
     "version",
     "publisher",
@@ -64,6 +64,7 @@ const PAYLOAD_MEMBERS: &[&str] = &[
     "ingress",
     "events_uri",
     "service_auth",
+    "activitypub_peers",
 ];
 
 /// The most `service_auth` entries (audiences) one manifest may declare
@@ -71,6 +72,14 @@ const PAYLOAD_MEMBERS: &[&str] = &[
 pub const MAX_SERVICE_AUTH_AUDIENCES: usize = 16;
 /// The most `lxm` methods one `service_auth` entry may name.
 pub const MAX_SERVICE_AUTH_METHODS: usize = 64;
+/// The most hosts one manifest's `activitypub_peers` member may declare
+/// (`third-party.md` § The manifest; refutable).
+pub const MAX_ACTIVITYPUB_PEERS: usize = 64;
+/// The most entries (path prefixes and whole-name labels together) one
+/// manifest's `ingress` member may declare (`third-party.md` § The manifest; refutable).
+pub const MAX_INGRESS_PATHS: usize = 16;
+/// The longest `ingress` path prefix, in bytes.
+pub const MAX_INGRESS_PATH_BYTES: usize = 128;
 
 /// Why a manifest was refused. Each refusal happens at resolution — a
 /// document carrying one never yields a principal or a kind.
@@ -141,12 +150,15 @@ pub struct ManifestKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifiedManifest {
     /// The compact JWS verbatim — what the plane row carries and every
-    /// replica re-verifies.
+    /// replica re-verifies. Empty for the development carve-out's unsigned
+    /// manifest ([`parse_development_manifest`]), which nothing re-verifies.
     pub jws: String,
     /// The publisher — the document's host.
     pub publisher_domain: String,
-    /// The publisher's Ed25519 key, raw (the row's `publisher_key`).
-    pub publisher_key: [u8; 32],
+    /// The publisher's Ed25519 key, raw (the row's `publisher_key`). `None`
+    /// only for the development carve-out's unsigned manifest
+    /// ([`parse_development_manifest`]); every [`verify_manifest`] carries one.
+    pub publisher_key: Option<[u8; 32]>,
     /// The declared kinds, in manifest order.
     pub kinds: Vec<ManifestKind>,
     /// The `bridge` block, validated — `None` for a document that is not a
@@ -158,11 +170,20 @@ pub struct VerifiedManifest {
     /// (`fauna_bridge_atproto::authz::service_auth_lxm_admitted`), which the
     /// nest's resolver applies after this parse.
     pub service_auth: Vec<ServiceAuthEntry>,
+    /// The `activitypub_peers` member, validated by [`parse_activitypub_peers`]
+    /// — empty for a document that declares none: the hosts the oracle's
+    /// `activitypub.http_sig` class signs requests to.
+    pub activitypub_peers: Vec<String>,
     /// The `events_uri` member, validated by [`validate_events_uri`] —
     /// `None` for a document that declares none (absent or `null`): the
     /// webhook the events doors POST to (`transport.md` § Push events →
     /// *Third-party event doors*).
     pub events_uri: Option<String>,
+    /// The `ingress` member, validated by [`parse_ingress`] — empty for a
+    /// document that declares none: the path prefixes the nest proxies to
+    /// the plugin's `ingress.handle` (`security.md` § Co-resident process
+    /// trust boundary → *Hosted third-party code*).
+    pub ingress: Vec<IngressEntry>,
     /// The whole payload object, for the members other slices interpret.
     pub payload: Map<String, Value>,
 }
@@ -320,6 +341,183 @@ fn parse_service_auth(value: &Value) -> Result<Vec<ServiceAuthEntry>, ManifestEr
             lxm,
             extra: Default::default(),
         });
+    }
+    Ok(out)
+}
+
+/// Is `h` a host a manifest may name as an outbound peer: a lowercase DNS
+/// name under the publisher grammar, never an IP literal (the grammar's
+/// labels admit digits, so an IPv4 literal would pass it). The rule
+/// `execution.hosts` and `activitypub_peers` share.
+fn is_valid_peer_host(h: &str) -> bool {
+    is_valid_publisher(h) && h.parse::<std::net::Ipv4Addr>().is_err()
+}
+
+/// Parse and validate the `activitypub_peers` member (`third-party.md` § The
+/// manifest): at most [`MAX_ACTIVITYPUB_PEERS`] distinct exact hostnames —
+/// lowercase DNS names, no wildcard, no port, no IP literal.
+fn parse_activitypub_peers(value: &Value) -> Result<Vec<String>, ManifestError> {
+    let bad = |why: String| ManifestError::BadPayload(format!("activitypub_peers: {why}"));
+    let entries = value
+        .as_array()
+        .ok_or_else(|| bad("must be an array".into()))?;
+    if entries.len() > MAX_ACTIVITYPUB_PEERS {
+        return Err(bad(format!("at most {MAX_ACTIVITYPUB_PEERS} hosts")));
+    }
+    let mut out: Vec<String> = Vec::with_capacity(entries.len());
+    for h in entries {
+        let h = h
+            .as_str()
+            .filter(|h| is_valid_peer_host(h))
+            .ok_or_else(|| bad(format!("{h} is not a lowercase DNS name")))?;
+        if out.iter().any(|x| x == h) {
+            return Err(bad(format!("{h:?} is declared twice")));
+        }
+        out.push(h.to_string());
+    }
+    Ok(out)
+}
+
+/// One `ingress` entry (`third-party.md` § The manifest): either a path
+/// prefix on the nest's own host, or a whole name under the nest's apex,
+/// whose requests the nest terminates and proxies to the plugin
+/// (`security.md` § Co-resident process trust boundary → *Hosted third-party
+/// code*). An entry claims one or the other, never both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IngressEntry {
+    /// `{ "path": "/matrix/" }` — an absolute prefix ending in `/`: at least
+    /// one segment, each of ASCII letters, digits and `-._~`, never `.` or
+    /// `..`; served on the nest's own host.
+    Path(String),
+    /// `{ "sni": "matrix" }` — one lowercase DNS label; the claim is the
+    /// whole name `<label>.<apex>` of whichever nest installs the document
+    /// (a document installs on many nests, so a name is relative to the
+    /// nest's apex, never spelled in full). A label the nest serves itself
+    /// (`fauna_core::web::RESERVED_SUBDOMAIN_LABELS`) refuses here, on every
+    /// nest alike.
+    Name(String),
+}
+
+impl IngressEntry {
+    /// The path prefix, for a path entry.
+    #[must_use]
+    pub fn path(&self) -> Option<&str> {
+        match self {
+            Self::Path(p) => Some(p),
+            Self::Name(_) => None,
+        }
+    }
+
+    /// The claimed label, for a whole-name entry.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Name(n) => Some(n),
+            Self::Path(_) => None,
+        }
+    }
+}
+
+/// One lowercase DNS label a plugin may claim under the nest's apex: 1 to
+/// [`fauna_core::web::MAX_DNS_LABEL_BYTES`] bytes of `a-z`, `0-9` and `-`,
+/// neither starting nor ending in `-`, and not a label the nest serves
+/// itself. Underscore labels (`_acme-challenge`) fail the charset, so the
+/// challenge host can never be claimed either.
+fn is_valid_ingress_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= fauna_core::web::MAX_DNS_LABEL_BYTES
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+        && !fauna_core::web::is_reserved_subdomain_label(label)
+}
+
+fn is_valid_ingress_path(path: &str) -> bool {
+    let Some(inner) = path.strip_prefix('/').and_then(|p| p.strip_suffix('/')) else {
+        return false;
+    };
+    path.len() <= MAX_INGRESS_PATH_BYTES
+        && inner.split('/').all(|seg| {
+            !seg.is_empty()
+                && seg != "."
+                && seg != ".."
+                && seg
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~'))
+        })
+}
+
+/// Parse and validate the `ingress` member (`third-party.md` § The
+/// manifest): at most [`MAX_INGRESS_PATHS`] entries `{ "path", "sni" }`,
+/// each claiming exactly one of the two — a `path`, an absolute prefix
+/// ending in `/` with no `..`, no query and no percent-escape, no prefix
+/// declared twice or inside another; or an `sni`, one lowercase DNS label
+/// under the nest's apex ([`IngressEntry::Name`]), no label twice and never
+/// one the nest serves itself. Which prefixes and names the nest already
+/// answers for, and which another installed plugin holds, is the nest's own
+/// refusal, at install.
+///
+/// # Errors
+/// [`ManifestError::BadPayload`] naming the rule broken.
+pub fn parse_ingress(value: &Value) -> Result<Vec<IngressEntry>, ManifestError> {
+    let bad = |why: String| ManifestError::BadPayload(format!("ingress: {why}"));
+    let entries = value
+        .as_array()
+        .ok_or_else(|| bad("must be an array".into()))?;
+    if entries.len() > MAX_INGRESS_PATHS {
+        return Err(bad(format!("at most {MAX_INGRESS_PATHS} entries")));
+    }
+    let mut out: Vec<IngressEntry> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let obj = entry
+            .as_object()
+            .ok_or_else(|| bad(format!("{entry} is not an object")))?;
+        only_members(obj, &["path", "sni"])?;
+        let set = |key: &str| obj.get(key).filter(|v| !v.is_null());
+        let parsed = match (set("path"), set("sni")) {
+            (Some(_), Some(_)) => {
+                return Err(bad(format!(
+                    "{entry} claims both a path and a name; an entry claims one"
+                )));
+            }
+            (None, None) => return Err(bad(format!("{entry} claims neither a path nor a name"))),
+            (Some(path), None) => {
+                let path = path
+                    .as_str()
+                    .filter(|p| is_valid_ingress_path(p))
+                    .ok_or_else(|| bad(format!("{entry} has no valid path prefix")))?;
+                if let Some(clash) = out
+                    .iter()
+                    .filter_map(IngressEntry::path)
+                    .find(|theirs| theirs.starts_with(path) || path.starts_with(theirs))
+                {
+                    return Err(bad(format!("{path:?} overlaps {clash:?}")));
+                }
+                IngressEntry::Path(path.to_string())
+            }
+            (None, Some(name)) => {
+                let label = name
+                    .as_str()
+                    .filter(|l| is_valid_ingress_label(l))
+                    .ok_or_else(|| {
+                        bad(format!(
+                            "{entry} has no valid sni label: one lowercase DNS label under the \
+                             nest's apex, never a name the nest serves itself"
+                        ))
+                    })?;
+                if out
+                    .iter()
+                    .filter_map(IngressEntry::name)
+                    .any(|l| l == label)
+                {
+                    return Err(bad(format!("sni {label:?} is declared twice")));
+                }
+                IngressEntry::Name(label.to_string())
+            }
+        };
+        out.push(parsed);
     }
     Ok(out)
 }
@@ -584,36 +782,60 @@ impl VerifiedManifest {
                 "execution.digest must be sha256: and 64 lowercase hex digits".into(),
             ));
         }
-        let hosts = match obj.get("hosts") {
-            None => Vec::new(),
-            Some(Value::Array(entries)) => entries
-                .iter()
-                .map(|h| {
-                    h.as_str()
-                        // The publisher grammar's labels admit digits, so an
-                        // IPv4 literal would pass it; the member never does.
-                        .filter(|h| {
-                            is_valid_publisher(h) && h.parse::<std::net::Ipv4Addr>().is_err()
-                        })
-                        .map(str::to_string)
-                        .ok_or_else(|| {
-                            ManifestError::BadPayload(format!(
-                                "execution.hosts entry {h} is not a lowercase DNS name"
-                            ))
-                        })
-                })
-                .collect::<Result<_, _>>()?,
-            Some(_) => {
-                return Err(ManifestError::BadPayload(
-                    "execution.hosts must be an array".into(),
-                ));
-            }
-        };
         Ok(Some(WasmExecution {
             module: module.to_string(),
             digest: digest.to_string(),
-            hosts,
+            hosts: execution_hosts(obj)?,
         }))
+    }
+
+    /// The development carve-out's outbound surface
+    /// ([`parse_development_manifest`]): its `execution.hosts`, empty when the
+    /// manifest declares no `execution` — a development plugin reaches nothing
+    /// it did not declare, exactly as a published one.
+    ///
+    /// # Errors
+    /// An `execution` that is not `{ "form": "wasm", "hosts": [...] }`, or a
+    /// `hosts` entry that is not a lowercase DNS name.
+    pub fn development_hosts(&self) -> Result<Vec<String>, ManifestError> {
+        let Some(execution) = self.payload.get("execution") else {
+            return Ok(Vec::new());
+        };
+        let Value::Object(obj) = execution else {
+            return Err(ManifestError::BadPayload(
+                "execution must be an object".into(),
+            ));
+        };
+        only_members(obj, &["form", "hosts"])?;
+        if str_member(obj, "form")? != EXECUTION_FORM_WASM {
+            return Err(ManifestError::BadPayload(format!(
+                "a development plugin's execution form is {EXECUTION_FORM_WASM}"
+            )));
+        }
+        execution_hosts(obj)
+    }
+}
+
+/// An `execution` member's `hosts`: lowercase DNS names, empty when absent.
+fn execution_hosts(obj: &Map<String, Value>) -> Result<Vec<String>, ManifestError> {
+    match obj.get("hosts") {
+        None => Ok(Vec::new()),
+        Some(Value::Array(entries)) => entries
+            .iter()
+            .map(|h| {
+                h.as_str()
+                    .filter(|h| is_valid_peer_host(h))
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        ManifestError::BadPayload(format!(
+                            "execution.hosts entry {h} is not a lowercase DNS name"
+                        ))
+                    })
+            })
+            .collect(),
+        Some(_) => Err(ManifestError::BadPayload(
+            "execution.hosts must be an array".into(),
+        )),
     }
 }
 
@@ -780,12 +1002,7 @@ pub fn verify_manifest(jws: &str, document_host: &str) -> Result<VerifiedManifes
     // The payload: the extension object, verified bytes parsed.
     let payload: Map<String, Value> = serde_json::from_slice(&b64(payload_b64, "payload")?)
         .map_err(|_| ManifestError::BadPayload("payload is not a JSON object".into()))?;
-    only_members(&payload, PAYLOAD_MEMBERS)?;
-    if payload.get("version").and_then(Value::as_u64) != Some(MANIFEST_VERSION) {
-        return Err(ManifestError::BadPayload(format!(
-            "version must be {MANIFEST_VERSION}"
-        )));
-    }
+    check_envelope(&payload)?;
 
     let publisher = payload
         .get("publisher")
@@ -804,7 +1021,32 @@ pub fn verify_manifest(jws: &str, document_host: &str) -> Result<VerifiedManifes
             "publisher.key must equal the JWS header kid".into(),
         ));
     }
+    let domain = domain.to_string();
+    parse_payload(jws.to_string(), payload, domain, Some(key_bytes))
+}
 
+/// The members every manifest's payload is held to before its publisher is
+/// read: no unknown member, and the one version.
+fn check_envelope(payload: &Map<String, Value>) -> Result<(), ManifestError> {
+    only_members(payload, PAYLOAD_MEMBERS)?;
+    if payload.get("version").and_then(Value::as_u64) != Some(MANIFEST_VERSION) {
+        return Err(ManifestError::BadPayload(format!(
+            "version must be {MANIFEST_VERSION}"
+        )));
+    }
+    Ok(())
+}
+
+/// The payload half every manifest shares, once its publisher is settled —
+/// the signed document's ([`verify_manifest`]) and the development carve-out's
+/// ([`parse_development_manifest`]): each member parsed against `domain`.
+fn parse_payload(
+    jws: String,
+    payload: Map<String, Value>,
+    domain: String,
+    publisher_key: Option<[u8; 32]>,
+) -> Result<VerifiedManifest, ManifestError> {
+    let domain = domain.as_str();
     let kinds = match payload.get("kinds") {
         None => Vec::new(),
         Some(Value::Array(entries)) => parse_kinds(entries, domain)?,
@@ -814,6 +1056,16 @@ pub fn verify_manifest(jws: &str, document_host: &str) -> Result<VerifiedManifes
     let service_auth = payload
         .get("service_auth")
         .map(parse_service_auth)
+        .transpose()?
+        .unwrap_or_default();
+    let activitypub_peers = payload
+        .get("activitypub_peers")
+        .map(parse_activitypub_peers)
+        .transpose()?
+        .unwrap_or_default();
+    let ingress = payload
+        .get("ingress")
+        .map(parse_ingress)
         .transpose()?
         .unwrap_or_default();
     let events_uri = match payload.get("events_uri") {
@@ -830,13 +1082,15 @@ pub fn verify_manifest(jws: &str, document_host: &str) -> Result<VerifiedManifes
     };
 
     Ok(VerifiedManifest {
-        jws: jws.to_string(),
+        jws,
         publisher_domain: domain.to_string(),
-        publisher_key: key_bytes,
+        publisher_key,
         kinds,
         bridge,
         service_auth,
+        activitypub_peers,
         events_uri,
+        ingress,
         payload,
     })
 }
@@ -891,10 +1145,42 @@ pub fn verify_manifest_pinned(
     pinned_key: &[u8; 32],
 ) -> Result<VerifiedManifest, ManifestError> {
     let verified = verify_manifest(jws, document_host)?;
-    if &verified.publisher_key != pinned_key {
+    if verified.publisher_key.as_ref() != Some(pinned_key) {
         return Err(ManifestError::KeyChanged);
     }
     Ok(verified)
+}
+
+/// Parse the development carve-out's manifest (`third-party.md` § Developer
+/// loop): the unsigned object a sibling `<stem>.fauna.json` beside a local
+/// component carries, read only on that install path. The same payload
+/// grammar as a signed manifest, under the loopback publisher
+/// ([`crate::plugins::DEVELOPMENT_PUBLISHER`]) — so every kind it declares is
+/// an `ext.localhost.*` kind — with no publisher key, `jws` empty, and
+/// `publisher` refused (there is no signature for it to name a key for). Its
+/// `execution`, if present, is `{ "form": "wasm", "hosts": [...] }`: the file
+/// is the module, so `module` and `digest` have nothing to say.
+///
+/// # Errors
+/// Every refusal [`verify_manifest`] applies to the payload, plus a
+/// `publisher` member and an `execution` that is not that shape.
+pub fn parse_development_manifest(
+    payload: Map<String, Value>,
+) -> Result<VerifiedManifest, ManifestError> {
+    check_envelope(&payload)?;
+    if payload.contains_key("publisher") {
+        return Err(ManifestError::BadPayload(
+            "a development manifest names no publisher: it is the loopback host".into(),
+        ));
+    }
+    let manifest = parse_payload(
+        String::new(),
+        payload,
+        crate::plugins::DEVELOPMENT_PUBLISHER.to_string(),
+        None,
+    )?;
+    manifest.development_hosts()?;
+    Ok(manifest)
 }
 
 fn parse_kinds(entries: &[Value], publisher: &str) -> Result<Vec<ManifestKind>, ManifestError> {
@@ -1007,7 +1293,7 @@ mod tests {
         ])));
         let m = verify_manifest(&jws, "example.com").unwrap();
         assert_eq!(m.publisher_domain, "example.com");
-        assert_eq!(m.publisher_key, key().verifying_key().to_bytes());
+        assert_eq!(m.publisher_key, Some(key().verifying_key().to_bytes()));
         assert_eq!(m.jws, jws);
         let kinds: Vec<String> = m.kinds.iter().map(|k| k.kind.to_string()).collect();
         assert_eq!(kinds, ["ext.example.com.notes", "ext.example.com.tags"]);
@@ -1267,6 +1553,167 @@ mod tests {
         );
     }
 
+    fn with_activitypub_peers(peers: Value) -> Result<VerifiedManifest, ManifestError> {
+        let mut p = payload(json!([]));
+        p["activitypub_peers"] = peers;
+        verify_manifest(&sign(&p), "example.com")
+    }
+
+    /// `third-party.md` § The manifest: `activitypub_peers` is the declared
+    /// set the oracle's `activitypub.http_sig` class signs to — exact
+    /// lowercase hostnames, capped, and a refusal refuses the document.
+    #[test]
+    fn the_activitypub_peers_member_is_a_set_of_exact_hostnames() {
+        let m = with_activitypub_peers(json!(["mastodon.social", "gts.example.org"])).unwrap();
+        assert_eq!(m.activitypub_peers, ["mastodon.social", "gts.example.org"]);
+        let none = verify_manifest(&sign(&payload(json!([]))), "example.com").unwrap();
+        assert!(none.activitypub_peers.is_empty());
+        for bad in [
+            json!("mastodon.social"),
+            json!(["Mastodon.Social"]),
+            json!(["*.example.org"]),
+            json!(["mastodon.social:443"]),
+            json!(["10.0.0.1"]),
+            json!(["https://mastodon.social"]),
+            json!(["mastodon.social", "mastodon.social"]),
+            json!([7]),
+        ] {
+            assert!(
+                matches!(
+                    with_activitypub_peers(bad.clone()),
+                    Err(ManifestError::BadPayload(_))
+                ),
+                "{bad} must refuse"
+            );
+        }
+        let at_cap: Vec<String> = (0..MAX_ACTIVITYPUB_PEERS)
+            .map(|i| format!("p{i}.example"))
+            .collect();
+        assert!(with_activitypub_peers(json!(at_cap)).is_ok());
+        let over: Vec<String> = (0..=MAX_ACTIVITYPUB_PEERS)
+            .map(|i| format!("p{i}.example"))
+            .collect();
+        assert!(with_activitypub_peers(json!(over)).is_err());
+    }
+
+    fn with_ingress(ingress: Value) -> Result<VerifiedManifest, ManifestError> {
+        let mut p = payload(json!([]));
+        p["ingress"] = ingress;
+        verify_manifest(&sign(&p), "example.com")
+    }
+
+    /// `third-party.md` § The manifest: `ingress` is a list of path prefixes
+    /// on the nest's own host, and any malformed or overlapping prefix
+    /// refuses the document.
+    #[test]
+    fn the_ingress_member_is_a_set_of_disjoint_path_prefixes() {
+        let m = with_ingress(json!([
+            { "path": "/matrix/", "sni": null },
+            { "path": "/_matrix/client/" },
+        ]))
+        .unwrap();
+        let paths: Vec<&str> = m.ingress.iter().filter_map(IngressEntry::path).collect();
+        assert_eq!(paths, ["/matrix/", "/_matrix/client/"]);
+        let none = verify_manifest(&sign(&payload(json!([]))), "example.com").unwrap();
+        assert!(none.ingress.is_empty());
+        for bad in [
+            json!({ "path": "/matrix/", "sni": null }),
+            json!([{ "path": "/matrix/", "sni": "matrix" }]),
+            json!([{ "path": "/matrix" }]),
+            json!([{ "path": "matrix/" }]),
+            json!([{ "path": "/" }]),
+            json!([{ "path": "//" }]),
+            json!([{ "path": "/a//b/" }]),
+            json!([{ "path": "/a/../b/" }]),
+            json!([{ "path": "/./" }]),
+            json!([{ "path": "/a?b=1/" }]),
+            json!([{ "path": "/a%2e/" }]),
+            json!([{ "path": "/a b/" }]),
+            json!([{ "path": "/matrix/" }, { "path": "/matrix/" }]),
+            json!([{ "path": "/matrix/" }, { "path": "/matrix/client/" }]),
+            json!([{ "path": "/matrix/client/" }, { "path": "/matrix/" }]),
+            json!([{ "path": "/matrix/", "port": 8448 }]),
+            json!([{ "sni": null }]),
+            json!(["/matrix/"]),
+        ] {
+            assert!(
+                matches!(
+                    with_ingress(bad.clone()),
+                    Err(ManifestError::BadPayload(_) | ManifestError::UnknownMember(_))
+                ),
+                "{bad} must refuse"
+            );
+        }
+        let long = format!("/{}/", "a".repeat(MAX_INGRESS_PATH_BYTES - 2));
+        assert!(with_ingress(json!([{ "path": long }])).is_ok());
+        let too_long = format!("/{}/", "a".repeat(MAX_INGRESS_PATH_BYTES - 1));
+        assert!(with_ingress(json!([{ "path": too_long }])).is_err());
+        let at_cap: Vec<Value> = (0..MAX_INGRESS_PATHS)
+            .map(|i| json!({ "path": format!("/p{i}/") }))
+            .collect();
+        assert!(with_ingress(json!(at_cap)).is_ok());
+        let over: Vec<Value> = (0..=MAX_INGRESS_PATHS)
+            .map(|i| json!({ "path": format!("/p{i}/") }))
+            .collect();
+        assert!(with_ingress(json!(over)).is_err());
+    }
+
+    /// `third-party.md` § The manifest: an `sni` entry claims the whole name
+    /// `<label>.<apex>` of the installing nest as one lowercase DNS label — a
+    /// document installs on many nests, so a full name is never spelled; an
+    /// entry claims a path or a name, never both; and a label the nest serves
+    /// itself refuses on every nest alike.
+    #[test]
+    fn the_ingress_member_claims_whole_names_as_labels_under_the_nests_apex() {
+        let m = with_ingress(json!([
+            { "sni": "matrix" },
+            { "path": null, "sni": "synapse-1" },
+            { "path": "/_matrix/" },
+        ]))
+        .unwrap();
+        assert_eq!(
+            m.ingress,
+            [
+                IngressEntry::Name("matrix".into()),
+                IngressEntry::Name("synapse-1".into()),
+                IngressEntry::Path("/_matrix/".into()),
+            ]
+        );
+        assert_eq!(m.ingress[0].name(), Some("matrix"));
+        assert_eq!(m.ingress[0].path(), None);
+        assert_eq!(m.ingress[2].path(), Some("/_matrix/"));
+        let longest = "a".repeat(fauna_core::web::MAX_DNS_LABEL_BYTES);
+        assert!(with_ingress(json!([{ "sni": longest }])).is_ok());
+        let mut bad = vec![
+            json!([{ "sni": "matrix.example.com" }]),
+            json!([{ "sni": "Matrix" }]),
+            json!([{ "sni": "" }]),
+            json!([{ "sni": "-matrix" }]),
+            json!([{ "sni": "matrix-" }]),
+            json!([{ "sni": "ma trix" }]),
+            json!([{ "sni": "ma_trix" }]),
+            json!([{ "sni": "_acme-challenge" }]),
+            json!([{ "sni": "*" }]),
+            json!([{ "sni": 5 }]),
+            json!([{ "sni": "matrix" }, { "sni": "matrix" }]),
+            json!([{ "path": "/matrix/", "sni": "matrix" }]),
+            json!([{ "path": null, "sni": null }]),
+            json!([{ "sni": "a".repeat(fauna_core::web::MAX_DNS_LABEL_BYTES + 1) }]),
+        ];
+        // Every label the nest serves itself (`mail.`, `app.`, `pds.`, …).
+        bad.extend(
+            fauna_core::web::RESERVED_SUBDOMAIN_LABELS
+                .iter()
+                .map(|l| json!([{ "sni": l }])),
+        );
+        for bad in bad {
+            assert!(
+                matches!(with_ingress(bad.clone()), Err(ManifestError::BadPayload(_))),
+                "{bad} must refuse"
+            );
+        }
+    }
+
     fn with_service_auth(service_auth: Value) -> Result<VerifiedManifest, ManifestError> {
         let mut p = payload(json!([]));
         p["service_auth"] = service_auth;
@@ -1459,6 +1906,52 @@ mod tests {
             json!({ "form": "wasm", "module": "https://example.com/p.wasm", "digest": digest, "image": "x" }),
         ] {
             assert!(with(bad.clone()).wasm_execution().is_err(), "{bad}");
+        }
+    }
+
+    /// The development carve-out's unsigned manifest (`third-party.md`
+    /// § Developer loop): the signed grammar's payload half under the
+    /// loopback publisher, no key, no `publisher`, `execution` only for hosts.
+    #[test]
+    fn a_development_manifest_is_the_payload_grammar_under_the_loopback_publisher() {
+        let dev = |v: Value| parse_development_manifest(v.as_object().unwrap().clone());
+        let m = dev(json!({
+            "version": 1,
+            "kinds": [{
+                "kind": "ext.localhost.notes",
+                "class": "state", "merge": "latest-wins", "floor": "none",
+            }],
+            "execution": { "form": "wasm", "hosts": ["api.example.com"] },
+            "settings_schema": { "greeting": { "type": "string" } },
+        }))
+        .unwrap();
+        assert_eq!(m.publisher_domain, "localhost");
+        assert_eq!(m.publisher_key, None);
+        assert!(m.jws.is_empty());
+        assert_eq!(m.kinds[0].kind.to_string(), "ext.localhost.notes");
+        assert_eq!(m.development_hosts().unwrap(), ["api.example.com"]);
+        assert_eq!(
+            dev(json!({ "version": 1 })).unwrap().development_hosts(),
+            Ok(Vec::new()),
+            "no execution reaches nothing"
+        );
+
+        for bad in [
+            // A real publisher's kind: the loopback host publishes only its own.
+            json!({ "version": 1, "kinds": [{
+                "kind": "ext.example.com.notes",
+                "class": "state", "merge": "latest-wins", "floor": "none",
+            }] }),
+            json!({ "version": 1, "publisher": { "domain": "localhost", "key": did() } }),
+            json!({ "version": 2 }),
+            json!({ "version": 1, "unknown": true }),
+            json!({ "version": 1, "execution": { "form": "container" } }),
+            json!({ "version": 1, "execution": {
+                "form": "wasm", "module": "https://example.com/p.wasm",
+            } }),
+            json!({ "version": 1, "execution": { "form": "wasm", "hosts": ["10.0.0.1"] } }),
+        ] {
+            assert!(dev(bad.clone()).is_err(), "{bad}");
         }
     }
 

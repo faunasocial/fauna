@@ -236,9 +236,12 @@ pub struct EventsState {
     /// drops what the owner has dismissed, so this page never re-derives that
     /// rule.
     ///
-    /// Loaded with the calendar list rather than on a poll of its own — the
-    /// rows change only when the inbound drain refuses something, which is
-    /// rare, and a nav-entry refresh is exactly when the user is looking.
+    /// Loaded with the calendar list, and re-read while the page is open on
+    /// the store-change notice ([`store_resync_op`]) — a refusal is the
+    /// runtime's own background write to the store, a source of the notice
+    /// like a pump run (`account-runtime.md` § Multi-instance concurrency →
+    /// *A runtime's own pump is a source of the notice too*, part 2) — never
+    /// on a poll of its own.
     pub refused_changes: Vec<fauna_core::data::RefusedSchedulingChange>,
     /// `calendar-import-file` — the typed path of the `.ics` file to import
     /// (events.md § Import / Export). A plain buffer, not part of the
@@ -309,6 +312,22 @@ pub fn nav_enter_op(
         organizer_email: state.organizer_email.clone(),
         selected_calendar: state.selected_calendar.clone(),
         query_gen,
+    })
+}
+
+/// The Events page's leg of the store-change handler (`App`'s
+/// `AccountStoreChanged` arm): re-read the page's one store-backed render
+/// source, the refused-change list, and nothing else — the calendars and
+/// events beside it are the nest's, so the notice says nothing about them.
+/// Reload semantics, no new render path (the `RefusedChangesLoaded` fold a
+/// dismiss already lands through); a level, not an event — an unchanged list
+/// repaints the same rows. `None` while the account store is not assembled:
+/// nothing could have changed there, and an empty read would blank the list.
+pub fn store_resync_op(
+    account_store: Option<fauna_sync_engine::account_runtime::AccountStoreHandle>,
+) -> Option<Op> {
+    Some(Op::LoadRefusedChanges {
+        account_store: Some(account_store?),
     })
 }
 
@@ -507,6 +526,10 @@ pub enum Action {
     CreateCalendarSubmit,
     ShowCreateEvent,
     CreateEventSubmit,
+    /// `event-form-discard` — empties the half-written event AND its draft rail
+    /// (`clear_event_compose`) and closes the form. Distinct from leaving the
+    /// page, which closes it and keeps the draft (drafts-survive outcome 11).
+    DiscardEvent,
     /// `events-day-cell-{YYYY-MM-DD}`, **single** press — the Outlook month→day
     /// drill-in: focus that date and switch to Day view (`ui/events.md`
     /// § Layout & flow).
@@ -628,6 +651,7 @@ impl Action {
             | Action::NextMonth
             | Action::ShowCreateCalendar
             | Action::ShowCreateEvent
+            | Action::DiscardEvent
             | Action::DrillIntoDay { .. }
             | Action::ComposeOnDay { .. }
             | Action::BackFromDetail
@@ -677,6 +701,11 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // they were writing. The buffers are emptied on a successful
             // create, on discard, and by the day-cell gesture below.
             app.events.mode = Mode::CreateEvent;
+            None
+        }
+        Action::DiscardEvent => {
+            app.events.clear_event_compose();
+            app.events.mode = Mode::List;
             None
         }
         Action::DrillIntoDay { y, m, d } => {
@@ -1161,6 +1190,11 @@ pub enum Op {
         /// `fauna_core::data::RefusedSchedulingChange::key` of the row.
         key: String,
     },
+    /// Re-read the open refused-change rows while the page is open — the
+    /// store-change notice's re-drive ([`store_resync_op`]).
+    LoadRefusedChanges {
+        account_store: Option<fauna_sync_engine::account_runtime::AccountStoreHandle>,
+    },
     /// Read the `.ics` at `path` and import its VEVENTs into `calendar_id`
     /// through the shared `CalDavClient::import_ical_events`, then re-read
     /// the calendar so the imported events are what the page shows.
@@ -1198,9 +1232,10 @@ pub enum Outcome {
         refused_changes: Vec<fauna_core::data::RefusedSchedulingChange>,
         query_gen: u64,
     },
-    /// A `refused-change-dismiss` landed; carries the re-read open rows (the
-    /// dismissed one is gone, and any row another device raised meanwhile is
-    /// now here).
+    /// The re-read open refused-change rows — after a
+    /// `refused-change-dismiss` landed (the dismissed one is gone, and any
+    /// row another device raised meanwhile is now here), or on the
+    /// store-change notice while the page is open ([`Op::LoadRefusedChanges`]).
     RefusedChangesLoaded(Vec<fauna_core::data::RefusedSchedulingChange>),
     EventsLoaded {
         calendar_id: String,
@@ -1445,15 +1480,12 @@ impl Op {
                         "no downloads directory to save the calendar into".to_string(),
                     );
                 };
-                if let Err(e) = tokio::fs::create_dir_all(&dir).await {
-                    return Outcome::Failed(format!("{}: {e}", dir.display()));
-                }
-                let path = unused_export_path(&dir, &calendar_name);
-                match tokio::fs::write(&path, ics.as_bytes()).await {
-                    Ok(()) => Outcome::IcsExported {
+                let file_name = format!("{}.ics", ics_file_stem(&calendar_name));
+                match crate::backups::save_into(&dir, &file_name, ics.as_bytes()) {
+                    Ok(path) => Outcome::IcsExported {
                         path: path.display().to_string(),
                     },
-                    Err(e) => Outcome::Failed(format!("{}: {e}", path.display())),
+                    Err(e) => Outcome::Failed(format!("{}: {e}", dir.display())),
                 }
             }
             Op::DismissRefusedChange { account_store, key } => {
@@ -1463,6 +1495,10 @@ impl Op {
                 }
                 Outcome::RefusedChangesLoaded(load_open(account_store.as_ref()).await)
             }
+            Op::LoadRefusedChanges { account_store } => Outcome::RefusedChangesLoaded(
+                fauna_client_account_runtime::refused_changes::load_open(account_store.as_ref())
+                    .await,
+            ),
             Op::RefreshEvents {
                 nest,
                 secret_hex,
@@ -2016,23 +2052,6 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             app.errors.insert(Page::Events, message);
         }
     }
-}
-
-/// Where an export of `calendar_name` lands in `dir`: the calendar's own name
-/// made safe as a file name, `.ics`, and a ` (2)`, ` (3)`, … suffix rather
-/// than overwriting a file already there — a second export of the same
-/// calendar is a new file, the way a browser download is. Pure but for the
-/// existence probe.
-fn unused_export_path(dir: &std::path::Path, calendar_name: &str) -> std::path::PathBuf {
-    let stem = ics_file_stem(calendar_name);
-    let first = dir.join(format!("{stem}.ics"));
-    if !first.exists() {
-        return first;
-    }
-    (2u32..)
-        .map(|n| dir.join(format!("{stem} ({n}).ics")))
-        .find(|p| !p.exists())
-        .unwrap_or(first)
 }
 
 /// A calendar name as a file-name stem: path separators and control or
@@ -2591,6 +2610,12 @@ pub fn elements(app: &App) -> Vec<Element> {
                 true,
                 Gesture::Events(Action::CreateEventSubmit),
             ));
+            out.push(Element::gesture_button(
+                ids::EVENT_FORM_DISCARD,
+                et::DISCARD_EVENT,
+                true,
+                Gesture::Events(Action::DiscardEvent),
+            ));
         }
         Mode::EventDetail(event_id) => render_detail(st, event_id, &mut out),
     }
@@ -2828,11 +2853,11 @@ mod tests {
         assert_eq!(ics_file_stem(""), "calendar");
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let first = unused_export_path(dir.path(), "Work");
+        let name = format!("{}.ics", ics_file_stem("Work"));
+        let first = crate::backups::save_into(dir.path(), &name, b"x").unwrap();
         assert_eq!(first, dir.path().join("Work.ics"));
-        std::fs::write(&first, "x").unwrap();
         assert_eq!(
-            unused_export_path(dir.path(), "Work"),
+            crate::backups::save_into(dir.path(), &name, b"y").unwrap(),
             dir.path().join("Work (2).ics")
         );
     }
@@ -2870,6 +2895,26 @@ mod tests {
              the offline gate, so the control stays usable with no nest: \
              acknowledging a notice you have read is not work that should need \
              a connection"
+        );
+    }
+
+    /// The store-change notice re-reads the refused-change list only — the
+    /// page's one store-backed source — and only once the account store is
+    /// assembled (before that nothing could have changed there, and an empty
+    /// read would blank the list).
+    #[test]
+    fn the_store_change_resync_reads_the_refused_list_only_once_the_store_is_up() {
+        assert!(
+            store_resync_op(None).is_none(),
+            "no account store: nothing to re-read, nothing to blank"
+        );
+        let mut app = events_test_app();
+        app.events.refused_changes = vec![refusal_row("uid-1", "Kickoff")];
+        let folded = Outcome::RefusedChangesLoaded(vec![refusal_row("uid-2", "Standup")]);
+        apply_outcome(&mut app, folded);
+        assert_eq!(
+            app.events.refused_changes[0].uid_hash, "uid-2",
+            "the fold replaces the list with the fresh read"
         );
     }
 
@@ -3292,6 +3337,7 @@ mod tests {
             "event-form-description",
             "event-form-location",
             "create-event",
+            "event-form-discard",
         ] {
             assert!(ids.contains(&want.to_string()), "missing {want}");
         }
@@ -3340,6 +3386,19 @@ mod tests {
 
         apply_local(&mut app, Action::ShowCreateEvent);
 
+        assert_eq!(app.events.new_event_summary, "half a thought");
+        // The explicit discard is the one exit that does clear (outcome 12).
+        apply_local(&mut app, Action::DiscardEvent);
+        assert!(app.events.new_event_summary.is_empty());
+        assert!(app.events.new_event_description.is_empty());
+        assert!(app.events.new_event_location.is_empty());
+        assert!(matches!(app.events.mode, Mode::List));
+        apply_local(&mut app, Action::ShowCreateEvent);
+        assert!(app.events.new_event_summary.is_empty());
+        app.events.new_event_summary = "half a thought".to_string();
+        app.events.new_event_description = "Agenda and notes".to_string();
+        app.events.new_event_location = "Room 3".to_string();
+        apply_local(&mut app, Action::ShowCreateEvent);
         assert_eq!(app.events.new_event_summary, "half a thought");
         assert_eq!(app.events.new_event_description, "Agenda and notes");
         assert_eq!(app.events.new_event_location, "Room 3");

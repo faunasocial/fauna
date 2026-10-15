@@ -10,7 +10,7 @@ default = ["format_blob", "format_text"]
 # The client-side engine lifecycle (`src/engine_lifecycle.rs`): build one folder
 # engine from nest state (row or custody read → FAIL-CLOSED content-key binding →
 # seal roots) — the one builder every engine host shares, the `fauna-ffi` hosts
-# and the desktop sync agent alike (`on-demand-files.md` § Shared sets on a
+# and the desktop sync agent alike (`on-demand-files-shared-sets.md` § Shared sets on a
 # capability host → *One mechanism*). Needs only the lean custody read
 # (`fauna-client-config`) and the base, fauna-mls-free `fauna-client-folders`
 # resolvers — never its `mls` feature's conversations graph — so the bearer-only
@@ -52,6 +52,16 @@ account-runtime = [
     "dep:fauna-peer-channel",
     "dep:fauna-transport",
 ]
+# The WS-RPC adapter's web-plane sender: the complete-set declaration
+# `SyncEngine::converge_corpus_to_website` ends with (`nest_api::ws_rpc`,
+# `web-content-hosting.md` § Content model). Off by default — the deep-crate
+# rule of `dynamic-features.md` § Compile-time excision — so a build that
+# excises web publishing (the kids flavor) carries no web-plane sender;
+# without it the adapter refuses the prune locally, which the caller treats as
+# the non-fatal error the seam's contract already allows. Every host that
+# publishes websites turns it on: the sync agent, tui, linux, the nest, and
+# fauna-ffi from its own `web-content` feature (rule (b)).
+web = ["fauna-protocol/web"]
 format_blob = []
 format_text = ["fauna-core/format_text"]
 # (`compress_chunks` retired 2026-09-03: it chose whether the upload path
@@ -154,6 +164,11 @@ fauna-client.workspace = true
 # control plane (`register` / `changes.{list,record}`) through it over the
 # `NestClient` connection (byte routes stay HTTP on `SyncClient`).
 fauna-client-sync = { path = "../fauna-client-sync" }
+# The ONE snapshot entry reader (`fauna_client_snapshots::entry_reader`): the
+# restore walk and the per-file download read every snapshot entry through it
+# — sealed-only, then licensed by the judged change row that named the
+# manifest (`backup-restore.md` § Security Properties → Integrity).
+fauna-client-snapshots = { path = "../fauna-client-snapshots" }
 # The client-side engine lifecycle (`engine_lifecycle`) resolves each set's
 # content-key binding from the nest-authoritative roster + the owner's account-plane
 # custody — the fail-closed decision every in-process deployment shares (linux,
@@ -233,6 +248,11 @@ rustix = { version = "1", features = ["fs"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# `PlaneFolderKeys` — the production re-fetch-request seam the two-mount pin
+# (`a_refetch_request_stamped_through_one_mount_is_read_through_a_second`)
+# drives over each mount's handle. Test-only; the seams crate never depends
+# back on this crate.
+fauna-account-seams = { path = "../fauna-account-seams" }
 # The generation-writer test fixture the account-runtime suite drives
 # (`generation_fixture_test_support`, re-exported at its old test path).
 fauna-account-plane = { workspace = true, features = ["test-helpers"] }

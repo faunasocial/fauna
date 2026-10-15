@@ -66,6 +66,7 @@ import datetime
 import pytest
 
 from actions import ActionLayer
+from helpers.app_launch import app_launch_config
 from conftest import _seeded_environment
 from drivers import create_driver
 from helpers.connection import wait_until_online
@@ -113,11 +114,10 @@ def _apple_launch_config(app_name, request, locale):
     Fetched via `request.getfixturevalue` (not a plain fixture parameter) so a
     `--app macos` run never triggers the iOS build, and vice versa — mirrors
     `test_account_switcher_apple.py::_apple_launch_config`."""
-    app_args = f"-AppleLocale {locale}"
-    if app_name == "ios":
-        setup = request.getfixturevalue("ios_setup")
-        return {"app_path": setup["app_path"], "udid": setup["udid"], "app_args": app_args}
-    return {"app_path": request.getfixturevalue("macos_app_path"), "app_args": app_args}
+    return {
+        **app_launch_config(app_name, request),
+        "app_args": f"-AppleLocale {locale}",
+    }
 
 
 @pytest.mark.parametrize("app_name", APPS, indirect=True)

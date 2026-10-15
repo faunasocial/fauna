@@ -19,9 +19,10 @@
 //!    binds-nothing policy, never `None`.
 
 use fauna_folders_machine::{
-    NEST_SNAPSHOTS_DEFAULT, NEST_SNAPSHOTS_OFF, NEST_SNAPSHOTS_ON, NestPlaceEdit,
-    VersionRetentionEdit, nest_place_edit_from_row, nest_place_write, nest_snapshots_label,
-    nest_snapshots_options, version_retention_edit_from_bounds, version_retention_write,
+    NEST_SNAPSHOTS_DEFAULT, NEST_SNAPSHOTS_OFF, NEST_SNAPSHOTS_ON, NestPlaceEdit, NestPlaceForm,
+    VersionRetentionEdit, nest_place_edit_from_row, nest_place_form_from_row, nest_place_reseed,
+    nest_place_write, nest_snapshots_label, nest_snapshots_options,
+    version_retention_edit_from_bounds, version_retention_write,
 };
 
 /// The select's option set is a catalog like every sibling picker
@@ -281,4 +282,84 @@ fn version_retention_prefilled_and_saved_untouched_writes_back_what_it_read() {
         let w = version_retention_write(&e);
         assert_eq!((w.max_versions_per_path, w.max_age_days), bounds);
     }
+}
+
+// ── A refresh never overwrites what the user has staged ──────────────────────
+//
+// An app re-reads its folder rows on every store change, and a busy account
+// changes its store between the typing and the save. A refresh that re-seeds the
+// six boxes unconditionally put the nest's old values back under the user's
+// cursor, and the save then sent the old policy with no error (the live red tui
+// hit on 2026-10-06). `nest_place_reseed` is the one rule every app's refresh
+// asks.
+
+fn form(quiet: &str, version_count: &str) -> NestPlaceForm {
+    NestPlaceForm {
+        policy: NestPlaceEdit {
+            snapshots: NEST_SNAPSHOTS_DEFAULT.into(),
+            quiet_secs: quiet.into(),
+            retention_snapshots: String::new(),
+            retention_days: String::new(),
+        },
+        version_retention: VersionRetentionEdit {
+            count: version_count.into(),
+            days: String::new(),
+        },
+    }
+}
+
+/// Untouched boxes follow the nest: what the user sees is what the nest holds.
+#[test]
+fn a_refresh_moves_boxes_nobody_has_typed_in() {
+    let seeded = form("60", "");
+    let fresh = form("120", "");
+    assert_eq!(
+        nest_place_reseed(Some(&seeded), &seeded, fresh.clone()),
+        Some(fresh)
+    );
+}
+
+/// A staged edit in ANY of the six boxes — the version pair included — holds
+/// the whole form, because the save sends all six together.
+#[test]
+fn a_refresh_leaves_a_staged_edit_alone_even_when_the_nest_moved() {
+    let seeded = form("60", "");
+    for on_screen in [form("300", ""), form("60", "5")] {
+        assert_eq!(
+            nest_place_reseed(Some(&seeded), &on_screen, seeded.clone()),
+            None,
+            "a same-policy tick must not wipe {on_screen:?}"
+        );
+        assert_eq!(
+            nest_place_reseed(Some(&seeded), &on_screen, form("900", "9")),
+            None,
+            "a changed policy must not wipe {on_screen:?} either"
+        );
+    }
+}
+
+/// No seed on record — the first paint, or a save that released the boxes —
+/// re-seeds, which is how the save's own refresh shows what the nest STORED
+/// rather than what was typed.
+#[test]
+fn a_released_editor_reseeds_from_the_nest() {
+    let fresh = form("120", "");
+    assert_eq!(
+        nest_place_reseed(None, &form("300", "5"), fresh.clone()),
+        Some(fresh)
+    );
+}
+
+/// The form seed is exactly the two shared prefills side by side.
+#[test]
+fn the_form_seed_is_the_two_prefills_together() {
+    let f = nest_place_form_from_row(Some(true), Some(120), None, 5, 0);
+    assert_eq!(
+        f.policy,
+        nest_place_edit_from_row(Some(true), Some(120), None)
+    );
+    assert_eq!(
+        f.version_retention,
+        version_retention_edit_from_bounds(5, 0)
+    );
 }

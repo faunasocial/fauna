@@ -38,8 +38,8 @@ import pytest
 from drivers.port_util import find_free_port
 from helpers.ap_nest import (
     AP_BRIDGE_ID,
-    ap_post_map_row,
     delivery_jobs_for,
+    deliver_note,
     enable_ap,
     start_ap_nest,
 )
@@ -109,52 +109,6 @@ def _account_public_key(nest, username: str) -> str:
         return json.loads(resp.read())["publicKey"]["publicKeyPem"]
 
 
-def _deliver_note(nest, peer, username: str, actor_url: str, text: str) -> str:
-    """The peer follows the user (auto-accepted) and sends it a signed
-    ``Create{Note}`` on the user's own inbox — the relationship gate's
-    *addressed* arm ingests it into the user's feed. Returns the note's id."""
-    code = peer.post_signed(
-        f"{nest['url']}/ap/users/{username}/inbox",
-        {
-            "@context": "https://www.w3.org/ns/activitystreams",
-            "type": "Follow",
-            "id": f"{peer.actor_uri}/activities/follow-1",
-            "actor": peer.actor_uri,
-            "object": actor_url,
-        },
-    )
-    assert code == 202, f"inbox did not accept the Follow: HTTP {code}"
-    peer.wait_for("Accept")
-
-    note_id = f"{peer.actor_uri}/statuses/{_unique('note')}"
-    code = peer.post_signed(
-        f"{nest['url']}/ap/users/{username}/inbox",
-        {
-            "@context": "https://www.w3.org/ns/activitystreams",
-            "type": "Create",
-            "id": f"{note_id}/activity",
-            "actor": peer.actor_uri,
-            "to": ["https://www.w3.org/ns/activitystreams#Public"],
-            "object": {
-                "type": "Note",
-                "id": note_id,
-                "attributedTo": peer.actor_uri,
-                "content": f"<p>{text}</p>",
-                # Now, never a fixed date: the inbox drops a note published
-                # past its future bound, and a fixed date ages the feed order.
-                "published": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "to": ["https://www.w3.org/ns/activitystreams#Public"],
-            },
-        },
-    )
-    assert code == 202, f"inbox did not accept the Create: HTTP {code}"
-    assert ap_post_map_row(nest, note_id) is not None, (
-        f"the peer's note {note_id!r} was accepted (202) but never ingested — "
-        "a rejected activity answers the peer, not us; read the nest log"
-    )
-    return note_id
-
-
 def _signed_in_on_the_note(app, request, nest, user, note_text: str) -> int:
     """Log ``app`` in as ``user`` on the AP nest and return the index of the
     card carrying the ingested note."""
@@ -180,6 +134,9 @@ def _federating_user(nest):
 
 
 @pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
 @pytest.mark.feature("fediverse")
 def test_a_reply_to_a_fediverse_post_reaches_its_author(
     request, app, fediverse_nest, follower
@@ -191,7 +148,7 @@ def test_a_reply_to_a_fediverse_post_reaches_its_author(
     nest = fediverse_nest
     user, username, actor_url = _federating_user(nest)
     note_text = _unique("fedi-note-reply")
-    note_id = _deliver_note(nest, follower, username, actor_url, note_text)
+    note_id = deliver_note(nest, follower, username, actor_url, note_text)
     index = _signed_in_on_the_note(app, request, nest, user, note_text)
 
     reply_text = _unique("fedi-reply-body")
@@ -227,6 +184,9 @@ def test_a_reply_to_a_fediverse_post_reaches_its_author(
 
 
 @pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
 @pytest.mark.feature("fediverse")
 def test_a_quote_of_a_fediverse_post_reaches_its_author(
     request, app, fediverse_nest, follower
@@ -238,7 +198,7 @@ def test_a_quote_of_a_fediverse_post_reaches_its_author(
     nest = fediverse_nest
     user, username, actor_url = _federating_user(nest)
     note_text = _unique("fedi-note-quote")
-    note_id = _deliver_note(nest, follower, username, actor_url, note_text)
+    note_id = deliver_note(nest, follower, username, actor_url, note_text)
     index = _signed_in_on_the_note(app, request, nest, user, note_text)
 
     app.feed.quote_post(index)
@@ -267,6 +227,9 @@ def test_a_quote_of_a_fediverse_post_reaches_its_author(
 
 
 @pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
 @pytest.mark.feature("fediverse")
 @pytest.mark.parametrize("kind", ["reply", "quote"])
 def test_replying_or_quoting_with_federation_off_is_refused_inline(
@@ -281,7 +244,7 @@ def test_replying_or_quoting_with_federation_off_is_refused_inline(
     nest = fediverse_nest
     user, username, actor_url = _federating_user(nest)
     note_text = _unique(f"fedi-note-off-{kind}")
-    _deliver_note(nest, follower, username, actor_url, note_text)
+    deliver_note(nest, follower, username, actor_url, note_text)
     ws_api.bridge_set_settings(nest["port"], user, AP_BRIDGE_ID, {"enabled": False})
     jobs_before = delivery_jobs_for(nest, follower.inbox_url)
 

@@ -54,7 +54,10 @@ fn query_handler() -> RpcHandler {
                 .limit
                 .unwrap_or(protocol_search::DEFAULT_LIMIT)
                 .clamp(protocol_search::MIN_LIMIT, protocol_search::MAX_LIMIT);
-            let offset = req.offset.unwrap_or(0).max(0);
+            let offset = req
+                .offset
+                .unwrap_or(0)
+                .clamp(0, protocol_search::MAX_OFFSET);
             let spec = SearchSpec {
                 query: req.query,
                 content_type: req.content_type,

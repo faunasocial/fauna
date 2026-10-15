@@ -70,6 +70,12 @@ pub async fn handle_request(req: &Request, state: &Arc<SyncServiceState>) -> Res
         RequestMethod::GetCustodianReseed => Ok(ResponsePayload::CustodianReseed(
             state.reseed_job.lock().await.clone(),
         )),
+        RequestMethod::RecoverCustodianStore(req) => {
+            handle_recover_custodian_store(state, req).await
+        }
+        RequestMethod::GetCustodianRecover => Ok(ResponsePayload::CustodianRecover(
+            state.recover_job.lock().await.clone(),
+        )),
         RequestMethod::GetCustodianFolderNames => handle_get_custodian_folder_names(state).await,
         RequestMethod::Pause => handle_set_paused(state, true).await,
         RequestMethod::Resume => handle_set_paused(state, false).await,
@@ -83,11 +89,19 @@ pub async fn handle_request(req: &Request, state: &Arc<SyncServiceState>) -> Res
         RequestMethod::CustodianRunPassNow { now_offset_secs } => {
             handle_custodian_run_pass_now(state, *now_offset_secs).await
         }
+        // Test-only: the push arm's decisions (`RequestMethod::GetPushArmTally`).
+        #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+        RequestMethod::GetPushArmTally => Ok(ResponsePayload::PushArmTally(
+            state.push_tally.snapshot(&state.attached_apps),
+        )),
         RequestMethod::ApplyHeldDeletes { folder } => {
             handle_apply_held_deletes(state, folder).await
         }
         RequestMethod::GetShareServeInfo => handle_get_share_serve_info(state).await,
         RequestMethod::ReconcileAccountRuntime => handle_reconcile_account_runtime(state).await,
+        RequestMethod::WalkFleetNow => Ok(ResponsePayload::FleetWalked(
+            walk_fleet_now_within(state, fauna_ipc::sync::WALK_FLEET_NOW_BOUND).await,
+        )),
         RequestMethod::ShareIngest {
             folder,
             folder_id,
@@ -265,15 +279,18 @@ async fn handle_get_service_status(
             .get()
             .and_then(|probe| probe.err())
             .map(str::to_string),
+        // The same-account peer data plane — atomics and the registry's
+        // lock, ack-path safe like every field above.
+        peer_files: Some(state.peer_files.status()),
     }))
 }
 
 /// [`RequestMethod::AttachApp`] — the calling app is open for as long as this
 /// connection is: the lease is held in the connection's scope and ends when
 /// the app closes it (or dies), which is what the push arm reads
-/// ([`crate::push_arm`]). A named notification identity is handed to the sink
-/// before the reply, so an app that reads the status after attaching sees the
-/// sink that identity gives.
+/// ([`crate::push_arm`]). The app's name (what a tapped banner launches) and a
+/// named notification identity are handed to the sink before the reply, so an
+/// app that reads the status after attaching sees the sink that identity gives.
 async fn handle_attach_app(
     state: &Arc<SyncServiceState>,
     app: Option<&str>,
@@ -283,6 +300,14 @@ async fn handle_attach_app(
         return Err("AttachApp must arrive on a served connection".into());
     }
     tracing::debug!(app = app.unwrap_or("?"), "an app attached");
+    if let Some(app) = app {
+        // What a tapped banner launches: the app that attached last.
+        let sink = Arc::clone(&state.notification_sink);
+        let app = app.to_owned();
+        if let Err(e) = tokio::task::spawn_blocking(move || sink.adopt_app(&app)).await {
+            tracing::warn!("push arm: keeping the attached app failed: {e}");
+        }
+    }
     if let Some(identity) = notification_identity {
         let sink = Arc::clone(&state.notification_sink);
         // May block: a platform probe and a small file write.
@@ -723,6 +748,7 @@ async fn handle_get_custodian_store(
             held: r.held,
             served: r.served,
             observed_at: r.observed_at,
+            floored_at: r.floored_at,
         })
         .collect();
     Ok(ResponsePayload::CustodianStore(CustodianStoreInfo {
@@ -792,10 +818,23 @@ async fn handle_reseed_custodian_store(
         .nest_backup_key_array()
         .ok_or_else(|| "re-seed: the NestBackupKey must be exactly 32 bytes".to_string())?;
     {
+        // The store-job slot's lock order: `reseed_job`, then `recover_job`.
         let mut job = state.reseed_job.lock().await;
         if matches!(*job, CustodianReseedState::Running) {
             return Ok(ResponsePayload::CustodianReseed(
                 CustodianReseedState::Running,
+            ));
+        }
+        if matches!(
+            *state.recover_job.lock().await,
+            fauna_ipc::sync::CustodianRecoverState::Running
+        ) {
+            return Ok(ResponsePayload::CustodianReseed(
+                CustodianReseedState::Failed {
+                    phase: "store".into(),
+                    detail: "a recovery from this device's copy is running; nothing was started"
+                        .into(),
+                },
             ));
         }
         *job = CustodianReseedState::Running;
@@ -814,6 +853,59 @@ async fn handle_reseed_custodian_store(
     });
     Ok(ResponsePayload::CustodianReseed(
         CustodianReseedState::Running,
+    ))
+}
+
+/// [`RequestMethod::RecoverCustodianStore`] — start the recovery from this
+/// device's store into the owner's nest, or report the one already running
+/// (`segment-backup-protocol.md` § Client-device custodian (pull) → *Restore*
+/// → *Recovery from this device's own store*, question (2)).
+///
+/// The re-seed's handler over the recovery's job: answers at once, the job
+/// outlives the request, the `Running` swap happens under the slot's locks
+/// (taken in the slot's order) so two presses start one job, and a press while
+/// the re-seed holds the slot starts nothing.
+async fn handle_recover_custodian_store(
+    state: &Arc<SyncServiceState>,
+    req: &fauna_ipc::sync::CustodianRecoverRequest,
+) -> Result<ResponsePayload, String> {
+    use fauna_ipc::sync::{CustodianRecoverState, CustodianReseedState};
+    let key = req
+        .nest_backup_key_array()
+        .ok_or_else(|| "recovery: the NestBackupKey must be exactly 32 bytes".to_string())?;
+    {
+        let reseed = state.reseed_job.lock().await;
+        let mut job = state.recover_job.lock().await;
+        if matches!(*job, CustodianRecoverState::Running) {
+            return Ok(ResponsePayload::CustodianRecover(
+                CustodianRecoverState::Running,
+            ));
+        }
+        if matches!(*reseed, CustodianReseedState::Running) {
+            return Ok(ResponsePayload::CustodianRecover(
+                CustodianRecoverState::Failed {
+                    phase: "store".into(),
+                    detail: "a restore from this device's copy is running; nothing was started"
+                        .into(),
+                },
+            ));
+        }
+        *job = CustodianRecoverState::Running;
+    }
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        let finished = if stop_hosted_custodian(&state, "recovery").await {
+            crate::custodian::run_recover(&state, &key).await
+        } else {
+            CustodianRecoverState::Failed {
+                phase: "store".into(),
+                detail: "this device's backup replica did not stop; nothing was sent".into(),
+            }
+        };
+        *state.recover_job.lock().await = finished;
+    });
+    Ok(ResponsePayload::CustodianRecover(
+        CustodianRecoverState::Running,
     ))
 }
 
@@ -844,13 +936,11 @@ async fn handle_reclaim_custodian_store(
 ) -> Result<ResponsePayload, String> {
     let store = custodian_store_here(state).await?;
 
-    // A running re-seed is reading this store to rebuild the owner's nest from
-    // it: the one moment deleting it would destroy the copy being restored.
-    // Refused the same way a stint that will not stop is — nothing deleted.
-    let reseeding = matches!(
-        *state.reseed_job.lock().await,
-        fauna_ipc::sync::CustodianReseedState::Running
-    );
+    // A running store ceremony is reading this store to rebuild or recover
+    // the owner's nest from it: the one moment deleting it would destroy the
+    // copy being restored. Refused the same way a stint that will not stop is
+    // — nothing deleted.
+    let reseeding = state.store_job_running().await;
     if reseeding || !stop_hosted_custodian(state, "reclaim").await {
         tracing::warn!(
             reseeding,
@@ -1076,16 +1166,21 @@ async fn handle_apply_held_deletes(
 /// trip must not hold it longer than this — the pass runs on regardless.
 const RECONCILE_NUDGE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// [`RequestMethod::ReconcileAccountRuntime`] — run one full pass of the
-/// account store this agent has mounted, now: the devices page's
+/// [`RequestMethod::ReconcileAccountRuntime`] — run `reconcile_now` on the
+/// account store this agent has mounted, now. Two askers: the devices page's
 /// participation switch rested the device-local row, and the pass's
 /// `peer_leg::ensure_bound` is what drops (or binds) the same-account listener
-/// (`p2p.md` § Per-device participation → *Enforcement*, (c) Promptness).
-/// Reads the mounted store slot ([`SyncServiceState::mounted_store`]), never
-/// the config. A quiet `Empty` when nothing is mounted or this runtime is not
-/// the engine holder — an app's runtime holds it and ran its own pass — and
-/// whatever the pass reports: its outcome is its report's, and the row is the
-/// fact the next pass reads either way.
+/// (`p2p.md` § Per-device participation → *Enforcement*, (c) Promptness); and
+/// an app runtime beside this agent yielded the engine role to it, and asks on
+/// the yield's edge so the role is taken now rather than at this runtime's
+/// backstop tick (`account-runtime.md` § Multi-instance concurrency → *The
+/// agent holds the role when present*, part 4). So it runs whether or not this
+/// runtime holds the engine: a non-holder's `reconcile_now` is the
+/// re-election, the kernel arbitrates, and a lock still held elsewhere leaves
+/// it a non-holder that ran no pass. Reads the mounted store slot
+/// ([`SyncServiceState::mounted_store`]), never the config. A quiet `Empty`
+/// when nothing is mounted, and whatever the pass reports: its outcome is its
+/// report's, and the row is the fact the next pass reads either way.
 async fn handle_reconcile_account_runtime(
     state: &Arc<SyncServiceState>,
 ) -> Result<ResponsePayload, String> {
@@ -1098,10 +1193,7 @@ async fn handle_reconcile_account_runtime(
         tracing::debug!("account pass nudge: no store mounted");
         return Ok(ResponsePayload::Empty);
     };
-    if !handle.is_engine_holder() {
-        tracing::debug!("account pass nudge: an app's runtime holds the engine");
-        return Ok(ResponsePayload::Empty);
-    }
+    let held_before = handle.is_engine_holder();
     match tokio::time::timeout(RECONCILE_NUDGE_TIMEOUT, handle.reconcile_now()).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => {
@@ -1109,7 +1201,60 @@ async fn handle_reconcile_account_runtime(
         }
         Err(_) => tracing::warn!("account pass nudge: the pass outlived the reply"),
     }
+    // The handover's witness line: the election is taken at the pass's start,
+    // so the role reads true here even when the pass outlived the reply.
+    if !held_before && handle.is_engine_holder() {
+        tracing::info!("account pass nudge: took the engine role an app's runtime yielded");
+    }
     Ok(ResponsePayload::Empty)
+}
+
+/// [`RequestMethod::WalkFleetNow`] — walk the fleet scope of the account
+/// store this agent has mounted, on a non-holder app runtime's behalf, and
+/// answer whether the walk landed (`account-runtime.md` § Multi-instance
+/// concurrency → *A non-holder's awaited fleet walk reaches the holder*). It
+/// runs the mounted handle's own `walk_fleet` — the awaited pass, which the
+/// e2e fleet-walk hold spares as it spares every awaited leg — so a mount that
+/// does not hold the role either takes it now (the pass is the re-election)
+/// or answers the role refusal as its reason. Waits `bound` at most: a walk
+/// that outlives it answers `walked: false` and the pass runs on. Reads the
+/// mounted store slot ([`SyncServiceState::mounted_store`]), never the config.
+async fn walk_fleet_now_within(
+    state: &Arc<SyncServiceState>,
+    bound: Duration,
+) -> fauna_ipc::sync::FleetWalkOutcome {
+    let not_walked = |reason: String| fauna_ipc::sync::FleetWalkOutcome {
+        walked: false,
+        reason: Some(reason),
+    };
+    let Some(handle) = state
+        .mounted_store
+        .lock()
+        .ok()
+        .and_then(|held| held.clone())
+    else {
+        return not_walked("the sync agent has no account store mounted".into());
+    };
+    match tokio::time::timeout(bound, handle.walk_fleet()).await {
+        Ok(Ok(())) => {
+            tracing::info!("walk fleet now: walked the fleet scope for an app runtime");
+            fauna_ipc::sync::FleetWalkOutcome {
+                walked: true,
+                ..Default::default()
+            }
+        }
+        Ok(Err(e)) => {
+            let why = format!("{e:#}");
+            tracing::warn!(error = %why, "walk fleet now: the walk did not land");
+            not_walked(why)
+        }
+        Err(_) => {
+            tracing::warn!("walk fleet now: the walk outlived the reply");
+            not_walked(format!(
+                "the fleet walk outlived the agent's {bound:?} bound"
+            ))
+        }
+    }
 }
 
 /// [`RequestMethod::GetShareServeInfo`] — where each bound folder's state DB
@@ -1376,7 +1521,7 @@ async fn handle_unpin_file(
 /// `abs_path` to its serving folder and folder-relative path, route the
 /// [`EngineCommand`](fauna_sync_engine::always_resident::EngineCommand) `make`
 /// builds through the engine's command channel, and wait for its answer
-/// (`on-demand-files.md` § Linux FUSE binding, the dehydrate rule: the bytes move
+/// (`on-demand-files-linux.md` § Linux FUSE binding, the dehydrate rule: the bytes move
 /// on the loop that owns them). Errors — never a silent drop — for a path no
 /// on-demand binding serves, a root not running, or a loop that stops first.
 #[cfg(target_os = "linux")]
@@ -1840,9 +1985,15 @@ async fn handle_list_file_versions(
         let config = state.config.read().await;
         crate::path_map::resolve_to_folder_rel(&config, path)
     };
-    // The version verbs are nest-side and name-addressed — only the DB-reading
-    // sites need the binding's `folder_ref`.
-    let Some(crate::path_map::ResolvedFolder { folder, rel, .. }) = resolved else {
+    // The version verbs are nest-side: the list names the binding's row
+    // (`set-addressing.md` § The row form → *Whoever holds the row sends it*).
+    let Some(crate::path_map::ResolvedFolder {
+        folder,
+        folder_ref,
+        rel,
+        ..
+    }) = resolved
+    else {
         return Ok(ResponsePayload::FileVersionList(
             crate::versions::empty_version_list(path),
         ));
@@ -1855,7 +2006,7 @@ async fn handle_list_file_versions(
     let call = async {
         let client = state.nest_rpc_client().await?;
         let sync = fauna_client_sync::SyncClient::new(client);
-        crate::versions::list_file_versions(&sync, path, &folder, &rel, &seat).await
+        crate::versions::list_file_versions(&sync, path, &folder, folder_ref, &rel, &seat).await
     };
 
     let info = match tokio::time::timeout(NEST_VERB_TIMEOUT, call).await {
@@ -1997,6 +2148,7 @@ async fn handle_restore_file_version(
         folder,
         folder_ref,
         rel,
+        mode,
     }) = resolved
     else {
         return Err("file is not in a synced folder".to_string());
@@ -2042,6 +2194,7 @@ async fn handle_restore_file_version(
         crate::versions::restore_file_version(
             &sync,
             &folder,
+            folder_ref,
             &device_id,
             &rel,
             version_num,
@@ -2081,9 +2234,9 @@ async fn handle_restore_file_version(
     );
 
     #[cfg(windows)]
-    apply_restore_locally(state, path, folder_ref, &rel, &restored, recorded_as).await;
+    apply_restore_locally(state, path, folder_ref, &rel, &restored, recorded_as, mode).await;
     #[cfg(not(windows))]
-    let _ = (&folder_ref, &rel, &restored, recorded_as);
+    let _ = (&folder_ref, &rel, &restored, recorded_as, mode);
 
     Ok(ResponsePayload::Empty)
 }
@@ -2094,10 +2247,12 @@ async fn handle_restore_file_version(
 /// `manifest_hash` — so this read-modify-writes through `upsert_entry`, whose
 /// `ON CONFLICT` clause deliberately omits `pinned`, leaving the user's pin intact.
 ///
-/// The row written here is exactly the row `record_placeholders_from_changes` would
-/// fold from the nest's new head (`local_hash`/`remote_hash` = `None`, `local_mtime`
-/// = 0, `state` = `Placeholder`), so a *different* device that learns of this restore
-/// through catch-up lands in the identical state. The entry's head is stamped as signed
+/// The row written here is the row `record_placeholders_from_changes` would fold from
+/// the nest's new head (`remote_hash` = `None`, `local_mtime` = 0, `state` =
+/// `Placeholder`), so a *different* device that learns of this restore through catch-up
+/// lands in the same state — save the local identity, which names the bytes still on
+/// this disk until the free lets them go ([`kept_local_identity`]), and the dehydration
+/// proof, which was the replaced head's and is dropped. The entry's head is stamped as signed
 /// by `recorded_as`, the identity the restore recorded as
 /// (`writer-signed-change-records.md` ruling (11)(d)): an entry with no signer recorded
 /// opens under no owner root, so a re-point that named none would strand the restored
@@ -2128,13 +2283,12 @@ pub(crate) async fn repoint_entry(
     let Some(entry) = db.get_entry(rel).map_err(|e| format!("db error: {e}"))? else {
         return Ok(false);
     };
+    let head = fauna_core::data::ContentHash::from_digest_raw(restored.manifest_hash);
     db.upsert_entry(
         rel,
-        None, // local_hash: the bytes are about to be freed
+        kept_local_identity(&entry),
         None, // remote_hash: carried by neither the version projection nor changes.list
-        Some(fauna_core::data::ContentHash::from_digest_raw(
-            restored.manifest_hash,
-        )),
+        Some(head),
         fauna_sync_engine::db::SyncState::Placeholder,
         0,            // local_mtime: nothing on disk once dehydrated
         remote_mtime, // the restore record is the new head, recorded just now
@@ -2145,6 +2299,12 @@ pub(crate) async fn repoint_entry(
         restored.content_key_version,
     )
     .map_err(|e| format!("db error: {e}"))?;
+    if entry.manifest_hash != Some(head) {
+        // The dehydration proof is the content the replaced head reassembles to.
+        // Left behind, it would vouch for the stale cache as the restored version.
+        db.clear_recorded_content_hash(rel)
+            .map_err(|e| format!("db error: {e}"))?;
+    }
     if let Some(signer) = recorded_as {
         db.set_head_signed_as(
             rel,
@@ -2154,6 +2314,24 @@ pub(crate) async fn repoint_entry(
         .map_err(|e| format!("db error: {e}"))?;
     }
     Ok(true)
+}
+
+/// The local identity a restore's re-point keeps: the row's own, when the row proves those
+/// bytes recorded — its local identity is the content its head was proven to reassemble to —
+/// and none otherwise (`file-versions.md` § Restore, ordering 2).
+///
+/// If the free that follows is refused (another program holds the file), those bytes stay on
+/// the disk: the version the restore replaced. A row naming them is what keeps the uploader
+/// and the converge from taking them for an edit and recording the replaced version over the
+/// restore. Bytes no record proves — an upload whose record has not landed — get no identity:
+/// named, such an edit would read as a stale cache and never upload, so it uploads as a
+/// conflict with the restore instead.
+fn kept_local_identity(
+    entry: &fauna_sync_engine::db::SyncEntry,
+) -> Option<fauna_core::data::ContentHash> {
+    entry
+        .local_hash
+        .filter(|local| entry.recorded_content_hash == Some(*local))
 }
 
 /// Re-point this device's own copy at the just-restored version, then drop the stale
@@ -2172,22 +2350,39 @@ pub(crate) async fn repoint_entry(
 ///   `FETCH_DATA` against the re-pointed row.
 ///
 /// A failed supersede therefore leaves a *correct* row and a stale cache, the edit that
-/// refused it uploading on its own (a conflict with the restore). The reverse order
+/// refused it uploading on its own (a conflict with the restore). The stale cache itself
+/// is no edit: the row names its bytes ([`kept_local_identity`]). The reverse order
 /// would leave a placeholder-on-disk pointing at the **old** manifest — actively
 /// re-materializing the pre-restore bytes, which is strictly worse.
 ///
 /// A failed re-point skips the supersede for the same reason: freeing against a
 /// stale row re-downloads the pre-restore content.
+///
+/// **A copy kept on this device takes neither step** ([`restore_kept_copy`]): a file
+/// on an always-resident root, read off the serving location's `mode` (an ordinary
+/// file, which no free can reach), or a pinned file on an on-demand root, which cfapi
+/// refuses to supersede. Its row is moved last, after the restored version has been
+/// written in.
 #[cfg(windows)]
-async fn apply_restore_locally(
+pub(crate) async fn apply_restore_locally(
     state: &Arc<SyncServiceState>,
     abs_path: &str,
     folder_ref: FolderRef,
     rel: &str,
     restored: &crate::versions::RestoredVersion,
     recorded_as: Option<[u8; 32]>,
+    mode: crate::config::LocationMode,
 ) {
     let now = fauna_core::data::Timestamp::now_secs_or_zero();
+    if mode == crate::config::LocationMode::Always
+        || matches!(
+            fauna_cfapi::pin_state(std::path::Path::new(abs_path)),
+            Ok(fauna_cfapi::PinState::Pinned)
+        )
+    {
+        restore_kept_copy(state, abs_path, folder_ref, rel, restored, recorded_as, now).await;
+        return;
+    }
     match repoint_entry(state, folder_ref, rel, restored, recorded_as, now).await {
         Ok(true) => {}
         Ok(false) => {
@@ -2221,6 +2416,125 @@ async fn apply_restore_locally(
     if let Some(event) = event {
         let _ = state.ipc_event_tx.send(event);
     }
+}
+
+/// [`apply_restore_locally`] for a copy kept on this device — any file on an
+/// always-resident root, or a pinned file, which cfapi never frees (`file-versions.md`
+/// § Restore, ordering 2's kept-copy branch). Its row is NOT re-pointed first: a row
+/// naming the restored version over the replaced bytes is read back as a local edit, and
+/// the replaced version uploaded over the restore. The restored version goes to the root's
+/// own loop as a stale hydrated row instead (`EngineCommand::ApplyStaleHydrated`): on an
+/// on-demand root `bridge::apply_stale_hydrated`, the road another device's edit takes to
+/// the same copy — fetched beside it and swapped in pin and all; on a resident root
+/// `SyncEngine::replace_kept_copy` — written in over it. Either way a copy carrying an
+/// unsynced local edit is left whole, and only after the write is the row moved. The loop
+/// owns the root's binding and its engine, and this handler holds neither.
+///
+/// A root not running, or a loop that stops before answering, leaves the copy and its row as
+/// they are: the nest is correct. An on-demand root's start-up fold reports the row stale and
+/// replaces the copy the same way (ordering 1); a resident root has no such fold, and its
+/// copy stays at the replaced version until the user restores again (`file-versions.md`
+/// § Implementation status today).
+#[cfg(windows)]
+async fn restore_kept_copy(
+    state: &Arc<SyncServiceState>,
+    abs_path: &str,
+    folder_ref: FolderRef,
+    rel: &str,
+    restored: &crate::versions::RestoredVersion,
+    recorded_as: Option<[u8; 32]>,
+    remote_mtime: i64,
+) {
+    let row = match restored_head(state, folder_ref, rel, restored, recorded_as, remote_mtime) {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            tracing::debug!(path = abs_path, "no local copy to replace after restore");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(path = abs_path, error = %e, "reading the kept copy's row after restore failed");
+            return;
+        }
+    };
+    let tx = state
+        .engine_cmd_senders
+        .lock()
+        .await
+        .get(&folder_ref.to_wire())
+        .cloned();
+    let Some(tx) = tx else {
+        tracing::info!(
+            path = abs_path,
+            "the folder's root is not running: the kept copy is left at the replaced version"
+        );
+        return;
+    };
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    // `send`, not `try_send`: the restore waits its turn behind a command the loop is
+    // still answering.
+    if tx
+        .send(fauna_sync_engine::always_resident::EngineCommand::ApplyStaleHydrated { row, reply })
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            path = abs_path,
+            "the folder's sync engine is shutting down: the kept copy is left at the replaced \
+             version"
+        );
+        return;
+    }
+    match answer.await {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => tracing::info!(
+            path = abs_path,
+            "the kept copy was left as it is (its log names why); a local edit uploads as a \
+             conflict with the restore"
+        ),
+        Ok(Err(e)) => {
+            tracing::warn!(path = abs_path, error = %e, "replacing the kept copy after restore failed")
+        }
+        Err(_) => tracing::warn!(
+            path = abs_path,
+            "the folder's sync engine stopped before answering: the kept copy may be left at \
+             the replaced version"
+        ),
+    }
+}
+
+/// The head a restore moved `rel` to, as the stale hydrated row its local copy now is
+/// ([`restore_kept_copy`]): the restored version, recorded at `remote_mtime` (Unix seconds)
+/// and signed as `recorded_as`, carrying the row's own `version_num` — the fields
+/// [`repoint_entry`] writes. `Ok(None)` = there is no local copy (the folder is bound but not
+/// yet served, or the path has no row).
+///
+/// Not `cfg(windows)` (its only non-test caller is), for [`repoint_entry`]'s reason.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn restored_head(
+    state: &Arc<SyncServiceState>,
+    folder_ref: FolderRef,
+    rel: &str,
+    restored: &crate::versions::RestoredVersion,
+    recorded_as: Option<[u8; 32]>,
+    remote_mtime: i64,
+) -> Result<Option<fauna_sync_engine::engine::StaleHydratedRow>, String> {
+    let db_path = state.paths.sync_db_path_for_ref(folder_ref);
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    let db = fauna_sync_engine::db::SyncDb::open(&db_path).map_err(|e| format!("open db: {e}"))?;
+    let Some(entry) = db.get_entry(rel).map_err(|e| format!("db error: {e}"))? else {
+        return Ok(None);
+    };
+    Ok(Some(fauna_sync_engine::engine::StaleHydratedRow {
+        relative_path: rel.to_string(),
+        manifest_hash: fauna_core::data::ContentHash::from_digest_raw(restored.manifest_hash),
+        size_bytes: restored.size_bytes,
+        content_key_version: restored.content_key_version,
+        remote_mtime,
+        version_num: entry.version_num,
+        signed_as: recorded_as,
+    }))
 }
 
 // ── Configure ──
@@ -2287,7 +2601,7 @@ async fn handle_provision_capability(
     .with_provisioned_at_ms(cap.provisioned_at_ms);
     let expires_at = owned.bearer.expires_at;
 
-    // Per-actor state scoping (`file-sync.md` § Multi-account × File Provider,
+    // Per-actor state scoping (`on-demand-files-apple.md` § Multi-account × File Provider,
     // consequence 3): scope the shared paths to the provisioned actor BEFORE
     // publishing the capability, and reload the binding store from the scoped
     // location — a switch must never leave the outgoing account's bindings or DBs
@@ -2321,6 +2635,7 @@ async fn handle_provision_capability(
     // stint keys on the same slot's device id.
     crate::account_host::recheck_now(state);
     crate::custodian::recheck_now(state);
+    crate::push_arm::recheck_now(state);
     // NB: never log the key or bearer.
     tracing::info!(nest_url = %cap.nest_url, ?expires_at, "on-demand hydration capability provisioned");
 
@@ -2360,8 +2675,10 @@ async fn handle_refresh_bearer(
             }
             tracing::info!(expires_at = ?bearer.expires_at, "on-demand hydration bearer refreshed");
             // The pushed bearer re-arms dialling and leaves a standing refusal
-            // reported; the renewal loop re-reads the machine's evidence now.
+            // reported; the renewal loop re-reads the machine's evidence now,
+            // and the push arm re-arms on a connection the refusal closed.
             crate::renewal::wake_if_refused(state);
+            crate::push_arm::recheck_now(state);
             Ok(ResponsePayload::Empty)
         }
         // The "no capability provisioned" prefix is a cross-process contract: the
@@ -2417,7 +2734,10 @@ pub(crate) async fn unprovision_now(state: &Arc<SyncServiceState>) -> bool {
     // The custodian replica goes with the capability: without this its stint
     // pulled on, every check-in refused, until the next rediscovery tick.
     crate::custodian::recheck_now(state);
+    // The capability connection goes with it — and with that the push stand-in's
+    // announce and its arm (`crate::push_arm::host`).
     state.invalidate_nest_rpc().await;
+    crate::push_arm::recheck_now(state);
 
     // The per-actor scope leaves with the capability — the next provision re-scopes
     // to its own actor. The in-memory config resets so a signed-out agent serves no
@@ -2435,6 +2755,14 @@ pub(crate) async fn unprovision_now(state: &Arc<SyncServiceState>) -> bool {
         state.paths.set_actor_scope(None);
         *state.config.write().await = crate::config::SyncConfig::default();
     }
+
+    // An e2e app's per-test reset un-provisions this agent, and a reset app is a
+    // new device: the agent outlives the in-place reset, so its dial budget is
+    // cleared here as the app's reset arm clears the app's — else a module's
+    // sign-ins spend the burst and pace a late test's sign-in
+    // (`transport-connection.md` § The dial budget). Compiled out of release.
+    #[cfg(any(debug_assertions, feature = "test-helpers"))]
+    fauna_ws_substrate::dial_budget::clear_for_test();
 
     tracing::info!("capability un-provisioned; stopping engines");
     // With the capability gone, reconcile serves no engines (same predicate the
@@ -2608,6 +2936,29 @@ mod tests {
         test_state_with_config(crate::config::SyncConfig::default())
     }
 
+    /// An e2e app's per-test reset un-provisions this agent, and a reset app is
+    /// a new device — so the agent's dial budget is whole again, as the app's
+    /// own is (`transport-connection.md` § The dial budget). Without it the
+    /// agent, which outlives every in-place reset, spent its burst over a
+    /// module's sign-ins and paced a late test's sign-in past its wait.
+    #[cfg(any(debug_assertions, feature = "test-helpers"))]
+    #[tokio::test(start_paused = true)]
+    async fn an_unprovision_gives_an_e2e_agent_a_whole_dial_burst() {
+        const NEST: &str = "unprovision-clears-budget.example:443";
+        for _ in 0..fauna_ws_substrate::dial_budget::DIAL_BUDGET_BURST {
+            fauna_ws_substrate::dial_budget::acquire(NEST).await;
+        }
+        let state = test_state();
+        assert!(unprovision_now(&state).await);
+        let before = tokio::time::Instant::now();
+        fauna_ws_substrate::dial_budget::acquire(NEST).await;
+        assert_eq!(
+            tokio::time::Instant::now(),
+            before,
+            "an un-provisioned e2e agent dials on a whole burst"
+        );
+    }
+
     // ── ShareFile: the Explorer Share hand-off's target (apps/windows.md
     //    § Shell Extension → The Share hand-off, step 1) ──
 
@@ -2762,7 +3113,7 @@ mod tests {
             crate::config::SyncConfig::default(),
             shutdown_tx,
             event_tx,
-            crate::config::SyncPaths::new(Some(dir.path().to_path_buf())),
+            crate::config::SyncPaths::at(dir.path().to_path_buf()),
         );
         let cap = SyncCapability::new(
             vec![9u8; 32],
@@ -2822,6 +3173,130 @@ mod tests {
         }
     }
 
+    // ── the recovery job (`RequestMethod::RecoverCustodianStore`) ───────────
+
+    fn recover_state(payload: ResponsePayload) -> fauna_ipc::sync::CustodianRecoverState {
+        match payload {
+            ResponsePayload::CustodianRecover(state) => state,
+            other => panic!("expected CustodianRecover, got {other:?}"),
+        }
+    }
+
+    fn recover_request() -> fauna_ipc::sync::CustodianRecoverRequest {
+        fauna_ipc::sync::CustodianRecoverRequest::new([7; 32])
+    }
+
+    /// A second press while a recovery runs starts nothing.
+    #[tokio::test]
+    async fn a_recover_press_while_one_runs_starts_nothing() {
+        use fauna_ipc::sync::CustodianRecoverState;
+        let state = test_state();
+        *state.recover_job.lock().await = CustodianRecoverState::Running;
+        let reply = handle_recover_custodian_store(&state, &recover_request())
+            .await
+            .unwrap();
+        assert_eq!(recover_state(reply), CustodianRecoverState::Running);
+    }
+
+    /// **One store-job slot serves both ceremonies:** a recovery pressed while
+    /// the re-seed runs starts nothing (and its own job stays idle), and a
+    /// re-seed pressed while a recovery runs starts nothing.
+    #[tokio::test]
+    async fn either_ceremony_pressed_while_the_other_runs_starts_nothing() {
+        use fauna_ipc::sync::{CustodianRecoverState, CustodianReseedState};
+        let state = test_state();
+        *state.reseed_job.lock().await = CustodianReseedState::Running;
+        let reply = handle_recover_custodian_store(&state, &recover_request())
+            .await
+            .unwrap();
+        assert!(matches!(
+            recover_state(reply),
+            CustodianRecoverState::Failed { phase, .. } if phase == "store"
+        ));
+        assert_eq!(*state.recover_job.lock().await, CustodianRecoverState::Idle);
+
+        let state = test_state();
+        *state.recover_job.lock().await = CustodianRecoverState::Running;
+        let reply = handle_reseed_custodian_store(&state, &reseed_request())
+            .await
+            .unwrap();
+        assert!(matches!(
+            reseed_state(reply),
+            CustodianReseedState::Failed { phase, .. } if phase == "store"
+        ));
+        assert_eq!(*state.reseed_job.lock().await, CustodianReseedState::Idle);
+    }
+
+    /// A reclaim during a recovery refuses and deletes nothing — the store
+    /// is the copy being recovered from.
+    #[tokio::test]
+    async fn a_reclaim_during_a_recovery_refuses() {
+        use fauna_ipc::sync::CustodianRecoverState;
+        let dir = tempfile::tempdir().unwrap();
+        let (shutdown_tx, _rx) = tokio::sync::watch::channel(false);
+        let (event_tx, _) = tokio::sync::broadcast::channel(16);
+        let state = SyncServiceState::new(
+            crate::config::SyncConfig::default(),
+            shutdown_tx,
+            event_tx,
+            crate::config::SyncPaths::at(dir.path().to_path_buf()),
+        );
+        *state.capability.write().await = Some(SyncCapability::new(
+            vec![9u8; 32],
+            vec![0x42u8; 32],
+            "https://nest.example".into(),
+            "dev-test".into(),
+            BearerToken::new("b".into(), 5),
+        ));
+        *state.recover_job.lock().await = CustodianRecoverState::Running;
+        match handle_reclaim_custodian_store(&state).await.unwrap() {
+            ResponsePayload::CustodianStoreReclaimed(outcome) => {
+                assert!(outcome.still_hosting, "a reclaim must refuse mid-recovery");
+                assert_eq!(outcome.freed_files, 0);
+            }
+            other => panic!("expected CustodianStoreReclaimed, got {other:?}"),
+        }
+    }
+
+    /// An agent with no capability has no store to read and no nest to
+    /// recover into: the job ends `Failed` at the `store` phase, having sent
+    /// nothing, and the read verb reports exactly that.
+    #[tokio::test]
+    async fn a_recovery_on_an_unprovisioned_agent_fails_at_the_store() {
+        use fauna_ipc::sync::CustodianRecoverState;
+        let state = test_state();
+        let started = handle_recover_custodian_store(&state, &recover_request())
+            .await
+            .unwrap();
+        assert_eq!(recover_state(started), CustodianRecoverState::Running);
+        let finished = loop {
+            let now = state.recover_job.lock().await.clone();
+            if now != CustodianRecoverState::Running {
+                break now;
+            }
+            tokio::task::yield_now().await;
+        };
+        match finished {
+            CustodianRecoverState::Failed { phase, .. } => assert_eq!(phase, "store"),
+            other => panic!("expected Failed at store, got {other:?}"),
+        }
+        let read = handle_request(
+            &Request {
+                id: 1,
+                method: RequestMethod::GetCustodianRecover,
+            },
+            &state,
+        )
+        .await;
+        match read.result {
+            ResponseResult::Ok(payload) => assert!(matches!(
+                recover_state(payload),
+                CustodianRecoverState::Failed { .. }
+            )),
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
     fn test_state_with_config(config: crate::config::SyncConfig) -> Arc<SyncServiceState> {
         let (shutdown_tx, _rx) = tokio::sync::watch::channel(false);
         let (event_tx, _) = tokio::sync::broadcast::channel(16);
@@ -2831,7 +3306,7 @@ mod tests {
             config,
             shutdown_tx,
             event_tx,
-            crate::config::SyncPaths::new(None),
+            crate::config::SyncPaths::new(None).expect("this box has an absolute home"),
         )
     }
 
@@ -3007,7 +3482,7 @@ mod tests {
         use fauna_sync_engine::db::SyncState as S;
 
         let tmp = tempfile::tempdir().unwrap();
-        let paths = crate::config::SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = crate::config::SyncPaths::at(tmp.path().to_path_buf());
         let photos_ref = fauna_core::folder_keys::FolderRef::Local(9).to_wire();
         let config = crate::config::SyncConfig {
             locations: vec![
@@ -3141,7 +3616,7 @@ mod tests {
     #[tokio::test]
     async fn list_engines_carries_the_per_set_mass_delete_hold() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = crate::config::SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = crate::config::SyncPaths::at(tmp.path().to_path_buf());
         let config = crate::config::SyncConfig {
             locations: vec![
                 crate::config::LocationConfig {
@@ -3211,7 +3686,7 @@ mod tests {
     #[tokio::test]
     async fn list_engines_carries_the_per_set_unreadable_count() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = crate::config::SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = crate::config::SyncPaths::at(tmp.path().to_path_buf());
         let config = crate::config::SyncConfig {
             locations: vec![
                 crate::config::LocationConfig {
@@ -3296,7 +3771,7 @@ mod tests {
         use fauna_sync_engine::succession_progress::CorpusResealPass;
 
         let tmp = tempfile::tempdir().unwrap();
-        let paths = crate::config::SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = crate::config::SyncPaths::at(tmp.path().to_path_buf());
         let config = crate::config::SyncConfig {
             locations: vec![
                 crate::config::LocationConfig {
@@ -3376,7 +3851,7 @@ mod tests {
             .wake_senders
             .lock()
             .await
-            .insert(tref("documents").to_wire(), wake_tx);
+            .insert(tref("documents").to_wire(), 0, wake_tx);
 
         // The registered set → its wake channel fires exactly once.
         let resp = handle_request(
@@ -3451,7 +3926,7 @@ mod tests {
             .engine_cmd_senders
             .lock()
             .await
-            .insert(tref("documents").to_wire(), cmd_tx);
+            .insert(tref("documents").to_wire(), 0, cmd_tx);
         let resealed = fauna_sync_engine::engine::ResealedVersion {
             manifest_hash: fauna_core::data::ContentHash::from_digest_raw([0xee; 32]),
             size_bytes: 5000,
@@ -3508,7 +3983,7 @@ mod tests {
             .engine_cmd_senders
             .lock()
             .await
-            .insert(tref("documents").to_wire(), cmd_tx);
+            .insert(tref("documents").to_wire(), 0, cmd_tx);
 
         // Stand in for the resident loop: answer the one command with a canned
         // engine verdict, so the test pins the ROUTING + wire mapping.
@@ -3656,7 +4131,7 @@ mod tests {
     #[tokio::test]
     async fn pause_resume_persist_the_flag() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = crate::config::SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = crate::config::SyncPaths::at(tmp.path().to_path_buf());
         let (shutdown_tx, _rx) = tokio::sync::watch::channel(false);
         let (event_tx, _) = tokio::sync::broadcast::channel(16);
         let state = SyncServiceState::new(
@@ -4082,7 +4557,7 @@ mod tests {
             crate::config::SyncConfig::default(),
             shutdown_tx,
             event_tx,
-            crate::config::SyncPaths::new(None),
+            crate::config::SyncPaths::new(None).expect("this box has an absolute home"),
             Some(store.clone()),
         );
 
@@ -4166,7 +4641,7 @@ mod tests {
         let root = tmp.path().to_path_buf();
         let state = test_state_with_config_and_paths(
             crate::config::SyncConfig::default(),
-            crate::config::SyncPaths::new(Some(root.clone())),
+            crate::config::SyncPaths::at(root.clone()),
         );
         let location = root.join("docs-a");
         std::fs::create_dir_all(&location).unwrap();
@@ -4271,7 +4746,7 @@ mod tests {
                 crate::config::SyncConfig::default(),
                 shutdown_tx,
                 event_tx,
-                crate::config::SyncPaths::new(None),
+                crate::config::SyncPaths::new(None).expect("this box has an absolute home"),
                 Some(store.clone()),
             );
             let cap = SyncCapability::new(
@@ -4309,7 +4784,7 @@ mod tests {
             crate::config::SyncConfig::default(),
             shutdown_tx,
             event_tx,
-            crate::config::SyncPaths::new(None),
+            crate::config::SyncPaths::new(None).expect("this box has an absolute home"),
             Some(store.clone()),
         );
         // A fresh state's slot is empty until the boot-reload runs — nothing has
@@ -4521,7 +4996,7 @@ mod tests {
     #[tokio::test]
     async fn get_file_status_reads_the_identity_keyed_db_for_a_ref_carrying_binding() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = crate::config::SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = crate::config::SyncPaths::at(tmp.path().to_path_buf());
         let fs_ref = fauna_core::folder_keys::FolderRef::Local(7).to_wire();
         let db_path = paths.sync_db_path_for_ref(FolderRef::parse(&fs_ref).unwrap());
         seed_row_at(
@@ -4561,7 +5036,7 @@ mod tests {
     #[tokio::test]
     async fn folder_badge_folds_descendants_from_the_identity_keyed_db() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = crate::config::SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = crate::config::SyncPaths::at(tmp.path().to_path_buf());
         let fs_ref = fauna_core::folder_keys::FolderRef::Local(7).to_wire();
         let db_path = paths.sync_db_path_for_ref(FolderRef::parse(&fs_ref).unwrap());
         seed_row_at(
@@ -4602,7 +5077,7 @@ mod tests {
     #[tokio::test]
     async fn mark_placeholder_updates_the_identity_keyed_db() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = crate::config::SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = crate::config::SyncPaths::at(tmp.path().to_path_buf());
         let fs_ref = fauna_core::folder_keys::FolderRef::Local(7).to_wire();
         let db_path = paths.sync_db_path_for_ref(FolderRef::parse(&fs_ref).unwrap());
         seed_row_at(
@@ -4642,7 +5117,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("od-docs");
         std::fs::create_dir_all(&root).expect("create root");
-        let paths = crate::config::SyncPaths::new(Some(tmp.path().join("data")));
+        let paths = crate::config::SyncPaths::at(tmp.path().join("data"));
         let fs_ref = fauna_core::folder_keys::FolderRef::Local(7).to_wire();
         let db_path = paths.sync_db_path_for_ref(FolderRef::parse(&fs_ref).unwrap());
         let mut config = ref_carrying_config(&fs_ref);
@@ -4722,7 +5197,7 @@ mod tests {
     #[tokio::test]
     async fn repoint_entry_re_points_the_row_in_the_identity_keyed_db() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = crate::config::SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = crate::config::SyncPaths::at(tmp.path().to_path_buf());
         let fs_ref = fauna_core::folder_keys::FolderRef::Local(7).to_wire();
         let db_path = paths.sync_db_path_for_ref(FolderRef::parse(&fs_ref).unwrap());
         seed_row_at(
@@ -4779,6 +5254,255 @@ mod tests {
              an entry with no signer opens under no owner root"
         );
     }
+
+    /// The row a restore re-points, seeded with `local` as its local identity and `proven` as
+    /// the content its head is proven to reassemble to; the restore then runs.
+    async fn restore_over(
+        st: fauna_sync_engine::db::SyncState,
+        local: fauna_core::data::ContentHash,
+        proven: fauna_core::data::ContentHash,
+    ) -> fauna_sync_engine::db::SyncEntry {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = crate::config::SyncPaths::at(tmp.path().to_path_buf());
+        let fs_ref = fauna_core::folder_keys::FolderRef::Local(7).to_wire();
+        let folder_ref = FolderRef::parse(&fs_ref).unwrap();
+        let db_path = paths.sync_db_path_for_ref(folder_ref);
+        seed_row_at(&db_path, "a.txt", st, 4096);
+        {
+            let db = fauna_sync_engine::db::SyncDb::open(&db_path).expect("open db");
+            let head = Some(fauna_core::data::ContentHash::from_digest_raw([0x11; 32]));
+            db.upsert_entry("a.txt", Some(proven), None, head, st, 0, 0, 4096, 1, None)
+                .expect("seed the proven content");
+            db.stamp_recorded_content_from_local(
+                "a.txt",
+                fauna_sync_engine::db::ProofOrigin::Fetched,
+            )
+            .expect("stamp the proof");
+            db.upsert_entry("a.txt", Some(local), None, head, st, 0, 0, 4096, 1, None)
+                .expect("seed the local identity");
+        }
+        let state = test_state_with_config_and_paths(ref_carrying_config(&fs_ref), paths);
+        let restored = crate::versions::RestoredVersion {
+            manifest_hash: [0xAA; 32],
+            size_bytes: 2048,
+            content_key_version: None,
+            recorded_seq: 9,
+        };
+        assert!(
+            repoint_entry(&state, folder_ref, "a.txt", &restored, None, 1_700_000_100)
+                .await
+                .expect("repoint_entry")
+        );
+        fauna_sync_engine::db::SyncDb::open(&db_path)
+            .expect("open db")
+            .get_entry("a.txt")
+            .expect("db read")
+            .expect("row exists")
+    }
+
+    /// **The restore keeps the identity of recorded bytes, and drops their proof**
+    /// (`file-versions.md` § Restore, ordering 2). When another program holds the file and
+    /// refuses the restore's free, those bytes stay on the disk: the version the restore
+    /// replaced. The row naming them is what keeps the uploader from taking them for an edit
+    /// and recording them over the restore. Their proof — the content the head reassembles
+    /// to — was the replaced head's, so it goes with the head.
+    #[tokio::test]
+    async fn repoint_entry_keeps_the_identity_of_recorded_bytes_and_drops_their_proof() {
+        let recorded = fauna_core::data::ContentHash::of_raw(b"the recorded version");
+        let entry =
+            restore_over(fauna_sync_engine::db::SyncState::Synced, recorded, recorded).await;
+        assert_eq!(entry.state, fauna_sync_engine::db::SyncState::Placeholder);
+        assert_eq!(
+            entry.local_hash,
+            Some(recorded),
+            "the row names the bytes still on the disk"
+        );
+        assert_eq!(
+            entry.recorded_content_hash, None,
+            "the replaced head's proof is not the restored head's"
+        );
+    }
+
+    /// **…and never the identity of bytes no record proves.** An upload whose record has not
+    /// landed names bytes the nest may not hold. A row naming them would take that edit for a
+    /// stale cache and never upload it; with no identity it uploads as a conflict with the
+    /// restore, as ordering 2 says.
+    #[tokio::test]
+    async fn repoint_entry_keeps_no_identity_for_unrecorded_bytes() {
+        let entry = restore_over(
+            fauna_sync_engine::db::SyncState::Uploading,
+            fauna_core::data::ContentHash::of_raw(b"an edit whose record has not landed"),
+            fauna_core::data::ContentHash::of_raw(b"the recorded version"),
+        )
+        .await;
+        assert_eq!(entry.local_hash, None);
+    }
+
+    /// A restore over a kept copy hands its loop the head `repoint_entry` would have
+    /// written — read from the identity-keyed DB, the row itself left untouched (it moves
+    /// only after the swap).
+    #[tokio::test]
+    async fn restored_head_carries_the_restore_and_leaves_the_row_as_it_is() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = crate::config::SyncPaths::at(tmp.path().to_path_buf());
+        let fs_ref = fauna_core::folder_keys::FolderRef::Local(7).to_wire();
+        let folder_ref = FolderRef::parse(&fs_ref).unwrap();
+        let db_path = paths.sync_db_path_for_ref(folder_ref);
+        seed_row_at(
+            &db_path,
+            "sub/a.txt",
+            fauna_sync_engine::db::SyncState::Synced,
+            4096,
+        );
+        let state = test_state_with_config_and_paths(ref_carrying_config(&fs_ref), paths);
+        let restored = crate::versions::RestoredVersion {
+            manifest_hash: [0xAA; 32],
+            size_bytes: 2048,
+            content_key_version: Some(3),
+            recorded_seq: 9,
+        };
+
+        let head = restored_head(
+            &state,
+            folder_ref,
+            "sub/a.txt",
+            &restored,
+            Some([0x5C; 32]),
+            1_700_000_100,
+        )
+        .expect("restored_head")
+        .expect("the row lives in the identity-keyed DB");
+        assert_eq!(
+            head,
+            fauna_sync_engine::engine::StaleHydratedRow {
+                relative_path: "sub/a.txt".to_string(),
+                manifest_hash: fauna_core::data::ContentHash::from_digest_raw([0xAA; 32]),
+                size_bytes: 2048,
+                content_key_version: Some(3),
+                remote_mtime: 1_700_000_100,
+                version_num: 1,
+                signed_as: Some([0x5C; 32]),
+            }
+        );
+        let entry = fauna_sync_engine::db::SyncDb::open(&db_path)
+            .expect("open db")
+            .get_entry("sub/a.txt")
+            .expect("db read")
+            .expect("row exists");
+        assert_eq!(
+            (entry.state, entry.size_bytes),
+            (fauna_sync_engine::db::SyncState::Synced, 4096),
+            "the row is not moved ahead of the swap"
+        );
+
+        assert_eq!(
+            restored_head(&state, folder_ref, "sub/gone.txt", &restored, None, 0),
+            Ok(None),
+            "no row, no local copy to replace"
+        );
+    }
+
+    /// **Every file on an always-resident root is a copy this device keeps**
+    /// (`file-versions.md` § Restore, ordering 2's kept-copy branch): the restore's local
+    /// apply hands the restored head to the root's own loop and leaves the row where it is,
+    /// read off the location's mode — the file is an ordinary one, which no pin or free
+    /// reaches. Red-first: the road was chosen by the cfapi pin alone, so the row was
+    /// re-pointed to a `Placeholder` over the replaced bytes and the loop never heard of it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_restore_on_an_always_resident_root_takes_the_kept_copy_road() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = crate::config::SyncPaths::at(tmp.path().join("state"));
+        let fs_ref = fauna_core::folder_keys::FolderRef::Local(7).to_wire();
+        let folder_ref = FolderRef::parse(&fs_ref).unwrap();
+        let db_path = paths.sync_db_path_for_ref(folder_ref);
+        seed_row_at(
+            &db_path,
+            "a.txt",
+            fauna_sync_engine::db::SyncState::Synced,
+            4096,
+        );
+        let state = test_state_with_config_and_paths(ref_carrying_config(&fs_ref), paths);
+        let abs = tmp.path().join("a.txt");
+        std::fs::write(&abs, b"the version the restore replaces").expect("the kept copy");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        state
+            .engine_cmd_senders
+            .lock()
+            .await
+            .insert(fs_ref.clone(), 0, tx);
+        let loop_answers = tokio::spawn(async move {
+            match rx.recv().await {
+                Some(fauna_sync_engine::always_resident::EngineCommand::ApplyStaleHydrated {
+                    row,
+                    reply,
+                }) => {
+                    let _ = reply.send(Ok(true));
+                    Some(row)
+                }
+                _ => None,
+            }
+        });
+
+        let restored = crate::versions::RestoredVersion {
+            manifest_hash: [0xAA; 32],
+            size_bytes: 2048,
+            content_key_version: Some(3),
+            recorded_seq: 9,
+        };
+        apply_restore_locally(
+            &state,
+            &abs.to_string_lossy(),
+            folder_ref,
+            "a.txt",
+            &restored,
+            Some([0x5C; 32]),
+            crate::config::LocationMode::Always,
+        )
+        .await;
+        // The loop hangs up with the registration, so a restore that never reached it
+        // fails below instead of waiting for ever.
+        state.engine_cmd_senders.lock().await.remove(&fs_ref, 0);
+
+        let row = loop_answers
+            .await
+            .expect("the loop task")
+            .expect("the restored head reached the root's loop");
+        assert_eq!(
+            (
+                row.relative_path.as_str(),
+                row.manifest_hash,
+                row.size_bytes,
+                row.content_key_version,
+                row.signed_as,
+            ),
+            (
+                "a.txt",
+                fauna_core::data::ContentHash::from_digest_raw([0xAA; 32]),
+                2048,
+                Some(3),
+                Some([0x5C; 32]),
+            ),
+            "the loop is handed the restored head, signed as the identity the restore \
+             recorded as"
+        );
+        let entry = fauna_sync_engine::db::SyncDb::open(&db_path)
+            .expect("open db")
+            .get_entry("a.txt")
+            .expect("db read")
+            .expect("row exists");
+        assert_eq!(
+            (entry.state, entry.manifest_hash, entry.size_bytes),
+            (fauna_sync_engine::db::SyncState::Synced, None, 4096),
+            "the row is not moved ahead of the write — the loop moves it"
+        );
+        assert_eq!(
+            std::fs::read(&abs).expect("the copy"),
+            b"the version the restore replaces",
+            "the agent writes nothing itself"
+        );
+    }
 }
 
 // ── The test-only custodian pass poke ─────────────────────────────────────────
@@ -4799,7 +5523,7 @@ mod custodian_poke_tests {
             crate::config::SyncConfig::default(),
             shutdown_tx,
             event_tx,
-            crate::config::SyncPaths::new(None),
+            crate::config::SyncPaths::new(None).expect("this box has an absolute home"),
         )
     }
 
@@ -4934,14 +5658,16 @@ mod attach_tests {
     async fn an_attach_lease_lasts_exactly_as_long_as_the_apps_connection() {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let (event_tx, _) = tokio::sync::broadcast::channel(4);
+        // A private base: attaching hands the app's name to the sink, which
+        // keeps it there (never the developer's production agent dir).
+        let dir = std::env::temp_dir().join(format!("fauna-attach-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
         let state = SyncServiceState::new(
             crate::config::SyncConfig::default(),
             shutdown_tx.clone(),
             event_tx.clone(),
-            crate::config::SyncPaths::new(None),
+            crate::config::SyncPaths::at(dir.clone()),
         );
-        let dir = std::env::temp_dir().join(format!("fauna-attach-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("a.sock");
         let served = Arc::clone(&state);
         let server_socket = socket.clone();
@@ -4996,6 +5722,14 @@ mod attach_tests {
             state.attached_apps.any(),
             "the reply is sent only after the lease is held"
         );
+        // linux: the attached app is what a tapped banner launches, kept
+        // across the agent's restarts (`push_arm`'s `tap`).
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            std::fs::read_to_string(dir.join("attached-app")).unwrap(),
+            "tui",
+            "the reply is sent only after the sink kept the attached app"
+        );
 
         drop(client);
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -5028,7 +5762,7 @@ mod reconcile_account_runtime_tests {
             crate::config::SyncConfig::default(),
             shutdown_tx,
             event_tx,
-            crate::config::SyncPaths::new(None),
+            crate::config::SyncPaths::new(None).expect("this box has an absolute home"),
         )
     }
 
@@ -5159,6 +5893,40 @@ mod reconcile_account_runtime_tests {
         handle.shutdown().await;
     }
 
+    /// A nudge on a non-holder re-tries the election (`account-runtime.md`
+    /// § Multi-instance concurrency → *The agent holds the role when
+    /// present*, part 4): the app's runtime beside the agent yielded the role,
+    /// asked for this pass on the yield's edge, and the agent's runtime takes
+    /// the freed lock now, not at its backstop tick.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconcile_account_runtime_on_a_non_holder_takes_a_free_role() {
+        let dir = tempfile::tempdir().unwrap();
+        // The app's runtime came up first and holds the role…
+        let app = holding_runtime(dir.path()).await;
+        assert!(app.is_engine_holder(), "the first runtime holds");
+        // …so the agent's mount beside it is a non-holder.
+        let agent = holding_runtime(dir.path()).await;
+        assert!(!agent.is_engine_holder(), "the lock is the app's");
+        let state = test_state();
+        *state.mounted_store.lock().unwrap() = Some(agent.clone());
+
+        // The app lets the role go (its yield; here its exit) and asks.
+        app.shutdown().await;
+        drop(app);
+        let reply = handle_request(&reconcile_request(), &state).await;
+        assert!(matches!(
+            reply.result,
+            ResponseResult::Ok(ResponsePayload::Empty)
+        ));
+        assert!(
+            agent.is_engine_holder(),
+            "the nudged pass re-ran the election and took the free lock"
+        );
+
+        *state.mounted_store.lock().unwrap() = None;
+        agent.shutdown().await;
+    }
+
     /// Nothing mounted — signed out, or the stint not yet up — is not the
     /// gesture's failure: the row rests in the store, and the mount's first
     /// pass reads it.
@@ -5170,5 +5938,102 @@ mod reconcile_account_runtime_tests {
             reply.result,
             ResponseResult::Ok(ResponsePayload::Empty)
         ));
+    }
+
+    // ── `WalkFleetNow`: the holder's arm of a non-holder's awaited walk ──
+    // (`account-runtime.md` § Multi-instance concurrency → *A non-holder's
+    // awaited fleet walk reaches the holder*). Invoke-and-reply: every arm
+    // answers a typed `FleetWalked`, never `Empty`, never silence. The landed
+    // arm — a walk over a real nest — is `conformance_account_runtime`'s.
+
+    fn walk_request() -> Request {
+        Request {
+            id: 2,
+            method: RequestMethod::WalkFleetNow,
+        }
+    }
+
+    fn fleet_walked(reply: fauna_ipc::sync::Response) -> fauna_ipc::sync::FleetWalkOutcome {
+        match reply.result {
+            ResponseResult::Ok(ResponsePayload::FleetWalked(outcome)) => outcome,
+            other => panic!("expected FleetWalked, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn walk_fleet_now_with_no_store_mounted_answers_why() {
+        let state = test_state();
+        let outcome = fleet_walked(handle_request(&walk_request(), &state).await);
+        assert!(!outcome.walked);
+        assert!(
+            outcome
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.contains("no account store mounted")),
+            "{outcome:?}"
+        );
+    }
+
+    /// The reply carries the walk's own outcome: this runtime's nest is
+    /// unreachable, so its walk cannot land, and the reply says so — with the
+    /// reason — rather than an `Empty`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn walk_fleet_now_replies_the_walks_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = holding_runtime(dir.path()).await;
+        let state = test_state();
+        *state.mounted_store.lock().unwrap() = Some(handle.clone());
+
+        let (_, before) = handle.pump_cycles();
+        let outcome = fleet_walked(handle_request(&walk_request(), &state).await);
+        let (_, after) = handle.pump_cycles();
+        assert!(after > before, "the reply follows the walk's pass");
+        assert!(!outcome.walked, "no nest, no walk: {outcome:?}");
+        assert!(
+            outcome.reason.as_deref().is_some_and(|r| !r.is_empty()),
+            "a walk that did not land says why: {outcome:?}"
+        );
+
+        *state.mounted_store.lock().unwrap() = None;
+        handle.shutdown().await;
+    }
+
+    /// A walk outliving the bound answers `walked: false` with the bound as
+    /// its reason; the pass itself runs on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn walk_fleet_now_outliving_its_bound_answers_not_walked() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = holding_runtime(dir.path()).await;
+        let state = test_state();
+        *state.mounted_store.lock().unwrap() = Some(handle.clone());
+
+        let (_, before) = handle.pump_cycles();
+        let outcome = walk_fleet_now_within(&state, Duration::ZERO).await;
+        assert!(!outcome.walked);
+        assert!(
+            outcome
+                .reason
+                .as_deref()
+                .is_some_and(|r| r.contains("outlived")),
+            "{outcome:?}"
+        );
+        // The pass the timed-out walk asked for still runs: a later barrier
+        // is served after it.
+        handle.settled().await;
+        let (_, after) = handle.pump_cycles();
+        assert!(after > before, "the pass ran on ({before} → {after})");
+
+        *state.mounted_store.lock().unwrap() = None;
+        handle.shutdown().await;
+    }
+
+    /// The agent answers within its bound, and the app waits past it — so
+    /// the reply the app reads is always the agent's verdict, never the
+    /// pipe's own timeout.
+    #[test]
+    fn the_apps_wait_outlasts_the_agents_bound() {
+        assert!(
+            fauna_ipc::sync::WALK_FLEET_NOW_REQUEST_TIMEOUT > fauna_ipc::sync::WALK_FLEET_NOW_BOUND
+        );
     }
 }

@@ -76,6 +76,51 @@ impl<S: CustodyCeremonyStore> StoreCustodyCeremonySink<S> {
     }
 }
 
+/// What this process's [`StoreCustodyCeremonySink`]s did with each received
+/// ceremony payload (offer / accept / deliver; receipts are not counted) —
+/// the counts behind `fauna_e2e_agent::CUSTODY_CEREMONY_INGEST_KEY`, which
+/// owns the contract. Every field only ever increases, from 0 at process start.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CustodyCeremonyIngestCounts {
+    /// Payloads handed to a sink.
+    pub seen: u64,
+    /// Captured and advanced a ceremony (an offer newly pending, an accept
+    /// bound, a witness held or refreshed).
+    pub moved: u64,
+    /// Captured as a re-delivery of what is already on record.
+    pub duplicate: u64,
+    /// Refused by verification — among them a deliver for a custody this
+    /// account declined or removed.
+    pub refused: u64,
+    /// Not captured because the store door failed (not up, no generation tip).
+    pub uncaptured: u64,
+}
+
+/// Process-wide, like the share-endpoints tally: every session's sink counts
+/// into one place, so a relaunch-free reader needs no session handle.
+static INGEST_COUNTS: [std::sync::atomic::AtomicU64; 5] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+
+fn count_ingest(slot: usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    INGEST_COUNTS[0].fetch_add(1, Relaxed);
+    INGEST_COUNTS[slot].fetch_add(1, Relaxed);
+}
+
+/// Read [`CustodyCeremonyIngestCounts`] — five atomic loads, no lock or I/O,
+/// so it is legal on an e2e state path (convention 11).
+pub fn custody_ceremony_ingest_counts() -> CustodyCeremonyIngestCounts {
+    use std::sync::atomic::Ordering::Relaxed;
+    let read = |i: usize| INGEST_COUNTS[i].load(Relaxed);
+    CustodyCeremonyIngestCounts {
+        seen: read(0),
+        moved: read(1),
+        duplicate: read(2),
+        refused: read(3),
+        uncaptured: read(4),
+    }
+}
+
 #[async_trait]
 impl<S: CustodyCeremonyStore> CustodyCeremonySink for StoreCustodyCeremonySink<S> {
     async fn custody_payload(&self, channel_hex: &str, sender: ActorId, bytes: &[u8]) -> bool {
@@ -92,6 +137,10 @@ impl<S: CustodyCeremonyStore> CustodyCeremonySink for StoreCustodyCeremonySink<S
             .await;
         match result {
             Ok(Ok(outcome)) => {
+                count_ingest(match &outcome {
+                    IngestOutcome::Duplicate => 2,
+                    _ => 1,
+                });
                 if let Some(observer) = &self.observer {
                     match &outcome {
                         IngestOutcome::OfferPending { grant_id }
@@ -109,6 +158,7 @@ impl<S: CustodyCeremonyStore> CustodyCeremonySink for StoreCustodyCeremonySink<S
                 // candidate — `false` here is honest ("not captured") and the
                 // debug line is the diagnosis (a duplicate grant id with
                 // different bytes is the interesting one).
+                count_ingest(3);
                 tracing::debug!("custody ceremony payload refused: {refused}");
                 false
             }
@@ -116,6 +166,7 @@ impl<S: CustodyCeremonyStore> CustodyCeremonySink for StoreCustodyCeremonySink<S
                 // The store door failed (not up yet, no generation tip) —
                 // genuinely uncaptured; the per-launch re-walk and the
                 // ceremony decay both heal.
+                count_ingest(4);
                 tracing::debug!("custody ceremony capture failed: {e}");
                 false
             }

@@ -30,7 +30,7 @@ Stamped 2026-09-19 at f62a5e4e1c.
 | App | Status | Stamp |
 |---|---|---|
 | web | ✅ full | 0.1.2-dev+72d6a508 standalone |
-| linux | ✅ full | 0.1.2-dev+a1f84cc6 standalone |
+| linux | ✅ full | 0.1.4-dev+52904896 standalone |
 | windows | ✅ full | 0.1.2-dev+920556fa standalone |
 | macos | ✅ full | 0.1.2-dev+83158a20 standalone |
 | ios | ✅ full | 0.1.2-dev+83158a20 standalone |

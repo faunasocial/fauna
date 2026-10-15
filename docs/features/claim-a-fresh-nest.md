@@ -48,6 +48,7 @@ Stamped 2026-09-23 at 207d96534d.
    - `tests/e2e-unified/tests/platform/docker/test_docker_api_claim.py::test_docker_api_provisioning`
 7. [app] Finishing the claim always puts you in the app — it never closes on you at the last step — `docs/goal/behavior/onboarding.md` § Wizard exit handling
    - `tests/e2e-unified/tests/test_onboarding_logged_in_terminal_empty_store.py::test_logged_in_terminal_survives_an_empty_secret_slot`
+   - `tests/e2e-unified/tests/test_web_claim_enters_without_teardown.py::test_an_imported_identity_claims_a_fresh_box_and_enters_without_a_teardown`
 8. [app] The claim step takes the claim link your nest printed as readily as the bare code — `docs/goal/behavior/onboarding.md` § 3a. Claim code
    - `tests/e2e-unified/tests/test_claim_code_unclaimed_nest.py::test_claim_code_uri_paste_reaches_the_machine_intact`
 9. [app] A claim made with the link holds the nest to the identity the link names, and a damaged link is refused rather than claimed unprotected — `docs/goal/behavior/onboarding.md` § 3a. Claim code
@@ -102,6 +103,7 @@ Stamped 2026-09-23 at 207d96534d.
 | 5 | nest | `tests/e2e-unified/tests/platform/docker/test_nest.py::test_docker_nest_claim_admin` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/platform/docker/test_docker_api_claim.py::test_docker_api_provisioning` | nest (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_onboarding_logged_in_terminal_empty_store.py::test_logged_in_terminal_survives_an_empty_secret_slot` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_web_claim_enters_without_teardown.py::test_an_imported_identity_claims_a_fresh_box_and_enters_without_a_teardown` | — |
 | 8 | app | `tests/e2e-unified/tests/test_claim_code_unclaimed_nest.py::test_claim_code_uri_paste_reaches_the_machine_intact` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_web_claim_pin_wasm_witness.py::test_wasm_claim_pin_same_root_preserves_rotation_seq` | web (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_web_claim_pin_wasm_witness.py::test_wasm_claim_pin_differing_root_overwrites` | web (linux): passed |

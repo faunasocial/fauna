@@ -768,6 +768,38 @@ async fn the_set_name_pair_ships_to_the_owner_and_to_a_roster_member() {
     }
 }
 
+/// Every item names its set's row (`folders.id`) — the value a by-manifest
+/// reader puts in its relay hint's ref form, so a member's own same-named set
+/// never shadows the shared set the item came from (`file-sync.md` § Relay
+/// serving, step (4)).
+#[tokio::test]
+async fn every_item_carries_its_sets_row() {
+    let (router, state) = router_and_state().await;
+    let owner = [0xc1u8; 32];
+    let member = [0xc2u8; 32];
+    let shared = bind_shared(&state, "photos", &owner, &[0x5du8; 24], &[member]).await;
+    seed_file(&state.db, &owner, shared, "s1.jpg", 10).await;
+    let own = state.db.create_folder("photos", &member).await.unwrap();
+    seed_file(&state.db, &member, own, "m1.jpg", 10).await;
+    assert_ne!(own, shared);
+
+    let reply = list_page_v(&router, &state, member, None, 0, MEDIA_LIST_CURSOR_V2).await;
+    let row_of = |path: &str| {
+        reply
+            .items
+            .iter()
+            .find(|i| i.path == path)
+            .unwrap_or_else(|| panic!("the member sees {path}"))
+            .folder_id
+    };
+    assert_eq!(row_of("s1.jpg"), Some(shared), "the shared set's row");
+    assert_eq!(
+        row_of("m1.jpg"),
+        Some(own),
+        "the member's own same-named set's row"
+    );
+}
+
 /// The non-audience arm — the fix. An admin who is neither owner
 /// nor roster member still *reads* the row (the Q5 discovery grant is
 /// unchanged), but receives **neither** label half: no seal it cannot open, and

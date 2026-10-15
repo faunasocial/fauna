@@ -3,6 +3,7 @@ package wsrpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -239,6 +240,90 @@ func TestReconnectingClient_RevokedStopsAndSignalsDone(t *testing.T) {
 	// Calls after a revoke must fail fast, never hang.
 	if err := r.Call(ctx, "x", nil, nil); err == nil {
 		t.Fatal("Call after revoke unexpectedly succeeded")
+	}
+}
+
+// A revoked service user's reconnect is refused at the upgrade (the bearer
+// validator asks its standing), so it never reaches onConnect's whoami: the
+// loop asks checkRevoked and stops with ErrBridgeRevoked on its say-so.
+func TestReconnectingClient_UpgradeRefusedAndRevokedShutsDown(t *testing.T) {
+	conn1 := newFakeConn(1)
+	var checks atomic.Int32
+	deps := reconnectDeps{
+		dial: func(context.Context) (rpcConn, error) {
+			return nil, fmt.Errorf("wsrpc dial: %w", ErrUpgradeRefused)
+		},
+		onConnect: func(context.Context, rpcConn) error { t.Fatal("onConnect without a conn"); return nil },
+		checkRevoked: func(context.Context) bool {
+			checks.Add(1)
+			return true
+		},
+		backoff: fastBackoff,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := newReconnectingClient(ctx, conn1, deps)
+	defer func() { _ = r.Close() }()
+
+	conn1.Close() // the 4401 drop → re-dial refused at the upgrade
+
+	select {
+	case <-r.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Done() never fired for an upgrade-refused revoked bridge")
+	}
+	if !errors.Is(r.Err(), ErrBridgeRevoked) {
+		t.Fatalf("Err() = %v, want ErrBridgeRevoked", r.Err())
+	}
+	if checks.Load() != 1 {
+		t.Fatalf("checkRevoked called %d times, want 1", checks.Load())
+	}
+}
+
+// An upgrade refusal whose status check does NOT say revoked (a nest that
+// forgot the bearer and is mid-restart, a status-surface hiccup) and every
+// other dial failure stay transient: the loop retries and recovers.
+func TestReconnectingClient_UpgradeRefusedNotRevokedKeepsRetrying(t *testing.T) {
+	conn1 := newFakeConn(1)
+	conn2 := newFakeConn(2)
+	var dials, checks atomic.Int32
+	deps := reconnectDeps{
+		dial: func(context.Context) (rpcConn, error) {
+			switch dials.Add(1) {
+			case 1:
+				return nil, fmt.Errorf("wsrpc dial: %w", ErrUpgradeRefused)
+			case 2:
+				return nil, errors.New("connection refused") // not an upgrade refusal
+			default:
+				return conn2, nil
+			}
+		},
+		onConnect: func(context.Context, rpcConn) error { return nil },
+		checkRevoked: func(context.Context) bool {
+			checks.Add(1)
+			return false
+		},
+		backoff: fastBackoff,
+	}
+	r := newReconnectingClient(context.Background(), conn1, deps)
+	defer func() { _ = r.Close() }()
+
+	conn1.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for r.getCur() != conn2 {
+		if time.Now().After(deadline) {
+			t.Fatal("loop never recovered after a non-revoked upgrade refusal")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if checks.Load() != 1 {
+		t.Fatalf("checkRevoked called %d times, want 1 (only for the upgrade refusal)", checks.Load())
+	}
+	select {
+	case <-r.Done():
+		t.Fatal("Done() fired for a bridge that is not revoked")
+	default:
 	}
 }
 

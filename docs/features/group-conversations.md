@@ -59,32 +59,32 @@ Stamped 2026-09-19 at fdd225839d.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | 0.1.2-dev+b3bd74b7 standalone |
-| linux | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
 | windows | ⚠ partial | 0.1.2-dev+b9593858 standalone |
-| macos | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| ios | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |
+| tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_thread_membership.py::test_add_to_oneonone_forks_new_group` | web (linux): passed, web (windows): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed, tui (windows): passed |
+| 1 | app | `tests/e2e-unified/tests/test_thread_membership.py::test_add_to_oneonone_forks_new_group` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 2 | app | `tests/e2e-unified/tests/test_thread_membership_real.py::test_in_place_mls_add_through_the_ui` | web (linux): passed, web (windows): error, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_thread_rename.py::test_rename_mls_group` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_thread_rename.py::test_rename_button_hidden_on_oneonone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_cross_nest_api.py::test_cross_nest_group_channel` | nest (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_thread_membership_real.py::test_in_place_mls_remove_through_the_ui` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 6 | app | `tests/e2e-unified/tests/test_conversation_room_roles.py::test_a_room_is_born_governed_and_its_roles_govern_removal` | web (linux): passed, linux (linux): failed, windows (windows): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_conversation_room_roles.py::test_a_room_is_born_governed_and_its_roles_govern_removal` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_conversation_room_history.py::test_a_newcomer_under_none_sees_nothing_before_the_join` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_conversation_room_history.py::test_a_newcomer_under_full_sees_the_conversation_so_far` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_conversation_room_ownership.py::test_the_owner_hands_the_room_over_and_the_root_moves` | web (linux): passed, linux (linux): failed, windows (windows): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_conversation_room_leave.py::test_a_member_leaves_the_room_and_the_floor_drops_them` | windows (windows): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_conversation_room_roles.py::test_a_room_is_born_governed_and_its_roles_govern_removal` | web (linux): passed, linux (linux): failed, windows (windows): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_conversation_room_roles.py::test_a_room_is_born_governed_and_its_roles_govern_removal` | web (linux): passed, linux (linux): failed, windows (windows): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_conversation_room_join_rule.py::test_the_join_rule_decides_whether_a_plain_member_may_invite` | tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_conversation_room_delete_any.py::test_an_admin_and_the_owner_delete_a_members_message_for_everyone` | tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_conversation_room_ownership.py::test_the_owner_hands_the_room_over_and_the_root_moves` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_conversation_room_leave.py::test_a_member_leaves_the_room_and_the_floor_drops_them` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_conversation_room_roles.py::test_a_room_is_born_governed_and_its_roles_govern_removal` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_conversation_room_roles.py::test_a_room_is_born_governed_and_its_roles_govern_removal` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_conversation_room_join_rule.py::test_the_join_rule_decides_whether_a_plain_member_may_invite` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_conversation_room_delete_any.py::test_an_admin_and_the_owner_delete_a_members_message_for_everyone` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_thread_membership_real.py::test_in_place_add_of_an_unreachable_person_is_refused` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_conversation_room_community.py::test_a_community_room_is_founded_joined_searched_and_its_read_withdrawn` | tui (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_conversation_room_labelers.py::test_a_community_rooms_owner_names_a_labeler_and_a_members_message_is_labelled` | tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_conversation_room_community.py::test_a_community_room_is_founded_joined_searched_and_its_read_withdrawn` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_conversation_room_labelers.py::test_a_community_rooms_owner_names_a_labeler_and_a_members_message_is_labelled` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 17 | app | `tests/e2e-unified/tests/test_conversation_room_community_cross_nest.py::test_a_member_of_another_nest_joins_a_community_room_through_the_relay` | tui (linux): passed |
 <!-- features-render:end -->

@@ -202,6 +202,8 @@ fn custodian_status_row(
             cap_state: Some(c.cap_state),
             audit_state: c.audit_state,
             last_audit_passed_at: c.last_audit_passed_at.map(|t| t.max(0) as u64),
+            // A custodian pulls; it has no writer gate to refuse it.
+            writer_state: None,
             extra: Default::default(),
         },
         None => BackupDestinationStatusItem {
@@ -212,6 +214,7 @@ fn custodian_status_row(
             cap_state: None,
             audit_state: None,
             last_audit_passed_at: None,
+            writer_state: None,
             extra: Default::default(),
         },
     }

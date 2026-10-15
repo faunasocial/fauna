@@ -79,20 +79,20 @@ Stamped 2026-10-01 at 308c995169.
 21. [nest] Mail you send from a mail app to someone else on your nest lands straight in their inbox — `docs/goal/behavior/smtp-server.md` § Outbound submission flow (per-user view)
    - `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_mail_app_send_to_a_local_user_lands_in_their_inbox`
 22. [nest] If the nest is briefly unavailable while a mail app is sending, the app is told to try again instead of the message being accepted and lost — `docs/goal/behavior/smtp-server.md` § Recipient handling on submission
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_a_mail_app_sending_while_the_nest_is_down_is_told_to_try_again`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+74e26248 standalone |
-| linux | ⚠ partial | 0.1.2-dev+74e26248 standalone |
-| windows | ⚠ partial | 0.1.2-dev+74e26248 standalone |
-| macos | ⚠ partial | 0.1.2-dev+74e26248 standalone |
-| ios | ⚠ partial | 0.1.2-dev+74e26248 standalone |
-| android | ⚠ partial | 0.1.2-dev+74e26248 standalone |
-| tui | ⚠ partial | 0.1.2-dev+74e26248 standalone |
+| web | ✅ full | 0.1.3-dev+937bbf0c.dirty standalone |
+| linux | ✅ full | 0.1.3-dev+937bbf0c.dirty standalone |
+| windows | ✅ full | 0.1.3-dev+937bbf0c.dirty standalone |
+| macos | ✅ full | 0.1.3-dev+937bbf0c.dirty standalone |
+| ios | ✅ full | 0.1.3-dev+937bbf0c.dirty standalone |
+| android | ⚠ partial | 0.1.3-dev+937bbf0c.dirty standalone |
+| tui | ✅ full | 0.1.3-dev+937bbf0c.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -135,5 +135,5 @@ Stamped 2026-10-01 at 308c995169.
 | 19 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_repeated_wrong_passwords_are_briefly_refused` | nest (linux): passed |
 | 20 | nest | `tests/e2e-unified/tests/test_mail_bridge_mda_mailboxes.py::test_login_command_and_rev1_dialect_over_tls` | nest (linux): passed |
 | 21 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_mail_app_send_to_a_local_user_lands_in_their_inbox` | nest (linux): passed |
-| 22 | nest | (none) | — |
+| 22 | nest | `tests/e2e-unified/tests/test_mail_bridge_mua_submission.py::test_a_mail_app_sending_while_the_nest_is_down_is_told_to_try_again` | nest (linux): passed |
 <!-- features-render:end -->

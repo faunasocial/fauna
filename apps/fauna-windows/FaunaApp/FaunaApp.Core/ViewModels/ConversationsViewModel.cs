@@ -430,6 +430,16 @@ internal partial class ConversationsViewModel : ObservableObject
     public async Task ResolveRecipientAsync() => await _manager.ResolveRecipient();
 
     /// <summary>
+    /// Re-read the list-send texts (<c>dm-compose-list-send-warning</c> /
+    /// <c>-quota-warning</c> / <c>-send-progress</c>) for the active compose —
+    /// <c>null</c> for the new-thread composer after a recipient chip commits, the
+    /// thread id when a thread opens (mail-mass-mailing.md § Composing a list
+    /// message). The result rides the manager's snapshot notify into
+    /// <c>ComposeState.listSend</c>; nothing to return.
+    /// </summary>
+    public async Task RefreshListSendAsync(string? threadId) => await _manager.RefreshListSend(threadId);
+
+    /// <summary>
     /// Rename a thread via the shared manager's wire-propagating
     /// <c>rename_thread</c> (the same async op linux calls natively): relabels the
     /// snapshot immediately, then posts the encrypted <c>GroupMeta::NameChanged</c>
@@ -475,6 +485,50 @@ internal partial class ConversationsViewModel : ObservableObject
     /// WinUI VM must resume on the UI thread.
     /// </summary>
     internal async Task LeaveRoom(string id) => await _manager.LeaveRoom(id);
+
+    /// <summary>
+    /// The new-thread composer's home-nest choice
+    /// (<c>recipient-picker-home-nest-toggle</c>) — the shared
+    /// <c>ConversationsManager::set_new_thread_home_nest</c>. ON seats the home
+    /// nest in the room about to be created, which makes it a community room the
+    /// first send founds; <c>recipient-picker-class</c> follows it. Synchronous:
+    /// the snapshot tick carries the new <c>include_home_nest</c> back.
+    /// </summary>
+    public void SetNewThreadHomeNest(bool include) => _manager.SetNewThreadHomeNest(include);
+
+    /// <summary>
+    /// The community-room invitations standing for this account, atop the list
+    /// (<c>room-invitation[i]</c>) — already verified against their signers in
+    /// shared Rust.
+    /// </summary>
+    internal RoomInvitationSnapshot[] RoomInvitations => Snapshot.roomInvitations;
+
+    /// <summary>
+    /// <c>room-invitation-accept-button[i]</c>: the shared
+    /// <c>accept_room_invitation</c> seats the account on the room's floor and
+    /// SELECTS the room's thread (the page follows the snapshot into the detail
+    /// view); a refusal is already on <c>Snapshot.error</c>. No try/catch and no
+    /// <c>ConfigureAwait(false)</c> — the <see cref="LeaveRoom"/> posture.
+    /// </summary>
+    internal async Task<string?> AcceptRoomInvitation(long id) =>
+        await _manager.AcceptRoomInvitation(id);
+
+    /// <summary>
+    /// <c>room-invitation-decline-button[i]</c>: the invitation stops standing for
+    /// this account (<c>fauna.inbox.ack</c>, offline-safe); the room is told
+    /// nothing.
+    /// </summary>
+    internal async Task DeclineRoomInvitation(long id) =>
+        await _manager.DeclineRoomInvitation(id);
+
+    /// <summary>
+    /// <c>room-pending-invite-withdraw-button[i]</c>: withdraw the invitation
+    /// pending on room <paramref name="id"/> for the invitee named by the row's own
+    /// <c>invitee_actor_hex</c>. Acts at once, never staged through Save; on
+    /// success the list is read again and the row is gone.
+    /// </summary>
+    internal async Task WithdrawRoomInvite(string id, string inviteeActorHex) =>
+        await _manager.WithdrawRoomInvite(id, inviteeActorHex);
 
     /// <summary>
     /// Send the active draft on an existing thread (<c>dm-send-button →

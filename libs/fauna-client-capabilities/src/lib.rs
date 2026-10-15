@@ -170,7 +170,7 @@ pub enum DerivePayloadError {
     #[error("content.write scope tuple refused: {0}")]
     ContentWriteRefused(String),
     /// A `deposit` tuple must name one folder by its row id in decimal and
-    /// carry nothing else (`file-sync.md` § Third-party deposit ingress).
+    /// carry nothing else (`folder-deposit.md`).
     #[error("deposit scope tuple refused: {0}")]
     DepositRefused(String),
 }
@@ -322,11 +322,22 @@ fn check_deposit(tuple: &ScopeTuple) -> Result<(), String> {
     }
 }
 
-/// Mint the **consent-time grant to a third-party principal** over folder
-/// deposit (`file-sync.md` § Third-party deposit ingress): one keyless
-/// `deposit` tuple per folder, wrapping nothing — the audit + revocation
-/// record the nest's deposit door re-resolves at every deposit, held by the
-/// principal's attested X25519 key.
+/// The folder deposit twin's tuples (`file-sync.md` § Third-party deposit
+/// ingress): one keyless `deposit` tuple per folder, wrapping nothing — the
+/// audit + revocation record the nest's deposit door re-resolves at every
+/// deposit. What [`ext_consent::prepare_ext_consent_grant`] adds to the
+/// consent's one grant for its `fauna:folder:deposit:<id>` scopes.
+#[must_use]
+pub fn folder_deposit_scope_wraps(folder_ids: &[i64]) -> Vec<ScopeWraps> {
+    folder_ids
+        .iter()
+        .map(|id| (ScopeTuple::folder_deposit(*id), Vec::new()))
+        .collect()
+}
+
+/// The folder deposit twin as a grant of its own — [`folder_deposit_scope_wraps`]
+/// held by the principal's attested X25519 key, minus the ledger `Mint` (the
+/// consent-time mint is [`ext_consent::prepare_ext_consent_grant`]'s).
 ///
 /// # Errors
 ///
@@ -338,17 +349,13 @@ pub fn mint_folder_deposit_grant(
     window: GrantWindow,
     folder_ids: &[i64],
 ) -> Result<GrantBlob, MintGrantError> {
-    let scopes: Vec<(ScopeTuple, Option<Vec<u8>>)> = folder_ids
-        .iter()
-        .map(|id| (ScopeTuple::folder_deposit(*id), None))
-        .collect();
-    Ok(build_grant_blob(
+    Ok(build_grant_blob_with_epochs(
         owner_actor_id,
         grant_id,
         holder_pubkey,
         None,
         window,
-        &scopes,
+        &folder_deposit_scope_wraps(folder_ids),
     )?)
 }
 
@@ -405,16 +412,142 @@ pub fn ext_kinds_scope_wraps(
     let mut scopes = Vec::with_capacity(kinds.len() * 2);
     for kind in kinds {
         let kind = kind.to_string();
-        let (entry_key, item_blind) = delegable.for_kind(&kind).to_grant();
-        let mut payload = Vec::with_capacity(EXT_KIND_PAYLOAD_LEN);
-        payload.extend_from_slice(&entry_key);
-        payload.extend_from_slice(&item_blind);
+        let payload = delegable_pair_payload(delegable, &kind);
         scopes.push((ScopeTuple::ext_kind_read(&kind), vec![(None, payload)]));
         if let Some(writer) = writer {
             scopes.push((ScopeTuple::content_write(&kind, writer), Vec::new()));
         }
     }
     scopes
+}
+
+/// The wrap payload of one delegable kind's `content.read` tuple: the kind's
+/// delegable pair, `entry_key ‖ item_blind` ([`EXT_KIND_PAYLOAD_LEN`] bytes).
+fn delegable_pair_payload(
+    delegable: &fauna_core::crypto::DelegableSchedule,
+    kind: &str,
+) -> Vec<u8> {
+    let (entry_key, item_blind) = delegable.for_kind(kind).to_grant();
+    let mut payload = Vec::with_capacity(EXT_KIND_PAYLOAD_LEN);
+    payload.extend_from_slice(&entry_key);
+    payload.extend_from_slice(&item_blind);
+    payload
+}
+
+/// A grant built only of delegable-kind tuples — the consent-time grant's
+/// `ext.*` reads with their writer-confined `content.write` tuples, and the
+/// `fauna:personalization:rw` twin's reads, in any mix — rebuilt tuple for
+/// tuple over `delegable`: each read re-wraps that schedule's pair for its
+/// kind, each write tuple carries its writer verbatim. `None` when any tuple
+/// is of another shape, so the caller's other arms keep it.
+///
+/// The succession re-mint's delegable arm
+/// ([`succession::remint_capability_grants`]): the successor re-wraps its
+/// OWN pairs, the rows' delegable-rung carry re-sealing them under the
+/// successor's schedule (`succession-aftermath.md` § Re-key scope).
+#[must_use]
+pub fn delegable_kinds_scope_wraps(
+    delegable: &fauna_core::crypto::DelegableSchedule,
+    tuples: &[ScopeTuple],
+) -> Option<Vec<ScopeWraps>> {
+    let delegable_read = |kind: &str| {
+        fauna_protocol::ext_kind::is_ext_kind(kind) || PERSONALIZATION_GRANT_KINDS.contains(&kind)
+    };
+    let mut scopes = Vec::with_capacity(tuples.len());
+    for t in tuples {
+        let kind = t.kind.as_deref()?;
+        if t.tier.is_some() || t.set.is_some() {
+            return None;
+        }
+        match t.class.as_str() {
+            ScopeTuple::CLASS_CONTENT_READ if t.factor.is_none() && delegable_read(kind) => {
+                let payload = delegable_pair_payload(delegable, kind);
+                scopes.push((ScopeTuple::delegable_kind_read(kind), vec![(None, payload)]));
+            }
+            ScopeTuple::CLASS_CONTENT_WRITE if fauna_protocol::ext_kind::is_ext_kind(kind) => {
+                let writer = fauna_core::grant_event::parse_writer_factor(t.factor.as_deref()?)?;
+                scopes.push((ScopeTuple::content_write(kind, &writer), Vec::new()));
+            }
+            _ => return None,
+        }
+    }
+    scopes
+        .iter()
+        .any(|(t, _)| t.class == ScopeTuple::CLASS_CONTENT_READ)
+        .then_some(scopes)
+}
+
+/// The two kinds the `fauna:personalization:rw` grant twin covers
+/// (`authorization-server.md` § Scope grammar → *The fifth arm*): the
+/// trained-factor registry `fauna.state.personalization`, and
+/// `fauna.personalization.model`, the reserved kind whose delegable pair
+/// seals the model blobs (`topic-factors.md` § At rest → *Re-keyed for the
+/// third-party plane*).
+pub const PERSONALIZATION_GRANT_KINDS: [&str; 2] = [
+    fauna_protocol::merge_policy::KIND_PERSONALIZATION,
+    fauna_protocol::personalization::MODEL_SEAL_KIND,
+];
+
+/// The `fauna:personalization:rw` twin's tuples and wraps: one
+/// `content.read` tuple per [`PERSONALIZATION_GRANT_KINDS`] kind, each
+/// wrapping the kind's delegable pair — the ordinary delegable unit, from the
+/// owner's delegable branch alone. No `content.write` tuple: the registry is
+/// the owner's to write, and the model blobs ride their own door.
+#[must_use]
+pub fn personalization_scope_wraps(
+    delegable: &fauna_core::crypto::DelegableSchedule,
+) -> Vec<ScopeWraps> {
+    PERSONALIZATION_GRANT_KINDS
+        .iter()
+        .map(|kind| {
+            (
+                ScopeTuple::delegable_kind_read(kind),
+                vec![(None, delegable_pair_payload(delegable, kind))],
+            )
+        })
+        .collect()
+}
+
+/// The `fauna:personalization:rw` twin as a grant of its own — the blob
+/// [`ext_consent::prepare_ext_consent_grant`] builds for a consent naming the
+/// arm and no `records` scope, minus the ledger `Mint` (a harness holding no
+/// account store cannot make it; the entry point's tests pin it).
+///
+/// # Errors
+///
+/// [`MintGrantError::Wrap`] on a seal failure (a malformed holder key).
+pub fn mint_personalization_grant(
+    delegable: &fauna_core::crypto::DelegableSchedule,
+    owner_actor_id: &[u8; 32],
+    grant_id: &[u8; 16],
+    holder_pubkey: &[u8; 32],
+    window: GrantWindow,
+) -> Result<GrantBlob, MintGrantError> {
+    Ok(build_grant_blob_with_epochs(
+        owner_actor_id,
+        grant_id,
+        holder_pubkey,
+        None,
+        window,
+        &personalization_scope_wraps(delegable),
+    )?)
+}
+
+/// The holder's side of [`personalization_scope_wraps`]: open the twin's
+/// two pairs in `blob` with the holder's X25519 secret, one
+/// [`fauna_core::crypto::AccountStateKindKeys`] per kind — the registry
+/// kind's opens its `state` rows, the model kind's opens the model blobs.
+///
+/// # Errors
+///
+/// As [`open_ext_kind_keys`].
+pub fn open_personalization_keys(
+    blob: &GrantBlob,
+    holder_x25519_secret: &[u8; 32],
+) -> Result<Vec<fauna_core::crypto::AccountStateKindKeys>, fauna_mls::wrapped_blob::UnwrapError> {
+    open_delegable_kind_keys(blob, holder_x25519_secret, |kind| {
+        PERSONALIZATION_GRANT_KINDS.contains(&kind)
+    })
 }
 
 /// The holder's side of [`mint_ext_kinds_grant`]: open every `ext.*` kind's
@@ -431,6 +564,21 @@ pub fn open_ext_kind_keys(
     blob: &GrantBlob,
     holder_x25519_secret: &[u8; 32],
 ) -> Result<Vec<fauna_core::crypto::AccountStateKindKeys>, fauna_mls::wrapped_blob::UnwrapError> {
+    open_delegable_kind_keys(
+        blob,
+        holder_x25519_secret,
+        fauna_protocol::ext_kind::is_ext_kind,
+    )
+}
+
+/// Open every `content.read` tuple in `blob` whose kind `covers` names, each
+/// a delegable pair. A wrap that does not open, or a payload of the wrong
+/// length, refuses the whole grant.
+fn open_delegable_kind_keys(
+    blob: &GrantBlob,
+    holder_x25519_secret: &[u8; 32],
+    covers: impl Fn(&str) -> bool,
+) -> Result<Vec<fauna_core::crypto::AccountStateKindKeys>, fauna_mls::wrapped_blob::UnwrapError> {
     let owner: [u8; 32] = blob.index.0.as_slice().try_into().map_err(|_| {
         fauna_mls::wrapped_blob::UnwrapError::InvalidFormat("grant owner is not 32 bytes".into())
     })?;
@@ -438,10 +586,7 @@ pub fn open_ext_kind_keys(
         .iter()
         .filter(|w| {
             w.scope.class == ScopeTuple::CLASS_CONTENT_READ
-                && w.scope
-                    .kind
-                    .as_deref()
-                    .is_some_and(fauna_protocol::ext_kind::is_ext_kind)
+                && w.scope.kind.as_deref().is_some_and(&covers)
         })
         .map(|w| {
             let payload =
@@ -607,6 +752,73 @@ pub fn folder_read_scope_wraps(
         .map(|g| (Some(g.version), g.key.to_array().to_vec()))
         .collect();
     Ok((tuple, wraps))
+}
+
+/// The holder's side of [`folder_read_scope_wraps`]: a principal's folder read
+/// twin opened with its X25519 secret into the set's
+/// [`fauna_core::folder_keys::FolderContentKeys`] — what the principal sends on
+/// every WebDAV bearer request in the `Fauna-Folder-Keys` header
+/// (`webdav-server.md` § Key model → *A principal's read* (3);
+/// `FolderContentKeys::to_header_value`). A twin is one grant per (principal,
+/// folder) (rule (1), *Its grant shape*), so a blob carrying no folder read
+/// tuple, or more than one, is refused; so is a wrap that does not open, names
+/// no generation, or carries a payload that is not a 32-byte key — a principal
+/// holding part of a set's history would omit the rows the rest opens. The
+/// wraps carry no rotation stamp, so each generation's `rotated_at` is its
+/// version: the bundle's order is the versions' ([`FolderContentKeys::
+/// from_generations`]), which is all the MDA's `keys_for` consults.
+///
+/// # Errors
+///
+/// The wrap's own unseal error, or `InvalidFormat` for any shape above.
+pub fn open_folder_read_keys(
+    blob: &GrantBlob,
+    holder_x25519_secret: &[u8; 32],
+) -> Result<fauna_core::folder_keys::FolderContentKeys, fauna_mls::wrapped_blob::UnwrapError> {
+    use fauna_mls::wrapped_blob::UnwrapError;
+    let owner: [u8; 32] = blob
+        .index
+        .0
+        .as_slice()
+        .try_into()
+        .map_err(|_| UnwrapError::InvalidFormat("grant owner is not 32 bytes".into()))?;
+    let is_folder_read = |t: &ScopeTuple| {
+        t.class == ScopeTuple::CLASS_CONTENT_READ
+            && t.kind.as_deref() == Some(ScopeTuple::KIND_FOLDER)
+    };
+    let mut tuples = blob.scope.iter().filter(|t| is_folder_read(t));
+    let tuple = match (tuples.next(), tuples.next()) {
+        (Some(t), None) => t,
+        _ => {
+            return Err(UnwrapError::InvalidFormat(
+                "a folder read twin carries exactly one folder read tuple".into(),
+            ));
+        }
+    };
+    let generations = blob
+        .wrapped_keys
+        .iter()
+        .filter(|w| &w.scope == tuple)
+        .map(|w| {
+            let version = w.epoch.ok_or_else(|| {
+                UnwrapError::InvalidFormat("a folder wrap names no generation".into())
+            })?;
+            let key: [u8; 32] =
+                fauna_mls::wrapped_blob::unseal_capability(w, &owner, holder_x25519_secret)?
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| {
+                        UnwrapError::InvalidFormat("a folder content key is not 32 bytes".into())
+                    })?;
+            Ok(fauna_core::folder_keys::ContentKeyGeneration {
+                version,
+                key: key.into(),
+                rotated_at: version,
+            })
+        })
+        .collect::<Result<Vec<_>, UnwrapError>>()?;
+    fauna_core::folder_keys::FolderContentKeys::from_generations(generations)
+        .map_err(|e| UnwrapError::InvalidFormat(e.to_string()))
 }
 
 /// The web-paywall capability grant id for a set at one generation (the

@@ -139,3 +139,91 @@ def test_non_admin_denied_on_put_policy_kind(nest_instance, test_user):
     assert excinfo.value.code == "fauna.bridges.permission_denied", (
         f"User-class actor on an Admin kind must be denied; got {excinfo.value.code!r}"
     )
+
+
+# The four groups beside spam (the alias group's twin is
+# `api/test_mail_alias_policy.py::test_non_admin_denied_on_put_alias_policy`).
+_NON_SPAM_KINDS = [(kind, payload) for kind, payload in _PUT_CASES if "spam" not in kind]
+
+
+@pytest.mark.parametrize("kind,payload", _NON_SPAM_KINDS, ids=[k for k, _ in _NON_SPAM_KINDS])
+@pytest.mark.feature("admin-mail-policy")
+def test_non_admin_denied_on_every_other_policy_group(nest_instance, test_user, kind, payload):
+    """A member who is not an admin cannot save the sender-check (auth),
+    sending (submission), mail-app (imap) or delivery (outbound) group, and
+    the refusal writes nothing: the admin's read-back is unchanged."""
+    from clients.ws_rpc_admin_client import RpcCallError, WsRpcAdminClient
+
+    section = kind.removeprefix("fauna.bridges.put_").removesuffix("_policy")
+    with _admin_client(nest_instance) as admin:
+        before = admin.call("fauna.bridges.get_mail_config", {})[section]
+    client = WsRpcAdminClient(
+        nest_instance["url"],
+        actor_id=test_user["actor_id_bytes"],
+        signing_key=bytes(test_user["signing_key"]),
+    )
+    with client:
+        with pytest.raises(RpcCallError) as excinfo:
+            client.call(kind, payload)
+    assert excinfo.value.code == "fauna.bridges.permission_denied", (
+        f"User-class actor on {kind} must be denied; got {excinfo.value.code!r}"
+    )
+    with _admin_client(nest_instance) as admin:
+        after = admin.call("fauna.bridges.get_mail_config", {})[section]
+    assert after == before, f"a refused {kind} must write nothing: {before!r} → {after!r}"
+
+
+@pytest.mark.feature("admin-mail-policy")
+def test_full_confidence_not_above_min_samples_refused_and_nothing_saved(policy_nest):
+    """A full-confidence sample count that is not above the minimum-samples
+    count is refused (equal and below both), and the refused save changes no
+    spam knob — not even the valid ones it carried."""
+    from clients.ws_rpc_admin_client import RpcCallError
+
+    with _admin_client(policy_nest) as client:
+        before = client.call("fauna.bridges.get_mail_config", {})["spam"]
+        for full in (100, 99):
+            with pytest.raises(RpcCallError) as excinfo:
+                client.call(
+                    "fauna.bridges.put_spam_policy",
+                    {
+                        "baseline_standing_publish": before["baseline_standing_publish"],
+                        "bayesian_min_samples": 100,
+                        "bayesian_full_confidence_samples": full,
+                        "max_conn_per_min": 7,
+                    },
+                )
+            assert excinfo.value.code == "fauna.protocol.malformed", (
+                f"full={full} ≤ min=100 must be refused; got {excinfo.value.code!r}"
+            )
+        after = client.call("fauna.bridges.get_mail_config", {})["spam"]
+    assert after == before, f"a refused put_spam_policy must save nothing: {before!r} → {after!r}"
+
+
+@pytest.mark.feature("admin-mail-policy")
+def test_saving_other_spam_knobs_never_switches_standing_baseline_off(policy_nest):
+    """Once the admin turns standing publish on, a spam save that does not
+    state it is refused rather than read as "off", a save of another knob
+    that restates it keeps it on, and only its own switch turns it off."""
+    from clients.ws_rpc_admin_client import RpcCallError
+
+    with _admin_client(policy_nest) as client:
+        client.call("fauna.bridges.put_spam_policy", {"baseline_standing_publish": True})
+        try:
+            with pytest.raises(RpcCallError):
+                client.call("fauna.bridges.put_spam_policy", {"max_conn_per_min": 9})
+            spam = client.call("fauna.bridges.get_mail_config", {})["spam"]
+            assert spam["baseline_standing_publish"] is True, (
+                f"a save omitting the field must not switch standing publish off: {spam!r}"
+            )
+            client.call(
+                "fauna.bridges.put_spam_policy",
+                {"baseline_standing_publish": True, "max_conn_per_min": 9},
+            )
+            spam = client.call("fauna.bridges.get_mail_config", {})["spam"]
+            assert spam["baseline_standing_publish"] is True
+            assert spam["max_conn_per_min"] == 9
+        finally:
+            client.call("fauna.bridges.put_spam_policy", {"baseline_standing_publish": False})
+        spam = client.call("fauna.bridges.get_mail_config", {})["spam"]
+    assert spam["baseline_standing_publish"] is False, "its own switch turns it off"

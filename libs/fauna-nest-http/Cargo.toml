@@ -32,6 +32,10 @@ client = [
     "dep:bytes",
     "dep:serde",
     "dep:serde_json",
+    # `BearerSource::subscribe_self_identity` — the identity watch
+    # (`tokio::sync::watch` of `fauna_protocol::auth::MintedIdentity`).
+    "dep:tokio",
+    "dep:fauna-protocol",
 ]
 # Pulls in the `LaunchMachineBearer` impl (a fauna-nest-http -> fauna-launch-machine
 # dep) — implies `client` (the impl is part of the content/bearer layer). The
@@ -68,6 +72,7 @@ async-trait = { version = "0.1", optional = true }
 fauna-launch-machine = { path = "../fauna-launch-machine", optional = true }
 fauna-core = { workspace = true, optional = true }
 fauna-protocol = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

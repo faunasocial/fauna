@@ -414,6 +414,98 @@ impl SegmentFamily {
 /// `BACKED_UP_KINDS` long after its name is derivable.
 pub const BACKUP_SET_KINDS: &[&str] = &["mail", "post", "calendar", "card", "conv"];
 
+/// The segment kinds the backup arm covers, for **every** runner — the
+/// nest's own worker (`bins/fauna-nest/src/segment_backup.rs`, which
+/// re-exports this) and the client-device custodian pull.
+///
+/// **One constant, deliberately.** The nest arm used to declare its own
+/// `["mail"]` "in lockstep by comment only", which was harmless while both
+/// sides independently swept their own list. It stopped being harmless when a
+/// client observing a fresh nest holder began yielding the **whole kind**: the
+/// nest's `backup-upload` lease is kind-agnostic, so any kind a client lists
+/// and the nest does not sweep would stop being backed up **silently**
+/// (the same treatment the destination mode
+/// filter got before it retired). Divergence is now unrepresentable rather than warned about.
+///
+/// Every actor-scoped kind (2026-09-29): each has every nest-side arm (the
+/// nest-local source serves it and its journal, the materialize verb
+/// reconstitutes it), and a client-device custodian's store keys every row by
+/// its set (`fauna_sync_engine::custodian_store::held_path`), so kinds whose content
+/// families share one within-set grammar (`{scope_hex}/seg-NNNNNNNN.*`) rest
+/// side by side. `conv` is absent: it scopes on a channel, not the owner.
+/// Adding a kind here is not sufficient on its own — a runner whose body is
+/// kind-specific must grow an arm first, and `NestLocalSegmentSource` holds a
+/// **compile-time** pin that fails the build until it does.
+pub const BACKED_UP_KINDS: &[&str] = &["mail", "post", "calendar", "card"];
+
+/// The reserved folder name a segment `kind` backs up into, or `None` for a
+/// kind that has no cross-location backup surface.
+///
+/// **One derivation, now four consumers, so they cannot drift**: the nest's
+/// destination-capability predicate (`CacheDb::is_pure_backup_destination`), the
+/// federated backup-custody relay
+/// (`federation_handlers::resolve_backup_custody_set`, which get-or-creates this
+/// exact set for an authorized source nest), the nest coordinator's own pass,
+/// and — since the re-seed ceremony — the **client device** naming the set it
+/// records delivered custody into (`fauna_sync_engine::reseed`). A mismatch between any two
+/// would let custody land in a set the capability gates do not recognise as a
+/// pure-backup destination, i.e. a destination that both serves and backs up.
+///
+/// It lives here, beside [`segment_rel_path`] and [`manifest_rel_path`], because
+/// this module is already the shared leaf set every backup arm reuses verbatim —
+/// and because a device arm cannot reach a nest binary's private module at all.
+///
+/// Mail, post, calendar and card use a fixed name scoped by `actor_id`; conv
+/// encodes the channel in the **name** (`__conv/<channel_hex>`) because one nest
+/// holds many channels. Note the scoping actor differs by consumer: on a
+/// *source* nest a conv set is scoped by `channel_id`, while a *destination*
+/// holds it under the enrolled member's own actor (that member's quota pays for
+/// it — `message-segment-store.md` § Cross-location backup protocol, conv v1).
+/// The name is the same on both, which is all this function owns.
+pub fn reserved_backup_set_name(kind: &str, scope_id: &[u8; 32]) -> Option<String> {
+    match kind {
+        "mail" => Some("__mail".to_string()),
+        "post" => Some("__post".to_string()),
+        "calendar" => Some("__calendar".to_string()),
+        "card" => Some("__card".to_string()),
+        "conv" => Some(format!("__conv/{}", hex::encode(scope_id))),
+        _ => None,
+    }
+}
+
+/// Read a segment-axis reserved backup set name back into the `(kind, scope)` it
+/// was derived from, or `None` if [`reserved_backup_set_name`] could not have
+/// produced it.
+///
+/// The **folder** axis (`folder_backup_set_name`'s `__folder/<nest>/<id>`) is
+/// deliberately not parsed here: that name embeds a *source nest id*, which a
+/// writer must never be trusted to name — the federated relay re-derives it from
+/// the handshake's verified `origin_nest_id`, and no owner-authed caller has an
+/// equivalent to be checked against.
+///
+/// Written as parse-then-re-derive rather than as a second list of prefixes, so
+/// the two can never disagree: whatever this returns, feeding it back through
+/// [`reserved_backup_set_name`] reproduces the input name exactly, and a kind
+/// added there without being added to [`BACKUP_SET_KINDS`] is simply not
+/// recognised here rather than silently mis-parsed.
+pub fn parse_reserved_backup_set_name(name: &str) -> Option<(&'static str, [u8; 32])> {
+    let (kind, scope) = match name.strip_prefix("__conv/") {
+        Some(scope_hex) => {
+            let mut scope = [0u8; 32];
+            hex::decode_to_slice(scope_hex, &mut scope).ok()?;
+            ("conv", scope)
+        }
+        None => {
+            let kind = BACKUP_SET_KINDS
+                .iter()
+                .copied()
+                .find(|k| *k != "conv" && name == format!("__{k}"))?;
+            (kind, [0u8; 32])
+        }
+    };
+    (reserved_backup_set_name(kind, &scope)?.as_str() == name).then_some((kind, scope))
+}
+
 /// The destination-side path of the `manifest.<kind>` mirror — the same contract
 /// as [`segment_rel_path`], for the one non-segment path in a backup set.
 pub fn manifest_rel_path(scope_hex: &str, kind: &str) -> String {

@@ -11,6 +11,7 @@ import com.fauna.ffi.FfiAccountRegistry
 import com.fauna.ffi.ageBandFromAgeRange
 import com.fauna.ffi.onboarding.AgeNoncePlain
 import com.fauna.ffi.onboarding.OnboardingMachine
+import com.fauna.ffi.onboarding.CapturedDnsCredential
 import com.fauna.ffi.onboarding.OnboardingObserver
 import com.fauna.ffi.onboarding.OnboardingStep
 import com.fauna.ffi.onboarding.RestoredPredecessorSeed
@@ -121,49 +122,47 @@ class OnboardingHost @Inject constructor(
     }
 
     /**
-     * First-authenticated-setup mail latch (onboarding.md § Enable-email at claim ·
-     * mail-credentials.md § Auto-enable for new users). Latched on every
-     * `WizardOutcome::LoggedIn` (fresh onboarding only — returning users skip the
-     * wizard), carrying the machine-derived enable-email intent
-     * (`emailEnableRequested()` — the claim-time enablement checkboxes are retired
-     * with the storage-mode page; onboarding.md § 3b-bis). The authed
-     * surface consumes it exactly once and runs the `am_i_admin`-discriminated
-     * first-setup glue ([com.fauna.app.ui.viewmodel.MailEnableGlueVM.provisionMailAtFirstSetup],
-     * mirroring Linux's `provision_mail_at_first_setup`): the admin claim honors the
-     * latched intent; a new non-admin user auto-mints per the deployment policy
-     * (so the boolean is meaningful only on the admin branch). `null` = no fresh
-     * onboarding completed (the launch glue no-ops on a returning-user relaunch).
-     * Process-lifetime only (not persisted): a missed enable is recoverable from the
-     * mail-settings page, which fires the same idempotent path.
+     * First-authenticated-setup serving-enablement latches (onboarding.md § 3b
+     * *Mechanism* · mail-credentials.md § Auto-enable for new users). Latched on
+     * every `WizardOutcome::LoggedIn` (fresh onboarding only — returning users
+     * skip the wizard) from the machine-derived intents (`emailEnableRequested()`
+     * and its three DAV siblings — the claim-time enablement checkboxes are
+     * retired with the storage-mode page; onboarding.md § 3b-bis). The authed
+     * surface takes all four together exactly once via
+     * [consumePendingServingEnablement] and hands them to the ONE shared step
+     * (`ApiClient.applyPostClaimServingEnablement`), which discriminates
+     * `am_i_admin` and fires the mail provision, the three DAV toggles and their
+     * companion mints itself. `null` = no fresh onboarding completed (the launch
+     * glue no-ops on a returning-user relaunch — the once-only / opt-out
+     * guarantee: an opt-out is not re-minted on the next launch). Process-lifetime
+     * only (not persisted): a missed enable is recoverable from the mail-settings
+     * and admin pages, which fire the same idempotent paths.
      */
     @Volatile
-    private var pendingFirstSetupMail: Boolean? = null
+    private var pendingServingEnablement: ServingEnablementIntents? = null
 
-    /** One-shot read of the first-setup mail latch: returns (and clears) the
-     *  latched admin enable-email intent, or `null` when no fresh onboarding
-     *  reached `LoggedIn` (a returning-user relaunch — the launch glue no-ops). */
-    fun consumePendingFirstSetupMail(): Boolean? {
-        val v = pendingFirstSetupMail
-        pendingFirstSetupMail = null
+    /** The four machine-derived serving-enablement intents read off the onboarding
+     *  machine at `LoggedIn`. */
+    data class ServingEnablementIntents(
+        val email: Boolean,
+        val caldav: Boolean,
+        val carddav: Boolean,
+        val webdav: Boolean,
+    )
+
+    /** One-shot read of the serving-enablement latch: returns (and clears) all four
+     *  intents as one boundary, or `null` when no fresh onboarding reached
+     *  `LoggedIn` (a returning-user relaunch — the launch glue no-ops). */
+    fun consumePendingServingEnablement(): ServingEnablementIntents? {
+        val v = pendingServingEnablement
+        pendingServingEnablement = null
         return v
     }
 
     /**
-     * Non-consuming read of [pendingFirstSetupMail] — for the CalDAV/CardDAV
-     * mailbox-mint gates (`MailEnableGlueVM.applyPendingCaldavEnable` /
-     * `applyPendingCarddavEnable`), which need the ORIGINAL mail intent to
-     * decide whether they must also mint the shared MSEK. The launch-glue call
-     * site reads this **before** [consumePendingFirstSetupMail] clears the
-     * latch, so the mint gate never depends on which of the independently-fired
-     * glue coroutines happens to run first (mirrors apple's `FaunaApp.swift`
-     * snapshot-before-consume sequencing).
-     */
-    fun peekPendingFirstSetupMail(): Boolean? = pendingFirstSetupMail
-
-    /**
      * The one-tap "trust this box" answer latched on the `trust_prompt` page
      * (`onboarding.md` § 3b-ter), latched on `WizardOutcome::LoggedIn` for the
-     * authed launch glue to mint (sibling of [pendingFirstSetupMail]). `true`
+     * authed launch glue to mint (sibling of [pendingServingEnablement]). `true`
      * only when the user tapped grant; `false` on skip or when the app never
      * declared the capability.
      */
@@ -190,6 +189,28 @@ class OnboardingHost @Inject constructor(
     @Volatile
     private var pendingRecoveryKit: String? = null
 
+    /**
+     * The DNS-provider credential the wizard verified at its `dns_config`
+     * step (`OnboardingMachine::captured_dns_credential`), latched at
+     * `WizardOutcome::LoggedIn` for the authed post-auth glue to seal into the
+     * account's `fauna.state.dns` (`onboarding-provisioning.md` § 4. DNS
+     * configuration, *Capture at onboarding, seal via the launched app*). The
+     * wizard holds no authenticated session and the store is `BackupKey`-sealed,
+     * so the seal is the signed-in edge's job, over the ONE shared rule
+     * (`PostAuthGlueVM.sealCapturedDnsCredential`). Never persisted —
+     * process-lifetime like the kit latch; `null` on the manual / set-up-later /
+     * unverified paths, or once taken.
+     */
+    @Volatile
+    private var pendingDnsCredential: CapturedDnsCredential? = null
+
+    /** One-shot read of the captured-DNS-credential latch: returns (and clears) it. */
+    fun consumePendingDnsCredential(): CapturedDnsCredential? {
+        val v = pendingDnsCredential
+        pendingDnsCredential = null
+        return v
+    }
+
     /** One-shot read of the confirmed-kit latch: returns (and clears) it. */
     fun consumePendingRecoveryKit(): String? {
         val v = pendingRecoveryKit
@@ -198,79 +219,10 @@ class OnboardingHost @Inject constructor(
     }
 
     /**
-     * Sibling of [pendingFirstSetupMail] for the machine-derived enable-caldav
-     * intent (`caldavEnableRequested()`). CalDAV gates independently of email
-     * (caldav-server.md § Independent enablement), so the intent is latched and
-     * fired separately via
-     * `fauna.bridges.set_caldav_enabled`. Same process-lifetime, recoverable-
-     * from-mail-settings contract as the mail latch.
-     */
-    @Volatile
-    private var pendingCaldavEnable = false
-
-    /** One-shot read: returns (and clears) whether onboarding just completed
-     *  with enable-caldav left on. */
-    fun consumePendingCaldavEnable(): Boolean {
-        val v = pendingCaldavEnable
-        pendingCaldavEnable = false
-        return v
-    }
-
-    /**
-     * Non-consuming read of [pendingCaldavEnable] — sibling of
-     * [peekPendingFirstSetupMail], for `MailEnableGlueVM.applyPendingCarddavEnable`'s
-     * mailbox-mint gate (a contacts-only first setup mints the shared MSEK only
-     * when NEITHER mail NOR CalDAV already did).
-     */
-    fun peekPendingCaldavEnable(): Boolean = pendingCaldavEnable
-
-    /**
-     * Contacts sibling of [pendingCaldavEnable] for the machine-derived
-     * enable-carddav intent (`carddavEnableRequested()`). CardDAV gates
-     * independently of both
-     * email and calendar (carddav-server.md § Independent enablement), so the
-     * intent is latched and fired separately via
-     * `fauna.bridges.set_carddav_enabled`. Same process-lifetime, recoverable-
-     * from-admin-contacts contract as the caldav latch.
-     */
-    @Volatile
-    private var pendingCarddavEnable = false
-
-    /** One-shot read: returns (and clears) whether onboarding just completed
-     *  with enable-carddav left on. */
-    fun consumePendingCarddavEnable(): Boolean {
-        val v = pendingCarddavEnable
-        pendingCarddavEnable = false
-        return v
-    }
-
-    /**
-     * Files sibling of [pendingCarddavEnable] for the machine-derived
-     * enable-webdav intent (`webdavEnableRequested()`). WebDAV gates
-     * independently of email,
-     * calendar, and contacts (webdav-server.md § Independent enablement), so
-     * the intent is latched and fired separately via
-     * `fauna.bridges.set_webdav_enabled`. Same process-lifetime,
-     * recoverable-from-admin-files contract as the carddav latch — but unlike
-     * carddav there is no companion mailbox-mint (WebDAV has no per-actor
-     * mailbox).
-     */
-    @Volatile
-    private var pendingWebdavEnable = false
-
-    /** One-shot read: returns (and clears) whether onboarding just completed
-     *  with enable-webdav left on. */
-    fun consumePendingWebdavEnable(): Boolean {
-        val v = pendingWebdavEnable
-        pendingWebdavEnable = false
-        return v
-    }
-
-    /**
      * Post-factory-reset re-claim claim code (mail-bridge-lifecycle.md § Factory
      * reset). `fauna.admin.factory_reset` returns the new claim code to the
      * client — the human never sees it — so the re-onboarding claim-code step
-     * must pre-fill it. Held here (process-lifetime, like [pendingFirstSetupMail])
+     * must pre-fill it. Held here (process-lifetime, like [pendingServingEnablement])
      * rather than only on the machine, because the launch flow's CLAIM_CODE
      * routing calls `seed_identity` (which repositions the wizard at HandleEntry)
      * before re-navigating to claim-code; AppLaunchVM reads this to re-navigate
@@ -420,15 +372,11 @@ class OnboardingHost @Inject constructor(
                             persistRestoredPredecessors(registry, actorId, machine.restoredPredecessors())
                         }.onFailure { ShellLog.w(TAG, "persistLoggedIn failed: ${it.message}") }
                     }
-                    // Claim terminal #3 (gap CR-1, nest/common.md § Client-state
-                    // recoverability). The re-claim after a factory reset has
-                    // landed, so the pre-dispatch slot is spent. Leaving it set
-                    // would pin every future launch to the pre-filled claim
-                    // surface for a box the admin has already re-claimed — that
-                    // row is evaluated before ALL the others. Per-actor, on the
-                    // account `persistLoggedIn` just activated.
-                    runCatching { launchPersistence.deletePendingFactoryReset() }
-                        .onFailure { ShellLog.w(TAG, "registry deletePendingFactoryReset failed: ${it.message}") }
+                    // Claim terminal #3 (gap CR-1) is spent inside
+                    // `persistLoggedIn`. A skipped or failed helper (no secret, a
+                    // refused add) deliberately leaves the slot set: the claim
+                    // was never recorded on this device, so resuming the
+                    // pre-filled claim surface is the recoverable state.
                 }
                 runCatching { launchPersistence.deletePendingInvite() }
                     .onFailure { ShellLog.w(TAG, "registry deletePendingInvite failed: ${it.message}") }
@@ -447,22 +395,17 @@ class OnboardingHost @Inject constructor(
                 // The in-memory latch of the factory-reset claim code is the
                 // same-process fast path of claim terminal #3 above.
                 pendingFactoryResetClaimCode = null
-                // Latch first-setup mail: fresh onboarding reached LoggedIn. Carry
-                // the enable-email checkbox intent (default ON for a real-domain
-                // handle) — meaningful only on the admin branch; the authed surface
-                // runs the am_i_admin-discriminated provisionMailAtFirstSetup once.
-                pendingFirstSetupMail = machine.emailEnableRequested()
-                // Sibling enable-caldav intent — captured + fired separately, as
-                // CalDAV gates independently of email (caldav-server.md
-                // § Independent enablement).
-                pendingCaldavEnable = machine.caldavEnableRequested()
-                // Contacts sibling — CardDAV gates independently of both
-                // (carddav-server.md § Independent enablement).
-                pendingCarddavEnable = machine.carddavEnableRequested()
-                // Files sibling — WebDAV gates independently of email,
-                // calendar, and contacts (webdav-server.md § Independent
-                // enablement).
-                pendingWebdavEnable = machine.webdavEnableRequested()
+                // Latch the serving-enablement intents: fresh onboarding reached
+                // LoggedIn. The four machine-derived intents travel together; the
+                // authed surface hands them to the ONE shared post-claim step
+                // (onboarding.md § 3b *Mechanism*), which does the
+                // am_i_admin discrimination itself.
+                pendingServingEnablement = ServingEnablementIntents(
+                    email = machine.emailEnableRequested(),
+                    caldav = machine.caldavEnableRequested(),
+                    carddav = machine.carddavEnableRequested(),
+                    webdav = machine.webdavEnableRequested(),
+                )
                 // onboarding.md § 3b-ter: the one-tap trust answer latched on
                 // the `trust_prompt` page. Consume-once, so a handoff that
                 // runs twice mints once; `false` when the user skipped or was
@@ -479,6 +422,11 @@ class OnboardingHost @Inject constructor(
                     }
                 } else {
                     pendingRecoveryKit = kit
+                    // The DNS credential verified in the wizard: `null` on every
+                    // run that did not provision a box through a supported
+                    // provider. Latched here beside the kit, like every other
+                    // hand-off intent the authed glue consumes once.
+                    pendingDnsCredential = machine.capturedDnsCredential()
                 }
             }
             // ⚠ There is deliberately no `InviteSubmitted` arm (retired

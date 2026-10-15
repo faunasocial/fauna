@@ -30,12 +30,16 @@
 //!
 //! Whether a subscription row is pushed is decided **per device**, never per
 //! actor ([`DevicePresence::action_for`]): a `web-push`/`apns` row is skipped
-//! while a live connection announcing its `device_id` exists
+//! while a live **app** connection announcing its `device_id` exists
 //! (`fauna.push.presence`) and dialled otherwise; a `ws-device` row is
-//! delivered as a `fauna.push.notification` frame to those connections and
-//! skipped, with nothing queued, when there are none. A live connection that
-//! announced nothing (no app sends `fauna.push.presence` yet) suppresses every `web-push`/`apns`
-//! row, the pre-ruling behaviour (the compatibility rider). Rule:
+//! delivered as a `fauna.push.notification` frame to the connections that
+//! announced its device, of either kind, and skipped, with nothing queued,
+//! when there are none. A wake stand-in's announce (`stand_in: true`, the sync
+//! agent's) delivers and never suppresses: it reaches the device's `ws-device`
+//! row only, so a device only its stand-in announces still has its relay rows
+//! dialled. A live connection that announced nothing at all suppresses every
+//! `web-push`/`apns` row, the pre-ruling behaviour (the compatibility rider);
+//! an announce of either kind never triggers it. Rule:
 //! `docs/goal/architecture/apps/common.md` § Dispatch Logic.
 
 use std::sync::Arc;
@@ -90,10 +94,27 @@ const GENERIC_BODY: &str = "New message";
 /// event, and handed whole to the dispatch that runs later.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DevicePresence {
-    /// The `device_id`s the actor's live connections announced.
-    pub announced: std::collections::BTreeSet<String>,
-    /// Some live connection of the actor announced no device (no app sends the presence announce yet).
+    /// The `device_id`s the actor's live **app** connections announced — the
+    /// devices that render their own events, whose relay rows are skipped.
+    pub app: std::collections::BTreeSet<String>,
+    /// The `device_id`s announced by a wake stand-in (`stand_in: true`, the
+    /// sync agent): delivery points for the device's `ws-device` row and
+    /// nothing else — a stand-in renders nothing, so its device's relay rows
+    /// are still dialled (ruled 2026-10-03).
+    pub stand_in: std::collections::BTreeSet<String>,
+    /// Some live connection of the actor announced no device at all — the
+    /// compatibility rider's trigger. An announce of either kind clears it.
     pub any_unannounced: bool,
+}
+
+/// What one live connection announced over `fauna.push.presence`: the push
+/// device it serves, and whether it is that device's wake stand-in (the sync
+/// agent) rather than an app (`apps/common.md` § Registration → *Every
+/// connection announces*).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Announce {
+    pub device_id: String,
+    pub stand_in: bool,
 }
 
 /// What the dispatch does with one subscription row.
@@ -111,12 +132,15 @@ pub enum RowAction {
 impl DevicePresence {
     /// The per-device rule for one row (`apps/common.md` § Dispatch Logic).
     pub fn action_for(&self, transport: &str, device_id: &str) -> RowAction {
-        let present = self.announced.contains(device_id);
+        // Only an app renders the device's events itself; a wake stand-in is a
+        // delivery point and nothing more.
+        let rendering = self.app.contains(device_id);
+        let reachable = rendering || self.stand_in.contains(device_id);
         match transport {
-            "ws-device" if present => RowAction::Deliver,
+            "ws-device" if reachable => RowAction::Deliver,
             // The compatibility rider: an unannounced connection keeps the actor-wide
             // skip for the relay transports, so it never gets double banners.
-            "web-push" | "apns" if !present && !self.any_unannounced => RowAction::Dial,
+            "web-push" | "apns" if !rendering && !self.any_unannounced => RowAction::Dial,
             _ => RowAction::Skip,
         }
     }
@@ -276,6 +300,13 @@ pub struct DispatchCounters {
 }
 
 impl PushService {
+    /// Remove a row the dial can never serve, the way a dead endpoint is removed.
+    async fn delete_undialable(&self, actor_id: &[u8], device_id: &str) {
+        if let Err(e) = self.db.delete_push_subscription(actor_id, device_id).await {
+            warn!("failed to delete undialable push subscription: {e:#}");
+        }
+    }
+
     /// Create a new `PushService` from a VAPID EC private key in PEM format.
     ///
     /// The PEM may use PKCS8 (`BEGIN PRIVATE KEY` header) or SEC1
@@ -485,23 +516,31 @@ impl PushService {
                                 "web-push endpoint refused by the dial guard, not dialled"
                             );
                             // A refusal the URL text alone decides is permanent:
-                            // the row can never be dialled (a dial policy tighter
-                            // than the subscribe-time check), so it goes the way of a
-                            // dead endpoint. A resolver's answer can change, so
-                            // those rows stay.
-                            if !matches!(e, SsrfError::Resolve | SsrfError::NonGlobal)
-                                && let Err(e) = self
-                                    .db
-                                    .delete_push_subscription(actor_id, &sub.device_id)
-                                    .await
-                            {
-                                warn!("failed to delete undialable push subscription: {e:#}");
+                            // the row can never be dialled (it predates the
+                            // subscribe-time check), so it goes the way of a dead
+                            // endpoint. Decided on the text half, not the error
+                            // variant: `NonGlobal` also comes from an internal IP
+                            // literal or a `localhost` name. A resolver's answer
+                            // can change, so those rows stay.
+                            if crate::ssrf::parse_https_url(&sub.endpoint).is_err() {
+                                self.delete_undialable(actor_id, &sub.device_id).await;
                             }
                             continue;
                         }
                     }
                 }
                 "apns" => {
+                    // The token is interpolated into the APNs request path: a
+                    // row stored before subscribe enforced hex is removed
+                    // here, never dialled.
+                    if !is_apns_device_token(&sub.endpoint) {
+                        warn!(
+                            device_id = %sub.device_id,
+                            "apns token is not hex, removing subscription without a dial"
+                        );
+                        self.delete_undialable(actor_id, &sub.device_id).await;
+                        continue;
+                    }
                     let (Some(p256dh), Some(auth)) =
                         (sub.key_p256dh.as_deref(), sub.key_auth.as_deref())
                     else {
@@ -710,6 +749,16 @@ pub fn validate_ws_device_subscription(
         .ok_or(EndpointRefusal::WsDevice)
 }
 
+/// Whether `token` may be interpolated into the APNs request path: hex only, so
+/// it can never name another path on Apple's host. Checked at subscribe and again
+/// at every dial, because a row stored before the subscribe check existed can
+/// hold anything.
+fn is_apns_device_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.len() <= APNS_DEVICE_TOKEN_MAX_HEX
+        && token.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// The subscribe-time check, with **no test hook in front of it** — exactly what
 /// [`validate_subscription_endpoint`] compiles down to in every artifact we
 /// ship. Its own function for the reason `activitypub::outbound`'s strict twin
@@ -723,12 +772,9 @@ fn validate_subscription_endpoint_strict(
         // The token is interpolated into the APNs request path, which carries
         // this deployment's APNs credential: hex only, so it can never name
         // another path on Apple's host.
-        "apns" => {
-            let hex = !endpoint.is_empty()
-                && endpoint.len() <= APNS_DEVICE_TOKEN_MAX_HEX
-                && endpoint.bytes().all(|b| b.is_ascii_hexdigit());
-            hex.then_some(()).ok_or(EndpointRefusal::Apns)
-        }
+        "apns" => is_apns_device_token(endpoint)
+            .then_some(())
+            .ok_or(EndpointRefusal::Apns),
         // Text-only, no DNS: the answer depends on nothing but the request (no
         // resolver latency inside the RPC deadline, no resolver oracle, no
         // refusal of a good relay during a DNS outage). A name that *resolves*
@@ -1210,9 +1256,57 @@ mod tests {
 
     fn presence(announced: &[&str], any_unannounced: bool) -> DevicePresence {
         DevicePresence {
-            announced: announced.iter().map(|d| d.to_string()).collect(),
+            app: announced.iter().map(|d| d.to_string()).collect(),
             any_unannounced,
+            ..Default::default()
         }
+    }
+
+    /// A wake stand-in's announce delivers; it never suppresses
+    /// (`apps/common.md` § Dispatch Logic, ruled 2026-10-03): a device only a
+    /// stand-in announces has its relay rows dialled and its `ws-device` row
+    /// delivered; an app announce of the same device still skips the relay
+    /// rows; and a stand-in announce alone never trips the compatibility rider.
+    #[test]
+    fn a_stand_in_announce_delivers_and_never_suppresses() {
+        let stand_in_only = DevicePresence {
+            stand_in: ["mac".to_string()].into(),
+            ..Default::default()
+        };
+        let app_and_stand_in = DevicePresence {
+            app: ["mac".to_string()].into(),
+            stand_in: ["mac".to_string()].into(),
+            ..Default::default()
+        };
+        for relay in ["web-push", "apns"] {
+            assert_eq!(
+                stand_in_only.action_for(relay, "mac"),
+                RowAction::Dial,
+                "{relay}: a stand-in renders nothing, so its device is absent"
+            );
+            assert_eq!(
+                stand_in_only.action_for(relay, "phone"),
+                RowAction::Dial,
+                "{relay}: a stand-in announce is no compatibility rider"
+            );
+            assert_eq!(
+                app_and_stand_in.action_for(relay, "mac"),
+                RowAction::Skip,
+                "{relay}: the app announce still suppresses"
+            );
+        }
+        assert_eq!(
+            stand_in_only.action_for("ws-device", "mac"),
+            RowAction::Deliver
+        );
+        assert_eq!(
+            app_and_stand_in.action_for("ws-device", "mac"),
+            RowAction::Deliver
+        );
+        assert_eq!(
+            stand_in_only.action_for("ws-device", "phone"),
+            RowAction::Skip
+        );
     }
 
     /// The per-device rule, row by row (`apps/common.md` § Dispatch Logic):
@@ -1321,8 +1415,8 @@ mod tests {
         let ws = WsState::new();
         let (desk, mut desk_rx) = ws.subscribe(actor_id);
         let (laptop, mut laptop_rx) = ws.subscribe(actor_id);
-        assert!(ws.announce_device(&actor_id, desk.conn_id, "desk"));
-        assert!(ws.announce_device(&actor_id, laptop.conn_id, "laptop"));
+        assert!(ws.announce_device(&actor_id, desk.conn_id, "desk", false));
+        assert!(ws.announce_device(&actor_id, laptop.conn_id, "laptop", false));
 
         let outcome = svc
             .maybe_send_push(
@@ -1633,7 +1727,11 @@ mod tests {
         let svc = Arc::new(make_push_service(Arc::clone(&db)));
         state.push_service = Some(Arc::clone(&svc));
         let (phone, _rx) = state.ws.subscribe(actor_id);
-        assert!(state.ws.announce_device(&actor_id, phone.conn_id, "phone"));
+        assert!(
+            state
+                .ws
+                .announce_device(&actor_id, phone.conn_id, "phone", false)
+        );
 
         dispatch_offline_push(&state, &actor_id, "t", "b", "/app");
         // The phone's app closes before the spawned dispatch gets to run.
@@ -1716,6 +1814,109 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "a plain-http row must be removed, not dialled"
+        );
+    }
+
+    /// Rows the subscribe-time check would refuse today — an internal
+    /// IP literal and a `localhost` name — are refused by the dial guard from
+    /// their text alone, so they are removed at the first dispatch, not skipped
+    /// for ever. No network: both are decided before any resolver is asked.
+    #[tokio::test]
+    async fn legacy_internal_web_push_rows_are_removed_at_the_dial() {
+        let db = make_db();
+        let actor_id = [0x16u8; 32];
+        for (device, endpoint) in [
+            ("legacy-private-literal", "https://10.0.0.7/wp/legacy"),
+            ("legacy-localhost-name", "https://localhost/wp/legacy"),
+        ] {
+            db.upsert_push_subscription(
+                &actor_id,
+                device,
+                "web-push",
+                endpoint,
+                Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+                Some("AAAAAAAAAAAAAAAA"),
+            )
+            .await
+            .unwrap();
+        }
+        let svc = make_push_service(Arc::clone(&db));
+
+        svc.maybe_send_push(
+            &WsState::new(),
+            &DevicePresence::default(),
+            &actor_id,
+            "t",
+            "b",
+            "/app",
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            db.list_push_subscriptions(&actor_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a row refused on its URL text alone must be removed"
+        );
+    }
+
+    /// A legacy `apns` token that is not hex is never interpolated into
+    /// the APNs path — nothing reaches the listener standing in for Apple's
+    /// host — and the row is removed at its first dispatch.
+    #[tokio::test]
+    async fn a_legacy_non_hex_apns_token_is_removed_and_never_dialled() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let apns = ApnsConfig {
+            signing_key: SecretKey::random(&mut rand::thread_rng()),
+            key_id: "KEYID".to_owned(),
+            team_id: "TEAMID".to_owned(),
+            topic: "social.fauna.fauna".to_owned(),
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            client: reqwest::Client::builder()
+                .http2_prior_knowledge()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+        };
+        let db = make_db();
+        let actor_id = [0x17u8; 32];
+        db.upsert_push_subscription(
+            &actor_id,
+            "legacy-apns",
+            "apns",
+            "../../../elsewhere?x=1",
+            Some("AAAA"),
+            Some("AAAA"),
+        )
+        .await
+        .unwrap();
+        let svc = PushService::new(Arc::clone(&db), generate_test_vapid_pem(), Some(apns)).unwrap();
+
+        svc.maybe_send_push(
+            &WsState::new(),
+            &DevicePresence::default(),
+            &actor_id,
+            "t",
+            "b",
+            "/app",
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "a non-hex token must never be dialled"
+        );
+        assert!(
+            db.list_push_subscriptions(&actor_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the legacy apns row must be removed"
         );
     }
 

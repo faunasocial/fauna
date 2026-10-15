@@ -24,3 +24,17 @@ export function rejectionText(e: unknown, fallback: string): string {
   if (e instanceof Error && e.message) return e.message;
   return fallback;
 }
+
+/**
+ * The shared refusal line a wasm export rejected with, or `null` when the
+ * rejection is anything else — a plain `Error` or string is a fault the caller
+ * keeps its own handling for. The account add rejects with a `LocalizedText`
+ * only when the device's account list is full (`add_refused_copy`,
+ * `libs/fauna-wasm/src/accounts.rs::mutate_add`).
+ */
+export function localizedRejectionText(e: unknown): string | null {
+  if (e && typeof e === 'object' && typeof (e as LocalizedText).key === 'string') {
+    return resolveLocalized(e as LocalizedText);
+  }
+  return null;
+}

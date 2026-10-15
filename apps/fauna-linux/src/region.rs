@@ -152,12 +152,49 @@ pub fn verdict_for(
     labels: &[ContentLabelEntry],
     input: impl FnOnce() -> LabelerPostInput,
 ) -> ComposedVerdict {
-    let joined = STATE.with(|s| {
+    crate::content_policy::verdict_for(&joined_labels(content_id_hex, labels, input))
+}
+
+/// How the viewer's own reports name one item — see [`verdict_for_item`].
+#[derive(Debug, Clone, Copy)]
+pub struct ReportKey<'a> {
+    /// The id a report of the item names: a post's cid, a message's plane
+    /// record digest (NOT the message id).
+    pub item_id: &'a str,
+    /// The item's author as hex, when the surface knows it — an account
+    /// report hides everything the account authored.
+    pub author_id: Option<&'a str>,
+}
+
+/// [`verdict_for`] plus the viewer's own reports (`moderation.md` § Corollary):
+/// an item they reported, or whose author they reported, is a `Block`
+/// attributed to the reporter's own act. The feed card and the conversation
+/// bubble call this; the region state walk, which only asks what a *region*
+/// says, calls [`verdict_for`].
+pub fn verdict_for_item(
+    content_id_hex: &str,
+    labels: &[ContentLabelEntry],
+    key: ReportKey<'_>,
+    input: impl FnOnce() -> LabelerPostInput,
+) -> ComposedVerdict {
+    crate::content_policy::verdict_for_item(
+        key.item_id,
+        key.author_id,
+        &joined_labels(content_id_hex, labels, input),
+    )
+}
+
+/// The item's labels joined with the region scorers' factors.
+fn joined_labels(
+    content_id_hex: &str,
+    labels: &[ContentLabelEntry],
+    input: impl FnOnce() -> LabelerPostInput,
+) -> Vec<ContentLabelEntry> {
+    STATE.with(|s| {
         let s = s.borrow();
         let id = fauna_core::hex32::decode(content_id_hex).ok();
         s.plane.join_labels(id.as_ref(), labels, input).into_owned()
-    });
-    crate::content_policy::verdict_for(&joined)
+    })
 }
 
 /// The region placeholder a composed verdict paints, when the region drove it.

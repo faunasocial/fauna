@@ -87,10 +87,12 @@
                                  WinUI 3 surfaces this Grid in the UIA content view. Bare
                                  panels with only an AutomationId get pruned and FlaUI's
                                  ByAutomationId() can't find them — same trick as post-card
-                                 in FeedPage.xaml. -->
+                                 in FeedPage.xaml. AccessibleName falls back to a fixed
+                                 "Unnamed device" when the label renders empty (sealless or
+                                 unopenable seal), since an empty Name prunes the card too. -->
                             <Grid Padding="8" ColumnSpacing="12" RowSpacing="4"
                                   AutomationProperties.AutomationId="device-card"
-                                  AutomationProperties.Name="{Binding Name}">
+                                  AutomationProperties.Name="{Binding AccessibleName}">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="*" />
@@ -139,6 +141,17 @@
                                            Visibility="{Binding ThisMarkVisibility}"
                                            FontSize="12" VerticalAlignment="Center"
                                            Opacity="0.6" />
+                                <!-- This device's own key fingerprint, beside the marker above
+                                     (devices.md § Members without a matching entry): the shared
+                                     machine's render (DevicesSnapshot.ownFingerprint), painted
+                                     only on the this-device row and only while one is known.
+                                     Collapsed otherwise so count() sees at most one. -->
+                                <TextBlock
+                                           AutomationProperties.AutomationId="device-own-fingerprint"
+                                           Text="{Binding OwnFingerprintText}"
+                                           Visibility="{Binding OwnFingerprintVisibility}"
+                                           FontSize="12" VerticalAlignment="Center"
+                                           Opacity="0.6" IsTextSelectionEnabled="True" />
                                 <!-- Piece 1 of the custody facet (devices.md § Custody facet):
                                      an own device enrolled relay-only wears the "holds no keys"
                                      marker. The DERIVED posture — the shared
@@ -226,6 +239,65 @@
 
                 <ProgressRing x:Name="LoadProgress" IsActive="False" Visibility="Collapsed"
                               HorizontalAlignment="Center" />
+            </StackPanel>
+
+            <!-- Members without a matching entry (devices.md § Members without a
+                 matching entry): verified fleet members no roster row accounts for,
+                 each armed for removal by its fleet id. Renders NOTHING while the
+                 snapshot's list is empty. An ItemsControl (non-virtualizing) so every
+                 card and its controls realize a UIA peer. Literal ids for the same
+                 reason as device-card above. -->
+            <StackPanel x:Name="MembersSection" Spacing="8" Visibility="Collapsed">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=devices/members_title}" />
+                <TextBlock AutomationProperties.AutomationId="device-member-note"
+                           Text="{loc:Localize Key=devices/member_note}"
+                           TextWrapping="Wrap" Opacity="0.6" FontSize="12" />
+                <ItemsControl x:Name="MembersList">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Padding="8" ColumnSpacing="12" RowSpacing="2"
+                                  AutomationProperties.AutomationId="device-member-card"
+                                  AutomationProperties.Name="{Binding FingerprintText}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Grid.Column="0"
+                                           AutomationProperties.AutomationId="device-member-fingerprint"
+                                           Text="{Binding FingerprintText}"
+                                           FontWeight="SemiBold" IsTextSelectionEnabled="True" />
+                                <TextBlock Grid.Row="1" Grid.Column="0"
+                                           AutomationProperties.AutomationId="device-member-enrolled-at"
+                                           Text="{Binding EnrolledAtText}"
+                                           Opacity="0.6" FontSize="12" />
+                                <!-- The two-step remove: the remove button arms THIS card
+                                     only; its confirm/cancel pair paints on the armed card
+                                     and the remove button gives way (Collapsed, so count()
+                                     sees exactly one of the two states). -->
+                                <Button Grid.Row="0" Grid.RowSpan="2" Grid.Column="1"
+                                        AutomationProperties.AutomationId="device-member-remove-button"
+                                        Content="{loc:Localize Key=common/remove}"
+                                        Visibility="{Binding RemoveVisibility}"
+                                        Tag="{Binding}" Click="MemberRemove_Click" />
+                                <StackPanel Grid.Row="0" Grid.RowSpan="2" Grid.Column="1"
+                                            Orientation="Horizontal" Spacing="6"
+                                            Visibility="{Binding ConfirmVisibility}">
+                                    <Button AutomationProperties.AutomationId="device-member-remove-confirm-button"
+                                            Content="{loc:Localize Key=devices/member_remove_confirm}"
+                                            Tag="{Binding}" Click="MemberRemoveConfirm_Click" />
+                                    <Button AutomationProperties.AutomationId="device-member-remove-cancel-button"
+                                            Content="{loc:Localize Key=common/cancel}"
+                                            Tag="{Binding}" Click="MemberRemoveCancel_Click" />
+                                </StackPanel>
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
             </StackPanel>
 
             <!-- ══════════════════════════════════════════════════════

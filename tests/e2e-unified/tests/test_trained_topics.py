@@ -13,12 +13,10 @@ Rollout: linux first (user 2026-07-07), then web (S8, 2026-07-12), windows
 (S8, 2026-07-13), macos/ios (S8, 2026-07-15); android's publish-sheet tests
 (the two `_publishes_as_a_*` outcomes and the two error-precedence
 regressions) carry the `android` marker — built, Robolectric-verified, no
-restart involved. The restart test below is the one
-exception, left unmarked: it drives `app.driver.hard_reload()`, which
-delegates to `PlatformDriver.recover()` for a real force-quit+relaunch —
-android is the one driver that has not overridden `recover()`
-(`HttpBridgeDriver.supports_cold_relaunch()` is False for it today), so marking it would silently no-op the test's own
-restart step rather than prove persistence.
+restart involved. The restart test below joined android
+once `AndroidDriver.recover()` became a real in-place force-stop + relaunch
+(`supports_cold_relaunch()` is derived from the MRO, so it now reads True
+there): `hard_reload()` is a genuine restart on android like the other natives.
 """
 import time
 import uuid
@@ -27,6 +25,9 @@ import cbor2
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
+from helpers import budgets
+from helpers.waiting import wait_until
+from i18n.strings import S
 from tests.api import ws_api
 
 pytestmark = pytest.mark.tier_3
@@ -164,6 +165,7 @@ def _rank_by_this_modules_factors_alone(nest_instance, test_user):
 @pytest.mark.macos
 @pytest.mark.ios
 @pytest.mark.tui
+@pytest.mark.android
 # iOS re-enabled 2026-07-17: FeedListView was converted from a lazy
 # multi-section `List` to an eager `ScrollView { VStack }`, so every
 # post-card now mounts regardless of scroll position — the off-screen
@@ -292,6 +294,107 @@ def test_trained_topic_train_reranks_and_marker_survives_reload(
     )
 
 
+def _post_index(app, needle: str, timeout: float = 15.0) -> int:
+    """Poll until a rendered post's text contains ``needle``; return its index
+    in the CURRENT order (a train re-reads it, so callers re-resolve)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        for i in range(app.feed.post_count()):
+            if needle in (app.feed.post_text(i) or ""):
+                return i
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"no rendered post contains {needle!r}; error={app.error_text()!r}"
+            )
+        time.sleep(0.3)
+
+
+# tui leads (the lead-app rule). The sheet's tui shape is one picker under the
+# sheet's own id; the other six apps paint per-topic buttons with no ids of
+# their own, so they join once the sheet's row family is settled.
+@pytest.mark.tui
+@pytest.mark.feature("trained-topics")
+def test_target_sheet_trains_an_existing_or_a_new_topic_outside_a_topic_feed(
+    logged_in_app, nest_instance, test_user
+):
+    """Outside a feed built around one topic, *more like this* asks which topic
+    to train, and offers to start a new one (topic-factors.md § Authoring
+    surface & picker: "elsewhere it opens a small target sheet (existing
+    factors + 'New trained topic…')").
+
+    Two legs, both on the chronological General feed, whose composition names
+    no trained factor:
+
+    1. the sheet lists the user's topic and the new-topic entry; choosing the
+       topic and tapping the verb trains the post into it;
+    2. "New trained topic…" leads to the Trained-topics facet, where the topic
+       is created by name; back on the feed the sheet now lists it, and a
+       second post trains into it.
+
+    Each train is witnessed at the nest (``sample_count``), never by the UI.
+    """
+    app = logged_in_app
+    port = nest_instance["port"]
+
+    # ── 1. One trained topic, and two posts on the chronological feed ────
+    app.personalization.navigate()
+    first = _unique("Cats")
+    app.personalization.create_sole_topic(first)
+    first_key = app.personalization.topic_factor_key()
+
+    app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+    app.feed.open_feed("General")
+    cat_text = f"{CAT_TEXT} {_unique('sheet')}"
+    dog_text = f"retriever puppy chasing the ball {_unique('sheet')}"
+    app.feed.create_post(text=cat_text)
+    app.feed.create_post(text=dog_text)
+
+    # ── 2. The verb opens the sheet: the topic, then the new-topic entry ─
+    app.feed.open_train_target_sheet("more", _post_index(app, cat_text))
+    options = app.feed.train_target_options()
+    assert len(options) == 2 and first in options[0], (
+        f"the sheet must list the user's one topic, then 'New trained topic…'; "
+        f"painted {options!r}"
+    )
+
+    app.feed.train_into_target("more", first_key)
+    reply = _wait_sample_count(port, test_user, first_key, 1)
+    assert reply["sample_count"] == 1, (
+        f"the sheet's pick never trained {first_key}: {reply!r}; "
+        f"error={app.error_text()!r}"
+    )
+
+    # ── 3. "New trained topic…" → the facet → create → back to the feed ──
+    app.feed.open_train_target_sheet("more", _post_index(app, dog_text))
+    app.feed.choose_new_trained_topic()
+    app.driver.wait_for("personalization-trained-factor-name-input")
+    second = _unique("Dogs")
+    app.personalization.create_topic(second)
+    assert app.personalization.wait_for_topic_count(2) == 2, (
+        f"the facet the sheet led to did not create {second!r}; "
+        f"error={app.error_text()!r}"
+    )
+    names = app.personalization.topic_names()
+    second_index = next(i for i, n in enumerate(names) if second in n)
+    second_key = app.personalization.topic_factor_key(second_index)
+    assert second_key != first_key
+
+    app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+    app.feed.open_feed("General")
+    app.feed.open_train_target_sheet("more", _post_index(app, dog_text))
+    options = app.feed.train_target_options()
+    assert any(second in o for o in options), (
+        f"the new topic is missing from the sheet; painted {options!r}"
+    )
+    app.feed.train_into_target("more", second_key)
+    reply = _wait_sample_count(port, test_user, second_key, 1)
+    assert reply["sample_count"] == 1, (
+        f"the new topic never trained: {reply!r}; error={app.error_text()!r}"
+    )
+    # The first topic learned only from the post trained into it.
+    assert ws_api.personalization_model_fetch(port, test_user, first_key)["sample_count"] == 1
+
+
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.windows
@@ -336,6 +439,9 @@ def test_trained_factor_publishes_as_a_pruned_list_labeler(
     # not a paging crawl), so a feed that was never opened scores nothing:
     # this navigation is load-bearing setup, not cosmetics. ───────────────
     app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+    # Compose onto the chronological feed: an earlier test may have left a
+    # ranked one (Trending) selected, which can hide a fresh un-engaged post.
+    app.feed.open_feed("General")
     app.feed.create_post(text=CAT_TEXT)
     app.feed.create_post(text=f"quarterly budget spreadsheet {_unique('rows')}")
 
@@ -1227,3 +1333,636 @@ def test_trained_factor_publishes_as_a_scrubbed_text_model(
         f"the model-publish test left a trained topic behind; "
         f"error={app.error_text()!r}"
     )
+
+
+# ── The read-back's unwitnessed outcomes (docs/features/trained-topics.md) ──
+#
+# tui leads every journey below (the lead-app rule); the other six follow in
+# the batched trickle-down.
+
+
+def _wait_sample_exactly(port: int, actor: dict, factor: str, expected: int) -> dict:
+    """Poll the model row until its advisory ``sample_count`` is exactly
+    ``expected`` — the un-mark leg needs a count that goes DOWN, which
+    ``_wait_sample_count``'s at-least gate cannot see."""
+    last = {}
+
+    def settled():
+        nonlocal last
+        last = ws_api.personalization_model_fetch(port, actor, factor)
+        return last.get("sample_count", 0) == expected
+
+    wait_until(
+        settled,
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"sample_count never reached {expected}: {last!r}",
+    )
+    return last
+
+
+def _positions(app, needles: list) -> dict:
+    """Each needle's rendered index in the open feed, or ``None`` if absent."""
+    texts = [app.feed.post_text(i) or "" for i in range(app.feed.post_count())]
+    return {n: next((i for i, t in enumerate(texts) if n in t), None) for n in needles}
+
+
+def _wait_order(app, needles: list, holds, what: str) -> dict:
+    """Poll until every needle renders AND ``holds(positions)`` is true; return
+    the positions.
+
+    The poll is for a STATE (a settled order the caller names), never for time
+    passing: a train re-ranks asynchronously (delta → re-seal → put → re-rank →
+    notify → rows), so the order is read until it says what it should, and the
+    failure names the order it said instead (convention 14, convention 6).
+    """
+    last = {}
+
+    def settled():
+        nonlocal last
+        last = _positions(app, needles)
+        return all(v is not None for v in last.values()) and holds(last)
+
+    wait_until(
+        settled,
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"{what}: rendered positions {last!r}; error={app.error_text()!r}",
+    )
+    return last
+
+
+def _open_actions_for(app, needle: str) -> None:
+    pos = _positions(app, [needle])[needle]
+    assert pos is not None, f"{needle!r} is not in the open feed"
+    app.feed.open_post_actions(index=pos)
+
+
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.tui
+@pytest.mark.feature("trained-topics")
+def test_renaming_a_trained_topic_keeps_its_learning_and_a_deleted_topics_feed_keeps_working(
+    logged_in_app, nest_instance, test_user
+):
+    """Outcomes 5 and 7 (`topic-factors.md` § Authoring surface & picker,
+    § Wire & registry).
+
+    A rename is a registry write only: the factor's key, its sealed model and
+    every composition that names the key are untouched, so what it learned and
+    every feed that uses it carry straight on. A delete removes the registry
+    row and the model; a feed still composed of the now-orphan key keeps
+    working, the key inert under the zero-term seam.
+    """
+    app = logged_in_app
+    port = nest_instance["port"]
+
+    app.personalization.navigate()
+    original = _unique("Cats")
+    app.personalization.create_sole_topic(original)
+    factor_key = app.personalization.topic_factor_key()
+
+    app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+    app.feed.open_feed("General")
+    app.feed.create_post(text=CAT_TEXT)
+    # sleep-ok: nest `created_at` has epoch-second resolution; the clock is
+    # the thing being waited for.
+    time.sleep(1.2)  # sleep-ok: strictly-older created_at (epoch-seconds resolution)
+    app.feed.create_post(text=f"quarterly budget spreadsheet {_unique('rows')}")
+    app.feed.create_post(text=f"garage door spring replacement {_unique('note')}")
+
+    feed_name = _unique("rename-feed")
+    app.feed.create_feed_with_factor(name=feed_name, factor_label=factor_key, weight="5.0")
+    app.feed.open_feed(feed_name)
+    _wait_order(
+        app, [CAT_TEXT], lambda p: p[CAT_TEXT] > 0,
+        "pre-train the on-topic post (the oldest) must not lead",
+    )
+
+    _open_actions_for(app, CAT_TEXT)
+    app.feed.click_train_verb("more")
+    trained = _wait_sample_count(port, test_user, factor_key, 1)
+    assert trained["sample_count"] == 1 and trained.get("sealed_blob"), trained
+    assert CAT_TEXT in _wait_top_post_contains(app, CAT_TEXT), (
+        f"the train never re-ranked the feed; error={app.error_text()!r}"
+    )
+
+    # ── Outcome 5: rename ───────────────────────────────────────────────
+    app.personalization.navigate()
+    assert app.personalization.wait_for_topic_count(1) == 1
+    renamed = _unique("Kittens")
+    app.personalization.rename_topic(0, renamed)
+    wait_until(
+        lambda: renamed in app.personalization.topic_name(0),
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            f"row still reads {app.personalization.topic_name(0)!r}; "
+            f"error={app.error_text()!r}"
+        ),
+    )
+    assert original not in app.personalization.topic_name(0)
+    assert app.personalization.topic_factor_key() == factor_key, (
+        "a rename must keep the factor's key — every composition names the key"
+    )
+    assert "1" in app.personalization.topic_example_count_text(0), (
+        f"the renamed topic lost its example count: "
+        f"{app.personalization.topic_example_count_text(0)!r}"
+    )
+    after = ws_api.personalization_model_fetch(port, test_user, factor_key)
+    assert after["sample_count"] == 1 and after.get("sealed_blob") == trained.get(
+        "sealed_blob"
+    ), "a rename must leave the sealed model exactly as it was"
+
+    feeds = [f for f in ws_api.list_feeds(port, test_user) if f["name"] == feed_name]
+    assert feeds, f"the composed feed {feed_name!r} vanished"
+    assert ws_api.get_feed(port, test_user, feeds[0]["feed_id"]).get("composition") == [
+        {"factor": factor_key, "weight_permille": 5000}
+    ], "a rename must not touch a composition that uses the topic"
+
+    app.feed.return_to_feed_page()
+    assert CAT_TEXT in _wait_top_post_contains(app, CAT_TEXT), (
+        f"after the rename the feed no longer ranks by what the topic learned; "
+        f"error={app.error_text()!r}"
+    )
+
+    # ── Outcome 7: delete, and the feed that weighted it keeps working ───
+    app.personalization.navigate()
+    assert app.personalization.wait_for_topic_count(1) == 1
+    app.personalization.delete_topic(0)
+    assert app.personalization.wait_for_topic_count(0) == 0
+    wait_until(
+        lambda: not ws_api.personalization_model_fetch(port, test_user, factor_key).get(
+            "sealed_blob"
+        ),
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: "the deleted topic's model row is still on the nest",
+    )
+
+    app.feed.return_to_feed_page()
+    positions = _wait_order(
+        app, [CAT_TEXT], lambda p: p[CAT_TEXT] > 0,
+        "with the topic deleted, the feed must still load and the orphan "
+        "key must be inert (the oldest post no longer lifted to the top)",
+    )
+    assert app.feed.post_count() >= 3, (
+        f"the feed that weighted a deleted topic stopped loading; "
+        f"positions={positions!r}; error={app.error_text()!r}"
+    )
+    assert not app.has_error(), (
+        f"the feed that weighted a deleted topic must keep working without it; "
+        f"error={app.error_text()!r}"
+    )
+
+
+# Two posts that share their words, and two that share none with them. The
+# shared-vocabulary pair is what lets outcome 8 say "posts LIKE IT", not just
+# "the post you marked".
+DOG_A = "golden retriever puppy fetching the red ball at the park"
+DOG_B = "golden retriever puppy napping after fetching sticks"
+OFF_1 = "municipal water main repair schedule for the east district"
+OFF_2 = "sourdough starter feeding ratio and proofing notes"
+MARK_NEEDLES = [DOG_A, OFF_2, DOG_B, OFF_1]  # newest first: the recency order
+
+
+def _in_order(positions: dict, order: list) -> bool:
+    return [positions[n] for n in order] == sorted(positions[n] for n in order)
+
+
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.tui
+@pytest.mark.feature("trained-topics")
+def test_untrained_topic_keeps_the_order_less_like_this_sinks_and_marks_switch_and_come_back(
+    logged_in_app, nest_instance, test_user
+):
+    """Outcomes 14, 8 and 9 (`topic-factors.md` § The model, § Goal,
+    § Training signals — line 32: the other verb applies the inverse then the
+    new; un-marking applies the inverse alone).
+
+    Seeded oldest → newest OFF_1, DOG_B, OFF_2, DOG_A, so recency interleaves
+    the two dog posts with the two unrelated ones and every leg below moves a
+    post across an unrelated one — an order change recency cannot fake.
+    """
+    app = logged_in_app
+    port = nest_instance["port"]
+
+    app.personalization.navigate()
+    app.personalization.create_sole_topic(_unique("Dogs"))
+    factor_key = app.personalization.topic_factor_key()
+
+    app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+    app.feed.open_feed("General")
+    for text in reversed(MARK_NEEDLES):
+        app.feed.create_post(text=text)
+        # sleep-ok: nest `created_at` has epoch-second resolution; the clock
+        # is the thing being waited for.
+        time.sleep(1.2)  # sleep-ok: strictly-ordered created_at (epoch-seconds resolution)
+
+    feed_name = _unique("dogs-feed")
+    app.feed.create_feed_with_factor(name=feed_name, factor_label=factor_key, weight="5.0")
+    app.feed.open_feed(feed_name)
+
+    # ── Outcome 14: the untrained topic leaves the order as recency put it ──
+    _wait_order(
+        app, MARK_NEEDLES, lambda p: _in_order(p, MARK_NEEDLES),
+        "an untrained topic must leave the composed feed in recency order",
+    )
+    fetch = ws_api.personalization_model_fetch(port, test_user, factor_key)
+    assert fetch.get("sample_count", 0) == 0 and not fetch.get("sealed_blob"), fetch
+
+    # ── Outcome 8: less like this pushes the post AND posts like it down ──
+    _open_actions_for(app, DOG_A)
+    assert app.feed.train_verb_state("less") == "off"
+    app.feed.click_train_verb("less")
+    _wait_sample_exactly(port, test_user, factor_key, 1)
+    _wait_order(
+        app, MARK_NEEDLES,
+        lambda p: max(p[OFF_1], p[OFF_2]) < min(p[DOG_A], p[DOG_B]),
+        "less like this on one dog post must sink it AND the other dog post "
+        "below both unrelated posts (DOG_B started above OFF_1)",
+    )
+    _open_actions_for(app, DOG_A)
+    assert app.feed.train_verb_state("less") == "on"
+    assert app.feed.train_verb_state("more") == "off"
+
+    # ── Outcome 9a: the other mark switches it ──────────────────────────
+    app.feed.click_train_verb("more")
+    _wait_order(
+        app, MARK_NEEDLES,
+        lambda p: max(p[DOG_A], p[DOG_B]) < min(p[OFF_1], p[OFF_2]),
+        "switching the mark to more like this must lift both dog posts above "
+        "both unrelated posts (DOG_B started below OFF_2)",
+    )
+    switched = _wait_sample_exactly(port, test_user, factor_key, 1)
+    assert switched["sample_count"] == 1, (
+        "a switch replaces the example, never adds a second one"
+    )
+    _open_actions_for(app, DOG_A)
+    assert app.feed.train_verb_state("more") == "on"
+    assert app.feed.train_verb_state("less") == "off"
+
+    # ── Outcome 9b: choosing the current mark again takes the example back ──
+    app.feed.click_train_verb("more")
+    _wait_sample_exactly(port, test_user, factor_key, 0)
+    _wait_order(
+        app, MARK_NEEDLES, lambda p: _in_order(p, MARK_NEEDLES),
+        "taking the example back must return the feed to recency order",
+    )
+    _open_actions_for(app, DOG_A)
+    assert app.feed.train_verb_state("more") == "off"
+    assert app.feed.train_verb_state("less") == "off"
+
+    app.personalization.navigate()
+    assert app.personalization.wait_for_topic_count(1) == 1
+    app.personalization.delete_topic(0)
+    assert app.personalization.wait_for_topic_count(0) == 0
+
+
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.tui
+@pytest.mark.feature("trained-topics")
+def test_creating_a_topic_is_refused_by_name_when_blank_and_at_the_limit(logged_in_app):
+    """Outcomes 13 and 12 (`topic-factors.md` § Implementation status today —
+    a blank name is its own error, distinct from the cap; § At rest — seal +
+    home: `TRAINED_FACTORS_MAX = 32` per actor, rejected at create).
+
+    The two refusals are asserted to read DIFFERENTLY: collapsing them would
+    tell a user who left the box empty that they had run out of topics.
+    """
+    app = logged_in_app
+    app.personalization.navigate()
+    app.personalization.create_sole_topic(_unique("Cap"))
+
+    # ── Outcome 13: a blank name ─────────────────────────────────────────
+    app.personalization.create_topic("   ")
+    blank_error = wait_until(
+        lambda: app.has_error() and app.error_text(),
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: f"no refusal shown; rows={app.personalization.topic_names()!r}",
+    )
+    assert "name" in blank_error.lower(), (
+        f"a blank create must say it needs a name; got {blank_error!r}"
+    )
+    assert app.personalization.topic_count() == 1, "a blank create minted a row"
+
+    # ── Outcome 12: the limit ────────────────────────────────────────────
+    limit = 32  # fauna_protocol::personalization::TRAINED_FACTORS_MAX
+    for n in range(2, limit + 1):
+        app.personalization.create_topic(_unique(f"Cap{n}"))
+        assert app.personalization.wait_for_topic_count(n) == n, (
+            f"create {n} of {limit} never rendered; error={app.error_text()!r}"
+        )
+    app.personalization.create_topic(_unique("OneTooMany"))
+    cap_error = wait_until(
+        lambda: app.has_error() and app.error_text() != blank_error and app.error_text(),
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"no cap refusal; error={app.error_text()!r}",
+    )
+    assert str(limit) in cap_error, f"the cap refusal must name the limit; got {cap_error!r}"
+    assert app.personalization.topic_count() == limit, (
+        f"the refused create minted a row anyway: {app.personalization.topic_count()}"
+    )
+
+    for remaining in range(limit, 0, -1):
+        app.personalization.delete_topic(0)
+        assert app.personalization.wait_for_topic_count(remaining - 1) == remaining - 1
+
+
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.tui
+@pytest.mark.feature("trained-topics")
+def test_publish_name_starts_blank_every_open_and_a_thin_model_is_refused(
+    logged_in_app, nest_instance, test_user
+):
+    """Outcomes 20 and 21 (`topic-factors.md` § Publishing a trained factor:
+    the name input starts blank on every open, never prefilled from the
+    registry; `TEXT_MODEL_PUBLISH_MIN_DOCS = 3` — fewer than three public
+    examples sharing a pattern is an empty vocabulary, which refuses with copy
+    asking for more public examples)."""
+    app = logged_in_app
+    port = nest_instance["port"]
+
+    app.personalization.navigate()
+    private_name = _unique("SecretCats")
+    app.personalization.create_sole_topic(private_name)
+    factor_key = app.personalization.topic_factor_key()
+
+    app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+    app.feed.open_feed("General")
+    thin = [f"{t} {_unique('thin')}" for t in MODEL_MORE[:2]]  # one short of the floor
+    for text in thin:
+        app.feed.create_post(text=text)
+    feed_name = _unique("thin-feed")
+    app.feed.create_feed_with_factor(name=feed_name, factor_label=factor_key, weight="5.0")
+    app.feed.open_feed(feed_name)
+    for expected, text in enumerate(MODEL_MORE[:2], start=1):
+        _wait_order(app, [text], lambda p: True, f"{text!r} never rendered")
+        _open_actions_for(app, text)
+        app.feed.click_train_verb("more")
+        _wait_sample_exactly(port, test_user, factor_key, expected)
+
+    # ── Outcome 20: blank on every open ──────────────────────────────────
+    app.personalization.navigate()
+    assert app.personalization.wait_for_topic_count(1) == 1
+    app.personalization.open_publish_sheet(0)
+    assert app.personalization.publish_name_text() == "", (
+        f"the public name must start blank; got "
+        f"{app.personalization.publish_name_text()!r}"
+    )
+    app.personalization.type_publish_name("Something I typed")
+    app.personalization.cancel_publish()
+    assert app.personalization.wait_for_publish_sheet_closed()
+    app.personalization.open_publish_sheet(0)
+    reopened = app.personalization.publish_name_text()
+    assert reopened == "", f"a re-open must start blank again; got {reopened!r}"
+    assert private_name not in reopened
+
+    # ── Outcome 21: a Model with fewer than three shared examples ────────
+    app.personalization.set_publish_kind(app.personalization.PUBLISH_KIND_MODEL)
+    wait_until(
+        app.personalization.publish_ngram_refusal_visible,
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            f"no refusal; ngrams={app.personalization.publish_ngram_count()}; "
+            f"error={app.error_text()!r}"
+        ),
+    )
+    assert app.personalization.publish_ngram_count() == 0
+    refusal = app.personalization.publish_ngram_refusal_text().lower()
+    assert "public" in refusal and "3" in refusal, (
+        f"the refusal must ask for more public examples and name the floor; "
+        f"got {refusal!r}"
+    )
+    app.personalization.type_publish_name(_unique("Thin"))
+    assert not app.personalization.publish_submit_enabled(), (
+        "a Model below the floor must not be publishable"
+    )
+
+    app.personalization.cancel_publish()
+    app.personalization.delete_topic(0)
+    assert app.personalization.wait_for_topic_count(0) == 0
+
+
+@pytest.mark.linux
+@pytest.mark.tui
+@pytest.mark.windows
+@pytest.mark.android
+@pytest.mark.web
+@pytest.mark.feature("custom-feeds")
+def test_the_factor_picker_offers_a_trained_topic_by_its_name(logged_in_app):
+    """`feed-factor-select` lists the user's trained topics by the names they
+    gave them, never by the stable `topic:<hex>` key the composition stores
+    (topic-factors.md § Authoring surface & picker — the third source)."""
+    app = logged_in_app
+
+    app.personalization.navigate()
+    topic_name = _unique("Orange cats")
+    app.personalization.create_sole_topic(topic_name)
+    factor_key = app.personalization.topic_factor_key()
+
+    app.feed.navigate()
+    app.driver.click("feed-create-feed-button")
+    app.driver.wait_for("feed-create-feed-name")
+    # The trained-topic options land async (the sealed-registry read):
+    # deadline-poll the painted set (convention 14).
+    options: list[str] | None = None
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        options = app.driver.option_texts("feed-factor-select")
+        if options is not None and any(topic_name in o for o in options):
+            break
+        time.sleep(0.3)
+    try:
+        assert options is not None, "feed-factor-select publishes no options attr"
+        assert any(topic_name in o for o in options), (
+            f"the picker must offer the trained topic by its name "
+            f"{topic_name!r}; it paints {options!r}"
+        )
+        assert not any(factor_key in o for o in options), (
+            f"the picker must not paint the stable key {factor_key!r}: {options!r}"
+        )
+    finally:
+        app.feed.close_create_feed_form()
+        app.personalization.navigate()
+        app.personalization.delete_topic(0)
+    assert app.personalization.wait_for_topic_count(0) == 0, (
+        f"the picker test left a trained topic behind; error={app.error_text()!r}"
+    )
+
+
+# Bytes that are no sealed model: the AEAD open refuses them, exactly as it
+# refuses a corrupted row or one sealed under a key this device does not hold.
+UNOPENABLE_MODEL = b"not a sealed topic model -- the open must refuse it"
+
+
+def _error_starting_with(app, prefix: str) -> str:
+    """The page's error line when it starts with ``prefix``, else ``""`` — a
+    `wait_until` predicate that returns the text it matched."""
+    error = app.error_text() or ""
+    return error if error.startswith(prefix) else ""
+
+
+@pytest.mark.tui
+@pytest.mark.feature("trained-topics")
+def test_a_topics_saved_learning_that_cannot_be_opened_is_reported_and_never_reset(
+    logged_in_app, nest_instance, test_user
+):
+    """Outcome 16 (`topic-factors.md` § Implementation status today: an
+    unopenable model blob is a surfaced error, never silently a fresh model).
+
+    The topic's saved learning is made unopenable as an environment fault — its
+    nest row overwritten, through the test's own WS-RPC seat, with bytes that
+    will not open (the nest stores the blob opaque) — not as anything a user
+    does, so convention 8 has no gesture to route it through. Then the app reads
+    it where a user would make it: opening a feed weighted by the topic. The
+    feed page says the topic could not be applied, and the row still holds the
+    same bytes. A "more like this" on that feed is refused too, and the row is
+    still untouched — a fresh model standing in for the unopenable one would
+    have trained over it.
+    """
+    app = logged_in_app
+    port = nest_instance["port"]
+
+    app.personalization.navigate()
+    app.personalization.create_sole_topic(_unique("Cats"))
+    factor_key = app.personalization.topic_factor_key()
+
+    app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+    app.feed.open_feed("General")
+    post_text = f"{CAT_TEXT} {_unique('unopenable')}"
+    app.feed.create_post(text=post_text)
+
+    # Before any feed loads the topic's model, so the first read meets the fault.
+    ws_api.personalization_model_put(port, test_user, factor_key, UNOPENABLE_MODEL, 7)
+    try:
+        feed_name = _unique("unopenable-feed")
+        app.feed.create_feed_with_factor(
+            name=feed_name, factor_label=factor_key, weight="5.0",
+        )
+        app.feed.open_feed(feed_name)
+
+        # ── Told so: the feed page's error line names the topic's failure ──
+        error = wait_until(
+            lambda: _error_starting_with(app, S.feed.error_trained_factor(message="")),
+            budgets.RPC_ROUNDTRIP_S,
+            diagnose=lambda: f"error line reads {app.error_text()!r}",
+        )
+        assert "sealed model failed to decrypt" in error, (
+            f"the report must carry why the learning would not open: {error!r}"
+        )
+        row = ws_api.personalization_model_fetch(port, test_user, factor_key)
+        assert bytes(row.get("sealed_blob") or b"") == UNOPENABLE_MODEL and row[
+            "sample_count"
+        ] == 7, f"opening the feed rewrote the unopenable learning: {row!r}"
+
+        # ── Never reset: a train on top of it is refused, nothing is put ───
+        _open_actions_for(app, post_text)
+        app.feed.click_train_verb("more")
+        # The refusal replaces the feed's notice with the train's own error, so
+        # once it paints the train has finished (failed) and the row read after
+        # it is not racing a put still in flight.
+        refused = wait_until(
+            lambda: _error_starting_with(app, "sealed model failed to decrypt"),
+            budgets.RPC_ROUNDTRIP_S,
+            diagnose=lambda: f"error line reads {app.error_text()!r}",
+        )
+        assert refused
+        row = ws_api.personalization_model_fetch(port, test_user, factor_key)
+        assert bytes(row.get("sealed_blob") or b"") == UNOPENABLE_MODEL and row[
+            "sample_count"
+        ] == 7, (
+            f"a train over unopenable learning must not replace it with a "
+            f"fresh model: {row!r}"
+        )
+    finally:
+        # The session actor outlives this module: never leave the fault behind.
+        ws_api.personalization_model_delete(port, test_user, factor_key)
+
+    app.personalization.navigate()
+    app.personalization.delete_topic(0)
+    assert app.personalization.wait_for_topic_count(0) == 0, (
+        f"the test left its trained topic behind; error={app.error_text()!r}"
+    )
+
+
+@pytest.mark.tui
+@pytest.mark.feature("trained-topics")
+def test_a_topic_trained_on_one_device_follows_you_to_your_other_device(
+    request, logged_in_app, nest_instance, test_user
+):
+    """Outcome 11 (`topic-factors.md` § Goal: the model syncs to the user's
+    other devices through the nest as an opaque blob; § Placement: a device
+    fetches the sealed blob at session start or page open, and puts after each
+    train).
+
+    Seat A creates a topic, composes a feed of it and trains a post *more like
+    this*. A second seat of the same identity (e2e convention 16), launched
+    only after that train's put landed — its own device id and an empty state
+    root, so it holds nothing it did not fetch — lists the topic with its
+    example, and the feed composed of it ranks the trained post first although
+    it is the oldest. The second seat is launched after the train on purpose:
+    sync is fetch-on-demand, so an already-open seat is not expected to change.
+    """
+    app = logged_in_app
+    port = nest_instance["port"]
+
+    app.personalization.navigate()
+    topic_name = _unique("Cats")
+    app.personalization.create_sole_topic(topic_name)
+    factor_key = app.personalization.topic_factor_key()
+
+    app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+    app.feed.open_feed("General")
+    app.feed.create_post(text=CAT_TEXT)
+    time.sleep(1.2)  # sleep-ok: strictly-older created_at (epoch-seconds resolution)
+    off_1 = f"quarterly budget spreadsheet {_unique('rows')}"
+    off_2 = f"garage door spring replacement {_unique('note')}"
+    app.feed.create_post(text=off_1)
+    app.feed.create_post(text=off_2)
+
+    feed_name = _unique("follow-feed")
+    app.feed.create_feed_with_factor(name=feed_name, factor_label=factor_key, weight="5.0")
+    app.feed.open_feed(feed_name)
+    _wait_order(
+        app, [CAT_TEXT], lambda p: p[CAT_TEXT] > 0,
+        "pre-train the on-topic post (the oldest) must not lead",
+    )
+
+    _open_actions_for(app, CAT_TEXT)
+    app.feed.click_train_verb("more")
+    trained = _wait_sample_count(port, test_user, factor_key, 1)
+    assert trained["sample_count"] == 1 and trained.get("sealed_blob"), trained
+
+    try:
+        # The other device, launched now: whatever it shows, it fetched.
+        seat_b, _driver_b = request.getfixturevalue("alice_second_device")
+
+        row = seat_b.personalization.wait_for_topic_reopening(topic_name)
+        assert seat_b.personalization.topic_factor_key(row) == factor_key, (
+            "the other device must list the same topic, not a new one by its name"
+        )
+        wait_until(
+            lambda: "1" in seat_b.personalization.topic_example_count_text(row),
+            budgets.RPC_ROUNDTRIP_S,
+            diagnose=lambda: (
+                f"the other device lists the topic without what it learned: "
+                f"{seat_b.personalization.topic_example_count_text(row)!r}; "
+                f"error={seat_b.error_text()!r}"
+            ),
+        )
+
+        seat_b.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+        seat_b.feed.open_feed(feed_name)
+        positions = _wait_order(
+            seat_b, [CAT_TEXT, off_1, off_2],
+            lambda p: p[CAT_TEXT] < p[off_1] and p[CAT_TEXT] < p[off_2],
+            "on the other device the feed composed of the topic must rank the "
+            "trained post above the newer off-topic posts",
+        )
+        assert positions[CAT_TEXT] == 0, (
+            f"the trained post must lead the other device's feed: {positions!r}"
+        )
+    finally:
+        app.personalization.navigate()
+        app.personalization.delete_topic(0)
+    assert app.personalization.wait_for_topic_count(0) == 0

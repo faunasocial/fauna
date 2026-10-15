@@ -7,8 +7,8 @@ namespace FaunaApp.Tests;
 
 /// <summary>
 /// <see cref="SessionDeviceId.Resolve"/> — the device id the SESSION account
-/// registers under, read by every launch path through
-/// <c>RegistrySessionAccount.DeviceId</c>. It must apply the shared
+/// registers under, resolved by every launch path through
+/// <c>RegistrySessionAccount.ResolveDeviceId()</c>. It must apply the shared
 /// get-or-create rule (<c>FfiAccountRegistry.DeviceIdForActor</c>,
 /// <c>sync-agent-credentials.md</c> § Credential model, the RULED 2026-09-20
 /// block), never serve the raw per-actor slot: a slot that is not a 32-byte-hex
@@ -68,5 +68,58 @@ public class SessionDeviceIdTests
         using var registry = new FfiAccountRegistry(store);
 
         Assert.Null(SessionDeviceId.Resolve(registry, store, new string('c', 64)));
+    }
+
+    // ── Observers read; only a session consumer resolves ─────────────────────
+    //
+    // `Resolve` is a WRITE: the shared get-or-create persists a derived id into the
+    // account's own slot. The moment-1 retirement (`retire_superseded_provisionals`,
+    // `long-term-store.md` § Eager vs. lazy migration at native boot) retires an
+    // abandoned identity only while every per-actor slot but its secret is absent,
+    // so a resolve on an identity the wizard has not finished turns it into a ghost
+    // switcher row. The e2e state snapshot polled exactly that during a wizard run
+    // and the ghost-row journey went red.
+
+    private const string SecretB = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    [Fact]
+    public void AStoredReadOfAnUnfinishedIdentityLeavesItRetirableByTheNextConfirm()
+    {
+        var store = new LogicalSecretStore(new MemoryBackend());
+        using var registry = new FfiAccountRegistry(store);
+        var abandoned = registry.ConfirmIdentity(SecretA, false);
+
+        Assert.Null(SessionDeviceId.Stored(registry, abandoned));
+
+        var kept = registry.ConfirmIdentity(SecretB, false);
+        var rows = registry.List();
+        Assert.Single(rows);
+        Assert.Equal(kept, rows[0].@actorId);
+    }
+
+    [Fact]
+    public void AStoredReadServesThePersistedSlotVerbatim()
+    {
+        var store = new LogicalSecretStore(new MemoryBackend());
+        using var registry = new FfiAccountRegistry(store);
+        var actor = registry.AddAccount(SecretA, "https://a.example", "smoke-e2e-device");
+
+        Assert.Equal("smoke-e2e-device", SessionDeviceId.Stored(registry, actor));
+    }
+
+    /// The other side of the line, and why an observer may not cross it: a resolve
+    /// on the unfinished identity persists its id, and the row survives the next
+    /// confirm as the ghost.
+    [Fact]
+    public void AResolveOfAnUnfinishedIdentityKeepsItPastTheNextConfirm()
+    {
+        var store = new LogicalSecretStore(new MemoryBackend());
+        using var registry = new FfiAccountRegistry(store);
+        var abandoned = registry.ConfirmIdentity(SecretA, false);
+
+        Assert.True(IsSyncShaped(SessionDeviceId.Resolve(registry, store, abandoned)));
+
+        registry.ConfirmIdentity(SecretB, false);
+        Assert.Equal(2, registry.List().Length);
     }
 }

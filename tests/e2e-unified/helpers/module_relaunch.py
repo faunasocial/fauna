@@ -1,6 +1,6 @@
 """Module-boundary cold relaunch — a 7-app fixture contract, not a platform workaround.
 
-Owner: `testing.md` § point 10 (a launch is isolated from the box it runs on).
+Owner: `e2e-launch-isolation.md` convention 10 (a launch is isolated from the box it runs on).
 A session-scoped app process accumulates state that the in-process ``reset()``
 does not model, so the ``app`` fixture cold-relaunches the app at every test-
 MODULE boundary: each module starts against a fresh instance — the same

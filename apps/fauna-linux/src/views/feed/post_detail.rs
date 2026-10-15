@@ -7,14 +7,13 @@ use tokio::runtime::Handle;
 
 use crate::client::FaunaClient;
 use crate::feed::host::LinuxFeedManager;
-use fauna_client_bluesky::bluesky::BlueskyPost;
-use fauna_feed::PostSummary;
+use fauna_feed::{PostSummary, ThreadPage, ThreadPostView, ThreadStatus};
 
 #[cfg(feature = "payments")]
 use super::post_list::build_tip_row;
 use super::post_list::{
     append_tag_chips, build_post_image, build_post_proxied_image, build_post_video,
-    build_reply_dialog, engagement_indicator_content, format_timestamp,
+    build_reply_dialog, engagement_indicator_content, format_timestamp, post_video_block,
 };
 use crate::i18n::strings::{common, feed};
 use crate::views::document;
@@ -110,7 +109,8 @@ pub fn build_post_detail<F: Fn() + 'static>(
     }
 
     // ── Source icon badge(s) ─────────────────────────────────────────────
-    let source_badges = super::post_list::build_protocol_badges(&post.source);
+    let source_badges =
+        super::post_list::build_protocol_badges(&post.source, &manager.snapshot().bridge_roster);
     if !source_badges.is_empty() {
         let source_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         for badge in &source_badges {
@@ -206,10 +206,8 @@ pub fn build_post_detail<F: Fn() + 'static>(
     }
     // `video-thumbnail` — the D6b `Video` sibling of `Image` (render-model.md
     // § D6b); mutually exclusive with the image branch above, same fold.
-    if let Some(hash) = post.document.first_video_hash() {
-        content.append(&build_post_video(hash));
-    } else if let Some(path) = post.document.proxied_post_video() {
-        content.append(&build_post_video(path));
+    if let Some(block) = post_video_block(&post.document) {
+        content.append(&build_post_video(&post.post_id, block, manager, client));
     }
 
     // ── Tip surface (`monetization.md` § Tips) — the same surface the list
@@ -239,16 +237,22 @@ pub fn build_post_detail<F: Fn() + 'static>(
     crate::offline_gate::declare_wire_kind(&repost_btn, "fauna.posts.interact");
     actions.append(&repost_btn);
 
-    // "View Thread" button for Bluesky posts.
-    if post.source == "bluesky" {
+    // `feed-post-view-thread-button` — offered only where the shared
+    // `offers_thread_view` says there is a Bluesky thread to open
+    // (`bridges.md` § Bluesky-native thread view). The page itself is the
+    // manager's `FeedSnapshot::thread`, painted by `render_posts`.
+    if post.offers_thread_view() {
         let thread_btn = gtk::Button::with_label(feed::post::VIEW_THREAD);
         thread_btn.add_css_class("flat");
+        crate::testid::set_test_id(&thread_btn, ids::FEED_POST_VIEW_THREAD_BUTTON);
         actions.append(&thread_btn);
 
-        let c = Rc::clone(client);
+        let m = Arc::clone(manager);
+        let rt = rt.clone();
         let pid = post.post_id.clone();
         thread_btn.connect_clicked(move |_| {
-            c.fetch_bluesky_thread(&pid);
+            let (m, pid) = (Arc::clone(&m), pid.clone());
+            rt.spawn(async move { m.open_thread(pid).await });
         });
     }
 
@@ -289,19 +293,22 @@ pub fn build_post_detail<F: Fn() + 'static>(
     outer
 }
 
-/// Build a thread view showing the full Bluesky thread context.
+/// Build the thread page (`feed-thread-page`, ui.yaml `feed.sub_pages.thread`)
+/// from the shared [`ThreadPage`] (`bridges.md` § Bluesky-native thread view).
 ///
-/// `posts` is the flat `bluesky.feed.thread` list: ancestors (oldest first),
-/// the focal post, then its direct replies. `focal_index` is the nest-named
-/// focal post; ancestors render dim, the focal is highlighted, replies render
-/// normally.
+/// One `feed-thread-post` per post in thread order — ancestors oldest-first,
+/// the opened post, then its direct replies — the opened one (the nest-named
+/// `is_focal`) highlighted and `selected`. A failed fetch paints no posts;
+/// `error` lands on the page's own `error-message` — the thread's reason, else
+/// the feed's (tui's `page_error` order). `on_back` returns to the post detail
+/// the page was opened from.
 pub fn build_thread_view<F: Fn() + 'static>(
-    posts: &[BlueskyPost],
-    focal_idx: usize,
-    client: &Rc<FaunaClient>,
+    page: &ThreadPage,
+    error: Option<&str>,
     on_back: F,
 ) -> gtk::Box {
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    crate::testid::set_test_id(&outer, ids::FEED_THREAD_PAGE);
 
     // ── Header with Back button ───────────────────────────────────────────
     let header = adw::HeaderBar::new();
@@ -314,40 +321,60 @@ pub fn build_thread_view<F: Fn() + 'static>(
 
     outer.append(&header);
 
+    // ── Page-level error (`error-message`) ────────────────────────────────
+    if let Some(error) = error {
+        let label = gtk::Label::new(Some(error));
+        label.set_wrap(true);
+        label.add_css_class("error");
+        crate::testid::set_test_id(&label, ids::ERROR_MESSAGE);
+        outer.append(&label);
+    }
+
     // ── Thread content ────────────────────────────────────────────────────
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
-    if posts.is_empty() {
-        let status = adw::StatusPage::builder()
-            .title(feed::post::NO_THREAD_DATA)
-            .description(feed::post::NO_THREAD_DESC)
-            .icon_name("dialog-information-symbolic")
-            .vexpand(true)
-            .build();
-        content.append(&status);
-    } else {
-        for (i, post) in posts.iter().enumerate() {
-            let card = build_thread_post_card(post, client);
+    match page.status {
+        ThreadStatus::Loading => {
+            let spinner = gtk::Spinner::new();
+            spinner.start();
+            spinner.set_margin_top(24);
+            content.append(&spinner);
+        }
+        ThreadStatus::Failed => {}
+        ThreadStatus::Loaded if page.posts.is_empty() => {
+            let status = adw::StatusPage::builder()
+                .title(feed::post::NO_THREAD_DATA)
+                .description(feed::post::NO_THREAD_DESC)
+                .icon_name("dialog-information-symbolic")
+                .vexpand(true)
+                .build();
+            content.append(&status);
+        }
+        ThreadStatus::Loaded => {
+            let focal_idx = page.posts.iter().position(|p| p.is_focal);
+            for (i, post) in page.posts.iter().enumerate() {
+                let card = build_thread_post_card(post);
 
-            if i == focal_idx {
-                // Highlight the focal post.
-                card.add_css_class("card");
-            } else if i < focal_idx {
-                // Ancestor: dim styling.
-                card.add_css_class("dim-label");
+                if post.is_focal {
+                    // Highlight the focal post.
+                    card.add_css_class("card");
+                } else if focal_idx.is_some_and(|f| i < f) {
+                    // Ancestor: dim styling.
+                    card.add_css_class("dim-label");
+                }
+
+                // Add a thread connector line between posts.
+                if i > 0 {
+                    let connector = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                    connector.set_halign(gtk::Align::Center);
+                    connector.set_height_request(16);
+                    let line = gtk::Separator::new(gtk::Orientation::Vertical);
+                    connector.append(&line);
+                    content.append(&connector);
+                }
+
+                content.append(&card);
             }
-
-            // Add a thread connector line between posts.
-            if i > 0 {
-                let connector = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-                connector.set_halign(gtk::Align::Center);
-                connector.set_height_request(16);
-                let line = gtk::Separator::new(gtk::Orientation::Vertical);
-                connector.append(&line);
-                content.append(&connector);
-            }
-
-            content.append(&card);
         }
     }
 
@@ -362,31 +389,36 @@ pub fn build_thread_view<F: Fn() + 'static>(
     outer
 }
 
-/// Build a single post card for the thread view from a typed [`BlueskyPost`].
-fn build_thread_post_card(post: &BlueskyPost, _client: &Rc<FaunaClient>) -> gtk::Box {
+/// Build one `feed-thread-post` card from the shared [`ThreadPostView`]: its
+/// text is `‹author› ‹post text›` (tui's element text), and its `selected`
+/// attribute is always present — `"true"` on the opened post only.
+fn build_thread_post_card(post: &ThreadPostView) -> gtk::Box {
     let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
     card.set_margin_top(8);
     card.set_margin_bottom(8);
     card.set_margin_start(16);
     card.set_margin_end(16);
 
-    // Author line: display_name or handle.
-    let handle = post.author_handle.as_str();
-    let author = post
-        .author_display_name
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(if handle.is_empty() { "Unknown" } else { handle });
+    let author = post.author_label();
+    crate::testid::set_test_id(&card, ids::FEED_THREAD_POST);
+    crate::testid::set_test_text(&card, &format!("{author} {}", post.text));
+    crate::testid::set_test_attr(
+        &card,
+        "selected",
+        if post.is_focal { "true" } else { "false" },
+    );
 
     let top_line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let author_label = gtk::Label::new(Some(author));
+    let author_label = gtk::Label::new(Some(&author));
     author_label.set_halign(gtk::Align::Start);
     author_label.set_hexpand(true);
     author_label.add_css_class("heading");
     top_line.append(&author_label);
 
-    if !handle.is_empty() && handle != author {
-        let handle_label = gtk::Label::new(Some(&format!("@{}", handle)));
+    // The handle beside a display name (a bare handle already is the label).
+    let at_handle = format!("@{}", post.author_handle);
+    if !post.author_handle.is_empty() && at_handle != author {
+        let handle_label = gtk::Label::new(Some(&at_handle));
         handle_label.add_css_class("dim-label");
         handle_label.add_css_class("caption");
         handle_label.set_halign(gtk::Align::End);
@@ -488,6 +520,96 @@ mod tests {
             }
             // reply=1, repost=0 (omitted), like=5.
             assert_eq!(counts, vec!["1", "5"]);
+        });
+    }
+
+    fn thread_post_cards(root: &gtk::Box) -> Vec<gtk::Widget> {
+        fn walk(w: &gtk::Widget, out: &mut Vec<gtk::Widget>) {
+            if w.widget_name() == ids::FEED_THREAD_POST {
+                out.push(w.clone());
+            }
+            let mut c = w.first_child();
+            while let Some(child) = c {
+                walk(&child, out);
+                c = child.next_sibling();
+            }
+        }
+        let mut out = Vec::new();
+        walk(root.upcast_ref(), &mut out);
+        out
+    }
+
+    /// The loaded page paints one `feed-thread-post` per shared post in thread
+    /// order, `‹author› ‹text›`, the nest-named post `selected` — and no
+    /// `error-message` (`bridges.md` § Bluesky-native thread view).
+    #[test]
+    fn the_thread_page_paints_each_post_with_the_opened_one_selected() {
+        crate::testid::run_on_gtk_thread(|| {
+            let p = |handle: &str, text: &str, is_focal: bool| ThreadPostView {
+                at_uri: format!("at://{handle}/1"),
+                author_handle: handle.into(),
+                text: text.into(),
+                is_focal,
+                ..Default::default()
+            };
+            let page = ThreadPage {
+                post_id: "ab".into(),
+                status: ThreadStatus::Loaded,
+                posts: vec![
+                    p("root.test", "the root", false),
+                    p("bob.test", "the opened post", true),
+                    p("stranger.test", "a reply", false),
+                ],
+                error: None,
+            };
+            let view = build_thread_view(&page, None, || {});
+            assert_eq!(view.widget_name(), ids::FEED_THREAD_PAGE);
+            let cards = thread_post_cards(&view);
+            let texts: Vec<_> = cards
+                .iter()
+                .map(|c| crate::testid::test_text(c).unwrap_or_default())
+                .collect();
+            assert_eq!(
+                texts,
+                [
+                    "@root.test the root",
+                    "@bob.test the opened post",
+                    "@stranger.test a reply"
+                ]
+            );
+            let selected: Vec<bool> = cards
+                .iter()
+                .map(|c| c.has_css_class("test-attr-selected-true"))
+                .collect();
+            assert_eq!(selected, [false, true, false]);
+            assert!(
+                cards
+                    .iter()
+                    .all(|c| c.has_css_class("test-attr-selected-true")
+                        ^ c.has_css_class("test-attr-selected-false")),
+                "every post carries the attribute"
+            );
+            assert!(crate::testid::find_by_test_id(&view, ids::ERROR_MESSAGE).is_none());
+        });
+    }
+
+    /// A failed fetch paints no posts and its reason on the page's own
+    /// `error-message`.
+    #[test]
+    fn a_failed_thread_paints_its_reason_and_no_posts() {
+        crate::testid::run_on_gtk_thread(|| {
+            let page = ThreadPage {
+                post_id: "ab".into(),
+                status: ThreadStatus::Failed,
+                posts: vec![],
+                error: None,
+            };
+            let view = build_thread_view(&page, Some("gone"), || {});
+            assert!(thread_post_cards(&view).is_empty());
+            let error = crate::testid::find_by_test_id(&view, ids::ERROR_MESSAGE)
+                .and_then(|w| w.downcast::<gtk::Label>().ok())
+                .expect("the page carries its own error-message");
+            assert_eq!(error.text(), "gone");
         });
     }
 

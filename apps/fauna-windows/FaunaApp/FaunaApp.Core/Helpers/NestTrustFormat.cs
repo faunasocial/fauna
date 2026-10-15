@@ -29,9 +29,15 @@ internal static class NestTrustFormat
     internal static string ScopeLabel(TrustScope scope) =>
         Strings.Resolve(FaunaClientPairMethods.ScopeLabel(scope));
 
-    /// <summary>"Mail, Calendar" — the grant scope's rendered line.</summary>
-    internal static string ScopeLine(IEnumerable<TrustScope> scope) =>
-        string.Join(", ", scope.Select(ScopeLabel));
+    /// <summary>
+    /// "Mail, Calendar" — the grant scope's rendered line, through the shared
+    /// <c>fauna_client_pair::grant_scope_labels</c> door so a third-party
+    /// grant's folder read names the folder (<c>Your folder "premium"</c>) and a
+    /// scopeless <c>Revoke</c> that carries a folder renders that folder alone
+    /// (nests.md § Trust facet — grants).
+    /// </summary>
+    internal static string ScopeLine(IEnumerable<TrustScope> scope, TrustFolder? folder = null) =>
+        string.Join(", ", FaunaClientPairMethods.GrantScopeLabels(scope.ToArray(), folder).Select(l => Strings.Resolve(l)));
 
     /// <summary>
     /// A grant's liveness status (<c>nest-trust-grant-status</c>) via the
@@ -48,7 +54,7 @@ internal static class NestTrustFormat
     /// </summary>
     internal static string HistoryLine(TrustHistoryRow h)
     {
-        var scope = ScopeLine(h.@scope);
+        var scope = ScopeLine(h.@scope, h.@folder);
         var when = FaunaFfiMethods.FormatUnixLocal(h.@at);
         return h.@kind switch
         {

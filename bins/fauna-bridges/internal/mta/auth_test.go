@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -103,6 +104,16 @@ type submissionAuthCaller struct {
 	// behaviour for an unprovisioned local-part. Used by D.6 tests
 	// that need different actor_ids per recipient address.
 	validateRecipientByLocal map[string][]byte
+	// validateRecipientHandles, keyed by the request's local_part, names the
+	// canonical handle a Resolved validate_recipient reply carries ("" = the
+	// actor has none, so the reply omits the field). An unmapped local_part
+	// replies with itself as the handle — the common "logged in as the
+	// handle" case; map an alias login to its actor's real handle.
+	validateRecipientHandles map[string]string
+	// resolveRefused names `local@domain` addresses resolve_recipient rejects
+	// whatever else drives the fake — an exact alias asked about on a domain
+	// other than the one it names.
+	resolveRefused map[string]bool
 	// validateRecipientErr, when non-nil, is returned by every
 	// validate_recipient call (transport-failure path). It also drives
 	// resolve_recipient (the submission RCPT path), so the existing RCPT
@@ -204,6 +215,11 @@ type enqueueOutboundCall struct {
 	OriginalSender string
 	Recipients     []string
 	RawMessage     []byte
+	// OnBehalfOf is the submitter the bridge named (nil when omitted).
+	OnBehalfOf *[]byte
+	// SubmissionToken is the proof of OnBehalfOf the bridge sent (empty when
+	// omitted).
+	SubmissionToken []byte
 	// StagedBody is non-nil when the body rode the bulk-byte plane under a
 	// one-shot AEAD envelope (the staged-envelope rule): RawMessage is then
 	// empty and the reference carries the chunk hashes + total + key.
@@ -241,7 +257,7 @@ func (a *submissionAuthCaller) Call(_ context.Context, method string, body, repl
 				return fmt.Errorf("decode validate_recipient body: %w", err)
 			}
 			if actor, ok := a.validateRecipientByLocal[req.LocalPart]; ok {
-				return encodeReply(map[string]any{"outcome": "resolved", "actor_id": actor}, reply)
+				return encodeReply(a.validateResolved(req.LocalPart, actor), reply)
 			}
 			return encodeReply(map[string]any{"outcome": "reject", "reason": "unknown recipient"}, reply)
 		}
@@ -252,7 +268,13 @@ func (a *submissionAuthCaller) Call(_ context.Context, method string, body, repl
 		if err != nil {
 			return fmt.Errorf("test fake bad hex: %w", err)
 		}
-		return encodeReply(map[string]any{"outcome": "resolved", "actor_id": raw}, reply)
+		var req struct {
+			LocalPart string `cbor:"local_part"`
+		}
+		if err := cbor.Unmarshal(enc, &req); err != nil {
+			return fmt.Errorf("decode validate_recipient body: %w", err)
+		}
+		return encodeReply(a.validateResolved(req.LocalPart, raw), reply)
 
 	case wsrpc.MethodResolveRecipient:
 		// The submission RCPT path resolves through resolve_recipient (the
@@ -269,6 +291,13 @@ func (a *submissionAuthCaller) Call(_ context.Context, method string, body, repl
 		}
 		if err := cbor.Unmarshal(enc, &req); err != nil {
 			return fmt.Errorf("decode resolve_recipient body: %w", err)
+		}
+		if a.resolveRefused[strings.ToLower(req.LocalPart+"@"+req.Domain)] {
+			return encodeReply(map[string]any{
+				"outcome":   "reject",
+				"smtp_code": uint16(550),
+				"reason":    "unknown recipient",
+			}, reply)
 		}
 		if fwd, ok := a.resolveForwarders[req.LocalPart]; ok {
 			return encodeReply(map[string]any{
@@ -346,17 +375,21 @@ func (a *submissionAuthCaller) Call(_ context.Context, method string, body, repl
 			OriginalSender string               `cbor:"original_sender"`
 			Recipients     []string             `cbor:"recipients"`
 			RawMessage     []byte               `cbor:"raw_message"`
+			OnBehalfOf     *[]byte              `cbor:"on_behalf_of_actor,omitempty"`
 			StagedBody     *wsrpc.StagedBodyRef `cbor:"staged_body,omitempty"`
+			Token          []byte               `cbor:"submission_token,omitempty"`
 		}
 		if err := cbor.Unmarshal(enc, &req); err != nil {
 			return fmt.Errorf("decode enqueue_outbound_mail body: %w", err)
 		}
 		a.enqueuedOutbound = append(a.enqueuedOutbound, enqueueOutboundCall{
-			OriginalMsgID:  req.OriginalMsgID,
-			OriginalSender: req.OriginalSender,
-			Recipients:     append([]string(nil), req.Recipients...),
-			RawMessage:     append([]byte(nil), req.RawMessage...),
-			StagedBody:     req.StagedBody,
+			OriginalMsgID:   req.OriginalMsgID,
+			OriginalSender:  req.OriginalSender,
+			Recipients:      append([]string(nil), req.Recipients...),
+			RawMessage:      append([]byte(nil), req.RawMessage...),
+			OnBehalfOf:      req.OnBehalfOf,
+			StagedBody:      req.StagedBody,
+			SubmissionToken: append([]byte(nil), req.Token...),
 		})
 		ids := make([]int64, len(req.Recipients))
 		for i := range ids {
@@ -518,6 +551,21 @@ func (a *submissionAuthCaller) callsOf(method string) []submissionAuthCall {
 	return out
 }
 
+// validateResolved builds the fake's Resolved validate_recipient reply for a
+// login local_part, carrying the handle validateRecipientHandles names for it
+// (the local_part itself when unmapped; no handle field when mapped to "").
+func (a *submissionAuthCaller) validateResolved(localPart string, actor []byte) map[string]any {
+	handle, ok := a.validateRecipientHandles[localPart]
+	if !ok {
+		handle = localPart
+	}
+	r := map[string]any{"outcome": "resolved", "actor_id": actor}
+	if handle != "" {
+		r["handle"] = handle
+	}
+	return r
+}
+
 // ── Test session construction ────────────────────────────────────
 
 func newTestSubmissionSession(caller *submissionAuthCaller) *submissionSession {
@@ -563,8 +611,8 @@ func TestSubmissionPLAINSuccess(t *testing.T) {
 	if sess.credentialID != fixtureCredentialID {
 		t.Errorf("credentialID = %q", sess.credentialID)
 	}
-	if sess.authedLocalPart != "alice" {
-		t.Errorf("authedLocalPart = %q", sess.authedLocalPart)
+	if sess.authedHandle != "alice" {
+		t.Errorf("authedHandle = %q", sess.authedHandle)
 	}
 	if sess.submissionToken == nil {
 		t.Fatal("submissionToken must be stashed on success")
@@ -599,8 +647,8 @@ func TestSubmissionBareUsernameResolvesUnderPrimaryDomain(t *testing.T) {
 	if !sess.authenticated {
 		t.Fatal("authenticated flag must flip on a bare-username success")
 	}
-	if sess.authedLocalPart != "alice" {
-		t.Errorf("authedLocalPart = %q, want %q", sess.authedLocalPart, "alice")
+	if sess.authedHandle != "alice" {
+		t.Errorf("authedHandle = %q, want %q", sess.authedHandle, "alice")
 	}
 	calls := caller.callsOf(wsrpc.MethodValidateRecipient)
 	if len(calls) != 1 {
@@ -876,7 +924,7 @@ func TestSubmissionAuthLockoutResetsOnSuccess(t *testing.T) {
 	sess.submissionToken = nil
 	sess.actorID = nil
 	sess.credentialID = ""
-	sess.authedLocalPart = ""
+	sess.authedHandle = ""
 	sess.mu.Unlock()
 
 	// Three fresh failures must NOT lock — the bucket was reset by

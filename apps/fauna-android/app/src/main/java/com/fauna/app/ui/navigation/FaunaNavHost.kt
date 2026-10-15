@@ -31,6 +31,7 @@ import com.fauna.app.core.AppState
 import com.fauna.app.ui.components.ReportHost
 import com.fauna.app.ui.screen.LaunchAccountIndexUnreadableScreen
 import com.fauna.app.ui.screen.LaunchIdentityChangedScreen
+import com.fauna.app.ui.screen.LaunchIdentityForkedScreen
 import com.fauna.app.ui.screen.LaunchNeedsUpdateScreen
 import com.fauna.app.ui.screen.LaunchSignInRefusedScreen
 import com.fauna.app.ui.screen.LaunchRetryScreen
@@ -47,6 +48,7 @@ import com.fauna.app.ui.screen.notifications.NotificationsScreen
 import com.fauna.app.ui.screen.settings.*
 import com.fauna.app.ui.screen.status.*
 import com.fauna.app.ui.util.LocalConnectionState
+import com.fauna.app.ui.util.getStringFmt
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.viewmodel.AccountSettingsVM
@@ -355,6 +357,17 @@ fun NavController.navigateToDrawerRoute(route: String) {
 }
 
 /**
+ * The `admin-nav-back` exit — `docs/goal/behavior/admin.md` § Navigation
+ * model: leaving admin lands on the primary view (Conversations), not on
+ * whichever page the user reached admin from. The admin pages are
+ * `settings/admin*` entries stacked over Settings, so a one-entry pop would
+ * land back in Settings; this crosses the drawer's own edge to the start
+ * destination instead, which pops the admin and settings entries. System back
+ * stays the idiomatic one-entry pop.
+ */
+fun NavController.exitAdminToPrimary() = navigateToDrawerRoute("conversations")
+
+/**
  * The onboarding wizard's route table — shared by the cold-boot launch-routing
  * flow (`AppLaunchVM.NavTarget.Wizard`) and the "Add account" append-mode
  * overlay (`appState.isAddingAccount`), which drives the SAME shared
@@ -385,6 +398,7 @@ private fun OnboardingWizardNavHost(
         composable("onboarding/identity-import") { IdentityImportScreen(navController) }
         composable(RECOVERY_KIT_ROUTE) { RecoveryKitScreen(navController) }
         composable(RECOVERY_ENTRY_ROUTE) { RecoveryEntryScreen(navController) }
+        composable(EMERGENCY_LOCKOUT_ENTRY_ROUTE) { EmergencyLockoutEntryScreen(navController) }
         composable("onboarding/handle-entry") {
             HandleEntryScreen(navController, onWizardExit)
         }
@@ -483,15 +497,42 @@ fun FaunaNavHost(
             Unit
         }
 
-        when (
-            val target = launchVm.navTargetFor(
-                snapshot.phase,
-                snapshot.accountIndexRefusal,
-                snapshot.signInRefused,
-                supersededSuccessor = snapshot.supersededSuccessor,
-            )
-        ) {
+        // The locked surface (leg 2) follows the machine out with no timer of
+        // its own: once a notice has painted for `shownLock`, it stands while
+        // the shared `lock_notice_holds` rule says so (parked on that lock, or
+        // the machine's own refresh at the unlock time in flight), and always
+        // while the user is mid-ceremony on `identity_stolen_entry`.
+        var shownLock by remember { mutableStateOf<ULong?>(null) }
+        var stolenEntry by remember { mutableStateOf(false) }
+        val routed = launchVm.navTargetFor(
+            snapshot.phase,
+            snapshot.accountIndexRefusal,
+            snapshot.signInRefused,
+            supersededSuccessor = snapshot.supersededSuccessor,
+            identityFork = snapshot.identityFork,
+            lockedUntilSecs = snapshot.lockedUntilSecs,
+        )
+        val followed = launchVm.followLock(routed, snapshot, shownLock, stolenEntry)
+        LaunchedEffect(followed) {
+            val locked = followed as? com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.AccountLocked
+            shownLock = locked?.lockedUntilSecs
+            if (locked == null) stolenEntry = false
+        }
+
+        when (val target = followed) {
             null -> { /* in-flight: cold-start blank screen */ }
+            is com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.AccountLocked -> {
+                LockedSurfaceHost(
+                    launchVm = launchVm,
+                    lockedUntilSecs = target.lockedUntilSecs,
+                    stolenEntry = stolenEntry,
+                    onStolenEntry = { stolenEntry = it },
+                    onSignedIn = {
+                        stolenEntry = false
+                        shownLock = null
+                    },
+                )
+            }
             com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.Authenticated -> {
                 LaunchedEffect(Unit) {
                     launchVm.connectActiveSession()
@@ -500,13 +541,30 @@ fun FaunaNavHost(
             }
             com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.TransientError -> {
                 val scope = rememberCoroutineScope()
-                LaunchRetryScreen(
-                    onRetry = { scope.launch { launchVm.retry() } },
-                    onUseDifferentNest = {
-                        launchVm.seedForFallthrough()
-                        navController.navigate("onboarding/handle-entry")
-                    },
-                )
+                var recoverableBoxes by remember { mutableStateOf(emptyList<String>()) }
+                LaunchedEffect(Unit) { recoverableBoxes = launchVm.loadRecoverableBoxes() }
+                // `nest_retire` is hosted over the retry surface (`launch-retire-button`);
+                // leaving it puts the surface back as it was.
+                var retiring by remember { mutableStateOf(false) }
+                if (retiring) {
+                    NestRetireScreen(
+                        entry = RetireEntry.Launch,
+                        onExit = { retiring = false },
+                    )
+                } else {
+                    LaunchRetryScreen(
+                        onRetry = { scope.launch { launchVm.retry() } },
+                        onUseDifferentNest = {
+                            launchVm.seedForFallthrough()
+                            navController.navigate("onboarding/handle-entry")
+                        },
+                        recoverableBoxes = recoverableBoxes,
+                        onRecover = {
+                            navController.navigate(launchVm.seedForRecovery(recoverableBoxes))
+                        },
+                        onRetire = { retiring = true },
+                    )
+                }
             }
             com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.NeedsUpdate -> {
                 // The nest reported it is outdated — a non-retry surface that
@@ -541,6 +599,19 @@ fun FaunaNavHost(
                 val scope = rememberCoroutineScope()
                 LaunchIdentityChangedScreen(
                     onTrust = { scope.launch { launchVm.trustIdentity() } },
+                    onUseDifferentNest = {
+                        launchVm.seedForFallthrough()
+                        navController.navigate("onboarding/handle-entry")
+                    },
+                )
+            }
+            is com.fauna.app.ui.viewmodel.AppLaunchVM.NavTarget.IdentityForked -> {
+                // Rotation-chain fork evidence (box-recovery.md § Client
+                // acceptance): the warning naming both heads, the fallthrough
+                // only — no trust button, no Retry.
+                LaunchIdentityForkedScreen(
+                    pinnedHex = target.pinnedHex,
+                    seenHex = target.seenHex,
                     onUseDifferentNest = {
                         launchVm.seedForFallthrough()
                         navController.navigate("onboarding/handle-entry")
@@ -665,6 +736,9 @@ fun FaunaNavHost(
         // identity-succession.md § The RecoveryKey → Creation UX: register the
         // kit confirmed on the sign-up recovery_kit page. No-op if skipped.
         LaunchedEffect(Unit) { postAuthGlue.registerDeferredRecoveryKit() }
+        // onboarding-provisioning.md § 4: seal the DNS-provider credential the
+        // wizard verified into the account store. No-op if none was captured.
+        LaunchedEffect(Unit) { postAuthGlue.sealCapturedDnsCredential() }
         // box-recovery.md § The plane-era recovery floor, (c) The writes: the
         // deployment-seed custody leg at the post-auth edge, on every connect —
         // the only capture, so the nest's `nest_actor_id` survives total box
@@ -672,17 +746,13 @@ fun FaunaNavHost(
         // unconfirmed for an admin is surfaced as a warning banner — the
         // android idiom of linux's toast (cleared on the next navigation, like
         // the page-scoped errors). Nothing shows when custody is held or this
-        // identity is not an admin here.
-        val custodyMismatchMsg = stringResource(R.string.launch_recovery_custody_mismatch)
-        val custodyFailedMsg = stringResource(R.string.launch_recovery_custody_failed)
+        // identity is not an admin here. The warning is the shared Rust
+        // `LocalizedText`; this only renders it.
+        val custodyContext = androidx.compose.ui.platform.LocalContext.current
         LaunchedEffect(Unit) {
-            when (postAuthGlue.runDeploymentSeedCustodyLeg()) {
-                com.fauna.app.ui.viewmodel.PostAuthGlueVM.RecoveryCustodyOutcome.NOT_PROTECTED_MISMATCH ->
-                    appState.messages.showWarning(custodyMismatchMsg)
-                com.fauna.app.ui.viewmodel.PostAuthGlueVM.RecoveryCustodyOutcome.NOT_PROTECTED_FAILED ->
-                    appState.messages.showWarning(custodyFailedMsg)
-                com.fauna.app.ui.viewmodel.PostAuthGlueVM.RecoveryCustodyOutcome.OK -> {}
-            }
+            postAuthGlue.runDeploymentSeedCustodyLeg()
+                ?.let { com.fauna.app.ui.util.resolveLocalized(custodyContext, it) }
+                ?.let { appState.messages.showWarning(it) }
         }
         // domains-and-tls-bootstrap.md § Host-address acquisition: fire-and-forget
         // leg at the same universal post-auth hook. Best-effort, logged only.
@@ -691,6 +761,9 @@ fun FaunaNavHost(
         // (S8 D1 + D3): stamp missing sealed siblings + snapshot tag seals,
         // same universal post-auth hook.
         LaunchedEffect(Unit) { postAuthGlue.runSealBackfill() }
+        // succession-aftermath.md § Re-key scope's `BackupKey` corpus row: the
+        // shared post-succession pass, every authenticated start.
+        LaunchedEffect(Unit) { postAuthGlue.runSuccessionAftermath() }
 
         var searchQuery by remember { mutableStateOf("") }
         var isSearchActive by remember { mutableStateOf(false) }
@@ -857,6 +930,12 @@ fun FaunaNavHost(
                                 navController.navigateToDrawerRoute("settings/account")
                             }
                         }
+                        // A `fauna://consent` route that arrived signed out is
+                        // applied now the session is (android.md § Navigation →
+                        // *In-app routes*); same effect-after-graph ordering.
+                        LaunchedEffect(Unit) {
+                            com.fauna.app.core.ConsentHandoff.shared.applyHeld(navController)
+                        }
                         // The screen-time lock (family-safety.md § Screen
                         // time) covers the page content only, not the chrome
                         // above (supervised-indicator stays reachable) — a
@@ -966,7 +1045,21 @@ fun FaunaNavHost(
                         // re-homed under the Settings shell (was the top-level Peers/Devices
                         // page). Folder list/wizard/conflicts live on settings/folders.
                         composable("settings/devices") { DevicesRosterScreen(navController) }
-                        composable("notifications") { NotificationsScreen() }
+                        // Settings → Sessions (`ui/sessions.md`; directly after Devices).
+                        // A lock that lands leaves the shell the way every session-ending
+                        // verdict does — a drop, never an erase (the stolen-identity
+                        // ceremony on the locked surface needs the seed) — and the re-run
+                        // launch machine meets the lock and paints the locked notice.
+                        composable("settings/sessions") {
+                            com.fauna.app.ui.screen.settings.SessionsScreen(
+                                navController,
+                                onLocked = {
+                                    launchVmPostAuth.escalateAccountLocked()
+                                    appState.isOnboarding = true
+                                },
+                            )
+                        }
+                        composable("notifications") { NotificationsScreen(navController) }
 
                         // Photo backup: the standalone settings/photo-backup route retired
                         // 2026-07-19 (media.md § Photo-backup reframe) — its controls now
@@ -996,6 +1089,22 @@ fun FaunaNavHost(
                             com.fauna.app.ui.screen.settings.AdminNestScreen(
                                 navController,
                                 onFactoryResetComplete = { appState.isOnboarding = true },
+                            )
+                        }
+                        // `nest_retire` over the live session (nest-retirement.md §
+                        // Layout & flow; entered from `admin-nest-retire-button`).
+                        // Retiring the box this session is signed into drops the
+                        // session (credentials kept) and re-enters launch routing.
+                        composable("settings/admin-nest-retire") {
+                            NestRetireScreen(
+                                entry = RetireEntry.Admin,
+                                onExit = { sessionDropped ->
+                                    if (sessionDropped) {
+                                        appState.isOnboarding = true
+                                    } else {
+                                        navController.popBackStack()
+                                    }
+                                },
                             )
                         }
                         // admin-custody-hosting: the nest-wide custody-hosting
@@ -1057,4 +1166,77 @@ fun FaunaNavHost(
             }
         }
     }
+}
+
+/**
+ * The locked launch surface's two screens (`ui/sessions.md` § Layout & flow →
+ * *The locked surface (leg 2)*): the standing notice, and the
+ * `identity_stolen_entry` step its one button opens. The step's three inputs
+ * live here and nowhere else — nothing typed is persisted, and leaving the
+ * step drops them. The ceremony and every gate re-check are
+ * [com.fauna.app.ui.viewmodel.AppLaunchVM.succeedStolenLocked]'s; this only
+ * says its answer on `error-message`.
+ */
+@Composable
+private fun LockedSurfaceHost(
+    launchVm: com.fauna.app.ui.viewmodel.AppLaunchVM,
+    lockedUntilSecs: ULong,
+    stolenEntry: Boolean,
+    onStolenEntry: (Boolean) -> Unit,
+    onSignedIn: () -> Unit,
+) {
+    if (!stolenEntry) {
+        com.fauna.app.ui.screen.LaunchAccountLockedScreen(
+            unlockTime = com.fauna.ffi.formatUnixLocal(lockedUntilSecs.toLong()),
+            onStolen = { onStolenEntry(true) },
+        )
+        return
+    }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    var phrase by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    com.fauna.app.ui.screen.IdentityStolenEntryScreen(
+        phrase = phrase,
+        confirm = confirm,
+        confirmWord = com.fauna.app.ui.viewmodel.RecoveryKitVM.STOLEN_CONFIRM_WORD,
+        busy = busy,
+        error = error,
+        onPhraseChange = { phrase = it },
+        onConfirmChange = { confirm = it },
+        onSucceed = {
+            busy = true
+            error = null
+            scope.launch {
+                val result = launchVm.succeedStolenLocked(phrase, confirm)
+                busy = false
+                error = lockedCeremonyMessage(context, result)
+                if (result is com.fauna.app.ui.viewmodel.AppLaunchVM.LockedCeremonyResult.SignedIn) {
+                    onSignedIn()
+                }
+            }
+        },
+        onBack = { onStolenEntry(false) },
+    )
+}
+
+/** The sentence `identity_stolen_entry` says for a ceremony answer — the shared
+ *  outcome's own words on a refused arm, `null` once signed in. */
+private fun lockedCeremonyMessage(
+    context: android.content.Context,
+    result: com.fauna.app.ui.viewmodel.AppLaunchVM.LockedCeremonyResult,
+): String? = when (result) {
+    com.fauna.app.ui.viewmodel.AppLaunchVM.LockedCeremonyResult.SignedIn -> null
+    com.fauna.app.ui.viewmodel.AppLaunchVM.LockedCeremonyResult.NotArmed ->
+        context.getString(R.string.settings_recovery_kit_stolen_confirm_placeholder)
+    com.fauna.app.ui.viewmodel.AppLaunchVM.LockedCeremonyResult.NoPhrase ->
+        context.getString(R.string.settings_recovery_kit_kit_phrase_required)
+    is com.fauna.app.ui.viewmodel.AppLaunchVM.LockedCeremonyResult.Refused ->
+        com.fauna.app.ui.util.resolveLocalized(context, result.outcome.message) ?: result.outcome.kind
+    is com.fauna.app.ui.viewmodel.AppLaunchVM.LockedCeremonyResult.PersistFailed ->
+        context.getStringFmt(R.string.settings_recovery_kit_stolen_persist_failed, result.successorSecretHex)
+    is com.fauna.app.ui.viewmodel.AppLaunchVM.LockedCeremonyResult.Failed ->
+        context.getStringFmt(R.string.settings_recovery_kit_stolen_ceremony_failed, result.detail.orEmpty())
 }

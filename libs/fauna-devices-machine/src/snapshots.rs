@@ -100,8 +100,8 @@ impl DeviceSummary {
 /// One **signed-in device without a matching entry** — a verified fleet member
 /// no roster row accounts for, offered the member-addressed removal door
 /// (`ui/devices.md` § Members without a matching entry;
-/// `account-data-taxonomy.md` § The generation machinery → *Fleet-scope
-/// reclamation*, clause (4), *A disagreement is the user's to settle*). It has
+/// `fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (4), *A disagreement is the user's to settle*). It has
 /// no nest row, so no label: what a card shows is the fleet id's fingerprint
 /// and the enrollment instant the member's own record asserts. Both are
 /// rendered here, once, so every app paints the same strings
@@ -143,6 +143,14 @@ pub struct FolderSummary {
     pub cached_last_snapshot_at: Option<i64>,
     pub include_paths: Option<Vec<String>>,
     pub exclude_paths: Option<Vec<String>>,
+    /// `true` when the nest holds a sealed include list this device could not
+    /// open (keyless app, key mismatch): `include_paths` is `None` as "not
+    /// readable", not "no list". The editor renders the list as unavailable and
+    /// `DevicesMachine::set_folder_paths` refuses to save over it. Set by the
+    /// machine's render seam, never by the wire transcribe.
+    pub include_paths_unreadable: bool,
+    /// [`Self::include_paths_unreadable`] for `exclude_paths`.
+    pub exclude_paths_unreadable: bool,
     /// Hex-encoded raw MLS **group id** binding this set to a cross-user shared
     /// group. `Some` ⇒ the set is shared (the owner-side `folder-shared-badge`
     /// renders, and `ChannelId::from_group_id(mls_group_id)` yields the channel
@@ -353,6 +361,18 @@ impl FolderSummary {
     }
 }
 
+/// [`FolderSummary::is_public_unverified_for`] for an app that holds its seat's
+/// actor id as hex (every app but linux/tui, which hold an `ActorId`): the one
+/// face the FFI and wasm exports wrap. An id that does not parse answers
+/// `false` — a seat that cannot name itself cannot judge a signature, and
+/// painting the re-confirm door on that guess would be the unattested-public
+/// defect run backwards.
+#[must_use]
+pub fn folder_is_public_unverified(folder: &FolderSummary, own_actor_hex: &str) -> bool {
+    fauna_core::identity::ActorId::from_hex(own_actor_hex)
+        .is_ok_and(|own| folder.is_public_unverified_for(&own))
+}
+
 /// A folder's live exclusive-editing lease, as the folder projection reports
 /// it. Transcribes `fauna_protocol::folders::FolderLeaseState`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -515,7 +535,7 @@ pub struct DevicesSnapshot {
     pub followed: Vec<FollowedFolderSummary>,
     pub conflicts: Vec<ConflictSummary>,
     /// Whether this actor's per-handle web address is switched on
-    /// (`fauna.web.get_subdomain_enabled`) — the second half of the website
+    /// (the web plane's subdomain read) — the second half of the website
     /// toggle's tri-state hint (`fauna_folders_machine::website_serve_hint`).
     /// `None` = unknown (an unwired adapter, a failed read): the
     /// hint then hedges rather than claiming the site is live. Read
@@ -621,6 +641,8 @@ impl From<WireFolder> for FolderSummary {
             cached_last_snapshot_at: f.cached_last_snapshot_at,
             include_paths: f.include_paths,
             exclude_paths: f.exclude_paths,
+            include_paths_unreadable: false,
+            exclude_paths_unreadable: false,
             mls_group_id: f.mls_group_id,
             role: f.role,
             access: f.access,
@@ -707,12 +729,26 @@ impl From<SyncConflict> for ConflictSummary {
     }
 }
 
-/// Append the skipping device's label to each skipped catch-up change's
-/// `file_info` line, so the user sees WHICH device is behind (`conflicts.md`
-/// § Skipped catch-up changes reach the review list: on that row `device_id`
-/// names the device that skipped, not a writer). A device absent from the list
-/// (removed, or a read that failed) is named by its id's first 8 hex.
-pub(crate) fn name_skipping_devices(conflicts: &mut [ConflictSummary], devices: &[DeviceSummary]) {
+/// The review list's fold for skipped catch-up changes (`conflicts.md`
+/// § Skipped catch-up changes reach the review list).
+///
+/// A CURED row leaves the list: the page fetches resolved rows as review
+/// history, but a resolved `catchup_failed` row says the device was behind and
+/// no longer is — nothing to review, nothing to re-point — so it clears on its
+/// own (`ui/folders.md` § Conflicts).
+///
+/// Each remaining row's `file_info` gains the skipping device's label, so the
+/// user sees WHICH device is behind (on that row `device_id` names the device
+/// that skipped, not a writer). A device absent from the list (removed, or a
+/// read that failed) is named by its id's first 8 hex.
+pub(crate) fn fold_skipped_changes(
+    conflicts: &mut Vec<ConflictSummary>,
+    devices: &[DeviceSummary],
+) {
+    conflicts.retain(|c| {
+        c.conflict_type != fauna_protocol::folders::CONFLICT_TYPE_CATCHUP_FAILED
+            || c.resolved_at.is_none()
+    });
     for c in conflicts
         .iter_mut()
         .filter(|c| c.conflict_type == fauna_protocol::folders::CONFLICT_TYPE_CATCHUP_FAILED)
@@ -761,6 +797,27 @@ mod wire_transcription_tests {
         }
         .into();
         assert!(bare.is_public_unverified_for(&owner.actor_id()));
+    }
+
+    /// The hex-taking face every app calls: the same verdict as the method for a
+    /// genuine seat id, and `false` — never a paint — for an id it cannot parse,
+    /// because a seat that cannot name itself cannot judge a signature either.
+    #[test]
+    fn the_hex_face_agrees_with_the_method_and_fails_safe_on_a_bad_id() {
+        let owner = fauna_core::identity::ActorKeypair::from_secret([5; 32]);
+        let bare: FolderSummary = WireFolder {
+            id: 9,
+            name: "site".into(),
+            audience: "public".into(),
+            ..Default::default()
+        }
+        .into();
+        assert!(folder_is_public_unverified(
+            &bare,
+            &owner.actor_id().to_hex()
+        ));
+        assert!(!folder_is_public_unverified(&bare, "not-hex"));
+        assert!(!folder_is_public_unverified(&bare, ""));
     }
 
     /// The audience is transcribed as the nest projected it; an empty token

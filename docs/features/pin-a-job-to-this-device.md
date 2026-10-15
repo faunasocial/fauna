@@ -32,8 +32,8 @@ Stamped 2026-09-26 at ef1315baff.
 | App | Status | Stamp |
 |---|---|---|
 | web | — absent | |
-| linux | ✅ full | 0.1.2-dev+c4a95c20 standalone |
-| windows | ✅ full | 0.1.2-dev+0d1e684d standalone |
+| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
+| windows | ✅ full | 0.1.3-dev+7135fff0.dirty standalone |
 | macos | ✅ full | 0.1.2-dev+f85ee000 standalone |
 | ios | — absent | |
 | android | — absent | |

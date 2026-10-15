@@ -19,6 +19,16 @@
 //!
 //! - **Keys here already** (retained bundle, inline wrap, any merged top-up):
 //!   nothing — byte-quiet, no request.
+//! - **Plane first — a merged `fauna.state.escrow-wrap` row opens**: this
+//!   identity's row at `<generation>/<identity>`, then each attested
+//!   predecessor's, opened with the seed-derived secret and checked against
+//!   the mint's key commitment. A key that checks is recorded and counted
+//!   exactly as a door-opened one, and no door is asked
+//!   (`account-replica-posture.md` § Replica posture → the custodian-NEST
+//!   serve door bullet → *Escrow custody*, ruling (2)). The rows below bound
+//!   *requests*; a plane open makes none, so it runs ahead of them — which is
+//!   what keys a cold device restored from a custodian, whose pin names no
+//!   holder that signed the account's receipts.
 //! - **No verifying receipt in merged state from a trusted holder or a
 //!   verified ancestor of one**: nothing. A receipt is holder-signed and binds
 //!   the generation id, so a forged mint row can never carry one — a
@@ -31,7 +41,8 @@
 //!   predecessor and keyed by no surviving device would otherwise never be
 //!   asked for, though its wrap rests at the nest. The clause bounds requests;
 //!   an opened wrap is still checked against its mint's key commitment.
-//! - **Already answered this runtime life** ([`EscrowRecoveryMemo`]): nothing.
+//! - **Already answered this runtime life** ([`EscrowRecoveryMemo`]): nothing
+//!   more — the memo covers the door only.
 //! - **Otherwise**: one `escrow.get` filtered to that generation; every wrap
 //!   in the reply is opened with the seed-derived secret and checked against
 //!   the mint's key commitment. The first key that opens is recorded on the
@@ -52,7 +63,8 @@
 //! takes them from the fleet walk instead: every predecessor mint record it
 //! opened under the mint-kind keys and declined for want of the key
 //! ([`AccountStatePlane::unkeyed_predecessor_mints`]). For each, not keyed
-//! here and not yet answered, one filtered `escrow.get`; every wrap in the
+//! here, the merged wrap rows first, as above; then, not yet answered, one
+//! filtered `escrow.get`; every wrap in the
 //! reply is opened under this identity's escrow secret and then each attested
 //! predecessor's, checked against the record's key commitment. The request
 //! bound is the mint-kind open itself — only a holder of the retired
@@ -84,7 +96,7 @@ use fauna_mls::wrapped_blob::generation_wraps::open_generation_key_from_escrow;
 use fauna_protocol::generation_escrow::{
     EscrowGetReply, EscrowGetRequest, EscrowWrapRow, KIND_ESCROW_GET,
 };
-use fauna_protocol::merge_policy::{KIND_ESCROW_RECEIPT, KIND_GENERATION_MINT};
+use fauna_protocol::merge_policy::{KIND_ESCROW_RECEIPT, KIND_ESCROW_WRAP, KIND_GENERATION_MINT};
 use fauna_protocol::{ByteBuf, RpcRequester};
 
 use crate::account_state_plane::AccountStatePlane;
@@ -127,6 +139,7 @@ impl EscrowRecoveryMemo {
 /// life (one derivation per pass, not per wrap).
 pub struct EscrowOpener<'a> {
     identity_seed: &'a [u8; 32],
+    identity: ActorId,
     target_key: String,
     keypair: OnceLock<fauna_pq_kem::XWingKeyPair>,
 }
@@ -136,9 +149,45 @@ impl<'a> EscrowOpener<'a> {
     pub fn new(identity_seed: &'a [u8; 32], root: &ActorId) -> Self {
         Self {
             identity_seed,
+            identity: *root,
             target_key: fauna_core::generation::escrow_target_identity_key(root),
             keypair: OnceLock::new(),
         }
+    }
+
+    /// The key of `generation_id` from the fleet plane's copy of this
+    /// identity's escrow wrap — the merged `fauna.state.escrow-wrap` row at
+    /// `<generation>/<this identity>` — when the row is live, opens, and
+    /// matches `core`'s key commitment; `None` otherwise. **The plane-first
+    /// half of every seed-holding opener** (`account-replica-posture.md`
+    /// § *Escrow custody*, ruling (2)): asked before any holder's door, so a
+    /// replica that carries the row — a custodian's restore included — keys
+    /// the generation with no holder reachable.
+    ///
+    /// # Errors
+    /// Store I/O only.
+    pub async fn open_plane_row<B: StoreBackend>(
+        &self,
+        store: &AccountStore<B>,
+        generation_id: &[u8; 32],
+        core: &MintCore,
+    ) -> Result<Option<GenerationKey>> {
+        let key = fauna_core::generation::escrow_wrap_cell_key(generation_id, &self.identity);
+        let Some(row) = store.state(KIND_ESCROW_WRAP, &key).await? else {
+            return Ok(None);
+        };
+        if row.tombstone {
+            return Ok(None);
+        }
+        Ok(self.open(
+            &[EscrowWrapRow {
+                generation_id: ByteBuf::from(generation_id.to_vec()),
+                wrap: ByteBuf::from(row.value),
+                ..Default::default()
+            }],
+            generation_id,
+            core,
+        ))
     }
 
     /// This identity's escrow-target key — the string its wraps seal under
@@ -257,6 +306,10 @@ where
     );
     let mut recovered = 0usize;
     let mut door_failure = None;
+    let predecessor_openers: Vec<EscrowOpener<'_>> = predecessors
+        .iter()
+        .map(|kp| EscrowOpener::new(kp.secret_bytes(), &kp.actor_id()))
+        .collect();
 
     for entry in live_rows(store, KIND_GENERATION_MINT).await? {
         // One generation is one unit of local work — a KEM decap and a
@@ -268,9 +321,6 @@ where
         let Some((generation_id, core)) = minted_core(&entry) else {
             continue;
         };
-        if !acked.contains(&generation_id) || memo.answered(&generation_id) {
-            continue;
-        }
         if generation_tip::generation_key_for(
             store,
             &generation_id,
@@ -281,6 +331,20 @@ where
         .await?
         .is_some()
         {
+            continue;
+        }
+        // Plane-first (module docs, *Plane first*): this identity's merged
+        // wrap row, then each attested predecessor's. No request leaves the
+        // box, so neither the receipt bound nor the memo applies — the key
+        // commitment is what a recovered key is trusted for.
+        if let Some(key) =
+            open_from_plane(store, &opener, &predecessor_openers, &generation_id, &core).await?
+        {
+            custody.record_generation_key(&generation_id, &key);
+            recovered += 1;
+            continue;
+        }
+        if !acked.contains(&generation_id) || memo.answered(&generation_id) {
             continue;
         }
 
@@ -339,16 +403,9 @@ where
 
     // The kept wrap: the predecessor generations the fleet walk declined for
     // want of the key (module docs).
-    let predecessor_openers: Vec<EscrowOpener<'_>> = predecessors
-        .iter()
-        .map(|kp| EscrowOpener::new(kp.secret_bytes(), &kp.actor_id()))
-        .collect();
     for candidate in fleet.unkeyed_predecessor_mints().unwrap_or_default() {
         crate::pass_breath::pass_breath().await;
         let generation_id = candidate.generation_id;
-        if memo.answered(&generation_id) {
-            continue;
-        }
         if generation_tip::generation_key_for(
             store,
             &generation_id,
@@ -359,6 +416,22 @@ where
         .await?
         .is_some()
         {
+            continue;
+        }
+        if let Some(key) = open_from_plane(
+            store,
+            &opener,
+            &predecessor_openers,
+            &generation_id,
+            &candidate.core,
+        )
+        .await?
+        {
+            custody.record_generation_key(&generation_id, &key);
+            recovered += 1;
+            continue;
+        }
+        if memo.answered(&generation_id) {
             continue;
         }
         let reply: EscrowGetReply = match fleet
@@ -412,6 +485,24 @@ where
         tracing::info!(recovered, "generation escrow recovery: keys recovered");
         Ok(EscrowRecoveryPass::Recovered(recovered))
     }
+}
+
+/// The first of `opener`'s and then each of `predecessors`' merged
+/// `fauna.state.escrow-wrap` rows for `generation_id` that opens to `core`'s
+/// committed key — the plane-first step of the recovery pass.
+async fn open_from_plane<B: StoreBackend>(
+    store: &AccountStore<B>,
+    opener: &EscrowOpener<'_>,
+    predecessors: &[EscrowOpener<'_>],
+    generation_id: &[u8; 32],
+    core: &MintCore,
+) -> Result<Option<GenerationKey>> {
+    for o in std::iter::once(opener).chain(predecessors) {
+        if let Some(key) = o.open_plane_row(store, generation_id, core).await? {
+            return Ok(Some(key));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -602,6 +693,64 @@ mod tests {
             assert_eq!(again, EscrowRecoveryPass::Current);
         }
         assert_eq!(*door.asked.lock().unwrap(), vec![g], "one request, ever");
+    }
+
+    /// Land `wrap` as this identity's merged `fauna.state.escrow-wrap` row of
+    /// `g` — what the custody pull carries to a replica.
+    async fn plane_wrap_row(f: &Fixture, g: &[u8; 32], wrap: Vec<u8>) {
+        f.put(StateEntry {
+            kind: KIND_ESCROW_WRAP.into(),
+            key: fauna_core::generation::escrow_wrap_cell_key(
+                g,
+                &crate::generation_fixture_test_support::root().actor_id(),
+            ),
+            scope: ACCOUNT_STATE_FLEET_SCOPE.into(),
+            value: wrap,
+            merge_meta: None,
+            entry_version: 0,
+            tombstone: false,
+        })
+        .await;
+    }
+
+    /// **Plane first** (`account-replica-posture.md` § *Escrow custody*,
+    /// ruling (2)) — the plane-first sibling of the one-door pin: a replica
+    /// holding the generation's wrap row and no reachable holder keys it with
+    /// ZERO door calls, and needs no receipt to do so — the cold device's
+    /// shape, whose pin names no holder that signed the account's receipts.
+    /// Red-verified by removing the plane-first step: the pass then reports
+    /// `Current` (no receipt, so no request) and the bundle stays empty.
+    #[tokio::test]
+    async fn a_merged_wrap_row_keys_the_generation_with_no_door_call() {
+        let mut f = fixture().await;
+        let (door, bundle) = (Door::default(), Bundle::default());
+        let memo = EscrowRecoveryMemo::default();
+        let g = unkeyable_generation(&mut f, &door, false).await;
+        let wrap = door.wraps.lock().unwrap().pop().unwrap().1;
+        plane_wrap_row(&f, &g, wrap).await;
+        *door.unreachable.lock().unwrap() = true;
+
+        let keyed = pass(&f, &door, &bundle, &ESCROW_SEED, &memo).await.unwrap();
+        assert_eq!(keyed, EscrowRecoveryPass::Recovered(1));
+        assert!(bundle.retained_generation_key(&g).is_some());
+        assert!(door.asked.lock().unwrap().is_empty(), "no door was asked");
+        assert!(!memo.answered(&g), "the memo covers the door only");
+    }
+
+    /// A wrap row that does not open to the mint's committed key keys
+    /// nothing, and the door is still asked — the plane row is a copy, the
+    /// holder's table the fallback.
+    #[tokio::test]
+    async fn a_wrap_row_that_does_not_open_falls_back_to_the_door() {
+        let mut f = fixture().await;
+        let (door, bundle) = (Door::default(), Bundle::default());
+        let memo = EscrowRecoveryMemo::default();
+        let g = unkeyable_generation(&mut f, &door, true).await;
+        plane_wrap_row(&f, &g, b"not a wrap".to_vec()).await;
+
+        let keyed = pass(&f, &door, &bundle, &ESCROW_SEED, &memo).await.unwrap();
+        assert_eq!(keyed, EscrowRecoveryPass::Recovered(1));
+        assert_eq!(*door.asked.lock().unwrap(), vec![g]);
     }
 
     /// **Recovery admits a verified ancestor** (`account-data-taxonomy.md`

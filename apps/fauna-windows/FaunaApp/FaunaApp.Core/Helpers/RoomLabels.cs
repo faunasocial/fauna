@@ -87,6 +87,24 @@ internal static class RoomLabels
         _ => "conversations/unified/room_history_policy_none",
     });
 
+    /// <summary><c>room-nest-read-toggle</c>'s own text, off its staged state.</summary>
+    internal static string NestReadLabel(bool reads) => Strings.Get(reads
+        ? "conversations/unified/room_nest_read_yes"
+        : "conversations/unified/room_nest_read_no");
+
+    /// <summary><c>room-labeler-toggle[i]</c>'s own text: the kind, a prefix of the
+    /// id (the catalog row carries no name, and the full id is one inspect away),
+    /// and the staged mark — tui's wording and separator, so the id prefix a driver
+    /// finds a row by (<c>room_labeler_index</c>) is the same on every app.</summary>
+    internal static string LabelerToggleText(string kind, string labelerId, bool staged)
+    {
+        var shortId = labelerId.Length > 16 ? labelerId[..16] : labelerId;
+        var mark = Strings.Get(staged
+            ? "conversations/unified/room_labeler_on"
+            : "conversations/unified/room_labeler_off");
+        return kind + ChipMarkSeparator + shortId + "…" + ChipMarkSeparator + mark;
+    }
+
     /// <summary><c>room-admin-toggle[i]</c>'s own text, off its staged state.</summary>
     internal static string AdminToggleLabel(bool staged) => Strings.Get(staged
         ? "conversations/unified/room_admin_yes"

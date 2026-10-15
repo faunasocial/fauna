@@ -38,7 +38,7 @@ use fauna_core::obligation::RenderVerdict;
 use fauna_core::render::{AuthoringOriginStatus, VerificationStatus};
 use fauna_feed::{
     AttachedFile, FactorWeightInput, FeedManager, FeedSnapshot, FeedSnapshotObserver,
-    FilterRuleInput, PostSummary, ReplyAudience, SourceKind, classify_sources,
+    FilterRuleInput, PostSummary, ReplyAudience, classify_sources,
 };
 // Entering sell mode is the paywall-designation gesture, the money plane's
 // (`dynamic-features.md` § Platform-family surface excision → *The
@@ -96,6 +96,11 @@ pub enum Action {
         post_id: String,
         verb: fauna_feed::TrainVerb,
     },
+    /// `feed-post-train-target-sheet` — choose which trained factor the open
+    /// post's verbs train, by its stable `topic:<hex>` key. Choosing
+    /// [`NEW_TRAINED_TOPIC_OPTION`] instead leaves for the Personalization
+    /// home's Trained-topics facet, where topics are created.
+    PickTrainTarget(String),
     /// `feed-post-delete-button` — arm the destructive confirm step on this own
     /// post. Purely local: nothing is destroyed until the confirm.
     StartDeletePost(String),
@@ -201,6 +206,8 @@ pub enum Action {
     LoadMore,
     /// `post-card` click — ui.yaml `feed.sub_pages.post_detail`.
     OpenPostDetail(String),
+    /// `feed-post-view-thread-button` — ui.yaml `feed.sub_pages.thread`.
+    OpenThread(String),
     /// `gated-post-buy-button` — the self-serve teaser purchase (gap (2c),
     /// `monetization.md` § Per-post pay-to-unlock): subscribe against the
     /// resolved offer's tier, no claim code needed. The money plane's buyer
@@ -255,6 +262,11 @@ pub enum Mode {
     CreateFeed,
     /// ui.yaml `feed.sub_pages.post_detail` — the post id being shown.
     PostDetail(String),
+    /// ui.yaml `feed.sub_pages.thread` — the Bluesky thread opened from the
+    /// post detail of this post id (`bridges.md` § Bluesky-native thread
+    /// view). Its content is the manager's `FeedSnapshot::thread`; Esc returns
+    /// to `PostDetail` of the same post.
+    Thread(String),
 }
 
 /// The create-feed form's local buffers — the only genuinely page-local state
@@ -408,6 +420,14 @@ pub struct FeedState {
     /// to destroy"), and every path that closes the menu clears both — an armed
     /// confirm surviving a menu close would re-arm on the next open.
     pub delete_confirm: Option<String>,
+    /// The open `feed-post-train-target-sheet`: which post's ⋯ menu it opened
+    /// on, and the trained factor it currently targets.
+    ///
+    /// Keyed by post id for [`Self::actions_open`]'s reason, and painted only
+    /// while that same post's menu is open — so every path that closes the
+    /// menu retires the sheet with it, and `OpenPostActions` (a fresh open)
+    /// clears it outright.
+    pub train_sheet: Option<TrainSheet>,
     /// What the ⋯ menu's last copy affordance put on the clipboard, and which
     /// post's which verb produced it — painted back as that button's `copied`
     /// attr and as a visible line.
@@ -575,6 +595,7 @@ pub fn init(
         revealed_content: std::collections::HashSet::new(),
         actions_open: None,
         delete_confirm: None,
+        train_sheet: None,
         web_copied: None,
         compose_dialog_open: false,
         lightbox: None,
@@ -839,6 +860,8 @@ impl Action {
             // `train_post`/`untrain_post` read the model, then put it back; the
             // put is the mutation.
             Action::TrainPost { .. } => Some("fauna.personalization.model.put"),
+            // Choosing a target is local; the verb it arms makes the put.
+            Action::PickTrainTarget(_) => None,
             Action::CreateFeed => Some("fauna.feed.create"),
             Action::DeleteFeed(_) => Some("fauna.feed.delete"),
             Action::SubscribeBridge => Some("fauna.bridges.feeds.create"),
@@ -881,6 +904,8 @@ impl Action {
             | Action::ClearSearch
             | Action::LoadMore
             | Action::OpenPostDetail(_)
+            // A `Read` (`bluesky.feed.thread`): a view switch like the detail.
+            | Action::OpenThread(_)
             | Action::OpenPostActions(_)
             | Action::StartDeletePost(_)
             | Action::OpenComposeDialog
@@ -1232,6 +1257,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 post_id,
             })
         }
+        // --- the Bluesky thread page, opened from the post detail ---
+        Action::OpenThread(post_id) => {
+            app.feed.mode = Mode::Thread(post_id.clone());
+            app.feed.actions_open = None;
+            Some(Op::OpenThread { manager, post_id })
+        }
 
         // --- the self-serve teaser purchase (gap (2c)) ---
         #[cfg(feature = "payments")]
@@ -1270,6 +1301,9 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // property of THIS opening of the menu, so arming, closing and
             // reopening must present the un-armed verb again.
             app.feed.delete_confirm = None;
+            // Nor does it open on a target sheet: the sheet is what a verb
+            // opens, on this opening of the menu.
+            app.feed.train_sheet = None;
             // The menu about to paint carries this actor's web-publishing verbs,
             // whose copy affordances need an origin. `view` is the settings
             // page's own hydrated flag; `None` means nobody has read those
@@ -1287,17 +1321,27 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             None
         }
         // Train-in-context: the verb targets the composed feed's single trained
-        // factor. With none resolved the menu shows `feed-post-train-target-sheet`
-        // instead and paints no verbs, so this arm cannot be reached without one
-        // — but it is still gated rather than unwrapped, because a composition
-        // can change under an open menu.
+        // factor. With none resolved it targets the factor chosen on this post's
+        // open `feed-post-train-target-sheet` — and with no sheet open yet, the
+        // tap opens one (ui.yaml's component spec: "with no in-context factor
+        // they open feed-post-train-target-sheet").
         Action::TrainPost { post_id, verb } => {
             let manager = app.feed.manager.clone()?;
-            let factor = manager.train_target_factor()?;
+            let Some(factor) = train_target(app, &manager, &post_id) else {
+                // The registry's first topic starts chosen, as linux's dropdown
+                // does; with none the sheet offers only "New trained topic…".
+                let target = trained_topic_keys(app)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default();
+                app.feed.train_sheet = Some(TrainSheet { post_id, target });
+                return None;
+            };
             // Tapping the already-active verb un-marks it (the toggle semantics
             // ui.yaml's component spec states); tapping the other verb re-trains.
             let undo = manager.example_label_for(&post_id, &factor) == Some(verb);
             app.feed.actions_open = None;
+            app.feed.train_sheet = None;
             Some(Op::TrainPost {
                 manager,
                 post_id,
@@ -1305,6 +1349,25 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 verb,
                 undo,
             })
+        }
+
+        // "New trained topic…" links out to the Trained-topics facet rather than
+        // duplicating its create form here — the shape every other app's sheet
+        // has. A topic key only re-aims the sheet; the verbs make the train.
+        Action::PickTrainTarget(value) => {
+            if value == NEW_TRAINED_TOPIC_OPTION {
+                app.feed.actions_open = None;
+                app.feed.train_sheet = None;
+                open_trained_topics_facet(app);
+                return None;
+            }
+            // Only a key the registry holds: a stale pick (the topic deleted
+            // since the sheet painted) must not aim a train at a dead factor.
+            let known = trained_topic_keys(app).contains(&value);
+            if let Some(sheet) = app.feed.train_sheet.as_mut().filter(|_| known) {
+                sheet.target = value;
+            }
+            None
         }
 
         // --- local: the create-feed form ---
@@ -1434,6 +1497,26 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
 /// on the agent's path or spawned on the keyboard's. Resolves to an [`Outcome`]:
 /// an error to surface on `error-message` / `compose-error`, or `Done` on
 /// success.
+/// The `feed-post-train-target-sheet` option that leaves for the Trained-topics
+/// facet rather than naming a factor — the sheet's "New trained topic…" entry.
+/// Never a valid factor key (those are `topic:<hex>`), so the two cannot
+/// collide.
+pub const NEW_TRAINED_TOPIC_OPTION: &str = "new-trained-topic";
+
+/// The open target sheet ([`FeedState::train_sheet`]).
+///
+/// A terminal picker cycles on Enter, so choosing and training are two steps
+/// here: the sheet holds the chosen factor and the verbs train into it. Were
+/// choosing itself the train, the first Enter on the picker would train the
+/// post into whichever topic happened to come next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrainSheet {
+    pub post_id: String,
+    /// The chosen factor's stable `topic:<hex>` key; empty while the user has
+    /// no trained topic to choose.
+    pub target: String,
+}
+
 /// What the ⋯ menu's last copy affordance produced: the exact string it put on
 /// the clipboard, the post it belongs to, and which of the two verbs fired.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1562,6 +1645,12 @@ pub enum Op {
     OpenPostDetail {
         manager: Arc<CliFeedManager>,
         content: Option<Arc<dyn NestContentApi>>,
+        post_id: String,
+    },
+    /// `feed-post-view-thread-button` — the shared `FeedManager::open_thread`,
+    /// which lands loading / loaded / failed on the snapshot itself.
+    OpenThread {
+        manager: Arc<CliFeedManager>,
         post_id: String,
     },
     /// `gated-post-buy-button` — the self-serve teaser purchase (gap (2c),
@@ -1859,7 +1948,8 @@ impl Op {
                 // → Repost, ratified 2026-08-10): off → composes the caller's
                 // empty-body `Reference::Repost` post; on → un-reposts it via
                 // the viewer_repost_id the projection now carries. Bridged
-                // sources route through interact inside the manager.
+                // sources route through interact inside the manager (a
+                // Bluesky row toggles there too).
                 //
                 // `like` is the manager's other TOGGLE, off `viewer_liked`:
                 // both directions ride the same interact door on the same
@@ -1932,6 +2022,12 @@ impl Op {
                 if let Ok(bytes) = content.get(&paths::blob::by_hash(&hash)).await {
                     let _ = manager.unlock_gated_post(post_id, bytes.to_vec()).await;
                 }
+                Outcome::Done
+            }
+            Op::OpenThread { manager, post_id } => {
+                // A failed fetch is the PAGE's state (`FeedSnapshot::thread`'s
+                // own error, read by `page_error`), never an op error.
+                manager.open_thread(post_id).await;
                 Outcome::Done
             }
             #[cfg(feature = "payments")]
@@ -2658,6 +2754,10 @@ pub fn elements(app: &App) -> Vec<Element> {
         ));
         return out;
     }
+    if let Mode::Thread(_) = &app.feed.mode {
+        out.extend(thread_elements(&snapshot));
+        return out;
+    }
     if let Mode::PostDetail(post_id) = &app.feed.mode {
         // Post detail composes the region source like the list card does
         // (`region-blocking.md` § Where it composes: "no render surface that
@@ -2952,7 +3052,7 @@ pub fn elements(app: &App) -> Vec<Element> {
 ///
 /// **Train-in-context.** `FeedManager::train_target_factor` answers `Some` only
 /// when the feed's composition has exactly ONE trained factor — then the verbs
-/// train it directly. With none (or several) resolved the menu shows
+/// train it directly. With none (or several) resolved a verb opens
 /// `feed-post-train-target-sheet` instead, per ui.yaml's component spec: the
 /// verbs would have no unambiguous target, and guessing one would train the
 /// wrong model silently.
@@ -2962,16 +3062,15 @@ fn post_actions_menu(app: &App) -> Vec<Element> {
     };
     let mut out = vec![Element::label(ids::FEED_POST_ACTIONS_MENU, String::new())];
     out.extend(train_verbs(app, &post_id));
-    // ⚠ Deliberately OUTSIDE the training half, which returns early when no
-    // single factor composes. The web verbs have nothing to do with training, so
-    // sharing that early return would hide the whole family behind an unrelated
-    // condition — pinned by
+    // ⚠ Deliberately OUTSIDE the training half. The web verbs have nothing to
+    // do with training, so gating them on its target would hide the whole
+    // family behind an unrelated condition — pinned by
     // `the_web_verbs_paint_with_no_in_context_trained_factor`.
     out.extend(web_publish_verbs(app, &post_id));
-    // Last in the menu, and outside the training early return for the same
-    // reason the web verbs are: delete has nothing to do with training, so
-    // sharing that return would make an own-post's destruction verb vanish on
-    // any feed whose composition resolves no single trained factor.
+    // Last in the menu, and outside the training half for the same reason the
+    // web verbs are: delete has nothing to do with training, so gating it there
+    // could make an own-post's destruction verb vanish on any feed whose
+    // composition resolves no single trained factor.
     out.extend(delete_verbs(app, &post_id));
     out.extend(report_verb(app, &post_id));
     out
@@ -2980,7 +3079,7 @@ fn post_actions_menu(app: &App) -> Vec<Element> {
 /// `feed-post-report-button` — report someone else's post to the nest admins
 /// (`moderation.md` § User-initiated reporting → *App surface*). Gated
 /// `!is_own` off the same `PostSummary::author` the delete verb reads, and
-/// outside the training early return for the delete verb's reason. Opens the
+/// outside the training half for the delete verb's reason. Opens the
 /// shared report sheet (`crate::report`) with the post as its subject.
 fn report_verb(app: &App, post_id: &str) -> Vec<Element> {
     let Some(session) = app.session.as_ref() else {
@@ -3045,33 +3144,101 @@ fn delete_verbs(app: &App, post_id: &str) -> Vec<Element> {
     )]
 }
 
-/// The training half of the ⋯ overflow: both verbs against the in-context
-/// factor, or the target sheet when none resolves.
+/// The factor `post_id`'s training verbs train: the feed's in-context trained
+/// factor, else the one chosen on that post's open target sheet, else none (a
+/// verb then opens the sheet).
+fn train_target(app: &App, manager: &CliFeedManager, post_id: &str) -> Option<String> {
+    manager.train_target_factor().or_else(|| {
+        app.feed
+            .train_sheet
+            .as_ref()
+            .filter(|s| s.post_id == post_id && !s.target.is_empty())
+            .map(|s| s.target.clone())
+    })
+}
+
+/// Every trained topic's stable `topic:<hex>` key, in registry order — the
+/// registry the Trained-topics facet edits, loaded at login. A corrupt
+/// (non-16-byte) id has no key and so no model, and is skipped, as the
+/// create-feed factor picker skips it.
+fn trained_topic_keys(app: &App) -> Vec<String> {
+    app.settings
+        .trained_topics
+        .rows
+        .iter()
+        .filter_map(|t| t.factor_key.clone())
+        .collect()
+}
+
+/// Leave the feed for Settings › Personalization, where the Trained-topics
+/// facet creates topics — the destination of the sheet's "New trained topic…".
+/// The same route the rail row takes (`settings::Action::OpenPersonalization`).
+fn open_trained_topics_facet(app: &mut App) {
+    // The nav edge lands Settings on its rail root; the route then moves it on,
+    // so the root's own refresh would only be superseded.
+    let _ = app.apply(crate::pages::Page::Settings);
+    let signals = app.feed.manager.clone();
+    if let Some(op) =
+        crate::settings::route_subpage(&mut app.settings, Some("personalization"), signals)
+    {
+        app.spawn_page_op(crate::app::PageOp::Settings(op));
+    }
+}
+
+/// `feed-post-train-target-sheet`: the user's trained topics plus "New trained
+/// topic…", as one picker (no row ids of its own exist in ui.yaml). Its value
+/// is the chosen factor's stable key — or, with no topic to choose, the
+/// new-topic entry, so Enter still reaches it — and each option paints the
+/// user's own name for the topic.
+fn train_target_sheet(app: &App, sheet: &TrainSheet) -> Element {
+    let topics = &app.settings.trained_topics.rows;
+    let mut keys = Vec::new();
+    let mut labels = Vec::new();
+    for t in topics {
+        if let Some(key) = t.factor_key.clone() {
+            keys.push(key);
+            labels.push(t.name.clone());
+        }
+    }
+    keys.push(NEW_TRAINED_TOPIC_OPTION.to_string());
+    labels.push(fauna_i18n::strings::personalization::TRAINED_FACTOR_CREATE.to_string());
+    let value = if sheet.target.is_empty() {
+        NEW_TRAINED_TOPIC_OPTION.to_string()
+    } else {
+        sheet.target.clone()
+    };
+    let display = keys
+        .iter()
+        .position(|k| *k == value)
+        .map(|i| labels[i].clone())
+        .unwrap_or_default();
+    Element::select(
+        ids::FEED_POST_TRAIN_TARGET_SHEET,
+        value,
+        SelectTarget::TrainTarget,
+        keys,
+    )
+    .labelled(feed::TRAIN_TARGET_TITLE)
+    .display_value(display)
+    .option_labels(labels)
+}
+
+/// The training half of the ⋯ overflow: both verbs — against the in-context
+/// factor, else the target sheet's choice — and the sheet itself once a verb
+/// has opened it.
 fn train_verbs(app: &App, post_id: &str) -> Vec<Element> {
     let mut out = Vec::new();
-    let target = app
-        .feed
-        .manager
-        .as_ref()
-        .and_then(|m| m.train_target_factor());
-    let Some(factor) = target else {
-        // The fallback surface. It is `optional_elements` in ui.yaml, so it may
-        // exist without the verbs — and it MUST, or a user on an uncomposed feed
-        // would tap ⋯ and get an empty menu.
-        out.push(Element::label(
-            ids::FEED_POST_TRAIN_TARGET_SHEET,
-            feed::TRAIN_TARGET_TITLE,
-        ));
+    let Some(manager) = app.feed.manager.as_ref() else {
         return out;
     };
+    let factor = train_target(app, manager, post_id);
     let post_id = post_id.to_string();
     // The marker lives in the SEALED model, so it renders the same across
-    // restarts and devices — `example_label_for`, never a local set.
-    let marked = app
-        .feed
-        .manager
-        .as_ref()
-        .and_then(|m| m.example_label_for(&post_id, &factor));
+    // restarts and devices — `example_label_for`, never a local set. With no
+    // target yet there is no model to be marked in.
+    let marked = factor
+        .as_deref()
+        .and_then(|f| manager.example_label_for(&post_id, f));
     for (id, verb, label) in [
         (
             "feed-post-more-like-this",
@@ -3101,6 +3268,14 @@ fn train_verbs(app: &App, post_id: &str) -> Vec<Element> {
             )
             .attr("state", if marked == Some(verb) { "on" } else { "off" }),
         );
+    }
+    if let Some(sheet) = app
+        .feed
+        .train_sheet
+        .as_ref()
+        .filter(|s| s.post_id == post_id)
+    {
+        out.push(train_target_sheet(app, sheet));
     }
     out
 }
@@ -3855,7 +4030,8 @@ pub(crate) fn region_blocked_count(app: &App) -> usize {
         Mode::PostDetail(id) => snapshot
             .find_post(id)
             .map_or(0, |p| usize::from(is_blocked(p))),
-        Mode::CreateFeed => 0,
+        // The thread page paints Bluesky's own posts, never a snapshot post.
+        Mode::CreateFeed | Mode::Thread(_) => 0,
     }
 }
 
@@ -3971,7 +4147,7 @@ fn post_card(
         )
         .cue(cues::CueSubject {
             post_id: post.post_id.clone(),
-            is_media: post.has_media,
+            is_media: post.plays_media,
         }),
         Element::label(ids::POST_AUTHOR, author).within(ids::POST_CARD, i),
         // The document, walked. The registry still reads its plaintext, which is
@@ -4045,10 +4221,13 @@ fn post_card(
     // "Room: ‹label›" string) instead of the reserved tier, and the card's
     // detail-open is its "open"; a reader not in the room sees the reserved
     // tier (`ui/feed.md` § Encryption at rest → *the app half*, the card).
-    if let Some(tier) = &post.gated_tier {
-        let text = match &post.room_label {
+    // A repost row of a restricted target paints the TARGET's badge over the
+    // target's teaser (`restricted-posts.md` § Encryption at rest, ruling 3) —
+    // the shared `PostSummary::card_gate` picks which.
+    if let Some((tier, room_label)) = post.card_gate() {
+        let text = match room_label {
             Some(label) => feed::post::gate_room(label),
-            None => tier.clone(),
+            None => tier.to_string(),
         };
         out.push(Element::label(ids::GATED_POST_BADGE, text).within(ids::POST_CARD, i));
     }
@@ -4113,9 +4292,10 @@ fn post_card(
     // paints beside the glyph. A first-party source is its glyph alone: the
     // glyph IS its name.
     for kind in classify_sources(&post.source, bridges) {
-        let text = match &kind {
-            SourceKind::Bridged { label, .. } => format!("{} {label}", kind.glyph().emoji()),
-            _ => kind.glyph().emoji().to_string(),
+        let text = if kind.badge_paints_label() {
+            format!("{} {}", kind.glyph().emoji(), kind.label())
+        } else {
+            kind.glyph().emoji().to_string()
         };
         out.push(Element::label(ids::PROTOCOL_BADGE, text).within(ids::POST_CARD, i));
     }
@@ -4378,6 +4558,14 @@ fn post_detail_contents(
         ids::FEED_POST_DETAIL_BODY,
         post.document.clone(),
     ));
+    if post.offers_thread_view() {
+        out.push(Element::gesture_button(
+            ids::FEED_POST_VIEW_THREAD_BUTTON,
+            feed::post::VIEW_THREAD,
+            true,
+            Gesture::Feed(Action::OpenThread(post.post_id.clone())),
+        ));
+    }
     for tag in &post.tags {
         out.push(Element::label(ids::TAG_CHIP, format!("#{tag}")));
     }
@@ -4411,6 +4599,60 @@ fn post_detail_contents(
     #[cfg(feature = "payments")]
     out.extend(tip_elements(post, None));
     out
+}
+
+/// ui.yaml `feed.sub_pages.thread` — the Bluesky thread page
+/// (`bridges.md` § Bluesky-native thread view), painted from the shared
+/// `FeedSnapshot::thread`: one `feed-thread-post[i]` per post in thread order,
+/// the opened post `selected`. Loading paints the page with a chrome line; a
+/// failed fetch paints the page empty and its reason on `error-message`
+/// ([`page_error`]).
+fn thread_elements(snapshot: &FeedSnapshot) -> Vec<Element> {
+    let mut out = vec![Element::label(ids::FEED_THREAD_PAGE, feed::post::THREAD)];
+    let Some(page) = &snapshot.thread else {
+        return out;
+    };
+    if page.status == fauna_feed::ThreadStatus::Loading {
+        out.push(Element::label("", common::LOADING));
+        return out;
+    }
+    for p in &page.posts {
+        out.push(
+            Element::label(
+                ids::FEED_THREAD_POST,
+                format!("{} {}", p.author_label(), p.text),
+            )
+            .attr("selected", if p.is_focal { "true" } else { "false" })
+            .within(ids::FEED_THREAD_PAGE, 0),
+        );
+    }
+    out
+}
+
+/// The feed page's error line: on the thread page its own fetch error, else the
+/// feed's (`FeedSnapshot::error`) — read by `App::page_snapshot_error`.
+pub(crate) fn page_error(state: &FeedState) -> Option<String> {
+    let snapshot = state.snapshot()?;
+    let thread_error = matches!(state.mode, Mode::Thread(_))
+        .then(|| snapshot.thread.as_ref().and_then(|t| t.error.clone()))
+        .flatten();
+    thread_error
+        .or(snapshot.error)
+        .map(|e| e.resolve(fauna_i18n::strings::lookup))
+}
+
+/// Leave the thread page back to the post detail it was opened from (Esc —
+/// ui.yaml gives the page no dismiss element, the `post_detail` posture).
+/// Returns whether there was a thread page to leave.
+pub(crate) fn close_thread(state: &mut FeedState) -> bool {
+    let Mode::Thread(post_id) = &state.mode else {
+        return false;
+    };
+    state.mode = Mode::PostDetail(post_id.clone());
+    if let Some(manager) = &state.manager {
+        manager.close_thread();
+    }
+    true
 }
 
 /// What a `quoted-post` embed says: the quoted body — or, when there is no body to
@@ -4470,7 +4712,7 @@ fn create_feed_elements(
         .map(|o| o.input_kind)
         .unwrap_or(fauna_client_feed::RuleInputKind::Text);
 
-    // The shared built-ins lead (`engagement`, `trending`), then the
+    // The shared built-ins lead (`engagement`, `trending`, the two `signal:*`), then the
     // subscribed labelers, then each trained factor's stable key.
     //
     // A corrupt (non-16-byte) registry id has no `factor_key` and therefore no
@@ -4486,15 +4728,19 @@ fn create_feed_elements(
     // anywhere in the system, so its raw factor key IS its display text — the
     // same answer linux gives. A trained topic paints the user's chosen name,
     // which is sealed, so it never reaches the wire.
-    let factor_label = fauna_client_feed::builtin_factor_option(&form.factor)
-        .map(|o| o.label.resolve(fauna_i18n::strings::lookup))
-        .or_else(|| {
-            topics
-                .iter()
-                .find(|t| t.factor_key.as_deref() == Some(form.factor.as_str()))
-                .map(|t| t.name.clone())
-        })
-        .unwrap_or_else(|| form.factor.clone());
+    let label_for = |key: &str| {
+        fauna_client_feed::builtin_factor_option(key)
+            .map(|o| o.label.resolve(fauna_i18n::strings::lookup))
+            .or_else(|| {
+                topics
+                    .iter()
+                    .find(|t| t.factor_key.as_deref() == Some(key))
+                    .map(|t| t.name.clone())
+            })
+            .unwrap_or_else(|| key.to_string())
+    };
+    let factor_label = label_for(&form.factor);
+    let factor_labels: Vec<String> = factor_keys.iter().map(|k| label_for(k)).collect();
 
     let mut elements = vec![
         Element::input(
@@ -4581,7 +4827,8 @@ fn create_feed_elements(
             SelectTarget::Factor,
             factor_keys,
         )
-        .display_value(factor_label),
+        .display_value(factor_label)
+        .option_labels(factor_labels),
         Element::input(
             ids::FEED_FACTOR_WEIGHT_INPUT,
             form.factor_weight.clone(),
@@ -4701,6 +4948,10 @@ pub fn state_json(state: &FeedState) -> serde_json::Value {
                 // is the toggle's state (and `unrepost`'s argument).
                 "reposted_post_id": p.reposted_post_id,
                 "viewer_repost_id": p.viewer_repost_id,
+                // The quote's embed carrier: an empty-commentary quote's card
+                // text is only its folded embed, so the harness finds a quote of
+                // a given post by this id, never by text.
+                "quoted_post_id": p.quoted_post_id,
                 "viewer_liked": p.viewer_liked,
                 // Every link preview in the body with its state, in body order
                 // (`RenderDocument::link_previews` — render-model.md § D4). A card
@@ -4824,6 +5075,150 @@ mod tests {
             text.contains("nest rejected fauna.feed.local.posts"),
             "must carry the injected reason: {text:?}"
         );
+    }
+
+    // ── The Bluesky thread page (`bridges.md` § Bluesky-native thread view) ──
+
+    fn bluesky_post(body: &str) -> TestPostSpec {
+        TestPostSpec {
+            source: "bluesky".into(),
+            ..post(body)
+        }
+    }
+
+    fn thread_page(post_id: &str) -> fauna_feed::ThreadPage {
+        let p = |handle: &str, text: &str, is_focal: bool| fauna_feed::ThreadPostView {
+            at_uri: format!("at://{handle}/1"),
+            author_handle: handle.into(),
+            text: text.into(),
+            is_focal,
+            ..Default::default()
+        };
+        fauna_feed::ThreadPage {
+            post_id: post_id.into(),
+            status: fauna_feed::ThreadStatus::Loaded,
+            posts: vec![
+                p("root.test", "the root", false),
+                p("bob.test", "the opened post", true),
+                p("stranger.test", "a reply", false),
+            ],
+            error: None,
+        }
+    }
+
+    /// The post detail offers *View thread* for a Bluesky post only; pressing
+    /// it opens the thread page through the shared `open_thread`.
+    #[test]
+    fn view_thread_is_offered_for_a_bluesky_post_only_and_opens_the_thread_page() {
+        let mut app = feed_app(vec![bluesky_post("from bluesky")]);
+        let post_id = app.feed.snapshot().unwrap().posts[0].post_id.clone();
+        apply_local(&mut app, Action::OpenPostDetail(post_id.clone()));
+        assert!(ids(&app).contains("feed-post-view-thread-button"));
+
+        let op = apply_local(&mut app, Action::OpenThread(post_id.clone()));
+        assert!(
+            matches!(&op, Some(Op::OpenThread { post_id: id, .. }) if *id == post_id),
+            "the button routes through the one open_thread op"
+        );
+        assert_eq!(app.feed.mode, Mode::Thread(post_id));
+        assert!(ids(&app).contains("feed-thread-page"));
+
+        let mut native = feed_app(vec![post("a fauna post")]);
+        let pid = native.feed.snapshot().unwrap().posts[0].post_id.clone();
+        apply_local(&mut native, Action::OpenPostDetail(pid));
+        assert!(
+            !ids(&native).contains("feed-post-view-thread-button"),
+            "a native post has no Bluesky thread to open"
+        );
+    }
+
+    /// The loaded page paints one `feed-thread-post` per post in thread order,
+    /// inside the page, the opened post — and only it — `selected`.
+    #[test]
+    fn the_thread_page_paints_each_post_with_the_opened_one_selected() {
+        let spec = bluesky_post("from bluesky");
+        let post_id = spec.post_id.clone();
+        let mut snapshot = feed_snapshot_with_posts(vec![spec]);
+        snapshot.thread = Some(thread_page(&post_id));
+        let mut app = feed_app_with(snapshot);
+        app.feed.mode = Mode::Thread(post_id);
+
+        let posts: Vec<_> = crate::feed::elements(&app)
+            .into_iter()
+            .filter(|e| e.id == "feed-thread-post")
+            .collect();
+        let texts: Vec<_> = posts.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "@root.test the root",
+                "@bob.test the opened post",
+                "@stranger.test a reply"
+            ]
+        );
+        let selected: Vec<_> = posts
+            .iter()
+            .map(|e| {
+                e.attrs
+                    .iter()
+                    .find(|(k, _)| k == "selected")
+                    .map(|(_, v)| v.as_str())
+            })
+            .collect();
+        assert_eq!(selected, [Some("false"), Some("true"), Some("false")]);
+        assert!(
+            posts
+                .iter()
+                .all(|e| format!("{:?}", e.path).contains("feed-thread-page")),
+            "each post is scoped inside the page: {:?}",
+            posts[0].path
+        );
+    }
+
+    /// A failed thread fetch paints its reason on `error-message` while the
+    /// page is open — and only then.
+    #[test]
+    fn a_failed_thread_fetch_surfaces_on_the_page_error_line() {
+        let spec = bluesky_post("from bluesky");
+        let post_id = spec.post_id.clone();
+        let mut snapshot = feed_snapshot_with_posts(vec![spec]);
+        snapshot.thread = Some(fauna_feed::ThreadPage {
+            post_id: post_id.clone(),
+            status: fauna_feed::ThreadStatus::Failed,
+            posts: vec![],
+            error: Some(fauna_core::localized::LocalizedText::key_arg(
+                "feed.error_thread",
+                "message",
+                "bluesky.not_found",
+            )),
+        });
+        let mut app = feed_app_with(snapshot);
+        app.feed.mode = Mode::PostDetail(post_id.clone());
+        assert_eq!(app.error_line_text(), None, "not on the thread page");
+
+        app.feed.mode = Mode::Thread(post_id);
+        let text = app.error_line_text().expect("the reason surfaces");
+        assert!(
+            text.contains("bluesky.not_found") && !text.contains("feed.error_thread"),
+            "{text:?}"
+        );
+        assert!(!ids(&app).contains("feed-thread-post"));
+    }
+
+    /// Esc on the thread page steps back to the post detail it came from and
+    /// closes the shared page.
+    #[test]
+    fn esc_on_the_thread_page_returns_to_the_post_detail() {
+        let spec = bluesky_post("from bluesky");
+        let post_id = spec.post_id.clone();
+        let mut snapshot = feed_snapshot_with_posts(vec![spec]);
+        snapshot.thread = Some(thread_page(&post_id));
+        let mut app = feed_app_with(snapshot);
+        app.feed.mode = Mode::Thread(post_id.clone());
+
+        app.handle_key(crate::app::tests::key(crossterm::event::KeyCode::Esc));
+        assert_eq!(app.feed.mode, Mode::PostDetail(post_id));
+        assert_eq!(app.feed.snapshot().unwrap().thread, None);
     }
 
     fn post(body: &str) -> TestPostSpec {
@@ -5711,20 +6106,184 @@ mod tests {
         );
     }
 
-    /// With no single trained factor composed, the verbs would have no
-    /// unambiguous target — so the menu shows the target sheet instead, and
-    /// paints no verbs at all. ui.yaml's component spec states exactly this.
+    /// A registry row as the Trained-topics facet loads it.
+    fn topic_row(byte: u8, name: &str) -> fauna_client_personalization::topics::TrainedTopicRow {
+        fauna_client_personalization::topics::TrainedTopicRow {
+            id: vec![byte; 16],
+            name: name.to_string(),
+            factor_key: Some(format!("topic:{}", format!("{byte:02x}").repeat(16))),
+            example_count: 0,
+            learn_from_engagement: false,
+        }
+    }
+
+    fn element(app: &App, id: &str) -> Option<Element> {
+        crate::feed::elements(app).into_iter().find(|e| e.id == id)
+    }
+
+    /// ui.yaml's component spec: the verbs are the menu's own elements, and
+    /// "with no in-context factor they open feed-post-train-target-sheet". So
+    /// an uncomposed feed paints both verbs, and no sheet until one is tapped.
     #[test]
-    fn the_overflow_falls_back_to_the_target_sheet_with_no_in_context_factor() {
+    fn with_no_in_context_factor_a_verb_opens_the_target_sheet() {
+        let mut app = feed_app(vec![post("hello")]);
+        app.settings.trained_topics.rows = vec![topic_row(0x11, "Cats"), topic_row(0x22, "Dogs")];
+        let post_id = "aa".repeat(32);
+        assert!(apply_local(&mut app, Action::OpenPostActions(post_id.clone())).is_none());
+        let ids = ids(&app);
+        assert!(ids.contains("feed-post-more-like-this"), "have {ids:?}");
+        assert!(ids.contains("feed-post-less-like-this"), "have {ids:?}");
+        assert!(
+            !ids.contains("feed-post-train-target-sheet"),
+            "have {ids:?}"
+        );
+
+        let tap = Action::TrainPost {
+            post_id: post_id.clone(),
+            verb: fauna_feed::TrainVerb::MoreLikeThis,
+        };
+        assert!(
+            apply_local(&mut app, tap).is_none(),
+            "with no target the tap must open the sheet, never train"
+        );
+        let sheet = element(&app, "feed-post-train-target-sheet").expect("the sheet opens");
+        // The user's topics by name, then the new-topic entry; the first
+        // topic starts chosen.
+        let options = sheet
+            .attrs
+            .iter()
+            .find(|(k, _)| k == "options")
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        assert_eq!(options, r#"["Cats","Dogs","New trained topic"]"#);
+        assert_eq!(sheet.text, topic_row(0x11, "Cats").factor_key.unwrap());
+        assert!(
+            crate::feed::elements(&app)
+                .iter()
+                .any(|e| e.id == "feed-post-actions-menu"),
+            "the sheet opens inside the still-open menu"
+        );
+    }
+
+    /// Choosing a topic re-aims the verbs; the next tap trains the post into
+    /// it — the two-step a terminal picker needs, since Enter cycles it.
+    #[test]
+    fn a_topic_chosen_on_the_sheet_is_what_the_verb_trains() {
+        let mut app = feed_app(vec![post("hello")]);
+        app.settings.trained_topics.rows = vec![topic_row(0x11, "Cats"), topic_row(0x22, "Dogs")];
+        let dogs = topic_row(0x22, "Dogs").factor_key.unwrap();
+        let post_id = "aa".repeat(32);
+        apply_local(&mut app, Action::OpenPostActions(post_id.clone()));
+        let tap = || Action::TrainPost {
+            post_id: post_id.clone(),
+            verb: fauna_feed::TrainVerb::MoreLikeThis,
+        };
+        apply_local(&mut app, tap());
+        assert!(apply_local(&mut app, Action::PickTrainTarget(dogs.clone())).is_none());
+        assert_eq!(
+            element(&app, "feed-post-train-target-sheet").unwrap().text,
+            dogs
+        );
+
+        match apply_local(&mut app, tap()) {
+            Some(Op::TrainPost {
+                factor, verb, undo, ..
+            }) => {
+                assert_eq!(factor, dogs);
+                assert_eq!(verb, fauna_feed::TrainVerb::MoreLikeThis);
+                assert!(!undo);
+            }
+            _ => panic!("the second tap must train into the chosen topic"),
+        }
+        assert!(app.feed.actions_open.is_none() && app.feed.train_sheet.is_none());
+    }
+
+    /// A key the registry no longer holds (the topic deleted since the sheet
+    /// painted) must not aim a train at a dead factor.
+    #[test]
+    fn the_sheet_refuses_a_key_the_registry_does_not_hold() {
+        let mut app = feed_app(vec![post("hello")]);
+        app.settings.trained_topics.rows = vec![topic_row(0x11, "Cats")];
+        let cats = topic_row(0x11, "Cats").factor_key.unwrap();
+        let post_id = "aa".repeat(32);
+        apply_local(&mut app, Action::OpenPostActions(post_id.clone()));
+        apply_local(
+            &mut app,
+            Action::TrainPost {
+                post_id,
+                verb: fauna_feed::TrainVerb::MoreLikeThis,
+            },
+        );
+        apply_local(
+            &mut app,
+            Action::PickTrainTarget(format!("topic:{}", "ff".repeat(16))),
+        );
+        assert_eq!(app.feed.train_sheet.as_ref().unwrap().target, cats);
+    }
+
+    /// With no topic at all the sheet still offers its one way forward, and
+    /// it is the picker's value — so Enter, which cycles, can reach it.
+    #[test]
+    fn with_no_topic_the_sheet_offers_only_the_new_topic_entry() {
         let mut app = feed_app(vec![post("hello")]);
         let post_id = "aa".repeat(32);
-        assert!(apply_local(&mut app, Action::OpenPostActions(post_id)).is_none());
-        let ids = ids(&app);
-        assert!(ids.contains("feed-post-train-target-sheet"), "have {ids:?}");
+        apply_local(&mut app, Action::OpenPostActions(post_id.clone()));
+        let tap = || Action::TrainPost {
+            post_id: post_id.clone(),
+            verb: fauna_feed::TrainVerb::LessLikeThis,
+        };
+        apply_local(&mut app, tap());
+        let sheet = element(&app, "feed-post-train-target-sheet").unwrap();
+        assert_eq!(sheet.text, NEW_TRAINED_TOPIC_OPTION);
         assert!(
-            !ids.contains("feed-post-more-like-this"),
-            "a verb with no target must not paint — it would train the wrong model"
+            apply_local(&mut app, tap()).is_none(),
+            "no topic, no train — the tap leaves the sheet open"
         );
+        assert!(element(&app, "feed-post-train-target-sheet").is_some());
+    }
+
+    /// "New trained topic…" leaves for the Trained-topics facet, where topics
+    /// are created (the shape every other app's sheet has), closing the menu.
+    #[tokio::test]
+    async fn the_new_topic_entry_opens_the_trained_topics_facet() {
+        let mut app = feed_app(vec![post("hello")]);
+        let post_id = "aa".repeat(32);
+        apply_local(&mut app, Action::OpenPostActions(post_id.clone()));
+        apply_local(
+            &mut app,
+            Action::TrainPost {
+                post_id,
+                verb: fauna_feed::TrainVerb::MoreLikeThis,
+            },
+        );
+        assert!(
+            apply_local(
+                &mut app,
+                Action::PickTrainTarget(NEW_TRAINED_TOPIC_OPTION.into())
+            )
+            .is_none()
+        );
+        assert_eq!(app.page, Page::Settings);
+        assert_eq!(app.settings.sub, crate::settings::SubPage::Personalization);
+        assert!(app.feed.actions_open.is_none() && app.feed.train_sheet.is_none());
+    }
+
+    /// A fresh open of the menu is never already showing a sheet.
+    #[test]
+    fn reopening_the_menu_closes_the_sheet() {
+        let mut app = feed_app(vec![post("hello")]);
+        app.settings.trained_topics.rows = vec![topic_row(0x11, "Cats")];
+        let post_id = "aa".repeat(32);
+        apply_local(&mut app, Action::OpenPostActions(post_id.clone()));
+        apply_local(
+            &mut app,
+            Action::TrainPost {
+                post_id: post_id.clone(),
+                verb: fauna_feed::TrainVerb::MoreLikeThis,
+            },
+        );
+        apply_local(&mut app, Action::OpenPostActions(post_id));
+        assert!(element(&app, "feed-post-train-target-sheet").is_none());
     }
 
     /// The verb's `state` attr is the post's marker in the SEALED model, so it
@@ -5807,12 +6366,12 @@ mod tests {
     /// passing for the wrong reason.
     #[test]
     fn origin_resolves_in_the_hydrated_fixture() {
-        let app = feed_app_with_origin(vec![own_post(Some("s"), None)], "example.com");
+        let app = feed_app_with_origin(vec![own_post(Some("s"), None)], "example.net");
         assert_eq!(
             crate::settings::web::site_link(&app.settings)
                 .origin
                 .as_deref(),
-            Some("https://test-handle.example.com/"),
+            Some("https://test-handle.example.net/"),
             "the positive direction must be real, or the negative tests are vacuous"
         );
         let none = feed_app_with_origin(vec![own_post(Some("s"), None)], "");
@@ -5832,7 +6391,7 @@ mod tests {
     /// takedown and both copy affordances describe a page that does not exist.
     #[test]
     fn an_own_unpublished_post_offers_only_the_publish_verb() {
-        let mut app = feed_app_with_origin(vec![own_post(None, None)], "example.com");
+        let mut app = feed_app_with_origin(vec![own_post(None, None)], "example.net");
         let ids = open_menu(&mut app);
         assert!(ids.contains("feed-post-publish-web-button"), "have {ids:?}");
         for absent in [
@@ -5852,7 +6411,7 @@ mod tests {
     /// post that already serves).
     #[test]
     fn an_own_published_post_offers_takedown_and_the_public_link() {
-        let mut app = feed_app_with_origin(vec![own_post(Some("my-post"), None)], "example.com");
+        let mut app = feed_app_with_origin(vec![own_post(Some("my-post"), None)], "example.net");
         let ids = open_menu(&mut app);
         for present in [
             "feed-post-unpublish-web-button",
@@ -5870,7 +6429,7 @@ mod tests {
     /// paywalled body, so the mint would hand out a token for nothing.
     #[test]
     fn the_paywall_link_verb_is_published_and_gated_only() {
-        let mut ungated = feed_app_with_origin(vec![own_post(Some("s"), None)], "example.com");
+        let mut ungated = feed_app_with_origin(vec![own_post(Some("s"), None)], "example.net");
         assert!(
             !open_menu(&mut ungated).contains("feed-post-copy-paywall-link-button"),
             "an ungated post has no paywalled body to hand out"
@@ -5878,7 +6437,7 @@ mod tests {
 
         let mut gated = feed_app_with_origin(
             vec![own_post(Some("s"), Some("post-unlock-x"))],
-            "example.com",
+            "example.net",
         );
         assert!(
             open_menu(&mut gated).contains("feed-post-copy-paywall-link-button"),
@@ -5897,7 +6456,7 @@ mod tests {
                 gated_tier: Some("post-unlock-x".into()),
                 ..post("not mine")
             }],
-            "example.com",
+            "example.net",
         );
         let ids = open_menu(&mut app);
         for absent in [
@@ -5947,17 +6506,22 @@ mod tests {
     }
 
     /// **The web verbs are independent of the training target.** The menu's
-    /// train half returns early when no single trained factor composes — and the
-    /// web verbs have nothing to do with training, so an own post must still
+    /// train half resolves no target when no single trained factor composes —
+    /// and the web verbs have nothing to do with training, so an own post must still
     /// offer them on an uncomposed feed. Getting this wrong hides the whole
     /// family behind an unrelated condition.
     #[test]
     fn the_web_verbs_paint_with_no_in_context_trained_factor() {
-        let mut app = feed_app_with_origin(vec![own_post(Some("s"), None)], "example.com");
+        let mut app = feed_app_with_origin(vec![own_post(Some("s"), None)], "example.net");
         let ids = open_menu(&mut app);
         assert!(
-            ids.contains("feed-post-train-target-sheet"),
-            "fixture precondition: no in-context factor, so the sheet shows"
+            app.feed
+                .manager
+                .as_ref()
+                .unwrap()
+                .train_target_factor()
+                .is_none(),
+            "fixture precondition: no in-context factor"
         );
         for present in [
             "feed-post-unpublish-web-button",
@@ -5979,7 +6543,7 @@ mod tests {
     /// delete painted there could only ever be refused nest-side.
     #[test]
     fn delete_is_offered_on_an_own_post_and_only_an_own_post() {
-        let mut app = feed_app_with_origin(vec![own_post(None, None)], "example.com");
+        let mut app = feed_app_with_origin(vec![own_post(None, None)], "example.net");
         assert!(
             open_menu(&mut app).contains("feed-post-delete-button"),
             "an own post's ⋯ menu must offer delete"
@@ -6004,7 +6568,7 @@ mod tests {
     /// only one that keeps a confirm — unpublish deliberately has none.
     #[test]
     fn delete_arms_a_confirm_step_and_only_the_confirm_dispatches() {
-        let mut app = feed_app_with_origin(vec![own_post(None, None)], "example.com");
+        let mut app = feed_app_with_origin(vec![own_post(None, None)], "example.net");
         let post_id = "aa".repeat(32);
         open_menu(&mut app);
 
@@ -6042,7 +6606,7 @@ mod tests {
     /// and came back would find a one-press destroy waiting for them.
     #[test]
     fn a_reopened_menu_is_never_still_armed() {
-        let mut app = feed_app_with_origin(vec![own_post(None, None)], "example.com");
+        let mut app = feed_app_with_origin(vec![own_post(None, None)], "example.net");
         let post_id = "aa".repeat(32);
         open_menu(&mut app);
         apply_local(&mut app, Action::StartDeletePost(post_id.clone()));
@@ -6063,18 +6627,23 @@ mod tests {
         );
     }
 
-    /// The trap this menu has already sprung twice: the training half returns
-    /// early when no single trained factor composes, and a verb added *inside*
-    /// it vanishes on any uncomposed feed. Delete sits beside the web verbs,
-    /// outside that return — the twin of
+    /// The trap this menu has already sprung twice: the training half once
+    /// returned early when no single trained factor composed, and a verb added
+    /// *inside* it vanished on any uncomposed feed. Delete sits beside the web
+    /// verbs, outside that half — the twin of
     /// `the_web_verbs_paint_with_no_in_context_trained_factor`.
     #[test]
     fn delete_paints_with_no_in_context_trained_factor() {
-        let mut app = feed_app_with_origin(vec![own_post(None, None)], "example.com");
+        let mut app = feed_app_with_origin(vec![own_post(None, None)], "example.net");
         let ids = open_menu(&mut app);
         assert!(
-            ids.contains("feed-post-train-target-sheet"),
-            "fixture precondition: no in-context factor, so the sheet shows"
+            app.feed
+                .manager
+                .as_ref()
+                .unwrap()
+                .train_target_factor()
+                .is_none(),
+            "fixture precondition: no in-context factor"
         );
         assert!(
             ids.contains("feed-post-delete-button"),
@@ -6108,7 +6677,7 @@ mod tests {
     /// the mere presence of a button (the devices-page lesson).
     #[test]
     fn copying_the_public_link_clipboards_the_posts_own_page_url() {
-        let mut app = feed_app_with_origin(vec![own_post(Some("my-post"), None)], "example.com");
+        let mut app = feed_app_with_origin(vec![own_post(Some("my-post"), None)], "example.net");
         let post_id = "aa".repeat(32);
         assert!(apply_local(&mut app, Action::OpenPostActions(post_id.clone())).is_none());
         assert!(
@@ -6118,7 +6687,7 @@ mod tests {
         let copied = app.feed.web_copied.as_ref().expect("nothing was copied");
         assert_eq!(
             copied.url,
-            "https://test-handle.example.com/post/my-post.html"
+            "https://test-handle.example.net/post/my-post.html"
         );
         assert_eq!(copied.post_id, post_id);
 
@@ -6133,7 +6702,7 @@ mod tests {
             });
         assert_eq!(
             attr.as_deref(),
-            Some("https://test-handle.example.com/post/my-post.html"),
+            Some("https://test-handle.example.net/post/my-post.html"),
             "the button must publish what it actually copied"
         );
     }
@@ -6151,7 +6720,7 @@ mod tests {
                 web_slug: Some("theirs".into()),
                 ..post("not mine")
             }],
-            "example.com",
+            "example.net",
         );
         let id = "aa".repeat(32);
         for action in [
@@ -6173,7 +6742,7 @@ mod tests {
         // Own, but UNPUBLISHED: the takedown and both copies name a page that
         // does not exist, so each must refuse on its own rather than rely on
         // having been painted absent.
-        let mut own = feed_app_with_origin(vec![own_post(None, None)], "example.com");
+        let mut own = feed_app_with_origin(vec![own_post(None, None)], "example.net");
         for action in [
             Action::UnpublishWeb(id.clone()),
             Action::CopyWebLink(id.clone()),
@@ -6193,7 +6762,7 @@ mod tests {
     fn the_paywall_link_mints_only_for_a_published_gated_own_post() {
         let mut gated = feed_app_with_origin(
             vec![own_post(Some("s"), Some("post-unlock-x"))],
-            "example.com",
+            "example.net",
         );
         let id = "aa".repeat(32);
         assert!(
@@ -6204,7 +6773,7 @@ mod tests {
             "a published+gated own post must mint"
         );
 
-        let mut ungated = feed_app_with_origin(vec![own_post(Some("s"), None)], "example.com");
+        let mut ungated = feed_app_with_origin(vec![own_post(Some("s"), None)], "example.net");
         assert!(
             apply_local(&mut ungated, Action::CopyPaywallLink(id)).is_none(),
             "an ungated post has no paywalled body — minting would hand out a token for nothing"
@@ -6233,7 +6802,7 @@ mod tests {
     fn folding_a_minted_paywall_link_paints_it_and_clears_the_error() {
         let mut app = feed_app_with_origin(
             vec![own_post(Some("s"), Some("post-unlock-x"))],
-            "example.com",
+            "example.net",
         );
         let post_id = "aa".repeat(32);
         app.errors
@@ -6244,7 +6813,7 @@ mod tests {
             Outcome::CopiedPaywallLink(CopiedFeedLink {
                 post_id: post_id.clone(),
                 kind: CopiedKind::Paywall,
-                url: "https://test-handle.example.com/post/s.html?token=T".into(),
+                url: "https://test-handle.example.net/post/s.html?token=T".into(),
             }),
         );
         assert!(!app.errors.contains_key(&crate::pages::Page::Feed));
@@ -6259,7 +6828,7 @@ mod tests {
             });
         assert_eq!(
             attr.as_deref(),
-            Some("https://test-handle.example.com/post/s.html?token=T"),
+            Some("https://test-handle.example.net/post/s.html?token=T"),
             "the minted link must land on the button that minted it"
         );
     }
@@ -6278,7 +6847,7 @@ mod tests {
                     ..own_post(Some("theirs"), None)
                 },
             ],
-            "example.com",
+            "example.net",
         );
         let post_id = "aa".repeat(32);
         assert!(apply_local(&mut app, Action::OpenPostActions(post_id.clone())).is_none());
@@ -6483,6 +7052,8 @@ mod tests {
                     &vec![
                         "engagement".to_string(),
                         "trending".to_string(),
+                        "signal:watch-complete".to_string(),
+                        "signal:skip".to_string(),
                         format!("labeler:{}", "aa".repeat(32)),
                     ],
                     "the built-ins lead, then the subscribed labeler; the unsubscribed one \
@@ -6516,6 +7087,24 @@ mod tests {
             ),
             other => panic!("feed-factor-select must be a Select, got {other:?}"),
         }
+        // Every option's painted label answers the automation `options`
+        // attribute — what `option_texts` reads — never the raw keys.
+        let options = select
+            .attrs
+            .iter()
+            .find(|(k, _)| k == "options")
+            .map(|(_, v)| v.clone())
+            .expect("the factor picker publishes its option labels");
+        let labels: Vec<String> = serde_json::from_str(&options).unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                feed::create::FACTOR_ENGAGEMENT.to_string(),
+                feed::create::FACTOR_TRENDING.to_string(),
+                feed::create::FACTOR_WATCH_COMPLETE.to_string(),
+                feed::create::FACTOR_SKIP.to_string(),
+            ],
+        );
     }
 
     /// The rule row shows only the widgets the selected type's encoder arm
@@ -7001,6 +7590,40 @@ mod tests {
                 .contains(fauna_i18n::strings::feed::post::REPOSTED_MARKER),
             "the marker carries the i18n reposted text, got {:?}",
             markers[0].text
+        );
+    }
+
+    /// A repost of a room or tier post paints the TARGET's `gated-post-badge`
+    /// on the repost row's card (`behavior/restricted-posts.md` § Encryption
+    /// at rest, ruling 3: a repost renders "as the target's own gated card,
+    /// teaser and badge") — otherwise the teaser reads as a short public
+    /// post. The badge rides `reposted_gated_tier`, never the row's own
+    /// `gated_tier`. (A member's room label is derived against `own_rooms` —
+    /// pinned in `fauna-feed`'s
+    /// `a_repost_row_carries_its_targets_gate_and_names_the_room_for_a_member`.)
+    #[test]
+    fn a_repost_of_a_gated_post_paints_the_targets_badge() {
+        let mut outsider = post("");
+        outsider.reposted_post_id = Some("cc".repeat(32));
+        outsider.reposted_gated_tier = Some(fauna_core::subscription::ROOM_POST_TIER.into());
+        outsider.reposted_gated_room = Some("c7".repeat(32));
+        let mut gold = post("");
+        gold.post_id = "ee".repeat(32);
+        gold.reposted_post_id = Some("ff".repeat(32));
+        gold.reposted_gated_tier = Some("gold".into());
+        let app = feed_app(vec![outsider, gold, post("an ordinary post")]);
+        let badges: Vec<_> = crate::feed::elements(&app)
+            .into_iter()
+            .filter(|e| e.id == "gated-post-badge")
+            .map(|e| (e.path[0].1, e.text))
+            .collect();
+        assert_eq!(
+            badges,
+            vec![
+                (0, fauna_core::subscription::ROOM_POST_TIER.to_string()),
+                (1, "gold".to_string()),
+            ],
+            "each repost card carries its target's badge; the ordinary post none"
         );
     }
 

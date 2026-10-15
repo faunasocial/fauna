@@ -11,10 +11,10 @@
 //! [`crate::deployment_seed_rows`]'s.
 //!
 //! - [`read_local_deployment_seeds`] — this device's own account store, no
-//!   runtime and no nest. Rows rest opened in the local store
-//!   (`account-replica-posture.md` § Local at-rest posture), so it needs the
-//!   actor and the store root only. It answers empty for a store that does not
-//!   exist and never creates one.
+//!   runtime and no nest. Rows rest sealed in the local store under the key
+//!   the identity seed derives (`account-replica-posture.md` § Local at-rest
+//!   posture), so it needs the actor, that key and the store root. It
+//!   answers empty for a store that does not exist and never creates one.
 //! - [`cold_read_deployment_seeds`] — a reachable nest and the identity seed,
 //!   for a device holding no store for the account. It **writes nothing**: no
 //!   enrollment, no device-set row, no escrow target, no mint, no put, no walk
@@ -30,7 +30,7 @@ use std::future::Future;
 
 use anyhow::{Context, Result};
 use fauna_account_store::backend::StoreBackend;
-use fauna_core::crypto::BackupKey;
+use fauna_core::crypto::{BackupKey, ReplicaSealKey};
 use fauna_core::data::DeploymentSeedEntry;
 use fauna_core::identity::ActorKeypair;
 use fauna_protocol::RpcRequester;
@@ -58,18 +58,24 @@ pub use fauna_account_store::root::StoreRoot;
 /// A malformed actor id, a store that fails to open (a newer-breaking format
 /// among them), or a stored row that does not decode strictly
 /// ([`deployment_seeds_of`] — never a silently skipped box).
+///
+/// `seal` is the replica seal key ([`replica_seal_key`]); `None` reads a
+/// store whose rows rest opened and fails on a sealed one. Web's IndexedDB
+/// replica rests opened (the per-platform posture) and ignores it.
 pub async fn read_local_deployment_seeds(
     root: &StoreRoot,
     actor_id_hex: &str,
+    seal: Option<ReplicaSealKey>,
 ) -> Result<Vec<DeploymentSeedEntry>> {
     // Native: the SQLite read is synchronous under its async signature, and the
     // connection is not `Sync`, so it runs to completion in a sync helper and
     // this future holds no connection across an await — the resolver's future
     // stays `Send` for a native caller's `Send` seam (the re-provision reader).
     #[cfg(not(target_arch = "wasm32"))]
-    return read_local_deployment_seeds_native(root, actor_id_hex);
+    return read_local_deployment_seeds_native(root, actor_id_hex, seal);
     #[cfg(target_arch = "wasm32")]
     {
+        let _ = seal;
         let name = root.store_name(actor_id_hex)?;
         let backend = fauna_account_store::indexeddb::IndexedDbBackend::open_existing(&name)
             .await
@@ -89,10 +95,11 @@ pub async fn read_local_deployment_seeds(
 fn read_local_deployment_seeds_native(
     root: &StoreRoot,
     actor_id_hex: &str,
+    seal: Option<ReplicaSealKey>,
 ) -> Result<Vec<DeploymentSeedEntry>> {
     use std::task::{Context as TaskContext, Poll, Waker};
     let dir = root.store_dir(actor_id_hex)?;
-    let Some(backend) = fauna_account_store::sqlite::SqliteBackend::open_existing(&dir)
+    let Some(backend) = fauna_account_store::sqlite::SqliteBackend::open_existing_keyed(&dir, seal)
         .with_context(|| format!("open the account store at {}", dir.display()))?
     else {
         return Ok(Vec::new());
@@ -209,12 +216,13 @@ impl ResolvedDeploymentSeeds {
 pub async fn resolve_deployment_seeds<F>(
     root: &StoreRoot,
     actor_id_hex: &str,
+    seal: Option<ReplicaSealKey>,
     cold: Option<F>,
 ) -> ResolvedDeploymentSeeds
 where
     F: Future<Output = Result<Vec<DeploymentSeedEntry>>>,
 {
-    let local = read_local_deployment_seeds(root, actor_id_hex).await;
+    let local = read_local_deployment_seeds(root, actor_id_hex, seal).await;
     let cold = match cold {
         Some(read) => Some(read.await),
         None => None,
@@ -237,9 +245,17 @@ pub async fn resolve_deployment_seeds_over<R: RpcRequester>(
     resolve_deployment_seeds(
         root,
         &actor_hex,
+        Some(replica_seal_key(identity_seed)),
         cold.map(|rpc| cold_read_deployment_seeds(rpc, identity_seed)),
     )
     .await
+}
+
+/// The replica seal key the account whose identity seed is `identity_seed`
+/// seals its local store under — the one every pre-login local read
+/// opens it with.
+pub fn replica_seal_key(identity_seed: &[u8; 32]) -> ReplicaSealKey {
+    ReplicaSealKey::derive(&BackupKey::derive(identity_seed))
 }
 
 /// [`resolve_deployment_seeds`]'s join, over answers already in hand: each
@@ -422,7 +438,7 @@ mod tests {
             other => panic!("the test's engine must hold the lock: {other:?}"),
         };
 
-        let read = read_local_deployment_seeds(&root_dir, &actor_hex())
+        let read = read_local_deployment_seeds(&root_dir, &actor_hex(), None)
             .await
             .unwrap();
 
@@ -448,7 +464,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root_dir = StoreRoot::at(tmp.path());
 
-        let read = read_local_deployment_seeds(&root_dir, &actor_hex())
+        let read = read_local_deployment_seeds(&root_dir, &actor_hex(), None)
             .await
             .unwrap();
 
@@ -469,7 +485,7 @@ mod tests {
         let dir = root_dir.store_dir(&actor_hex()).unwrap();
         std::fs::create_dir_all(&dir).unwrap();
 
-        let read = read_local_deployment_seeds(&root_dir, &actor_hex())
+        let read = read_local_deployment_seeds(&root_dir, &actor_hex(), None)
             .await
             .unwrap();
 
@@ -492,7 +508,7 @@ mod tests {
         let local = [custodied(0x5D, "box.example")];
         let _store = door_written_store(&root_dir, &local).await;
 
-        let resolved = resolve_deployment_seeds::<Cold>(&root_dir, &actor_hex(), None).await;
+        let resolved = resolve_deployment_seeds::<Cold>(&root_dir, &actor_hex(), None, None).await;
 
         assert!(!resolved.cold_asked);
         assert!(resolved.local_failure.is_none());
@@ -506,7 +522,7 @@ mod tests {
         let remote = vec![custodied(0x5D, "box.example")];
 
         let resolved =
-            resolve_deployment_seeds(&root_dir, &actor_hex(), cold(Ok(remote.clone()))).await;
+            resolve_deployment_seeds(&root_dir, &actor_hex(), None, cold(Ok(remote.clone()))).await;
 
         assert!(resolved.local_failure.is_none() && resolved.cold_failure.is_none());
         assert_eq!(resolved.into_result().unwrap(), remote);
@@ -532,6 +548,7 @@ mod tests {
         let seeds = resolve_deployment_seeds(
             &root_dir,
             &actor_hex(),
+            None,
             cold(Ok(vec![rotated.clone(), successor.clone()])),
         )
         .await
@@ -567,6 +584,7 @@ mod tests {
         let resolved = resolve_deployment_seeds(
             &root_dir,
             &actor_hex(),
+            None,
             cold(Err(anyhow::anyhow!("the nest did not answer"))),
         )
         .await;
@@ -590,7 +608,7 @@ mod tests {
         .unwrap();
 
         let resolved =
-            resolve_deployment_seeds(&root_dir, &actor_hex(), cold(Ok(remote.clone()))).await;
+            resolve_deployment_seeds(&root_dir, &actor_hex(), None, cold(Ok(remote.clone()))).await;
 
         assert!(resolved.local_failure.is_some(), "{resolved:?}");
         assert_eq!(resolved.into_result().unwrap(), remote);

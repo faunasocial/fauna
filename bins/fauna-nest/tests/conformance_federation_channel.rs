@@ -3327,7 +3327,7 @@ async fn folder_read_plane_over_channel_serves_member_and_refuses_wrong_binding(
     let reply: FedFolderContentKeyFetchReply = from_value(&call.await_reply().await.expect("ok"));
     assert_eq!(reply.epoch, 3);
     assert_eq!(reply.sealed, hex::encode(b"sealed-envelope-bytes"));
-    // The federated floor (`on-demand-files.md` § Shared sets on a capability
+    // The federated floor (`on-demand-files-shared-sets.md` § Shared sets on a capability
     // host → *One mechanism*, question 2): the home nest stamps the set's
     // owner-stamped `content_key_floor` — the same value `fauna.folders.list`
     // projects — so a cross-nest member's engine can hold its writes behind it
@@ -4829,9 +4829,7 @@ async fn channel_append_over_channel_lands_and_gates() {
 /// residency beside `caller_access`, read off the home nest's claimed row and
 /// always STATED (`"full"` included), because absent on the wire means *not
 /// stated*, never *full*. The metadata-only pair is seeded beneath the handlers
-/// (the folder's column and the foreign-member row written on the nest DB):
-/// the interim refusal (`file-sync.md` § Relay serving → *Until that leg is
-/// built, the pair is refused*) stands, and an existing pair is left as it is.
+/// (the folder's column and the foreign-member row written on the nest DB).
 #[tokio::test]
 async fn every_federated_folder_read_reply_stamps_the_folders_residency() {
     let (_h_url, h_state) = start_nest().await;

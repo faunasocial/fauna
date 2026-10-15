@@ -73,7 +73,10 @@ from actions import ActionLayer
 from common import build_registry_seed, create_actor_and_register
 from conftest import _seeded_environment
 from drivers import create_driver
-from helpers.instance_guard import is_app_alive, wait_alive_until
+from helpers.instance_guard import (
+    await_first_seat_follows_the_account,
+    wait_alive_until,
+)
 from helpers.succession_ceremony import (
     SUCCESSION_AND_RELAUNCH_S,
     wait_for_successor_actor,
@@ -149,17 +152,67 @@ def _shared_instance_world():
     """One throwaway install world for two instances to share — the same-OS-login
     premise of the guard.
 
-    All three keys matter: ``credential_dir`` + ``keyring_app`` make both launches
-    read ONE registry, and ``data_dir`` is what makes them contend on one lock file
-    (windows keys the lock off ``AccountStateDir.Base``, i.e. ``BackupPaths.DataDir``).
-    Supplying ``data_dir`` also means the driver will not delete it (``_owns_data_dir``),
-    so the caller cleans up."""
+    All four keys matter: ``credential_dir`` + ``keyring_app`` make both launches
+    read ONE registry; ``data_dir`` is what makes them contend on one lock file
+    (windows keys the lock off ``AccountStateDir.Base``, i.e. ``BackupPaths.DataDir``);
+    and ``local_appdata`` is what makes them open ONE account store. Shared Rust
+    roots that store at ``%LOCALAPPDATA%\\Fauna\\sync`` (``fauna_account_store::root``),
+    never under ``data_dir``, and the driver otherwise gives every launch its own
+    relocated ``%LOCALAPPDATA%`` (convention 10) — two instances on two stores are two
+    devices, not one OS login, and no sibling's write ever reaches the other. The
+    pair is laid out as production lays it out (``data_dir`` =
+    ``<local_appdata>\\Fauna``), the same ancestor-sharing linux and tui do with
+    ``xdg_base``. Supplying both means the driver deletes neither
+    (``_owns_data_dir``, ``_owns_local_appdata``), so the caller cleans up."""
     base = tempfile.mkdtemp(prefix="fauna-e2e-win-instance-world-")
+    local_appdata = os.path.join(base, "localappdata")
     return base, {
         "credential_dir": os.path.join(base, "credentials"),
         "keyring_app": f"fauna-e2e-instance-world-{os.path.basename(base)}",
-        "data_dir": os.path.join(base, "data"),
+        "local_appdata": local_appdata,
+        "data_dir": os.path.join(local_appdata, "Fauna"),
     }
+
+
+def _drop_world(world_base):
+    """Reclaim a :func:`_shared_instance_world` — unless ``FAUNA_E2E_KEEP_DATA_DIR``
+    is set, the driver's own keep switch for the dirs it owns. This world is the
+    caller's, so the driver's switch never reached it, and a failing run deleted
+    the one app log both instances write before anyone could read it."""
+    if os.environ.get("FAUNA_E2E_KEEP_DATA_DIR"):
+        print(f"[instance-world] keeping the shared world for inspection: {world_base}")
+        return
+    shutil.rmtree(world_base, ignore_errors=True)
+
+
+def _shared_log_tail(driver, chars=8000):
+    """The tail of the app log both instances of a shared world write (one data
+    dir), for a failure message (convention 6)."""
+    try:
+        return driver.app_stderr_text()[-chars:]
+    except Exception as e:  # noqa: BLE001 - diagnostic only
+        return f"(unreadable: {type(e).__name__}: {e})"
+
+
+def _await_first_seat_follows_the_account(first, old_actor, new_actor):
+    """The plain first seat follows the account to the successor — the shared
+    observable (:func:`helpers.instance_guard.await_first_seat_follows_the_account`),
+    diagnosed with the app log both seats of a windows world write.
+
+    ⚠ This asserted "still the old id, still authenticated" until 2026-10-10.
+    That held only while the harness gave the two seats two account stores — two
+    devices, not one OS login. Once the world shared one store
+    (`git log --grep "the two-instance world shares one account store"`), the
+    first seat's leg became observable. It is the same lesson this goal doc
+    records for linux and tui: an assertion overtaken by a ratified change is not
+    a regression to chase."""
+    await_first_seat_follows_the_account(
+        first,
+        old_actor,
+        new_actor,
+        SUCCESSION_AND_RELAUNCH_S,
+        diagnose=lambda: f"The app log both instances share, tail:\n{_shared_log_tail(first)}",
+    )
 
 
 def _wait_authenticated(driver, timeout=60):
@@ -246,15 +299,15 @@ def test_windows_second_plain_launch_cannot_become_the_only_served_account(
         )
     finally:
         first.teardown()
-        shutil.rmtree(world_base, ignore_errors=True)
+        _drop_world(world_base)
 
 
 @pytest.mark.feature("second-identity-in-its-own-window")
 def test_windows_bound_launch_onto_the_served_account_coexists(
     nest_instance, windows_app_path, request
 ):
-    """**The W5.6 (account-data-plane.md § Workstreams) success condition, windows' leg** (`account-data-plane.md`
-    § Multi-instance concurrency; `account-scoping.md` § Concurrent instances —
+    """**The W5.6 (account-data-plane.md § Workstreams) success condition, windows' leg** (`account-runtime.md`
+    § Multi-instance concurrency (W5); `account-scoping.md` § Concurrent instances —
     windows RETIRED 2026-08-24): a bound launch onto the account a live instance
     already serves passes the bound-or-refuse gate AND the (now shared) instance
     lock, so two same-account windows instances run concurrently against one
@@ -396,8 +449,12 @@ def test_windows_bound_launch_onto_the_served_account_coexists(
                     break
             assert CONVERGED_TERM in seen, (
                 "the first instance's write never became visible in the second "
-                f"within {CONVERGENCE_BUDGET_S:.0f}s — the shared-store "
-                f"notification floor is not converging; second saw {seen!r}"
+                f"within {CONVERGENCE_BUDGET_S:.0f}s — a fresh visit to the "
+                "second's page does not read what the shared store holds; "
+                f"second saw {seen!r}, its error-message "
+                f"{second_app.error_text()!r}. The app log both instances "
+                "share (one data dir), tail:\n"
+                f"{second.app_stderr_text()[-6000:]}"
             )
 
             # And the first's own conversations page carries no refusal — the
@@ -414,7 +471,7 @@ def test_windows_bound_launch_onto_the_served_account_coexists(
             second.teardown()
     finally:
         first.teardown()
-        shutil.rmtree(world_base, ignore_errors=True)
+        _drop_world(world_base)
 
 
 @pytest.mark.feature("second-identity-in-its-own-window")
@@ -479,7 +536,7 @@ def test_windows_bound_launch_for_another_account_coexists_as_that_account(
             second.teardown()
     finally:
         first.teardown()
-        shutil.rmtree(world_base, ignore_errors=True)
+        _drop_world(world_base)
 
 
 @pytest.mark.feature("take-your-account-back")
@@ -515,8 +572,8 @@ def test_windows_a_launch_bound_to_a_retired_id_comes_up_as_the_successor(
     passed the gate, and met the nest's ``superseded`` refusal on its first
     connect.
 
-    The first (plain) seat still serves the retired id throughout; what it
-    does about being superseded is the own-device-fleet leg, not this case's.
+    The first (plain) seat is the account's too, and it FOLLOWS the account:
+    see :func:`_await_first_seat_follows_the_account`.
     """
     seed, user_actor = _seed_one_account(nest_instance)
     world_base, world = _shared_instance_world()
@@ -562,7 +619,7 @@ def test_windows_a_launch_bound_to_a_retired_id_comes_up_as_the_successor(
                 f"ceremony; got {old_actor!r}, error: {app.error_text()!r}"
             )
 
-            new_actor = wait_for_successor_actor(app, old_actor)
+            new_actor = wait_for_successor_actor(app, old_actor, guard_alive=True)
             assert new_actor and new_actor != old_actor, (
                 f"the bound seat must settle on a NEW actor id; got {new_actor!r}"
             )
@@ -598,17 +655,19 @@ def test_windows_a_launch_bound_to_a_retired_id_comes_up_as_the_successor(
                     f"got {actor!r}"
                 )
             finally:
-                third.teardown()
+                # Stop only the third: the first and second share its data dir and
+                # are tracked by their own bridges, and a default teardown kills
+                # every instance owning the dir — the first seat included, which is
+                # asserted on below.
+                third.teardown(sweep_data_dir_peers=False)
 
-            fstate = first.get_state()
-            assert fstate.get("session", {}).get("actor_id") == user_actor and bool(
-                fstate.get("session", {}).get("authenticated")
-            ), "the first (plain) seat must be untouched by either launch"
+            # Neither launch tore the first seat down; it followed the account.
+            _await_first_seat_follows_the_account(first, old_actor, new_actor)
         finally:
             second.teardown()
     finally:
         first.teardown()
-        shutil.rmtree(world_base, ignore_errors=True)
+        _drop_world(world_base)
 
 
 @pytest.mark.feature("take-your-account-back")
@@ -642,10 +701,8 @@ def test_windows_a_bound_instance_survives_its_own_succession(
        configuration that produces this arm without fault injection. The
        shared retry-gate helper then asserts the button renders on it and
        that a press answers.
-    4. **The first instance is untouched by the second's ceremony** — still
-       alive, still serving; what its next connect does about the
-       superseded identity is the own-device-fleet leg
-       (`succession-aftermath.md` § Propagation), not this case's subject.
+    4. **The first instance survives the second's ceremony and follows the
+       account** to the successor — :func:`_await_first_seat_follows_the_account`.
 
     ⚠ Do NOT "simplify" this into a lone bound launch: the first instance is
     what makes the seat *bound* in practice (a plain second launch renders
@@ -740,16 +797,10 @@ def test_windows_a_bound_instance_survives_its_own_succession(
             assert sweep_owes_work(sweep), f"a no_engine sweep owes work; {sweep!r}"
             assert_the_retry_affordance_matches_the_sweep(app, sweep)
 
-            # ── 4. the first instance is untouched ───────────────────────────
-            assert is_app_alive(first) is not False, (
-                "the first instance must survive the second's ceremony"
-            )
-            fstate = first.get_state()
-            assert bool(fstate.get("session", {}).get("authenticated")), (
-                f"the first instance must still be serving; got {fstate.get('session')!r}"
-            )
+            # ── 4. the first instance survives, and follows the account ──────
+            _await_first_seat_follows_the_account(first, old_actor, new_actor)
         finally:
             second.teardown()
     finally:
         first.teardown()
-        shutil.rmtree(world_base, ignore_errors=True)
+        _drop_world(world_base)

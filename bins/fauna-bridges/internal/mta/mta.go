@@ -204,10 +204,7 @@ func Run(ctx context.Context, deps Deps) error {
 	}
 	var tlsConfig *tls.Config
 	if tlsAvailable {
-		tlsConfig = &tls.Config{
-			GetCertificate: deps.TLSProvider.GetCertificate,
-			MinVersion:     tls.VersionTLS12,
-		}
+		tlsConfig = bridgetls.HardenedServerConfig(deps.TLSProvider.GetCertificate)
 	}
 
 	// Bind port 25 unconditionally. When TLS is available, also bind the
@@ -290,6 +287,9 @@ func Run(ctx context.Context, deps Deps) error {
 		// Same condition as the listener's tlsConfig below.
 		requireStartTLS: tlsAvailable,
 		drain:           inboundDrain,
+		// Port-25 per-IP message rate: process-lifetime, so a config reload
+		// does not hand a flooding source a fresh hour.
+		msgRate: NewRateLimiter(maxInboundMsgsPerIPPerHour, time.Hour, realClock{}),
 	}
 	// Spawn the outbound worker + submission backend only when submission
 	// listeners are wired (TLS present). Without 465/587, this bridge has
@@ -537,6 +537,7 @@ func newPolicyFromSnapshot(snap wsrpc.ConfigSnapshot, resolver DNSResolver, cloc
 		FCrDNS:               NewFCrDNSChecker(resolver),
 		FCrDNSMode:           ParseFCrDNSMode(snap.Spam.FCrDNSMode),
 		RejectFCrDNSFail:     snap.Spam.RejectFCrDNSFail,
+		RejectNoRDNS:         snap.Spam.RejectNoRdns,
 		HELOIdentityRequired: snap.Spam.HELOIdentityRequired,
 		HELOResolver:         resolver,
 		HELOLookupTimeout:    3 * time.Second,

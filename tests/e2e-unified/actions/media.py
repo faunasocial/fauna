@@ -177,6 +177,22 @@ class MediaActions:
                     ) from e
                 time.sleep(0.2)
 
+    @staticmethod
+    def shared_set_value(folder_id: int) -> str:
+        """The ``media-folder-filter`` value of a set shared WITH the caller —
+        its row's ``FolderRef`` wire string. An own set's value is its name
+        (pass the name to :meth:`set_filter`); a set the caller does not own is
+        addressed by its row, so a same-named pair is two options (``media.md``
+        § Encryption at rest → *The filter and the upload target address the
+        row*, (a)). The one place the scheme is spelled, so tests never do."""
+        return f"local:{folder_id}"
+
+    def folder_filter_labels(self) -> list[str] | None:
+        """The labels ``media-folder-filter`` paints, one per option — a shared
+        set's reads ``<name> (<owner>)`` (ibid., (b)). ``None`` on a driver
+        whose bridge does not serve the ``options`` attr."""
+        return self.driver.option_texts("media-folder-filter")
+
     # ── Items (indexed ``media-item`` component) ─────────────────────────
 
     def item_count(self) -> int:
@@ -495,20 +511,11 @@ class MediaActions:
         ``path`` is a local filesystem path.
 
         android's ``file-upload`` opens the system document picker, which no
-        agent can drive, and its test agent has no ``compose.file`` arm for this
-        page yet (only the feed and conversations composers), so an upload there
-        is declared unbuilt rather than typed into a button."""
-        if self.driver.is_android():
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="the Media page's file-upload pick seam",
-                detail="TestAgent.kt's applyComposePatch has no `file-upload` "
-                       "target (MediaScreen's picker result)",
-                tracked="",
-            )
-        if self.driver.is_web():
+        agent can drive, so android sets the file the way web does: its driver
+        stages the bytes on the device and sends a ``compose.file`` patch naming
+        ``file-upload``, which the test agent hands to the upload row's own
+        picker staging (``MediaScreen.kt``)."""
+        if self.driver.is_web() or self.driver.is_android():
             self.driver.set_input_files("file-upload", path)
         else:
             # A generous deadline-poll before interacting (testing.md convention

@@ -71,6 +71,11 @@ pub struct SyncClient {
     /// for a folder-less client (snapshot restore, custodian pulls): the GET
     /// is then the plain hit-or-404 read.
     folder_hint: Option<String>,
+    /// The folder's row, sent beside the name as the hint's ref form
+    /// (`paths::chunk_store::FOLDER_REF_HINT_PARAM`) — the form the nest
+    /// prefers, since a name finds the reader's own same-named set first.
+    /// `None` until the engine's binding names it ([`Self::set_folder_ref`]).
+    folder_ref: Option<fauna_core::folder_keys::FolderRef>,
 }
 
 /// Response wrapper for the chunk-existence check endpoint.
@@ -105,30 +110,10 @@ impl std::fmt::Display for SegmentMetaUnavailable {
 
 impl std::error::Error for SegmentMetaUnavailable {}
 
-/// A segment half's body crossed the caller's byte bound and was refused
-/// mid-read — never buffered whole (`message-segment-store.md` § Segment size:
-/// no legal ceiling exists, so the bound is the caller's budget or the
-/// listing's declared size, never a constant).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SegmentBodyTooLarge {
-    pub kind: String,
-    pub segment_id: u32,
-    /// `".dat"` or `".meta"`.
-    pub half: &'static str,
-    pub max_bytes: u64,
-}
-
-impl std::fmt::Display for SegmentBodyTooLarge {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} segment {} {} refused: the body exceeds the {}-byte bound",
-            self.kind, self.segment_id, self.half, self.max_bytes
-        )
-    }
-}
-
-impl std::error::Error for SegmentBodyTooLarge {}
+/// The over-bound refusal lives with the store that counts it
+/// ([`fauna_account_store::segments::SegmentBodyTooLarge`]); re-exported so the
+/// byte plane's callers keep one path.
+pub use fauna_account_store::segments::SegmentBodyTooLarge;
 
 /// One segment half's body, streamed under its byte bound
 /// ([`fauna_nest_http::capped::CappedBody`], the over-bound refusal typed as
@@ -210,6 +195,7 @@ impl SyncClient {
             upload_limiter: None,
             download_limiter: None,
             folder_hint: None,
+            folder_ref: None,
         }
     }
 
@@ -220,9 +206,23 @@ impl SyncClient {
         self.folder_hint = folder;
     }
 
+    /// Name the folder's **row** too — the hint's ref form, which the nest
+    /// prefers over the name (a name finds the reader's own same-named set
+    /// first; `file-sync.md` § Relay serving, step (4)). `SyncEngine::with_folder_ref`
+    /// sets it from the engine's binding, where the ref is known; a client
+    /// with no ref sends the name forms alone.
+    pub fn set_folder_ref(&mut self, folder_ref: Option<fauna_core::folder_keys::FolderRef>) {
+        self.folder_ref = folder_ref;
+    }
+
     /// The folder hint in force (see [`Self::set_folder_hint`]).
     pub fn folder_hint(&self) -> Option<&str> {
         self.folder_hint.as_deref()
+    }
+
+    /// The folder ref in force (see [`Self::set_folder_ref`]).
+    pub fn folder_ref(&self) -> Option<fauna_core::folder_keys::FolderRef> {
+        self.folder_ref
     }
 
     /// Get a bearer token from AuthClient.
@@ -231,6 +231,38 @@ impl SyncClient {
             .ensure_auth()
             .await
             .map_err(|e| anyhow::anyhow!("auth: {e}"))
+    }
+
+    /// Attach the bearer, send, and — on `401` — tell the bearer
+    /// ([`fauna_client::AuthClient::clear_token`] → `BearerSource::notify_401`)
+    /// and retry once under the re-minted one: the shape
+    /// `fauna_nest_http::content` sends with. Every byte-plane call goes
+    /// through here, so a token the nest stops honouring before its own
+    /// expiry (a restart forgets the nest's in-memory write tokens) costs one
+    /// retry, not every call until the TTL runs out. A second `401` is
+    /// returned as is — one retry, never a loop — and any other status,
+    /// a `404` miss included, never touches the bearer.
+    async fn send(&self, req: reqwest::RequestBuilder, what: &str) -> Result<reqwest::Response> {
+        let token = self.token().await?;
+        let retry = req.try_clone();
+        let resp = req
+            .bearer_auth(&token)
+            .send()
+            .await
+            .with_context(|| what.to_string())?;
+        if resp.status() != reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(resp);
+        }
+        self.auth.clear_token().await;
+        let Some(retry) = retry else {
+            return Ok(resp);
+        };
+        let token = self.token().await?;
+        retry
+            .bearer_auth(&token)
+            .send()
+            .await
+            .with_context(|| what.to_string())
     }
 
     /// Access the underlying AuthClient.
@@ -280,18 +312,16 @@ impl SyncClient {
         if let Some(ref limiter) = self.upload_limiter {
             limiter.wait(data.len()).await;
         }
-        let token = self.token().await?;
         let url = format!("{}/api/v1/chunks", self.auth.nest_url());
         let hash_hex = hex::encode(hash.digest());
-        self.auth
+        let req = self
+            .auth
             .http()
             .post(&url)
-            .bearer_auth(&token)
             .header("X-Content-Hash", &hash_hex)
-            .body(data.to_vec())
-            .send()
-            .await
-            .context("POST /api/v1/chunks")?
+            .body(data.to_vec());
+        self.send(req, "POST /api/v1/chunks")
+            .await?
             .error_for_status()
             .context("upload_chunk: unexpected status")?;
         Ok(())
@@ -304,7 +334,6 @@ impl SyncClient {
     /// bytes instead of answering `404` — additive, ignored on a hit, and
     /// actor-scoped on the nest (the bearer below is what scopes it).
     pub async fn download_chunk(&self, hash: &ContentHash) -> Result<Vec<u8>> {
-        let token = self.token().await?;
         let hash_hex = hex::encode(hash.digest());
         let url = format!(
             "{}{}",
@@ -312,24 +341,20 @@ impl SyncClient {
             fauna_nest_http::paths::chunk_store::chunk_by_hash(&hash_hex)
         );
         tracing::debug!(url = %url, "downloading chunk");
-        let mut req = self.auth.http().get(&url).bearer_auth(&token);
+        let mut req = self.auth.http().get(&url);
         if let Some(folder) = &self.folder_hint {
-            // Both forms: the hash is the address a sealed set is found by
-            // (its name rests blank on the nest); the plaintext rides until
-            // the wire contraction retires it.
-            let folder_hash = hex::encode(fauna_core::path_crypto::set_name_hash(folder));
-            req = req.query(&[
-                (
-                    fauna_nest_http::paths::chunk_store::FOLDER_HINT_PARAM,
-                    folder.as_str(),
-                ),
-                (
-                    fauna_nest_http::paths::chunk_store::FOLDER_HASH_HINT_PARAM,
-                    folder_hash.as_str(),
-                ),
-            ]);
+            // Every form the engine holds (`FolderHint`): the hash is the
+            // address a sealed set is found by (its name rests blank on the
+            // nest); the plaintext rides until the wire contraction retires
+            // it; the ref, when the binding named it, is the form the nest
+            // prefers — a name finds this actor's own same-named set first.
+            req = req.query(
+                &fauna_core::file_download::FolderHint::new(folder.as_str())
+                    .with_ref(self.folder_ref)
+                    .query_pairs(),
+            );
         }
-        let resp = req.send().await.context("GET /api/v1/chunks/{hash}")?;
+        let resp = self.send(req, "GET /api/v1/chunks/{hash}").await?;
         tracing::debug!(status = %resp.status(), "chunk download response");
         let resp = resp
             .error_for_status()
@@ -347,7 +372,6 @@ impl SyncClient {
     /// nest no longer has the ask pending — another seat answered first, or
     /// the reader went away — which is an ordinary outcome, not a failure.
     pub async fn answer_relay_ask(&self, request_id: u64, chunk: Option<&[u8]>) -> Result<bool> {
-        let token = self.token().await?;
         let url = format!(
             "{}{}",
             self.auth.nest_url(),
@@ -362,11 +386,9 @@ impl SyncClient {
             }
             None => self.auth.http().delete(&url),
         };
-        let resp = req
-            .bearer_auth(&token)
-            .send()
-            .await
-            .context("answer /api/v1/chunks/relay/{request_id}")?;
+        let resp = self
+            .send(req, "answer /api/v1/chunks/relay/{request_id}")
+            .await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(false);
         }
@@ -416,7 +438,6 @@ impl SyncClient {
         resume_from: u64,
         max_bytes: u64,
     ) -> Result<SegmentBody<'_>> {
-        let token = self.token().await?;
         let url = format!(
             "{}/api/v1/segments/{}/{}/{}",
             self.auth.nest_url(),
@@ -424,14 +445,14 @@ impl SyncClient {
             actor_hex,
             segment_id
         );
-        let mut req = self.auth.http().get(&url).bearer_auth(&token);
+        let mut req = self.auth.http().get(&url);
         if resume_from > 0 {
             req = req.header("Range", format!("bytes={resume_from}-"));
         }
-        let resp = req
-            .send()
-            .await
-            .with_context(|| format!("GET /api/v1/segments/{kind}/{actor_hex}/{segment_id}"))?
+        let what = format!("GET /api/v1/segments/{kind}/{actor_hex}/{segment_id}");
+        let resp = self
+            .send(req, &what)
+            .await?
             .error_for_status()
             .context("get_segment_bytes: unexpected status")?;
         self.segment_half(resp, kind, segment_id, ".dat", max_bytes)
@@ -478,7 +499,6 @@ impl SyncClient {
         segment_id: u32,
         max_bytes: u64,
     ) -> Result<SegmentBody<'_>> {
-        let token = self.token().await?;
         let url = format!(
             "{}/api/v1/segments/{}/{}/{}/meta",
             self.auth.nest_url(),
@@ -486,16 +506,8 @@ impl SyncClient {
             actor_hex,
             segment_id
         );
-        let resp = self
-            .auth
-            .http()
-            .get(&url)
-            .bearer_auth(&token)
-            .send()
-            .await
-            .with_context(|| {
-                format!("GET /api/v1/segments/{kind}/{actor_hex}/{segment_id}/meta")
-            })?;
+        let what = format!("GET /api/v1/segments/{kind}/{actor_hex}/{segment_id}/meta");
+        let resp = self.send(self.auth.http().get(&url), &what).await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Err(SegmentMetaUnavailable {
                 kind: kind.to_string(),
@@ -542,19 +554,13 @@ impl SyncClient {
 
     /// Check which of the given chunk hashes are missing on the node.
     pub async fn check_chunks(&self, hashes: &[ContentHash]) -> Result<Vec<ContentHash>> {
-        let token = self.token().await?;
         let url = format!("{}/api/v1/chunks/check", self.auth.nest_url());
         let hex_list: Vec<String> = hashes.iter().map(|h| hex::encode(h.digest())).collect();
         let body = serde_json::json!({ "hashes": hex_list });
+        let req = self.auth.http().post(&url).json(&body);
         let resp: CheckChunksResponse = self
-            .auth
-            .http()
-            .post(&url)
-            .bearer_auth(&token)
-            .json(&body)
-            .send()
-            .await
-            .context("POST /api/v1/chunks/check")?
+            .send(req, "POST /api/v1/chunks/check")
+            .await?
             .error_for_status()
             .context("check_chunks: unexpected status")?
             .json()
@@ -577,16 +583,10 @@ impl SyncClient {
 
     /// Upload a manifest (serialized bytes).
     pub async fn upload_manifest(&self, manifest_bytes: &[u8]) -> Result<()> {
-        let token = self.token().await?;
         let url = format!("{}/api/v1/manifests", self.auth.nest_url());
-        self.auth
-            .http()
-            .post(&url)
-            .bearer_auth(&token)
-            .body(manifest_bytes.to_vec())
-            .send()
-            .await
-            .context("POST /api/v1/manifests")?
+        let req = self.auth.http().post(&url).body(manifest_bytes.to_vec());
+        self.send(req, "POST /api/v1/manifests")
+            .await?
             .error_for_status()
             .context("upload_manifest: unexpected status")?;
         Ok(())
@@ -594,17 +594,11 @@ impl SyncClient {
 
     /// Download a manifest by its content hash.
     pub async fn download_manifest(&self, hash: &ContentHash) -> Result<Vec<u8>> {
-        let token = self.token().await?;
         let hash_hex = hex::encode(hash.digest());
         let url = format!("{}/api/v1/manifests/{}", self.auth.nest_url(), hash_hex);
         let bytes = self
-            .auth
-            .http()
-            .get(&url)
-            .bearer_auth(&token)
-            .send()
-            .await
-            .context("GET /api/v1/manifests/{hash}")?
+            .send(self.auth.http().get(&url), "GET /api/v1/manifests/{hash}")
+            .await?
             .error_for_status()
             .context("download_manifest: unexpected status")?
             .bytes()
@@ -615,16 +609,10 @@ impl SyncClient {
 
     /// Upload an opaque blob.
     pub async fn upload_blob(&self, data: &[u8]) -> Result<()> {
-        let token = self.token().await?;
         let url = format!("{}/api/v1/blob", self.auth.nest_url());
-        self.auth
-            .http()
-            .post(&url)
-            .bearer_auth(&token)
-            .body(data.to_vec())
-            .send()
-            .await
-            .context("POST /api/v1/blob")?
+        let req = self.auth.http().post(&url).body(data.to_vec());
+        self.send(req, "POST /api/v1/blob")
+            .await?
             .error_for_status()
             .context("upload_blob: unexpected status")?;
         Ok(())
@@ -658,29 +646,17 @@ impl SyncClient {
     /// when the nest holds no blob under this hash, `Err` for every other
     /// failure.
     ///
-    /// The post-succession re-seal's provenance discriminator. One
-    /// `sync_changes.manifest_hash` column carries two provenances — a
-    /// chunk-store manifest for an engine-recorded file, and a **blob-store
-    /// primary** for a Media-page upload (`MediaMachine::do_upload` posts the
-    /// sealed primary and records *its* hash) — and they live in different
-    /// stores. `MediaMachine::download_file` already discriminates in this
-    /// direction, treating a typed blob miss as "walk it as a manifest"; the
-    /// re-seal needs the inverse, so it needs a miss it can tell apart from a
-    /// transport failure. Collapsing the two would be the dangerous reading:
-    /// a 500 or a dropped connection would be scored "not a blob", and the
-    /// entry would be reported un-resealable rather than retried.
+    /// The post-succession thumbnail move's fetch: a thumbnail the nest no
+    /// longer holds is nothing to move, while a transport failure must stay an
+    /// error. Collapsing the two would be the dangerous reading: a 500 or a
+    /// dropped connection would be scored "gone", and the thumbnail pointer
+    /// would drop rather than be retried.
     pub async fn download_blob_opt(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>> {
-        let token = self.token().await?;
         let hash_hex = hex::encode(hash.digest());
         let url = format!("{}/api/v1/blob/{}", self.auth.nest_url(), hash_hex);
         let resp = self
-            .auth
-            .http()
-            .get(&url)
-            .bearer_auth(&token)
-            .send()
-            .await
-            .context("GET /api/v1/blob/{hash}")?;
+            .send(self.auth.http().get(&url), "GET /api/v1/blob/{hash}")
+            .await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -695,17 +671,11 @@ impl SyncClient {
 
     /// Download a blob by its content hash.
     pub async fn download_blob(&self, hash: &ContentHash) -> Result<Vec<u8>> {
-        let token = self.token().await?;
         let hash_hex = hex::encode(hash.digest());
         let url = format!("{}/api/v1/blob/{}", self.auth.nest_url(), hash_hex);
         let bytes = self
-            .auth
-            .http()
-            .get(&url)
-            .bearer_auth(&token)
-            .send()
-            .await
-            .context("GET /api/v1/blob/{hash}")?
+            .send(self.auth.http().get(&url), "GET /api/v1/blob/{hash}")
+            .await?
             .error_for_status()
             .context("download_blob: unexpected status")?
             .bytes()
@@ -774,6 +744,155 @@ mod tests {
         bare.download_chunk(&hash)
             .await
             .expect_err("a client with no folder hint must not send one");
+    }
+
+    /// A client whose binding named the folder's row sends the ref form
+    /// beside the two name forms — the form the nest prefers, so a member
+    /// owning a same-named set still reads the shared one (`file-sync.md`
+    /// § Relay serving, step (4)). Matched on the query, with the name-only
+    /// mock absent, so a ref that rides anywhere else, or not at all, fails.
+    #[tokio::test]
+    async fn download_chunk_carries_the_folder_ref_when_the_binding_named_it() {
+        use wiremock::matchers::query_param;
+
+        let server = MockServer::start().await;
+        let data = b"chunk bytes by ref".to_vec();
+        let hash = ContentHash::of_raw(&data);
+        let route = fauna_nest_http::paths::chunk_store::chunk_by_hash(&hex::encode(hash.digest()));
+        Mock::given(method("GET"))
+            .and(path(route.clone()))
+            .and(query_param("folder", "photos"))
+            .and(query_param(
+                "folder_hash",
+                hex::encode(fauna_core::path_crypto::set_name_hash("photos")),
+            ))
+            .and(query_param("folder_ref", "local:42"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(data.clone()))
+            .mount(&server)
+            .await;
+
+        let mut by_name = test_client(&server.uri());
+        by_name.set_folder_hint(Some("photos".to_string()));
+        assert!(by_name.folder_ref().is_none());
+        by_name
+            .download_chunk(&hash)
+            .await
+            .expect_err("a client with no ref sends the name forms alone");
+
+        let mut by_ref = test_client(&server.uri());
+        by_ref.set_folder_hint(Some("photos".to_string()));
+        by_ref.set_folder_ref(Some(fauna_core::folder_keys::FolderRef::Local(42)));
+        assert_eq!(by_ref.download_chunk(&hash).await.unwrap(), data);
+    }
+
+    /// A bearer that answers `stale` until told of a `401`, then `fresh` —
+    /// counting the tellings, so a test can pin "re-minted exactly once"
+    /// (the fixture's `StaticBearer` no-ops `notify_401`).
+    #[derive(Default)]
+    struct CountingBearer {
+        notified: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl fauna_nest_http::BearerSource for CountingBearer {
+        async fn bearer(&self) -> Result<String, fauna_nest_http::ApiError> {
+            let told = self.notified.load(std::sync::atomic::Ordering::SeqCst);
+            Ok(if told == 0 { "stale" } else { "fresh" }.to_string())
+        }
+        async fn notify_401(&self) {
+            self.notified
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn counting_client(server_uri: &str) -> (SyncClient, Arc<CountingBearer>) {
+        let counter = Arc::new(CountingBearer::default());
+        let bearer: Arc<dyn fauna_nest_http::BearerSource> = counter.clone();
+        let auth = Arc::new(fauna_client::AuthClient::with_bearer_source(
+            server_uri.to_string(),
+            ActorKeypair::generate(),
+            bearer,
+            reqwest::Client::new(),
+        ));
+        (SyncClient::new(auth, &[0u8; 32]), counter)
+    }
+
+    fn told(counter: &CountingBearer) -> usize {
+        counter.notified.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A byte-plane `401` (a token the home nest no longer honours — its
+    /// in-memory token store forgot it across a restart) is fed back to the
+    /// bearer once and the call retried once under the re-minted token: the
+    /// read and the upload (whose body must ride the retry too) both land.
+    #[tokio::test]
+    async fn a_byte_plane_401_re_mints_once_and_retries_once() {
+        let server = MockServer::start().await;
+        let data = b"chunk bytes".to_vec();
+        let hash = ContentHash::of_raw(&data);
+        let route = fauna_nest_http::paths::chunk_store::chunk_by_hash(&hex::encode(hash.digest()));
+        Mock::given(header("authorization", "Bearer stale"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(route))
+            .and(header("authorization", "Bearer fresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(data.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/chunks"))
+            .and(header("authorization", "Bearer fresh"))
+            .and(wiremock::matchers::body_bytes(data.clone()))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let (client, counter) = counting_client(&server.uri());
+        assert_eq!(client.download_chunk(&hash).await.unwrap(), data);
+        assert_eq!(told(&counter), 1, "the bearer is asked to re-mint once");
+
+        let (client, counter) = counting_client(&server.uri());
+        client.upload_chunk(&hash, &data).await.unwrap();
+        assert_eq!(told(&counter), 1);
+    }
+
+    /// A `404` is an ordinary miss — the relay answer's "no longer pending"
+    /// included — and never touches the bearer.
+    #[tokio::test]
+    async fn a_byte_plane_404_never_re_mints() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path(
+                fauna_nest_http::paths::chunk_store::chunk_relay_answer(7),
+            ))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let (client, counter) = counting_client(&server.uri());
+        assert!(!client.answer_relay_ask(7, None).await.unwrap());
+        let hash = ContentHash::of_raw(b"absent");
+        client.download_chunk(&hash).await.expect_err("a miss");
+        assert_eq!(told(&counter), 0);
+    }
+
+    /// A `401` that survives the re-mint fails the call — one retry, no loop.
+    #[tokio::test]
+    async fn a_second_401_fails_without_a_loop() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let (client, counter) = counting_client(&server.uri());
+        let hash = ContentHash::of_raw(b"never served");
+        client.download_chunk(&hash).await.expect_err("still 401");
+        assert_eq!(told(&counter), 1);
+        server.verify().await;
     }
 
     #[tokio::test]

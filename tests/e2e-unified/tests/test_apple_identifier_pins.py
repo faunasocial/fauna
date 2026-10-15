@@ -145,7 +145,7 @@ SYNC_AGENT_ENTITLEMENTS = "installer/macos/fauna-sync-agent.entitlements"
 #: Every entitlements file that is NOT the macOS app: none may name the account
 #: keychain group, or the identity seed becomes readable from that process —
 #: for the File Provider appex, the exact least-privilege boundary
-#: `on-demand-files.md` § Apple File Provider binding draws ("BackupKey + bearer,
+#: `on-demand-files-apple.md` § Apple File Provider binding draws ("BackupKey + bearer,
 #: never the seed").
 NOT_ACCOUNT_KEYCHAIN_PLISTS = [
     "apps/fauna-apple/Fauna-iOS/Resources/Fauna-iOS.entitlements",
@@ -213,7 +213,7 @@ def test_only_the_macos_app_is_entitled_to_the_account_keychain_group(rel):
         f"{rel} is entitled to {MACOS_ACCOUNT_KEYCHAIN_GROUP!r}, the access group "
         f"the identity seed lives in on macOS; only Fauna-macOS.entitlements may "
         f"name it — an appex or the agent reading the seed breaks the "
-        f"least-privilege boundary of on-demand-files.md § Apple File Provider "
+        f"least-privilege boundary of on-demand-files-apple.md § Apple File Provider "
         f"binding."
     )
     assert MACOS_ACCOUNT_KEYCHAIN_GROUP not in _read(rel)
@@ -253,6 +253,9 @@ def test_rust_and_swift_owners_agree_on_the_app_group():
     rust = _read("libs/fauna-core/src/platform_ids.rs")
     swift = _read("apps/fauna-apple/FaunaKit/Sources/FaunaExtensionKit/AppleIdentifiers.swift")
     assert f'APPLE_TEAM_ID: &str = "{TEAM_ID}"' in rust
+    # The Fauna Kids record's bundle id — the App ID its age attestation
+    # signs under (`family-safety.md` § The account age band, D5).
+    assert f'APPLE_KIDS_BUNDLE_ID: &str = "{KIDS_BUNDLE_ID}"' in rust
     assert f'APPLE_APP_GROUP: &str = "{APP_GROUP}"' in rust
     assert f'APPLE_MACOS_APP_GROUP: &str = "{MACOS_APP_GROUP}"' in rust
     # Swift forks the one constant with `#if os(macOS)` — both branch literals
@@ -653,6 +656,8 @@ def test_export_compliance_key_absent_from_appex_targets(rel):
 # ---------------------------------------------------------------------------
 
 SHIPPING_BUNDLE_ID = "social.fauna.fauna"
+#: The Fauna Kids iOS app's own record (the `Fauna-Kids-iOS` target).
+KIDS_BUNDLE_ID = "social.fauna.faunakids"
 
 #: The per-platform leaves this family retired 2026-08-23. Unlike the launchd
 #: and `.pkg` tiers, these need no upgrade sweep — no signed or notarized apple
@@ -676,10 +681,15 @@ def test_both_apple_apps_ship_the_one_family_bundle_id():
         f"{SHIPPING_BUNDLE_ID}.FileProviderUI",
         # The home-screen widget (apps/common.md § Home-screen widget).
         f"{SHIPPING_BUNDLE_ID}.Widget",
+        # Fauna Kids — a SEPARATE record by the stores' own rule, not a second
+        # spelling of this family's id: a Kids-Category listing cannot share an
+        # identifier with the 13+ main listing (family-safety.md § The account
+        # age band, the kids-app bullet, item (2); installers/ios.md).
+        KIDS_BUNDLE_ID,
     }
     assert declared == expected, (
-        f"the .xcodeproj must declare exactly the one-family id and its three "
-        f"appex children; got {sorted(declared)}. Universal purchase requires "
+        f"the .xcodeproj must declare exactly the one-family id, its three "
+        f"appex children and the Fauna Kids record; got {sorted(declared)}. Universal purchase requires "
         f"iOS and macOS to share ONE bundle id, and an appex must be prefixed "
         f"by its host app's id or xcodebuild refuses to embed it."
     )
@@ -773,13 +783,14 @@ def test_the_e2e_ios_bundle_id_matches_the_shipping_app():
 # ---------------------------------------------------------------------------
 
 EXPORT_OPTIONS = "apps/fauna-apple/ExportOptions-AppStore.plist"
-#: The four iOS Release configs (Fauna-iOS, its File Provider pair, the widget)
-#: — the ONLY configs that may carry device signing.
+#: The iOS Release configs (Fauna-iOS, its File Provider pair, the widget, and
+#: the Fauna Kids app) — the ONLY configs that may carry device signing.
 IOS_RELEASE_CONFIGS = (
     "FB0000000000000000000021",
     "FB0000000000000000000023",
     "FC0000000000000000000033",
     "FD0000000000000000000043",
+    "FF000000000000000000000D",
 )
 _DEVICE_SIGNING_KEYS = (
     "CODE_SIGN_IDENTITY[sdk=iphoneos*]",
@@ -826,7 +837,7 @@ def test_ios_export_options_name_a_profile_for_every_bundle():
     )
 
 
-def test_device_signing_lives_only_in_the_four_ios_release_configs():
+def test_device_signing_lives_only_in_the_ios_release_configs():
     pbxproj = _read("apps/fauna-apple/Fauna.xcodeproj/project.pbxproj")
     configs = _build_configs(pbxproj)
     for cid in IOS_RELEASE_CONFIGS:
@@ -840,7 +851,7 @@ def test_device_signing_lives_only_in_the_four_ios_release_configs():
         cid for cid, body in configs.items()
         if cid not in IOS_RELEASE_CONFIGS and any(k in body for k in _DEVICE_SIGNING_KEYS))
     assert not stray, (
-        f"device signing keys appear outside the four iOS Release configs: {stray}. "
+        f"device signing keys appear outside the iOS Release configs: {stray}. "
         f"Debug, simulator and macOS builds keep the project-level ad-hoc '-'."
     )
     assert "CODE_SIGN_STYLE = Automatic" not in pbxproj, (

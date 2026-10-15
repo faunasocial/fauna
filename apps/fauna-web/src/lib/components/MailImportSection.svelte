@@ -37,7 +37,17 @@
   // Start; web cannot, and pretending otherwise would fake progress.
   import { identity } from '$lib/store';
   import { mailImportMachine } from '$lib/rpc';
-  import { ensureWasm, importSourceKindLabel, importTlsModeLabel, mailImportConnectActions } from '$lib/wasm';
+  import {
+    ensureWasm,
+    importSelectedTotals,
+    importSourceKindLabel,
+    importTlsModeLabel,
+    mailImportConnectActions,
+    transferTiming,
+    type TransferTiming,
+  } from '$lib/wasm';
+  import { byteSize, durationSecs } from '$lib/value-format';
+  import { confirmSummaryText } from '$lib/mail-import-confirm';
   import { resolveLocalized } from '$lib/i18n/localized';
   import { onDestroy, onMount } from 'svelte';
   import { t } from '$lib/i18n/strings';
@@ -51,7 +61,12 @@
   // Shapes mirror the shared `MailImportSnapshot` serde JSON (snake_case across
   // the serde_wasm_bindgen boundary; the step/kind enums serialize as their
   // PascalCase variant-name string).
-  interface SourceMailboxOption { name: string; selected: boolean; message_count: number; }
+  interface SourceMailboxOption {
+    name: string;
+    selected: boolean;
+    message_count: number;
+    byte_total?: number | null;
+  }
   interface ImportSnapshot {
     step: string; // "Source" | "Scope" | "Confirm" | "Progress" | "Done"
     source_kind: string; // "Gmail" | "Outlook" | "ICloud" | "Generic"
@@ -67,6 +82,8 @@
     skipped_count: number;
     errored_count: number;
     total_count: number;
+    started_at: number; // the session's epoch seconds; 0 before a session exists
+    last_progress_at: number;
     error_log: string[];
     status: string; // "Idle" | "Loading" | "Working"
     error: string | null;
@@ -101,6 +118,13 @@
     cancelArmTimer = setTimeout(() => { cancelArmed = false; }, CANCEL_ARM_MS);
   }
   let snap = $state<ImportSnapshot | null>(null);
+  // Review skipped reveals the run's skip log below the Done card: a page-local
+  // view toggle (the snapshot already carries the log), cleared whenever the
+  // wizard is off Done so a fresh visit hides it — tui's `show_skipped` shape.
+  let showSkipped = $state(false);
+  $effect(() => {
+    if (snap?.step !== 'Done') showSkipped = false;
+  });
 
   // Page-local draft buffers, exactly as tui and linux hold them: every Source
   // and Scope text field is a client-only value the machine would otherwise
@@ -206,12 +230,62 @@
   }
 
   function confirmSummary(s: ImportSnapshot): string {
-    const selected = s.mailboxes.filter((m) => m.selected);
-    return t.mail_import.confirm_summary_fmt({
-      source: sourceLabel(s.source_kind),
-      mailboxes: String(selected.length),
-      messages: String(selected.reduce((n, m) => n + m.message_count, 0)),
+    return confirmSummaryText(
+      sourceLabel(s.source_kind),
+      importSelectedTotals(s),
+      {
+        plain: t.mail_import.confirm_summary_fmt,
+        sized: t.mail_import.confirm_summary_sized_fmt,
+      },
+      byteSize,
+    );
+  }
+
+  // Elapsed time and time left, from the shared `transfer_timing`
+  // (`mailbox-migration.md` § Wizard steps steps 5–6) — never derived here. A
+  // running session reads this device's clock; the snapshot repaint re-renders it.
+  function timing(s: ImportSnapshot): TransferTiming {
+    return transferTiming(
+      s.started_at,
+      s.last_progress_at,
+      s.session_state === 'Running',
+      s.imported_count + s.skipped_count + s.errored_count,
+      s.total_count,
+      Math.floor(Date.now() / 1000),
+    );
+  }
+
+  function progressSummary(s: ImportSnapshot): string {
+    const summary = t.mail_import.progress_summary_fmt({
+      imported: String(s.imported_count),
+      total: String(s.total_count),
+      skipped: String(s.skipped_count),
+      errored: String(s.errored_count),
     });
+    const { elapsed_secs: elapsed, remaining_secs: remaining } = timing(s);
+    if (elapsed == null) return summary;
+    if (remaining == null) {
+      return t.mail_import.progress_elapsed_fmt({ summary, elapsed: durationSecs(elapsed) });
+    }
+    return t.mail_import.progress_remaining_fmt({
+      summary,
+      elapsed: durationSecs(elapsed),
+      remaining: durationSecs(remaining),
+    });
+  }
+
+  // § Wizard steps step 6: the counts and the time elapsed; a snapshot with no
+  // clock yet keeps the untimed form.
+  function doneSummary(s: ImportSnapshot): string {
+    const counts = {
+      imported: String(s.imported_count),
+      skipped: String(s.skipped_count),
+      errored: String(s.errored_count),
+    };
+    const took = timing(s).elapsed_secs;
+    return took == null
+      ? t.mail_import.done_summary_fmt(counts)
+      : t.mail_import.done_summary_timed_fmt({ ...counts, elapsed: durationSecs(took) });
   }
 </script>
 
@@ -393,12 +467,7 @@
       <div class="step">
         <h3 class="muted small">{t.mail_import.progress_title}</h3>
         <p class="summary" data-testid={IDS.MAIL_IMPORT_PROGRESS_SUMMARY}>
-          {t.mail_import.progress_summary_fmt({
-            imported: String(snap.imported_count),
-            total: String(snap.total_count),
-            skipped: String(snap.skipped_count),
-            errored: String(snap.errored_count),
-          })}
+          {progressSummary(snap)}
         </p>
         <progress data-testid={IDS.MAIL_IMPORT_PROGRESS_BAR} value={snap.imported_count} max={snap.total_count || 1}></progress>
         <!-- The machine tracks only GLOBAL counts, not a per-mailbox breakdown
@@ -439,25 +508,24 @@
       <div class="step">
         <h3 class="muted small">{t.mail_import.done_title}</h3>
         <p class="summary" data-testid={IDS.MAIL_IMPORT_DONE_SUMMARY}>
-          {t.mail_import.done_summary_fmt({
-            imported: String(snap.imported_count),
-            skipped: String(snap.skipped_count),
-            errored: String(snap.errored_count),
-          })}
+          {doneSummary(snap)}
         </p>
-        <!-- Neither button is backed by a MailImportAction — the shared machine
-             never wired a "view inbox" / "skip log" RPC. Both go to the mail
-             surface, tui's own resolution; "Review skipped" cannot deep-link to
-             a skip-log page that exists nowhere yet (the log is inline on
-             Progress instead). -->
+        <!-- Neither button is backed by a MailImportAction. View imported goes
+             to the mail surface; Review skipped toggles the skip log below. -->
         <div class="nav">
           <a class="btn primary" data-testid={IDS.MAIL_IMPORT_VIEW_IMPORTED_BUTTON} href="/conversations">
             {t.mail_import.view_imported_button}
           </a>
-          <a class="btn" data-testid={IDS.MAIL_IMPORT_REVIEW_SKIPPED_BUTTON} href="/conversations">
+          <button class="btn" data-testid={IDS.MAIL_IMPORT_REVIEW_SKIPPED_BUTTON} onclick={() => { showSkipped = !showSkipped; }}>
             {t.mail_import.review_skipped_button}
-          </a>
+          </button>
         </div>
+        {#if showSkipped}
+          <span class="muted small">{t.mail_import.error_log_title}</span>
+          <div class="error-log" data-testid={IDS.MAIL_IMPORT_ERROR_LOG}>
+            {#each snap.error_log as line}<p class="muted small">{line}</p>{/each}
+          </div>
+        {/if}
       </div>
     {/if}
   {/if}

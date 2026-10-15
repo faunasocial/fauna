@@ -1622,20 +1622,6 @@ impl SettingsState {
         devices::wire_mls_query(&self.devices, session);
     }
 
-    /// Wire the Devices page's fleet-scope removal door
-    /// (`devices.md` § Removing a Device) once the account-store runtime
-    /// handle lands. Called from `app.rs`'s `AccountStoreReady` arm, the same
-    /// edge that sets [`Self::account_store`] — this struct's own field is
-    /// module-private, so `app.rs` reaches it through this wrapper rather
-    /// than through `self.settings.devices` directly (the [`Self::wire_folder_join_filter`]
-    /// pattern).
-    pub fn wire_fleet_removal(
-        &self,
-        handle: fauna_sync_engine::account_runtime::AccountStoreHandle,
-    ) {
-        devices::wire_fleet_removal(&self.devices, handle);
-    }
-
     // The post-auth hook takes the session's facts one by one, as the sibling
     // sub-page wirings do; bundling them into a struct purely to satisfy the
     // arity lint would put a type between `session.rs` and every field it
@@ -1696,13 +1682,8 @@ impl SettingsState {
             Arc::clone(&nest),
             &secret_hex,
             succession_predecessors,
-            follows_door(self.account_runtime.clone()),
+            self.account_runtime.clone(),
         );
-        // A rebuild under a runtime that is already up must not strand the
-        // fresh machine's removal door on an empty slot.
-        if let Some(handle) = self.account_store.clone() {
-            devices::wire_fleet_removal(&self.devices, handle);
-        }
         // The AT Protocol sub-page's shared machine — same reasoning as Mail (it
         // decodes `secret_hex` too, for the same BackupKey-derivation reason).
         self.atproto = atproto::AtprotoState::build(
@@ -1871,6 +1852,11 @@ impl SettingsState {
         // `MintedKit` holds a `SecretString` rather than a `String`.
         self.recovery.reset();
         self.privacy = PrivacyState::default();
+        // Per-actor page state, dropped with the session like its siblings below —
+        // the cached origin (and the published rows) are this actor's own, and
+        // `attach_session` resets the same field for the identity-change path
+        // that never passes through here.
+        self.web = WebSettingsState::default();
         // Drops the `Arc<MailSettingsMachine>` (and with it the machine's own
         // client + signer), so a stale machine can never outlive the session
         // that built it — the same reason `nest` is cleared above.
@@ -2222,25 +2208,34 @@ pub fn nav_enter_op(state: &SettingsState) -> Option<Op> {
 /// Re-read the OPEN sub-page's store-backed render source off a store-change
 /// notice rather than a visit — the [`atproto_resync_op`] shape, for the W5.2
 /// `data_version` floor (`account-data-plane.md` § Multi-instance
-/// concurrency): a sibling same-account process committed to the shared
-/// store, so an open page's snapshot may no longer be what the store holds.
+/// concurrency) and the own pump's change generation (`account-runtime.md`
+/// § Multi-instance concurrency, part 4): a sibling same-account process, or
+/// this runtime's own pump, changed the shared store, so an open page's
+/// snapshot may no longer be what the store holds.
 ///
 /// Exactly the sub-pages whose load op reads through the account store
 /// (`store:` in their op) — every other sub-page either self-hydrates from
 /// the nest on its own visit cadence or renders live client state, neither of
-/// which a store commit can stale. `None` also when none of them is open: the
+/// which a store commit can stale. Privacy's filter marks and Members to
+/// review are App-wide ledger planes, re-read on every notice by
+/// [`ledger_resync_ops`] instead. `None` also when none of them is open: the
 /// next visit's own load serves fresh state anyway.
 pub fn store_resync_op(state: &mut SettingsState) -> Option<Op> {
     match state.sub {
         SubPage::MutedWords => muted_words_load_op(state),
         SubPage::TaskDelegation => task_delegation_load_op(state),
-        SubPage::Folders => folders_hydrate_op(state),
+        SubPage::Folders => folders_hydrate_op(state, true),
+        // The Trained topics facet; the home's labeler-catalog and
+        // engagement-cue halves are nest reads, never the store's.
+        SubPage::Personalization => trained_topics::resync_op(state),
+        SubPage::Devices => devices_resync_op(state),
         // The custody facet folds from the store-backed registry rows too,
         // so a store move while ON the page re-hydrates (the Folders shape).
         SubPage::Nests => state.nests.machine.clone().map(|machine| Op::HydrateNests {
             machine,
             store: state.account_store.clone(),
             custody: custody_ctx_of(state),
+            reread: true,
         }),
         _ => None,
     }
@@ -2325,6 +2320,24 @@ pub fn mail_spam_resync_op(state: &SettingsState) -> Option<Op> {
     let machine = state.mail_spam.machine.clone()?;
     let nest = state.nest.clone()?;
     Some(Op::HydrateMailSpam { machine, nest })
+}
+
+/// Re-read the Export wizard off a *push* (or a reconnect) rather than a visit
+/// — `fauna_protocol::StaleSurfaces::mail_export`: an export another device
+/// started, finished, failed or discarded (`mail-export.md` § A failed export
+/// is a record the wizard shows until the user moves on). The machine's own
+/// `Refresh` decides what to adopt, and ignores the nudge while it holds a run.
+///
+/// The visit's hydrate op minus the visit's `reset_form`, the
+/// [`mail_spam_resync_op`] shape: a push never clears the date drafts the user
+/// is typing. `None` unless the Export sub-page is the one shown (the flag is
+/// page-gated; a visit re-reads anyway) or before login (no machine).
+pub fn mail_export_resync_op(state: &SettingsState) -> Option<Op> {
+    if state.sub != SubPage::MailExport {
+        return None;
+    }
+    let machine = state.mail_export.machine.clone()?;
+    Some(Op::HydrateMailExport { machine })
 }
 
 /// Re-read the Connected apps page off the same push — the consent card moved
@@ -3177,6 +3190,11 @@ pub enum Action {
     /// (`mailbox-migration.md` § Wizard steps step 5) — the `MailExportCancel`
     /// gate shape, without the blob-unlink side effect (import has no blob).
     MailImportCancel,
+    /// `mail-import-review-skipped-button` — show/hide the skip log on the
+    /// Done screen (`mailbox-migration.md` § Wizard steps step 6). Purely
+    /// local: the log is already on the snapshot, so this is a view toggle,
+    /// not a machine action — the `ArchiveImportToggleSkipped` shape.
+    MailImportToggleSkipped,
 
     // ── Import from other services (`archive-import.md` § The wizard and its
     // machine, steps 1–6). Every gesture below goes through the shared
@@ -3343,8 +3361,8 @@ pub enum Action {
     /// which would retire the kit the user just received to fix a blob).
     RecoveryResealEscrow,
     /// `recovery-kit-let-go-button` — let go of the dead generations the
-    /// section lists (`account-data-taxonomy.md` § The generation machinery →
-    /// *Fleet-scope reclamation*, clause (3)(j)): the account runtime re-reads
+    /// section lists (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (3)(j)): the account runtime re-reads
     /// them dead and retires every row resting under each. Gated on
     /// `recovery-kit-let-go-confirm-field` holding the confirm word, re-checked
     /// when it fires.
@@ -4366,29 +4384,28 @@ impl Action {
             Action::MailCommitForwardPerHour => Some("fauna.bridges.set_forward_per_hour"),
 
             // ── Mail → Export mailbox (`mail-export.md`) ────────────────────
-            // ⚠ EVERY export gesture is `None`, and not because the sweep
-            // skipped them: the export seam issues no wire call at all. Steps
-            // 1–3 are client-side state moves, and every durable one —
-            // Start/Pause/Resume/Cancel/Discard, and the Refresh that Download
-            // dispatches — resolves to `rpc_glue.rs::export_unimpl`, a
-            // client-side rejection naming an RPC that is not a registered kind
-            // (`mail-export.md` § Implementation status today). There is nothing
-            // for the gate to classify, and declaring the named-but-absent kind
-            // would red walk invariant I7. Re-visit when the backend lands.
+            // The wizard's steps 1–3 are client-side state moves inside the
+            // shared machine's `dispatch` — no wire call. Every durable gesture
+            // drives a real `fauna.bridges.*_export_session` kind (the
+            // `MailExportNest` seam), so it declares it, the Import shape.
+            // Resume declares the warm `resume_export_session`: the cold path
+            // (`restart_export_session`) shares its class. Download stays
+            // `None`: it is an HTTP GET of the session's `download_url`
+            // (§ Download flow), not a wire kind, and reads are never gated.
             Action::MailExportSelectFormat(_)
             | Action::MailExportNext
             | Action::MailExportBack
             | Action::MailExportToggleMailbox(_)
             | Action::MailExportToggleStripHeaders
-            | Action::MailExportStart
-            | Action::MailExportPause
-            | Action::MailExportResume
-            | Action::MailExportCancel
-            | Action::MailExportDownload
-            | Action::MailExportDiscard => None,
+            | Action::MailExportDownload => None,
+            Action::MailExportStart => Some("fauna.bridges.start_export_session"),
+            Action::MailExportPause => Some("fauna.bridges.pause_export_session"),
+            Action::MailExportResume => Some("fauna.bridges.resume_export_session"),
+            Action::MailExportCancel => Some("fauna.bridges.cancel_export_session"),
+            Action::MailExportDiscard => Some("fauna.bridges.discard_export_blob"),
 
             // ── Mail → Import mailbox (`mailbox-migration.md`) ──────────────
-            // Unlike Export, the backend is real: Start/Pause/Resume/Cancel each
+            // As for Export, the backend is real: Start/Pause/Resume/Cancel each
             // drive a genuine `import_sessions` RPC (§ RPC surface). Connect
             // talks to the FOREIGN IMAP source, never nest — no nest wire kind
             // to declare. The rest are client-only mutations inside the
@@ -4399,7 +4416,8 @@ impl Action {
             | Action::MailImportConnect
             | Action::MailImportToggleMailbox(_)
             | Action::MailImportNext
-            | Action::MailImportBack => None,
+            | Action::MailImportBack
+            | Action::MailImportToggleSkipped => None,
             Action::MailImportStart => Some("fauna.bridges.start_import_session"),
             Action::MailImportPause => Some("fauna.bridges.pause_import_session"),
             Action::MailImportResume => Some("fauna.bridges.resume_import_session"),
@@ -5485,6 +5503,7 @@ pub fn apply(state: &mut SettingsState, action: Action) {
         | Action::MailImportPause
         | Action::MailImportResume
         | Action::MailImportCancel
+        | Action::MailImportToggleSkipped
         // Same for the archive-import wizard: every gesture, nest call or not,
         // goes through the shared machine's `dispatch`, so each needs the
         // machine Arc off `App` in `apply_local`; the rail row routes through
@@ -5569,6 +5588,96 @@ pub fn apply(state: &mut SettingsState, action: Action) {
 /// a person in the same frame. `None` means the read failed and the cache
 /// stands: blanking it would paint an empty review page, which is the one thing
 /// this surface must never say by accident.
+/// The Devices machine's snapshot fold — every Devices and Folders outcome
+/// lands here. The page is backed by a shared manager (like Mail), so this
+/// fold MUST bridge the machine's error onto `error-message` — the same
+/// dropped-command hazard `apply_mail_snapshot`'s comment names.
+/// `DevicesSnapshot.error` is a `LocalizedText` (unlike Mail's own
+/// already-resolved `String`), so it's resolved here before insertion.
+///
+/// `reread` is a store-change re-read of the open Devices sub-page
+/// ([`devices_resync_op`]): its bridge writes and retires only its own error
+/// (`PageErrors::insert_own` / `retire_own`), so a gesture's message — a
+/// custody act's refusal, which never rides the machine — survives it.
+fn fold_devices_snapshot(app: &mut App, snapshot: Box<DevicesSnapshot>, reread: bool) {
+    // Paint the machine as it stands NOW, not the reading the op took
+    // when its own work finished. Ops finish out of order: a background
+    // re-hydrate (`store_resync_op`, on every account-store change) can
+    // fold after a newer gesture's result, and its older reading then
+    // painted the list from before the create — or the wizard still open
+    // over the whole page — with nothing left to refresh it. The machine
+    // is the one source both readings came from; linux's observer reads
+    // it live for the same reason. A fixture with no machine folds the
+    // carried snapshot.
+    let snapshot = match &app.settings.devices.machine {
+        Some(machine) => Box::new(machine.snapshot()),
+        None => snapshot,
+    };
+    let own = &mut app.settings.devices.read_error;
+    match (&snapshot.error, reread) {
+        (Some(err), true) => {
+            app.errors.insert_own(
+                Page::Settings,
+                err.resolve(fauna_i18n::strings::lookup),
+                own,
+            );
+        }
+        (None, true) => app.errors.retire_own(&Page::Settings, own),
+        (Some(err), false) => {
+            *own = None;
+            app.errors
+                .insert(Page::Settings, err.resolve(fauna_i18n::strings::lookup));
+        }
+        (None, false) => {
+            *own = None;
+            app.errors.remove(&Page::Settings);
+        }
+    }
+    app.settings.devices.snapshot = Some(*snapshot);
+    // Re-seed the expanded row's NEST-PLACE buffers from what the nest
+    // now actually holds. Without this the boxes keep whatever was
+    // typed even where the nest stored something else — an unparseable
+    // quiet period is sent as `None` (unset), so the screen would go on
+    // showing a bound that does not exist. The knobs are three-state,
+    // and "unset" is the state a stale buffer most easily fakes. Never
+    // over staged, unsaved edits, though — the re-seed waits for the
+    // save (`reseed_nest_place_if_untouched`).
+    //
+    // ⚠ Only the nest-place buffers. The selective-sync path buffers are
+    // deliberately NOT re-seeded here: every folder gesture on this page
+    // lands a fresh snapshot, so doing so would wipe half-typed
+    // `folder-include-paths` the moment the user flipped some unrelated
+    // toggle on the same row.
+    let expanded = app.settings.folders.expanded;
+    if let Some(i) = expanded {
+        let fs = app
+            .settings
+            .devices
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.folders.get(i))
+            .cloned();
+        folders::reseed_nest_place_if_untouched(&mut app.settings.folders, fs.as_ref());
+    }
+}
+
+/// The open Devices sub-page's store-change re-read — its nav-edge hydrate
+/// (the machine's refresh, the custody facet, the enrolled row and the
+/// enrollment refusal off the store) with the level-rule fold
+/// ([`Outcome::DevicesPage`]'s `reread`).
+fn devices_resync_op(state: &SettingsState) -> Option<Op> {
+    let custody = custody_ctx_of(state);
+    state
+        .devices
+        .machine
+        .clone()
+        .map(|machine| Op::HydrateDevices {
+            machine,
+            custody,
+            reread: true,
+        })
+}
+
 fn fold_review_roster(app: &mut App, roster: Option<Vec<fauna_core::data::MemberReview>>) {
     if let Some(roster) = roster {
         app.member_reviews = roster;
@@ -5654,6 +5763,25 @@ pub(crate) fn sign_out_confirm_unless(app: &mut App, blocked: impl FnOnce(&App) 
         return;
     }
     app.reset();
+}
+
+/// The mail-export machine, with the account's handle refreshed onto it first.
+///
+/// The handle names the archive's root directory and the saved file
+/// (`mail-export.md` § Compression wrapper), and it can arrive after the page's
+/// machine was built (the e2e `set_state` login lands it with the identity
+/// follower's first mint) or change with the user — so it is read at the
+/// gesture that uses it (Start, Resume, Download), never baked at attach. The
+/// linux page does the same at the same three gestures
+/// (`apps/fauna-linux/src/settings/mail_export.rs::dispatch_action`).
+fn mail_export_machine_with_current_handle(
+    app: &App,
+) -> Option<Arc<fauna_client_mail_settings::MailExportMachine>> {
+    let machine = app.settings.mail_export.machine.clone()?;
+    if let Some(handle) = crate::session::session_account_handle(app) {
+        machine.set_actor_handle(handle);
+    }
+    Some(machine)
 }
 
 /// The dispatcher for a `Gesture::Settings` — the local/network split every
@@ -5987,6 +6115,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                     .as_ref()
                     .map(|session| session.engine()),
                 credentials: Arc::clone(&app.credentials),
+                account_store: app.settings.account_store.clone(),
             })
         }
         // A rail-row click into Mail — the same self-hydrate entry the
@@ -6012,7 +6141,11 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 .devices
                 .machine
                 .clone()
-                .map(|machine| Op::HydrateDevices { machine, custody })
+                .map(|machine| Op::HydrateDevices {
+                    machine,
+                    custody,
+                    reread: false,
+                })
         }
         // A rail-row click into Sessions — the same self-hydrate entry the
         // two-element nav patch takes via `route_subpage`.
@@ -6048,18 +6181,16 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // emits no gesture, but an agent driving the id directly reaches
             // this arm, and the wrong word must refuse loudly
             // (`ui/sessions.md` § Errors & edge cases; testing.md point 11).
-            let word = fauna_client_recovery::ceremony::LOCKOUT_CONFIRM_WORD;
-            if app.settings.sessions.lockout_confirm_input != word {
+            if let Some(refusal) = fauna_client_account::sessions_view::lockout_word_refusal(
+                &app.settings.sessions.lockout_confirm_input,
+                fauna_client_recovery::ceremony::LOCKOUT_CONFIRM_WORD,
+            ) {
                 let snapshot = app
                     .settings
                     .sessions
                     .snapshot
                     .get_or_insert_with(Default::default);
-                snapshot.error = Some(fauna_core::localized::LocalizedText::key_arg(
-                    fauna_client_account::sessions_view::keys::LOCKOUT_WRONG_WORD,
-                    "word",
-                    word,
-                ));
+                snapshot.error = Some(refusal);
                 return None;
             }
             let op = sessions::op(&app.settings, Some(sessions::SessionsAct::Lockout))?;
@@ -6278,7 +6409,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 linger_enabled: crate::sync_agent::linger_enabled(),
                 ..Default::default()
             };
-            folders_hydrate_op(&app.settings)
+            folders_hydrate_op(&app.settings, false)
         }
         Action::SetFolderConflictPolicy { row, policy } => {
             let name = app
@@ -6851,19 +6982,16 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // save documents: a re-expand is the caller's job, not this gesture's).
         Action::SaveFolderPaths => {
             let i = app.settings.folders.expanded?;
-            let name = app
-                .settings
-                .devices
-                .snapshot
-                .as_ref()?
-                .folders
-                .get(i)?
-                .name
-                .clone();
-            let include =
-                fauna_folders_machine::parse_paths_field(&app.settings.folders.include_paths_input);
-            let exclude =
-                fauna_folders_machine::parse_paths_field(&app.settings.folders.exclude_paths_input);
+            let row = app.settings.devices.snapshot.as_ref()?.folders.get(i)?;
+            let name = row.name.clone();
+            // A list this device could not open is sent as `None` ("leave
+            // unchanged"), never as the blank the editor no longer shows.
+            let include = (!row.include_paths_unreadable).then(|| {
+                fauna_folders_machine::parse_paths_field(&app.settings.folders.include_paths_input)
+            });
+            let exclude = (!row.exclude_paths_unreadable).then(|| {
+                fauna_folders_machine::parse_paths_field(&app.settings.folders.exclude_paths_input)
+            });
             let machine = app.settings.devices.machine.clone()?;
             // ⚠ SAFETY NET, not scope creep: `folder-location-path-input` and
             // `folder-save-paths` are two adjacent "save"-shaped controls in the
@@ -7348,7 +7476,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             })
         }
         Action::MailExportStart => Some(Op::MailExportDispatch {
-            machine: app.settings.mail_export.machine.clone()?,
+            machine: mail_export_machine_with_current_handle(app)?,
             actions: vec![MailExportAction::Start],
         }),
         Action::MailExportPause => Some(Op::MailExportDispatch {
@@ -7356,7 +7484,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             actions: vec![MailExportAction::Pause],
         }),
         Action::MailExportResume => Some(Op::MailExportDispatch {
-            machine: app.settings.mail_export.machine.clone()?,
+            machine: mail_export_machine_with_current_handle(app)?,
             actions: vec![MailExportAction::Resume],
         }),
         // The two-click inline confirm, the `MailSpamReset` shape: arming is
@@ -7380,7 +7508,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // `error-message` rather than silently saving nothing (testing.md
         // point 11), and leaves no file behind.
         Action::MailExportDownload => Some(Op::MailExportDispatch {
-            machine: app.settings.mail_export.machine.clone()?,
+            machine: mail_export_machine_with_current_handle(app)?,
             actions: vec![MailExportAction::Download],
         }),
         Action::MailExportDiscard => Some(Op::MailExportDispatch {
@@ -7458,9 +7586,11 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // fresh spawn, which `Op::MailImportDispatch`'s executor does whenever
         // the post-dispatch snapshot reads `Running` — covering both Start and
         // Resume from the one call site.
+        // On a session adopted after a restart, the credential the Progress
+        // step painted is committed first (`MailImportState::resume_actions`).
         Action::MailImportResume => Some(Op::MailImportDispatch {
             machine: app.settings.mail_import.machine.clone()?,
-            actions: vec![MailImportAction::Resume],
+            actions: app.settings.mail_import.resume_actions(),
         }),
         // The two-click inline confirm, the `MailExportCancel` shape: arming is
         // local and only the confirm reaches the machine. Already-imported
@@ -7476,6 +7606,13 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 machine: app.settings.mail_import.machine.clone()?,
                 actions: vec![MailImportAction::Cancel],
             })
+        }
+        // Purely local — the skip log is already on the snapshot, so showing it
+        // is a view toggle with no machine action behind it (the
+        // `ArchiveImportToggleSkipped` shape).
+        Action::MailImportToggleSkipped => {
+            app.settings.mail_import.show_skipped ^= true;
+            None
         }
 
         // ── Import from other services. Every gesture funnels through the one
@@ -8089,7 +8226,15 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // Every arm delegates to `trained_topics`, which owns the local
         // bookkeeping (the retarget, the busy arming) and returns the op; the
         // shared service owns everything else.
-        Action::CommitTrainedFactorName => trained_topics::commit_name_op(&mut app.settings),
+        Action::CommitTrainedFactorName => {
+            // A blank buffer spends no round trip, but it must still say why
+            // nothing was created — the shared refusal's own sentence.
+            if let Some(refusal) = trained_topics::blank_name_refusal(&app.settings) {
+                app.errors.insert(Page::Settings, refusal);
+                return None;
+            }
+            trained_topics::commit_name_op(&mut app.settings)
+        }
         Action::StartTrainedFactorRename(index) => {
             // Purely local — retargeting the shared input spends no round trip.
             trained_topics::start_rename(&mut app.settings, index);
@@ -8474,6 +8619,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                     machine,
                     store: app.settings.account_store.clone(),
                     custody: custody_ctx_of(&app.settings),
+                    reread: false,
                 })
         }
         Action::NestsShowAddForm => {
@@ -8682,8 +8828,9 @@ pub struct GroupConsentOp {
 pub enum Op {
     /// The Status landing's live reads, concurrently: `fauna.quota.get` for the
     /// quota cells and the feature plane's transparency read
-    /// (`fauna.features.status` + `fauna.nest.info`, both behind the shared
-    /// `FeaturesClient::rows`) for `feature-limits-section`.
+    /// (`fauna.features.status` joined with the connection's one
+    /// `fauna.nest.info` reply, via the shared `FeaturesClient::rows_with`) for
+    /// `feature-limits-section`.
     ///
     /// **One op, not two,** because the nav edge hands back exactly one awaited
     /// op — and that is the whole reason a driver never sees the pre-fetch
@@ -8717,9 +8864,12 @@ pub enum Op {
     /// [`Outcome::UpdateCheckResolved`].
     CheckForUpdates,
     /// The once-per-sign-in look (`installers/README.md` § Knowing a newer
-    /// version is out): the shared `fauna_client::update_look`, spawned by
-    /// `session::establish`. Resolves to [`Outcome::SignInLookResolved`].
-    LookForUpdatesAtSignIn,
+    /// version is out): the shared `fauna_client::update_look`, reading the
+    /// newest release `nest` (the one just signed in to) reports, spawned by
+    /// `session::establish`. Reads the connection's one `fauna.nest.info`
+    /// reply (`fauna_protocol::read_nest_info`, shared with the landing load).
+    /// Resolves to [`Outcome::SignInLookResolved`].
+    LookForUpdatesAtSignIn { nest: Arc<NestClient> },
     /// `fauna.profile.handle.change` — the (already format-validated) handle.
     ChangeHandle {
         nest: Arc<NestClient>,
@@ -8930,6 +9080,14 @@ pub enum Op {
         /// idempotent, so the later `adopt_successor` re-persisting it in the
         /// fold is a no-op that just re-activates it.
         credentials: Arc<fauna_credential_store::CredentialStore>,
+        /// The succeeded identity's account runtime, taken while it still
+        /// serves that identity: on a landed arm the op records its fleet as
+        /// the departed devices the successor attests
+        /// (`fauna_client_account_runtime::record_departed_fleet`;
+        /// `succession-aftermath.md` § Re-key scope → *Predecessor devices
+        /// are departed devices*). `None` before the assembly lands, when the
+        /// identity's store is read at rest instead.
+        account_store: Option<fauna_sync_engine::account_runtime::AccountStoreHandle>,
     },
     /// Cancel a pending seed-alone replacement on proof of the current kit, at
     /// the bound nest and every linked nest
@@ -8957,6 +9115,12 @@ pub enum Op {
     /// makes afterwards. See [`member_review_hydrate_op`] for why this page
     /// reads on a nav edge when the member lists deliberately do not.
     LoadMemberReviews {
+        store: Arc<dyn fauna_client_config::SuccessionLedgerStore>,
+    },
+    /// The inherited-filter marks' re-read off a store-change notice
+    /// ([`ledger_resync_ops`]) — the filter plane's twin of
+    /// [`Self::LoadMemberReviews`], folding onto [`Outcome::FilterMarks`].
+    LoadFilterMarks {
         store: Arc<dyn fauna_client_config::SuccessionLedgerStore>,
     },
     /// The Privacy sub-page's self-fetch (`fauna.inbox.mode.get` +
@@ -9491,6 +9655,9 @@ pub enum Op {
     HydrateDevices {
         machine: Arc<DevicesMachine>,
         custody: Option<devices::CustodyCtx>,
+        /// Off a store-change notice ([`devices_resync_op`]) rather than a
+        /// visit: [`Outcome::DevicesPage`] then folds under the level rule.
+        reread: bool,
     },
     /// One T16 custody gesture (accept / decline / budget / stop / revoke),
     /// grant-resolved at dispatch time; the arm runs the act and re-folds
@@ -9536,8 +9703,8 @@ pub enum Op {
     SaveFolderPaths {
         machine: Arc<DevicesMachine>,
         name: String,
-        include: Vec<String>,
-        exclude: Vec<String>,
+        include: Option<Vec<String>>,
+        exclude: Option<Vec<String>>,
     },
     /// `DevicesMachine::set_folder_conflict_policy`, then re-snapshot —
     /// `folder-conflict-policy-select[row]`.
@@ -9596,6 +9763,11 @@ pub enum Op {
         /// lent late*; `offline_share::load_group_shares`).
         #[cfg(feature = "p2p-share")]
         session_seat: crate::offline_share::SessionSeat,
+        /// A store-change re-read ([`store_resync_op`]) rather than a visit:
+        /// its error bridge writes and retires only its own error, so a folder
+        /// gesture's message survives it (the level rule, as
+        /// [`Op::HydrateDevices`]'s `reread`).
+        reread: bool,
     },
     /// `folder-follow-confirm` — resolve a public folder by (handle, name)
     /// against its home nest and pin the record, then re-hydrate so the new row
@@ -10004,6 +10176,9 @@ pub enum Op {
         /// The custody-facet load (the custodian-NEST rows render from the
         /// same fold the Devices page paints — one source of truth).
         custody: Option<devices::CustodyCtx>,
+        /// A store-change re-read ([`store_resync_op`]) rather than a visit:
+        /// the fold retires only its own error (the level rule).
+        reread: bool,
     },
     /// Every Nests **mutation** — link / unlink / mint / renew / revoke /
     /// set-lens / the two backup revokes — as one op, because the fold is
@@ -10384,6 +10559,9 @@ pub enum Outcome {
         /// same edge (`p2p.md` § Offline share initiation).
         #[cfg(feature = "p2p-share")]
         group_shares: crate::offline_share::GroupShareViews,
+        /// [`Op::HydrateFolders`]'s `reread`: the fold retires only the error
+        /// a store-change re-read put up, never a gesture's.
+        reread: bool,
     },
     /// A per-set author gesture (serve / paywall / share / evict / access) failed
     /// — the localized message for `error-message`. Success has no variant of its
@@ -10493,21 +10671,29 @@ pub enum Outcome {
     /// nav-edge fetch (logged) from a user gesture (`error-message`) —
     /// `MutedWordsFailed`'s split.
     FolderDefaultConflictPolicyFailed { error: String, surface: bool },
-    /// A fresh trained-topic row list — the single fold for the nav-edge load
-    /// AND all four mutations (they all return the same shape). `seq` is the
-    /// originating op's `TrainedTopicsState::dispatch_seq` — the fold applies
-    /// it only if it is not older than `applied_seq`.
+    /// A fresh trained-topic row list from one of the four mutations (they all
+    /// return the same shape). `seq` is the originating op's
+    /// `TrainedTopicsState::dispatch_seq` — the fold applies it only if it is
+    /// not older than `applied_seq`.
     TrainedTopicsLoaded {
         rows: Vec<TrainedTopicRow>,
         seq: u64,
     },
-    /// A trained-topic read/mutation failed. `surface` distinguishes a
-    /// background self-fetch (logged) from a user gesture (must say so on
-    /// `error-message`) — `MutedWordsFailed`'s split. `seq`: see
-    /// [`Self::TrainedTopicsLoaded`] — a stale failure must not clear `busy`
-    /// out from under a newer op that is still in flight.
+    /// A trained-topic mutation failed — must say so on `error-message`, unless
+    /// `surface` is off. `seq`: see [`Self::TrainedTopicsLoaded`] — a stale
+    /// failure must not clear `busy` out from under a newer op still in flight.
     TrainedTopicsFailed {
         error: String,
+        surface: bool,
+        seq: u64,
+    },
+    /// The background list read ([`Op::LoadTrainedTopics`] — at login, and off
+    /// a store-change notice). Folded under the level rule, unlike a gesture's
+    /// answer: it replaces the rows only when they differ and never clears the
+    /// name buffer, the rename target, `busy` or a gesture's error. A failure
+    /// is logged, except the first-listing gate's refusal (`surface`).
+    TrainedTopicsListed {
+        rows: Result<Vec<TrainedTopicRow>, String>,
         surface: bool,
         seq: u64,
     },
@@ -10629,6 +10815,8 @@ pub enum Outcome {
         /// The custody-facet fold (None = unreadable this pass — keep the
         /// previous facet; the same rule as `DevicesPage`).
         custody: Option<devices::CustodyFacetSnapshot>,
+        /// [`Op::HydrateNests`]'s `reread`.
+        reread: bool,
     },
     /// The Devices nav-edge hydrate's combined answer: the roster snapshot
     /// plus the custody-facet fold (None = the config was unreadable this
@@ -10649,6 +10837,10 @@ pub enum Outcome {
         /// device cap) — painted on `error-message` while it stands. Set fresh
         /// every hydrate; `None` = nothing refused, or no store this pass.
         enrollment_refusal: Option<fauna_sync_engine::account_runtime::EnrollmentRefusal>,
+        /// A store-change re-read ([`Op::HydrateDevices`]'s `reread`): the
+        /// budget drafts re-seed only when untouched, and `error-message` is
+        /// written and retired only for the re-read's own error.
+        reread: bool,
     },
     /// A custody act's answer: the re-folded facet + the act's error (if
     /// any) for `error-message` — a custody gesture is never silently
@@ -10708,7 +10900,7 @@ pub enum Outcome {
     /// same count read the initial hydrate does.
     EncryptionKeyPackageCount(Result<u64, String>),
     /// [`Op::Sessions`]'s re-folded page (or its lock).
-    Sessions(sessions::SessionsOutcome),
+    Sessions(fauna_client_account::SessionsPass),
 }
 
 /// `fauna.pending_actions.list`, projected to the account page's rows: only
@@ -10749,12 +10941,35 @@ impl Op {
                 let conversations =
                     fauna_client_conversations::ConversationsClient::new(Arc::clone(&nest));
                 let features_client = fauna_client_features::FeaturesClient::new(nest);
-                let (quota, features, own_limits, node, key_packages) = tokio::join!(
+                // The three legs that want the nest's identity reply share the
+                // connection's one read (`fauna_protocol::read_nest_info`, the
+                // transport's per-connection memo — `security.md` § Transport
+                // trust); a failed read fails all three, each with its own
+                // message, as three failed reads did.
+                let identity_legs = async {
+                    let info = match status.nest_info().await {
+                        Ok(info) => info,
+                        Err(e) => {
+                            let e = e.to_string();
+                            return (Err(e.clone()), Err(e.clone()), Err(e));
+                        }
+                    };
+                    let (features, own_limits) = tokio::join!(
+                        features_client.rows_with(&info.capabilities),
+                        features_client.authored_surface_with(
+                            fauna_client_features::AuthoringTier::SelfImposed,
+                            &info.capabilities,
+                        ),
+                    );
+                    (
+                        features.map_err(|e| e.to_string()),
+                        own_limits.map_err(|e| e.to_string()),
+                        Ok(fauna_client_status::NodeLeg::from(&info)),
+                    )
+                };
+                let (quota, (features, own_limits, node), key_packages) = tokio::join!(
                     account.quota_get(),
-                    features_client.rows(),
-                    features_client
-                        .authored_surface(fauna_client_features::AuthoringTier::SelfImposed),
-                    status.node(),
+                    identity_legs,
                     conversations.keypackage_count(actor_id_hex),
                 );
                 Outcome::LandingLoaded {
@@ -10801,7 +11016,9 @@ impl Op {
                 }
             }
             Op::CheckForUpdates => Outcome::UpdateCheckResolved(about::check().await),
-            Op::LookForUpdatesAtSignIn => Outcome::SignInLookResolved(about::look().await),
+            Op::LookForUpdatesAtSignIn { nest } => {
+                Outcome::SignInLookResolved(about::look(nest).await)
+            }
             // The three delayed-verb arms each end on a fresh pending-actions
             // list read (`settings.md` § Pending actions: the verb's reply is
             // FED into the section, never dropped) — and deliberately do NOT
@@ -10845,12 +11062,11 @@ impl Op {
                 {
                     Ok(bytes) => match crate::backups::download_dir() {
                         Some(dir) => {
-                            let path = dir.join("fauna-export.zip");
-                            match std::fs::write(&path, &bytes) {
-                                Ok(()) => Outcome::DataExported(path.display().to_string()),
+                            match crate::backups::save_into(&dir, "fauna-export.zip", &bytes) {
+                                Ok(path) => Outcome::DataExported(path.display().to_string()),
                                 Err(e) => Outcome::DataExportFailed(format!(
                                     "write {}: {e}",
-                                    path.display()
+                                    dir.display()
                                 )),
                             }
                         }
@@ -11064,6 +11280,7 @@ impl Op {
                 nest_url,
                 old_engine,
                 credentials,
+                account_store,
             } => match recovery_identity(&secret_hex) {
                 Ok(identity) => {
                     // The shared composition — the same call the locked launch
@@ -11088,20 +11305,31 @@ impl Op {
                     // (see that field): the composition persists the successor
                     // seed through it the instant the ceremony returns, and
                     // its unconfirmed arm reads back through the same one.
-                    let accounts = fauna_client_accounts::AccountRegistry::new(
+                    let accounts = crate::session::registry_over(
                         credentials as Arc<dyn fauna_client_accounts::SecretStore>,
                     );
-                    Outcome::RecoverySucceeded(
-                        fauna_client_recovery::ceremony::succeed_stolen_identity(
-                            &nest_url,
-                            &identity,
-                            &phrase,
-                            old_engine.as_deref(),
-                            &accounts,
-                            successor_db_path,
-                        )
-                        .await,
+                    let outcome = fauna_client_recovery::ceremony::succeed_stolen_identity(
+                        &nest_url,
+                        &identity,
+                        &phrase,
+                        old_engine.as_deref(),
+                        None,
+                        &accounts,
+                        successor_db_path,
                     )
+                    .await;
+                    // The departed fleet, before the fold's switch tears this
+                    // identity's runtime down.
+                    if let StolenOutcome::Landed(_) = &outcome {
+                        fauna_client_account_runtime::record_departed_fleet(
+                            account_store.as_ref(),
+                            &accounts,
+                            fauna_sync_engine::root::StoreRoot::platform(),
+                            &identity,
+                        )
+                        .await;
+                    }
+                    Outcome::RecoverySucceeded(outcome)
                 }
                 // The ceremony never started — nothing moved either.
                 Err(e) => Outcome::RecoverySucceeded(StolenOutcome::not_landed(e)),
@@ -11160,6 +11388,7 @@ impl Op {
             Op::LoadMemberReviews { store } => {
                 Outcome::MemberReviewRoster(reread_member_reviews(store.as_ref()).await)
             }
+            Op::LoadFilterMarks { store } => Outcome::FilterMarks(read_filter_marks(&store).await),
             Op::MemberReviewRemove {
                 manager,
                 store,
@@ -11366,15 +11595,19 @@ impl Op {
             Op::LoadTrainedTopics { nest, store, seq } => {
                 let svc = trained_topics::service(nest);
                 match trained_topics::load_rows(&store, &svc).await {
-                    Ok(rows) => Outcome::TrainedTopicsLoaded { rows, seq },
-                    // A nav-edge self-fetch → logged, not surfaced — except
+                    Ok(rows) => Outcome::TrainedTopicsListed {
+                        rows: Ok(rows),
+                        surface: false,
+                        seq,
+                    },
+                    // A background self-fetch → logged, not surfaced — except
                     // the first-listing gate's refusal (the `LoadMutedWords`
                     // rule).
                     Err(e) => {
                         let error = trained_topics::localize(&e);
-                        Outcome::TrainedTopicsFailed {
+                        Outcome::TrainedTopicsListed {
                             surface: refused_as_not_ready(&error),
-                            error,
+                            rows: Err(error),
                             seq,
                         }
                     }
@@ -12122,7 +12355,11 @@ impl Op {
                 let _ = machine.dispatch(MailSettingsAction::ResumeRotation).await;
                 Outcome::MailSnapshot(Box::new(machine.snapshot()))
             }
-            Op::HydrateDevices { machine, custody } => {
+            Op::HydrateDevices {
+                machine,
+                custody,
+                reread,
+            } => {
                 machine.refresh().await;
                 let (facet, keyed, enrolled, refusal) = match custody {
                     Some(ctx) => {
@@ -12160,6 +12397,7 @@ impl Op {
                     keyed_principals: keyed,
                     enrolled_device_row: enrolled,
                     enrollment_refusal: refusal,
+                    reread,
                 }
             }
             Op::CustodyAct { ctx, act } => {
@@ -12199,9 +12437,7 @@ impl Op {
                 include,
                 exclude,
             } => {
-                machine
-                    .set_folder_paths(name, Some(include), Some(exclude))
-                    .await;
+                machine.set_folder_paths(name, include, exclude).await;
                 Outcome::DevicesSnapshot(Box::new(machine.snapshot()))
             }
             Op::SetFolderConflictPolicy {
@@ -12248,6 +12484,7 @@ impl Op {
                 preferences,
                 #[cfg(feature = "p2p-share")]
                 session_seat,
+                reread,
             } => {
                 machine.refresh().await;
                 let snapshot = Box::new(machine.snapshot());
@@ -12298,6 +12535,7 @@ impl Op {
                     pending_shares,
                     #[cfg(feature = "p2p-share")]
                     group_shares,
+                    reread,
                 }
             }
             Op::FollowPublicFolder {
@@ -12479,8 +12717,9 @@ impl Op {
                 let outcome = folders::set_residency(Arc::clone(&nest), name, residency)
                     .await
                     .map_err(|error| {
-                        // As for the audience: the nest's refusal text ("turn
-                        // off website serving first") is the actionable half.
+                        // A serving-pair refusal's typed code renders the
+                        // sentence naming the repair ("turn off website
+                        // serving first") — the actionable half.
                         tracing::debug!("[settings] set_residency failed: {error}");
                         fauna_i18n::strings::devices::error_set_residency(&error)
                     });
@@ -13028,6 +13267,7 @@ impl Op {
                 machine,
                 store,
                 custody,
+                reread,
             } => {
                 // A hydrate failure is not dropped: the machine stamps it on
                 // `snapshot.error`, which the single fold below bridges onto
@@ -13056,6 +13296,7 @@ impl Op {
                     snapshot: Box::new(machine.snapshot()),
                     escrow_holders,
                     custody,
+                    reread,
                 }
             }
             Op::Sessions(op) => Outcome::Sessions(sessions::run(op).await),
@@ -13318,7 +13559,22 @@ fn apply_mail_import_snapshot(app: &mut App, snapshot: MailImportSnapshot, disar
     if disarm_cancel {
         app.settings.mail_import.cancel_armed = false;
     }
-    app.settings.mail_import.snapshot = Some(snapshot);
+    // A session adopted after a restart asks for its credential on the
+    // Progress step (`resume_credential_elements`): seed Generic's port draft
+    // from the session the moment that starts, and drop the typed password
+    // once a Resume has used it.
+    let e = &mut app.settings.mail_import;
+    let asked_before = e
+        .snapshot
+        .as_ref()
+        .is_some_and(|s| s.resume_needs_credentials);
+    if snapshot.resume_needs_credentials && !asked_before {
+        e.port_input = snapshot.port.to_string();
+    }
+    if asked_before && !snapshot.resume_needs_credentials {
+        e.password_input.clear();
+    }
+    e.snapshot = Some(snapshot);
 }
 
 /// Bridge a shared-machine `ArchiveImportSnapshot` onto the page — the SINGLE
@@ -14061,13 +14317,23 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         Outcome::UpdateCheckResolved(check) => app.settings.update_check = check,
         // The unasked look paints the same notice the asked check does, and
         // says nothing otherwise. It never overwrites a check the user started
-        // meanwhile: theirs is the answer they are waiting on.
-        Outcome::SignInLookResolved(Some(tag))
-            if app.settings.update_check == about::UpdateCheck::Idle =>
-        {
-            app.settings.update_check = about::UpdateCheck::Newer { tag };
-        }
-        Outcome::SignInLookResolved(_) => {}
+        // meanwhile: theirs is the answer they are waiting on. A notice already
+        // showing only ever moves up (`update_look::keep_the_newer` — several
+        // nests each report what they know).
+        Outcome::SignInLookResolved(Some(found)) => match &app.settings.update_check {
+            about::UpdateCheck::Idle => {
+                app.settings.update_check = about::UpdateCheck::Newer { tag: found };
+            }
+            about::UpdateCheck::Newer { tag } => {
+                if let Some(tag) =
+                    fauna_client::update_look::keep_the_newer(Some(tag.clone()), Some(found))
+                {
+                    app.settings.update_check = about::UpdateCheck::Newer { tag };
+                }
+            }
+            _ => {}
+        },
+        Outcome::SignInLookResolved(None) => {}
         Outcome::HandleChanged { pending } => {
             app.errors.remove(&Page::Settings);
             app.settings.handle_input.clear();
@@ -14184,12 +14450,13 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             pending_shares,
             #[cfg(feature = "p2p-share")]
             group_shares,
+            reread,
         } => {
             // Through the one devices fold: this op awaits four more reads
             // after its refresh, so its reading is the likeliest of all to be
             // older than what is already painted (a wizard create that landed
             // meanwhile). The error slot is this outcome's own, set below.
-            apply_outcome(app, Outcome::DevicesSnapshot(snapshot));
+            fold_devices_snapshot(app, snapshot, reread);
             app.settings.folders.default_conflict_policy = default_conflict_policy;
             app.settings.folders.can_serve_webdav = can_serve_webdav;
             app.settings.folders.own_tiers = own_tiers;
@@ -14198,11 +14465,19 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             {
                 app.settings.folders.group_shares = group_shares;
             }
-            match policy_refused {
-                Some(reason) => {
+            // A re-read writes and retires only its own refusal (the level
+            // rule): a folder gesture's message, which never rides the machine
+            // or the policy read, survives a store-change notice.
+            let own = &mut app.settings.folders.read_error;
+            match (policy_refused, reread) {
+                (Some(reason), true) => app.errors.insert_own(Page::Settings, reason, own),
+                (None, true) => app.errors.retire_own(&Page::Settings, own),
+                (Some(reason), false) => {
+                    *own = None;
                     app.errors.insert(Page::Settings, reason);
                 }
-                None => {
+                (None, false) => {
+                    *own = None;
                     app.errors.remove(&Page::Settings);
                 }
             }
@@ -14223,7 +14498,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             // looking at: re-hydrate now, not at the next nav edge.
             if status.lands_a_scope()
                 && app.settings.sub == SubPage::Folders
-                && let Some(op) = folders_hydrate_op(&app.settings)
+                && let Some(op) = folders_hydrate_op(&app.settings, false)
             {
                 app.spawn_page_op(crate::app::PageOp::Settings(op));
             }
@@ -14376,6 +14651,27 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 // fresh re-open retires a stale one at the open action.
                 if !app.settings.trained_topics.publish.is_open() {
                     app.errors.remove(&Page::Settings);
+                }
+            }
+        }
+        Outcome::TrainedTopicsListed { rows, surface, seq } => {
+            let tt = &mut app.settings.trained_topics;
+            // Older than an outcome already applied: that one is the truer
+            // state, so this one is dropped.
+            if seq >= tt.applied_seq {
+                tt.applied_seq = seq;
+                match rows {
+                    Ok(rows) => {
+                        if rows != tt.rows {
+                            tt.rows = rows;
+                        }
+                        app.errors.retire_own(&Page::Settings, &mut tt.read_error);
+                    }
+                    Err(error) if surface => {
+                        app.errors
+                            .insert_own(Page::Settings, error, &mut tt.read_error);
+                    }
+                    Err(error) => tracing::warn!("[settings/trained-topics] load: {error}"),
                 }
             }
         }
@@ -14565,56 +14861,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
         // dropped-command hazard `apply_mail_snapshot`'s comment names.
         // `DevicesSnapshot.error` is a `LocalizedText` (unlike Mail's own
         // already-resolved `String`), so it's resolved here before insertion.
-        Outcome::DevicesSnapshot(snapshot) => {
-            // Paint the machine as it stands NOW, not the reading the op took
-            // when its own work finished. Ops finish out of order: a background
-            // re-hydrate (`store_resync_op`, on every account-store change) can
-            // fold after a newer gesture's result, and its older reading then
-            // painted the list from before the create — or the wizard still open
-            // over the whole page — with nothing left to refresh it. The machine
-            // is the one source both readings came from; linux's observer reads
-            // it live for the same reason. A fixture with no machine folds the
-            // carried snapshot.
-            let snapshot = match &app.settings.devices.machine {
-                Some(machine) => Box::new(machine.snapshot()),
-                None => snapshot,
-            };
-            match &snapshot.error {
-                Some(err) => {
-                    app.errors
-                        .insert(Page::Settings, err.resolve(fauna_i18n::strings::lookup));
-                }
-                None => {
-                    app.errors.remove(&Page::Settings);
-                }
-            }
-            app.settings.devices.snapshot = Some(*snapshot);
-            // Re-seed the expanded row's NEST-PLACE buffers from what the nest
-            // now actually holds. Without this the boxes keep whatever was
-            // typed even where the nest stored something else — an unparseable
-            // quiet period is sent as `None` (unset), so the screen would go on
-            // showing a bound that does not exist. The knobs are three-state,
-            // and "unset" is the state a stale buffer most easily fakes. Never
-            // over staged, unsaved edits, though — the re-seed waits for the
-            // save (`reseed_nest_place_if_untouched`).
-            //
-            // ⚠ Only the nest-place buffers. The selective-sync path buffers are
-            // deliberately NOT re-seeded here: every folder gesture on this page
-            // lands a fresh snapshot, so doing so would wipe half-typed
-            // `folder-include-paths` the moment the user flipped some unrelated
-            // toggle on the same row.
-            let expanded = app.settings.folders.expanded;
-            if let Some(i) = expanded {
-                let fs = app
-                    .settings
-                    .devices
-                    .snapshot
-                    .as_ref()
-                    .and_then(|s| s.folders.get(i))
-                    .cloned();
-                folders::reseed_nest_place_if_untouched(&mut app.settings.folders, fs.as_ref());
-            }
-        }
+        Outcome::DevicesSnapshot(snapshot) => fold_devices_snapshot(app, snapshot, false),
         // The Devices nav-edge hydrate: the roster fold above plus the T16
         // custody facet. A `None` facet keeps the previous one (the config
         // was unreadable this pass — never paint empty over live rows).
@@ -14624,6 +14871,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             keyed_principals,
             enrolled_device_row,
             enrollment_refusal,
+            reread,
         } => {
             app.settings.devices.keyed_principals = keyed_principals;
             // Set fresh every hydrate. A `None` correctly re-arms the own-id
@@ -14635,10 +14883,15 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             // says so (`page_error` paints it), and a `None` after a removal
             // is the remedy having landed.
             app.settings.devices.enrollment_refusal = enrollment_refusal;
-            apply_outcome(app, Outcome::DevicesSnapshot(snapshot));
+            fold_devices_snapshot(app, snapshot, reread);
             if let Some(facet) = custody {
-                app.settings.devices.custody_budget_drafts = devices::seed_budget_drafts(&facet);
-                app.settings.devices.custody = Some(facet);
+                if reread {
+                    devices::fold_reread_custody(&mut app.settings.devices, facet);
+                } else {
+                    app.settings.devices.custody_budget_drafts =
+                        devices::seed_budget_drafts(&facet);
+                    app.settings.devices.custody = Some(facet);
+                }
                 refresh_custody_nest_pin(app);
             }
         }
@@ -14709,19 +14962,33 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             snapshot,
             escrow_holders,
             custody,
+            reread,
         } => {
             if let Some(holders) = escrow_holders {
                 app.settings.nests.escrow_holders = holders;
             }
             // One custody source of truth: the facet lands where the Devices
             // page keeps it, and the Nests render reads it from there.
+            // Never over a budget being typed on Devices: this fold runs off
+            // every store-change notice while Nests is open, too.
             if let Some(facet) = custody {
-                app.settings.devices.custody_budget_drafts = devices::seed_budget_drafts(&facet);
-                app.settings.devices.custody = Some(facet);
+                devices::fold_reread_custody(&mut app.settings.devices, facet);
             }
-            apply_outcome(app, Outcome::NestsSnapshot(snapshot));
+            if reread {
+                // The level rule: this notice's own error is written and
+                // retired alone, so a gesture's message survives it.
+                let own = &mut app.settings.nests.read_error;
+                match &snapshot.error {
+                    Some(text) => app.errors.insert_own(Page::Settings, text.clone(), own),
+                    None => app.errors.retire_own(&Page::Settings, own),
+                }
+                app.settings.nests.snapshot = Some(*snapshot);
+            } else {
+                apply_outcome(app, Outcome::NestsSnapshot(snapshot));
+            }
         }
         Outcome::NestsSnapshot(snapshot) => {
+            app.settings.nests.read_error = None;
             // A restore's outcome (Restored / PastRecoveryWindow) is NOT an
             // error — it rides its own dedicated `nest-trust-generation-notice`
             // element (`nests.rs::push_trust_facet`, reading `state.snapshot`
@@ -14954,7 +15221,7 @@ pub fn route_subpage(
     // page-level default conflict policy), so it takes the compound op —
     // Devices, which has no such facet, keeps the plain machine hydrate.
     if state.sub == SubPage::Folders {
-        return folders_hydrate_op(state);
+        return folders_hydrate_op(state, false);
     }
     if state.sub == SubPage::Devices {
         let custody = custody_ctx_of(state);
@@ -14962,7 +15229,11 @@ pub fn route_subpage(
             .devices
             .machine
             .clone()
-            .map(|machine| Op::HydrateDevices { machine, custody });
+            .map(|machine| Op::HydrateDevices {
+                machine,
+                custody,
+                reread: false,
+            });
     }
     // Bluesky self-hydrates the same way — the whole depth-selector +
     // panels surface is the machine's snapshot (plus the Linked panel's
@@ -14987,6 +15258,7 @@ pub fn route_subpage(
             machine,
             store: state.account_store.clone(),
             custody: custody_ctx_of(state),
+            reread: false,
         });
     }
     // Muted words self-loads the same way — the sealed list is read from
@@ -15367,6 +15639,28 @@ pub(crate) fn member_review_hydrate_op(app: &App) -> Option<Op> {
     Some(Op::LoadMemberReviews {
         store: app.ledger_store.clone()?,
     })
+}
+
+/// The succession ledger's two review planes, re-read off a store-change notice
+/// whatever page is open (`account-runtime.md` § Multi-instance concurrency,
+/// part 4): the roster paints the Members to review sub-page, the
+/// `thread-member-chip` marks and the contact badges; the filter marks paint the
+/// Privacy sub-page's rows and the root's inherited-filter count. Both are
+/// App-wide render sources, like the reporter-side hide list beside them in the
+/// handler — not one sub-page's load. Each is one local store read, and both
+/// folds are level-safe as they stand: a successful read replaces the list
+/// wholesale (an equal answer paints the same frame), a failed one keeps it, and
+/// neither touches a draft, a busy flag or `error-message`. Empty pre-auth.
+pub(crate) fn ledger_resync_ops(app: &App) -> Vec<Op> {
+    let Some(store) = app.ledger_store.clone() else {
+        return Vec::new();
+    };
+    vec![
+        Op::LoadMemberReviews {
+            store: Arc::clone(&store),
+        },
+        Op::LoadFilterMarks { store },
+    ]
 }
 
 /// Every `SubPage`, for the sweeps that must visit all of them (today:
@@ -16010,6 +16304,8 @@ async fn folders_regesture_outcome(
         )
         .await,
         pending_shares: folders::load_pending_shares(nest).await,
+        // A gesture's own re-read: it replaces the error slot like a visit.
+        reread: false,
     }
 }
 
@@ -16018,7 +16314,7 @@ async fn folders_regesture_outcome(
 /// shared `DevicesMachine` does not exist yet (pre-session-attach); the config
 /// half is independently optional, so a logged-out visit still refreshes the
 /// machine.
-fn folders_hydrate_op(state: &SettingsState) -> Option<Op> {
+fn folders_hydrate_op(state: &SettingsState, reread: bool) -> Option<Op> {
     let machine = state.devices.machine.clone()?;
     let config = state.nest.clone().zip(state.identity_secret());
     Some(Op::HydrateFolders {
@@ -16028,6 +16324,7 @@ fn folders_hydrate_op(state: &SettingsState) -> Option<Op> {
         preferences: state.preference_store(),
         #[cfg(feature = "p2p-share")]
         session_seat: state.offline_share.session_seat.clone(),
+        reread,
     })
 }
 
@@ -16222,6 +16519,221 @@ mod tests {
             example_count: 0,
             learn_from_engagement: false,
         }
+    }
+
+    // ── the store-change notice's level rule (`account-runtime.md` § Multi-
+    // instance concurrency, part 4): a re-read that answers what the page
+    // shows paints nothing — no draft cleared, no busy flag reset, no
+    // gesture's message retired. ──
+
+    #[test]
+    fn an_unchanged_trained_topics_reread_paints_nothing() {
+        let mut app = crate::app::tests::test_app();
+        let rows = vec![trained_topic_row(1, "Birds")];
+        app.settings.trained_topics.rows = rows.clone();
+        app.settings.trained_topics.input = "half-typ".into();
+        app.settings.trained_topics.renaming = Some(vec![1; 16]);
+        app.settings.trained_topics.busy = true;
+        app.errors
+            .insert(Page::Settings, "your rename failed".into());
+        apply_outcome(
+            &mut app,
+            Outcome::TrainedTopicsListed {
+                rows: Ok(rows.clone()),
+                surface: false,
+                seq: 1,
+            },
+        );
+        let tt = &app.settings.trained_topics;
+        assert_eq!(tt.rows, rows);
+        assert_eq!(tt.input, "half-typ", "a re-read must not clear the draft");
+        assert_eq!(tt.renaming, Some(vec![1; 16]));
+        assert!(tt.busy, "a re-read must not re-enable a gesture in flight");
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some("your rename failed"),
+            "a gesture's message is not the re-read's to retire"
+        );
+    }
+
+    #[test]
+    fn a_trained_topics_reread_retires_only_its_own_error() {
+        let mut app = crate::app::tests::test_app();
+        apply_outcome(
+            &mut app,
+            Outcome::TrainedTopicsListed {
+                rows: Err("not ready yet".into()),
+                surface: true,
+                seq: 1,
+            },
+        );
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some("not ready yet")
+        );
+        let rows = vec![trained_topic_row(3, "Moths")];
+        apply_outcome(
+            &mut app,
+            Outcome::TrainedTopicsListed {
+                rows: Ok(rows.clone()),
+                surface: false,
+                seq: 2,
+            },
+        );
+        assert!(app.errors.get(&Page::Settings).is_none());
+        assert_eq!(app.settings.trained_topics.rows, rows);
+    }
+
+    #[test]
+    fn a_devices_reread_keeps_a_typed_budget_and_a_custody_error() {
+        let mut app = crate::app::tests::test_app();
+        let facet = devices::custody_walk_facet();
+        let seeded = devices::seed_budget_drafts(&facet);
+        assert!(!seeded.is_empty(), "the fixture must hold a budget row");
+        app.settings.devices.custody = Some(facet.clone());
+        app.settings.devices.custody_budget_drafts = seeded.clone();
+        app.settings.devices.custody_budget_drafts[0] = "12 G".into();
+        app.errors
+            .insert(Page::Settings, "the custody accept failed".into());
+        apply_outcome(
+            &mut app,
+            Outcome::DevicesPage {
+                snapshot: Box::default(),
+                custody: Some(facet.clone()),
+                keyed_principals: None,
+                enrolled_device_row: None,
+                enrollment_refusal: None,
+                reread: true,
+            },
+        );
+        assert_eq!(app.settings.devices.custody_budget_drafts[0], "12 G");
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some("the custody accept failed")
+        );
+        // The visit edge keeps its own posture: the page starts fresh.
+        apply_outcome(
+            &mut app,
+            Outcome::DevicesPage {
+                snapshot: Box::default(),
+                custody: Some(facet),
+                keyed_principals: None,
+                enrolled_device_row: None,
+                enrollment_refusal: None,
+                reread: false,
+            },
+        );
+        assert_eq!(app.settings.devices.custody_budget_drafts, seeded);
+        assert!(app.errors.get(&Page::Settings).is_none());
+    }
+
+    #[test]
+    fn a_devices_reread_retires_only_its_own_machine_error() {
+        let mut app = crate::app::tests::test_app();
+        let failed = DevicesSnapshot {
+            error: Some(fauna_core::localized::LocalizedText::key(
+                "devices.folder_lease_free",
+            )),
+            ..Default::default()
+        };
+        let reread = |snapshot: DevicesSnapshot| Outcome::DevicesPage {
+            snapshot: Box::new(snapshot),
+            custody: None,
+            keyed_principals: None,
+            enrolled_device_row: None,
+            enrollment_refusal: None,
+            reread: true,
+        };
+        apply_outcome(&mut app, reread(failed));
+        assert!(app.errors.get(&Page::Settings).is_some());
+        apply_outcome(&mut app, reread(DevicesSnapshot::default()));
+        assert!(app.errors.get(&Page::Settings).is_none());
+        // A gesture's message put up since is not the re-read's.
+        apply_outcome(&mut app, reread(DevicesSnapshot::default()));
+        app.errors.insert(Page::Settings, "remove failed".into());
+        apply_outcome(&mut app, reread(DevicesSnapshot::default()));
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some("remove failed")
+        );
+    }
+
+    fn folders_page(policy_refused: Option<&str>, reread: bool) -> Outcome {
+        Outcome::FoldersHydrated {
+            snapshot: Box::default(),
+            default_conflict_policy: None,
+            policy_refused: policy_refused.map(str::to_owned),
+            can_serve_webdav: false,
+            own_tiers: Vec::new(),
+            pending_shares: Vec::new(),
+            #[cfg(feature = "p2p-share")]
+            group_shares: Default::default(),
+            reread,
+        }
+    }
+
+    #[test]
+    fn a_folders_reread_retires_only_its_own_error() {
+        let mut app = crate::app::tests::test_app();
+        // The re-read's own refusal paints, and the next good read retires it.
+        apply_outcome(&mut app, folders_page(Some("policy refused"), true));
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some("policy refused")
+        );
+        apply_outcome(&mut app, folders_page(None, true));
+        assert!(app.errors.get(&Page::Settings).is_none());
+        // A folder gesture's message survives a clean notice re-read.
+        app.errors.insert(Page::Settings, "serve failed".into());
+        apply_outcome(&mut app, folders_page(None, true));
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some("serve failed")
+        );
+        // The visit edge keeps its own posture: the page starts fresh.
+        apply_outcome(&mut app, folders_page(None, false));
+        assert!(app.errors.get(&Page::Settings).is_none());
+    }
+
+    #[test]
+    fn a_nests_reread_retires_only_its_own_error() {
+        let mut app = crate::app::tests::test_app();
+        let page = |error: Option<&str>, reread: bool| Outcome::NestsPage {
+            snapshot: Box::new(LinkedNestsSnapshot {
+                home: None,
+                pairings: Vec::new(),
+                status: fauna_client_pair::LinkedNestStatus::Idle,
+                error: error.map(str::to_owned),
+                restore_outcome: None,
+                forward_queue: None,
+            }),
+            escrow_holders: None,
+            custody: None,
+            reread,
+        };
+        apply_outcome(&mut app, page(Some("hydrate failed"), true));
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some("hydrate failed")
+        );
+        apply_outcome(&mut app, page(None, true));
+        assert!(app.errors.get(&Page::Settings).is_none());
+        // A gesture's message survives a clean notice re-read.
+        app.errors.insert(Page::Settings, "link failed".into());
+        apply_outcome(&mut app, page(None, true));
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some("link failed")
+        );
+        // The visit edge keeps its own posture: the page starts fresh.
+        apply_outcome(&mut app, page(None, false));
+        assert!(app.errors.get(&Page::Settings).is_none());
+    }
+
+    #[test]
+    fn the_ledger_planes_resync_only_with_a_ledger() {
+        let app = crate::app::tests::test_app();
+        assert!(ledger_resync_ops(&app).is_empty());
     }
 
     #[test]
@@ -17744,15 +18256,6 @@ mod tests {
     /// there removal is reachable only through the e2e agent seam. Captured as
     /// a tui parity gap; the sentence stays because the member
     /// being asked may be on any app, and it is the only honest remedy there is.
-    ///
-    /// **2026-08-27 — the same two arms have a `*_no_retry` twin**, selected by
-    /// the shared projection (`SweepView::copy`,
-    /// `SweepRetryAffordance::Absent`) on an app that has NOT built the button:
-    /// there the button's label must be exactly as absent from the copy as the
-    /// button is from the screen (`settings.md` § Recovery kit — a degraded line
-    /// never names a control that is not on screen), while the member-side
-    /// remedy and the ban on the bare "again" both still hold. Pinned here, in
-    /// the app that owns the resolver, because the shared crate pins keys only.
     #[test]
     fn the_degraded_sweep_arms_name_only_remedies_that_exist() {
         let none = t::recovery_kit::SWEEP_NONE.to_string();
@@ -17775,38 +18278,6 @@ mod tests {
                  inches away, so the vague form is more dangerous than before: {text}"
             );
         }
-
-        let none_no_retry = t::recovery_kit::SWEEP_NONE_NO_RETRY.to_string();
-        let partial_no_retry = t::recovery_kit::sweep_partial_no_retry("1", "3");
-        for (arm, text) in [
-            ("sweep_none_no_retry", &none_no_retry),
-            ("sweep_partial_no_retry", &partial_no_retry),
-        ] {
-            assert!(
-                text.contains("another member"),
-                "{arm} must still carry the member-side remedy — on an app without the \
-                 button it is the ONLY remedy: {text}"
-            );
-            assert!(
-                !text.contains(button),
-                "{arm} must not name {button:?}: it is selected exactly where that button is \
-                 not on screen, and naming an absent control is the dishonesty the arms were \
-                 narrowed to remove: {text}"
-            );
-            assert!(
-                !text.contains("again"),
-                "{arm} must not fall back to the bare re-run advice either: {text}"
-            );
-        }
-        // And the two twins state the same FACT — only the remedy differs.
-        assert!(
-            none_no_retry.starts_with("Your conversations were not running")
-                && none.starts_with("Your conversations were not running")
-        );
-        assert!(
-            partial_no_retry.starts_with("Your old identity was removed from 1 of your 3")
-                && partial.starts_with("Your old identity was removed from 1 of your 3")
-        );
     }
 
     /// The retry button renders on exactly the sweep outcomes that still owe
@@ -17995,7 +18466,6 @@ mod tests {
     /// let a driver report a claim the projection deliberately refuses to make.
     #[test]
     fn each_sweep_line_carries_its_own_id_and_is_absent_when_the_projection_says_nothing() {
-        use fauna_client_recovery::ceremony::SweepRetryAffordance;
         use fauna_client_recovery::{GroupSweepOutcome, GroupSweepState, SweepReport};
         use fauna_ui_ids as ids;
 
@@ -18010,7 +18480,7 @@ mod tests {
                 .collect()
         };
         let resolved = |status: &SweepStatus| {
-            let copy = status.render_copy(SweepRetryAffordance::Rendered);
+            let copy = status.render_copy();
             (
                 copy.outcome.map(|l| l.resolve(fauna_i18n::strings::lookup)),
                 copy.unattested
@@ -20641,12 +21111,8 @@ mod tests {
     #[test]
     fn open_devices_enters_the_subpage_and_returns_the_hydrate_op() {
         let mut app = crate::app::tests::authed_app();
-        app.settings.devices = devices::DevicesState::build(
-            nest_for_test(),
-            "",
-            &[],
-            follows_door(Default::default()),
-        );
+        app.settings.devices =
+            devices::DevicesState::build(nest_for_test(), "", &[], Default::default());
         let op = apply_local(&mut app, Action::OpenDevices);
         assert_eq!(app.settings.sub, SubPage::Devices);
         assert!(
@@ -20658,12 +21124,8 @@ mod tests {
     #[test]
     fn remove_device_carries_the_row_index_and_the_machine() {
         let mut app = crate::app::tests::authed_app();
-        app.settings.devices = devices::DevicesState::build(
-            nest_for_test(),
-            "",
-            &[],
-            follows_door(Default::default()),
-        );
+        app.settings.devices =
+            devices::DevicesState::build(nest_for_test(), "", &[], Default::default());
         let op = apply_local(&mut app, Action::RemoveDevice(2));
         assert!(
             matches!(op, Some(Op::RemoveDevice { index: 2, .. })),
@@ -20683,12 +21145,8 @@ mod tests {
     #[test]
     fn remove_member_arms_a_confirm_and_only_the_confirm_issues_the_op() {
         let mut app = crate::app::tests::authed_app();
-        app.settings.devices = devices::DevicesState::build(
-            nest_for_test(),
-            "",
-            &[],
-            follows_door(Default::default()),
-        );
+        app.settings.devices =
+            devices::DevicesState::build(nest_for_test(), "", &[], Default::default());
         let id = || "22".repeat(32);
         apply(&mut app.settings, Action::RemoveMember(id()));
         assert_eq!(app.settings.devices.member_remove_pending, Some(id()));
@@ -21862,6 +22320,7 @@ mod tests {
                 pending_shares: Vec::new(),
                 #[cfg(feature = "p2p-share")]
                 group_shares: Default::default(),
+                reread: false,
             },
         );
         assert_eq!(
@@ -22219,15 +22678,68 @@ mod tests {
         assert!(state.mail.snapshot.is_none());
     }
 
+    fn web_state_with_a_cached_origin() -> WebSettingsState {
+        WebSettingsState {
+            view: Some(SubdomainView {
+                enabled: true,
+                url: Some("https://outgoing.example.test/".to_string()),
+                disabled_reason: None,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// **Sign-out drops the cached web origin** (`account-scoping.md` § The
+    /// scoping taxonomy → the in-memory corollary) — the published rows and the origin are the departing
+    /// actor's own. Deleting the reset from `clear_session` reddens this.
+    #[test]
+    fn clear_session_drops_the_cached_web_origin() {
+        let mut state = SettingsState {
+            web: web_state_with_a_cached_origin(),
+            ..Default::default()
+        };
+        state.clear_session();
+        assert_eq!(state.web, WebSettingsState::default());
+    }
+
+    /// **Attaching the incoming session starts the web page empty** — the one
+    /// drop on the identity-change path that deliberately skips `clear_session`
+    /// (`App::reset_for_identity_change`), so the outgoing actor's origin would
+    /// otherwise paint the incoming actor's copy-link verbs. Deleting the reset
+    /// from `attach_session` reddens this.
+    #[tokio::test]
+    async fn attaching_a_session_starts_the_web_page_empty() {
+        use fauna_client_config::test_helpers::FakeSuccessionLedgerStore;
+        let mut state = SettingsState {
+            web: web_state_with_a_cached_origin(),
+            ..Default::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        state.attach_session(
+            nest_for_test(),
+            "b".repeat(64),
+            "incoming".to_string(),
+            "11".repeat(32),
+            "http://127.0.0.1:1",
+            &tx,
+            Arc::new(fauna_client_alerts::CriticalAlerts::new()),
+            &[],
+            1,
+            Arc::new(FakeSuccessionLedgerStore::empty(
+                fauna_core::identity::ActorId([1u8; 32]),
+            )),
+        );
+        assert_eq!(
+            state.web,
+            WebSettingsState::default(),
+            "the incoming session inherited the outgoing actor's cached web origin"
+        );
+    }
+
     #[test]
     fn clear_session_drops_the_devices_machine() {
         let mut state = SettingsState {
-            devices: devices::DevicesState::build(
-                nest_for_test(),
-                "",
-                &[],
-                follows_door(Default::default()),
-            ),
+            devices: devices::DevicesState::build(nest_for_test(), "", &[], Default::default()),
             ..Default::default()
         };
         state.clear_session();
@@ -22771,6 +23283,7 @@ mod tests {
             Action::MailImportPause,
             Action::MailImportResume,
             Action::MailImportCancel,
+            Action::MailImportToggleSkipped,
             Action::ArchiveImportSelectSource(ArchiveSourceKind::Facebook),
             Action::ArchiveImportOpenArchive,
             Action::ArchiveImportToggleCategory(s()),
@@ -23383,7 +23896,10 @@ mod tests {
     // 260 → 258 on 2026-10-03: `ToggleAutoTrain` and `SetShareModel` REMOVED
     // with the two retired spam preferences (`mail-spam.md` § Implicit signals
     // are forbidden).
-    const ACTION_COUNT: usize = 258;
+    // 258 → 259 on 2026-10-12: `MailImportToggleSkipped`
+    // (`mail-import-review-skipped-button` reveals the skip log on Done),
+    // added to every_action() in the same commit.
+    const ACTION_COUNT: usize = 259;
 
     #[test]
     fn every_settings_action_is_in_the_corpus() {
@@ -23459,6 +23975,10 @@ mod tests {
                 "fauna.bridges.add_list_member",
             ),
             (Action::MailSpamReset, "fauna.bridges.reset_spam_model"),
+            (
+                Action::MailExportStart,
+                "fauna.bridges.start_export_session",
+            ),
             (Action::ChangeHandle, "fauna.profile.handle.change"),
             (Action::RecoveryStolen, "fauna.recovery.succession.submit"),
             #[cfg(feature = "payments")]
@@ -23571,23 +24091,22 @@ mod tests {
             "OpenAtproto",
             "OpenNests",
         ];
-        // The export seam issues no wire call at all today (`export_unimpl`).
+        // Export: the client-side wizard steps, plus Download — an HTTP GET of
+        // the session's `download_url`, not a wire kind. Start/Pause/Resume/
+        // Cancel/Discard each declare a REAL `fauna.bridges.*` kind and are
+        // deliberately absent from this list.
         let export = [
             "MailExportSelectFormat",
             "MailExportNext",
             "MailExportBack",
             "MailExportToggleMailbox",
             "MailExportToggleStripHeaders",
-            "MailExportStart",
-            "MailExportPause",
-            "MailExportResume",
-            "MailExportCancel",
             "MailExportDownload",
-            "MailExportDiscard",
         ];
         // Import: Connect talks to the FOREIGN IMAP source, not nest — no nest
         // wire call to declare. The rest are client-only FSM moves inside the
-        // machine's own `dispatch` (`import.rs::apply_client_action`).
+        // machine's own `dispatch` (`import.rs::apply_client_action`), and
+        // `ToggleSkipped` is a view toggle.
         // Start/Pause/Resume/Cancel each declare a REAL `fauna.bridges.*` kind
         // and are deliberately absent from this list.
         let import = [
@@ -23598,6 +24117,7 @@ mod tests {
             "MailImportToggleMailbox",
             "MailImportNext",
             "MailImportBack",
+            "MailImportToggleSkipped",
         ];
         // Archive import: `OpenArchive` reads a LOCAL file, and steps 1–3 are
         // client-only FSM moves inside the machine's own `dispatch`.
@@ -23800,5 +24320,48 @@ mod tests {
             );
             assert_eq!(app.settings.update_check, asked);
         }
+
+        // A later look (another nest) moves a showing notice only up.
+        app.settings.update_check = about::UpdateCheck::Newer {
+            tag: "v9.9.9".to_owned(),
+        };
+        apply_outcome(
+            &mut app,
+            Outcome::SignInLookResolved(Some("v9.0.0".to_owned())),
+        );
+        apply_outcome(&mut app, Outcome::SignInLookResolved(None));
+        assert_eq!(
+            app.settings.update_check,
+            about::UpdateCheck::Newer {
+                tag: "v9.9.9".to_owned()
+            }
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::SignInLookResolved(Some("v10.0.0".to_owned())),
+        );
+        assert_eq!(
+            app.settings.update_check,
+            about::UpdateCheck::Newer {
+                tag: "v10.0.0".to_owned()
+            }
+        );
+    }
+
+    /// A blank create is refused with its own sentence on `error-message`
+    /// (`docs/features/trained-topics.md` outcome 13) — still locally, with no
+    /// round trip, but no longer a silent no-op that leaves the user guessing
+    /// why nothing happened. It never arms `busy` and never mints a row.
+    #[test]
+    fn a_blank_trained_topic_commit_says_why_on_error_message() {
+        let mut app = crate::app::tests::authed_app();
+        app.settings.trained_topics.input = "   ".to_string();
+        let op = apply_local(&mut app, Action::CommitTrainedFactorName);
+        assert!(op.is_none(), "a blank name must never spend a round trip");
+        assert!(!app.settings.trained_topics.busy);
+        assert_eq!(
+            app.errors.get(&Page::Settings).map(String::as_str),
+            Some(fauna_i18n::strings::personalization::TRAINED_FACTOR_BLANK_NAME),
+        );
     }
 }

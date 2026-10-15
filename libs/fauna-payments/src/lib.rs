@@ -77,6 +77,13 @@ pub struct VerifiedPaymentEvent {
     /// Provider-side event/payment id — idempotency key (providers redeliver)
     /// and the audit link back to the provider dashboard.
     pub external_ref: String,
+    /// The provider's post-checkout reference — the value its redirect hands
+    /// the buyer's browser (Stripe: the Checkout Session id substituted for
+    /// `{CHECKOUT_SESSION_ID}`). Persisted on a minted claim so the visitor
+    /// return door ([`return_url`]) can show the buyer their code
+    /// (monetization.md § Pillar 2 → *Visitor entitlement doors* ruling (2)).
+    /// `None` on every event that is not a checkout completion.
+    pub return_ref: Option<String>,
 }
 
 /// Why an inbound webhook was rejected. Every variant MUST surface as a
@@ -222,6 +229,49 @@ pub fn webhook_url(base_url: &str, author_id_hex: &str, kind: &str) -> String {
     )
 }
 
+// ── Visitor entitlement doors ──────────────────────────────────
+
+/// Path of the web paywall's redeem door: the target of the static claim-code
+/// `<form>` on every paywall teaser (monetization.md § Pillar 2 → *Visitor
+/// entitlement doors* ruling (1)). A reserved `/api/v1/…` path like
+/// [`WEBHOOK_PATH_PREFIX`] — never shadowable by user web content — and
+/// host-relative: the nest resolves the site owner from the request's `Host`,
+/// so the one path serves every creator's site.
+pub const REDEEM_PATH: &str = "/api/v1/paywall/redeem";
+
+/// Path prefix of the web paywall's return door
+/// (`<prefix>/<kind>?ref=<provider reference>`), where a provider's
+/// post-checkout redirect lands the buyer (ruling (2)). The nest registers
+/// its route from this constant and every app renders the creator-facing URL
+/// from [`return_url`], so the two cannot drift.
+pub const RETURN_PATH_PREFIX: &str = "/api/v1/paywall/return";
+
+/// The placeholder `kind`'s checkout redirect substitutes with the reference
+/// its webhook later reports as [`VerifiedPaymentEvent::return_ref`].
+fn return_ref_placeholder(kind: &str) -> &'static str {
+    match kind {
+        stripe::KIND => "{CHECKOUT_SESSION_ID}",
+        _ => "{REF}",
+    }
+}
+
+/// The exact post-checkout redirect URL a creator pastes into `kind`'s
+/// checkout settings: `<site_url>/api/v1/paywall/return/<kind>?ref=<placeholder>`.
+///
+/// `site_url` is the creator's **web site** origin (apex, subdomain or custom
+/// domain), not the app's nest URL: the door resolves the site owner from the
+/// request's `Host`, exactly as the serving path does. Its trailing slash is
+/// optional, as for [`webhook_url`].
+pub fn return_url(site_url: &str, kind: &str) -> String {
+    format!(
+        "{}{}/{}?ref={}",
+        site_url.trim_end_matches('/'),
+        RETURN_PATH_PREFIX,
+        kind,
+        return_ref_placeholder(kind)
+    )
+}
+
 // ── Tier mapping ───────────────────────────────────────────────
 
 /// The creator-configured payment→tier mapping ("map" capability of the
@@ -289,6 +339,10 @@ pub struct PaymentEntitlement {
     pub valid_until_secs: Option<u64>,
     /// Provider-side event/payment id (idempotency + audit).
     pub external_ref: String,
+    /// The provider's post-checkout reference, carried from
+    /// [`VerifiedPaymentEvent::return_ref`] onto a minted claim (the visitor
+    /// return door's lookup key). `None` for every non-checkout mechanism.
+    pub return_ref: Option<String>,
 }
 
 impl PaymentEntitlement {
@@ -328,6 +382,7 @@ impl PaymentEntitlement {
             tier: tier.to_string(),
             valid_until_secs: event.valid_until_secs,
             external_ref: event.external_ref.clone(),
+            return_ref: event.return_ref.clone(),
         })
     }
 }
@@ -372,6 +427,22 @@ mod tests {
             let url = webhook_url("https://n", "aa", kind);
             assert!(url.ends_with(kind), "{url} should end with {kind}");
         }
+    }
+
+    #[test]
+    fn return_url_pairs_with_the_nest_return_route() {
+        // The redirect a creator pastes into Stripe's checkout settings: the
+        // nest registers its route from RETURN_PATH_PREFIX, and Stripe
+        // substitutes the session id its webhook later reports as return_ref.
+        assert_eq!(
+            return_url("https://site.example/", "stripe"),
+            "https://site.example/api/v1/paywall/return/stripe?ref={CHECKOUT_SESSION_ID}",
+        );
+        assert_eq!(
+            return_url("https://site.example", "fake"),
+            "https://site.example/api/v1/paywall/return/fake?ref={REF}",
+        );
+        assert!(REDEEM_PATH.starts_with("/api/v1/paywall/"));
     }
 
     #[test]
@@ -420,6 +491,7 @@ mod tests {
             product_reference: Some("prod_123".into()),
             valid_until_secs: Some(1_800_000_000),
             external_ref: "evt_1".into(),
+            return_ref: Some("cs_test_1".into()),
         }
     }
 
@@ -443,6 +515,7 @@ mod tests {
         assert_eq!(e.tier, "gold");
         assert_eq!(e.valid_until_secs, Some(1_800_000_000));
         assert_eq!(e.external_ref, "evt_1");
+        assert_eq!(e.return_ref.as_deref(), Some("cs_test_1"));
     }
 
     #[test]

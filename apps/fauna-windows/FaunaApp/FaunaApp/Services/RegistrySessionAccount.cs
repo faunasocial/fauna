@@ -59,18 +59,27 @@ internal sealed class RegistrySessionAccount : ISessionAccount
 
     public string? SecretHex => Material()?.@secretHex;
     public string? NestUrl => Material()?.@nestUrl;
-    /// <summary>
-    /// Persisted-or-derived through the shared get-or-create
-    /// (<see cref="SessionDeviceId.Resolve"/>), never the raw per-actor slot.
-    /// </summary>
-    public string? DeviceId
+    /// <summary>The slot as it stands (<see cref="SessionDeviceId.Stored"/>) — a pure read.</summary>
+    public string? StoredDeviceId
     {
         get
         {
             using var registry = CredentialStore.Registry();
             var actor = _servedActor() ?? registry.SessionAccount();
-            return actor is null ? null : SessionDeviceId.Resolve(registry, CredentialStore.Logical, actor);
+            return actor is null ? null : SessionDeviceId.Stored(registry, actor);
         }
+    }
+    /// <summary>
+    /// Persisted-or-derived through the shared get-or-create
+    /// (<see cref="SessionDeviceId.Resolve"/>), never the raw per-actor slot — and
+    /// a write, which is why it is a method and not a property
+    /// (<see cref="ISessionAccount"/>'s own doc).
+    /// </summary>
+    public string? ResolveDeviceId()
+    {
+        using var registry = CredentialStore.Registry();
+        var actor = _servedActor() ?? registry.SessionAccount();
+        return actor is null ? null : SessionDeviceId.Resolve(registry, CredentialStore.Logical, actor);
     }
     public string? Handle => Material()?.@handle;
     public string? Domain => Material()?.@domain;

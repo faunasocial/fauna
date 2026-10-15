@@ -26,6 +26,7 @@ import pytest
 import requests
 
 from common.auth import register_user
+from helpers.backup_destinations import DestinationEnrollment
 from common.nest import start_nest_in_place, stop_nest
 from i18n.strings import S
 
@@ -51,7 +52,7 @@ def trust_destination(request, nest_mode, tmp_path_factory):
     cleanup()
 
 
-def _enroll(app, owner, destination, name: str) -> None:
+def _enroll(app, nest_instance, owner, destination, name: str) -> None:
     """Register `owner` at the destination (a v1 destination is a nest the
     owner administers) and enroll it through the Backups page UI — which is
     what mints the seal grant at the source and the writer grant there."""
@@ -60,9 +61,9 @@ def _enroll(app, owner, destination, name: str) -> None:
         owner["actor_id_hex"],
         admin_signing_key=destination["admin"]["signing_key"],
     )
-    app.backups.remove_every_destination()
-    app.backups.add_destination(destination["url"], name=name)
-    app.backups.wait_for_destination_count(1)
+    # `owner` is this test's own dedicated actor, so the page holds nothing
+    # else; the enrollment still proves it by waiting for its own row.
+    DestinationEnrollment(app, nest_instance, owner).add_destination(destination["url"], name)
 
 
 def _sweep(nest_instance) -> None:
@@ -99,9 +100,12 @@ def _poll(predicate, what, budget_s: float = _UI_S):
 
 
 def _supersede_one_generation(app, nest_instance, owner) -> None:
-    """Upload a mail segment, grow it, upload again — the second pass
-    re-records the same path with a new manifest, so the destination RETAINS
-    the first generation (`test_nest_trust.py`'s retained-generation setup)."""
+    """Seed a mail segment, sweep, seed another, sweep again — the second pass
+    re-uploads each family's `manifest.<kind>` ledger at the same path with a
+    new manifest hash, so the destination RETAINS the first generation of each
+    (a finalized `.dat` is immutable, so the new mail lands in a new segment
+    and no segment path is superseded; `test_nest_trust.py`'s
+    retained-generation setup)."""
     from tests.test_backups import _seed_one_mail_segment
 
     _seed_one_mail_segment(app, nest_instance, owner)
@@ -112,7 +116,7 @@ def _supersede_one_generation(app, nest_instance, owner) -> None:
 
 @pytest.mark.feature("nests-and-trust")
 def test_an_unreachable_destination_reads_unreachable_never_missing_or_nothing_to_recover(
-    dedicated_actor_app, trust_destination
+    dedicated_actor_app, nest_instance, trust_destination
 ):
     """Outcomes 14 and 16 (first half): with the destination down, its writer
     row reads *could not reach this destination* — never *missing* — and the
@@ -130,7 +134,7 @@ def test_an_unreachable_destination_reads_unreachable_never_missing_or_nothing_t
     app.nest_trust.require_retained_generations_supported()
     destination = trust_destination
 
-    _enroll(app, owner, destination, "Offline")
+    _enroll(app, nest_instance, owner, destination, "Offline")
     app.linked_nests.navigate()
     assert app.nest_trust.wait_for_backup_row_count(2), (
         f"expected the seal + writer rows, got {app.nest_trust.backup_row_count()}. "
@@ -204,7 +208,7 @@ def test_stopping_the_seal_stops_new_backups_and_leaves_held_copies(
     destination = trust_destination
     owner_id = bytes.fromhex(owner["actor_id_hex"])
 
-    _enroll(app, owner, destination, "Kept")
+    _enroll(app, nest_instance, owner, destination, "Kept")
     from tests.test_backups import _seed_one_mail_segment
 
     _seed_one_mail_segment(app, nest_instance, owner)
@@ -268,32 +272,56 @@ def test_a_path_less_version_is_listed_and_a_restore_past_the_window_says_so(
     app.nest_trust.require_retained_generations_supported()
     destination = trust_destination
 
-    _enroll(app, owner, destination, "Rewind")
+    _enroll(app, nest_instance, owner, destination, "Rewind")
     _supersede_one_generation(app, nest_instance, owner)
 
+    # What the second pass supersedes is the set's `manifest.<kind>` LEDGER, one
+    # per family (the main set and `placement/`): a finalized segment is
+    # immutable, so the second seed lands in a new `.dat`, and every pass that
+    # moves content re-uploads each family's ledger last — retained by design,
+    # since the audit's vanished-ledger rule reads exactly those generations
+    # (`backup-restore.md` § The ledger's generation is pinned per device). Any
+    # one of them is a real retained version; take the main-family ledger.
     retained = _db_rows(
-        destination, "SELECT path_hash FROM backup_custody_generations"
+        destination,
+        "SELECT path_hash, path FROM backup_custody_generations ORDER BY path",
     )
-    assert len(retained) == 1, f"expected one retained generation, got {retained!r}"
-    path_hash_hex = bytes(retained[0][0]).hex()
+    ledgers = [
+        row for row in retained
+        if (row[1] or "").endswith("/manifest.mail") and "/placement/" not in row[1]
+    ]
+    assert len(ledgers) == 1, (
+        f"expected one retained main-family ledger generation, got {retained!r}"
+    )
+    path_hash = bytes(ledgers[0][0])
+    path_hash_hex = path_hash.hex()
     conn = sqlite3.connect(destination["db_path"], timeout=10.0)
     try:
-        conn.execute("UPDATE backup_custody_generations SET path = NULL")
+        conn.execute(
+            "UPDATE backup_custody_generations SET path = NULL WHERE path_hash = ?",
+            (path_hash,),
+        )
         conn.commit()
     finally:
         conn.close()
 
     app.linked_nests.navigate()
-    assert app.nest_trust.wait_for_generation_count(1), (
-        f"the retained version never rendered. error: {app.error_text()!r}"
+    assert app.nest_trust.wait_for_generation_count(len(retained)), (
+        f"the retained versions never rendered: {app.nest_trust.generation_count()} "
+        f"of {len(retained)}. error: {app.error_text()!r}"
     )
-    assert app.nest_trust.generation_status_text(0) == S.nests.generation_status_listed
-    path_text = app.nest_trust.generation_path_text(0)
-    assert path_hash_hex[:8] in path_text, (
+    paths = [
+        app.nest_trust.generation_path_text(i)
+        for i in range(app.nest_trust.generation_count())
+    ]
+    hits = [i for i, text in enumerate(paths) if path_hash_hex[:8] in text]
+    assert len(hits) == 1, (
         "a path-less version renders its path_hash in the path's place — never "
-        f"hidden; expected {path_hash_hex[:8]!r} in {path_text!r}"
+        f"hidden; expected {path_hash_hex[:8]!r} in exactly one of {paths!r}"
     )
-    assert app.nest_trust.has_generation_restore(0), (
+    row = hits[0]
+    assert app.nest_trust.generation_status_text(row) == S.nests.generation_status_listed
+    assert app.nest_trust.has_generation_restore(row), (
         "only the DISPLAY path is missing — the version is still restorable"
     )
 
@@ -306,7 +334,7 @@ def test_a_path_less_version_is_listed_and_a_restore_past_the_window_says_so(
     assert resp.status_code == 200, f"reclaim hook: {resp.status_code} {resp.text}"
     assert resp.json().get("reclaimed", 0) >= 1, resp.json()
 
-    app.nest_trust.restore_generation(0)
+    app.nest_trust.restore_generation(row)
 
     def notice() -> str:
         return app.nest_trust.generation_notice_text().strip()

@@ -56,6 +56,7 @@ fn session(id: u8, plane: &str, created: i64) -> AtprotoSessionInfo {
         created_at: created,
         last_refreshed_at: None,
         expires_at: created + 1_000_000,
+        oracle: None,
         extra: Default::default(),
     }
 }
@@ -148,6 +149,53 @@ async fn a_principal_row_is_composed_in_words_and_its_grants_are_not_listed_twic
     assert!(r.connected);
 }
 
+fn set(nsid: &str, title: &str) -> fauna_protocol::atproto_pds::ConsentSetInfo {
+    fauna_protocol::atproto_pds::ConsentSetInfo {
+        nsid: nsid.into(),
+        title: Some(title.into()),
+        members: vec!["repo:app.bsky.feed.post".into()],
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_principal_row_names_the_permission_sets_its_live_grants_came_from() {
+    let (m, api, _) = machine();
+    let cid = "https://a.example/c.json";
+    api.set_principals(vec![principal(1, cid, None, 1)]);
+    let mut first = grant(1, cid, None);
+    first.sets = vec![set("com.example.authFull", "Full\naccess")];
+    let mut again = grant(2, cid, None);
+    again.sets = vec![
+        set("com.example.authFull", "Full\naccess"),
+        set("com.example.authBasic", "Basic"),
+    ];
+    let mut suspended = grant(3, cid, None);
+    suspended.suspended = true;
+    suspended.sets = vec![set("com.example.authOld", "Old")];
+    let mut other = grant(4, "https://b.example/c.json", None);
+    other.sets = vec![set("com.example.authOther", "Other")];
+    api.set_grants(vec![first, again, suspended, other]);
+    m.refresh().await;
+    let r = &m.snapshot().principals[0];
+    let nsids: Vec<_> = r.sets.iter().map(|s| s.nsid.as_str()).collect();
+    assert_eq!(
+        nsids,
+        ["com.example.authFull", "com.example.authBasic"],
+        "this client's live grants only, each set once, in grant order"
+    );
+    assert_eq!(
+        r.sets[0].title.as_deref(),
+        Some("Fullaccess"),
+        "composed by the card's own function: attacker text stripped"
+    );
+    assert_eq!(r.sets[0].member_descriptions.len(), 1);
+    assert_ne!(
+        r.sets[0].member_descriptions[0], "repo:app.bsky.feed.post",
+        "members worded through describe_scope, never the token"
+    );
+}
+
 #[tokio::test]
 async fn an_open_ended_grant_makes_the_principal_open_ended_and_no_live_grant_is_not_connected() {
     let (m, api, _) = machine();
@@ -164,6 +212,24 @@ async fn an_open_ended_grant_makes_the_principal_open_ended_and_no_live_grant_is
         "https://a.example/c.json",
         "no label → the client id verbatim"
     );
+}
+
+/// A hosted plugin's binding holds no token, so it never has a live grant
+/// family: the row itself is its reach, and the badge — not the grant count —
+/// says it is connected (`connected-apps.md` § Layout & flow; `third-party.md`
+/// § The principal model → *Hosted principals*). The external-apps switch
+/// still pauses it.
+#[tokio::test]
+async fn a_hosted_binding_is_connected_with_no_grant_family() {
+    let (m, api, _) = machine();
+    let mut p = principal(1, "https://plugin.example/c.json", Some("Hello"), 1);
+    p.execution_form = class::WASM.into();
+    p.live_grants = 0;
+    api.set_principals(vec![p]);
+    m.refresh().await;
+    let r = &m.snapshot().principals[0];
+    assert_eq!(r.class, class::WASM);
+    assert!(r.connected, "a binding is connected by its row");
 }
 
 #[tokio::test]
@@ -696,6 +762,23 @@ async fn a_burned_mail_password_stays_listed_and_reads_as_not_connected() {
     assert!(r.mail.as_ref().unwrap().revoked);
 }
 
+#[tokio::test]
+async fn a_burned_signer_stays_listed_and_reads_as_not_connected() {
+    let (m, api, _) = machine();
+    api.set_bunker(vec![
+        signer(9, "Nos", "burned"),
+        signer(10, "Amethyst", "active"),
+    ]);
+    m.refresh().await;
+    let rows = m.snapshot().principals;
+    let burned = rows.iter().find(|r| r.key.ends_with(":9")).unwrap();
+    assert!(!burned.connected);
+    assert!(burned.signer_burned);
+    let live = rows.iter().find(|r| r.key.ends_with(":10")).unwrap();
+    assert!(live.connected);
+    assert!(!live.signer_burned);
+}
+
 /// Mail passwords made in the same second keep the mail machine's order — the
 /// row key must not re-sort them.
 #[tokio::test]
@@ -1047,4 +1130,301 @@ async fn a_nest_refusal_leaves_the_log_unwritten() {
     assert_eq!(revoked_grants(&api), [6, 7], "both were attempted");
     assert!(recorded_revokes(&ledger).is_empty());
     assert_eq!(m.snapshot().error, None, "the approve itself landed");
+}
+
+// ── The account's external-apps switch (`atproto-pds-full.md` § F1 detail,
+// the kill-switch bullet): OFF pauses the whole external-app plane — every
+// principal and every ATProto app-password session — and keeps each row
+// listed and revocable; a signer client and a mail app password are not on
+// that plane and read exactly as before.
+
+#[tokio::test]
+async fn the_switch_off_pauses_every_external_app_row_and_keeps_it_listed() {
+    let (m, api, _) = machine();
+    api.set_principals(vec![principal(1, "https://a.example/c.json", Some("A"), 1)]);
+    api.set_sessions(vec![session(2, "app_credential", 2)]);
+    api.set_bunker(vec![signer(8, "Amethyst", "active")]);
+    api.set_mail_credentials(vec![mail_credential("m1", "Thunderbird", 3, false)]);
+    api.set_external_apps_enabled(false);
+    m.refresh().await;
+    let rows = m.snapshot().principals;
+    assert_eq!(rows.len(), 4, "OFF lists every row: {rows:?}");
+    for r in &rows {
+        let external = r.class == "device" || (r.class == "app_password" && r.mail.is_none());
+        assert_eq!(r.paused, external, "paused exactly on the plane: {r:?}");
+        assert_eq!(
+            r.connected, !external,
+            "a paused row cannot act right now: {r:?}"
+        );
+    }
+    assert!(
+        api.calls().contains(&FakeCall::ExternalAppsEnabled),
+        "the flag is read beside the roster"
+    );
+    assert_eq!(m.snapshot().error, None);
+}
+
+#[tokio::test]
+async fn the_switch_back_on_restores_every_row_with_nothing_redone() {
+    let (m, api, _) = machine();
+    api.set_principals(vec![principal(1, "https://a.example/c.json", Some("A"), 1)]);
+    api.set_external_apps_enabled(false);
+    m.refresh().await;
+    assert!(m.snapshot().principals[0].paused);
+    api.set_external_apps_enabled(true);
+    m.refresh().await;
+    let r = &m.snapshot().principals[0];
+    assert!(!r.paused);
+    assert!(r.connected);
+}
+
+#[tokio::test]
+async fn an_account_without_the_switch_holds_it_at_its_default_on() {
+    let (m, api, _) = machine();
+    api.set_principals(vec![principal(1, "https://a.example/c.json", Some("A"), 1)]);
+    api.external_apps_unavailable();
+    m.refresh().await;
+    let snap = m.snapshot();
+    assert!(!snap.principals[0].paused, "below the full-PDS level: ON");
+    assert!(snap.principals[0].connected);
+    assert_eq!(snap.error, None, "an absent surface is no error");
+}
+
+#[tokio::test]
+async fn a_failed_switch_read_keeps_the_paused_state_on_screen() {
+    let (m, api, _) = machine();
+    api.set_principals(vec![principal(1, "https://a.example/c.json", Some("A"), 1)]);
+    api.set_external_apps_enabled(false);
+    m.refresh().await;
+    api.fail_external_apps();
+    m.refresh().await;
+    let snap = m.snapshot();
+    assert!(
+        snap.principals[0].paused,
+        "an unknown flag never reads as working"
+    );
+    assert_eq!(snap.error.unwrap().key, REFRESH_ERROR_KEY);
+}
+
+// ── the oracle record (`connected-apps.md` § Layout & flow, region 3) ──
+
+fn oracle_op(at: i64, class: &str, detail: &str) -> fauna_protocol::principals::OracleOp {
+    fauna_protocol::principals::OracleOp {
+        at,
+        class: class.into(),
+        detail: detail.into(),
+        ..Default::default()
+    }
+}
+
+fn served(id: u8, client_id: &str) -> PrincipalInfo {
+    PrincipalInfo {
+        oracle: Some(fauna_protocol::principals::OracleSummary {
+            ops_in_window: 3,
+            requests_served: 9,
+            last_op: Some(oracle_op(1_700_000_300, "nostr.sign_event", "1")),
+            ..Default::default()
+        }),
+        ..principal(id, client_id, Some("Signer"), 1_000)
+    }
+}
+
+#[tokio::test]
+async fn a_served_principals_row_carries_the_oracle_summary_in_the_cards_words() {
+    let (m, api, _) = machine();
+    api.set_principals(vec![
+        served(1, "https://served.example/c.json"),
+        principal(2, "https://never.example/c.json", None, 2_000),
+    ]);
+    m.refresh().await;
+    let snap = m.snapshot();
+    let summary = snap.principals[0]
+        .oracle
+        .as_ref()
+        .expect("a served principal's summary");
+    assert_eq!((summary.ops_in_window, summary.requests_served), (3, 9));
+    let last = summary.last_op.as_ref().expect("the newest operation");
+    assert_eq!(last.at_millis, 1_700_000_300_000);
+    assert_eq!(last.class, "nostr.sign_event");
+    assert_eq!(
+        resolve(&last.words),
+        fauna_core::identity_op::IdentityOpClass::NostrSignEvent.card_row(),
+        "the class reads as the consent card worded its scope"
+    );
+    assert_eq!(resolve(&last.detail), "1");
+    assert_eq!(
+        snap.principals[1].oracle, None,
+        "a principal no custodian served carries no summary — absent, never zero"
+    );
+}
+
+/// The ATProto write door's record (`key-material-hierarchy.md` § *The
+/// oracle* → *The ATProto classes ride the protocol's own door*): an
+/// app-password session, which has no principal, carries its summary on its
+/// own row, and an `atproto.commit` operation reads as the consent card's
+/// words for the `repo:*` permission it rode — never as its bare class.
+#[tokio::test]
+async fn an_app_password_sessions_writes_ride_its_row_in_the_cards_words() {
+    let (m, api, _) = machine();
+    let commit = fauna_protocol::principals::ATPROTO_COMMIT_CLASS;
+    api.set_sessions(vec![
+        AtprotoSessionInfo {
+            oracle: Some(fauna_protocol::principals::OracleSummary {
+                ops_in_window: 2,
+                requests_served: 5,
+                last_op: Some(oracle_op(40, commit, "create app.bsky.feed.post/3a")),
+                ..Default::default()
+            }),
+            ..session(2, "app_credential", 10)
+        },
+        session(3, "app_credential", 20),
+    ]);
+    m.refresh().await;
+    let snap = m.snapshot();
+    let summary = snap.principals[0]
+        .oracle
+        .as_ref()
+        .expect("a session that wrote");
+    assert_eq!((summary.ops_in_window, summary.requests_served), (2, 5));
+    let last = summary.last_op.as_ref().unwrap();
+    assert_eq!(last.class, commit);
+    assert_eq!(
+        resolve(&last.words),
+        fauna_atproto_settings_machine::scope_words("repo:*")[0],
+    );
+    assert_ne!(resolve(&last.words), commit);
+    assert_eq!(resolve(&last.detail), "create app.bsky.feed.post/3a");
+    assert_eq!(
+        snap.principals[1].oracle, None,
+        "a session that wrote nothing carries no summary"
+    );
+}
+
+#[test]
+fn an_unknown_class_reads_as_its_name_and_the_detail_is_control_stripped() {
+    let row = oracle_op_row(&oracle_op(5, "future.op", "POST\u{1b}[2J evil.example\nx"));
+    assert_eq!(resolve(&row.words), "future.op");
+    let detail = resolve(&row.detail);
+    assert!(
+        !detail.chars().any(char::is_control),
+        "relayed detail is control-stripped: {detail:?}"
+    );
+}
+
+#[tokio::test]
+async fn opening_a_record_reads_it_on_demand_newest_first_and_close_drops_it() {
+    let (m, api, obs) = machine();
+    let p = served(1, "https://served.example/c.json");
+    api.set_principals(vec![p.clone()]);
+    api.set_principal_ops(
+        &p.principal_id,
+        vec![
+            oracle_op(30, "nostr.sign_event", "1"),
+            oracle_op(20, "nostr.nip44", "nip44_encrypt"),
+        ],
+    );
+    m.refresh().await;
+    assert_eq!(
+        m.snapshot().record,
+        None,
+        "no record is read before it is opened"
+    );
+    assert!(
+        !api.calls()
+            .iter()
+            .any(|c| matches!(c, FakeCall::ListPrincipalOps(_)))
+    );
+
+    let key = m.snapshot().principals[0].key.clone();
+    let before = obs.count();
+    m.open_record(key.clone()).await;
+    assert_eq!(
+        obs.count(),
+        before + 2,
+        "open notifies unloaded, then loaded"
+    );
+    let record = m.snapshot().record.expect("the open record");
+    assert_eq!(record.key, key);
+    assert!(record.loaded);
+    let got: Vec<_> = record
+        .ops
+        .iter()
+        .map(|o| (o.at_millis, o.class.as_str()))
+        .collect();
+    assert_eq!(got, [(30_000, "nostr.sign_event"), (20_000, "nostr.nip44")]);
+    assert!(
+        api.calls()
+            .contains(&FakeCall::ListPrincipalOps(p.principal_id.clone()))
+    );
+
+    m.close_record();
+    assert_eq!(m.snapshot().record, None);
+}
+
+#[tokio::test]
+async fn a_served_principal_with_an_empty_record_reads_loaded_and_empty() {
+    let (m, api, _) = machine();
+    api.set_principals(vec![served(1, "https://served.example/c.json")]);
+    m.refresh().await;
+    let key = m.snapshot().principals[0].key.clone();
+    m.open_record(key).await;
+    let record = m.snapshot().record.expect("the open record");
+    assert!(record.loaded && record.ops.is_empty());
+    assert_eq!(m.snapshot().error, None);
+}
+
+#[tokio::test]
+async fn only_a_principal_row_opens_a_record() {
+    let (m, api, _) = machine();
+    api.set_bunker(vec![signer(7, "Signer app", "connected")]);
+    api.set_principals(vec![served(1, "https://served.example/c.json")]);
+    m.refresh().await;
+    m.open_record("signer:7".into()).await;
+    m.open_record("principal:ffff".into()).await;
+    assert_eq!(m.snapshot().record, None);
+    assert!(
+        !api.calls()
+            .iter()
+            .any(|c| matches!(c, FakeCall::ListPrincipalOps(_)))
+    );
+}
+
+#[tokio::test]
+async fn a_failed_record_read_closes_it_and_shows_the_error() {
+    let (m, api, _) = machine();
+    api.set_principals(vec![served(1, "https://served.example/c.json")]);
+    m.refresh().await;
+    api.fail_ops();
+    let key = m.snapshot().principals[0].key.clone();
+    m.open_record(key).await;
+    let snap = m.snapshot();
+    assert_eq!(snap.record, None);
+    assert_eq!(snap.error.unwrap().key, RECORD_ERROR_KEY);
+    assert_eq!(snap.principals.len(), 1, "the roster stays");
+}
+
+#[tokio::test]
+async fn a_re_read_refreshes_the_open_record_and_a_revoke_closes_it() {
+    let (m, api, _) = machine();
+    let p = served(1, "https://served.example/c.json");
+    api.set_principals(vec![p.clone()]);
+    m.refresh().await;
+    let key = m.snapshot().principals[0].key.clone();
+    m.open_record(key.clone()).await;
+    assert!(m.snapshot().record.unwrap().ops.is_empty());
+
+    api.set_principal_ops(
+        &p.principal_id,
+        vec![oracle_op(40, "nostr.sign_event", "7")],
+    );
+    m.refresh().await;
+    let record = m.snapshot().record.expect("still open across a re-read");
+    assert_eq!(record.ops.len(), 1, "a re-read re-reads the open record");
+
+    m.revoke(key).await;
+    assert_eq!(
+        m.snapshot().record,
+        None,
+        "a record whose row is gone closes"
+    );
 }

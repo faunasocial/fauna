@@ -400,6 +400,9 @@ impl ConversationsRpc for ConvNest {
     async fn keypackage_count(&self, _actor_id_hex: String) -> Result<u64, ConvRpcError> {
         unimplemented!("gate tests never call keypackage_count")
     }
+    async fn keypackage_addressable(&self, _actor_id_hex: String) -> Result<bool, ConvRpcError> {
+        unimplemented!("gate tests never call keypackage_addressable")
+    }
     async fn actor_by_handle(
         &self,
         _handle: String,

@@ -14,6 +14,7 @@
 //! - [`machine`] — the machine itself: hydrate, the client-side wizard steps,
 //!   and the dispatch surface.
 //! - [`run`] / [`audience`] — the import run and the audience mapping.
+//! - `timing` — the Progress step's elapsed time and estimate.
 //! - `rpc_glue` — the native WS-RPC implementation of [`ArchiveNest`], behind
 //!   the `rpc-glue` feature.
 //!
@@ -35,6 +36,7 @@ pub mod nest;
 pub mod run;
 pub mod snapshot;
 pub mod state;
+mod timing;
 
 #[cfg(all(feature = "rpc-glue", not(target_arch = "wasm32")))]
 pub mod rpc_glue;

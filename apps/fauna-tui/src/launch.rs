@@ -22,10 +22,11 @@
 //!   flow — it needs only a cloud token), plus — once a launch-time read finds ≥1
 //!   custodied box — the surviving-device `launch-recover-button`
 //!   (`box-recovery.md` § Recovery UI (step 4)).
-//! - [`LaunchSurface::NeedsUpdate`] — `Offline { transient: false }`, today only
-//!   the nest authoritatively reporting `fauna.nest.outdated`. Paints the
+//! - [`LaunchSurface::NeedsUpdate`] — `Offline { transient: false }`: the nest
+//!   authoritatively reporting `fauna.nest.outdated`, or refusing this app's
+//!   subprotocol (HTTP 426 — the app is too old for the nest). Paints the
 //!   localized message in the canonical `error-message` element, **omits**
-//!   `launch-retry-button` (retrying an outdated nest is futile), and keeps
+//!   `launch-retry-button` (retrying a version mismatch is futile), and keeps
 //!   `launch-fallthrough-button`. `version-compatibility.md` Dim 4.
 //! - [`LaunchSurface::SignInRefused`] — also `Offline { transient: false }`, told
 //!   apart by the snapshot's `sign_in_refused` side channel: a nest this app
@@ -76,7 +77,8 @@ pub enum LaunchSurface {
         /// so the CTA never offers a recovery the admin cannot actually perform.
         recover_boxes: Vec<String>,
     },
-    /// Terminal: the nest told us it is outdated. Non-retryable.
+    /// Terminal: the nest told us it is outdated, or that this app is too old
+    /// for it. Non-retryable.
     NeedsUpdate { error: String },
     /// A nest this app had signed in to before no longer signs the identity in
     /// — suspended, or removed; the app cannot tell, by design (`onboarding.md`
@@ -114,6 +116,16 @@ pub enum LaunchSurface {
     /// was widened out of `platforms: [web]` to all apps (user-approved,
     /// rule A, 2026-07-13).
     IdentityChanged { error: String },
+    /// The fork variant of `launch_identity_changed` (`box-recovery.md`
+    /// § Client acceptance — re-pin on a verified chain): the machine reported
+    /// rotation-chain fork evidence (`LaunchSnapshot::identity_fork` — two
+    /// competing successors, or a chain that does not extend the accepted
+    /// head). `warning` is the localized sentence naming BOTH heads (from
+    /// `LaunchPhase::IdentityChanged { pinned_hex, seen_hex }`), painted in
+    /// `nest-identity-fork-warning`. **No trust button** — the machine refuses
+    /// the re-trust on a fork, and an affordance that refuses is a lie; the
+    /// fallthrough is the only way out.
+    IdentityForked { warning: String },
     /// The saved account index at `fauna/index` is present and this build
     /// cannot use it (`version-compatibility.md` § 5 item 9;
     /// `onboarding.md` § App-launch routing — the row checked before every
@@ -337,6 +349,17 @@ impl LaunchSurface {
                     LaunchAction::Fallthrough,
                 ),
             ],
+            // The fork variant of the same page (ui.yaml note on
+            // `launch_identity_changed`): its own warning naming both heads and
+            // the fallthrough ONLY — no trust button on fork evidence.
+            LaunchSurface::IdentityForked { warning } => vec![
+                Element::label(ids::NEST_IDENTITY_FORK_WARNING, warning.clone()),
+                Element::launch_button(
+                    ids::LAUNCH_FALLTHROUGH_BUTTON,
+                    t::USE_DIFFERENT_NEST,
+                    LaunchAction::Fallthrough,
+                ),
+            ],
             // `launch_account_index_unreadable` (ui.yaml): its own warning
             // element, like the identity warning above, so an e2e asserting
             // "the user was told their accounts could not be read" cannot be
@@ -455,7 +478,9 @@ impl LaunchSurface {
             LaunchSurface::SignInRefused { .. } => {
                 fauna_i18n::strings::onboarding::launch::SIGN_IN_REFUSED_TITLE.to_string()
             }
-            LaunchSurface::IdentityChanged { .. } => t::IDENTITY_CHANGED_TITLE.to_string(),
+            LaunchSurface::IdentityChanged { .. } | LaunchSurface::IdentityForked { .. } => {
+                t::IDENTITY_CHANGED_TITLE.to_string()
+            }
             LaunchSurface::AccountLocked { .. } => {
                 fauna_i18n::strings::onboarding::launch::ACCOUNT_LOCKED_TITLE.to_string()
             }
@@ -974,10 +999,32 @@ pub fn route(app: &mut App, tx: &UnboundedSender<UiMessage>, snapshot: LaunchSna
                     recover_boxes: Vec::new(),
                 }
             } else {
-                // Today the only non-transient launch outcome is the nest
-                // reporting `fauna.nest.outdated`, whose localized message the
-                // machine already carries in `last_error`.
+                // The remaining non-transient launch outcomes are a version
+                // mismatch either way round — the nest reporting
+                // `fauna.nest.outdated`, or refusing this app's subprotocol as
+                // too old — whose localized message the machine already
+                // carries in `last_error`.
                 LaunchSurface::NeedsUpdate { error }
+            };
+        }
+        // Fork evidence (`box-recovery.md` § Client acceptance): the hard
+        // warning naming both heads, no re-trust. `identity_fork` is only a
+        // bool, so the heads come from the phase; a fork always carries a seen
+        // head (only the Withdrawn arm leaves it `None`), so the empty fallback
+        // is unreachable in practice and still never re-trustable.
+        LaunchPhase::IdentityChanged {
+            pinned_hex,
+            seen_hex,
+        } if snapshot.identity_fork => {
+            let seen_hex = seen_hex.unwrap_or_default();
+            tracing::error!(
+                "[launch] nest identity FORK: accepted head {pinned_hex}, presented head {seen_hex}"
+            );
+            app.launch = LaunchSurface::IdentityForked {
+                warning: fauna_i18n::strings::onboarding::launch::identity_fork_warning(
+                    &pinned_hex,
+                    &seen_hex,
+                ),
             };
         }
         LaunchPhase::IdentityChanged { .. } => {
@@ -1418,6 +1465,68 @@ mod tests {
             account_index_refusal: Some(refusal),
             ..LaunchSnapshot::initial()
         }
+    }
+
+    /// `box-recovery.md` § Client acceptance — re-pin on a verified chain: fork
+    /// evidence (two competing successors) is a hard warning NAMING BOTH HEADS
+    /// with no re-trust button on that surface. The shared machine already
+    /// refuses the trust action on a fork; this pins that tui reads
+    /// `LaunchSnapshot::identity_fork` and paints the honest surface instead of
+    /// a trust button that refuses. The heads come from the phase — the
+    /// snapshot's `identity_fork` is only a bool.
+    ///
+    /// Red-verify by deleting the fork arm: the ordinary warning and the trust
+    /// button come back.
+    #[test]
+    fn fork_evidence_names_both_heads_and_offers_no_trust_button() {
+        let mut app = crate::app::tests::test_app();
+        let tx = app.tx.clone();
+        let pinned = "ab".repeat(32);
+        let seen = "cd".repeat(32);
+        let snapshot = LaunchSnapshot {
+            phase: LaunchPhase::IdentityChanged {
+                pinned_hex: pinned.clone(),
+                seen_hex: Some(seen.clone()),
+            },
+            identity_fork: true,
+            ..LaunchSnapshot::initial()
+        };
+
+        route(&mut app, &tx, snapshot.clone());
+
+        assert_eq!(
+            ids(&app.launch),
+            vec!["nest-identity-fork-warning", "launch-fallthrough-button"],
+            "the fork variant paints its own warning and the fallthrough only — \
+             no trust button: got {:?}",
+            app.launch
+        );
+        let warning = &app.launch.elements()[0].text;
+        assert!(
+            warning.contains(&pinned) && warning.contains(&seen),
+            "the warning names both heads: {warning}"
+        );
+        assert_eq!(
+            app.launch.title(),
+            t::IDENTITY_CHANGED_TITLE,
+            "same page, same title"
+        );
+
+        // The control: the same phase without fork evidence is the ordinary
+        // warning with its explicit re-trust, unchanged.
+        let ordinary = LaunchSnapshot {
+            identity_fork: false,
+            ..snapshot
+        };
+        route(&mut app, &tx, ordinary);
+        assert_eq!(
+            ids(&app.launch),
+            vec![
+                "nest-identity-changed-warning",
+                "nest-identity-changed-trust-button",
+                "launch-fallthrough-button"
+            ]
+        );
     }
 
     /// `onboarding.md` § App-launch routing — the previously-signed-in row. The

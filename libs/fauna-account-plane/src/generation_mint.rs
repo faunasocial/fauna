@@ -2,8 +2,9 @@
 //! § The generation machinery → *The mint protocol*): read merged device-set
 //! state → refuse without a published escrow target → assemble the mint
 //! (`fauna_mls::wrapped_blob::generation_wraps::build_mint`) → **deposit
-//! escrow first** and verify the holder's receipt → hand back the two plane
-//! rows to write (mint entry + escrow-receipt entry) and the minted key.
+//! escrow first** and verify the holder's receipt → hand back the plane rows
+//! to write (mint entry, escrow-wrap entry, escrow-receipt entry) and the
+//! minted key.
 //!
 //! Deposit-first is the crash-safety shape the charter ratifies: a crash
 //! between deposit and publish leaves an acked-but-unpublished generation —
@@ -31,14 +32,14 @@ use fauna_core::crypto::GenerationKey;
 use fauna_core::generation::{
     EscrowReceiptRecord, EscrowTargetRecord, FleetMember, FleetView, GenerationMintRecord,
     MAX_INLINE_MEMBER_WRAPS, MAX_MINT_MEMBERS, escrow_receipt_cell_key, escrow_target_identity_key,
-    escrow_target_record, verify_escrow_receipt,
+    escrow_target_record, escrow_wrap_cell_key, verify_escrow_receipt,
 };
 use fauna_core::identity::ActorId;
 use fauna_mls::wrapped_blob::generation_wraps::build_mint;
 use fauna_protocol::generation_escrow::{EscrowPutReply, EscrowPutRequest, KIND_ESCROW_PUT};
 use fauna_protocol::merge_policy::{
-    KIND_DEVICE_SET, KIND_ESCROW_RECEIPT, KIND_ESCROW_TARGET, KIND_GENERATION_MINT,
-    home_scope_for_kind,
+    KIND_DEVICE_SET, KIND_ESCROW_RECEIPT, KIND_ESCROW_TARGET, KIND_ESCROW_WRAP,
+    KIND_GENERATION_MINT, home_scope_for_kind,
 };
 use fauna_protocol::{ByteBuf, RpcRequester};
 
@@ -75,6 +76,13 @@ pub struct MintedGeneration {
     /// `escrow_receipt_cell_key` — `<generation-hex>/<holder-hex>/<actor-hex>`)
     /// — the row step 6's tip resolution checks for escrow-acked.
     pub receipt_entry: StateEntry,
+    /// The `fauna.state.escrow-wrap` row (logical key =
+    /// `escrow_wrap_cell_key` — `<generation-hex>/<actor-hex>`): the wrap
+    /// bytes the holder's door just received, as the fleet plane's
+    /// replicated copy — what keys a cold restore from a custodian
+    /// (`account-replica-posture.md` § *Escrow custody*). Written before
+    /// the receipt row, so a reader holding the receipt holds the wrap.
+    pub wrap_entry: StateEntry,
     /// The verified receipt the entry carries, decoded.
     pub receipt: EscrowReceiptRecord,
     /// The minted key — the caller's generation-N schedule root
@@ -287,7 +295,7 @@ pub async fn mint_generation<B: StoreBackend, R: RpcRequester>(
         );
     }
 
-    // 6. The two rows the caller writes (door-lessly in tests; through the
+    // 6. The three rows the caller writes (door-lessly in tests; through the
     //    plane once step 6's tip resolution admits machinery kinds).
     let mint_entry = StateEntry {
         kind: KIND_GENERATION_MINT.into(),
@@ -307,6 +315,7 @@ pub async fn mint_generation<B: StoreBackend, R: RpcRequester>(
         entry_version: 0,
         tombstone: false,
     };
+    let wrap_entry = escrow_wrap_entry(&built.generation_id, ctx.root, built.escrow_wrap)?;
 
     debug_assert!(matches!(
         fauna_core::encoding::canonical_decode::<GenerationMintRecord>(&mint_entry.value),
@@ -317,9 +326,29 @@ pub async fn mint_generation<B: StoreBackend, R: RpcRequester>(
         generation_id: built.generation_id,
         mint_entry,
         receipt_entry,
+        wrap_entry,
         receipt,
         gen_key: built.gen_key,
         spilled: built.spilled,
+    })
+}
+
+/// The `fauna.state.escrow-wrap` row for `wrap`, the escrow wrap of
+/// `generation_id` sealed to `identity`'s target — the one shape both
+/// writers (the mint and the re-escrow pass) put.
+pub(crate) fn escrow_wrap_entry(
+    generation_id: &[u8; 32],
+    identity: &ActorId,
+    wrap: Vec<u8>,
+) -> Result<StateEntry> {
+    Ok(StateEntry {
+        kind: KIND_ESCROW_WRAP.into(),
+        key: escrow_wrap_cell_key(generation_id, identity),
+        scope: machinery_scope(KIND_ESCROW_WRAP)?.into(),
+        value: wrap,
+        merge_meta: None,
+        entry_version: 0,
+        tombstone: false,
     })
 }
 
@@ -571,6 +600,21 @@ mod tests {
         )
         .expect("the identity's escrow secret opens the deposit");
         assert_eq!(recovered.as_bytes(), minted.gen_key.as_bytes());
+
+        // The wrap row: the fleet plane's copy of exactly those bytes, at the
+        // per-(generation, identity) cell (`account-replica-posture.md`
+        // § *Escrow custody*).
+        assert_eq!(minted.wrap_entry.kind, KIND_ESCROW_WRAP);
+        assert_eq!(
+            minted.wrap_entry.key,
+            format!(
+                "{}/{}",
+                fauna_core::hex32::encode(&minted.generation_id),
+                fauna_core::hex32::encode(&root_id.0)
+            )
+        );
+        assert_eq!(minted.wrap_entry.scope, "state-fleet");
+        assert_eq!(&minted.wrap_entry.value, dep_wrap, "the deposited bytes");
 
         // The mint row: right kind/key/scope, both members wrapped.
         assert_eq!(minted.mint_entry.kind, KIND_GENERATION_MINT);

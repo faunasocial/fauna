@@ -4,7 +4,7 @@
 //! and the live-refresh tick (in-session re-pull → new/modified remote changes
 //! appear without a domain re-add), driven headlessly against a real in-process nest.
 //!
-//! `docs/goal/behavior/file-sync.md` § On-Demand Files → Apple File Provider
+//! `docs/goal/behavior/on-demand-files-apple.md` § On-Demand Files → Apple File Provider
 //! binding owns the milestone chain; its **Headless-first testing** bullet
 //! ratifies (2026-07-19) exactly this vehicle: the read-path *mechanism*
 //! (populate → enumerate → hydrate → decrypt under `BackupKey`, all shared-Rust
@@ -192,6 +192,16 @@ async fn start_test_nest_with_db(owner: [u8; 32]) -> (String, String, Arc<CacheD
 async fn start_test_nest_with_plane(
     owner: [u8; 32],
 ) -> (String, String, Arc<CacheDb>, PlaneMachine) {
+    let (url, bearer, state, plane) = start_test_nest_with_state(owner).await;
+    (url, bearer, state.db.clone(), plane)
+}
+
+/// [`start_test_nest_with_plane`], handing back the nest's whole state — for a
+/// test that drives a principal door the owner's bearer cannot (a third
+/// party's deposit).
+async fn start_test_nest_with_state(
+    owner: [u8; 32],
+) -> (String, String, Arc<AppState>, PlaneMachine) {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
 
     let blob_dir = tempfile::tempdir().unwrap();
@@ -246,6 +256,9 @@ async fn start_test_nest_with_plane(
             // reads the head's recording device, a field of the winner
             // statement it signs (`SyncEngine::ingest_conflicting`).
             fauna_nest::files_handlers::register_files_handlers(&mut b);
+            // The owner's inbox kinds — what a set's adoption pass lists,
+            // fetches and retires a parked third-party deposit through.
+            fauna_nest::folder_deposit::register_folder_deposit_handlers(&mut b);
             b.build()
         }),
         auth: fauna_nest::state::AuthState {
@@ -286,7 +299,7 @@ async fn start_test_nest_with_plane(
         fauna_core::data::Timestamp::now().0,
     );
     plane.write_custody(&created).await;
-    (url, owner_bearer, db, plane)
+    (url, owner_bearer, state, plane)
 }
 
 /// Enroll `writer` as a machine principal of `account` the way the ceremony
@@ -317,7 +330,7 @@ async fn register_principal(
 // table): the apps write custody through the account store's door, sealed
 // under the account's current generation, and a capability host reads it back
 // through a throwaway fleet replica keyed as the machine it is a process of —
-// the machine principal's wrap (`on-demand-files.md` § Shared sets on a
+// the machine principal's wrap (`on-demand-files-shared-sets.md` § Shared sets on a
 // capability host, decision 1′). Every fixture below therefore stands up the
 // account's plane for real: the nest serves the generation-escrow doors under
 // a deployment identity, each machine principal enrolls in the account's
@@ -473,6 +486,49 @@ impl PlaneMachine {
                 .expect("custody writes through the folder-keys door");
         plane.publish_pending().await.expect("custody publishes");
         folded
+    }
+
+    /// Enable the account's mail custody with `msek` through the production
+    /// door (`mail_rows::write_mail_state`, sealed under the current
+    /// generation like the folder keys) and publish it.
+    async fn write_mail(&self, msek: [u8; 32]) {
+        let plane = self.plane();
+        fauna_sync_engine::mail_rows::write_mail_state(
+            &self.store,
+            &plane,
+            &fauna_core::mail_rows::MailStateRow {
+                msek: Some(msek.into()),
+                mail_enabled: Some(true),
+                ..Default::default()
+            },
+            fauna_core::data::Timestamp::now(),
+        )
+        .await
+        .expect("the mail state writes through the mail door");
+        plane
+            .publish_pending()
+            .await
+            .expect("the mail state publishes");
+    }
+
+    /// Record `msek` as a retired mail generation (a rotation's prior) through
+    /// the production door, and publish it.
+    async fn retire_mail_generation(&self, msek: [u8; 32]) {
+        let plane = self.plane();
+        fauna_sync_engine::mail_rows::put_generation(
+            &self.store,
+            &plane,
+            &fauna_core::data::PriorMsekRetirement {
+                msek: msek.into(),
+                retired_at_unix: 1_000,
+            },
+        )
+        .await
+        .expect("the retired generation writes through the mail door");
+        plane
+            .publish_pending()
+            .await
+            .expect("the generation publishes");
     }
 
     /// The pump legs a sibling machine's join needs from this one: walk the
@@ -1502,7 +1558,7 @@ async fn office_atomic_save_dance_coalesces_to_one_clean_version_watcher_path() 
     // dance's one coalesced v2) — no partial/intermediate versions from the
     // dance's individual steps. ──
     let changes = fauna_client_sync::SyncClient::new(nest_client.clone())
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list")
         .changes;
@@ -1650,7 +1706,7 @@ async fn office_litter_via_provider_write_path_is_excluded_from_sync() {
 // ─────────────────────────────────────────────────────────────────────
 // Part (D) — an owner with no resident replica shares a set
 // (`mls-group-key-material.md` § M2 → *Pre-bind re-seal migration*;
-// `on-demand-files.md` § Shared sets on a capability host, decision 4)
+// `on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 4)
 // ─────────────────────────────────────────────────────────────────────
 
 /// An on-demand (placeholder-only) engine over `FOLDER`, bound to `group`
@@ -2281,7 +2337,7 @@ impl SharedSet {
     /// unstamped), or `None` when nothing was recorded for it.
     async fn recorded_version(&self, rel: &str) -> Option<Option<u64>> {
         let listed = CtlSyncClient::new(self.a_nest.clone())
-            .changes_list(Some(SHARED.into()), None, 0)
+            .changes_list(Some(SHARED.into()), None, 0, None)
             .await
             .expect("owner lists changes");
         let hash = hex::encode(fauna_core::sync::path_hash(rel));
@@ -2501,7 +2557,7 @@ async fn host_built_before_a_rotation_seals_under_the_new_generation_and_refresh
 
 // ── The owned-tree surface (android's SAF DocumentsProvider binding) ──
 //
-// `on-demand-files.md` § Android SAF DocumentsProvider binding → *Headless
+// `on-demand-files-android.md` § Android SAF DocumentsProvider binding → *Headless
 // proof*: the owned-tree cores are tier-1 tested against the faked engine
 // (`provider_face::owned_tree`), and proven here against a real nest through the
 // same FFI host a DocumentsProvider holds — open-hydrates, a reclaimed body is
@@ -3074,7 +3130,7 @@ async fn verified_signer_of(
     rel: &str,
 ) -> [u8; 32] {
     let page = CtlSyncClient::new(nest.clone())
-        .changes_list(Some(SIGNED_SET.into()), None, 0)
+        .changes_list(Some(SIGNED_SET.into()), None, 0, None)
         .await
         .expect("owner lists changes");
     let hash = hex::encode(fauna_core::sync::path_hash(rel));
@@ -3101,7 +3157,7 @@ async fn verified_signer_of(
 async fn set_lists(nest: &Arc<fauna_client::NestClient>, rel: &str) -> bool {
     let hash = hex::encode(fauna_core::sync::path_hash(rel));
     CtlSyncClient::new(nest.clone())
-        .changes_list(Some(SIGNED_SET.into()), None, 0)
+        .changes_list(Some(SIGNED_SET.into()), None, 0, None)
         .await
         .expect("owner lists changes")
         .changes
@@ -3326,7 +3382,7 @@ async fn seed_signed_set_file(
 /// a reader of the app's own principal slot (`SlotChangeSigner`) and nobody
 /// provisions it anything. Built before the machine is enrolled, it holds no
 /// principal, so it cannot read the account's plane custody (a host reads it
-/// as the enrolled device it is — `on-demand-files.md` § Shared sets on a
+/// as the enrolled device it is — `on-demand-files-shared-sets.md` § Shared sets on a
 /// capability host, decision 1′): without the set's nonce no signed row
 /// verifies, so it serves an empty tree — fail closed, never an unverified
 /// listing — and refuses a create. The ceremony then enrolls the machine into
@@ -3419,7 +3475,7 @@ async fn an_in_process_host_signs_with_the_principal_slot_it_reads_itself() {
 
 // ---------------------------------------------------------------------------
 // Decision 3 — a reader's host is read-only by construction
-// (`on-demand-files.md` § Shared sets on a capability host): a set shared with
+// (`on-demand-files-shared-sets.md` § Shared sets on a capability host): a set shared with
 // the account that it may only read builds read-only. It populates, hydrates
 // and decrypts like any host, and every write core refuses before anything is
 // sealed or recorded — on the apple-shaped host and on the one that owns its
@@ -3658,5 +3714,348 @@ async fn a_readers_owned_tree_host_opens_and_refuses_every_write() {
         std::fs::read(&path).unwrap(),
         PROOF_CONTENT,
         "the hydrated body is untouched"
+    );
+}
+
+// ── Third-party deposit adoption on a capability host ─────────────────────────
+//
+// `on-demand-files-apple.md` § Apple File Provider binding → *Third-party
+// deposit adoption on a capability host* (`folder-deposit.md` § Adoption): an
+// owner whose seats all present the folder through a capability host adopts
+// from the host's refresh — the MSEK read from the account's sealed mail
+// custody through the host's throwaway fleet replica, the item landed through
+// the engine's write door and recorded, and the row left honest about what
+// the device holds: a placeholder under the apple face (the OS keeps the
+// replica; the staging copy goes), a cache-root body under the owned tree.
+
+/// The owner's mail-state MSEK — what the deposit is sealed to.
+const DEPOSIT_MSEK: [u8; 32] = [0x4D; 32];
+/// A retired mail generation — a rotation's prior.
+const PRIOR_MSEK: [u8; 32] = [0x4E; 32];
+/// The depositing principal's attested key.
+const DEPOSIT_HOLDER: [u8; 32] = [0x77; 32];
+const DEPOSIT_NAME: &str = "deposited.txt";
+const DEPOSIT_BODY: &[u8] = b"a third party's deposited bytes\n";
+/// `start_test_nest` mints [`FOLDER`] as row 1.
+const FOLDER_ROW: i64 = 1;
+
+/// Give the owner the recipient seal key the provision door writes from
+/// `msek` — what the deposit door seals to on the owner's behalf.
+async fn seed_recipient_seal_key(db: &CacheDb, owner: &[u8; 32], msek: &[u8; 32]) {
+    let (_secret, pubkey) = fauna_mls::wrapped_blob::derive_recipient_hpke_keypair(msek);
+    let xwing = fauna_mls::wrapped_blob::derive_recipient_xwing_keypair(msek);
+    db.put_actor_recipient_seal_key(owner, &pubkey, xwing.public.mlkem_encaps_key())
+        .await
+        .expect("seed the owner's recipient seal key");
+}
+
+/// A third party deposits `name` into [`FOLDER_ROW`] through the real door:
+/// the consent ceremony's principal over `fauna:folder:deposit:<id>`, the
+/// owner's live keyless deposit grant to its attested key, and the principal
+/// dispatch both deposit doors take (`folder_deposit::tests`' shape).
+async fn deposit_through_the_door(
+    state: &Arc<AppState>,
+    owner: &[u8; 32],
+    name: &str,
+    body: &[u8],
+) {
+    use fauna_nest::db::third_party_principals::{
+        AttestedKeys, ExecutionForm, PrincipalAttestation,
+    };
+    let scope = format!("fauna:folder:deposit:{FOLDER_ROW}");
+    state
+        .db
+        .record_atproto_oauth_grant(
+            owner,
+            b"family-1",
+            "https://app.example/client.json",
+            Some("Example App"),
+            &scope,
+            &[],
+            "jkt",
+            i64::MAX,
+            None,
+            fauna_nest::db::atproto_pds::OAUTH_GRANT_ISSUER_NEST,
+            &PrincipalAttestation {
+                keys: AttestedKeys {
+                    holder_x25519: Some(DEPOSIT_HOLDER),
+                    writer_ed25519: None,
+                },
+                execution_form: ExecutionForm::Remote,
+                manifest: None,
+            },
+        )
+        .await
+        .unwrap();
+    let principal_id = state.db.list_third_party_principals(owner).await.unwrap()[0]
+        .principal_id
+        .clone();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let grant_id = [1u8; 16];
+    let blob = fauna_client_capabilities::mint_folder_deposit_grant(
+        owner,
+        &grant_id,
+        &DEPOSIT_HOLDER,
+        fauna_mls::wrapped_blob::GrantWindow(now - 60, i64::MAX as u64),
+        &[FOLDER_ROW],
+    )
+    .unwrap()
+    .to_canonical_bytes()
+    .unwrap();
+    state
+        .db
+        .put_capability_grant(owner, &grant_id, &DEPOSIT_HOLDER, i64::MAX, &blob)
+        .await
+        .unwrap();
+    let reply = fauna_nest::principal_handlers::dispatch_principal(
+        state.clone(),
+        &fauna_nest::principal_handlers::PrincipalBinding {
+            account: *owner,
+            principal_id,
+            token_scopes: vec![scope],
+            family_id: None,
+        },
+        fauna_protocol::folders::KIND_FOLDERS_DEPOSIT,
+        fauna_protocol::encode_canonical(&fauna_protocol::folders::FolderDepositRequest {
+            folder_id: FOLDER_ROW,
+            name: name.into(),
+            content_type: "text/plain".into(),
+            body: serde_bytes::ByteBuf::from(body.to_vec()),
+            extra: Default::default(),
+        })
+        .unwrap(),
+    )
+    .await
+    .expect("the door accepts the deposit");
+    let reply: fauna_protocol::folders::FolderDepositReply =
+        fauna_protocol::decode_strict(&reply).unwrap();
+    assert!(reply.accepted);
+    assert_eq!(
+        state
+            .db
+            .list_folder_deposits(FOLDER_ROW)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the deposit is parked in the owner's inbox"
+    );
+}
+
+/// The capability host's key reader answers the account's mail-custody MSEKs
+/// — current first, then the retired generations — by opening the sealed
+/// `fauna.state.mail` rows through its throwaway fleet replica, as it opens
+/// the folder keys: the same scope, the same `GenerationTip` schedule. No
+/// mail row, no MSEK.
+#[tokio::test]
+async fn the_host_reader_opens_the_sealed_mail_custody_for_its_mseks() {
+    let owner = ActorKeypair::from_secret(OWNER_SECRET);
+    let (url, bearer, _state, plane) = start_test_nest_with_state(owner.actor_id().0).await;
+    let auth = Arc::new(fauna_client::AuthClient::bearer_only(
+        url.clone(),
+        owner.actor_id().0,
+        Arc::new(fauna_nest_http::StaticBearer(bearer)),
+        fauna_client::pinned_http_client(&url),
+    ));
+    let reader = fauna_ffi::capability_host_folder_keys(
+        &auth,
+        owner.actor_id().0,
+        &BackupKey::derive(&OWNER_SECRET),
+        &*TestSigner::owner_principal(),
+    )
+    .expect("the reader starts");
+    let mseks = || async {
+        within(
+            "recipient_mseks",
+            fauna_client_folders::FolderKeyReader::recipient_mseks(&reader),
+        )
+        .await
+        .expect("the mail custody reads")
+        .iter()
+        .map(fauna_core::secret::SecretArray32::to_array)
+        .collect::<Vec<_>>()
+    };
+    assert!(mseks().await.is_empty(), "no mail row rests: no MSEK");
+
+    plane.write_mail(DEPOSIT_MSEK).await;
+    plane.retire_mail_generation(PRIOR_MSEK).await;
+    assert_eq!(
+        mseks().await,
+        vec![DEPOSIT_MSEK, PRIOR_MSEK],
+        "the replica opens the sealed mail rows: the current MSEK, then the prior"
+    );
+}
+
+/// The apple face: one refresh adopts a deposit parked for the owner — it
+/// lands, is recorded and retired, and the row is left a placeholder whose
+/// `contentVersion` is its bytes' hash, the staging copy gone (the OS
+/// enumerates the item and fetches it on open). The refresh answers true so
+/// the appex signals the enumerator; the next one finds nothing.
+#[tokio::test]
+async fn a_refresh_adopts_a_parked_deposit_as_a_placeholder() {
+    let owner = ActorKeypair::from_secret(OWNER_SECRET).actor_id().0;
+    let (url, bearer, state, plane) = start_test_nest_with_state(owner).await;
+    plane.write_mail(DEPOSIT_MSEK).await;
+    seed_recipient_seal_key(&state.db, &owner, &DEPOSIT_MSEK).await;
+
+    let (host, root) = app_dead_host(&url, &bearer, backup_key_bytes()).await;
+    let before = within("enumerate", host.enumerate(String::new()))
+        .await
+        .expect("enumerate root");
+    assert!(!before.iter().any(|i| i.rel == DEPOSIT_NAME));
+
+    deposit_through_the_door(&state, &owner, DEPOSIT_NAME, DEPOSIT_BODY).await;
+    assert!(
+        within("refresh", host.refresh()).await.expect("refresh"),
+        "the refresh adopted the deposit and reports it should signal"
+    );
+
+    let items = within("enumerate", host.enumerate(String::new()))
+        .await
+        .expect("enumerate root");
+    let item = items
+        .iter()
+        .find(|i| i.rel == DEPOSIT_NAME)
+        .expect("the adopted deposit enumerates");
+    assert_eq!(
+        item.content_version,
+        fauna_core::data::ContentHash::of_raw(DEPOSIT_BODY)
+            .digest()
+            .to_vec(),
+        "its contentVersion is the deposited bytes' hash"
+    );
+    assert!(
+        !within("hydrated_rels", host.hydrated_rels())
+            .await
+            .expect("hydrated_rels")
+            .contains(&DEPOSIT_NAME.to_string()),
+        "the row is a placeholder: the OS holds no bytes for it yet"
+    );
+    assert!(
+        !root.join(DEPOSIT_NAME).exists(),
+        "the staging copy is gone once the row is a placeholder"
+    );
+    assert!(
+        state
+            .db
+            .list_folder_deposits(FOLDER_ROW)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the adopted item is retired from the inbox"
+    );
+    assert!(
+        !within("refresh", host.refresh()).await.expect("refresh"),
+        "a second refresh finds nothing to adopt"
+    );
+    assert_eq!(
+        within("fetch", host.fetch(DEPOSIT_NAME.into()))
+            .await
+            .expect("the placeholder hydrates")
+            .bytes,
+        DEPOSIT_BODY,
+        "an open fetches the deposited bytes from the nest"
+    );
+}
+
+/// No mail custody on the plane, no MSEK: the host adopts nothing — the item
+/// stays parked for a seat that holds the key — and the refresh reports no
+/// change.
+#[tokio::test]
+async fn without_mail_custody_a_refresh_leaves_the_deposit_parked() {
+    let owner = ActorKeypair::from_secret(OWNER_SECRET).actor_id().0;
+    let (url, bearer, state, _plane) = start_test_nest_with_state(owner).await;
+    seed_recipient_seal_key(&state.db, &owner, &DEPOSIT_MSEK).await;
+
+    let (host, _root) = app_dead_host(&url, &bearer, backup_key_bytes()).await;
+    within("enumerate", host.enumerate(String::new()))
+        .await
+        .expect("enumerate root");
+    deposit_through_the_door(&state, &owner, DEPOSIT_NAME, DEPOSIT_BODY).await;
+
+    assert!(
+        !within("refresh", host.refresh()).await.expect("refresh"),
+        "nothing adopted, nothing to signal"
+    );
+    assert_eq!(
+        state
+            .db
+            .list_folder_deposits(FOLDER_ROW)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the item stays parked"
+    );
+    assert!(
+        !within("enumerate", host.enumerate(String::new()))
+            .await
+            .expect("enumerate root")
+            .iter()
+            .any(|i| i.rel == DEPOSIT_NAME)
+    );
+}
+
+/// The owned tree (android's DocumentsProvider): the adopted body is a
+/// recorded one, so it rests in the cache root — never the kept root, whose
+/// every body the start sweep reads as a write intent.
+#[tokio::test]
+async fn an_owned_tree_refresh_adopts_a_deposit_into_the_cache_root() {
+    let owner = ActorKeypair::from_secret(OWNER_SECRET).actor_id().0;
+    let (url, bearer, state, plane) = start_test_nest_with_state(owner).await;
+    plane.write_mail(DEPOSIT_MSEK).await;
+    seed_recipient_seal_key(&state.db, &owner, &DEPOSIT_MSEK).await;
+
+    let dirs = OwnedDirs::new();
+    let host = dirs.host(&url, &bearer);
+    within("enumerate", host.enumerate(String::new()))
+        .await
+        .expect("enumerate root");
+    deposit_through_the_door(&state, &owner, DEPOSIT_NAME, DEPOSIT_BODY).await;
+
+    assert!(
+        within("refresh", host.refresh()).await.expect("refresh"),
+        "the refresh adopted the deposit"
+    );
+    // Bodies only: the engine keeps its own edit-frontier state under a
+    // dot-directory of its `watch_dir`, which no sweep ever reads as a body.
+    let mut kept_bodies = Vec::new();
+    let mut walk = vec![dirs.files.path().to_path_buf()];
+    while let Some(dir) = walk.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                walk.push(path);
+            } else {
+                kept_bodies.push(path);
+            }
+        }
+    }
+    assert!(
+        kept_bodies.is_empty(),
+        "no adopted body rests in the kept root: {kept_bodies:?}"
+    );
+    let path = within("open_for_read", host.open_for_read(DEPOSIT_NAME.into()))
+        .await
+        .expect("the adopted body opens");
+    assert!(
+        std::path::Path::new(&path).starts_with(dirs.cache.path()),
+        "the adopted body is a recorded one, in the cache root: {path}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), DEPOSIT_BODY);
+    assert!(
+        state
+            .db
+            .list_folder_deposits(FOLDER_ROW)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the adopted item is retired from the inbox"
     );
 }

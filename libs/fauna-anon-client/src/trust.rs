@@ -273,6 +273,20 @@ pub fn pinned_identity_for_test(nest_url: &str) -> Option<[u8; 32]> {
     pinned_identity(&authority_of(nest_url))
 }
 
+/// **Test-only.** Record `spki` as the SPKI pin for `nest_url`'s authority, as a
+/// graduated WS handshake would — so a test can drive the production
+/// [`store_pinned_reqwest_tls`] leg (and every reader built on it) against a
+/// self-signed fixture server without standing up a nest. Gated for the same
+/// reason as [`pin_identity_for_test`]: production pins only through graduation.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+pub fn pin_spki_for_test(nest_url: &str, spki: [u8; 32]) {
+    state()
+        .spki
+        .lock()
+        .unwrap()
+        .insert(authority_of(nest_url), spki);
+}
+
 /// **Test-only.** Record a chain-accepted re-pin (`NestIdentityPinStore::
 /// set_rotation_accepted`) for `nest_url`'s authority in the *installed*
 /// store — the seed half of the guard's own precondition: a test asserting that a same-root

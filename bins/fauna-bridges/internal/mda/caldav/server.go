@@ -211,8 +211,11 @@ func NewServer(cfg ServerConfig, client wsrpc.Caller) *Server {
 	//                       logs auth failures and w1 rejections. Reconstructs
 	//                       the macOS create-then-rename verb sequence in box
 	//                       logs for the live hand-proof.
+	//   davauth.NewMiddleware — HTTP Basic → AEAD-unwrap → Session in ctx.
+	//                       Outside w1Mitigations on purpose: an
+	//                       anonymous peer is refused 401 before any body byte
+	//                       is read, so the 16 MiB buffer is authenticated-only.
 	//   w1Mitigations    — body cap / XML depth / PROPFIND depth gates
-	//   davauth.NewMiddleware — HTTP Basic → AEAD-unwrap → Session in ctx
 	//   ifMatchMiddleware — stash If-Match header for DELETE handler
 	//   newPropPatchInterceptor    — handle PROPPATCH (emersion 501s
 	//                       it at caldav/server.go:664); collection
@@ -237,7 +240,7 @@ func NewServer(cfg ServerConfig, client wsrpc.Caller) *Server {
 	//
 	// PUT continues to receive If-Match through `opts.IfMatch` per
 	// emersion's existing plumbing.
-	mux.Handle("/", accessLogMiddleware(w1Mitigations(davauth.NewMiddleware(caldavRealm, ifMatchMiddleware(newPropPatchInterceptor(newMkcalendarInterceptor(newMoveCopyInterceptor(newSyncCollectionInterceptor(newSchedulingInterceptor(dav.QuotaBody(handler), logger, cfg.CardDAVEnabled), logger), logger), logger), logger)), client, logger, lockout, primaryDomain)), logger))
+	mux.Handle("/", accessLogMiddleware(davauth.NewMiddleware(caldavRealm, w1Mitigations(ifMatchMiddleware(newPropPatchInterceptor(newMkcalendarInterceptor(newMoveCopyInterceptor(newSyncCollectionInterceptor(newSchedulingInterceptor(dav.QuotaBody(handler), logger, cfg.CardDAVEnabled), logger), logger), logger), logger))), client, logger, lockout, primaryDomain), logger))
 
 	inner := &http.Server{
 		Handler:           mux,

@@ -698,9 +698,10 @@ fn rule_the_paying_readers_entitlements(
 /// **bearer** credential: `redeem_claim` finds it by code alone and binds it to
 /// whoever presents it, so it consults the retired identity nowhere. A seed
 /// thief could mint an unbounded supply at `fauna.payments.claims.mint` and hold
-/// the codes through the ceremony, and **no app can revoke one** — there is no
-/// `claims.void` gesture; `void_payment_claim` is reachable only from the refund
-/// path. Carried live that is `nest_pairings`' shape exactly. Voiding costs the
+/// the codes through the ceremony. The successor can void any one code
+/// (`fauna.payments.claims.void`) but **cannot tell a thief's code from a
+/// buyer's** — both are bare `manual` rows on the moved ledger. Carried live that
+/// is `nest_pairings`' shape exactly. Voiding costs the
 /// honest buyer nothing a `Stay` would not have cost them anyway, and leaves the
 /// row — `external_ref` intact — so the successor can verify the payment in the
 /// provider dashboard and mint a fresh code.
@@ -1645,11 +1646,13 @@ impl CacheDb {
         // and loss, no reason carried — a self-declared reason could not be
         // trusted exactly where it matters.
         //
-        // The rows re-point *and* revoke rather than being left behind on the
+        // The rows re-point *and* burn rather than being left behind on the
         // dead identity: the successor's Connected-apps page is per actor, so
         // rows left on the old id would be invisible residue, and what the
         // successor most needs to see is precisely which apps held standing
-        // authority. The *signer keypair* row above deliberately survives (it
+        // authority. A burned row (`status = 'burned'`) is listed as not
+        // connected — the mail-credentials precedent — while a row the user
+        // had already revoked stays `revoked` and hidden. The *signer keypair* row above deliberately survives (it
         // never left the box and identifies the signer, not the user) — that is
         // the one thing this differs from `unlink_account`'s cascade, which
         // drops it.
@@ -1657,7 +1660,8 @@ impl CacheDb {
             corpus_rows_repointed += tx
                 .execute(
                     "UPDATE nostr_bunker_apps
-                        SET actor_id = ?2, status = 'revoked', secret_hash = NULL
+                        SET actor_id = ?2, secret_hash = NULL,
+                            status = CASE WHEN status = 'revoked' THEN 'revoked' ELSE 'burned' END
                       WHERE actor_id = ?1",
                     rusqlite::params![old_hex, new_hex],
                 )
@@ -1759,8 +1763,8 @@ impl CacheDb {
         //     entitlement plane, and the one that MOVES rather than burns,
         //     because its rows are the payment audit trail the schema keeps
         //     forever. Every unredeemed code is voided as it travels: a claim is
-        //     a bearer credential no app can revoke, so the ceremony is the only
-        //     place a thief-minted one can die. See the leg's doc.
+        //     a bearer credential, and the successor cannot tell a thief-minted
+        //     one from a buyer's to void it by hand. See the leg's doc.
         corpus_rows_repointed += rule_the_creators_claim_ledger(&tx, &old, &new)?;
 
         // 5f-septies. The floor roster's seats. The one membership plane whose
@@ -5726,10 +5730,9 @@ mod tests {
     /// it by code alone and binds it to whoever presents it, so it consults the
     /// retired identity nowhere — and a seed thief could have minted an
     /// unbounded supply at `fauna.payments.claims.mint` before the ceremony.
-    /// Nothing in any app can revoke one (there is no `claims.void` gesture;
-    /// `void_payment_claim` is reachable only from the refund path), so carrying
-    /// them live would hand the successor exactly the unrevocable standing
-    /// authority `nest_pairings` burns for.
+    /// The successor could void codes one by one (`claims.void`) but cannot tell
+    /// the thief's from a buyer's, so carrying them live would hand the
+    /// successor exactly the standing authority `nest_pairings` burns for.
     #[tokio::test]
     async fn a_succession_carries_the_claim_ledger_and_voids_what_was_never_redeemed() {
         let db = CacheDb::open_in_memory().unwrap();
@@ -5781,7 +5784,7 @@ mod tests {
         assert!(
             outstanding.voided_at.is_some(),
             "an unredeemed claim is a bearer credential the thief could have minted, \
-             and no app can revoke one — the ceremony is the only place it can die"
+             and the successor cannot tell it from a buyer's to void it by hand"
         );
         assert!(outstanding.redeemed_at.is_none());
         assert_eq!(outstanding.external_ref, "manual_code-still-outstanding");
@@ -6280,6 +6283,37 @@ mod tests {
         assert_eq!(accounts, 1, "the npub must follow the account");
         assert_eq!(active_apps, 0, "every bunker connection is revoked");
         assert_eq!(zappers, 0, "every zap-signer designation is deleted");
+    }
+
+    /// The successor's roster lists the connection the burn killed (as
+    /// `burned`, so it reads as not connected) and still hides one the user had
+    /// already revoked — the mail-credentials precedent, not a widening.
+    #[cfg(feature = "nostr")]
+    #[tokio::test]
+    async fn the_successor_sees_burned_bunker_connections_but_not_ordinary_revokes() {
+        let db = CacheDb::open_in_memory().unwrap();
+        seed_account(&db, &OLD, "alice").await;
+        seed_nostr_identity(&db, &OLD, "old").await;
+        {
+            let conn = db.conn.lock().await;
+            conn.execute(
+                "INSERT INTO nostr_bunker_apps (actor_id, app_pubkey, status, created_at, expires_at)
+                 VALUES (?1, 'app-revoked', 'revoked', 1, 9999999999)",
+                rusqlite::params![hex::encode(OLD)],
+            )
+            .unwrap();
+        }
+
+        db.record_succession(&OLD, &NEW, b"s", 1)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let conn = db.conn.lock().await;
+        let listed = crate::nostr::bunker::list_apps(&conn, &hex::encode(NEW)).unwrap();
+        assert_eq!(listed.len(), 1, "only the burned connection is listed");
+        assert_eq!(listed[0].status, "burned");
+        assert_eq!(listed[0].app_pubkey.as_deref(), Some("app-old"));
     }
 
     // ── The counterparty columns (2026-08-15) ───────────────────────

@@ -541,6 +541,27 @@ fn saturating_counter_move_sql(col: &str) -> String {
     )
 }
 
+/// The `size_bytes` column `sql` selects, summed with `saturating_add` — the
+/// read-side twin of [`saturating_counter_move_sql`]. A charged population can
+/// legitimately total past `i64::MAX` once an undelete has saturated its
+/// owner (the re-charge never refuses), and SQLite's `SUM` then raises
+/// `integer overflow`, failing the reclaim that was meant to credit it back.
+/// The fold saturates instead, so a credit is at most the saturated meter
+/// (floored by the caller's `MAX(0, …)`) and the reclaim never fails or wraps.
+fn saturating_size_sum(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> rusqlite::Result<i64> {
+    let mut stmt = conn.prepare(sql)?;
+    let mut rows = stmt.query(params)?;
+    let mut total = 0i64;
+    while let Some(row) = rows.next()? {
+        total = total.saturating_add(row.get::<_, i64>(0)?);
+    }
+    Ok(total)
+}
+
 /// Move the retained-accounting counters for version rows leaving
 /// (`sign = -1`) or rejoining (`sign = +1`) the charged population
 /// (`file-versions.md` § Retention (4), slice 3): the folder OWNER's
@@ -1027,6 +1048,16 @@ impl SetLabel {
     }
 }
 
+/// What a set's content-key envelope row lends its `fauna.folders.list` row
+/// ([`CacheDb::content_key_echoes_for`]): the owner-stamped generation floor,
+/// and the digest of the stored blob — `None` on a row put before the nest
+/// kept one (`writer-signed-change-records.md` ruling (7)(b)(ii) rule (6)(a)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentKeyEcho {
+    pub floor: i64,
+    pub digest: Option<[u8; 32]>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FolderOptions {
     pub retention_policy: Option<String>,
@@ -1108,6 +1139,14 @@ pub enum SupersedeOutcome {
     /// The path has no live manifest head, or its head is not the manifest the
     /// caller verified. Nothing was marked.
     HeadMismatch,
+    /// The head is the verified manifest, but it is not a reissue of the row
+    /// directly below it: the newest live non-delete row strictly below the
+    /// head does not carry the manifest the caller sourced its plaintext from
+    /// (or the caller named no source). A stale reissue — a device that was
+    /// offline while a peer recorded a newer edit re-seals the older content —
+    /// would otherwise bury that newer edit. Nothing was marked
+    /// (`mls-group-key-material.md` § M2 → *(B) Reclaim*, property (1)).
+    SourceNotHead,
 }
 
 /// The `snapshots` column list, in [`row_to_snapshot_row`]'s expected order.
@@ -1283,11 +1322,16 @@ impl CacheDb {
     /// browse that lists them (still recoverable until `purge_after`).
     /// Prune-*pending* rows stay in the default projection — their 7-day
     /// cancellable window keeps them fully listable and restorable.
+    /// `scope.include_superseded` is the snapshot restore's licence read
+    /// (`backup-restore.md` § Security Properties → Integrity): a row the
+    /// purge stamped `superseded_at` is served with its signature, because a
+    /// snapshot taken while it was the head still pins the bytes the purge
+    /// released, and the writer's statement is what licenses them.
     pub async fn list_file_versions_in_sets(
         &self,
         folder_ids: &[i64],
         path_hash: &[u8; 32],
-        include_pruned: bool,
+        scope: crate::db::VersionScope,
     ) -> Result<Vec<FileVersionRow>> {
         if folder_ids.is_empty() {
             return Ok(Vec::new());
@@ -1298,10 +1342,15 @@ impl CacheDb {
             .map(|id| id.to_string())
             .collect::<Vec<_>>()
             .join(",");
-        let pruned_filter = if include_pruned {
+        let pruned_filter = if scope.include_pruned {
             ""
         } else {
             "AND pruned_at IS NULL"
+        };
+        let superseded_filter = if scope.include_superseded {
+            ""
+        } else {
+            "AND superseded_at IS NULL"
         };
         let conn = self.conn.lock().await;
         // `ids_csv` is built from i64s (no injection surface); rusqlite has no
@@ -1316,7 +1365,7 @@ impl CacheDb {
                  WHERE path_hash = ?1
                    AND folder_id IN ({ids_csv})
                    AND manifest_hash IS NOT NULL
-                   AND superseded_at IS NULL
+                   {superseded_filter}
                    {pruned_filter}
                  ORDER BY seq",
             ))
@@ -4194,37 +4243,41 @@ impl CacheDb {
             // (the head-only sum would leak the retained charges). An
             // uncharged row of a same-manifest pair (`charged = 0`, ruling
             // (11)(g)) was never charged, so it is not credited either.
-            let sync_live: i64 = tx
-                .query_row(
-                    "SELECT COALESCE(SUM(size_bytes), 0) FROM sync_changes
-                     WHERE folder_id = ?1 AND manifest_hash IS NOT NULL
-                       AND superseded_at IS NULL AND pruned_at IS NULL
-                       AND charged = 1",
-                    rusqlite::params![fs_id],
-                    |r| r.get(0),
-                )
-                .context("sum charged sync_changes bytes for quota reclaim")?;
-            let custody_live: i64 = tx
-                .query_row(
-                    "SELECT COALESCE(SUM(size_bytes), 0) FROM backup_custody
-                     WHERE folder_id = ?1 AND manifest_hash IS NOT NULL",
-                    rusqlite::params![fs_id],
-                    |r| r.get(0),
-                )
-                .context("sum live backup_custody bytes for quota reclaim")?;
+            //
+            // Every sum saturates: past an undelete's saturating
+            // re-charge the population totals more than `i64::MAX`, and a
+            // failing reclaim would strand the folder (and a half-done account
+            // deletion) undeletable.
+            let sync_live = saturating_size_sum(
+                tx,
+                "SELECT size_bytes FROM sync_changes
+                 WHERE folder_id = ?1 AND manifest_hash IS NOT NULL
+                   AND superseded_at IS NULL AND pruned_at IS NULL
+                   AND charged = 1",
+                rusqlite::params![fs_id],
+            )
+            .context("sum charged sync_changes bytes for quota reclaim")?;
+            let custody_live = saturating_size_sum(
+                tx,
+                "SELECT size_bytes FROM backup_custody
+                 WHERE folder_id = ?1 AND manifest_hash IS NOT NULL",
+                rusqlite::params![fs_id],
+            )
+            .context("sum live backup_custody bytes for quota reclaim")?;
             // Retained superseded generations are charged for the whole grace
             // window, so deleting the set must credit them back too — otherwise
             // removing a destination leaks quota that no later sweep can free
             // (the rows are gone with the set).
-            let custody_retained: i64 = tx
-                .query_row(
-                    "SELECT COALESCE(SUM(size_bytes), 0) FROM backup_custody_generations
-                     WHERE folder_id = ?1",
-                    rusqlite::params![fs_id],
-                    |r| r.get(0),
-                )
-                .context("sum retained custody generation bytes for quota reclaim")?;
-            let total = sync_live + custody_live + custody_retained;
+            let custody_retained = saturating_size_sum(
+                tx,
+                "SELECT size_bytes FROM backup_custody_generations
+                 WHERE folder_id = ?1",
+                rusqlite::params![fs_id],
+            )
+            .context("sum retained custody generation bytes for quota reclaim")?;
+            let total = sync_live
+                .saturating_add(custody_live)
+                .saturating_add(custody_retained);
             if total != 0 {
                 tx.execute(
                     "UPDATE users SET storage_bytes_used = MAX(0, storage_bytes_used - ?1)
@@ -4436,7 +4489,11 @@ impl CacheDb {
         let files = latest_live_snapshot_files(&conn, folder_id)?;
 
         let file_count = files.len() as i64;
-        let total_bytes: i64 = files.iter().map(|f| f.size_bytes).sum();
+        // Saturating for the same reason as `create_snapshot_v2`'s total.
+        let total_bytes = files
+            .iter()
+            .map(|f| f.size_bytes)
+            .fold(0i64, i64::saturating_add);
 
         // Capture max_change_seq so the scheduler knows this snapshot covers all current changes
         let max_seq: Option<i64> = conn.query_row(
@@ -4538,7 +4595,13 @@ impl CacheDb {
         let files = latest_live_snapshot_files(&conn, folder_id)?;
 
         let file_count = files.len() as i64;
-        let total_bytes: i64 = files.iter().map(|f| f.size_bytes).sum();
+        // Saturating, never a plain `sum()`: the sizes are owner-declared, and
+        // a total past `i64::MAX` panicked the nest-wide scheduler task that
+        // cuts every folder's automatic snapshot.
+        let total_bytes = files
+            .iter()
+            .map(|f| f.size_bytes)
+            .fold(0i64, i64::saturating_add);
         // The wire still carries plaintext tags (this fn's `tags` param)
         // because the nest computes the retention pruner's matching key from
         // them (path-sealing S1): a JSON array of hex per-tag digests
@@ -5089,14 +5152,27 @@ impl CacheDb {
     /// history; the `backup_custody` tombstone precedent). Idempotent: a re-run
     /// marks 0 rows. Quota needs no adjustment — the live byte sum is already
     /// latest-per-path (`record_sync_change_metered` delta arithmetic).
+    ///
+    /// `source_manifest_hash` is the head the caller's re-seal sourced its
+    /// plaintext from. The mark happens only if the newest live non-delete
+    /// manifest row strictly below the head carries exactly that manifest
+    /// ([`SupersedeOutcome::SourceNotHead`] otherwise; an absent source refuses
+    /// the same way). "The head is the bytes I verified" does not by itself
+    /// prove "the head carries the newest content": a reissue of an OLDER head
+    /// recorded after a peer's newer edit takes the highest `seq`, and without
+    /// this conjunct the peer's edit would be marked and its chunks reclaimed.
+    /// A path with no live non-delete row below the head has nothing a reissue
+    /// could bury and marks as before.
     pub async fn supersede_sync_changes_for_path(
         &self,
         folder_id: i64,
         path_hash: &[u8; 32],
         verified_manifest_hash: &[u8; 32],
+        source_manifest_hash: Option<&[u8; 32]>,
     ) -> Result<SupersedeOutcome> {
         let path_hash = *path_hash;
         let verified = *verified_manifest_hash;
+        let source = source_manifest_hash.copied();
         // One held conn = the atomicity unit (the upsert_backup_custody
         // precedent): the head read and the mark cannot interleave with a
         // concurrent record or supersede.
@@ -5123,6 +5199,25 @@ impl CacheDb {
         };
         if head_manifest != verified.as_slice() {
             return Ok(SupersedeOutcome::HeadMismatch);
+        }
+        // The second conjunct: the head is a reissue of the row directly
+        // below it. Same live definition as the head read above.
+        let below: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT manifest_hash FROM sync_changes
+                 WHERE folder_id = ?1 AND path_hash = ?2 AND seq < ?3
+                   AND manifest_hash IS NOT NULL AND superseded_at IS NULL
+                   AND change_type != 'delete'
+                 ORDER BY seq DESC LIMIT 1",
+                rusqlite::params![folder_id, path_hash.as_slice(), head_seq],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("query supersede source row")?;
+        if let Some(below) = below
+            && source.is_none_or(|s| below != s.as_slice())
+        {
+            return Ok(SupersedeOutcome::SourceNotHead);
         }
         let now = now_epoch_millis();
         // The rows this call NEWLY releases from the charged population —
@@ -5500,16 +5595,22 @@ impl CacheDb {
 
         // Credit each affected owner back in one grouped pass, then drop the
         // rows — so a partial failure can only over-charge (safe), never
-        // under-charge while the bytes are gone.
+        // under-charge while the bytes are gone. Each uploader's sum saturates
+        // like `saturating_size_sum`'s, so a population past `i64::MAX` can
+        // neither fail the sweep nor wrap the credit negative.
         let mut stmt = conn.prepare(
-            "SELECT uploader_actor, COALESCE(SUM(size_bytes), 0)
+            "SELECT uploader_actor, size_bytes
              FROM backup_custody_generations
-             WHERE superseded_at <= ?1
-             GROUP BY uploader_actor",
+             WHERE superseded_at <= ?1",
         )?;
-        let credits: Vec<(Vec<u8>, i64)> = stmt
-            .query_map(rusqlite::params![cutoff], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?;
+        let mut credits: std::collections::BTreeMap<Vec<u8>, i64> =
+            std::collections::BTreeMap::new();
+        let mut rows = stmt.query(rusqlite::params![cutoff])?;
+        while let Some(row) = rows.next()? {
+            let sum = credits.entry(row.get(0)?).or_default();
+            *sum = sum.saturating_add(row.get::<_, i64>(1)?);
+        }
+        drop(rows);
         drop(stmt);
 
         for (uploader, bytes) in &credits {
@@ -6656,6 +6757,19 @@ impl CacheDb {
         .context("delete folder members for device")?;
         let members_removed = tx.changes() as i64;
 
+        // A removed device can never re-send or retry its skipped catch-up
+        // changes, so its unresolved `catchup_failed` reports leave the review
+        // list in this same transaction (`conflicts.md` § Skipped catch-up
+        // changes reach the review list → Lifecycle).
+        tx.execute(
+            "UPDATE sync_conflicts SET resolved_at = ?3
+             WHERE device_id = ?1 AND conflict_type = 'catchup_failed'
+               AND resolved_at IS NULL
+               AND folder_id IN (SELECT id FROM folders WHERE actor_id = ?2)",
+            rusqlite::params![device_id, actor_id, now_epoch_secs()],
+        )
+        .context("resolve catchup_failed reports for deleted device")?;
+
         tx.execute(
             "DELETE FROM sync_devices WHERE device_id = ?1 AND actor_id = ?2",
             rusqlite::params![device_id, actor_id],
@@ -6887,6 +7001,10 @@ impl CacheDb {
     /// records (KMH § M2 version floor, multi-writer Phase 1) — **monotonic**:
     /// the stored floor only ever rises (`MAX(stored, new)`), which is why
     /// this is an `ON CONFLICT DO UPDATE` and not an `INSERT OR REPLACE`.
+    /// `digest` is the blob's [`fauna_protocol::folder_envelope_sig::digest`],
+    /// written beside it at every put — what `fauna.folders.list` echoes so a
+    /// member learns of a re-publish that advanced no epoch
+    /// (`writer-signed-change-records.md` ruling (7)(b)(ii) rule (6)(a)).
     pub async fn upsert_folder_content_key(
         &self,
         channel_id: &[u8; 32],
@@ -6895,19 +7013,22 @@ impl CacheDb {
         current_version: i64,
     ) -> Result<()> {
         let channel_id = channel_id.to_vec();
+        let digest = fauna_protocol::folder_envelope_sig::digest(sealed).to_vec();
         let sealed = sealed.to_vec();
         let conn = self.conn.lock().await;
         let now = now_epoch_secs();
         conn.execute(
-            "INSERT INTO folder_content_keys (channel_id, epoch, sealed, updated_at, current_version)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO folder_content_keys
+                 (channel_id, epoch, sealed, updated_at, current_version, digest)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(channel_id) DO UPDATE SET
                  epoch = excluded.epoch,
                  sealed = excluded.sealed,
                  updated_at = excluded.updated_at,
                  current_version = MAX(folder_content_keys.current_version,
-                                       excluded.current_version)",
-            rusqlite::params![channel_id, epoch, sealed, now, current_version],
+                                       excluded.current_version),
+                 digest = excluded.digest",
+            rusqlite::params![channel_id, epoch, sealed, now, current_version, digest],
         )
         .context("upsert folder content key")?;
         Ok(())
@@ -6930,29 +7051,36 @@ impl CacheDb {
         Ok(result)
     }
 
-    /// The content-key floors of several groups in one read — the
-    /// `fauna.folders.list` projection's, which is polled on a tick by every
-    /// seat and must not scale per row. Groups with no floor are absent.
-    pub async fn content_key_floors_for(
+    /// What the `fauna.folders.list` projection reads off several groups'
+    /// envelope rows, in one read — the list is polled on a tick by every seat
+    /// and must not scale per row. Groups with no envelope row are absent.
+    pub async fn content_key_echoes_for(
         &self,
         channel_ids: &[[u8; 32]],
-    ) -> Result<std::collections::HashMap<[u8; 32], i64>> {
+    ) -> Result<std::collections::HashMap<[u8; 32], ContentKeyEcho>> {
         let mut out = std::collections::HashMap::new();
         if channel_ids.is_empty() {
             return Ok(out);
         }
         let conn = self.conn.lock().await;
-        let mut stmt =
-            conn.prepare("SELECT current_version FROM folder_content_keys WHERE channel_id = ?1")?;
+        let mut stmt = conn.prepare(
+            "SELECT current_version, digest FROM folder_content_keys WHERE channel_id = ?1",
+        )?;
         for channel_id in channel_ids {
-            let floor = stmt
+            let echo = stmt
                 .query_row(rusqlite::params![channel_id.as_slice()], |row| {
-                    row.get::<_, i64>(0)
+                    Ok(ContentKeyEcho {
+                        floor: row.get(0)?,
+                        // A digest of any other length is not one this nest wrote.
+                        digest: row
+                            .get::<_, Option<Vec<u8>>>(1)?
+                            .and_then(|d| <[u8; 32]>::try_from(d).ok()),
+                    })
                 })
                 .optional()
-                .context("read folder content key floors")?;
-            if let Some(floor) = floor {
-                out.insert(*channel_id, floor);
+                .context("read folder content key echoes")?;
+            if let Some(echo) = echo {
+                out.insert(*channel_id, echo);
             }
         }
         Ok(out)
@@ -7124,6 +7252,26 @@ impl CacheDb {
         } else {
             None
         };
+        // Idempotent at the nest end (`conflicts.md` § Skipped catch-up changes
+        // reach the review list): the one report whose reporter re-sends by
+        // design answers the id already on record for the same (set, device,
+        // path) while that row is unresolved, and inserts nothing.
+        if conflict_type == "catchup_failed" && resolution.is_none() {
+            let existing: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM sync_conflicts
+                     WHERE folder_id = ?1 AND device_id = ?2 AND path_hash = ?3
+                       AND conflict_type = 'catchup_failed' AND resolved_at IS NULL
+                     ORDER BY id LIMIT 1",
+                    rusqlite::params![folder_id, device_id, path_hash.as_slice()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .context("look up existing catchup_failed report")?;
+            if let Some(id) = existing {
+                return Ok(id);
+            }
+        }
         tx.execute(
             "INSERT INTO sync_conflicts (folder_id, device_id, path, conflict_type, details, created_at, resolved_at, resolution, winning_manifest_hash, path_hash, path_sealed, details_sealed)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
@@ -8309,6 +8457,65 @@ mod custody_grace_window_tests {
         );
     }
 
+    /// The expiry sweep's per-uploader credit folds with saturating
+    /// adds, like the folder-delete reclaim's. A generation's bytes are the
+    /// destination-derived charge, so the honest paths cannot total past
+    /// `i64::MAX`; the rows are therefore rested directly. With a
+    /// `SUM(size_bytes) … GROUP BY` back in place, SQLite raises `integer
+    /// overflow` and the sweep — the GC's first step — fails on every pass.
+    #[tokio::test]
+    async fn a_generation_population_past_i64_max_still_reclaims() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let owner = [0x11u8; 32];
+        let fs_id = setup(&db, &owner, "__mail").await;
+        {
+            let conn = db.conn.lock().await;
+            for (path, manifest) in [([0x01u8; 32], [0xA1u8; 32]), ([0x02u8; 32], [0xB2u8; 32])] {
+                conn.execute(
+                    "INSERT INTO backup_custody_generations
+                         (uploader_actor, folder_id, path_hash, manifest_hash, size_bytes, superseded_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                    rusqlite::params![
+                        owner.as_slice(),
+                        fs_id,
+                        path.as_slice(),
+                        manifest.as_slice(),
+                        i64::MAX - 10
+                    ],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "UPDATE users SET storage_bytes_used = ?1 WHERE actor_id = ?2",
+                rusqlite::params![i64::MAX, owner.as_slice()],
+            )
+            .unwrap();
+        }
+
+        let now = crate::db::now_epoch_secs();
+        assert_eq!(
+            db.reclaim_expired_backup_custody_generations(now)
+                .await
+                .unwrap(),
+            2,
+            "the sweep must reclaim a population past i64::MAX"
+        );
+        let conn = db.conn.lock().await;
+        let counter: (String, i64) = conn
+            .query_row(
+                "SELECT typeof(storage_bytes_used), storage_bytes_used FROM users
+                 WHERE actor_id = ?1",
+                rusqlite::params![owner.as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            counter,
+            ("integer".to_string(), 0),
+            "the saturated credit floors the counter at 0 as an INTEGER"
+        );
+    }
+
     /// Restore is what makes the window *useful*: after revoking a rogue source's
     /// writer grant, the owner promotes a good generation back to live. The
     /// displaced generation is retained by the same machinery, so restoring is
@@ -9157,6 +9364,114 @@ mod tests {
         );
     }
 
+    /// Replays `undelete_at_the_i64_ceiling_saturates_both_counters` up to its
+    /// saturated undelete: the folder's charged population (A, its newer
+    /// head, the refill and the re-charged A) now sums past `i64::MAX`.
+    /// Returns the db, the owner and the folder id.
+    async fn folder_charged_past_the_i64_ceiling() -> (CacheDb, [u8; 32], i64) {
+        let db = CacheDb::open_in_memory().unwrap();
+        let owner = [0x11u8; 32];
+        let writer = [0x22u8; 32];
+        db.create_user(&owner, "free", "owner").await.unwrap();
+        db.create_user(&writer, "free", "writer").await.unwrap();
+        db.create_folder("shared", &owner).await.unwrap();
+        let raw_group_id = vec![0x7du8; 20];
+        let channel = fauna_mls::types::ChannelId::from_group_id(&raw_group_id).0;
+        assert!(
+            db.set_folder_mls_group("shared", &owner, Some(&raw_group_id))
+                .await
+                .unwrap()
+        );
+        db.set_folder_member_access(&channel, &writer, "writer", None)
+            .await
+            .unwrap();
+        let fs_id = db.get_folder("shared").await.unwrap().unwrap().id;
+        let p: [u8; 32] = *blake3::hash(b"doc.txt").as_bytes();
+        let dev = [0xD1u8; 32];
+        let big = i64::MAX - 1_000;
+        let record = |manifest: [u8; 32], size: i64| {
+            let db = &db;
+            async move {
+                db.record_sync_change_metered(
+                    &writer,
+                    &owner,
+                    Some(&channel),
+                    &p,
+                    Some(&manifest),
+                    size,
+                    "modify",
+                    fs_id,
+                    &dev,
+                    Some("doc.txt"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    i64::MAX,
+                )
+                .await
+            }
+        };
+        let a = record([0xA1u8; 32], big).await.unwrap();
+        record([0xA2u8; 32], 1_000).await.unwrap();
+        assert!(db.soft_prune_version(a).await.unwrap());
+        record([0xA3u8; 32], big).await.unwrap();
+        assert!(db.undelete_version(a).await.unwrap());
+        (db, owner, fs_id)
+    }
+
+    /// The owner's `storage_bytes_used` as (`typeof`, value), read raw so a
+    /// REAL column shows as such rather than failing an `i64` decode.
+    async fn owner_counter_raw(db: &CacheDb, owner: &[u8; 32]) -> (String, f64) {
+        let conn = db.conn.lock().await;
+        conn.query_row(
+            "SELECT typeof(storage_bytes_used), storage_bytes_used FROM users
+             WHERE actor_id = ?1",
+            rusqlite::params![owner.as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    /// The folder-delete reclaim re-sums the set's charged
+    /// population; once an undelete has saturated the owner, that population
+    /// sums past `i64::MAX`, SQLite's `SUM` raised `integer overflow`, and the
+    /// delete failed — a state no app could repair. The reclaim folds with
+    /// saturating adds instead: the delete succeeds, and the credit (at least
+    /// the saturated meter) floors the owner's counter at 0 as an INTEGER.
+    ///
+    /// Red-verifiable: put back the `SUM(size_bytes)` sums in
+    /// `delete_folder_rows_in_tx` and the delete below returns `Err`.
+    #[tokio::test]
+    async fn folder_delete_after_a_saturating_undelete_succeeds() {
+        let (db, owner, fs_id) = folder_charged_past_the_i64_ceiling().await;
+        assert!(
+            db.delete_folder_by_id(fs_id).await.unwrap(),
+            "the delete must succeed past a saturating undelete"
+        );
+        assert_eq!(
+            owner_counter_raw(&db, &owner).await,
+            ("integer".to_string(), 0.0)
+        );
+    }
+
+    /// Account deletion's folder step runs the same reclaim per
+    /// folder; it must not stop a half-done account deletion at the ceiling.
+    #[tokio::test]
+    async fn delete_all_folders_after_a_saturating_undelete_succeeds() {
+        let (db, owner, _fs_id) = folder_charged_past_the_i64_ceiling().await;
+        assert_eq!(
+            db.delete_all_folders_for_actor(&owner).await.unwrap(),
+            1,
+            "every folder the owner holds is deleted"
+        );
+        assert_eq!(
+            owner_counter_raw(&db, &owner).await,
+            ("integer".to_string(), 0.0)
+        );
+    }
+
     /// A record's member half is bounded by no `checked_add` when
     /// the recorder is an uncapped member (`byte_cap` NULL, the default share)
     /// and the record is a same-manifest transfer: the owner is asked only
@@ -9344,7 +9659,7 @@ mod tests {
         // The owner's floorless privacy instrument marks BOTH pre-head rows
         // terminal, but only v2 was still charged — one credit, not two.
         let outcome = db
-            .supersede_sync_changes_for_path(fs.id, &p, &head)
+            .supersede_sync_changes_for_path(fs.id, &p, &head, Some(&[0xA2u8; 32]))
             .await
             .unwrap();
         match outcome {
@@ -9785,7 +10100,7 @@ mod tests {
 
         // Compact: supersede everything below the m2 head — the release point
         // that credits the retained m1 back (1600 → 1000).
-        db.supersede_sync_changes_for_path(fs.id, &p, &m2)
+        db.supersede_sync_changes_for_path(fs.id, &p, &m2, Some(&m1))
             .await
             .unwrap();
         assert_eq!(
@@ -10494,7 +10809,7 @@ mod tests {
         }
 
         assert_eq!(
-            db.supersede_sync_changes_for_path(fs.id, &p, &m3)
+            db.supersede_sync_changes_for_path(fs.id, &p, &m3, Some(&m2))
                 .await
                 .unwrap(),
             SupersedeOutcome::Marked(2),
@@ -10520,7 +10835,7 @@ mod tests {
 
         // Idempotent re-run marks nothing new.
         assert_eq!(
-            db.supersede_sync_changes_for_path(fs.id, &p, &m3)
+            db.supersede_sync_changes_for_path(fs.id, &p, &m3, Some(&m2))
                 .await
                 .unwrap(),
             SupersedeOutcome::Marked(0),
@@ -10556,7 +10871,7 @@ mod tests {
 
         // Naming the OLD manifest (not the head) refuses.
         assert_eq!(
-            db.supersede_sync_changes_for_path(fs.id, &p, &m_old)
+            db.supersede_sync_changes_for_path(fs.id, &p, &m_old, Some(&m_old))
                 .await
                 .unwrap(),
             SupersedeOutcome::HeadMismatch,
@@ -10564,7 +10879,7 @@ mod tests {
         // Unknown path refuses.
         let unknown: [u8; 32] = *blake3::hash(b"nope").as_bytes();
         assert_eq!(
-            db.supersede_sync_changes_for_path(fs.id, &unknown, &m_head)
+            db.supersede_sync_changes_for_path(fs.id, &unknown, &m_head, Some(&m_old))
                 .await
                 .unwrap(),
             SupersedeOutcome::HeadMismatch,
@@ -10572,6 +10887,70 @@ mod tests {
         // Nothing was marked: both manifests still pinned.
         let pins = db.sync_change_manifest_hashes(i64::MAX).await.unwrap();
         assert!(pins.contains(&m_old.to_vec()) && pins.contains(&m_head.to_vec()));
+    }
+
+    /// Property (1)'s second conjunct: a head that is the verified
+    /// manifest but a reissue of an OLDER row must not bury the newer edit
+    /// between them. X (seq 1), a peer's X′ (seq 2), then an offline device's
+    /// re-seal of X recorded at seq 3: superseding with `source = X` refuses
+    /// and marks nothing — X′ stays live in the feed and pinned for GC — while
+    /// `source = X′` (the reissue of the row directly below) marks rows 1–2.
+    /// An absent source refuses the same way.
+    #[tokio::test]
+    async fn supersede_refuses_a_reissue_that_is_not_of_the_row_below() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let owner = [0x24u8; 32];
+        db.create_folder("stale-reissue", &owner).await.unwrap();
+        let fs = db.get_folder("stale-reissue").await.unwrap().unwrap();
+
+        let p: [u8; 32] = *blake3::hash(b"notes.txt").as_bytes();
+        let (x, x_prime, reissue) = ([0xE1u8; 32], [0xE2u8; 32], [0xE3u8; 32]);
+        for mh in [&x, &x_prime, &reissue] {
+            db.record_sync_change(
+                &owner,
+                &p,
+                Some(mh),
+                10,
+                "modify",
+                Some(fs.id),
+                None,
+                Some("notes.txt"),
+            )
+            .await
+            .unwrap();
+        }
+
+        for source in [Some(&x), None] {
+            assert_eq!(
+                db.supersede_sync_changes_for_path(fs.id, &p, &reissue, source)
+                    .await
+                    .unwrap(),
+                SupersedeOutcome::SourceNotHead,
+                "a reissue sourced from {source:?} is not of the row below the head",
+            );
+        }
+        let pins = db.sync_change_manifest_hashes(i64::MAX).await.unwrap();
+        assert!(
+            pins.contains(&x_prime.to_vec()) && pins.contains(&x.to_vec()),
+            "the refusal marks nothing"
+        );
+        let feed = db
+            .get_sync_changes_for_folder(fs.id, 0, None)
+            .await
+            .unwrap();
+        assert!(
+            feed.iter()
+                .any(|c| c.manifest_hash.as_deref() == Some(x_prime.as_slice())),
+            "the newer edit stays in the feed"
+        );
+
+        assert_eq!(
+            db.supersede_sync_changes_for_path(fs.id, &p, &reissue, Some(&x_prime))
+                .await
+                .unwrap(),
+            SupersedeOutcome::Marked(2),
+            "a reissue of the row directly below marks rows 1-2",
+        );
     }
 
     // ── The version-retention prune pipeline (file-versions.md § Retention (3)) ──
@@ -10631,7 +11010,7 @@ mod tests {
 
         // Default projection: gone. Recovery browse: present, marked.
         let listed = db
-            .list_file_versions_in_sets(&[fs.id], &p, false)
+            .list_file_versions_in_sets(&[fs.id], &p, crate::db::VersionScope::default())
             .await
             .unwrap();
         assert_eq!(
@@ -10640,7 +11019,14 @@ mod tests {
             "the soft-pruned version leaves the default projection"
         );
         let browsed = db
-            .list_file_versions_in_sets(&[fs.id], &p, true)
+            .list_file_versions_in_sets(
+                &[fs.id],
+                &p,
+                crate::db::VersionScope {
+                    include_pruned: true,
+                    include_superseded: false,
+                },
+            )
             .await
             .unwrap();
         let pruned_row = browsed.iter().find(|v| v.version_num == seqs[0]).unwrap();
@@ -10668,7 +11054,7 @@ mod tests {
         // no-op the handler maps to not_found.
         assert!(db.undelete_version(seqs[0]).await.unwrap());
         let relisted = db
-            .list_file_versions_in_sets(&[fs.id], &p, false)
+            .list_file_versions_in_sets(&[fs.id], &p, crate::db::VersionScope::default())
             .await
             .unwrap();
         assert_eq!(
@@ -10729,6 +11115,71 @@ mod tests {
             "a row with no newer sibling is guarded, not purged"
         );
         assert!(db.undelete_version(head).await.unwrap());
+    }
+
+    /// The snapshot restore's licence read (`backup-restore.md` § Security
+    /// Properties → Integrity): a row the purge stamped `superseded_at` leaves
+    /// the default projection and the recovery browse alike, and is served —
+    /// signed fields intact — only under `include_superseded`, because a
+    /// snapshot taken while it was the head still pins the bytes the purge
+    /// released and the writer's statement is what licenses them.
+    #[tokio::test]
+    async fn a_purged_version_is_listed_only_under_include_superseded() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let owner = [0x58u8; 32];
+        let (fs, p, seqs) = folder_with_versions(&db, "vp-licence", "v.txt", &owner, 3).await;
+
+        assert!(db.soft_prune_version(seqs[0]).await.unwrap());
+        db.set_version_purge_after(seqs[0], 0).await.unwrap();
+        assert_eq!(
+            db.purge_expired_soft_pruned_versions().await.unwrap(),
+            (1, 0)
+        );
+
+        let default_listing = db
+            .list_file_versions_in_sets(&[fs.id], &p, crate::db::VersionScope::default())
+            .await
+            .unwrap();
+        assert_eq!(default_listing.len(), 2, "the purged row is not a version");
+        let recovery_browse = db
+            .list_file_versions_in_sets(
+                &[fs.id],
+                &p,
+                crate::db::VersionScope {
+                    include_pruned: true,
+                    include_superseded: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            recovery_browse.len(),
+            2,
+            "the recovery browse lists soft-pruned rows, never purged ones"
+        );
+
+        let licence_read = db
+            .list_file_versions_in_sets(
+                &[fs.id],
+                &p,
+                crate::db::VersionScope {
+                    include_pruned: true,
+                    include_superseded: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            licence_read.len(),
+            3,
+            "the licence read serves the purged row"
+        );
+        let purged = licence_read
+            .iter()
+            .find(|v| v.version_num == seqs[0])
+            .expect("the purged row is in the licence read");
+        assert_eq!(purged.manifest_hash, [0xE0u8; 32].to_vec());
+        assert!(purged.pruned_at.is_some());
     }
 
     /// Restore-during-window safety (§ Retention (3), first build pin): a
@@ -10805,7 +11256,7 @@ mod tests {
         // Marked rows STAY in the default projection (the cancellable window
         // keeps them fully listable and restorable).
         assert_eq!(
-            db.list_file_versions_in_sets(&[fs.id], &p, false)
+            db.list_file_versions_in_sets(&[fs.id], &p, crate::db::VersionScope::default())
                 .await
                 .unwrap()
                 .len(),
@@ -10961,7 +11412,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            db.supersede_sync_changes_for_path(fs.id, &pa, &new_a)
+            db.supersede_sync_changes_for_path(fs.id, &pa, &new_a, Some(&shared))
                 .await
                 .unwrap(),
             SupersedeOutcome::Marked(1),
@@ -11193,6 +11644,114 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "owner resolution clears the conflict"
+        );
+    }
+
+    /// The nest end of the catch-up report's idempotence (`conflicts.md` § Skipped
+    /// catch-up changes reach the review list): a repeated unresolved
+    /// `catchup_failed` report for one (set, device, path) answers the id on
+    /// record and inserts nothing; another path or device inserts; a resolved
+    /// row no longer dedupes; other conflict types are never deduped.
+    #[tokio::test]
+    async fn catchup_failed_report_dedupes_per_set_device_path() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let owner = [0xa1u8; 32];
+        let (dev_a, dev_b) = ([0xd1u8; 32], [0xd2u8; 32]);
+        let fs_id = db.create_folder("docs", &owner).await.unwrap();
+        let report = |device: [u8; 32], path: &'static str, kind: &'static str| {
+            let db = &db;
+            async move {
+                db.report_conflict(
+                    &owner,
+                    fs_id,
+                    &device,
+                    path,
+                    kind,
+                    None,
+                    &[],
+                    None,
+                    Default::default(),
+                    false,
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let first = report(dev_a, "a.txt", "catchup_failed").await;
+        assert_eq!(report(dev_a, "a.txt", "catchup_failed").await, first);
+        assert_eq!(
+            db.list_conflicts_for_actor(&owner, false)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let other_path = report(dev_a, "b.txt", "catchup_failed").await;
+        let other_dev = report(dev_b, "a.txt", "catchup_failed").await;
+        assert!(other_path != first && other_dev != first && other_path != other_dev);
+        // Only the one type is deduped.
+        let m1 = report(dev_a, "c.txt", "modify-modify").await;
+        assert_ne!(report(dev_a, "c.txt", "modify-modify").await, m1);
+
+        // Once resolved, a fresh report is a new row.
+        assert!(db.resolve_conflict(&owner, first).await.unwrap());
+        assert_ne!(report(dev_a, "a.txt", "catchup_failed").await, first);
+    }
+
+    /// Removing a device resolves its unresolved `catchup_failed` rows in the
+    /// delete transaction (`conflicts.md` § Skipped catch-up changes reach the
+    /// review list → Lifecycle), so the default review list drops them; other
+    /// devices' rows and other conflict types stay.
+    #[tokio::test]
+    async fn delete_device_resolves_its_catchup_failed_reports() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let owner = [0xa2u8; 32];
+        let (gone, kept) = ([0xd3u8; 32], [0xd4u8; 32]);
+        let fs_id = db.create_folder("docs", &owner).await.unwrap();
+        for (device, path, kind) in [
+            (gone, "a.txt", "catchup_failed"),
+            (gone, "b.txt", "modify-modify"),
+            (kept, "a.txt", "catchup_failed"),
+        ] {
+            db.report_conflict(
+                &owner,
+                fs_id,
+                &device,
+                path,
+                kind,
+                None,
+                &[],
+                None,
+                Default::default(),
+                false,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            db.list_conflicts_for_actor(&owner, false)
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
+
+        db.delete_device(&gone, &owner).await.unwrap();
+
+        let open = db.list_conflicts_for_actor(&owner, false).await.unwrap();
+        assert_eq!(
+            open.len(),
+            2,
+            "only the deleted device's catchup_failed row resolves"
+        );
+        assert_eq!(
+            db.list_conflicts_for_actor(&owner, true)
+                .await
+                .unwrap()
+                .len(),
+            3
         );
     }
 

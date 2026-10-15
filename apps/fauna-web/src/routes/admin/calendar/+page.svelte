@@ -117,6 +117,7 @@
       type="checkbox"
       data-testid={IDS.ADMIN_CALENDAR_ENABLED_TOGGLE}
       checked={caldavEnabled}
+      data-state={caldavEnabled ? 'on' : 'off'}
       disabled={busy && !snap}
       onchange={handleToggleEnabled}
     />

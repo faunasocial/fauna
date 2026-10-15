@@ -189,14 +189,10 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
     ));
     let channel = m.provision_update_channel();
     for c in UpdateChannel::ALL {
-        let (label, desc) = match c {
-            UpdateChannel::Stable => (
-                t::UPDATE_CHANNEL_STABLE_LABEL,
-                t::UPDATE_CHANNEL_STABLE_DESC,
-            ),
-            UpdateChannel::Test => (t::UPDATE_CHANNEL_TEST_LABEL, t::UPDATE_CHANNEL_TEST_DESC),
-            UpdateChannel::Dev => (t::UPDATE_CHANNEL_DEV_LABEL, t::UPDATE_CHANNEL_DEV_DESC),
-        };
+        // The shared getters pick the keys (the compat-line wording for Test /
+        // Dev while the product major is 0); the app only looks them up.
+        let label = fauna_i18n::strings::lookup(c.label_key()).unwrap_or_default();
+        let desc = fauna_i18n::strings::lookup(c.description_key()).unwrap_or_default();
         let is_selected = c == channel;
         out.push(
             Element::radio_gesture(
@@ -366,6 +362,28 @@ mod tests {
                     .iter()
                     .any(|(k, v)| k == "group" && v == "update-channel")),
             "the rows declare their own radio group (walk.rs I5)"
+        );
+
+        // The compat line: while the product major is 0 the Test / Dev rows
+        // carry the same-version wording the shared getter picks (the plain
+        // key at major >= 1 is proved in fauna-provisioning).
+        let text_of = |id: &str| {
+            els.iter()
+                .find(|e| e.id == id)
+                .map(|e| e.text.clone())
+                .unwrap_or_default()
+        };
+        assert!(
+            text_of("vps-config-update-channel-row[test]")
+                .contains(t::UPDATE_CHANNEL_TEST_DESC_SAME_VERSION)
+        );
+        assert!(
+            text_of("vps-config-update-channel-row[dev]")
+                .contains(t::UPDATE_CHANNEL_DEV_DESC_SAME_VERSION)
+        );
+        assert!(
+            text_of("vps-config-update-channel-row[stable]")
+                .contains(t::UPDATE_CHANNEL_STABLE_DESC)
         );
 
         m.set_provision_update_channel(UpdateChannel::Dev);

@@ -127,7 +127,7 @@ pub fn maybe_run_factory_reset(db_path: &str, blob_dir: &str) -> io::Result<bool
 
     // 3. Deployment markers in the data dir. The claim-code file is rewritten
     //    below from the marker; imap-enabled / caldav / carddav / webdav /
-    //    atproto-enabled → off.
+    //    atproto-enabled → off; caldav-port / serving-port → the defaults.
     //
     //    EVERY service-gating flag `mail_enable` writes belongs in this list,
     //    because nothing else clears one: a boot reconcile no-ops while its DB
@@ -143,6 +143,13 @@ pub fn maybe_run_factory_reset(db_path: &str, blob_dir: &str) -> io::Result<bool
     remove_file_if_exists(&data_dir.join(crate::mail_enable::CARDDAV_ENABLE_FLAG))?;
     remove_file_if_exists(&data_dir.join(crate::mail_enable::WEBDAV_ENABLE_FLAG))?;
     remove_file_if_exists(&data_dir.join(crate::mail_enable::ATPROTO_ENABLE_FLAG))?;
+    //    The two port value flags go too, for the same reason: each mirrors a
+    //    database singleton (`caldav_port`, `serving_port`) the wipe deletes, and
+    //    its boot reconcile leaves the file alone while the singleton is unset. A
+    //    leftover one would have a desktop supervisor bind the old custom port
+    //    while the fresh nest reports the default.
+    remove_file_if_exists(&data_dir.join(crate::mail_enable::CALDAV_PORT_FLAG))?;
+    remove_file_if_exists(&data_dir.join(crate::mail_enable::SERVING_PORT_FLAG))?;
 
     // 4. Stage the post-reset claim code so `ensure_claim_code_at` (later in
     //    startup) preserves it and the freshly-booted nest is claimable with it.
@@ -194,8 +201,8 @@ fn clear_dir_contents(dir: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::mail_enable::{
-        ATPROTO_ENABLE_FLAG, CALDAV_ENABLE_FLAG, CARDDAV_ENABLE_FLAG, MAIL_ENABLE_FLAG,
-        WEBDAV_ENABLE_FLAG,
+        ATPROTO_ENABLE_FLAG, CALDAV_ENABLE_FLAG, CALDAV_PORT_FLAG, CARDDAV_ENABLE_FLAG,
+        MAIL_ENABLE_FLAG, SERVING_PORT_FLAG, WEBDAV_ENABLE_FLAG,
     };
     use tempfile::TempDir;
 
@@ -209,6 +216,11 @@ mod tests {
         WEBDAV_ENABLE_FLAG,
         ATPROTO_ENABLE_FLAG,
     ];
+
+    /// Every port value flag the reset must clear: each mirrors a database
+    /// singleton the wipe deletes, and its boot reconcile leaves the file alone
+    /// while the singleton is unset.
+    const PORT_FLAGS: [&str; 2] = [CALDAV_PORT_FLAG, SERVING_PORT_FLAG];
 
     /// Build a fake populated data dir + blob dir, stage a reset, run it, and
     /// assert deployment state is gone while preserved files survive and the
@@ -234,6 +246,9 @@ mod tests {
         // decision rather than being silently left out of the reset.
         for flag in ENABLE_FLAGS {
             std::fs::write(data.join(flag), b"").unwrap();
+        }
+        for flag in PORT_FLAGS {
+            std::fs::write(data.join(flag), b"9443").unwrap();
         }
         std::fs::write(data.join("claim-code"), b"OLDOLD").unwrap();
 
@@ -266,6 +281,15 @@ mod tests {
                  running on a reset box with no users to serve, and nothing else \
                  clears it (a boot reconcile no-ops while the DB toggle is unset, \
                  and the atproto flag has no reconcile at all)"
+            );
+        }
+        for flag in PORT_FLAGS {
+            assert!(
+                !data.join(flag).exists(),
+                "{flag} must be gone — it mirrors a port the wipe deleted from the \
+                 database, and its boot reconcile leaves the file alone while the \
+                 database holds no port, so a leftover file has a supervisor bind \
+                 a port the reset nest reports it does not use"
             );
         }
         assert!(blob_dir.exists(), "blob dir itself must survive for re-use");
@@ -350,13 +374,13 @@ mod tests {
             )
             .await
             .unwrap();
-            // A superseded selector's key is not what signs, so it stays behind.
-            db.seat_dkim_selector_for_test("rotated.test", "default", "v=DKIM1; k=ed25519; p=OLD")
+            // A superseded label's keys are not what signs, so they stay behind.
+            db.seat_dkim_label_for_test("rotated.test", "default", "OLD")
                 .await;
             assert!(signs(&db).await);
             let mut live = db.list_dkim_selectors(None).await.unwrap();
-            live.retain(|row| !(row.domain == "rotated.test" && row.selector == "default"));
-            assert_eq!(live.len(), 2);
+            live.retain(|row| !(row.domain == "rotated.test" && row.label() == "default"));
+            assert_eq!(live.len(), 4, "both domains' active pairs");
             live
         };
 
@@ -409,8 +433,8 @@ mod tests {
             .await
             .unwrap();
         let listed = db.list_dkim_selectors(None).await.unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].domain, "other.test");
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().all(|row| row.domain == "other.test"));
 
         let conn = db.conn().await;
         let carried = |conn: &rusqlite::Connection| -> i64 {
@@ -421,15 +445,15 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!(carried(&conn), 1);
+        assert_eq!(carried(&conn), 2, "both keys of the label are carried");
         assert_eq!(
             crate::mail_dkim_key::expire_carried(&conn, 0).unwrap(),
             0,
-            "inside the window it is kept"
+            "inside the window they are kept"
         );
         assert_eq!(
             crate::mail_dkim_key::expire_carried(&conn, i64::MAX).unwrap(),
-            1
+            2
         );
         assert_eq!(carried(&conn), 0);
     }

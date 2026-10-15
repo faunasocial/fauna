@@ -69,7 +69,7 @@ def test_fauna_mls_web_receive(real_faunamls_app, nest_instance, test_user):
     #    backend opt-in (`enable_real_faunamls`) kicks off `ensureKeypackages`
     #    fire-and-forget, so the publish lands a moment after the fixture returns.
     wait_until(
-        lambda: conv_api.keypackage_count(port, alice, bob_actor_id) > 0,
+        lambda: conv_api.keypackage_count(port, test_user, bob_actor_id) > 0,
         MLS_HANDSHAKE_S,
         diagnose=lambda: "waiting for bob's web client to publish a key package",
     )

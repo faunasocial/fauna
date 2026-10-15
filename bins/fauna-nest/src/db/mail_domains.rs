@@ -25,6 +25,61 @@ use super::{CacheDb, now_epoch_millis};
 /// it expires a GC job destroys the row entirely.
 const SOFT_DELETE_RECOVERY_WINDOW_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
+/// A typed refusal from [`CacheDb::add_mail_domain`] the RPC layer maps to a
+/// wire code by downcast, never by message text.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MailDomainAddError {
+    /// The name belongs to a row soft-deleted within the 30-day recovery
+    /// window: re-adding it is the row's Restore, not an Add
+    /// (`mail-multidomain.md` § Wizard steps, step 1 + § Architectural rules —
+    /// `409 domain_pending_recovery`).
+    PendingRecovery,
+}
+
+impl std::fmt::Display for MailDomainAddError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PendingRecovery => {
+                f.write_str("domain was removed within the 30-day recovery window; restore it")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MailDomainAddError {}
+
+/// Hard-delete one expired soft-deleted `mail_domains` row **and** its
+/// per-domain dependents — the (disabled) `account_aliases` rows, the DKIM keys
+/// (`mail_dkim_keys`) and the per-domain TLS cert blobs
+/// (`bridge_tls_cert_blobs`), all keyed by domain name. The GC's per-row step,
+/// shared with [`CacheDb::add_mail_domain`], which purges an expired row the GC
+/// has not swept yet before it inserts the name afresh (else that later sweep
+/// would delete the new row's key and aliases by name).
+fn purge_expired_domain_row(
+    conn: &rusqlite::Connection,
+    domain_id: &[u8],
+    domain_name: &str,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM account_aliases WHERE local_domain = ?1",
+        [domain_name],
+    )
+    .context("gc delete account_aliases")?;
+    conn.execute(
+        "DELETE FROM mail_dkim_keys WHERE domain = ?1",
+        [domain_name],
+    )
+    .context("gc delete mail_dkim_keys")?;
+    conn.execute(
+        "DELETE FROM bridge_tls_cert_blobs WHERE domain = ?1",
+        [domain_name],
+    )
+    .context("gc delete bridge_tls_cert_blobs")?;
+    conn.execute("DELETE FROM mail_domains WHERE domain_id = ?1", [domain_id])
+        .context("gc delete mail_domains row")?;
+    Ok(())
+}
+
 /// 7 days in milliseconds: how long a domain stays in MTA-STS `testing` before
 /// the nest advances its stored mode to `enforce`
 /// (`mail-multidomain.md` § The advance). A constant, not a knob — no human
@@ -37,14 +92,16 @@ pub const MTA_STS_TESTING_WINDOW_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// record exists the moment the domain does. A selector that already has a
 /// key (a restored domain's) is left as it is, and one a factory reset carried
 /// a key for adopts that key. Logged, never fatal: the domain is added either way, and the boot
-/// step seats any key this could not.
+/// step seats any key this could not. The keys come from `drafts`, generated
+/// before the door took the connection (`mail_dkim_key::KeyDrafts`).
 fn mint_dkim_key_for_activated_domain(
     conn: &rusqlite::Connection,
     domain: &str,
     selector: Option<&str>,
+    drafts: &mut crate::mail_dkim_key::KeyDrafts,
 ) {
     let selector = selector.unwrap_or(crate::mail_dkim_key::DEFAULT_SELECTOR);
-    if let Err(e) = crate::mail_dkim_key::mint_selector(conn, domain, selector) {
+    if let Err(e) = crate::mail_dkim_key::mint_selector(conn, domain, selector, drafts) {
         tracing::error!(
             target: "mail_dkim",
             domain = %domain,
@@ -105,11 +162,12 @@ pub struct MailDomain {
 pub const DEFAULT_DKIM_ROTATION_DAYS: i64 = 90;
 
 /// Peer-cache warmup window before the scheduled auto-flip activates a freshly-
-/// provisioned selector: nest publishes (client-side) the new selector's TXT,
-/// then waits this long for peer resolver caches to pick it up before flipping
-/// the active signing selector onto it (`mail-multidomain.md` § Rotation,
-/// "After 24 h for peer caches"). The emergency `force_rotate_dkim` path passes
-/// `0` to skip the wait.
+/// provisioned selector: the window runs from the moment the nest first sees
+/// the new selector's TXT **published** (`mail_dkim_keys.published_seen_at`),
+/// not from its mint, so peer resolver caches have picked the record up before
+/// the active signing selector moves onto it (`mail-multidomain.md` § Rotation
+/// → *The flip waits for publication*). The emergency `force_rotate_dkim` path
+/// passes `0` to skip both the publication gate and the wait.
 pub const DKIM_ROTATION_CACHE_WARMUP_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// Pure due-computation for the DKIM rotation scheduler: a selector is due once
@@ -199,7 +257,13 @@ impl CacheDb {
     ///
     /// Refuses with a typed error if:
     /// - another active row already carries `domain_name` (unique index),
+    /// - a row carrying `domain_name` was soft-deleted within the 30-day
+    ///   recovery window ([`MailDomainAddError::PendingRecovery`] — re-add is
+    ///   that row's Restore),
     /// - `is_primary = true` and another active primary already exists.
+    ///
+    /// A soft-deleted row of the same name already past the window but not yet
+    /// swept by the GC is purged first, in the same transaction.
     pub async fn add_mail_domain(
         &self,
         domain_name: &str,
@@ -210,22 +274,56 @@ impl CacheDb {
         dkim_selector_override: Option<&str>,
     ) -> Result<MailDomain> {
         let domain_id = *Uuid::new_v4().as_bytes();
-        let name = domain_name.to_ascii_lowercase();
+        let name = fauna_core::web::normalize_dns_name(domain_name);
+        if name.is_empty() {
+            return Err(anyhow!("domain name is empty"));
+        }
         let mta_mode = mta_sts_mode.to_string();
         let mta_cert = mta_sts_cert_mode.to_string();
         let catch_all_owned: Option<[u8; 32]> = catch_all_actor_id.copied();
         let selector_owned = dkim_selector_override.map(|s| s.to_string());
         let now = now_epoch_millis();
+        // The domain's DKIM keys, generated before the connection is taken
+        // (`mail_dkim_key::KeyDrafts`); a draft logged as failed leaves the
+        // mint to generate in place.
+        let mut dkim_drafts = crate::mail_dkim_key::KeyDrafts::generate()
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(target: "mail_dkim", "{e:#}; the mint generates in place");
+                crate::mail_dkim_key::KeyDrafts::none()
+            });
 
         {
-            let conn = self.conn.lock().await;
+            let mut conn = self.conn.lock().await;
+            let tx = conn.transaction().context("begin add_mail_domain")?;
+            let removed: Vec<(Vec<u8>, i64)> = {
+                let mut stmt = tx
+                    .prepare(
+                        "SELECT domain_id, removed_at FROM mail_domains
+                         WHERE domain_name = ?1 AND removed_at IS NOT NULL",
+                    )
+                    .context("prepare soft-deleted lookup")?;
+                let rows = stmt
+                    .query_map([&name], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .context("query soft-deleted lookup")?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .context("collect soft-deleted lookup")?
+            };
+            let cutoff = now - SOFT_DELETE_RECOVERY_WINDOW_MS;
+            if removed.iter().any(|(_, removed_at)| *removed_at >= cutoff) {
+                return Err(MailDomainAddError::PendingRecovery.into());
+            }
+            for (domain_id, _) in &removed {
+                purge_expired_domain_row(&tx, domain_id, &name)?;
+            }
+            let conn = &tx;
             // A domain coming back after a factory reset registers under the
             // selector of the key the reset carried for it, so the key its DNS
             // still publishes is the one it signs with (`nest/common.md`
             // § Factory reset → *The DKIM keys are carried*).
             let selector_owned = match selector_owned {
                 Some(selector) => Some(selector),
-                None => crate::mail_dkim_key::carried_selector(&conn, &name)
+                None => crate::mail_dkim_key::carried_selector(conn, &name)
                     .unwrap_or_else(|e| {
                         tracing::error!(
                             target: "mail_dkim",
@@ -269,7 +367,13 @@ impl CacheDb {
                 ],
             )
             .context("insert mail_domains row")?;
-            mint_dkim_key_for_activated_domain(&conn, &name, selector_owned.as_deref());
+            mint_dkim_key_for_activated_domain(
+                conn,
+                &name,
+                selector_owned.as_deref(),
+                &mut dkim_drafts,
+            );
+            tx.commit().context("commit add_mail_domain")?;
         }
 
         self.lookup_mail_domain_by_id(&domain_id)
@@ -281,7 +385,7 @@ impl CacheDb {
     /// (per goal-doc § Removing a local domain — `403
     /// cannot_remove_primary_domain`).
     pub async fn soft_delete_mail_domain(&self, domain_name: &str) -> Result<MailDomain> {
-        let name = domain_name.to_ascii_lowercase();
+        let name = fauna_core::web::normalize_dns_name(domain_name);
         let now = now_epoch_millis();
 
         let row = self
@@ -312,7 +416,7 @@ impl CacheDb {
     /// Past the window, returns a typed error the HTTP layer maps to
     /// 410. Records `restored_at = NOW()` for audit; clears `removed_at`.
     pub async fn restore_mail_domain(&self, domain_name: &str) -> Result<MailDomain> {
-        let name = domain_name.to_ascii_lowercase();
+        let name = fauna_core::web::normalize_dns_name(domain_name);
         let now = now_epoch_millis();
 
         let candidate = self.lookup_mail_domain_by_name_any(&name).await?;
@@ -329,6 +433,14 @@ impl CacheDb {
             ));
         }
 
+        // A restored domain normally still holds its keys; the drafts cover
+        // one that does not, generated before the connection is taken.
+        let mut dkim_drafts = crate::mail_dkim_key::KeyDrafts::generate()
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(target: "mail_dkim", "{e:#}; the mint generates in place");
+                crate::mail_dkim_key::KeyDrafts::none()
+            });
         {
             let conn = self.conn.lock().await;
             conn.execute(
@@ -338,7 +450,12 @@ impl CacheDb {
                 rusqlite::params![now, &row.domain_id[..]],
             )
             .context("restore mail_domains row")?;
-            mint_dkim_key_for_activated_domain(&conn, &name, row.dkim_selector.as_deref());
+            mint_dkim_key_for_activated_domain(
+                &conn,
+                &name,
+                row.dkim_selector.as_deref(),
+                &mut dkim_drafts,
+            );
         }
 
         self.lookup_mail_domain_by_id(&row.domain_id)
@@ -366,8 +483,12 @@ impl CacheDb {
 
     /// `now`-injectable core of [`Self::gc_expired_soft_deleted_mail_domains`] for
     /// deterministic tests (a row removed "now" appears expired when GC runs with a
-    /// `now_ms` ≥ 30 days later, without sleeping).
-    async fn gc_expired_soft_deleted_mail_domains_at(&self, now_ms: i64) -> Result<Vec<String>> {
+    /// `now_ms` ≥ 30 days later, without sleeping), and for the e2e
+    /// `mail_domain_gc_test_hook`, which runs it at a shifted clock.
+    pub(crate) async fn gc_expired_soft_deleted_mail_domains_at(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
         let cutoff = now_ms - SOFT_DELETE_RECOVERY_WINDOW_MS;
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction().context("begin gc transaction")?;
@@ -389,26 +510,7 @@ impl CacheDb {
         };
 
         for (domain_id, domain_name) in &expired {
-            tx.execute(
-                "DELETE FROM account_aliases WHERE local_domain = ?1",
-                [domain_name],
-            )
-            .context("gc delete account_aliases")?;
-            tx.execute(
-                "DELETE FROM mail_dkim_keys WHERE domain = ?1",
-                [domain_name],
-            )
-            .context("gc delete mail_dkim_keys")?;
-            tx.execute(
-                "DELETE FROM bridge_tls_cert_blobs WHERE domain = ?1",
-                [domain_name],
-            )
-            .context("gc delete bridge_tls_cert_blobs")?;
-            tx.execute(
-                "DELETE FROM mail_domains WHERE domain_id = ?1",
-                [&domain_id[..]],
-            )
-            .context("gc delete mail_domains row")?;
+            purge_expired_domain_row(&tx, domain_id, domain_name)?;
         }
 
         // A DKIM key a factory reset carried for a domain nobody re-registered
@@ -461,7 +563,7 @@ impl CacheDb {
         domain_name: &str,
         update: MailDomainUpdate,
     ) -> Result<MailDomain> {
-        let name = domain_name.to_ascii_lowercase();
+        let name = fauna_core::web::normalize_dns_name(domain_name);
 
         let row = self
             .lookup_active_mail_domain(&name)
@@ -557,7 +659,7 @@ impl CacheDb {
         actor_hex: Option<String>,
     ) -> Result<MailDomain> {
         use fauna_mail::aliases::role_overrides::{parse_stored, to_stored};
-        let name = domain_name.to_ascii_lowercase();
+        let name = fauna_core::web::normalize_dns_name(domain_name);
 
         let domain_id: [u8; 16] = {
             let conn = self.conn.lock().await;
@@ -609,7 +711,7 @@ impl CacheDb {
         mode: fauna_mail::dmarc_publish::DmarcMode,
     ) -> Result<MailDomain> {
         use fauna_mail::dmarc_publish::set_policy_mode_json;
-        let name = domain_name.to_ascii_lowercase();
+        let name = fauna_core::web::normalize_dns_name(domain_name);
 
         let domain_id: [u8; 16] = {
             let conn = self.conn.lock().await;
@@ -689,14 +791,17 @@ impl CacheDb {
             .collect())
     }
 
-    /// Flip `row`'s active DKIM selector to its **newest-provisioned** selector,
-    /// IFF that selector is (a) different from the current active one and (b) at
-    /// least `min_provision_age_ms` old (the peer-cache warmup —
-    /// `DKIM_ROTATION_CACHE_WARMUP_MS` for the scheduled path, `0` for the
-    /// emergency `force_rotate_dkim` path which skips the wait). Returns the
-    /// updated row on a flip, else `None` (nothing newer provisioned, or the
-    /// newest isn't aged past the window yet — the rotation then waits for the
-    /// client to provision a key, per `mail-multidomain.md` § Rotation). The
+    /// Flip `row`'s active DKIM selector label to its **newest-provisioned**
+    /// label, IFF that label is (a) different from the current active one, (b)
+    /// holds both its keys (`<label>-rsa` + `<label>-ed25519`) and (c) had
+    /// BOTH records first seen published at least `min_published_age_ms` before `now_ms`
+    /// (the peer-cache warmup — `DKIM_ROTATION_CACHE_WARMUP_MS` for the
+    /// scheduled path, `0` for the emergency `force_rotate_dkim` path, which
+    /// skips both the publication gate and the wait). The key's mint age never
+    /// counts (`mail-multidomain.md` § Rotation → *The flip waits for
+    /// publication*). Returns the updated row on a flip, else `None` (nothing
+    /// newer provisioned, the newest not yet seen published, or seen too
+    /// recently — the old selector keeps signing, which is always safe). The
     /// **single** flip primitive both rotation paths share, so they agree on
     /// "newest-provisioned" + the `dkim_selector_activated_at` stamp (written by
     /// `update_mail_domain_config`). Idempotent: re-running after a flip is a
@@ -704,25 +809,51 @@ impl CacheDb {
     pub async fn flip_to_newest_dkim_selector(
         &self,
         row: &MailDomain,
-        min_provision_age_ms: i64,
+        min_published_age_ms: i64,
+        now_ms: i64,
     ) -> Result<Option<MailDomain>> {
-        let current = row.dkim_selector.as_deref().unwrap_or("default");
+        let current = row
+            .dkim_selector
+            .as_deref()
+            .unwrap_or(crate::mail_dkim_key::DEFAULT_SELECTOR);
         let provisioned = self.list_dkim_selectors(Some(&row.domain_name)).await?;
-        // `list_dkim_selectors` orders by `created_at` ascending → newest is last.
-        let Some(newest) = provisioned.last() else {
+        // `list_dkim_selectors` orders by `created_at` ascending → the newest
+        // label is the last row's.
+        let Some(newest) = provisioned.last().map(|s| s.label().to_string()) else {
             return Ok(None);
         };
-        if newest.selector == current {
+        if newest == current {
             return Ok(None);
         }
-        if now_epoch_millis() - newest.created_at < min_provision_age_ms {
-            return Ok(None); // not yet aged past the peer-cache warmup window
+        // Both of the label's keys — `<label>-rsa` and `<label>-ed25519` —
+        // must be held: the flip never activates a label that would sign once.
+        let pair = fauna_mail::dns::per_domain::dkim_selector_pair(&newest);
+        let keys: Vec<_> = provisioned
+            .iter()
+            .filter(|s| s.selector == pair.rsa || s.selector == pair.ed25519)
+            .collect();
+        if keys.len() < 2 {
+            return Ok(None);
+        }
+        if min_published_age_ms > 0 {
+            for key in keys {
+                match key.published_seen_at {
+                    // Not yet seen published: never flip onto a record
+                    // receivers cannot fetch — either of the two.
+                    None => return Ok(None),
+                    // Seen, but peer caches may not have it yet.
+                    Some(seen) if now_ms.saturating_sub(seen) < min_published_age_ms => {
+                        return Ok(None);
+                    }
+                    Some(_) => {}
+                }
+            }
         }
         let updated = self
             .update_mail_domain_config(
                 &row.domain_name,
                 MailDomainUpdate {
-                    dkim_selector: Some(newest.selector.clone()),
+                    dkim_selector: Some(newest),
                     ..Default::default()
                 },
             )
@@ -759,7 +890,7 @@ impl CacheDb {
     }
 
     pub async fn lookup_active_mail_domain(&self, domain_name: &str) -> Result<Option<MailDomain>> {
-        let name = domain_name.to_ascii_lowercase();
+        let name = fauna_core::web::normalize_dns_name(domain_name);
         let conn = self.conn.lock().await;
         conn.query_row(
             "SELECT
@@ -833,7 +964,7 @@ impl CacheDb {
         &self,
         domain_name: &str,
     ) -> Result<Option<MailDomain>> {
-        let name = domain_name.to_ascii_lowercase();
+        let name = fauna_core::web::normalize_dns_name(domain_name);
         let conn = self.conn.lock().await;
         conn.query_row(
             "SELECT
@@ -1107,7 +1238,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flip_to_newest_dkim_selector_flips_stamps_and_respects_age_gate() {
+    async fn flip_to_newest_dkim_selector_flips_stamps_and_respects_publication_gate() {
         let db = CacheDb::open_in_memory().unwrap();
         db.add_mail_domain(
             "example.com",
@@ -1119,30 +1250,93 @@ mod tests {
         )
         .await
         .unwrap();
-        // Provision the active key, then (a few ms later, so created_at orders) a
-        // newer selector — both just-provisioned.
-        db.seat_dkim_selector_for_test("example.com", "default", "v=DKIM1; k=ed25519; p=OLD")
-            .await;
+        // The add door minted the active label's pair; a few ms later (so
+        // created_at orders) a newer label's two keys.
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        db.seat_dkim_selector_for_test("example.com", "202606", "v=DKIM1; k=ed25519; p=NEW")
+        db.seat_dkim_selector_for_test("example.com", "202606-rsa", "v=DKIM1; k=rsa; p=NEW")
             .await;
+        db.seat_dkim_selector_for_test(
+            "example.com",
+            "202606-ed25519",
+            "v=DKIM1; k=ed25519; p=NEW",
+        )
+        .await;
         let row = db
             .lookup_active_mail_domain("example.com")
             .await
             .unwrap()
             .unwrap();
 
-        // A huge min-age blocks a just-provisioned newer selector (the warmup gate).
+        let window = DKIM_ROTATION_CACHE_WARMUP_MS;
+        let far_future = now_epoch_millis() + 10 * window;
+        // Never seen published: no flip however old the key is.
         assert!(
-            db.flip_to_newest_dkim_selector(&row, i64::MAX / 2)
+            db.flip_to_newest_dkim_selector(&row, window, far_future)
                 .await
                 .unwrap()
                 .is_none(),
-            "a freshly-provisioned selector must not flip until aged past the window"
+            "an unpublished selector must never flip on the scheduled path"
         );
-        // min_age = 0 (the emergency path) flips immediately + stamps activation.
+        // One of the label's two records seen published at t0: never a flip,
+        // however long ago — the other algorithm's record is not yet fetchable.
+        let t0 = now_epoch_millis();
+        assert!(
+            db.stamp_dkim_selector_published("example.com", "202606-ed25519", t0)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !db.stamp_dkim_selector_published("example.com", "202606-ed25519", t0 + 5)
+                .await
+                .unwrap(),
+            "the first sighting is never re-stamped"
+        );
+        assert!(
+            db.flip_to_newest_dkim_selector(&row, window, far_future)
+                .await
+                .unwrap()
+                .is_none(),
+            "a label with only one of its two records published must not flip"
+        );
+        // Both seen: no flip inside the warm-up of the later sighting, a flip
+        // past it.
+        let t1 = t0 + 1_000;
+        assert!(
+            db.stamp_dkim_selector_published("example.com", "202606-rsa", t1)
+                .await
+                .unwrap()
+        );
+        assert!(
+            db.flip_to_newest_dkim_selector(&row, window, t1 + window - 1)
+                .await
+                .unwrap()
+                .is_none(),
+            "a record seen published under 24 h ago must not flip yet"
+        );
+        let scheduled = db
+            .flip_to_newest_dkim_selector(&row, window, t1 + window)
+            .await
+            .unwrap()
+            .expect("past the warm-up the stamped label flips");
+        assert_eq!(scheduled.dkim_selector.as_deref(), Some("202606"));
+        // Back onto the old key, then the emergency path (min_age 0) flips
+        // with no stamp to consult + stamps activation.
+        db.update_mail_domain_config(
+            "example.com",
+            MailDomainUpdate {
+                dkim_selector: Some("default".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let row = db
+            .lookup_active_mail_domain("example.com")
+            .await
+            .unwrap()
+            .unwrap();
         let updated = db
-            .flip_to_newest_dkim_selector(&row, 0)
+            .flip_to_newest_dkim_selector(&row, 0, now_epoch_millis())
             .await
             .unwrap()
             .expect("min_age 0 flips to the newest selector");
@@ -1151,7 +1345,7 @@ mod tests {
         // Idempotent: re-running after the flip is a no-op (newest == current),
         // so a crashed/re-run tick can't double-flip.
         assert!(
-            db.flip_to_newest_dkim_selector(&updated, 0)
+            db.flip_to_newest_dkim_selector(&updated, 0, now_epoch_millis())
                 .await
                 .unwrap()
                 .is_none()
@@ -1171,7 +1365,7 @@ mod tests {
             .unwrap();
         // No DKIM blobs provisioned at all → nothing to flip to.
         assert!(
-            db.flip_to_newest_dkim_selector(&row, 0)
+            db.flip_to_newest_dkim_selector(&row, 0, now_epoch_millis())
                 .await
                 .unwrap()
                 .is_none()
@@ -1213,6 +1407,26 @@ mod tests {
         // Primary first per `ORDER BY is_primary DESC, added_at ASC`.
         assert_eq!(active[0].domain_name, "primary.example");
         assert_eq!(active[1].domain_name, "secondary.example");
+    }
+
+    #[tokio::test]
+    async fn domain_name_is_canonicalised_at_write_and_lookup() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let row = db
+            .add_mail_domain("X.Test.", true, "enforce", "expand_primary", None, None)
+            .await
+            .unwrap();
+        assert_eq!(row.domain_name, "x.test");
+        for spelling in ["x.test", "X.TEST.", "x.test.."] {
+            let found = db.lookup_active_mail_domain(spelling).await.unwrap();
+            assert_eq!(found.map(|d| d.domain_name), Some("x.test".to_string()));
+        }
+        assert!(
+            db.add_mail_domain(".", false, "enforce", "expand_primary", None, None)
+                .await
+                .is_err(),
+            "a name that normalises to empty is refused"
+        );
     }
 
     #[tokio::test]
@@ -1579,6 +1793,89 @@ mod tests {
             .set_role_address_override("never.heard.of.it", "postmaster", Some("ab".repeat(32)))
             .await;
         assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn add_purges_expired_unswept_row_so_later_gc_spares_new_domain() {
+        let db = CacheDb::open_in_memory().unwrap();
+        db.add_mail_domain(
+            "primary.example",
+            true,
+            "enforce",
+            "expand_primary",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        db.add_mail_domain(
+            "back.example",
+            false,
+            "enforce",
+            "expand_primary",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        db.soft_delete_mail_domain("back.example").await.unwrap();
+
+        // Within the window the Add is refused with the typed error.
+        let err = db
+            .add_mail_domain(
+                "back.example",
+                false,
+                "enforce",
+                "expand_primary",
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<MailDomainAddError>(),
+            Some(&MailDomainAddError::PendingRecovery)
+        );
+
+        // Backdate the removal past the window; the GC has not run yet.
+        {
+            let conn = db.conn.lock().await;
+            conn.execute(
+                "UPDATE mail_domains SET removed_at = ?1 WHERE domain_name = 'back.example'",
+                [now_epoch_millis() - SOFT_DELETE_RECOVERY_WINDOW_MS - 1_000],
+            )
+            .unwrap();
+        }
+        let readded = db
+            .add_mail_domain(
+                "back.example",
+                false,
+                "enforce",
+                "expand_primary",
+                None,
+                None,
+            )
+            .await
+            .expect("an expired soft-deleted row no longer blocks the name");
+
+        // The stale row is gone, so a later GC pass finds nothing to expire and
+        // leaves the re-added domain's key alone.
+        let swept = db
+            .gc_expired_soft_deleted_mail_domains_at(now_epoch_millis())
+            .await
+            .unwrap();
+        assert!(swept.is_empty(), "no stale row left for the GC: {swept:?}");
+        let keys: i64 = {
+            let conn = db.conn.lock().await;
+            conn.query_row(
+                "SELECT COUNT(*) FROM mail_dkim_keys WHERE domain = 'back.example'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert!(keys > 0, "the re-added domain keeps a signing key");
+        assert!(readded.removed_at.is_none());
     }
 
     #[tokio::test]

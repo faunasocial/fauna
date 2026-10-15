@@ -6,6 +6,7 @@ import type {
   CustodyFacetView,
   DeviceSummary,
   FolderMember,
+  FolderSummary,
   PlaceRow,
 } from '$lib/devices-machine';
 
@@ -327,6 +328,38 @@ export function versionRetentionEditFromBounds(
  *  `folder-place-row[j]` is what the e2e contract addresses. */
 export function placeRows(members: FolderMember[], devices: DeviceSummary[]): PlaceRow[] {
   return wasm().placeRows(members, devices) as PlaceRow[];
+}
+
+/** The `folder-lease-status` line for one folder row, or `undefined` while the
+ *  folder is not lease-governed (`ui/folders.md` § Exclusive editing).
+ *
+ *  ⚠ Resolved once in shared Rust (`fauna_devices_machine::folder_lease_status`):
+ *  do not re-derive the expiry rule or paint a raw device id here, and never
+ *  call the lease acquire kind to find out — asking takes the lease. `devices`
+ *  is the snapshot roster; `thisDeviceRow` is the row `device-this-mark-badge`
+ *  marks. */
+export function folderLeaseStatus(
+  folder: FolderSummary,
+  devices: DeviceSummary[],
+  thisDeviceRow: string | null,
+): LocalizedText | undefined {
+  return (
+    (wasm().folderLeaseStatus(folder, devices, thisDeviceRow ?? undefined) as
+      | LocalizedText
+      | undefined) ?? undefined
+  );
+}
+
+/** Is this owner row public on the nest's say-so while its audience attestation
+ *  does not verify under this seat? The paint condition for
+ *  `folder-audience-unattested` and `folder-audience-reconfirm-button`
+ *  (`ui/folders.md` § Audience and website serving).
+ *
+ *  ⚠ Resolved once in shared Rust (`fauna_devices_machine::folder_is_public_unverified`):
+ *  never re-derive the signature check here. `ownActorHex` is this seat's actor
+ *  id; an id that does not parse answers `false`. */
+export function folderIsPublicUnverified(folder: FolderSummary, ownActorHex: string): boolean {
+  return wasm().folderIsPublicUnverified(folder, ownActorHex) as boolean;
 }
 
 /** Flip ONE checkbox on a place row and return the WHOLE resulting point — the

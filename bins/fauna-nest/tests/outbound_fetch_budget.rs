@@ -21,7 +21,7 @@
 //! Run with: cargo test -p fauna-nest --test outbound_fetch_budget
 
 mod common;
-use common::approve_bridge;
+use common::{approve_bridge, proven_mta_submitter};
 
 use std::sync::Arc;
 
@@ -205,6 +205,7 @@ async fn enqueue_over_the_inline_budget_via_staged_body_is_accepted() {
     let (router, state) = router_and_state().await;
     let mta: [u8; 32] = [0x0C; 32];
     approve_bridge(&state.db, &mta, BridgeRole::Mta, &[0x99u8; 32]).await;
+    let (submitter, token) = proven_mta_submitter(&state, [0x0D; 32]).await;
 
     // Stand in for the bridge's stage step: seal + stage the plaintext on nest's
     // own blob store (the enqueue resolver reads from the same store).
@@ -219,7 +220,8 @@ async fn enqueue_over_the_inline_budget_via_staged_body_is_accepted() {
         recipients: vec!["bob@external.test".into()],
         raw_message: vec![], // empty — the body rides the staged reference
         staged_body: Some(sref),
-        ..Default::default()
+        on_behalf_of_actor: Some(submitter.to_vec()),
+        submission_token: Some(token.clone()),
     };
     let payload = Bytes::from(encode_canonical(&req).expect("encode req").to_vec());
     let meta = router
@@ -253,7 +255,8 @@ async fn enqueue_over_the_inline_budget_via_staged_body_is_accepted() {
         recipients: vec!["bob@external.test".into()],
         raw_message: b"inline".to_vec(),
         staged_body: Some(sref2),
-        ..Default::default()
+        on_behalf_of_actor: Some(submitter.to_vec()),
+        submission_token: Some(token.clone()),
     };
     let payload = Bytes::from(encode_canonical(&both).expect("encode").to_vec());
     let err = (meta.handler)(state.clone(), mta, payload)

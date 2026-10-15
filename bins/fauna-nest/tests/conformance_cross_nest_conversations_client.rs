@@ -2451,6 +2451,7 @@ async fn a_removed_foreign_members_relayed_roster_read_and_mint_die_with_the_bin
         &bob_hex,
         &room_hex,
         None,
+        None,
     )
     .await
     .expect("the federation channel itself is healthy")
@@ -2559,7 +2560,7 @@ async fn three_binding_only_doors(
     let pool = &f_state.federation_pool;
     let healthy = "the federation channel itself is healthy";
     let roster = fauna_nest::federation_pool::originate_room_roster(
-        pool, f_state, h_base, who_hex, room_hex, None,
+        pool, f_state, h_base, who_hex, room_hex, None, None,
     )
     .await
     .expect(healthy);
@@ -3159,6 +3160,7 @@ async fn a_foreign_member_leaves_a_community_room_through_its_own_nest() {
         &h_base,
         &bob_hex,
         &room_hex,
+        None,
         None,
     )
     .await
@@ -6409,9 +6411,8 @@ async fn cross_nest_writer_records_and_uploads_owner_reads_back_through_client_s
 //
 // The pair is seeded beneath the handlers: the folder is FULL when Alice
 // shares (so the Welcome relay passes) and its column is then written
-// metadata-only on H's DB. The interim refusal (`file-sync.md` § Relay serving
-// → *Until that leg is built, the pair is refused*) stands; this is an
-// existing pair, which it leaves as it is.
+// metadata-only on H's DB — a flip after the share, which the member's record
+// follows at its next federated read.
 // ─────────────────────────────────────────────────────────────────────────────
 #[tokio::test]
 async fn cross_nest_writer_into_a_metadata_only_folder_records_and_uploads_no_chunk() {
@@ -6526,6 +6527,10 @@ async fn cross_nest_writer_into_a_metadata_only_folder_records_and_uploads_no_ch
                 staged.set_name_sealed.as_deref().map(|b| &b[..]),
                 staged.set_name_hash.as_deref().map(|b| &b[..]),
             ),
+            // The Welcome's stamp seeds the record before any federated read
+            // (the seed itself is pinned without a refresh in
+            // `fauna_mls_backend_tests::cross_nest_folder_join_seeds_…`).
+            residency: staged.residency.clone(),
             ..Default::default()
         },
     )
@@ -6909,18 +6914,19 @@ async fn cross_nest_welcome_relay_gates_the_foreign_member_grant_by_claim() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The interim cross-nest refusal, the member-moves-second direction
-// (`file-sync.md` § Relay serving → *Until that leg is built, the pair is
-// refused*): a Welcome for a recipient on another nest, on a channel claimed by
-// a metadata-only folder, is refused BEFORE the relay — the peer nest receives
-// nothing and no `channel_foreign_members` row lands. The flip-moves-second
-// direction is pinned in `conformance_folder_residency`.
+// A metadata-only folder takes a member on another nest (`file-sync.md`
+// § Relay serving → *A member on another nest*): the interim refusal that held
+// the pair while the cross-nest leg was unbuilt is gone. A Welcome for a
+// recipient on another nest, on a channel claimed by a metadata-only folder,
+// relays like any folder share, seats the foreign-member row, and carries the
+// folder's residency to the member's record (step (1)). The flip direction is
+// pinned in `conformance_folder_residency`.
 //
 // Two real nests for the reason the claim-gate test above gives: only a real
-// dial can show that the Welcome was never relayed.
+// dial can show that the Welcome was relayed.
 // ─────────────────────────────────────────────────────────────────────────────
 #[tokio::test]
-async fn cross_nest_welcome_onto_a_metadata_only_folder_is_refused_before_the_relay() {
+async fn cross_nest_welcome_onto_a_metadata_only_folder_relays_with_its_residency() {
     use fauna_client_conversations::ConversationsClient;
     use fauna_protocol::conversations::WelcomeKind;
 
@@ -6944,26 +6950,25 @@ async fn cross_nest_welcome_onto_a_metadata_only_folder_is_refused_before_the_re
         .await
         .unwrap();
 
-    // Two group-bound folders of Alice's on H, each claiming its derived
-    // channel as `share_core` does: `vault` keeps its content off the nest,
-    // `docs` is full.
-    let mut channels = Vec::new();
-    for name in ["vault", "docs"] {
-        let raw_group_id = format!("raw-group-id-{name}");
-        h_state.db.create_folder(name, &alice_id.0).await.unwrap();
-        h_state
-            .db
-            .set_folder_mls_group(name, &alice_id.0, Some(raw_group_id.as_bytes()))
-            .await
-            .unwrap();
-        let channel = fauna_mls::types::ChannelId::from_group_id(raw_group_id.as_bytes()).0;
-        h_state
-            .db
-            .claim_folder_channel(&alice_id.0, &channel)
-            .await
-            .unwrap();
-        channels.push((raw_group_id, channel));
-    }
+    // A group-bound folder of Alice's on H that keeps its content off the
+    // nest, claiming its derived channel as `share_core` does.
+    let raw_group_id = "raw-group-id-vault";
+    h_state
+        .db
+        .create_folder("vault", &alice_id.0)
+        .await
+        .unwrap();
+    h_state
+        .db
+        .set_folder_mls_group("vault", &alice_id.0, Some(raw_group_id.as_bytes()))
+        .await
+        .unwrap();
+    let vault_channel = fauna_mls::types::ChannelId::from_group_id(raw_group_id.as_bytes()).0;
+    h_state
+        .db
+        .claim_folder_channel(&alice_id.0, &vault_channel)
+        .await
+        .unwrap();
     assert!(
         h_state
             .db
@@ -6979,37 +6984,31 @@ async fn cross_nest_welcome_onto_a_metadata_only_folder_is_refused_before_the_re
             .unwrap(),
         "fixture: vault is metadata-only"
     );
-    let (vault_group, vault_channel) = channels[0].clone();
-    let (docs_group, docs_channel) = channels[1].clone();
 
     let alice_nest = connected_client(&h_base, ActorKeypair::from_secret(alice_secret)).await;
-    let alice_convs = ConversationsClient::new(Arc::clone(&alice_nest));
-
-    // ── REFUSED: the owner's own share to a member on another nest. ──
-    let refused = alice_convs
+    ConversationsClient::new(Arc::clone(&alice_nest))
         .welcome_deliver(
             hex::encode(carol_id.0),
             hex::encode(vault_channel),
             vec![],
             WelcomeKind::Folder {
-                group_id: hex::encode(vault_group.as_bytes()),
+                group_id: hex::encode(raw_group_id.as_bytes()),
             },
             Some(f_base.clone()),
         )
         .await
-        .expect_err("a metadata-only folder cannot take a member on another nest yet");
+        .expect("a metadata-only folder's cross-nest share relays");
+
+    let inbox = f_state.db.list_inbox_all(&carol_id.0).await.unwrap();
+    assert_eq!(inbox.len(), 1, "the Welcome reached the member's nest");
+    let staged = fauna_protocol::inbox::InboxEnvelope::from_canonical_bytes(&inbox[0].1)
+        .expect("canonical inbox envelope")
+        .decode_welcome()
+        .expect("welcome envelope");
     assert_eq!(
-        refusal_code(&refused),
-        "fauna.conversations.invalid_request"
-    );
-    assert!(
-        f_state
-            .db
-            .list_inbox_all(&carol_id.0)
-            .await
-            .unwrap()
-            .is_empty(),
-        "the refused Welcome was relayed to the member's nest anyway"
+        staged.residency.as_deref(),
+        Some("metadata_only"),
+        "the Welcome carries the folder's residency to the member's record"
     );
     assert!(
         h_state
@@ -7017,70 +7016,9 @@ async fn cross_nest_welcome_onto_a_metadata_only_folder_is_refused_before_the_re
             .foreign_member_home_nest(&vault_channel, &carol_id.0)
             .await
             .unwrap()
-            .is_none(),
-        "a refused Welcome wrote a channel_foreign_members row"
-    );
-
-    // ── STILL LANDS: the same Welcome on a full folder. ──
-    alice_convs
-        .welcome_deliver(
-            hex::encode(carol_id.0),
-            hex::encode(docs_channel),
-            vec![],
-            WelcomeKind::Folder {
-                group_id: hex::encode(docs_group.as_bytes()),
-            },
-            Some(f_base.clone()),
-        )
-        .await
-        .expect("a full folder's cross-nest share must still relay");
-    assert_eq!(
-        f_state.db.list_inbox_all(&carol_id.0).await.unwrap().len(),
-        1,
-        "the full folder's Welcome reached the member's nest"
-    );
-    assert!(
-        h_state
-            .db
-            .foreign_member_home_nest(&docs_channel, &carol_id.0)
-            .await
-            .unwrap()
             .is_some(),
-        "the full folder's cross-nest share lost its foreign-member grant"
+        "the share seats the member on another nest"
     );
-
-    // ── AN EXISTING PAIR is left as it is: a member the metadata-only folder
-    // already holds keeps its in-band re-Welcomes. Seat Carol on `vault` behind
-    // the refusal's back, and re-deliver. ──
-    let carol_home = h_state
-        .db
-        .foreign_member_home_nest(&docs_channel, &carol_id.0)
-        .await
-        .unwrap()
-        .expect("read above");
-    h_state
-        .db
-        .register_foreign_channel_member(
-            &vault_channel,
-            &carol_id.0,
-            &carol_home,
-            None,
-            RebindPower::Standing,
-        )
-        .await
-        .unwrap();
-    alice_convs
-        .welcome_deliver(
-            hex::encode(carol_id.0),
-            hex::encode(vault_channel),
-            vec![],
-            WelcomeKind::Folder {
-                group_id: hex::encode(vault_group.as_bytes()),
-            },
-            Some(f_base.clone()),
-        )
-        .await
-        .expect("a member the folder already holds is not a new pair");
 }
 
 /// **The rebind is bounded by the inviter's power, not by knowledge of the

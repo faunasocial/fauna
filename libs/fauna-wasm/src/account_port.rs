@@ -102,6 +102,22 @@ pub(crate) async fn dispatch(
             return answered;
         }
     }
+    // The kind-manifest seam — the consent machines' overlay read and manifest
+    // publish (`fauna.state.kind-manifest`); `serve` re-verifies a publish's
+    // JWS before the seam sees it. Resolved per call like the ledger above.
+    if fauna_client_config::kind_manifest_port::doors::ALL.contains(&door) {
+        let manifests = {
+            let actor_id_hex = actor_id_hex.clone();
+            fauna_client_config::ResolvingLedgerStore::new(move || {
+                account_runtime::handle_for(&actor_id_hex)
+            })
+        };
+        if let Some(answered) =
+            fauna_client_config::kind_manifest_port::serve(&manifests, door, payload).await
+        {
+            return answered;
+        }
+    }
     let fleet = {
         let actor_id_hex = actor_id_hex.clone();
         RuntimeFleetRemoval::new(move || account_runtime::handle_for(&actor_id_hex))

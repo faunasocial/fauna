@@ -37,7 +37,8 @@ public struct SpamPreferencesView: View {
                     Text(String(format: "%.1f", vm.spamThreshold))
                         .font(.caption.monospaced())
                         .frame(width: 30)
-                    Text(SpamOptions.bandLabel(threshold: vm.spamThreshold))
+                    automationText(Ids.spamThresholdBand,
+                                   SpamOptions.bandLabel(threshold: vm.spamThreshold))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }

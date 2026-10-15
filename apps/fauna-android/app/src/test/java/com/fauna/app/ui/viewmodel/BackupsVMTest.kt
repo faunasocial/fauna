@@ -35,7 +35,7 @@ class BackupsVMTest {
     @Test
     fun noDeviceId_returnsNullWithoutCallingApi() = runTest {
         val (vm, api, storage) = makeVm()
-        whenever(storage.deviceId).thenReturn(null)
+        whenever(storage.resolveDeviceId()).thenReturn(null)
 
         val result = vm.downloadSnapshotFile(1, "docs/a.txt")
 
@@ -46,7 +46,7 @@ class BackupsVMTest {
     @Test
     fun success_returnsBytesAndLeavesErrorClear() = runTest {
         val (vm, api, storage) = makeVm()
-        whenever(storage.deviceId).thenReturn("aabbcc")
+        whenever(storage.resolveDeviceId()).thenReturn("aabbcc")
         val bytes = byteArrayOf(1, 2, 3)
         whenever(api.downloadSnapshotFileBytes("aabbcc", 7, "docs/a.txt")).thenReturn(bytes)
 
@@ -59,7 +59,7 @@ class BackupsVMTest {
     @Test
     fun apiFailure_returnsNullAndSetsDownloadError() = runTest {
         val (vm, api, storage) = makeVm()
-        whenever(storage.deviceId).thenReturn("aabbcc")
+        whenever(storage.resolveDeviceId()).thenReturn("aabbcc")
         whenever(api.downloadSnapshotFileBytes(anyString(), anyInt(), anyString()))
             .thenThrow(RuntimeException("boom"))
 

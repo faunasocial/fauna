@@ -156,6 +156,9 @@ pub fn run_wasm_labeler_score(
 /// canonical dag-cbor with `signature` zeroed via
 /// [`fauna_core::scoring::sign_labeler_metadata`] — so the produced blob passes
 /// `validate_labeler_publish` → `verify_labeler_metadata` by construction.
+/// `label_abi` is the signed output revision (`LabelerOutput::label_abi`; pass
+/// `fauna_core::scoring::LABEL_ABI_CURRENT`, 1 today — a test fixture passes a
+/// later one to mint a module newer than this build reads).
 /// Returns the canonical-CBOR `metadata_blob` bytes the `PublishLabelerRequest`
 /// carries (bytes, not a `fauna_core` type, to avoid the uniffi-bindgen-go
 /// value-format import footgun — same as the sibling exports).
@@ -170,6 +173,7 @@ pub fn build_signed_labeler_metadata(
     needs_media_metadata: bool,
     needs_author: bool,
     needs_attachment_bytes: bool,
+    label_abi: u16,
     max_memory_bytes: u64,
     max_cpu_microseconds: u64,
     updated_at: u64,
@@ -196,7 +200,7 @@ pub fn build_signed_labeler_metadata(
             needs_author,
             needs_attachment_bytes,
         },
-        output_schema: LabelerOutput::default(),
+        output_schema: LabelerOutput { label_abi },
         resource_limits: ScorerLimits {
             max_memory_bytes,
             max_cpu_microseconds,
@@ -346,6 +350,7 @@ mod tests {
             false,            // needs_media_metadata
             false,            // needs_author
             false,            // needs_attachment_bytes
+            1,                // label_abi
             16 * 1024 * 1024, // max_memory_bytes
             100_000,          // max_cpu_microseconds
             1,                // updated_at

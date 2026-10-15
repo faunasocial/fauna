@@ -42,6 +42,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <!-- Row 0 — the title and the header controls. -->
@@ -107,16 +108,42 @@
              No AutomationProperties.Name on the class label: it carries its
              token in HelpText (the `class` attribute), and a static Name makes
              a dynamic label read back wrong. -->
-        <TextBlock Grid.Row="1" x:Name="RoomClassLabel"
-                   AutomationProperties.AutomationId="{x:Bind ids:Ids.ThreadRoomClass}"
+        <!-- The family gate's marker (`conversation-guardian-state`,
+             family-safety.md § The bridge-DM gate) rides this line beside the class,
+             as on android; Collapsed — absent — while the nest reports no state. Its
+             `state` attribute rides HelpText. -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" Margin="0,4,0,0">
+            <TextBlock x:Name="RoomClassLabel"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ThreadRoomClass}"
+                       Visibility="Collapsed"
+                       Opacity="0.7" FontSize="12"
+                       TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+            <TextBlock x:Name="GuardianStateLabel"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ConversationGuardianState}"
+                       Visibility="Collapsed"
+                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                       FontSize="12"
+                       TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+        </StackPanel>
+
+        <!-- Row 2 — the room's standing notice (`thread-room-notice`,
+             `ui/conversations.md` § Element IDs): ONE text element, painted only
+             while a notice holds — moderation-unverified or awaiting-key, the
+             latter winning when both hold (the shared `RoomNoticeFor`). Its
+             `state` attribute rides HelpText, the `thread-room-class` shape, and
+             like it carries no static Name. A caption line of its own for the
+             same narrow-pane reason as the class statement above; COLLAPSED —
+             absent — while nothing holds. -->
+        <TextBlock Grid.Row="2" x:Name="RoomNoticeLabel"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.ThreadRoomNotice}"
                    Visibility="Collapsed"
                    Opacity="0.7" FontSize="12"
-                   TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                   TextWrapping="Wrap"
                    Margin="0,4,0,0" />
 
-        <!-- Row 2 — the participant chips and the add affordance, in their own
+        <!-- Row 3 — the participant chips and the add affordance, in their own
              Grid so their width can never reach row 0's columns. -->
-        <Grid Grid.Row="2" Margin="0,4,0,0">
+        <Grid Grid.Row="3" Margin="0,4,0,0">
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*" />
             <ColumnDefinition Width="Auto" />

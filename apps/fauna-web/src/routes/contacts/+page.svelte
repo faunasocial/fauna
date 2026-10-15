@@ -16,7 +16,8 @@
   import MessageBanner from '$lib/components/MessageBanner.svelte';
   import { t } from '$lib/i18n/strings';
   import { relativeTime } from '$lib/value-format';
-  import { contactStatusLabel, contactMatchesFilter, shortId, wardAskRules } from '$lib/wasm';
+  import { contactStatusLabel, wardAskRules } from '$lib/wasm';
+  import { contactOverlays, contactsRevision } from '$lib/conversations';
   import { carddavListAddressbooks, carddavQueryCardsDecoded, carddavLocateCardByUidHash, onPushEvent, staleSurfacesForPushKind } from '$lib/rpc';
   import { resolveLocalized } from '$lib/i18n/localized';
   import { consumePendingSearchNav } from '$lib/search';
@@ -46,7 +47,7 @@
   let localContacts = $state<Contact[]>([]);
   let findInput = $state('');
   let findStatus = $state<'idle' | 'searching' | 'found' | 'error'>('idle');
-  let findResult = $state<{ actorId: string; handle?: string; domain?: string } | null>(null);
+  let findResult = $state<{ actorId: string; handle?: string; domain?: string; nestUrl: string | null } | null>(null);
   let findError = $state('');
   let sendingKnock = $state(false);
   // The knock + guardian-ask state for the CURRENT Find User result — sent,
@@ -305,7 +306,7 @@
     knockAsk = knockStateFor(null);
     try {
       const result = await parseRecipient(findInput);
-      findResult = { actorId: result.actorId, handle: result.handle, domain: result.domain };
+      findResult = { actorId: result.actorId, handle: result.handle, domain: result.domain, nestUrl: result.nestUrl };
       knockAsk = knockStateFor(result.actorId);
       findStatus = 'found';
     } catch (e: any) {
@@ -336,7 +337,7 @@
     sendingKnock = true;
     let result: KnockSendResult;
     try {
-      await sendKnock(id.secretHex, peer);
+      await sendKnock(id.secretHex, peer, findResult.nestUrl);
       result = KNOCK_SENT;
     } catch (e) {
       result = classifyKnockFailure(e);
@@ -380,13 +381,43 @@
   const statusOrder = ['confirmed', 'accepted', 'pending', 'blocked'];
 
   function contactsByStatus(status: string): Contact[] {
-    // Shared roster-filter predicate (`fauna_core::format::contact_matches_filter`):
-    // case-insensitive substring over handle/domain/actor-id, empty query matches all
-    // — replaces web's prior actor-id-only `.includes` (contacts.md § Where logic lives).
+    // The private overlay's roster filter (`ContactsCache::matches_filter`):
+    // case-insensitive substring over handle/domain/actor-id plus the viewer's
+    // nickname and labels, empty query matches all (contacts.md § The private
+    // overlay → *Labels and the roster filter*). Re-run when names move.
+    void $contactsRevision;
+    if (localContacts.length === 0) return [];
+    const overlays = contactOverlays();
     return localContacts.filter(
-      (c) => c.status === status && contactMatchesFilter(contactsSearch, c.handle, c.domain, c.peer_id),
+      (c) => c.status === status && overlays.matchesFilter(contactsSearch, c.handle, c.domain, c.peer_id),
     );
   }
+
+  // What each roster row and knock card shows — the face's names, read again
+  // whenever the overlay's projection moves (`$contactsRevision`). Nothing here
+  // resolves a person's name itself (contacts.md § The private overlay →
+  // *Where the nickname paints*).
+  let rosterNames = $derived.by(() => {
+    void $contactsRevision;
+    // Rows exist only once wasm is up, which the face needs.
+    if (localContacts.length === 0) return new Map();
+    const overlays = contactOverlays();
+    return new Map(
+      localContacts.map((c) => [
+        c.peer_id,
+        {
+          label: overlays.peerLabel(null, c.handle, c.peer_id),
+          labels: overlays.labelsLine(c.peer_id) ?? null,
+        },
+      ]),
+    );
+  });
+  let knockNames = $derived.by(() => {
+    void $contactsRevision;
+    if (localKnocks.length === 0) return new Map<string, string>();
+    const overlays = contactOverlays();
+    return new Map(localKnocks.map((k) => [k.sender, overlays.peerLabel(null, null, k.sender).primary]));
+  });
 </script>
 
 <div data-testid={IDS.CONTACTS_VIEW}>
@@ -500,7 +531,7 @@
         {#each localKnocks as knock (knock.id)}
           <div data-testid={IDS.KNOCK_CARD} class="knock-card">
             <div class="knock-info">
-              <span data-testid={IDS.KNOCK_SENDER} class="peer-id mono">{shortId(knock.sender)}</span>
+              <span data-testid={IDS.KNOCK_SENDER} class="peer-id mono">{knockNames.get(knock.sender) ?? ''}</span>
               <span class="muted small">{knock.sender_node}</span>
               {#if knock.summary}
                 <span class="summary">{knock.summary}</span>
@@ -551,8 +582,17 @@
                   title={contact.peer_id}
                   onclick={() => goto(`/app/profile/${contact.peer_id}`)}
                 >
-                  <span data-testid={IDS.CONTACT_NAME} class="peer-id mono">{shortId(contact.peer_id)}</span>
+                  <span data-testid={IDS.CONTACT_NAME} class="peer-id mono">{rosterNames.get(contact.peer_id)?.label.primary ?? ''}</span>
                 </button>
+                {#if rosterNames.get(contact.peer_id)?.label.public}
+                  <!-- The public name a nickname replaced: a private name never
+                       hides who this is (contacts.md § The private overlay →
+                       *Two guards*). Absent while no nickname is set. -->
+                  <span data-testid={IDS.CONTACT_PUBLIC_NAME} class="muted small">{rosterNames.get(contact.peer_id)?.label.public}</span>
+                {/if}
+                {#if rosterNames.get(contact.peer_id)?.labels}
+                  <span data-testid={IDS.CONTACT_LABELS} class="muted small">{rosterNames.get(contact.peer_id)?.labels}</span>
+                {/if}
                 <button
                   data-testid={IDS.CONTACT_ACTOR_ID_COPY_BTN}
                   class="btn-copy"

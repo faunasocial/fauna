@@ -368,6 +368,10 @@ fn media_list_handler() -> RpcHandler {
                     let s = statement.unwrap_or_default();
                     items.push(MediaItem {
                         folder: fs.name.clone(),
+                        // The row both folder projections carry: the
+                        // reader's relay-hint ref (`file-sync.md` § Relay
+                        // serving, step (4)).
+                        folder_id: Some(fs.id),
                         // The empty string is the ratified scrub sentinel on
                         // this required wire field — render seams read it as
                         // "scrubbed" and fall back to the sealed pair below.

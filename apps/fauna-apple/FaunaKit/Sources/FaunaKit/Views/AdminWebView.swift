@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The admin **`admin-web`** page (`docs/goal/behavior/web-content-hosting.md`
@@ -92,3 +95,4 @@ public struct AdminWebView: View {
         }
     }
 }
+#endif // !FAUNA_KIDS

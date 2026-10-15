@@ -82,7 +82,9 @@
   // Add/edit inline sheet (reveal, not modal — matches linux + mail-settings).
   let sheetOpen = $state(false);
   let editingId = $state<string | null>(null); // non-null ⇒ Edit mode (kind read-only)
-  let isWildcard = $state(false); // kind-picker: false = Exact (default), true = Wildcard
+  // kind-picker: steps Exact (default) → Wildcard → Disposable, one click each;
+  // the selection is published as the picker's `kind` attr (tui + android shape).
+  let pickedKind = $state<'exact' | 'wildcard' | 'disposable'>('exact');
   let patternInput = $state('');
   let labelInput = $state('');
   let spamThresholdInput = $state('');
@@ -105,6 +107,9 @@
 
   // Transient "copied <address>" confirmation after a disposable mint.
   let mintedToast = $state('');
+  // The address the generate button last put on the clipboard, published as its
+  // `copied` attr (the `account-actor-id-copy-btn` contract) while the toast shows.
+  let mintedAddress = $state('');
 
   // Per-row two-click arm state for the destructive revoke/delete gestures (no
   // modal, no separate confirm id — matches linux; auto-disarms after 4s).
@@ -123,7 +128,11 @@
       copyText(snap.last_minted_address);
       mintedToast = `${t.mail_aliases.copied} ${snap.last_minted_address}`;
       const addr = snap.last_minted_address;
-      setTimeout(() => { if (mintedToast.endsWith(addr)) mintedToast = ''; }, 4000);
+      mintedAddress = addr;
+      setTimeout(() => {
+        if (mintedToast.endsWith(addr)) mintedToast = '';
+        if (mintedAddress === addr) mintedAddress = '';
+      }, 4000);
     }
   }
 
@@ -160,7 +169,7 @@
 
   function openAdd(): void {
     editingId = null;
-    isWildcard = false;
+    pickedKind = 'exact';
     patternInput = '';
     labelInput = '';
     spamThresholdInput = '';
@@ -173,7 +182,7 @@
 
   function openEdit(v: AliasView): void {
     editingId = v.alias_id_hex;
-    isWildcard = v.kind === 'Wildcard';
+    pickedKind = v.kind === 'Wildcard' ? 'wildcard' : 'exact';
     patternInput = v.pattern;
     labelInput = v.label;
     spamThresholdInput = v.spam_threshold_override != null ? String(v.spam_threshold_override) : '';
@@ -182,14 +191,21 @@
     sheetOpen = true;
   }
 
-  // Kind picker: a single value-via-state toggle (unchecked = Exact, checked =
-  // Wildcard), the same idiom as mail-add-credential-type-selector. Disposable
-  // mints via the generate button, not this sheet. Read-only on edit (kind is
-  // immutable — can't change a wildcard into a disposable mid-life).
+  // Kind picker: one click steps Exact → Wildcard → Disposable → Exact. Read-only
+  // on edit (kind is immutable — can't change a wildcard into a disposable
+  // mid-life).
   function toggleKind(): void {
     if (editingId) return;
-    isWildcard = !isWildcard;
+    pickedKind = pickedKind === 'exact' ? 'wildcard' : pickedKind === 'wildcard' ? 'disposable' : 'exact';
   }
+
+  const kindLabel = $derived(
+    pickedKind === 'wildcard'
+      ? t.mail_aliases.kind_wildcard_label
+      : pickedKind === 'disposable'
+        ? t.mail_aliases.kind_disposable
+        : t.mail_aliases.kind_exact,
+  );
 
   async function submitSheet(): Promise<void> {
     if (!machine) return;
@@ -203,9 +219,13 @@
     const spam_threshold_override = parseCount(spamThresholdInput) ?? null;
     const rate_limit_per_hour = parseCountI64(ratePerHourInput) ?? null;
     error = '';
+    // Disposable: the address is minted, not typed — the shared machine takes
+    // the lifetime / use cap (empty = the per-user default) and a label.
     const action = editingId
       ? { Update: { alias_id_hex: editingId, pattern, label, spam_threshold_override, rate_limit_per_hour } }
-      : { Create: { kind: isWildcard ? 'Wildcard' : 'Exact', pattern, label, spam_threshold_override, rate_limit_per_hour } };
+      : pickedKind === 'disposable'
+        ? { GenerateDisposable: { ttl_days: parseCount(ttlInput) ?? null, uses: parseCount(usesInput) ?? null, label } }
+        : { Create: { kind: pickedKind === 'wildcard' ? 'Wildcard' : 'Exact', pattern, label, spam_threshold_override, rate_limit_per_hour } };
     try {
       await machine.dispatch(action);
       applySnapshot();
@@ -326,7 +346,7 @@
     <button class="btn" data-testid={IDS.MAIL_ALIASES_ADD_BUTTON} disabled={!hasDomain} onclick={openAdd}>
       {t.mail_aliases.add_button}
     </button>
-    <button class="btn" data-testid={IDS.MAIL_ALIASES_GENERATE_DISPOSABLE_BUTTON} disabled={!hasDomain} onclick={generateDisposable}>
+    <button class="btn" data-testid={IDS.MAIL_ALIASES_GENERATE_DISPOSABLE_BUTTON} disabled={!hasDomain} data-copied={mintedAddress || undefined} onclick={generateDisposable}>
       {t.mail_aliases.generate_button}
     </button>
     <button class="btn" data-testid={IDS.MAIL_ALIASES_IMPORT_BUTTON} disabled={!hasDomain} onclick={openImport}>
@@ -346,52 +366,58 @@
     <div class="form">
       <button
         class="btn toggle"
-        class:on={isWildcard}
+        class:on={pickedKind !== 'exact'}
         data-testid={IDS.MAIL_ALIASES_ADD_SHEET_KIND_PICKER}
+        data-kind={pickedKind}
         disabled={editingId != null}
         onclick={toggleKind}
-      >{isWildcard ? t.mail_aliases.kind_wildcard_label : t.mail_aliases.kind_exact}</button>
+      >{kindLabel}</button>
 
-      <input
-        class="input"
-        data-testid={IDS.MAIL_ALIASES_ADD_SHEET_PATTERN_INPUT}
-        placeholder={t.mail_aliases.pattern_placeholder}
-        bind:value={patternInput}
-      />
+      {#if pickedKind !== 'disposable'}
+        <input
+          class="input"
+          data-testid={IDS.MAIL_ALIASES_ADD_SHEET_PATTERN_INPUT}
+          placeholder={t.mail_aliases.pattern_placeholder}
+          bind:value={patternInput}
+        />
+      {/if}
       <input
         class="input"
         data-testid={IDS.MAIL_ALIASES_ADD_SHEET_LABEL_INPUT}
         placeholder={t.mail_aliases.label_placeholder}
         bind:value={labelInput}
       />
-      <input
-        class="input"
-        data-testid={IDS.MAIL_ALIASES_ADD_SHEET_SPAM_THRESHOLD_INPUT}
-        placeholder={t.mail_aliases.spam_threshold_placeholder}
-        bind:value={spamThresholdInput}
-      />
-      <input
-        class="input"
-        data-testid={IDS.MAIL_ALIASES_ADD_SHEET_RATE_PER_HOUR_INPUT}
-        placeholder={t.mail_aliases.rate_per_hour_placeholder}
-        bind:value={ratePerHourInput}
-      />
-      <!-- Disposable-only; minted via the generate button (not this sheet) —
-           present but hidden for ui.yaml conformance, same as linux. -->
-      <input
-        class="input"
-        data-testid={IDS.MAIL_ALIASES_ADD_SHEET_TTL_INPUT}
-        hidden
-        placeholder={t.mail_aliases.ttl_placeholder}
-        bind:value={ttlInput}
-      />
-      <input
-        class="input"
-        data-testid={IDS.MAIL_ALIASES_ADD_SHEET_USES_INPUT}
-        hidden
-        placeholder={t.mail_aliases.uses_placeholder}
-        bind:value={usesInput}
-      />
+      {#if pickedKind !== 'disposable'}
+        <!-- The mint does not take a threshold or hourly limit — hidden for
+             Disposable (tui's shape). -->
+        <input
+          class="input"
+          data-testid={IDS.MAIL_ALIASES_ADD_SHEET_SPAM_THRESHOLD_INPUT}
+          placeholder={t.mail_aliases.spam_threshold_placeholder}
+          bind:value={spamThresholdInput}
+        />
+        <input
+          class="input"
+          data-testid={IDS.MAIL_ALIASES_ADD_SHEET_RATE_PER_HOUR_INPUT}
+          placeholder={t.mail_aliases.rate_per_hour_placeholder}
+          bind:value={ratePerHourInput}
+        />
+      {:else}
+        <!-- Disposable-only: how long the throwaway lasts and how many messages
+             it takes (empty = the per-user default). -->
+        <input
+          class="input"
+          data-testid={IDS.MAIL_ALIASES_ADD_SHEET_TTL_INPUT}
+          placeholder={t.mail_aliases.ttl_placeholder}
+          bind:value={ttlInput}
+        />
+        <input
+          class="input"
+          data-testid={IDS.MAIL_ALIASES_ADD_SHEET_USES_INPUT}
+          placeholder={t.mail_aliases.uses_placeholder}
+          bind:value={usesInput}
+        />
+      {/if}
 
       <div class="form-actions">
         <button class="btn primary" data-testid={IDS.MAIL_ALIASES_ADD_SHEET_SUBMIT_BUTTON} onclick={submitSheet}>

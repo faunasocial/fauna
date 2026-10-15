@@ -67,7 +67,7 @@ fn build_filter(profile: Profile) -> Result<BpfProgram> {
 
     // --- Profile-specific rules ---
     match profile {
-        Profile::Bridge | Profile::BridgeImap | Profile::Dns => {
+        Profile::Bridge | Profile::BridgeImap | Profile::Dns | Profile::Transcode => {
             // Base deny-list is sufficient for these profiles
         }
     }

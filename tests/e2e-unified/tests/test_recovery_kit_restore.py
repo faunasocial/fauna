@@ -62,12 +62,13 @@ import secrets
 
 import pytest
 
-from helpers.app_surface import skip_environment, skip_unbuilt
+from helpers.app_surface import skip_unbuilt
 from helpers.inherited_corpus import CORPUS_READ_S, seed_an_image_under_this_identity
 from helpers.recovery_restore import (
     RESTORE_OUTCOME_S,
     assert_landing_left_no_error,
     assert_restored_the_same_account,
+    copy_the_shown_kit,
     lose_every_device_and_open_restore,
     point_the_restore_at,
     qualified_account,
@@ -692,7 +693,7 @@ def test_a_restore_of_an_identity_that_moved_on_routes_to_the_import(
     app.settings.create_recovery_kit()
     app.wait_for("recovery-kit-secret-display", timeout=30.0)
     phrase = app.settings.recovery_kit_secret()
-    copied = _copy_the_shown_kit(app, phrase)
+    copied = copy_the_shown_kit(app, phrase)
 
     succeed_identity(
         nest_instance["url"],
@@ -723,34 +724,6 @@ def test_a_restore_of_an_identity_that_moved_on_routes_to_the_import(
 # ── A kit you copied restores with nothing typed ────────────────────────────
 
 
-def _copy_the_shown_kit(app, phrase: str) -> str:
-    """Press copy on the kit on screen and return what reached the clipboard.
-
-    Asserts it is the same kit in its account-naming form — the
-    ``fauna://recovery`` URI — without ever putting the secret in a message.
-    """
-    try:
-        before = app.driver.get_clipboard_text()
-    except NotImplementedError:
-        skip_environment(
-            f"the {app.driver.__class__.__name__} driver cannot read what the "
-            "app copies, so the copied kit cannot be carried to the restore"
-        )
-    app.settings.copy_recovery_kit()
-    wait_until(
-        lambda: app.driver.get_clipboard_text() not in (None, before),
-        10.0,
-        diagnose=lambda: "pressing copy put nothing new on the clipboard",
-    )
-    copied = app.driver.get_clipboard_text()
-    assert copied.startswith("fauna://recovery"), (
-        "copy carries the kit's URI form, which names the account; the "
-        "clipboard holds something else"
-    )
-    assert phrase in copied, "the copied kit must be the kit on screen"
-    return copied
-
-
 @pytest.mark.feature("recovery-kit")
 def test_a_copied_kit_restores_the_account_with_nothing_typed_but_the_kit(
     ungranted_app, nest_instance
@@ -775,7 +748,7 @@ def test_a_copied_kit_restores_the_account_with_nothing_typed_but_the_kit(
     app.settings.open_recovery_kit_or_skip()
     app.settings.create_recovery_kit()
     app.wait_for("recovery-kit-secret-display", timeout=30.0)
-    copied = _copy_the_shown_kit(app, app.settings.recovery_kit_secret())
+    copied = copy_the_shown_kit(app, app.settings.recovery_kit_secret())
 
     lose_every_device_and_open_restore(app, nest_instance)
     app.onboarding.restore_from_recovery_kit(copied)

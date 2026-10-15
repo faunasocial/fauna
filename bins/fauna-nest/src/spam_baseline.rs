@@ -112,6 +112,15 @@ pub fn changed_contributions(
 
 /// Run one publish — the admin's click and the cadence alike.
 pub async fn run_spam_baseline_publish(state: &Arc<AppState>) -> anyhow::Result<PublishOutcome> {
+    publish_run(state, false).await
+}
+
+/// The run itself. `cadence` marks a standing-publish tick: it re-reads
+/// `baseline_standing_publish` just before landing, so an admin turning
+/// standing off while the run waited on its holder is not silently undone by
+/// a baseline served after the unpublish. The admin's click (`cadence ==
+/// false`) never asks — "publish now" works with standing off.
+async fn publish_run(state: &Arc<AppState>, cadence: bool) -> anyhow::Result<PublishOutcome> {
     let snapshot = state.db.snapshot_spam_baseline_run().await?;
 
     // Every opted-in model row is a candidate for the holder drain below: the
@@ -246,6 +255,9 @@ pub async fn run_spam_baseline_publish(state: &Arc<AppState>) -> anyhow::Result<
     baseline.cap_to_bytes(fauna_mail::spam::MODEL_MAX_BYTES_DEFAULT);
     let sample_count = baseline.sample_count();
     let model_json = baseline.to_bytes();
+    if cadence && !standing_publish_enabled(state).await? {
+        return Ok(deferred(contributors, skipped_contributors));
+    }
     let landed = state
         .db
         .land_spam_baseline_publish(
@@ -299,17 +311,21 @@ pub async fn run_standing_publish_if_due(
     state: &Arc<AppState>,
     now_ms: i64,
 ) -> anyhow::Result<Option<PublishOutcome>> {
-    let standing = state
-        .db
-        .get_spam_policy()
-        .await?
-        .effective()
-        .baseline_standing_publish;
+    let standing = standing_publish_enabled(state).await?;
     let (_, run_state) = state.db.get_spam_baseline_state().await?;
     if !standing_publish_due(standing, run_state.last_run_at, now_ms) {
         return Ok(None);
     }
-    run_spam_baseline_publish(state).await.map(Some)
+    publish_run(state, true).await.map(Some)
+}
+
+async fn standing_publish_enabled(state: &Arc<AppState>) -> anyhow::Result<bool> {
+    Ok(state
+        .db
+        .get_spam_policy()
+        .await?
+        .effective()
+        .baseline_standing_publish)
 }
 
 /// Spawn the standing-publish cadence on the shared periodic-sweeper

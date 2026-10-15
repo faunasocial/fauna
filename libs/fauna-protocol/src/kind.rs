@@ -371,6 +371,12 @@ impl KindRegistry {
             "fauna.bridges.import_message_batch",
             RpcKindMeta::new(true, Duration::from_secs(60)),
         );
+        // A progress accumulator like the two above, so forbid-replay for the
+        // same reason: a replay would count the same skips twice.
+        self.add(
+            "fauna.bridges.record_import_outcomes",
+            RpcKindMeta::new(true, Duration::from_secs(60)),
+        );
         self.add("fauna.bridges.list_import_sessions", fetch);
         self.add("fauna.bridges.pause_import_session", fetch);
         self.add("fauna.bridges.resume_import_session", fetch);
@@ -512,6 +518,10 @@ impl KindRegistry {
         // an in-memory waiter (no DB touch), fetch weight; a repeat matches
         // nothing and answers `accepted: false`, so replay is harmless.
         self.add("fauna.bridges.atproto.deliver_permission_set", fetch);
+        // The bridge→nest half of the oracle's `atproto.service_auth` class:
+        // the same in-memory waiter release, the same weight and replay
+        // reasoning.
+        self.add("fauna.bridges.atproto.deliver_service_auth", fetch);
         // The integration-depth ladder (`ui/atproto.md` § Transition
         // semantics): the status read is a light row read; the transition can
         // boot the bridge and round-trip the consume-side unlink, so it gets
@@ -683,6 +693,12 @@ impl KindRegistry {
         self.add(
             "fauna.recovery.escrow.status",
             RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
+        // The custodian copy's pull (CUSTODIAN class): the custody pump reads
+        // the owner's blob into the pair store. A pure read, so replay-safe.
+        self.add(
+            crate::recovery::ESCROW_PULL_KIND,
+            RpcKindMeta::new(false, Duration::from_secs(10)),
         );
         // The seed-initiated replacement window. `request` is replay-safe by
         // construction: a re-delivered identical record upserts the same
@@ -1125,6 +1141,49 @@ impl KindRegistry {
         self.add("fauna.nostr.bunker.bind", light);
     }
 
+    /// Register the oracle's ActivityPub door (TP11 —
+    /// [`crate::activitypub_oracle::KIND_HTTP_SIG`]): principal-only, light,
+    /// replay-safe — a replayed signature request mints a second signature
+    /// over the same request, which the remote's own `Date` window bounds.
+    pub fn register_activitypub_oracle_kinds(&mut self) {
+        use std::time::Duration;
+        self.add(
+            crate::activitypub_oracle::KIND_HTTP_SIG,
+            RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
+    }
+
+    /// Register the oracle's posting door (TP11 — [`crate::post_author`]):
+    /// principal-only, light. The create is replay-safe in effect (a replay
+    /// re-authors the same body under a later `created_at`, which the
+    /// principal could ask for anyway); the delete is idempotent.
+    pub fn register_post_author_kinds(&mut self) {
+        use std::time::Duration;
+        self.add(
+            crate::post_author::KIND_CREATE,
+            RpcKindMeta::new(false, Duration::from_secs(10)),
+        );
+        self.add(
+            crate::post_author::KIND_DELETE,
+            RpcKindMeta::new(false, Duration::from_secs(10)),
+        );
+    }
+
+    /// Register the oracle's ATProto door (TP11 —
+    /// [`crate::atproto_oracle::KIND_SERVICE_AUTH`]): principal-only, light,
+    /// replay-safe — a replayed request mints a second token for the same
+    /// declared `(aud, lxm)`, each bounded by the class's lifetime cap. Its
+    /// deadline outlasts the nest's own wait on the PDS bridge
+    /// (`SERVICE_AUTH_RESOLVE_TIMEOUT`, 10 s) so the door's refusal, not the
+    /// transport's, answers a silent bridge.
+    pub fn register_atproto_oracle_kinds(&mut self) {
+        use std::time::Duration;
+        self.add(
+            crate::atproto_oracle::KIND_SERVICE_AUTH,
+            RpcKindMeta::new(false, Duration::from_secs(15)),
+        );
+    }
+
     /// Register the bridged-conversation family (`apps/bridges.md`
     /// § Bridge-kind catalogue → Phase G) — the nest's
     /// `register_bridged_conversation_handlers` twin: all light; only the
@@ -1283,7 +1342,8 @@ impl KindRegistry {
     ///   after SELECT); a replay consumes a second package on top of the
     ///   one the caller already received, which is observable to other
     ///   senders (queue depletion) and to the recipient (forced re-publish).
-    /// - `keypackage.count` is a pure read; replay-safe at 5 s.
+    /// - `keypackage.count` (owner-only) and `keypackage.addressable` (the
+    ///   boolean reachability probe) are pure reads; replay-safe at 5 s.
     pub fn register_conversations_keypackage_kinds(&mut self) {
         use std::time::Duration;
 
@@ -1294,6 +1354,7 @@ impl KindRegistry {
             RpcKindMeta::new(true, Duration::from_secs(5)),
         );
         self.add("fauna.conversations.keypackage.count", read);
+        self.add("fauna.conversations.keypackage.addressable", read);
     }
 
     /// Register the user-facing `fauna.conversations.welcome.deliver`
@@ -1685,6 +1746,13 @@ impl KindRegistry {
         // the idempotency cache replays the first reply (same minted token),
         // and the signature replay guard fails a re-executed request closed.
         self.add("fauna.auth.custody_handshake", auth);
+        // Custodied-fleet restore-read bearer mint
+        // (`crate::auth::CUSTODIED_FLEET_HANDSHAKE_KIND`,
+        // `account-replica-posture.md` § the custodian-NEST serve door;
+        // additive 2026-10-09). The custody handshake's replay posture: the
+        // idempotency cache replays the first reply, and the signature replay
+        // guard fails a re-executed request closed.
+        self.add("fauna.auth.custodied_fleet_handshake", auth);
         // The deployment-seed rotation chain
         // (`crate::nest_rotation::ROTATION_CHAIN_KIND`, `nest/box-recovery.md`
         // § Client acceptance). It sits in the `fauna.auth.*` family because it
@@ -2048,6 +2116,28 @@ impl KindRegistry {
             crate::folders::KIND_FOLDERS_DEPOSITS_RETIRE,
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
+        // A parked deposit's sealed part, one per call: a pure read.
+        self.add(
+            crate::folders::KIND_FOLDERS_DEPOSITS_PART,
+            RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
+        // A deposit larger than one message. `begin` opens a fresh staged
+        // upload per call, so it is never replayed; a part re-sent under its
+        // index replaces itself and a commit of a committed upload answers
+        // accepted again, so both are replay-safe. 30 s covers a full part's
+        // seal.
+        self.add(
+            crate::folders::KIND_FOLDERS_DEPOSIT_BEGIN,
+            RpcKindMeta::new(true, Duration::from_secs(5)),
+        );
+        self.add(
+            crate::folders::KIND_FOLDERS_DEPOSIT_PART,
+            RpcKindMeta::new(false, Duration::from_secs(30)),
+        );
+        self.add(
+            crate::folders::KIND_FOLDERS_DEPOSIT_COMMIT,
+            RpcKindMeta::new(false, Duration::from_secs(10)),
+        );
     }
 
     /// Register the share-link control plane `fauna.share.{create,list,revoke}` —
@@ -2131,8 +2221,8 @@ impl KindRegistry {
             // which is exactly the at-most-once property `changes.record` needs
             // the idempotency cache for.
             crate::account_state::KIND_STATE_PUT,
-            // `state.put`'s retire counterpart (`account-data-taxonomy.md` §
-            // The generation machinery → *Fleet-scope reclamation*). Decided,
+            // `state.put`'s retire counterpart (`fleet-scope-reclamation.md`
+            // § *Fleet-scope reclamation*). Decided,
             // not inherited from the retired `rotate_as_key` precedent
             // (transport.md:1767-1787, later overturned to
             // `forbid_replay = true` @30s): unlike a key rotation, this
@@ -2191,6 +2281,7 @@ impl KindRegistry {
     /// - `domain.set` is a non-idempotent registration write (generates a verify
     ///   token) @30 s; the per-connection idempotency cache replays the first
     ///   reply (with its token) on a recovered connection.
+    #[cfg(feature = "web")]
     pub fn register_web_kinds(&mut self) {
         use std::time::Duration;
         let read = RpcKindMeta::new(false, Duration::from_secs(5));
@@ -2382,6 +2473,13 @@ impl KindRegistry {
         // replace of one singleton row.
         self.add("fauna.admin.web_app_origin.get", meta);
         self.add("fauna.admin.web_app_origin.set", meta);
+
+        // Which builds this box's updater follows (`nest/update-channel.md`
+        // § The channel as nest state). Same `forbid_replay = false` @5 s: `get`
+        // is a pure read, `set` an idempotent whole-value replace of one
+        // singleton row.
+        self.add("fauna.admin.update_channel.get", meta);
+        self.add("fauna.admin.update_channel.set", meta);
 
         // C5 — folders / services (≡ `/admin/api/{folders*,services*}`). Same
         // `forbid_replay = false` @5 s: the folders/services reads are pure; the
@@ -2777,6 +2875,7 @@ impl KindRegistry {
     ///   against). `update`/`delete`/`grant`/`revoke` are idempotent
     ///   overwrites/removals on the owner-keyed `(feed_id, owner)` /
     ///   `(feed_id, nest_url, author_id)` keys.
+    #[cfg(feature = "feed")]
     pub fn register_feed_kinds(&mut self) {
         use std::time::Duration;
         let read = RpcKindMeta::new(false, Duration::from_secs(5));
@@ -2819,6 +2918,7 @@ impl KindRegistry {
     /// Register the full-text search kind (`fauna.search.query`). A pure
     /// read — replay-safe at 5 s. Scoped as part of the WS-RPC search
     /// migration (tracked internally).
+    #[cfg(feature = "search")]
     pub fn register_search_kinds(&mut self) {
         use std::time::Duration;
         self.add(
@@ -3080,6 +3180,10 @@ impl KindRegistry {
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
         self.add(
+            "fauna.bridges.get_dmarc_policy",
+            RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
+        self.add(
             "fauna.bridges.get_forward_all_to",
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
@@ -3089,6 +3193,10 @@ impl KindRegistry {
         );
         self.add(
             "fauna.bridges.get_mail_serving_enabled",
+            RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
+        self.add(
+            "fauna.bridges.get_message_scan_result",
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
         self.add(
@@ -3142,6 +3250,38 @@ impl KindRegistry {
         self.add(
             "fauna.bridges.list_list_send_history",
             RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
+        self.add(
+            "fauna.bridges.list_dmarc_aggregate_reports",
+            RpcKindMeta::new(false, Duration::from_secs(10)),
+        );
+        self.add(
+            "fauna.bridges.get_dmarc_aggregate_report",
+            RpcKindMeta::new(false, Duration::from_secs(10)),
+        );
+        self.add(
+            "fauna.bridges.list_dmarc_forensic_reports",
+            RpcKindMeta::new(false, Duration::from_secs(10)),
+        );
+        self.add(
+            "fauna.bridges.get_dmarc_forensic_report",
+            RpcKindMeta::new(false, Duration::from_secs(10)),
+        );
+        self.add(
+            "fauna.bridges.ingest_dmarc_report",
+            RpcKindMeta::new(false, Duration::from_secs(30)),
+        );
+        self.add(
+            "fauna.bridges.list_tlsrpt_inbound_reports",
+            RpcKindMeta::new(false, Duration::from_secs(10)),
+        );
+        self.add(
+            "fauna.bridges.get_tlsrpt_inbound_report",
+            RpcKindMeta::new(false, Duration::from_secs(10)),
+        );
+        self.add(
+            "fauna.bridges.ingest_tlsrpt_report",
+            RpcKindMeta::new(false, Duration::from_secs(30)),
         );
         self.add(
             "fauna.bridges.list_local_domains",
@@ -3208,6 +3348,10 @@ impl KindRegistry {
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
         self.add(
+            "fauna.bridges.put_dmarc_policy",
+            RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
+        self.add(
             "fauna.bridges.put_imap_policy",
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
@@ -3237,6 +3381,10 @@ impl KindRegistry {
         );
         self.add(
             "fauna.bridges.rename_mailbox",
+            RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
+        self.add(
+            "fauna.bridges.report_dmarc_observation",
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
         self.add(
@@ -3372,6 +3520,21 @@ impl KindRegistry {
             "fauna.bridges.set_forward_per_hour",
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
+        // The per-account receive and send switches: a read and an idempotent
+        // partial overwrite, both replay-safe @5 s, matching the router's meta.
+        self.add(
+            "fauna.bridges.get_mail_switches",
+            RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
+        self.add(
+            "fauna.bridges.set_mail_switches",
+            RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
+        // The caller's own mailbox + submission quotas: a read, replay-safe.
+        self.add(
+            "fauna.bridges.get_mail_quotas",
+            RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
         self.add(
             "fauna.bridges.set_webdav_enabled",
             RpcKindMeta::new(false, Duration::from_secs(5)),
@@ -3445,6 +3608,10 @@ impl KindRegistry {
 
         self.add(
             "fauna.subscriptions.delegate.upload",
+            RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
+        self.add(
+            "fauna.subscriptions.encaps_key.publish",
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
         self.add(
@@ -3623,6 +3790,13 @@ impl KindRegistry {
         self.add(
             "fauna.payments.claims.redeem",
             RpcKindMeta::new(false, Duration::from_secs(15)),
+        );
+        self.add(
+            // `forbid_replay: false` — a void of a voided code answers its
+            // existing stamp before any write, so a replay changes nothing.
+            // Mirrored nest-side in `payment_handlers::register_payment_handlers`.
+            "fauna.payments.claims.void",
+            RpcKindMeta::new(false, Duration::from_secs(5)),
         );
         self.add(
             "fauna.payments.providers.list",
@@ -3890,6 +4064,12 @@ impl KindRegistry {
             "fauna.principals.list",
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
+        // The oracle's per-operation record for one principal (`key-material-
+        // hierarchy.md` § *The oracle*, the audit split): a bounded read.
+        self.add(
+            "fauna.principals.ops",
+            RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
         self.add(
             "fauna.principals.revoke",
             RpcKindMeta::new(false, Duration::from_secs(5)),
@@ -3925,6 +4105,20 @@ impl KindRegistry {
         self.add(
             "fauna.plugins.uninstall",
             RpcKindMeta::new(false, Duration::from_secs(30)),
+        );
+        // The user's half: a read, a card open (a replay opens another card,
+        // which expires unanswered) and a merge-write of the same values.
+        self.add(
+            "fauna.plugins.available",
+            RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
+        self.add(
+            "fauna.plugins.bind",
+            RpcKindMeta::new(false, Duration::from_secs(10)),
+        );
+        self.add(
+            "fauna.plugins.set_settings",
+            RpcKindMeta::new(false, Duration::from_secs(5)),
         );
     }
 
@@ -4010,6 +4204,9 @@ impl KindRegistry {
         self.register_inbox_kinds();
         self.register_bluesky_kinds();
         self.register_nostr_bunker_kinds();
+        self.register_activitypub_oracle_kinds();
+        self.register_post_author_kinds();
+        self.register_atproto_oracle_kinds();
         self.register_bridged_conversation_kinds();
         #[cfg(feature = "zaps")]
         self.register_nostr_zap_signer_kinds();
@@ -4037,6 +4234,7 @@ impl KindRegistry {
         self.register_share_kinds();
         self.register_sync_kinds();
         self.register_media_kinds();
+        #[cfg(feature = "web")]
         self.register_web_kinds();
         self.register_labels_kinds();
         self.register_admin_kinds();
@@ -4049,8 +4247,10 @@ impl KindRegistry {
         self.register_profile_kinds();
         self.register_notifications_kinds();
         self.register_contacts_kinds();
+        #[cfg(feature = "feed")]
         self.register_feed_kinds();
         self.register_personalization_kinds();
+        #[cfg(feature = "search")]
         self.register_search_kinds();
         self.register_content_index_kinds();
         self.register_segments_kinds();
@@ -4341,10 +4541,11 @@ mod tests {
         use std::time::Duration;
         let mut r = KindRegistry::new();
         r.register_conversations_keypackage_kinds();
-        // upload + count are pure-ish reads (replay-safe at 5 s).
+        // upload + count + addressable are pure-ish reads (replay-safe at 5 s).
         for kind in [
             "fauna.conversations.keypackage.upload",
             "fauna.conversations.keypackage.count",
+            "fauna.conversations.keypackage.addressable",
         ] {
             let m = r.meta(kind).unwrap_or_else(|| panic!("{kind} registered"));
             assert!(!m.forbid_replay, "{kind} is replay-safe");
@@ -4657,6 +4858,19 @@ mod tests {
             .expect("fauna.folders.deposit registered");
         assert!(deposit.forbid_replay, "a replayed deposit would park twice");
         assert_eq!(deposit.default_deadline, Duration::from_secs(30));
+        // A larger deposit: only `begin` mints state per call.
+        let begin = r
+            .meta(crate::folders::KIND_FOLDERS_DEPOSIT_BEGIN)
+            .expect("fauna.folders.deposit.begin registered");
+        assert!(begin.forbid_replay, "a replayed begin opens another upload");
+        for kind in [
+            crate::folders::KIND_FOLDERS_DEPOSIT_PART,
+            crate::folders::KIND_FOLDERS_DEPOSIT_COMMIT,
+            crate::folders::KIND_FOLDERS_DEPOSITS_PART,
+        ] {
+            let m = r.meta(kind).unwrap_or_else(|| panic!("{kind} registered"));
+            assert!(!m.forbid_replay, "{kind} is idempotent");
+        }
     }
 
     #[test]
@@ -4718,6 +4932,7 @@ mod tests {
         assert_eq!(m.default_deadline, Duration::from_secs(5));
     }
 
+    #[cfg(feature = "web")]
     #[test]
     fn web_kinds_register_with_correct_metadata() {
         use std::time::Duration;
@@ -4929,6 +5144,7 @@ mod tests {
         assert_eq!(m.default_deadline, Duration::from_secs(5));
     }
 
+    #[cfg(feature = "search")]
     #[test]
     fn search_kind_registers_with_correct_metadata() {
         use std::time::Duration;
@@ -5073,6 +5289,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "feed")]
     #[test]
     fn feed_kinds_register_with_correct_metadata() {
         use std::time::Duration;
@@ -5371,6 +5588,7 @@ mod tests {
         for k in [
             "fauna.bridges.import_message",
             "fauna.bridges.import_message_batch",
+            "fauna.bridges.record_import_outcomes",
         ] {
             let m = r.meta(k).unwrap();
             assert_eq!(m.default_deadline, Duration::from_secs(60), "{k}");
@@ -5485,6 +5703,8 @@ mod tests {
             "fauna.bridges.import_message",
             "fauna.bridges.import_message_batch",
             "fauna.bridges.link",
+            // A progress accumulator: a replay counts the same skips twice.
+            "fauna.bridges.record_import_outcomes",
             // Every application opens a new stream generation, so a replay
             // would supersede the stream the first one just opened.
             "fauna.bridges.restart_export_session",
@@ -5534,6 +5754,8 @@ mod tests {
             // A deposit parks one item per accepted call: a replay would
             // park it twice.
             "fauna.folders.deposit",
+            // Each call opens another staged upload.
+            "fauna.folders.deposit.begin",
             "fauna.inbox.send",
             // Each call mints a key, so a replayed frame must not silently
             // rotate twice — `rotate_srs_secret`'s reason

@@ -33,24 +33,25 @@ Stamped 2026-10-01 at d8cb0887cb.
 7. [app] A feed that cannot be loaded says so on the page, instead of just looking empty — `docs/goal/ui/feed.md` § Errors & edge cases
    - `tests/e2e-unified/tests/test_feed_error.py::test_feed_error_surfaces_on_error_text`
 8. [app] A post that came from another network shows its author by their name or handle there, never a raw id, and a nickname you gave them comes first — `docs/goal/behavior/bridges.md` § Unified feed ingestion
-   - (none)
+   - `tests/e2e-unified/tests/test_bluesky_feed_ingest.py::test_a_bridged_author_shows_by_their_name_and_a_nickname_you_gave_them_comes_first`
 9. [nest] A post from another network arrives with its author's name, handle and picture, the picture served through your nest — `docs/goal/behavior/bridges.md` § Unified feed ingestion
    - `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_an_ingested_notes_author_carries_the_bridged_face`
 10. [app] Blocking someone removes their posts from your own feeds, and unblocking brings them back — `docs/goal/behavior/moderation.md` § Corollary — block also hides
    - `tests/e2e-unified/tests/test_abuse_reporting.py::test_blocking_an_author_hides_their_posts_until_unblocked`
 11. [app] Content removed under a legal obligation shows a notice in its place, in a quoted post, an opened post and a conversation, never a blank or an error — `docs/goal/behavior/moderation.md` § Legal takedown
-   - (none)
+   - `tests/e2e-unified/tests/test_legal_takedown_notice.py::test_a_taken_down_post_shows_the_notice_in_a_quote_and_when_opened`
+   - `tests/e2e-unified/tests/test_legal_takedown_notice.py::test_a_message_taken_down_from_a_report_shows_the_notice_to_a_member_who_reads_it_later`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+d034eec4.dirty standalone |
-| linux | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| windows | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| macos | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| ios | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| web | ✅ full | 0.1.2-dev+d034eec4.dirty standalone |
+| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.2-dev+4e31f706 standalone |
 
@@ -65,8 +66,9 @@ Stamped 2026-10-01 at d8cb0887cb.
 | 5 | app | `tests/e2e-unified/tests/test_feed_empty_state.py::test_a_feed_with_no_posts_says_so` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_feed.py::test_a_refresh_keeps_the_posts_on_screen_and_only_a_switch_clears_them` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_feed_error.py::test_feed_error_surfaces_on_error_text` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 8 | app | (none) | — |
+| 8 | app | `tests/e2e-unified/tests/test_bluesky_feed_ingest.py::test_a_bridged_author_shows_by_their_name_and_a_nickname_you_gave_them_comes_first` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 9 | nest | `tests/e2e-unified/tests/api/test_activitypub_federation.py::TestActivityPubInboundIngest::test_an_ingested_notes_author_carries_the_bridged_face` | nest (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_blocking_an_author_hides_their_posts_until_unblocked` | web (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 11 | app | (none) | — |
+| 10 | app | `tests/e2e-unified/tests/test_abuse_reporting.py::test_blocking_an_author_hides_their_posts_until_unblocked` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_legal_takedown_notice.py::test_a_taken_down_post_shows_the_notice_in_a_quote_and_when_opened` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_legal_takedown_notice.py::test_a_message_taken_down_from_a_report_shows_the_notice_to_a_member_who_reads_it_later` | tui (linux): passed |
 <!-- features-render:end -->

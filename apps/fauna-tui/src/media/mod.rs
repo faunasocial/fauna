@@ -261,6 +261,12 @@ pub struct DetailState {
     pub folder: String,
     pub path: String,
     pub name: String,
+    /// The opened item's set as a filter value
+    /// (`MediaItemSummary::filter_value`: a shared set's ref, an own set's
+    /// name) — what a write naming the item's set hands the machine, so a
+    /// delete lands in the item's own row, never a same-named own set
+    /// (`set-addressing.md` § The row form).
+    pub set_value: String,
     /// Version rows oldest→newest, `None` until the async load resolves.
     pub versions: Option<Vec<FileVersionSummary>>,
     /// The recovery browse is on (`file-version-show-pruned-toggle`): version
@@ -357,6 +363,26 @@ impl MediaObserver for TuiMediaObserver {
 /// produces a session gets a Media page without each remembering to wire one.
 /// The first `fauna.media.list` pull is **not** kicked here: entering the tab is
 /// the refresh trigger ([`nav_enter_op`]), matching linux's `connect_map`.
+/// Wire the member-row join-filter ([`crate::mls_query::TuiMlsQuery`]) into the
+/// Media machine once the conversations session is live — from `session.rs`'s
+/// post-auth hook beside the Folders page's, because the session handle lives
+/// on `App::conversations`, which [`init`] cannot reach. A no-op when either
+/// half is missing: the machine then keeps its fail-safe default (no member
+/// rows; a shared set stays an item-only option by name).
+pub fn wire_mls_query(
+    state: &MediaState,
+    session: Option<&Arc<fauna_conversations::ConversationsSession>>,
+) {
+    let (Some(machine), Some(session)) = (state.machine.as_ref(), session) else {
+        tracing::warn!(
+            "[media] no MLS join-filter wired — sets shared WITH this user stay \
+             item-only options (MediaMachine fail-safe)"
+        );
+        return;
+    };
+    machine.set_mls_query(crate::mls_query::TuiMlsQuery::new(session));
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn init(
     nest: Arc<NestClient>,
@@ -610,6 +636,7 @@ fn open_detail_for(
         folder: item.folder.clone(),
         path: item.path.clone(),
         name: item.name,
+        set_value: item.filter_value.clone(),
         versions: None,
         show_pruned: false,
         arming: None,
@@ -625,7 +652,7 @@ fn open_detail_for(
     }
     Some(Op::LoadVersions {
         machine: Arc::clone(machine),
-        folder: item.folder,
+        folder: item.filter_value,
         path: item.path,
         include_pruned: false,
     })
@@ -733,7 +760,9 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // onto a list that excludes the very file they just opened is the
             // one outcome that would read as a bug — this also answers "where
             // does this file live", which after a search jump is the question.
-            m.set_filter(Some(item.folder.clone()));
+            // By the item's own value, never its name: a shared set named like
+            // one of the caller's own would land the browse in the wrong one.
+            m.set_filter(Some(item.filter_value.clone()));
             open_detail_for(app, &m, item)
         }
         Action::CloseDetail => {
@@ -765,6 +794,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             Some(Op::RestoreVersion {
                 machine: m,
                 folder,
+                set_value: detail.set_value.clone(),
                 device_id,
                 path,
                 version,
@@ -782,7 +812,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             detail.versions = None;
             Some(Op::LoadVersions {
                 machine: m,
-                folder: detail.folder.clone(),
+                folder: detail.set_value.clone(),
                 path: detail.path.clone(),
                 include_pruned,
             })
@@ -798,7 +828,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             }
             Some(Op::UndeleteVersion {
                 machine: m,
-                folder: detail.folder.clone(),
+                folder: detail.set_value.clone(),
                 path: detail.path.clone(),
                 version_num: version.version_num,
                 include_pruned: detail.show_pruned,
@@ -842,7 +872,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             detail.delete_arming = false;
             Some(Op::Delete {
                 machine: m,
-                folder: detail.folder.clone(),
+                folder: detail.set_value.clone(),
                 device_id,
                 path: detail.path.clone(),
             })
@@ -1060,22 +1090,14 @@ fn external_open_op(app: &App) -> Option<Op> {
 /// The download's save step — the only platform glue in it. A terminal has no
 /// save dialog (`tui.md` § Declared platform absences), so the file lands in
 /// the dir every other file this app hands back lands in
-/// (`backups::download_dir`), under the item's last path component so a name
-/// carrying a separator can never steer the write outside it. A second press
-/// replaces the earlier copy, as the snapshot download does.
+/// (`backups::download_dir`), through the one `backups::save_into`: sanitized
+/// name, never a dotfile, never over an existing copy.
 fn save_download(
     dir: &std::path::Path,
     name: &str,
     bytes: &[u8],
 ) -> std::io::Result<std::path::PathBuf> {
-    let file_name = std::path::Path::new(name)
-        .file_name()
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| std::ffi::OsStr::new("download"));
-    std::fs::create_dir_all(dir)?;
-    let path = dir.join(file_name);
-    std::fs::write(&path, bytes)?;
-    Ok(path)
+    crate::backups::save_into(dir, name, bytes)
 }
 
 /// The nav-edge refresh entering the Media tab implies — the `fauna.media.list`
@@ -1107,6 +1129,8 @@ pub enum Op {
     },
     LoadVersions {
         machine: Arc<MediaMachine>,
+        /// The item's set as a filter value ([`DetailState::set_value`]), so
+        /// the list names the item's own row.
         folder: String,
         path: String,
         /// The recovery browse's switch state — `true` also lists soft-pruned
@@ -1118,6 +1142,7 @@ pub enum Op {
     /// repaints live without a close/reopen.
     UndeleteVersion {
         machine: Arc<MediaMachine>,
+        /// The item's set as a filter value, for the re-read.
         folder: String,
         path: String,
         version_num: i64,
@@ -1126,6 +1151,8 @@ pub enum Op {
     RestoreVersion {
         machine: Arc<MediaMachine>,
         folder: String,
+        /// The item's set as a filter value, for the re-read.
+        set_value: String,
         device_id: String,
         path: String,
         version: FileVersionSummary,
@@ -1298,16 +1325,17 @@ impl Op {
             Op::RestoreVersion {
                 machine,
                 folder,
+                set_value,
                 device_id,
                 path,
                 version,
             } => {
                 machine
-                    .restore_version(folder.clone(), device_id, path.clone(), version)
+                    .restore_version(folder, device_id, path.clone(), version)
                     .await;
                 // The restore appended a version; re-read the rows so the open
                 // detail surface shows it without a close/reopen.
-                match machine.file_versions(folder, path, false).await {
+                match machine.file_versions(set_value, path, false).await {
                     Ok(versions) => Outcome::Versions(versions),
                     Err(e) => Outcome::Failed(e.detail().to_string()),
                 }
@@ -1618,27 +1646,33 @@ pub fn elements(app: &App) -> Vec<Element> {
         ))),
     ];
 
-    // Filter options: the all-media sentinel + every browsable set the client
-    // knows (empty ones included — `media.md` § Layout & flow)
-    // (the machine hands the set list independent of the active filter), then
-    // the followed browse scopes (`media.md` § Followed public folders). A
-    // followed option's string is the machine-minted opaque VALUE — never
-    // parsed here, and never shown: the select paints only the current
-    // selection, whose label comes from `followed_scope` below.
+    // Filter options: the all-media sentinel + one option per browsable set
+    // (empty ones included — `media.md` § Layout & flow; the machine hands the
+    // list independent of the active filter), then the followed browse scopes
+    // (`media.md` § Followed public folders). Every option is the machine's
+    // value/label pair (§ Encryption at rest → *The filter and the upload
+    // target address the row*): the value — an own set's name, a shared set's
+    // `local:<id>`, a followed scope's minted value — is handed back to
+    // `set_filter` verbatim and never parsed here; the label is what paints,
+    // and the active one is the snapshot's `filter_label`.
     let mut filter_options = vec![FILTER_ALL_VALUE.to_string()];
-    filter_options.extend(snapshot.folders.iter().cloned());
-    filter_options.extend(snapshot.followed.iter().map(|f| f.value.clone()));
+    let mut filter_labels = vec![t::FILTER_ALL.to_string()];
+    for option in &snapshot.folder_options {
+        filter_options.push(option.value.clone());
+        filter_labels.push(option.label.clone());
+    }
+    for scope in &snapshot.followed {
+        filter_options.push(scope.value.clone());
+        filter_labels.push(scope.label.clone());
+    }
     let active_filter = snapshot
         .filter
         .clone()
         .unwrap_or_else(|| FILTER_ALL_VALUE.to_string());
-    let filter_label = if let Some(scope) = &snapshot.followed_scope {
-        scope.label.clone()
-    } else if snapshot.filter.is_none() {
-        t::FILTER_ALL.to_string()
-    } else {
-        active_filter.clone()
-    };
+    let filter_label = snapshot
+        .filter_label
+        .clone()
+        .unwrap_or_else(|| t::FILTER_ALL.to_string());
     els.push(
         Element::select(
             ids::MEDIA_FOLDER_FILTER,
@@ -1646,6 +1680,7 @@ pub fn elements(app: &App) -> Vec<Element> {
             SelectTarget::MediaFolderFilter,
             filter_options,
         )
+        .option_labels(filter_labels)
         .display_value(filter_label),
     );
 
@@ -2240,6 +2275,7 @@ pub fn state_json(state: &MediaState) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::Role;
     use crate::test_support::art;
     use fauna_media_machine::observer::NullObserver;
     use fauna_media_machine::{FakeMediaNestApi, MediaItem, MediaSnapshot};
@@ -2265,6 +2301,7 @@ mod tests {
             author_display: "bob".into(),
             pruned: false,
             purge_after: None,
+            folder_id: None,
         }
     }
 
@@ -2991,6 +3028,232 @@ mod tests {
         }
     }
 
+    /// A set alice shared with this caller, joined over group `g9`.
+    fn shared_row(id: i64, name: &str) -> fauna_media_machine::MediaFolder {
+        fauna_media_machine::MediaFolder {
+            id,
+            name: name.into(),
+            member: true,
+            writer: true,
+            owner_handle: Some("alice".into()),
+            owner_actor_id: Some("ab".repeat(32)),
+            mls_group_id: Some("g9".into()),
+            ..Default::default()
+        }
+    }
+
+    /// Every member row is joined — the join-filter's answer once the
+    /// conversations rail holds the group.
+    struct JoinedEverything;
+    impl fauna_media_machine::MlsQuery for JoinedEverything {
+        fn is_joined_shared_set(&self, _mls_group_id_hex: &str) -> bool {
+            true
+        }
+    }
+
+    /// `app_with_sets` with the join-filter wired, so member rows are offered.
+    async fn app_with_shared_sets(
+        items: Vec<MediaItem>,
+        sets: Vec<fauna_media_machine::MediaFolder>,
+    ) -> App {
+        let mut app = crate::app::tests::test_app();
+        let api = Arc::new(FakeMediaNestApi::new());
+        api.set_snapshot(MediaSnapshot {
+            items,
+            ..Default::default()
+        });
+        api.set_folders(sets);
+        let machine = MediaMachine::new(Arc::new(NullObserver), api, None, None, None, None);
+        machine.set_mls_query(Arc::new(JoinedEverything));
+        machine.refresh(Some(vec![0u8; 32])).await;
+        app.media.machine = Some(machine);
+        app.media.device_id = Some("de".repeat(32));
+        app
+    }
+
+    fn in_set(folder: &str, folder_id: i64, path: &str, path_hash: [u8; 32]) -> MediaItem {
+        MediaItem {
+            folder_id: Some(folder_id),
+            ..item_with_hash(folder, path, path_hash)
+        }
+    }
+
+    fn folder_filter(app: &App) -> Element {
+        elements(app)
+            .into_iter()
+            .find(|e| e.id == ids::MEDIA_FOLDER_FILTER)
+            .expect("the page paints media-folder-filter")
+    }
+
+    /// A set shared with the caller under the name of one of its own is a
+    /// second option, keyed by its row and labelled with its owner; choosing it
+    /// scopes the browse to that set alone and paints the machine's label
+    /// (`media.md` § Encryption at rest → *The filter and the upload target
+    /// address the row*, (a)/(b)).
+    #[tokio::test]
+    async fn a_same_named_shared_set_is_its_own_option_labelled_by_its_owner() {
+        let mut app = app_with_shared_sets(
+            vec![
+                in_set("photos", 7, "mine.jpg", [0x11; 32]),
+                in_set("photos", 9, "theirs.jpg", [0x22; 32]),
+            ],
+            vec![set_row(7, "photos"), shared_row(9, "photos")],
+        )
+        .await;
+        let filter = folder_filter(&app);
+        let Role::Select { options, .. } = &filter.role else {
+            panic!("media-folder-filter is a select");
+        };
+        assert_eq!(
+            options,
+            &vec![
+                FILTER_ALL_VALUE.to_string(),
+                "photos".to_string(),
+                "local:9".to_string()
+            ],
+            "one option per row, valued by identity"
+        );
+        let labels = filter
+            .attrs
+            .iter()
+            .find(|(k, _)| k == "options")
+            .map(|(_, v)| serde_json::from_str::<Vec<String>>(v).unwrap())
+            .expect("the painted option labels");
+        assert_eq!(
+            labels,
+            vec![
+                t::FILTER_ALL.to_string(),
+                "photos".to_string(),
+                "photos (alice)".to_string()
+            ]
+        );
+
+        apply_local(&mut app, Action::SetFilter("local:9".into()));
+        let filter = folder_filter(&app);
+        assert_eq!(filter.text, "local:9");
+        let Role::Select { display, .. } = &filter.role else {
+            panic!("media-folder-filter is a select");
+        };
+        assert_eq!(display.as_deref(), Some("photos (alice)"));
+        let paths: Vec<String> = app
+            .media
+            .snapshot()
+            .expect("a snapshot")
+            .items
+            .into_iter()
+            .map(|i| i.path)
+            .collect();
+        assert_eq!(paths, vec!["theirs.jpg".to_string()]);
+
+        apply_local(&mut app, Action::SetFilter("photos".into()));
+        let paths: Vec<String> = app
+            .media
+            .snapshot()
+            .expect("a snapshot")
+            .items
+            .into_iter()
+            .map(|i| i.path)
+            .collect();
+        assert_eq!(
+            paths,
+            vec!["mine.jpg".to_string()],
+            "the name is the own set"
+        );
+    }
+
+    /// A deep link into the shared one of a same-named pair lands the browse in
+    /// THAT set — the item's `filter_value`, never its name, which is the own
+    /// set's (ibid., (b)).
+    #[tokio::test]
+    async fn a_file_deep_link_into_a_shared_set_follows_its_row_not_its_name() {
+        let mut app = app_with_shared_sets(
+            vec![
+                in_set("photos", 7, "mine.jpg", [0x11; 32]),
+                in_set("photos", 9, "theirs.jpg", [0x22; 32]),
+            ],
+            vec![set_row(7, "photos"), shared_row(9, "photos")],
+        )
+        .await;
+        apply_local(
+            &mut app,
+            Action::OpenFile {
+                folder_id: 9,
+                path_hash: fauna_core::hex32::encode(&[0x22; 32]),
+            },
+        )
+        .expect("a versions op");
+        assert_eq!(
+            app.media.snapshot().expect("a snapshot").filter.as_deref(),
+            Some("local:9")
+        );
+    }
+
+    /// A delete of the shared one of a same-named pair names THAT set — the
+    /// opened item's `filter_value`, never its name, which the machine reads as
+    /// the own set (`set-addressing.md` § The row form → *Whoever holds the row
+    /// sends it*).
+    #[tokio::test]
+    async fn a_delete_of_a_shared_sets_item_names_its_row_not_its_name() {
+        let mut app = app_with_shared_sets(
+            vec![
+                in_set("photos", 7, "mine.jpg", [0x11; 32]),
+                in_set("photos", 9, "theirs.jpg", [0x22; 32]),
+            ],
+            vec![set_row(7, "photos"), shared_row(9, "photos")],
+        )
+        .await;
+        apply_local(
+            &mut app,
+            Action::OpenFile {
+                folder_id: 9,
+                path_hash: fauna_core::hex32::encode(&[0x22; 32]),
+            },
+        )
+        .expect("a versions op");
+        apply_local(&mut app, Action::ArmDelete);
+        match apply_local(&mut app, Action::ConfirmDelete).expect("a delete op") {
+            Op::Delete { folder, path, .. } => {
+                assert_eq!(folder, "local:9");
+                assert_eq!(path, "theirs.jpg");
+            }
+            _ => panic!("expected a Delete op"),
+        }
+    }
+
+    /// The versions list of the shared one of a same-named pair names THAT
+    /// set, on open and on every re-read — the opened item's `filter_value`,
+    /// as the delete does.
+    #[tokio::test]
+    async fn the_versions_of_a_shared_sets_item_list_by_its_row_not_its_name() {
+        let mut app = app_with_shared_sets(
+            vec![
+                in_set("photos", 7, "mine.jpg", [0x11; 32]),
+                in_set("photos", 9, "theirs.jpg", [0x22; 32]),
+            ],
+            vec![set_row(7, "photos"), shared_row(9, "photos")],
+        )
+        .await;
+        match apply_local(
+            &mut app,
+            Action::OpenFile {
+                folder_id: 9,
+                path_hash: fauna_core::hex32::encode(&[0x22; 32]),
+            },
+        )
+        .expect("a versions op")
+        {
+            Op::LoadVersions { folder, path, .. } => {
+                assert_eq!(folder, "local:9");
+                assert_eq!(path, "theirs.jpg");
+            }
+            _ => panic!("expected a LoadVersions op"),
+        }
+        match apply_local(&mut app, Action::TogglePruned).expect("a versions op") {
+            Op::LoadVersions { folder, .. } => assert_eq!(folder, "local:9"),
+            _ => panic!("expected a LoadVersions op"),
+        }
+    }
+
     /// A `SearchNav::File` deep link opens the detail for the file its identity
     /// pair names — **regardless of the browse state**, which is the property
     /// that separates it from `OpenDetail`'s index. Here the active filter
@@ -3687,9 +3950,10 @@ mod tests {
         assert_eq!(path, dir.path().join("report.pdf"));
         assert_eq!(std::fs::read(&path).unwrap(), b"plain");
 
-        // A second press of the same name replaces the earlier copy.
-        save_download(dir.path(), "report.pdf", b"newer").unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"newer");
+        // A second press of the same name is a new file, never a replacement.
+        let second = save_download(dir.path(), "report.pdf", b"newer").unwrap();
+        assert_eq!(second, dir.path().join("report (2).pdf"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"plain");
     }
 
     // ── share links (`share-links.md`) ──────────────────────────────────────

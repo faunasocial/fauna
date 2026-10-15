@@ -29,7 +29,7 @@
   // it via `error` and stays at empty lists/members until the nest track lands.
   import { identity } from '$lib/store';
   import { mailListsMachine, mailListMembersMachine } from '$lib/rpc';
-  import { ensureWasm, memberStatusLabel } from '$lib/wasm';
+  import { ensureWasm, memberStatusLabel, archiveUrlNeedsConfirm } from '$lib/wasm';
   import { resolveLocalized } from '$lib/i18n/localized';
   import { afterNavigate } from '$app/navigation';
   import { onMount } from 'svelte';
@@ -107,6 +107,14 @@
   let listHelpInput = $state('');
   let listArchiveInput = $state('');
   let perSendInput = $state('');
+  // Off-server archive link: Submit asks once per URL before saving (two-click
+  // confirm, mail-mass-mailing.md § Don't do these). The arm is keyed on the URL
+  // it was armed for, so editing the link disarms it.
+  let savedArchiveUrl = $state<string | null>(null); // the edited row's stored link; null on add
+  let armedArchiveUrl = $state<string | null>(null);
+  const archiveConfirmArmed = $derived(
+    armedArchiveUrl !== null && armedArchiveUrl === listArchiveInput.trim(),
+  );
 
   // Per-row two-click arm state for the destructive delete gesture (auto-disarms
   // after 4s — matches the aliases revoke/delete idiom).
@@ -126,6 +134,9 @@
   let importSheetOpen = $state(false);
   let addMemberInput = $state('');
   let importInput = $state('');
+  // The tally under the buttons stays up after the sheet closes; reopening the
+  // sheet, or leaving the list, clears it (tui's `import_result_shown`).
+  let importResultShown = $state(false);
 
   function applySnapshot(): void {
     if (!machine) return;
@@ -194,6 +205,8 @@
     listHelpInput = '';
     listArchiveInput = '';
     perSendInput = '';
+    savedArchiveUrl = null;
+    armedArchiveUrl = null;
     error = '';
     sheetOpen = true;
   }
@@ -207,6 +220,8 @@
     listHelpInput = v.list_help_url;
     listArchiveInput = v.list_archive_url;
     perSendInput = v.recipients_per_send != null ? String(v.recipients_per_send) : '';
+    savedArchiveUrl = v.list_archive_url;
+    armedArchiveUrl = null;
     error = '';
     sheetOpen = true;
   }
@@ -227,21 +242,33 @@
     if (!machine) return;
     error = '';
     const draft = buildDraft();
+    // First press on an off-server archive link saves nothing and arms; a second
+    // press on the same URL goes through.
+    if (
+      !archiveConfirmArmed &&
+      archiveUrlNeedsConfirm(draft.list_archive_url, savedArchiveUrl, snap?.local_domains ?? [])
+    ) {
+      armedArchiveUrl = draft.list_archive_url;
+      return;
+    }
     const action = editingId
       ? { Update: { list_id_hex: editingId, draft } }
       : { Create: { draft } };
     try {
       await machine.dispatch(action);
       applySnapshot();
+      armedArchiveUrl = null;
       if (snap?.error) return; // leave the sheet open for retry
       sheetOpen = false;
     } catch (e) {
       applySnapshot();
+      armedArchiveUrl = null;
       if (!error) error = e instanceof Error ? e.message : String(e);
     }
   }
 
   function cancelSheet(): void {
+    armedArchiveUrl = null;
     sheetOpen = false;
   }
 
@@ -280,6 +307,7 @@
     importSheetOpen = false;
     addMemberInput = '';
     importInput = '';
+    importResultShown = false;
     membersSnap = null;
     error = '';
     try {
@@ -327,6 +355,7 @@
     if (!membersSnap?.error) {
       importInput = '';
       importSheetOpen = false;
+      importResultShown = true;
     }
   }
 
@@ -406,7 +435,7 @@
         />
         <div class="form-actions">
           <button class="btn primary" data-testid={IDS.MAIL_LISTS_ADD_SHEET_SUBMIT_BUTTON} disabled={busy} onclick={submitSheet}>
-            {t.mail_lists.submit}
+            {archiveConfirmArmed ? t.mail_lists.archive_off_server_confirm : t.mail_lists.submit}
           </button>
           <button class="btn" data-testid={IDS.MAIL_LISTS_ADD_SHEET_CANCEL_BUTTON} onclick={cancelSheet}>
             {t.mail_lists.cancel}
@@ -460,10 +489,20 @@
       <button class="btn" data-testid={IDS.MAIL_LIST_MEMBERS_ADD_BUTTON} onclick={() => { memberSheetOpen = true; importSheetOpen = false; error = ''; }}>
         {t.mail_lists.add_member_button}
       </button>
-      <button class="btn" data-testid={IDS.MAIL_LIST_MEMBERS_IMPORT_BUTTON} onclick={() => { importSheetOpen = true; memberSheetOpen = false; error = ''; }}>
+      <button class="btn" data-testid={IDS.MAIL_LIST_MEMBERS_IMPORT_BUTTON} onclick={() => { importSheetOpen = true; memberSheetOpen = false; importResultShown = false; error = ''; }}>
         {t.mail_lists.import_button}
       </button>
     </div>
+
+    {#if importResultShown && membersSnap?.last_import}
+      <p class="muted small" data-testid={IDS.MAIL_LIST_MEMBERS_IMPORT_RESULT}>
+        {t.mail_lists.import_result({
+          added: String(membersSnap.last_import.added),
+          existed: String(membersSnap.last_import.skipped_duplicate),
+          invalid: String(membersSnap.last_import.skipped_invalid),
+        })}
+      </p>
+    {/if}
 
     {#if memberSheetOpen}
       <div class="form">

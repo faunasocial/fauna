@@ -10,8 +10,10 @@ import com.fauna.app.core.HexUtil
 import com.fauna.app.core.SecureStorage
 import com.fauna.app.core.WebPublishStore
 import com.fauna.app.core.feed.FeedManagerHost
+import com.fauna.app.core.feed.InlineVideoPlayback
 import com.fauna.app.core.feed.PostMediaOpen
 import com.fauna.app.payments.resolvePostTipsIfBuilt
+import com.fauna.ffi.FfiCueTracker
 import com.fauna.ffi.FfiFeedManager
 import com.fauna.ffi.actorIdFromSecret
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -20,7 +22,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import uniffi.fauna_core.ContentLabelEntry
+import uniffi.fauna_core.RenderBlock
 import uniffi.fauna_feed.AttachedFile
+import uniffi.fauna_feed.CueObservation
 import uniffi.fauna_feed.FactorWeightInput
 import uniffi.fauna_feed.FeedSnapshot
 import uniffi.fauna_feed.FilterRuleInput
@@ -179,7 +183,9 @@ class FeedVM @Inject constructor(
     val webLinkOrigin: StateFlow<String?> get() = webPublishStore.origin
     val webLinkCopied: StateFlow<Triple<String, String, String>?> get() = webPublishStore.copied
 
-    fun ensureWebOrigin() = webPublishStore.ensureOrigin()
+    fun ensureWebOrigin() {
+        webPublishStore.ensureOrigin()
+    }
 
     fun publishPostToWeb(postId: String) {
         viewModelScope.launch {
@@ -234,6 +240,10 @@ class FeedVM @Inject constructor(
         // state). The shared manager suppresses puts until hydration, so the
         // ordering is enforced there, not here.
         hydrateCues()
+        // Same lifetime for the Layer-B opt-in cache: a fresh manager starts with
+        // sharing off, so a persisted opt-in must be re-read before the producer
+        // sees its first observation (engagement-cues.md § Layer B).
+        hydrateSignalOptin()
     }
 
     /**
@@ -332,6 +342,21 @@ class FeedVM @Inject constructor(
         host.manager()?.resolvePost(postId)
     }
 
+    /** `feed-post-view-thread-button` — open the Bluesky thread page for
+     *  [postId] (`bridges.md` § Bluesky-native thread view). The shared manager
+     *  owns the page: [snapshot]'s `thread` reads loading at once, then the
+     *  loaded thread (the focal post named by the nest) or the failure. */
+    fun openThread(postId: String) {
+        val m = host.manager() ?: return
+        viewModelScope.launch { m.openThread(postId) }
+    }
+
+    /** Leave the thread page, back to the post detail it was opened from. A
+     *  fetch still in flight lands nowhere (the manager drops it). */
+    fun closeThread() {
+        host.manager()?.closeThread()
+    }
+
     /** Resolve this post's tip surface (`monetization.md` § Tips) — fire-once
      *  via the `tips == null` guard, since nothing in the feed-index
      *  projection says whether a post has tips (unlike [resolveMedia]'s
@@ -392,17 +417,27 @@ class FeedVM @Inject constructor(
     suspend fun fetchBlobBytes(hash: String): ByteArray? =
         PostMediaOpen.fetchAndOpen(api, host.manager(), hash)
 
+    /** What a tapped `video-thumbnail` plays (render-model.md § D6c → *Inline
+     *  playback*): the shared `playbackSource` projection, then the pinned ranged
+     *  reader or the sealed-media open ([InlineVideoPlayback]); `null` when nothing
+     *  plays, or before a manager exists. */
+    suspend fun resolvePlayback(block: RenderBlock, cacheDir: java.io.File): InlineVideoPlayback.Media? {
+        val m = host.manager() ?: return null
+        return InlineVideoPlayback.resolve(m, api, block, api.nodeUrl, cacheDir)
+    }
+
     /** Fetch a bridged post's `ProxiedImage` bytes from its nest-relative path
      *  (render-model.md § D6c) — the proxy's answer is plaintext, so there is no
      *  open step; `null` on any failure (the placeholder stays). */
     suspend fun fetchProxiedBytes(path: String): ByteArray? =
         runCatching { api.fetchNestPathBytes(path) }.getOrNull()
 
-    /** Check whether a feed media blob carries a verified C2PA provenance
-     *  manifest (`x-c2pa` server header on the public blob route) — drives the
-     *  `c2pa-badge` on post_detail. Client glue, mirrors [fetchBlobBytes]. */
+    /** Whether a feed media blob carries a verified C2PA provenance manifest —
+     *  drives the `c2pa-badge` on post_detail. The `x-c2pa` server header is only
+     *  the pre-filter; the verdict is the shared `detect_media_c2pa` over the
+     *  opened bytes ([PostMediaOpen.verifiedC2pa], `media.md` § C2PA provenance). */
     suspend fun checkBlobC2pa(hash: String): Boolean =
-        runCatching { api.checkBlobC2pa(hash) }.getOrDefault(false)
+        runCatching { PostMediaOpen.verifiedC2pa(api, host.manager(), hash) }.getOrDefault(false)
 
     // ── Engagement cues (engagement-cues.md § Cue vocabulary & derivation) ────
     // The capture shell (ui/screen/feed/CueViewport.kt) measures honest viewport
@@ -423,31 +458,40 @@ class FeedVM @Inject constructor(
         }
     }
 
-    /** Report one per-exposure observation (a card left the viewport). Failures
-     *  surface on `error-message` — a dropped observation that logs nothing and
-     *  does nothing is indistinguishable from a real product bug. */
-    fun recordObservation(
-        contentId: String,
-        isMedia: Boolean,
-        mediaPlayedPm: UInt?,
-        dwellMsAtSkipVisibility: ULong,
-        dwellMsAtLongVisibility: ULong,
-        observedAtMs: ULong,
-    ) {
+    /** Session-start hydrate of the Layer-B signal-sharing opt-in cache, beside
+     *  [hydrateCues]. Non-fatal: a failed read leaves sharing off (the safe
+     *  default) and is logged, never surfaced on `error-message`. */
+    fun hydrateSignalOptin() {
         val m = host.manager() ?: return
         viewModelScope.launch {
-            runCatching {
-                m.recordObservation(
-                    contentId,
-                    isMedia,
-                    mediaPlayedPm,
-                    dwellMsAtSkipVisibility,
-                    dwellMsAtLongVisibility,
-                    observedAtMs,
-                )
-            }.onFailure { _cueError.value = it.message ?: "cue observation failed" }
+            runCatching { m.hydrateSignalOptin() }
+                .onFailure {
+                    // The log is best-effort: a plain unit-test JVM has no
+                    // android.util.Log, and a throw here would escape the scope.
+                    runCatching { android.util.Log.w("FeedVM", "signal opt-in hydrate failed: ${it.message}") }
+                }
         }
     }
+
+    /** Report one per-exposure observation — the record the tracker emitted,
+     *  relayed whole. Failures surface on `error-message` — a dropped
+     *  observation that logs nothing and does nothing is indistinguishable from
+     *  a real product bug. */
+    fun recordObservation(obs: CueObservation) {
+        viewModelScope.launch { recordObservationNow(obs) }
+    }
+
+    /** [recordObservation], resolving once the record is folded — the engine's
+     *  Layer-A train and any put it made included. The e2e cue-clock steps
+     *  await this so their ack means nothing more is on its way. */
+    suspend fun recordObservationNow(obs: CueObservation) {
+        val m = host.manager() ?: return
+        runCatching { m.recordObservation(obs) }.onFailure { _cueError.value = it.message ?: "cue observation failed" }
+    }
+
+    /** The capture tracker of the current auth ([FeedManagerHost.cueTracker]),
+     *  or null before the manager exists. */
+    fun cueTracker(): FfiCueTracker? = host.manager()?.let { host.cueTracker(it) }
 
     /** Force a put of any unsaved cues — the background / app-close flush. The
      *  cue put is debounced (`CUE_PUT_DEBOUNCE_S`), so without this the tail of
@@ -890,10 +934,37 @@ class FeedVM @Inject constructor(
     // accepted a typed reply/quote and silently dropped it. Call the manager's
     // dedicated `reply`/`quote` doors instead, which actually create the
     // referencing post (feed.md § Interaction bar).
-    fun reply(postId: String, text: String) {
+    //
+    // The reply is SEALED to the target's own audience when the manager says
+    // this device can author under it (goal/behavior/restricted-posts.md
+    // § Encryption at rest → *Ruling 5's build — the shape*, (c)): prepare
+    // answers the sealed body or null, bytes go through the composer's own
+    // upload + submitGatedPost / abortGatedSubmit pair, and null falls through
+    // to `reply`. With the dialog's explicit-public answer checked
+    // ([publicConfirmed]) the one door that composes words public under a
+    // restricted target is `replyPublicConfirmed`. The audience is the
+    // manager's; this glue never decides it.
+    fun reply(postId: String, text: String, publicConfirmed: Boolean = false) {
         val m = host.manager() ?: return
         viewModelScope.launch {
-            runCatching { m.reply(postId, text) }
+            runCatching {
+                if (publicConfirmed) {
+                    m.replyPublicConfirmed(postId, text)
+                } else {
+                    val sealed = m.prepareSealedReply(postId, text)
+                    if (sealed != null) {
+                        val hash = try {
+                            api.uploadBlobWithSidecar(m.gatedUploadSidecar(), sealed).hash
+                        } catch (e: Exception) {
+                            m.abortGatedSubmit(e.message ?: "sealed reply upload failed")
+                            throw e
+                        }
+                        m.submitGatedPost(hash)
+                    } else {
+                        m.reply(postId, text)
+                    }
+                }
+            }
                 .onFailure {
                     android.util.Log.w("FeedVM", "reply failed: ${it.message}")
                     _verbError.value = it.message ?: "reply failed"

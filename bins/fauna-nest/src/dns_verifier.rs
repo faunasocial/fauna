@@ -305,6 +305,49 @@ pub struct DnsVerifier {
     resolver: Arc<dyn RecordResolver>,
     clock: ClockFn,
     cache: Mutex<HashMap<(String, String), CacheEntry>>,
+    /// Seeded answers layered over `resolver` (see [`SeededResolver`]).
+    #[cfg(any(test, feature = "test-hooks"))]
+    seeded: SeededAnswers,
+}
+
+/// Seeded `(name, TYPE)` → answers (records, or a transient failure),
+/// consulted ahead of the real resolver. Never compiled into production.
+#[cfg(any(test, feature = "test-hooks"))]
+type SeededAnswers = Arc<Mutex<HashMap<(String, String), LookupOutcome>>>;
+
+/// A [`RecordResolver`] answering seeded names first and delegating the rest
+/// to the real one — the seam a tier_3 e2e (`POST /api/v1/test/dns/record`)
+/// and the unit tests use to make a record "published" with no real DNS.
+/// Wraps every [`DnsVerifier`]'s resolver in a test or `test-hooks` build, so
+/// the cached path and [`DnsVerifier::resolver`]'s raw path both see it.
+#[cfg(any(test, feature = "test-hooks"))]
+struct SeededResolver {
+    seeded: SeededAnswers,
+    inner: Arc<dyn RecordResolver>,
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[async_trait]
+impl RecordResolver for SeededResolver {
+    async fn lookup(&self, name: &str, record_type: &str) -> LookupOutcome {
+        let seeded = self
+            .seeded
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&seed_key(name, record_type)).cloned());
+        match seeded {
+            Some(outcome) => outcome,
+            None => self.inner.lookup(name, record_type).await,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+fn seed_key(name: &str, record_type: &str) -> (String, String) {
+    (
+        name.trim_end_matches('.').to_ascii_lowercase(),
+        record_type.to_ascii_uppercase(),
+    )
 }
 
 /// One record's verification result: the observed values + the verdict.
@@ -315,10 +358,69 @@ pub struct VerifyResult {
 
 impl DnsVerifier {
     pub fn new(resolver: Arc<dyn RecordResolver>, clock: ClockFn) -> Self {
+        #[cfg(any(test, feature = "test-hooks"))]
+        let seeded = SeededAnswers::default();
+        #[cfg(any(test, feature = "test-hooks"))]
+        let resolver: Arc<dyn RecordResolver> = Arc::new(SeededResolver {
+            seeded: seeded.clone(),
+            inner: resolver,
+        });
         Self {
             resolver,
             clock,
             cache: Mutex::new(HashMap::new()),
+            #[cfg(any(test, feature = "test-hooks"))]
+            seeded,
+        }
+    }
+
+    /// Seed `records` as the answer for `(name, record_type)`, ahead of the
+    /// real resolver; an empty `records` removes the seed. Drops any cached
+    /// answer for the name so the seed is seen on the next lookup.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn seed_for_test(&self, name: &str, record_type: &str, records: Vec<String>) {
+        let outcome = (!records.is_empty()).then_some(LookupOutcome::Records(records));
+        self.seed_outcome_for_test(name, record_type, outcome);
+    }
+
+    /// Seed `(name, record_type)` to fail transiently (a timeout or SERVFAIL),
+    /// ahead of the real resolver — how an e2e makes a list not answer.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn seed_transient_for_test(&self, name: &str, record_type: &str) {
+        self.seed_outcome_for_test(name, record_type, Some(LookupOutcome::Transient));
+    }
+
+    /// Seed `(name, record_type)` with an authoritative "no such record"
+    /// answer (NXDOMAIN / NoData) — distinct from no seed at all, which falls
+    /// through to the real resolver. How an e2e makes a domain publish no MX.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn seed_empty_for_test(&self, name: &str, record_type: &str) {
+        self.seed_outcome_for_test(name, record_type, Some(LookupOutcome::Empty));
+    }
+
+    /// The seeded answer for `(name, record_type)`, if any — uncached and
+    /// without touching the real resolver. Lets another resolver seam (the
+    /// outbound MX one, `dns_seed_test_hook::SeededMxRrsetResolver`) answer
+    /// from the same seed store this verifier does.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn seeded_for_test(&self, name: &str, record_type: &str) -> Option<LookupOutcome> {
+        self.seeded
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&seed_key(name, record_type)).cloned())
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    fn seed_outcome_for_test(&self, name: &str, record_type: &str, outcome: Option<LookupOutcome>) {
+        let key = seed_key(name, record_type);
+        if let Ok(mut seeded) = self.seeded.lock() {
+            match outcome {
+                Some(outcome) => seeded.insert(key, outcome),
+                None => seeded.remove(&key),
+            };
+        }
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.retain(|(n, t), _| seed_key(n, t) != seed_key(name, record_type));
         }
     }
 
@@ -364,21 +466,29 @@ impl DnsVerifier {
         }
     }
 
-    /// Resolve `record_type` at `name` (cache-first) and compare the observed
-    /// values against `expected_wire` (the zone-file body `list_records`
-    /// reports). `record_type` selects the pure comparator.
-    pub async fn verify(&self, name: &str, record_type: &str, expected_wire: &str) -> VerifyResult {
+    /// Resolve `record_type` at `name`, cache-first: at most one live lookup
+    /// per `(name, type)` per [`VERIFY_CACHE_TTL_SECS`] (a transient outcome
+    /// is never cached). The read every caller that wants the raw observed
+    /// values shares — the scheduled DKIM flip's publication check included
+    /// (`mail-multidomain.md` § Rotation → *The flip waits for publication*).
+    pub async fn lookup(&self, name: &str, record_type: &str) -> LookupOutcome {
         let now = self.now();
         let key = (name.to_string(), record_type.to_ascii_uppercase());
-
-        let outcome = match self.cached(&key, now) {
+        match self.cached(&key, now) {
             Some(o) => o,
             None => {
                 let fresh = self.resolver.lookup(name, record_type).await;
                 self.store(key, fresh.clone(), now);
                 fresh
             }
-        };
+        }
+    }
+
+    /// Resolve `record_type` at `name` (cache-first) and compare the observed
+    /// values against `expected_wire` (the zone-file body `list_records`
+    /// reports). `record_type` selects the pure comparator.
+    pub async fn verify(&self, name: &str, record_type: &str, expected_wire: &str) -> VerifyResult {
+        let outcome = self.lookup(name, record_type).await;
 
         match outcome {
             LookupOutcome::Transient => VerifyResult {
@@ -413,16 +523,7 @@ impl DnsVerifier {
     /// check, which compares against an unquoted token rather than a zone-file
     /// body). `false` while the lookup is transient — the caller retries.
     pub async fn txt_contains(&self, name: &str, expected: &str) -> bool {
-        let now = self.now();
-        let key = (name.to_string(), "TXT".to_string());
-        let outcome = match self.cached(&key, now) {
-            Some(o) => o,
-            None => {
-                let fresh = self.resolver.lookup(name, "TXT").await;
-                self.store(key, fresh.clone(), now);
-                fresh
-            }
-        };
+        let outcome = self.lookup(name, "TXT").await;
         matches!(outcome, LookupOutcome::Records(ref obs) if obs.iter().any(|o| o == expected))
     }
 }

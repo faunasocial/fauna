@@ -24,9 +24,26 @@ test-helpers = []
 fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
 # `rpc-glue` for the wasm `build_connected_apps_machine` (over `WsRpcClient`).
 fauna-client-connected-apps = { path = "../fauna-client-connected-apps", default-features = false, features = ["rpc-glue"] }
+# The consent-time grant seams both consent machines take (`ConsentGrantSeams`),
+# wired over the account port by `consent_grant_seams_over_port` (`rpc-glue`
+# for the wasm folder/authoring impls, `account-port` for the forwarders).
+fauna-atproto-settings-machine = { path = "../fauna-atproto-settings-machine", default-features = false, features = ["rpc-glue", "account-port"] }
 # The browser WS-RPC transport the machine's gestures ride; the page lends the
 # SPA core chunk's socket as a `SharedRpcPort`.
 fauna-rpc-wasm = { path = "../fauna-rpc-wasm" }
+# The mail app-password rows: the chunk builds its own mail-settings machine
+# (`rpc-glue`'s wasm `build_mail_settings_machine`) over the same lent socket,
+# since another chunk's object cannot cross into this one; the roster reads,
+# revokes and reveals the passwords through it.
+fauna-client-mail-settings = { path = "../fauna-client-mail-settings", features = ["rpc-glue"] }
+# The account-port forwarders of the two account-store seams that mail machine
+# reads through (`mail_port::PortMailStore`,
+# `succession_ledger_port::PortLedgerStore`): the core chunk's runtime holds the
+# store and the tab's `SharedAccountPort` reaches it (mirrors
+# fauna-wasm-labeler-catalog).
+fauna-client-config = { path = "../fauna-client-config", features = ["account-port"] }
+# The account port's JS transport (`JsAccountPort` → `JsAccountTransport`).
+fauna-account-port = { workspace = true }
 # Installed at module init (`#[wasm_bindgen(start)]` in src/lib.rs) — each wasm
 # chunk is its own runtime, so this must be installed per-chunk.
 fauna-wasm-panic-hook = { path = "../fauna-wasm-panic-hook" }

@@ -100,6 +100,7 @@ macro_rules! store_conformance_suite {
             a_relay_row_remembers_its_feed_seq_once_told,
             voiding_the_watermark_clears_every_feed_seq_of_its_scope,
             the_retire_record_keeps_the_newest_and_a_reader_clears_only_what_it_read,
+            the_custodied_recovery_material_is_replaced_whole_and_read_back_whole,
             relay_rows_collapse_per_item_and_writer_and_never_regress,
             relay_rows_serve_past_frontier_as_ordered_prefixes_per_writer,
             relay_high_waters_are_the_seen_maximum_per_writer,
@@ -166,6 +167,7 @@ macro_rules! store_conformance_suite {
             a_segment_whose_kind_disagrees_with_the_scope_is_refused,
             a_lost_record_index_rebuilds_from_the_sidecars_record_order,
             a_transfer_interrupted_before_adoption_reopens_clean,
+            a_segment_many_transfer_chunks_long_is_admitted_one_record_at_a_time,
             a_segment_resident_block_refuses_to_dehydrate,
             a_segment_resident_records_tombstone_unindexes_it_without_punching_the_segment,
             bootstrap_adopts_a_hydrated_scopes_segments_in_bulk,
@@ -174,6 +176,8 @@ macro_rules! store_conformance_suite {
             the_custody_meter_counts_adopted_segments_dat_evictable_meta_floor,
             segment_eviction_drops_whole_dat_files_oldest_first_and_keeps_the_metadata_floor,
             a_budgeted_bootstrap_stops_adopting_at_the_budget_and_never_refetches_a_held_segment,
+            a_sidecar_over_the_remaining_budget_is_refused_at_the_fetch_and_the_pass_goes_on,
+            a_pair_whose_halves_each_fit_but_not_together_is_skipped_not_adopted,
         );
     };
 }
@@ -388,7 +392,31 @@ pub mod fixtures {
                 meta: include_bytes!(concat!("../tests/fixtures/segments/", $name, ".meta")),
             }
         };
+        ($name:literal, $kind:literal, $id:literal, $actor:expr, $bodies:expr) => {
+            PinnedSegment {
+                name: $name,
+                kind: $kind,
+                segment_id: $id,
+                actor: $actor,
+                bodies: $bodies,
+                dat: include_bytes!(concat!("../tests/fixtures/segments/", $name, ".dat")),
+                meta: include_bytes!(concat!("../tests/fixtures/segments/", $name, ".meta")),
+            }
+        };
     }
+
+    /// Six records of 60,000 bytes: a `.dat` over five times
+    /// [`crate::segments::SEGMENT_TRANSFER_CHUNK`] whose every record fits in
+    /// one chunk — what a case needs to tell "read one record at a time" from
+    /// "read the container".
+    pub const LARGE_SEGMENT_BODIES: &[&[u8]] = &[
+        &[b'a'; 60_000],
+        &[b'b'; 60_000],
+        &[b'c'; 60_000],
+        &[b'd'; 60_000],
+        &[b'e'; 60_000],
+        &[b'f'; 60_000],
+    ];
 
     /// Every segment fixture a conformance case adopts. A new case needing a
     /// new pair adds a row here, creates the two (empty) files, and blesses
@@ -435,6 +463,7 @@ pub mod fixtures {
             [b"a bulky mail record"]
         ),
         pinned!("post-2-small-post", "post", 2, SEG_ACTOR, [b"a small post"]),
+        pinned!("post-4-large", "post", 4, SEG_ACTOR, LARGE_SEGMENT_BODIES),
         pinned!(
             "mail-1-mislabelled-offer",
             "mail",
@@ -539,6 +568,9 @@ fn pinned_segments_are_the_writers_bytes() {
 pub struct FakeSource {
     pub segments: Vec<(crate::store::SegmentOffer, Vec<u8>, Vec<u8>)>,
     pub fetched: std::cell::RefCell<Vec<u32>>,
+    /// The offers refused at the fetch bound — what a case reads to tell the
+    /// source-side refusal from the store's own post-fetch pair check.
+    pub refused: std::cell::RefCell<Vec<u32>>,
 }
 
 impl crate::store::BootstrapSource for FakeSource {
@@ -561,11 +593,17 @@ impl crate::store::BootstrapSource for FakeSource {
             .expect("offered");
         // The trait's bound, as a network source keeps it: a half longer than
         // `max_bytes` is refused, never handed over.
-        if dat.len() as u64 > max_bytes || meta.len() as u64 > max_bytes {
-            anyhow::bail!(
-                "segment {} exceeds the {max_bytes}-byte fetch bound",
-                offer.segment_id
-            );
+        for (half, len) in [(".dat", dat.len()), (".meta", meta.len())] {
+            if len as u64 > max_bytes {
+                self.refused.borrow_mut().push(offer.segment_id);
+                return Err(crate::segments::SegmentBodyTooLarge {
+                    kind: offer.kind.clone(),
+                    segment_id: offer.segment_id,
+                    half,
+                    max_bytes,
+                }
+                .into());
+            }
         }
         // In pieces, as a network source hands them over: the staging slot
         // must reassemble a half from its chunks, not receive it whole.
@@ -598,6 +636,7 @@ pub fn fake_source(specs: &[(&str, u32, &[&[u8]])]) -> FakeSource {
             })
             .collect(),
         fetched: std::cell::RefCell::new(Vec::new()),
+        refused: std::cell::RefCell::new(Vec::new()),
     }
 }
 
@@ -1444,6 +1483,72 @@ pub mod cases {
         );
     }
 
+    /// The custodied recovery material (`identity-succession.md` § Seed
+    /// escrow → *The custodian copy*): a fresh store holds none; what one
+    /// handle puts a second handle reads back whole, links and statements in
+    /// order; a put replaces all three rows at once — a shorter chain, no
+    /// statements and no blob each mean exactly that, never a merge with what
+    /// was held; and the material lives outside the relay plane.
+    pub async fn the_custodied_recovery_material_is_replaced_whole_and_read_back_whole<
+        M: Medium,
+    >() {
+        use crate::types::{CustodiedEscrow, CustodiedRecovery};
+        let (medium, s) = store::<M>().await;
+        assert_eq!(
+            s.custodied_recovery().await.unwrap(),
+            CustodiedRecovery::default(),
+            "a fresh store holds no recovery material"
+        );
+
+        let held = CustodiedRecovery {
+            chain: vec![vec![1, 1], vec![2, 2, 2], vec![3]],
+            successions: vec![vec![9; 40], vec![8; 3]],
+            escrow: Some(CustodiedEscrow {
+                blob: vec![0xEE; 300],
+                updated_at: 1_700_000_000,
+                head_seq: 3,
+            }),
+        };
+        s.put_custodied_recovery(&held).await.unwrap();
+        // The process that reads is not the one that wrote.
+        let reader = AccountStore::open(medium.open().await, "aa11", writer(7))
+            .await
+            .unwrap();
+        assert_eq!(reader.custodied_recovery().await.unwrap(), held);
+        assert!(
+            reader.backend().relay_meter(&[]).await.unwrap().is_empty(),
+            "the material is not a relay row"
+        );
+
+        // Replaced whole: nothing of the earlier put survives a narrower one.
+        let narrower = CustodiedRecovery {
+            chain: vec![vec![4]],
+            successions: Vec::new(),
+            escrow: None,
+        };
+        s.put_custodied_recovery(&narrower).await.unwrap();
+        assert_eq!(reader.custodied_recovery().await.unwrap(), narrower);
+
+        // A blob alone, then nothing at all.
+        let blob_only = CustodiedRecovery {
+            escrow: Some(CustodiedEscrow {
+                blob: vec![1],
+                updated_at: 0,
+                head_seq: u64::try_from(i64::MAX).unwrap(),
+            }),
+            ..CustodiedRecovery::default()
+        };
+        s.put_custodied_recovery(&blob_only).await.unwrap();
+        assert_eq!(reader.custodied_recovery().await.unwrap(), blob_only);
+        s.put_custodied_recovery(&CustodiedRecovery::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            reader.custodied_recovery().await.unwrap(),
+            CustodiedRecovery::default()
+        );
+    }
+
     /// The collapse law: one live row per `(scope, writer, item)` — a newer
     /// row from the same writer for the same item supersedes in place, and a
     /// replayed or out-of-order OLDER row is a no-op (never a regression).
@@ -1585,8 +1690,8 @@ pub mod cases {
         );
     }
 
-    /// The let-go set (`account-data-taxonomy.md` § The generation machinery
-    /// → *Fleet-scope reclamation*, clause (3)(j)): an add only grows it, a
+    /// The let-go set (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (3)(j)): an add only grows it, a
     /// repeat writes nothing new, and it survives a reopen.
     pub async fn the_let_go_set_only_grows_and_survives_a_reopen<M: Medium>() {
         use std::collections::BTreeSet;
@@ -3320,6 +3425,74 @@ pub mod segment_cases {
     /// then adopts as if nothing had happened. Mutate: drop the open-time
     /// staging sweep and the leftover assertion reds on every arm with a file
     /// area.
+    /// `message-segment-store.md` § Segment size: a kept segment is admitted by
+    /// reading it back one record at a time — on every arm, the web's OPFS
+    /// included, whose main thread has no synchronous random access. Observed
+    /// at the read seam: staged a transfer chunk at a time, a `.dat` over five
+    /// chunks long is admitted with no single read of the staged file larger
+    /// than one record, and the store adopts it whole. Mutate: have an arm's
+    /// `dat_reader` (or `admit`) read the `.dat` in one range and the largest
+    /// read becomes the container.
+    pub async fn a_segment_many_transfer_chunks_long_is_admitted_one_record_at_a_time<M: Medium>() {
+        use crate::backend::SegmentStaging as _;
+        use crate::segments::{SEGMENT_TRANSFER_CHUNK, SegmentHalf};
+
+        /// The staged file's reader, remembering its largest answer.
+        struct Counting<R> {
+            inner: R,
+            largest: u64,
+        }
+        impl<R: fauna_carv2::ReadAt> fauna_carv2::ReadAt for Counting<R> {
+            async fn read_at(&mut self, offset: u64, max_len: u64) -> std::io::Result<Vec<u8>> {
+                let out = self.inner.read_at(offset, max_len).await?;
+                self.largest = self.largest.max(out.len() as u64);
+                Ok(out)
+            }
+        }
+
+        let dir = M::fresh();
+        let s = store_on(&dir).await;
+        let (dat, meta) = real_segment("post", 4, SEG_ACTOR, LARGE_SEGMENT_BODIES);
+        let chunk = SEGMENT_TRANSFER_CHUNK as u64;
+        assert!(
+            dat.len() as u64 > 5 * chunk,
+            "precondition: the .dat ({} bytes) is over five transfer chunks",
+            dat.len()
+        );
+
+        let mut staged = s.backend().segment_stage().await.unwrap();
+        for piece in dat.chunks(SEGMENT_TRANSFER_CHUNK) {
+            staged.write(SegmentHalf::Dat, piece).await.unwrap();
+        }
+        staged.write(SegmentHalf::Meta, &meta).await.unwrap();
+        let staged_meta = staged.meta().await.unwrap();
+        let mut reader = Counting {
+            inner: staged.dat_reader().await.unwrap(),
+            largest: 0,
+        };
+        let admission = crate::segments::admit(&mut reader, &staged_meta, &SEG_ACTOR, Some("post"))
+            .await
+            .unwrap();
+        assert_eq!(admission.blocks.len(), LARGE_SEGMENT_BODIES.len());
+        assert!(
+            reader.largest <= chunk,
+            "the largest read of the staged .dat was {} bytes — more than one record \
+             (a transfer chunk is {chunk}), out of a {}-byte container",
+            reader.largest,
+            dat.len()
+        );
+        drop(reader);
+        drop(staged);
+
+        assert_eq!(
+            s.adopt_segment(&seg_post_scope(), &dat, &meta)
+                .await
+                .unwrap(),
+            Some(LARGE_SEGMENT_BODIES.len()),
+            "the store adopts the whole segment"
+        );
+    }
+
     pub async fn a_transfer_interrupted_before_adoption_reopens_clean<M: Medium>() {
         use crate::backend::SegmentStaging as _;
         use crate::segments::SegmentHalf;
@@ -3380,8 +3553,14 @@ pub mod segment_cases {
         let s = store_on(&dir).await;
         let bodies: &[&[u8]] = &[b"mail record A", b"mail record B"];
         let (dat, meta) = real_segment("mail", 9, SEG_ACTOR, bodies);
-        let admission =
-            crate::segments::admit(std::io::Cursor::new(&dat), &meta, &SEG_ACTOR, None).unwrap();
+        let admission = crate::segments::admit(
+            fauna_carv2::SeekReadAt(std::io::Cursor::new(&dat)),
+            &meta,
+            &SEG_ACTOR,
+            None,
+        )
+        .await
+        .unwrap();
         let mut staged = s.backend().segment_stage().await.unwrap();
         staged
             .write(crate::segments::SegmentHalf::Dat, &dat)
@@ -3608,6 +3787,8 @@ pub mod segment_cases {
                 meta,
             )],
             fetched: std::cell::RefCell::new(Vec::new()),
+
+            refused: std::cell::RefCell::new(Vec::new()),
         };
 
         let report = s
@@ -3779,6 +3960,78 @@ pub mod segment_cases {
         assert_eq!(rest.adopted, 1);
         assert_eq!(rest.already_held, 1);
         assert_eq!(*source.fetched.borrow(), vec![1, 2]);
+    }
+
+    /// The budget bounds the `.meta` half's download as well as the `.dat`'s,
+    /// and an over-bound refusal ends only that offer: the too-large offer is
+    /// listed FIRST and the fitting one still adopts. Mutate: pass anything
+    /// wider than the remaining budget as the fetch bound and `refused` goes
+    /// empty (the store's later pair check would still skip the offer, so the
+    /// report alone would not see it); turn the `SegmentBodyTooLarge` arm in
+    /// the bootstrap loop back into `?` and the call errors instead of
+    /// adopting segment 2.
+    pub async fn a_sidecar_over_the_remaining_budget_is_refused_at_the_fetch_and_the_pass_goes_on<
+        M: Medium,
+    >() {
+        let dir = M::fresh();
+        let s = store_on(&dir).await;
+        let mut source = fake_source(&[("post", 1, &[b"p1", b"p2"]), ("post", 2, &[b"p3"])]);
+        // Segment 1's sidecar grows past anything the budget leaves; its
+        // `.dat` still fits, so only the `.meta` half can be what refuses it.
+        source.segments[0].2.extend_from_slice(&[0u8; 4096]);
+        let pair_two = {
+            let (_, dat, meta) = &source.segments[1];
+            (dat.len() + meta.len()) as u64
+        };
+        let dat_one = source.segments[0].1.len() as u64;
+        assert!(dat_one <= pair_two && pair_two < source.segments[0].2.len() as u64);
+
+        let mut budget = pair_two;
+        let report = s
+            .bootstrap_scope_segments_within(&seg_post_scope(), &source, &mut budget)
+            .await
+            .unwrap();
+        assert_eq!(*source.refused.borrow(), vec![1], "refused at the fetch");
+        assert_eq!(report.skipped_over_budget, 1);
+        assert_eq!(report.adopted, 1, "the fitting offer behind it adopted");
+        assert_eq!(budget, 0, "only the adopted pair was charged");
+        assert_eq!(
+            s.custody_meter(&[]).await.unwrap().held_bytes(),
+            pair_two,
+            "nothing of segment 1 was kept"
+        );
+    }
+
+    /// The post-fetch pair check: each half is within the bound, the pair is
+    /// not, and the pair is not adopted. Mutate: delete the `pair_bytes >
+    /// max_bytes` check in the bootstrap loop and the pair adopts.
+    pub async fn a_pair_whose_halves_each_fit_but_not_together_is_skipped_not_adopted<M: Medium>() {
+        let dir = M::fresh();
+        let s = store_on(&dir).await;
+        let source = fake_source(&[("post", 1, &[b"p1", b"p2"])]);
+        let (dat, meta) = {
+            let (_, dat, meta) = &source.segments[0];
+            (dat.len() as u64, meta.len() as u64)
+        };
+
+        let mut budget = dat + meta - 1;
+        let report = s
+            .bootstrap_scope_segments_within(&seg_post_scope(), &source, &mut budget)
+            .await
+            .unwrap();
+        assert!(
+            source.refused.borrow().is_empty(),
+            "each half fit the bound"
+        );
+        assert_eq!(*source.fetched.borrow(), vec![1], "fetched, then skipped");
+        assert_eq!(report.skipped_over_budget, 1);
+        assert_eq!(report.adopted, 0);
+        assert_eq!(budget, dat + meta - 1, "nothing was charged");
+        assert_eq!(
+            s.custody_meter(&[]).await.unwrap().held_bytes(),
+            0,
+            "the pair was not adopted"
+        );
     }
 }
 

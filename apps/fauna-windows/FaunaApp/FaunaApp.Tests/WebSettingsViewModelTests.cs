@@ -54,7 +54,10 @@ internal sealed class FakeWebClient : FfiWebClientFakeBase
 
     public override Task<WebDomainRow[]> DomainGet() => Task.FromResult(CustomDomains);
 
-    public override Task<FfiPublishedPost[]> PublishList() => Task.FromResult(Published);
+    public bool RenderedPagesDown;
+
+    public override Task<FfiPublishedSite> PublishedSite() =>
+        Task.FromResult(new FfiPublishedSite(posts: Published, renderedPagesDown: RenderedPagesDown));
 
     public override Task<bool> PublishUnset(byte[] @postId)
     {
@@ -148,6 +151,31 @@ public class WebSettingsViewModelTests
         var row = Assert.Single(vm.PublishedPosts);
         Assert.Equal("my-page", row.Slug);
         Assert.Null(row.GatedTier);
+    }
+
+    [Fact]
+    public async Task Render_status_follows_the_nest_flag_on_every_list_read()
+    {
+        // web-content-hosting.md § A blanked site tells its author: the flag rides
+        // the SAME publish.list read as the rows. Absent before the page has read
+        // the list, set while the nest reports the pages down, and cleared by the
+        // re-read a takedown triggers (the restoring render) with no re-visit.
+        var web = new FakeWebClient
+        {
+            SubdomainState = true,
+            RenderedPagesDown = true,
+            Published = new[] { Post(new byte[] { 7 }, "dark-site-post") },
+        };
+        var vm = new WebSettingsViewModel(web, "alice");
+        Assert.False(vm.RenderedPagesDown);
+
+        await vm.LoadAsync();
+        Assert.True(vm.RenderedPagesDown);
+        Assert.Single(vm.PublishedPosts); // information only — the rows still paint
+
+        web.RenderedPagesDown = false;
+        await vm.UnpublishAsync(vm.PublishedPosts.Single());
+        Assert.False(vm.RenderedPagesDown);
     }
 
     [Fact]

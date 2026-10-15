@@ -24,6 +24,23 @@ pub const MAX_SESSION_ID_LEN: usize = 64;
 /// DKIM/identity blobs (production blobs are ~250 bytes).
 pub const MAX_ATPROTO_SESSION_SECRET_BLOB_BYTES: usize = 16 * 1024;
 
+/// The newest external writes `atproto_external_write_ops` keeps per session —
+/// the same bound every oracle custodian's per-operation record keeps
+/// (`nostr::oracle::OPS_KEPT_PER_CLIENT`).
+pub const EXTERNAL_WRITE_OPS_KEPT_PER_SESSION: i64 = 256;
+
+/// One recorded external write (`atproto_external_write_ops`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AtprotoExternalWriteOp {
+    /// Epoch millis the batch applied.
+    pub at: i64,
+    /// `create` | `update` | `delete`.
+    pub action: String,
+    pub collection: String,
+    /// The record key the write landed at.
+    pub rkey: String,
+}
+
 /// Maximum bytes of a stored consent-request **identity** string (`client_id`,
 /// `client_name`). Generous — a `client_id` is a URL — and it exists only so a
 /// hostile or broken bridge cannot bloat rows the user's apps must render.
@@ -261,6 +278,12 @@ pub enum ConsentStartKind {
     /// answered through the same `resolve_consent`; its approval mints a
     /// hosted plugin, never a client's grant.
     Install,
+    /// `fauna.plugins.bind` — a user's bind card for an installed plugin
+    /// (`third-party.md` § The principal model → *Hosted principals*).
+    /// Opened only **assigned to the calling user**, in a bucket of its own,
+    /// over the install's ceiling scopes; its approval through
+    /// `resolve_consent` mints the account's binding row.
+    PluginBind,
 }
 
 impl ConsentStartKind {
@@ -268,6 +291,7 @@ impl ConsentStartKind {
     const PUSH: &'static str = "push";
     const HANDOFF: &'static str = "handoff";
     const INSTALL: &'static str = "install";
+    const PLUGIN_BIND: &'static str = "plugin_bind";
 
     fn column(self) -> Option<&'static str> {
         match self {
@@ -276,6 +300,7 @@ impl ConsentStartKind {
             ConsentStartKind::Push => Some(Self::PUSH),
             ConsentStartKind::Handoff => Some(Self::HANDOFF),
             ConsentStartKind::Install => Some(Self::INSTALL),
+            ConsentStartKind::PluginBind => Some(Self::PLUGIN_BIND),
         }
     }
 
@@ -288,6 +313,7 @@ impl ConsentStartKind {
             Some(Self::PUSH) => ConsentStartKind::Push,
             Some(Self::HANDOFF) => ConsentStartKind::Handoff,
             Some(Self::INSTALL) => ConsentStartKind::Install,
+            Some(Self::PLUGIN_BIND) => ConsentStartKind::PluginBind,
             _ => ConsentStartKind::Browser,
         }
     }
@@ -301,7 +327,8 @@ impl ConsentStartKind {
             ConsentStartKind::Browser
             | ConsentStartKind::Push
             | ConsentStartKind::Handoff
-            | ConsentStartKind::Install => (CONSENT_CODE_LEN, CONSENT_CODE_GROUP),
+            | ConsentStartKind::Install
+            | ConsentStartKind::PluginBind => (CONSENT_CODE_LEN, CONSENT_CODE_GROUP),
         }
     }
 
@@ -312,7 +339,8 @@ impl ConsentStartKind {
             ConsentStartKind::Browser
             | ConsentStartKind::Push
             | ConsentStartKind::Handoff
-            | ConsentStartKind::Install => MAX_PENDING_CONSENTS_PER_BUCKET,
+            | ConsentStartKind::Install
+            | ConsentStartKind::PluginBind => MAX_PENDING_CONSENTS_PER_BUCKET,
         }
     }
 }
@@ -537,7 +565,7 @@ pub struct AtprotoOauthGrantRow {
 }
 
 /// One session-registry row (live view).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AtprotoSessionRow {
     pub session_id: Vec<u8>,
     pub plane: String,
@@ -546,6 +574,9 @@ pub struct AtprotoSessionRow {
     pub created_at: i64,
     pub last_refreshed_at: Option<i64>,
     pub expires_at: i64,
+    /// The oracle's summary at the `atproto.commit` door for this session —
+    /// `None` for a session that has written nothing.
+    pub oracle: Option<fauna_protocol::principals::OracleSummary>,
 }
 
 /// One native-records journal row (D1). `record` is the record's canonical
@@ -907,25 +938,60 @@ impl CacheDb {
         Ok(())
     }
 
-    /// Live (unrevoked, unexpired) sessions for the account.
+    /// Live (unrevoked, unexpired) sessions for the account, each with the
+    /// oracle's summary of its writes at the `atproto.commit` door (the
+    /// `fauna.principals.list` summary shape, from the session's own ceiling
+    /// window, its `write_count` and its newest recorded write).
     pub async fn list_atproto_sessions(
         &self,
         actor_id: &[u8; 32],
     ) -> Result<Vec<AtprotoSessionRow>> {
         let actor = *actor_id;
         let now = now_epoch_millis();
+        let now_secs = u64::try_from(now / 1000).unwrap_or(0);
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
-                "SELECT session_id, plane, credential_id, client_note,
-                        created_at, last_refreshed_at, expires_at
-                   FROM atproto_sessions
-                  WHERE actor_id = ?1 AND revoked_at IS NULL AND expires_at > ?2
-                  ORDER BY created_at ASC",
+                "SELECT s.session_id, s.plane, s.credential_id, s.client_note,
+                        s.created_at, s.last_refreshed_at, s.expires_at,
+                        s.write_window_start, s.write_window_count, s.write_count,
+                        w.at / 1000, w.action || ' ' || w.collection || '/' || w.rkey
+                   FROM atproto_sessions s
+                   LEFT JOIN atproto_external_write_ops w ON w.id =
+                     (SELECT MAX(id) FROM atproto_external_write_ops
+                       WHERE actor_id = s.actor_id AND session_id = s.session_id)
+                  WHERE s.actor_id = ?1 AND s.revoked_at IS NULL AND s.expires_at > ?2
+                  ORDER BY s.created_at ASC",
             )
             .context("prepare list atproto sessions")?;
         let rows = stmt
             .query_map(rusqlite::params![&actor[..], now], |row| {
+                let window_start: i64 = row.get(7)?;
+                let window_count: i64 = row.get(8)?;
+                let write_count: i64 = row.get(9)?;
+                let last_op = match row.get::<_, Option<i64>>(10)? {
+                    Some(at) => Some(fauna_protocol::principals::OracleOp {
+                        at,
+                        class: fauna_protocol::principals::ATPROTO_COMMIT_CLASS.to_string(),
+                        detail: row.get(11)?,
+                        extra: Default::default(),
+                    }),
+                    None => None,
+                };
+                // A session that has written nothing carries no summary — the
+                // roster's "served" rule: absent, never a zero.
+                let oracle = (write_count > 0 || last_op.is_some()).then(|| {
+                    fauna_protocol::principals::OracleSummary {
+                        ops_in_window: super::third_party_principals::oracle_window_ops(
+                            now_secs,
+                            window_start,
+                            window_count,
+                        ),
+                        requests_served: u64::try_from(write_count).unwrap_or(0),
+                        last_op,
+                        extra: Default::default(),
+                    }
+                });
                 Ok(AtprotoSessionRow {
                     session_id: row.get(0)?,
                     plane: row.get(1)?,
@@ -934,6 +1000,7 @@ impl CacheDb {
                     created_at: row.get(4)?,
                     last_refreshed_at: row.get(5)?,
                     expires_at: row.get(6)?,
+                    oracle,
                 })
             })
             .context("query atproto sessions")?
@@ -977,6 +1044,206 @@ impl CacheDb {
         revoke_grant_row(&tx, &actor, session_id, now)?;
         tx.commit().context("commit revoke atproto session")?;
         Ok(revoked)
+    }
+
+    /// Whether the session family `session_id` of `actor_id` is still live —
+    /// its row present and never revoked. What a principal session's per-call
+    /// resolve reads beside the principal row (`transport-connection.md`
+    /// § *The principal session* → *Revocation — three doors*, door (c)), so
+    /// every family ending — this door, the reuse family-kill, the forced
+    /// sweep — bites at the next call with no further mechanism. A missing row
+    /// reads as ended: a family the nest cannot find is one it does not stand
+    /// behind. Expiry is not read: the access token's own `exp`, far shorter
+    /// than a family's, is the session's deadline.
+    pub async fn is_oauth_session_live(
+        &self,
+        actor_id: &[u8; 32],
+        session_id: &[u8],
+    ) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let live = conn
+            .query_row(
+                "SELECT 1 FROM atproto_sessions
+                  WHERE actor_id = ?1 AND session_id = ?2 AND revoked_at IS NULL",
+                rusqlite::params![&actor_id[..], session_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .context("read atproto session liveness")?;
+        Ok(live.is_some())
+    }
+
+    // ── The oracle at the `atproto.commit` door ─────────────────
+    //
+    // `key-material-hierarchy.md` § *The oracle* → *The ATProto classes ride
+    // the protocol's own door*: the PDS write funnel's `ingest_external_write`
+    // round trip is the per-write moment, and these three are the oracle's
+    // properties there — the live check, the ceiling, the record.
+
+    /// Whether `session_id` may write for the account NOW: its session row
+    /// exists, is unrevoked and unexpired, and — on the OAuth plane — its grant
+    /// row (`grant_id = session_id`) is unrevoked and unexpired too. An access
+    /// token outlives a revoke by up to its 60-minute lifetime; this is what
+    /// makes the revoke bite at the very next write instead. The app plane
+    /// needs no second read: revoking its credential revokes its sessions.
+    pub async fn atproto_session_may_write(
+        &self,
+        actor_id: &[u8; 32],
+        session_id: &[u8],
+    ) -> Result<bool> {
+        let actor = *actor_id;
+        let now = now_epoch_millis();
+        let conn = self.conn.lock().await;
+        let plane: Option<String> = conn
+            .query_row(
+                "SELECT plane FROM atproto_sessions
+                  WHERE actor_id = ?1 AND session_id = ?2
+                    AND revoked_at IS NULL AND expires_at > ?3",
+                rusqlite::params![&actor[..], session_id, now],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("read atproto session liveness")?;
+        let Some(plane) = plane else {
+            return Ok(false);
+        };
+        if plane != crate::oauth_as_token::PLANE_OAUTH {
+            return Ok(true);
+        }
+        let grant_live = conn
+            .query_row(
+                "SELECT 1 FROM atproto_oauth_grants
+                  WHERE actor_id = ?1 AND grant_id = ?2 AND revoked_at IS NULL
+                    AND (expires_at IS NULL OR expires_at > ?3)",
+                rusqlite::params![&actor[..], session_id, now],
+                |_| Ok(()),
+            )
+            .optional()
+            .context("read atproto grant liveness")?
+            .is_some();
+        Ok(grant_live)
+    }
+
+    /// Admit `writes` external writes for the session through its ceiling
+    /// (`fauna_core::identity_op::RateWindow`, one operation per write) at
+    /// `now_secs`. All or nothing, like the batch: `false` when any write of
+    /// the batch would pass the ceiling, and then the window is left as it was
+    /// (a refused operation does not consume it). A missing session row
+    /// refuses — the caller checked liveness first, so that is a race with a
+    /// deletion, and nothing is admitted against a session that is gone.
+    pub async fn admit_atproto_session_writes(
+        &self,
+        actor_id: &[u8; 32],
+        session_id: &[u8],
+        writes: usize,
+        now_secs: u64,
+    ) -> Result<bool> {
+        use fauna_core::identity_op::RateWindow;
+        let actor = *actor_id;
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction().context("begin admit atproto writes")?;
+        let window: Option<(u64, u32)> = tx
+            .query_row(
+                "SELECT write_window_start, write_window_count FROM atproto_sessions
+                  WHERE actor_id = ?1 AND session_id = ?2",
+                rusqlite::params![&actor[..], session_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .context("read atproto session window")?;
+        let Some((window_start, count)) = window else {
+            return Ok(false);
+        };
+        let mut window = RateWindow {
+            window_start,
+            count,
+        };
+        for _ in 0..writes {
+            match window.admit(now_secs) {
+                Ok(next) => window = next,
+                Err(_) => return Ok(false),
+            }
+        }
+        tx.execute(
+            "UPDATE atproto_sessions SET write_window_start = ?3, write_window_count = ?4
+              WHERE actor_id = ?1 AND session_id = ?2",
+            rusqlite::params![&actor[..], session_id, window.window_start, window.count],
+        )
+        .context("store atproto session window")?;
+        tx.commit().context("commit admit atproto writes")?;
+        Ok(true)
+    }
+
+    /// Record the applied writes of one batch against the session — one
+    /// `atproto_external_write_ops` row each, `(action, collection, rkey)` —
+    /// counting them on the session's `write_count` and trimming the session
+    /// to the newest [`EXTERNAL_WRITE_OPS_KEPT_PER_SESSION`] in the same
+    /// transaction.
+    pub async fn record_atproto_external_writes(
+        &self,
+        actor_id: &[u8; 32],
+        session_id: &[u8],
+        at_millis: i64,
+        ops: &[(&str, &str, &str)],
+    ) -> Result<()> {
+        let actor = *actor_id;
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction().context("begin record atproto writes")?;
+        for (action, collection, rkey) in ops {
+            tx.execute(
+                "INSERT INTO atproto_external_write_ops
+                    (actor_id, session_id, at, action, collection, rkey)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![&actor[..], session_id, at_millis, action, collection, rkey],
+            )
+            .context("insert atproto external write op")?;
+        }
+        tx.execute(
+            "UPDATE atproto_sessions SET write_count = write_count + ?3
+              WHERE actor_id = ?1 AND session_id = ?2",
+            rusqlite::params![&actor[..], session_id, ops.len() as i64],
+        )
+        .context("count atproto external writes")?;
+        tx.execute(
+            "DELETE FROM atproto_external_write_ops
+              WHERE actor_id = ?1 AND session_id = ?2 AND id NOT IN
+                (SELECT id FROM atproto_external_write_ops
+                  WHERE actor_id = ?1 AND session_id = ?2
+                  ORDER BY id DESC LIMIT ?3)",
+            rusqlite::params![&actor[..], session_id, EXTERNAL_WRITE_OPS_KEPT_PER_SESSION],
+        )
+        .context("trim atproto external write ops")?;
+        tx.commit().context("commit record atproto writes")?;
+        Ok(())
+    }
+
+    /// The session's recorded external writes, newest first.
+    pub async fn list_atproto_external_writes(
+        &self,
+        actor_id: &[u8; 32],
+        session_id: &[u8],
+    ) -> Result<Vec<AtprotoExternalWriteOp>> {
+        let actor = *actor_id;
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT at, action, collection, rkey FROM atproto_external_write_ops
+                  WHERE actor_id = ?1 AND session_id = ?2 ORDER BY id DESC",
+            )
+            .context("prepare list atproto external writes")?;
+        let rows = stmt
+            .query_map(rusqlite::params![&actor[..], session_id], |r| {
+                Ok(AtprotoExternalWriteOp {
+                    at: r.get(0)?,
+                    action: r.get(1)?,
+                    collection: r.get(2)?,
+                    rkey: r.get(3)?,
+                })
+            })
+            .context("query atproto external writes")?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("collect atproto external writes")?;
+        Ok(rows)
     }
 
     /// End **every live grant the nest-hosted authorization server minted** —
@@ -2065,15 +2332,19 @@ impl CacheDb {
     ) -> Result<ConsentRequestRow> {
         if matches!(
             start,
-            ConsentStartKind::Push | ConsentStartKind::Handoff | ConsentStartKind::Install
+            ConsentStartKind::Push
+                | ConsentStartKind::Handoff
+                | ConsentStartKind::Install
+                | ConsentStartKind::PluginBind
         ) && actor_id.is_none()
         {
             // Structural, not a policy the caller has to remember: an
             // unassigned push row would be listed to every account, which is
             // the unsolicited request rule (a) exists to keep out of sight;
-            // and a handoff or install row is the opening user's by definition.
+            // and a handoff, install or bind row is the opening user's by
+            // definition.
             return Err(anyhow!(
-                "a quiet-push, handoff or install consent request must name an account"
+                "a quiet-push, handoff, install or bind consent request must name an account"
             ));
         }
         if client_id.len() > MAX_CONSENT_FIELD_LEN
@@ -2660,6 +2931,152 @@ mod tests {
     use super::*;
 
     const ACTOR: [u8; 32] = [7u8; 32];
+
+    /// The owner's read of the `atproto.commit` door's record
+    /// (`key-material-hierarchy.md` § *The oracle* → *The ATProto classes
+    /// ride the protocol's own door*, property (iii)), on both planes: an
+    /// OAuth session's writes reach its principal's roster summary and
+    /// per-operation record, an app-password session's its own
+    /// `list_sessions` row — newest first, the lifetime count beyond the
+    /// trimmed record, and nothing of another account's.
+    #[tokio::test]
+    async fn the_write_record_is_read_back_to_its_owner_on_both_planes() {
+        use fauna_protocol::principals::ATPROTO_COMMIT_CLASS;
+        let db = CacheDb::open_in_memory().unwrap();
+        let other: [u8; 32] = [9u8; 32];
+        let client = "https://writer.example/client.json";
+        for actor in [&ACTOR, &other] {
+            db.record_atproto_oauth_grant(
+                actor,
+                b"oauth-1",
+                client,
+                Some("Writer"),
+                "atproto",
+                &[],
+                "jkt",
+                i64::MAX,
+                None,
+                OAUTH_GRANT_ISSUER_NEST,
+                &crate::db::third_party_principals::UNATTESTED_DEVICE,
+            )
+            .await
+            .unwrap();
+        }
+        for id in [&b"app-pw-1"[..], b"app-pw-quiet"] {
+            db.insert_atproto_session(
+                &ACTOR,
+                id,
+                crate::oauth_as_token::PLANE_APP_CREDENTIAL,
+                Some("ivory-1"),
+                None,
+                i64::MAX,
+            )
+            .await
+            .unwrap();
+        }
+        let now = u64::try_from(crate::db::now_epoch_secs()).unwrap();
+        assert!(
+            db.admit_atproto_session_writes(&ACTOR, b"oauth-1", 2, now)
+                .await
+                .unwrap()
+        );
+        let post = "app.bsky.feed.post";
+        db.record_atproto_external_writes(&ACTOR, b"oauth-1", 10_000, &[("create", post, "3a")])
+            .await
+            .unwrap();
+        db.record_atproto_external_writes(&ACTOR, b"oauth-1", 20_000, &[("delete", post, "3a")])
+            .await
+            .unwrap();
+        db.record_atproto_external_writes(&ACTOR, b"app-pw-1", 30_000, &[("update", post, "3b")])
+            .await
+            .unwrap();
+        db.record_atproto_external_writes(&other, b"oauth-1", 40_000, &[("create", post, "3z")])
+            .await
+            .unwrap();
+
+        // The OAuth plane: the principal's roster summary and record.
+        let principal = db.list_third_party_principals(&ACTOR).await.unwrap()[0]
+            .principal_id
+            .clone();
+        let summaries = db.principal_oracle_summaries(&ACTOR, now).await.unwrap();
+        let summary = &summaries[&principal];
+        assert_eq!(summary.ops_in_window, 2, "the session's own ceiling window");
+        assert_eq!(summary.requests_served, 2);
+        let last = summary.last_op.as_ref().unwrap();
+        assert_eq!(
+            (last.at, last.class.as_str(), last.detail.as_str()),
+            (20, ATPROTO_COMMIT_CLASS, "delete app.bsky.feed.post/3a"),
+        );
+        let ops = db
+            .list_principal_oracle_ops(&ACTOR, &principal, 10)
+            .await
+            .unwrap();
+        let shape: Vec<_> = ops.iter().map(|o| (o.at, o.detail.as_str())).collect();
+        assert_eq!(
+            shape,
+            [
+                (20, "delete app.bsky.feed.post/3a"),
+                (10, "create app.bsky.feed.post/3a"),
+            ],
+            "newest first, the other account's write absent",
+        );
+        // The other account's principal reads as nothing under this account.
+        let theirs = db.list_third_party_principals(&other).await.unwrap()[0]
+            .principal_id
+            .clone();
+        assert!(
+            db.list_principal_oracle_ops(&ACTOR, &theirs, 10)
+                .await
+                .unwrap()
+                .iter()
+                .all(|o| o.detail != "create app.bsky.feed.post/3z")
+        );
+
+        // The app-password plane: the session's own row.
+        let sessions = db.list_atproto_sessions(&ACTOR).await.unwrap();
+        let row = |id: &[u8]| sessions.iter().find(|s| s.session_id == id).unwrap();
+        let pw = row(b"app-pw-1")
+            .oracle
+            .clone()
+            .expect("a session that wrote");
+        assert_eq!(pw.requests_served, 1);
+        let last = pw.last_op.unwrap();
+        assert_eq!(
+            (last.at, last.class.as_str(), last.detail.as_str()),
+            (30, ATPROTO_COMMIT_CLASS, "update app.bsky.feed.post/3b"),
+        );
+        assert!(
+            row(b"app-pw-quiet").oracle.is_none(),
+            "a session that wrote nothing carries no summary"
+        );
+        assert_eq!(row(b"oauth-1").oracle.as_ref().unwrap().requests_served, 2);
+    }
+
+    /// The summary's lifetime count outlives the trimmed record.
+    #[tokio::test]
+    async fn the_write_count_outlives_the_trimmed_record() {
+        let db = CacheDb::open_in_memory().unwrap();
+        db.insert_atproto_session(
+            &ACTOR,
+            b"app-pw-1",
+            crate::oauth_as_token::PLANE_APP_CREDENTIAL,
+            None,
+            None,
+            i64::MAX,
+        )
+        .await
+        .unwrap();
+        let rkeys: Vec<String> = (0..300).map(|i| format!("3k{i}")).collect();
+        let ops: Vec<(&str, &str, &str)> = rkeys
+            .iter()
+            .map(|r| ("create", "app.bsky.graph.list", r.as_str()))
+            .collect();
+        db.record_atproto_external_writes(&ACTOR, b"app-pw-1", 1_000, &ops)
+            .await
+            .unwrap();
+        let sessions = db.list_atproto_sessions(&ACTOR).await.unwrap();
+        assert_eq!(sessions[0].oracle.as_ref().unwrap().requests_served, 300);
+    }
 
     #[tokio::test]
     async fn credential_round_trip_and_list() {

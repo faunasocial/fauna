@@ -40,7 +40,7 @@ jobs:
           rustflags: ""
           cache: false
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+        run: bash scripts/install-uv.sh
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
       # The same recipe the CI `macos` job runs: host darwin FFI slice, SwiftPM
       # FaunaMacOS product, sync agent, bundle assembly, ad-hoc signature.
@@ -190,6 +190,9 @@ jobs:
             build/Fauna-*.dmg.sha256
             build/fauna-tui-*-darwin.tar.gz
             build/fauna-tui-*-darwin.tar.gz.sha256
+          # A pre-release, as release.yml's: the tag is pushed at UAT entry and
+          # `fauna-publish release` flips the Release after the promote.
+          prerelease: true
           generate_release_notes: true
           body: |
             ## Verify the macOS download

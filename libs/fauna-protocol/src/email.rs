@@ -1052,9 +1052,33 @@ pub struct InboxMessage {
     /// read failed, and such a record is standing-sealed, so the reader's epoch
     /// chain ends on its standing arm. Never substitute `internal_date` for it.
     pub stored_at: i64,
+    /// Set on a **Sent** message the fresh-IP warm-up is holding back
+    /// (`mail-deliverability.md` § Enforcement at submission time, the
+    /// deferred-state bullet): when it will be delivered and how many held
+    /// messages are ahead of it. Absent on every INBOX message, on a Sent
+    /// message the warm-up never held, and once its release has passed.
+    ///
+    /// Additive (`#[serde(default, skip_serializing_if = "Option::is_none")]`):
+    /// a message nothing holds encodes with no `warmup_hold` key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warmup_hold: Option<WarmupHold>,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// The warm-up's hold on one sent message ([`InboxMessage::warmup_hold`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WarmupHold {
+    /// When the ramp lets the message go — epoch **seconds**, the next
+    /// 00:00 UTC after it was submitted.
+    pub release_at: i64,
+    /// Held messages submitted before this one (`0` = next in line).
+    pub messages_ahead: u32,
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4).
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -1077,6 +1101,15 @@ pub struct InboxMessage {
 /// imap/spam_score.go`). Internal/invisible-migratable per `mail-spam.md`
 /// § Re-file timing.
 pub const SPAM_SCORED_KEYWORD: &str = "$FaunaSpamScored";
+
+/// The most UIDs one `fauna.email.inbox.mark_seen` request, or one list of a
+/// `fauna.email.apply_spam_disposition` request (`scored_uids`, `junk_uids`),
+/// may carry. The nest refuses a longer list with `fauna.email.invalid_params`
+/// before any DB work, so a single frame cannot hold the nest-wide DB mutex
+/// for an unbounded walk; a sender with more owes the nest several requests.
+/// The conversations client's `MARK_SEEN_BATCH_MAX` MUST equal it
+/// (`mail-app-surface.md` § Read state).
+pub const INBOX_FLAG_WRITE_MAX_UIDS: usize = 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ApplySpamDispositionRequest {
@@ -1754,6 +1787,7 @@ mod tests {
                     sealed_envelope: vec![0x00, 0x01, 0x80, 0xff, 0x7f],
                     flags: vec!["\\Seen".to_string(), "$FaunaSpamScored".to_string()],
                     body_ref: None,
+                    warmup_hold: None,
                     extra: Default::default(),
                 },
                 // An over-frame message: empty inline envelope, a `body_ref`
@@ -1772,6 +1806,7 @@ mod tests {
                         ],
                         total_bytes: 6_000_000,
                     }),
+                    warmup_hold: None,
                     extra: Default::default(),
                 },
             ],
@@ -1795,6 +1830,7 @@ mod tests {
                 sealed_envelope: vec![0x42; 64],
                 flags: vec!["$FaunaSpamScored".to_string()],
                 body_ref: None,
+                warmup_hold: None,
                 extra: Default::default(),
             }],
             more: false,
@@ -1821,6 +1857,7 @@ mod tests {
             sealed_envelope: b"an inline envelope".to_vec(),
             flags: vec!["\\Seen".to_string()],
             body_ref: None,
+            warmup_hold: None,
             extra: Default::default(),
         };
         let encoded = encode_canonical(&inline).unwrap();
@@ -1837,6 +1874,42 @@ mod tests {
         assert!(decoded.body_ref.is_none());
     }
 
+    /// A Sent message the warm-up holds carries its release date and queue
+    /// place across the wire; a message nothing holds encodes no
+    /// `warmup_hold` key at all (`mail-deliverability.md` § Enforcement at
+    /// submission time, the deferred-state bullet).
+    #[test]
+    fn inbox_message_warmup_hold_round_trips_and_is_absent_when_none() {
+        let held = InboxMessage {
+            uid: 4,
+            message_id: vec![0xAB; 32],
+            internal_date: 1_716_200_000,
+            stored_at: 1_716_200_000,
+            sealed_envelope: b"envelope".to_vec(),
+            warmup_hold: Some(WarmupHold {
+                release_at: 1_716_249_600,
+                messages_ahead: 3,
+                extra: Default::default(),
+            }),
+            ..Default::default()
+        };
+        let encoded = encode_canonical(&held).unwrap();
+        assert_eq!(decode::<InboxMessage>(&encoded).unwrap(), held);
+
+        let free = InboxMessage {
+            warmup_hold: None,
+            ..held
+        };
+        let encoded = encode_canonical(&free).unwrap();
+        assert!(
+            !encoded
+                .windows(b"warmup_hold".len())
+                .any(|w| w == b"warmup_hold"),
+            "a None warmup_hold must not appear on the wire at all"
+        );
+        assert_eq!(decode::<InboxMessage>(&encoded).unwrap(), free);
+    }
+
     /// `stored_at` (the content-sealing-epochs seal instant) is always on the
     /// wire — the unknown `0` included, so a reader never mistakes an absent
     /// key for a value — and a message without it is refused rather than
@@ -1851,6 +1924,7 @@ mod tests {
             sealed_envelope: b"envelope".to_vec(),
             flags: vec![],
             body_ref: None,
+            warmup_hold: None,
             extra: Default::default(),
         };
         let encoded = encode_canonical(&msg).unwrap();

@@ -123,15 +123,18 @@ pub(crate) fn on_session_start(
     });
 }
 
+/// The runtime handle and the bounded row-drop future [`take_leave`] hands back.
+pub(crate) type LeaveDrop = (
+    tokio::runtime::Handle,
+    std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+);
+
 /// A leave gesture (switch-out, sign-out, factory reset): the leaving actor's
 /// row drop, bounded and best-effort, plus the runtime to drive it on —
 /// `None` with no session. Takes the session, so a second leave finds nothing.
 /// Issued over the leaving session's own client, which is why the caller
 /// sequences it ahead of anything that disconnects or erases.
-pub(crate) fn take_leave() -> Option<(
-    tokio::runtime::Handle,
-    std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
-)> {
+pub(crate) fn take_leave() -> Option<LeaveDrop> {
     let session = SESSION.with(|s| s.borrow_mut().take())?;
     let rt = session.rt.clone();
     Some((

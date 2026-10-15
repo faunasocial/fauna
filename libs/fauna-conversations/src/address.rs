@@ -382,9 +382,9 @@ pub const UNKNOWN_ADDRESS_DISPLAY: &str = "?";
 /// spelling belongs to is the nest's answer, matched against each bridge's
 /// declared grammar (`ui/conversations.md` § Where logic lives → *The
 /// `Bridged` adapter*, ruling 2 (d)), so no app parses one. A `did:`, a
-/// two-`@` Fediverse handle or an `npub1…` — the shapes the retired Bluesky,
-/// ActivityPub and Nostr rails claimed here — is therefore not recognised,
-/// and neither is read as an email address.
+/// two-`@` Fediverse handle, an `@`-led Bluesky handle or an `npub1…` — the
+/// shapes the retired Bluesky, ActivityPub and Nostr rails claimed here — is
+/// therefore not recognised, and neither is read as an email address.
 ///
 /// FFI-exported so the native apps (windows/macos/ios/android) consume this
 /// one recognizer for the `dm-reply-recipient-add` field + recipient picker
@@ -402,7 +402,10 @@ pub fn try_parse_typed_address(raw: &str) -> Option<TypedAddress> {
     if trimmed.matches('@').count() > 1 {
         return None;
     }
-    if trimmed.contains('@') {
+    // An email address has a local part and a host — the SMTP rail's own
+    // shape check (`backends::smtp`); a leading `@` is a far-network handle
+    // (a Bluesky handle typed with its `@`), the nest's to recognise.
+    if trimmed.contains('@') && !trimmed.starts_with('@') && !trimmed.ends_with('@') {
         return Some(TypedAddress::Email {
             email_address: trimmed.to_string(),
         });
@@ -748,6 +751,10 @@ mod tests {
         assert!(try_parse_typed_address("@user@instance.example").is_none());
         assert!(try_parse_typed_address("user@instance@example").is_none());
         assert!(try_parse_typed_address("npub1xyz").is_none());
+        // A Bluesky handle with its leading `@` has one `@` but no local part:
+        // the nest's answer, never an email chip — nor a dangling `user@`.
+        assert!(try_parse_typed_address("@alice.bsky.social").is_none());
+        assert!(try_parse_typed_address("alice@").is_none());
     }
 
     #[test]

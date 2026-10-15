@@ -159,11 +159,12 @@ pub fn acquire_account_instance_lock_shared(
     actor_id_hex: String,
     store_container_dir: Option<String>,
 ) -> Option<Arc<FfiAccountInstanceLock>> {
-    let store_root = crate::account_state::store_root_for(store_container_dir.map(Into::into));
+    let store_root =
+        crate::account_state::store_root_or_logged(store_container_dir.map(Into::into));
     acquire_raw_lock(
         fauna_client_accounts::ServingBases {
             state_base: Some(std::path::Path::new(&state_base)),
-            store_root: Some(store_root.as_path()),
+            store_root: store_root.as_deref(),
         },
         &actor_id_hex,
         fauna_client_accounts::ServingMode::Concurrent,
@@ -452,11 +453,12 @@ pub fn become_process_session_instance(
     // sees this instance (`account-scoping.md` § Concurrent instances → *An
     // erase refuses while a sibling serves the account*). The root resolves in
     // Rust, exactly as the erase pair resolves it, never from a shell's path.
-    let store_root = crate::account_state::store_root_for(store_container_dir.map(Into::into));
+    let store_root =
+        crate::account_state::store_root_or_logged(store_container_dir.map(Into::into));
     fauna_client_accounts::become_process_session_instance(
         fauna_client_accounts::ServingBases {
             state_base: state_base.as_deref().map(std::path::Path::new),
-            store_root: Some(store_root.as_path()),
+            store_root: store_root.as_deref(),
         },
         &actor_id_hex,
         mode.into(),
@@ -466,8 +468,8 @@ pub fn become_process_session_instance(
 
 /// The per-platform logical-keyed secret store, as a UniFFI callback
 /// interface. Kotlin implements it over `EncryptedSharedPreferences`, Swift
-/// over the Keychain, C# over Credential Manager (through
-/// [`native_keyring_get`] and its siblings below). All values are strings, so
+/// over the Keychain, C# over the shared credential store (through
+/// [`credential_store_get`] and its siblings below). All values are strings, so
 /// every platform's string-keyed secure store implements this trivially.
 ///
 /// Contract (mirrors `fauna_client_accounts::SecretStore`):
@@ -538,28 +540,38 @@ pub fn install_platform_credential_store(store: Arc<dyn FfiSecretStore>) {
     fauna_credential_store::install_foreign_store(Arc::new(SecretStoreBridge(store)));
 }
 
-// ── The windows shell's production backend: the shared Credential Manager arm ──
+// ── The windows shell's credential store: the shared crate's own store ──
 //
 // The other direction of the seam above. A phone *lends* its store to shared
 // Rust because the crate has no arm there; windows is the one FFI shell whose
 // platform the crate drives itself (`fauna_credential_store::win_credman` —
 // generic credentials, `CRED_PERSIST_LOCAL_MACHINE`, so they never roam), so
-// the shell *borrows* that arm instead of keeping a second implementation of
-// the same store. One writer of the `"{app}/{account}"` target-name grammar
-// means the app, the terminal app and the sync agent read each other's rows
-// by construction (`apps/common.md` § Credential storage, the Windows row).
+// the shell *borrows* the crate's store instead of keeping a second
+// implementation of it. One writer of the `"{app}/{account}"` target-name
+// grammar means the app, the terminal app and the sync agent read each other's
+// rows by construction (`apps/common.md` § Credential storage, the Windows row).
+//
+// The store, not just its keyring arm: `CredentialStore::for_namespace` picks
+// the arm exactly as it does for linux, tui and the sync agent — Credential
+// Manager, or the harness's file under a test-capable build
+// (`cred_file_dir`, gated `debug_assertions OR e2e-agent`, convention 15). So
+// windows' e2e file is the crate's file arm, whose writes are serialized
+// across processes and replace the file atomically. The shell's own copy of
+// that arm did neither, and two instances sharing one credential dir lost
+// registry writes to it (`credential file write failed: … being used by
+// another process`, measured 2026-10-10).
 //
 // Windows-only by `cfg`, like `FfiWindowsDetachedSpawner`: apple and android
 // own their platform stores app-side, and linux and tui call the crate
-// directly. These are the crate's gated public wrappers, so a test build's
+// directly. The keyring arm runs the crate's gated wrappers, so a test build's
 // `no-live-keyring` refusal reaches this path too.
 
-/// Read one item of the `app` namespace from the OS credential store. `None`
-/// when the item is absent or unreadable.
+/// Read one item of the `app` namespace from the shared credential store.
+/// `None` when the item is absent or unreadable.
 #[cfg(windows)]
 #[uniffi::export]
-pub fn native_keyring_get(app: String, account: String) -> Option<String> {
-    fauna_credential_store::keyring_get(&app, &account)
+pub fn credential_store_get(app: String, account: String) -> Option<String> {
+    fauna_credential_store::CredentialStore::for_namespace(app).get(&account)
 }
 
 /// Write (replace) one item of the `app` namespace. Best-effort and log-only,
@@ -567,15 +579,15 @@ pub fn native_keyring_get(app: String, account: String) -> Option<String> {
 /// it back.
 #[cfg(windows)]
 #[uniffi::export]
-pub fn native_keyring_set(app: String, account: String, value: String) {
-    fauna_credential_store::keyring_set(&app, &account, &value);
+pub fn credential_store_set(app: String, account: String, value: String) {
+    fauna_credential_store::CredentialStore::for_namespace(app).set(&account, &value);
 }
 
 /// Delete one item of the `app` namespace; an absent item is a quiet no-op.
 #[cfg(windows)]
 #[uniffi::export]
-pub fn native_keyring_delete(app: String, account: String) {
-    fauna_credential_store::keyring_delete(&app, &account);
+pub fn credential_store_delete(app: String, account: String) {
+    fauna_credential_store::CredentialStore::for_namespace(app).delete(&account);
 }
 
 /// FFI mirror of `fauna_client_accounts::AccountEntry` — one switcher row.
@@ -604,6 +616,23 @@ impl From<AccountEntry> for FfiAccountEntry {
     }
 }
 
+/// The profile SELF header's display handle — `<handle>@<current primary>`
+/// from the session handle + the account's cached handle/domain
+/// (`fauna_client_accounts::display_handle`; `mail-primary-domain-rename.md`
+/// § Display-handle interaction). `None` while nothing resolves.
+#[uniffi::export]
+pub fn account_display_handle(
+    session_handle: String,
+    entry_handle: Option<String>,
+    entry_domain: Option<String>,
+) -> Option<String> {
+    fauna_client_accounts::display_handle(
+        &session_handle,
+        entry_handle.as_deref(),
+        entry_domain.as_deref(),
+    )
+}
+
 /// The paired predecessor chain ([`FfiAccountRegistry::predecessor_chain`]):
 /// `actor_ids[i]` is the identity `keys[i]` (a 32-byte retired owner
 /// `BackupKey`) belongs to, nearest hop first. No `Debug` — the keys are
@@ -621,6 +650,7 @@ impl FfiPredecessorChain {
     /// 32 bytes, is refused whole: a shifted pairing would offer one
     /// identity's root to another's rows.
     #[cfg(feature = "sync-engine-host")]
+    #[cfg_attr(not(feature = "file-provider-host"), allow(dead_code))]
     pub(crate) fn seal_keys(
         &self,
     ) -> Result<Vec<fauna_core::file_download::PredecessorSealKey>, crate::FfiError> {
@@ -708,6 +738,25 @@ impl FfiAccountRegistry {
         &self.registry
     }
 
+    /// The attested predecessor ids of `actor_id_hex` as the shared seats take
+    /// them (`NestMailIndexLauncher::set_attested_predecessors`,
+    /// `FolderRemovalResume::with_predecessors`, `served_set_converge`) —
+    /// writer-signed change records, ruling (8)(b) source (ii). The one
+    /// registry walk those three share, off the session's OWN actor and never
+    /// the registry's active account. Empty for an identity that never
+    /// succeeded.
+    #[cfg_attr(
+        not(any(feature = "conversations-session", feature = "folders-author")),
+        allow(dead_code)
+    )]
+    pub(crate) fn attested_predecessor_ids32(&self, actor_id_hex: &str) -> Vec<[u8; 32]> {
+        self.registry
+            .attested_predecessor_actor_ids(actor_id_hex)
+            .into_iter()
+            .map(|id| id.0)
+            .collect()
+    }
+
     /// The retired owner keys of the identity `identity_secret` seeds,
     /// **paired with the identities they belong to**, nearest hop first —
     /// what the sync agent's capability carries as
@@ -771,6 +820,21 @@ impl FfiAccountRegistry {
             msg: fauna_client_accounts::switch_refused_copy(err, &label)
                 .resolve(fauna_i18n::strings::lookup),
         }
+    }
+}
+
+/// A refused account add as the error the seat shows: the shared
+/// `fauna_client_accounts::add_refused_copy` line (the device's account list is
+/// full) when the refusal is one the user can act on, otherwise the registry's
+/// plain error text the seat wraps itself (`long-term-store.md` § Multi-account
+/// evolution → *The index is bounded*). Built here, once, so no seat phrases the
+/// refusal or paints the registry's English `Display`.
+fn add_refusal(err: fauna_client_accounts::AccountError) -> FfiError {
+    match fauna_client_accounts::add_refused_copy(&err) {
+        Some(line) => FfiError::General {
+            msg: line.resolve(fauna_i18n::strings::lookup),
+        },
+        None => general_err(err),
     }
 }
 
@@ -1025,7 +1089,7 @@ impl FfiAccountRegistry {
     ) -> Result<String, FfiError> {
         self.registry
             .add_account(&secret_hex, nest_url.as_deref(), device_id.as_deref())
-            .map_err(general_err)
+            .map_err(add_refusal)
     }
 
     /// Moment 1 — the confirm-identity commit point, through the shared
@@ -1079,7 +1143,7 @@ impl FfiAccountRegistry {
             device_id.as_deref(),
             reach_ipv4.as_deref(),
         )
-        .map_err(general_err)
+        .map_err(add_refusal)
     }
 
     /// Persist the deferred-DNS resume slot at the wizard's `AwaitingManualDns`
@@ -1730,7 +1794,8 @@ mod tests {
         // no run writes a serving lock into the developer's own store root.
         let store = tempfile::tempdir().expect("temp store container");
         let store_str = store.path().to_string_lossy().to_string();
-        let store_root = crate::account_state::store_root_for(Some(store.path().to_path_buf()));
+        let store_root =
+            crate::account_state::store_root_for(Some(store.path().to_path_buf())).unwrap();
 
         // A plain launch has no binding until something sets one.
         assert_eq!(session_launch_binding(), None);
@@ -1931,6 +1996,29 @@ mod tests {
         assert!(none.actor_ids.is_empty() && none.keys.is_empty());
     }
 
+    /// The file seats' id walk (`conversations_session*`, `folders_serve_set`)
+    /// is the registry's attested list, byte-for-byte, off the session's own
+    /// actor — and an identity that never succeeded gets none.
+    #[test]
+    fn the_file_seats_resolve_the_attested_ids_off_the_sessions_own_actor() {
+        let store: Arc<MapStore> = Arc::new(MapStore::default());
+        let registry = FfiAccountRegistry::new(store);
+        let old = registry.add_account(SECRET_A.into(), None, None).unwrap();
+        let new = registry.add_account(SECRET_B.into(), None, None).unwrap();
+        registry
+            .record_succession(old.clone(), new.clone())
+            .unwrap();
+
+        let ids = registry.attested_predecessor_ids32(&new);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(hex::encode(ids[0]), old);
+        assert_eq!(
+            vec![ids[0].to_vec()],
+            registry.attested_predecessor_actor_ids(new)
+        );
+        assert!(registry.attested_predecessor_ids32(&old).is_empty());
+    }
+
     /// What the two engine-hosting FFI faces resolve off the registry they
     /// are handed: the sync agent's capability pairs
     /// (`SyncCapability::predecessor_keys_by_actor`) and the in-process
@@ -2029,6 +2117,39 @@ mod tests {
             !msg.contains("no stored secret"),
             "the debug text must not reach a seat: {msg}"
         );
+    }
+
+    /// An add refused because the device's account list is full reaches the
+    /// seat as the SHARED paint-ready line (`add_refused_copy`), on both add
+    /// exports, never the registry's English `Display`.
+    #[test]
+    fn a_refused_add_carries_the_shared_list_full_line() {
+        let registry = FfiAccountRegistry::new(Arc::new(MapStore::default()));
+        let mut n = 1usize;
+        let secret = |n: usize| format!("{n:064x}");
+        while registry.add_account(secret(n), None, None).is_ok() {
+            n += 1;
+            assert!(n < 200, "the registry never refused");
+        }
+        let want = fauna_client_accounts::add_refused_copy(
+            &fauna_client_accounts::AccountError::IndexFull {
+                needed: 0,
+                limit: 0,
+            },
+        )
+        .expect("a full list is a refusal the user can act on")
+        .resolve(fauna_i18n::strings::lookup);
+
+        let refusals = [
+            registry.add_account(secret(n), None, None),
+            registry.persist_logged_in(secret(n), "https://nest.example.org".into(), None, None),
+        ];
+        for refusal in refusals {
+            match refusal {
+                Err(FfiError::General { msg }) => assert_eq!(msg, want),
+                other => panic!("expected a General refusal, got {other:?}"),
+            }
+        }
     }
 
     struct Seat {

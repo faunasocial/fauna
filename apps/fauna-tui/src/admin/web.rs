@@ -80,8 +80,20 @@ mod tests {
                 (vec![1u8; 32], "alice".to_string()),
                 (vec![2u8; 32], "bob".to_string()),
             ],
+            serving_domain: "web.test".to_string(),
             error: None,
         }
+    }
+
+    /// `admin-web-apex-info` carries the nest's web serving domain, never the
+    /// host this app dialed (`admin.md` § 7).
+    #[test]
+    fn apex_info_is_the_nests_serving_domain_not_the_dialed_host() {
+        let mut app = crate::app::tests::test_app();
+        app.admin.sub = AdminPage::Web;
+        app.admin.web_snapshot = Some(snapshot(None));
+
+        assert_eq!(app.admin.apex_url(), "https://web.test/");
     }
 
     #[test]
@@ -184,6 +196,7 @@ mod tests {
         app.admin.web_snapshot = Some(AdminWebSnapshot {
             current: None,
             actors: Vec::new(),
+            serving_domain: String::new(),
             error: Some("apex read failed".to_string()),
         });
         assert!(
@@ -215,6 +228,7 @@ mod tests {
             crate::admin::Outcome::WebLoaded(AdminWebSnapshot {
                 current: None,
                 actors: Vec::new(),
+                serving_domain: String::new(),
                 error: Some("apex read failed".to_string()),
             }),
         );

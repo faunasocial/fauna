@@ -15,18 +15,20 @@
 //!
 //! The post-auth half is the SPA's warning sink for this account: a run that
 //! ends with custody unconfirmed for an admin of the bound nest calls it with
-//! `"mismatch"` or `"failed"`, and the SPA paints its existing custody
-//! warning (`launch.recovery_custody_mismatch` / `…_failed`) on the shell's
-//! message banner. The seed never leaves Rust: the leg fetches it over
+//! the shared `LocalizedText` (`fauna_client_config::custody_leg_warning`),
+//! which the SPA renders through its one resolver onto the shell's message
+//! banner — the choice between the warnings is never the SPA's. The seed never leaves Rust: the leg fetches it over
 //! `fauna.admin.deployment_seed.get` and merges it through the plane door.
 
 use std::cell::RefCell;
 
 use fauna_account_plane::account_driver::AccountStoreHandle;
 use fauna_client_config::{
-    DeploymentSeedCustody, SupersessionMarks, run_deployment_seed_custody_leg,
+    DeploymentSeedCustody, SupersessionMarks, custody_leg_unattempted_warning, custody_leg_warning,
+    run_deployment_seed_custody_leg,
 };
 use fauna_core::identity::ActorId;
+use fauna_core::localized::LocalizedText;
 use fauna_rpc_wasm::WsRpcClient as InnerClient;
 
 /// The post-auth half: the account the SPA's post-auth hook fired for, and
@@ -44,10 +46,10 @@ thread_local! {
 }
 
 /// The leg's outcome as the token the post-auth promise resolves to (for the
-/// console ring), plus the warning key a run owes the admin, if any.
+/// console ring), plus the warning a run owes the admin, if any.
 pub(crate) struct LegRun {
     pub(crate) token: &'static str,
-    pub(crate) warning: Option<&'static str>,
+    pub(crate) warning: Option<LocalizedText>,
 }
 
 /// Record the post-auth half for `actor_id_hex`, replacing any earlier one.
@@ -71,13 +73,18 @@ fn warning_sink_for(actor_id_hex: &str) -> Option<js_sys::Function> {
     })
 }
 
-/// Hand a warning key to the SPA's sink. A throwing sink is logged, never
-/// propagated — the leg's outcome is already settled.
-pub(crate) fn emit_warning(sink: &js_sys::Function, warning: &str) {
-    if let Err(e) = sink.call1(
-        &wasm_bindgen::JsValue::NULL,
-        &wasm_bindgen::JsValue::from_str(warning),
-    ) {
+/// Hand a warning to the SPA's sink as a JS `LocalizedText`. A throwing (or
+/// unencodable) sink is logged, never propagated — the leg's outcome is
+/// already settled.
+pub(crate) fn emit_warning(sink: &js_sys::Function, warning: &LocalizedText) {
+    let value = match crate::rpc::to_js(warning) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!("[wasm/seed-custody] the warning did not encode: {e:?}");
+            return;
+        }
+    };
+    if let Err(e) = sink.call1(&wasm_bindgen::JsValue::NULL, &value) {
         tracing::warn!("[wasm/seed-custody] the warning sink threw: {e:?}");
     }
 }
@@ -93,7 +100,7 @@ pub(crate) async fn run_leg(client: &InnerClient, handle: &AccountStoreHandle) -
             tracing::warn!("[wasm/seed-custody] bound nest id unresolved: {e:?}");
             return LegRun {
                 token: "bound_unresolved",
-                warning: Some("failed"),
+                warning: Some(custody_leg_unattempted_warning()),
             };
         }
     };
@@ -127,12 +134,10 @@ pub(crate) async fn run_leg(client: &InnerClient, handle: &AccountStoreHandle) -
     } else {
         tracing::debug!(outcome = ?custody, "[wasm/seed-custody] custody leg settled");
     }
-    let warning = match custody {
-        DeploymentSeedCustody::RefusedMismatch => Some("mismatch"),
-        other if other.unconfirmed() => Some("failed"),
-        _ => None,
-    };
-    LegRun { token, warning }
+    LegRun {
+        token,
+        warning: custody_leg_warning(custody),
+    }
 }
 
 /// The store-ready edge: run the leg for `actor_id_hex` over `client` once the
@@ -149,7 +154,7 @@ pub(crate) fn spawn_at_store_ready(
     wasm_bindgen_futures::spawn_local(async move {
         let run = run_leg(&client, &handle).await;
         if let Some(warning) = run.warning {
-            emit_warning(&sink, warning);
+            emit_warning(&sink, &warning);
         }
     });
 }

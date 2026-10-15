@@ -2436,7 +2436,7 @@ mod tests {
 
         // Owner verified the head, supersedes the pre-re-seal row.
         let outcome = db
-            .supersede_sync_changes_for_path(fs.id, &ph, &m_new.digest())
+            .supersede_sync_changes_for_path(fs.id, &ph, &m_new.digest(), Some(&m_old.digest()))
             .await
             .unwrap();
         assert_eq!(
@@ -2492,7 +2492,7 @@ mod tests {
             .await
             .unwrap();
         }
-        db.supersede_sync_changes_for_path(fs.id, &ph, &m_new.digest())
+        db.supersede_sync_changes_for_path(fs.id, &ph, &m_new.digest(), Some(&m_old.digest()))
             .await
             .unwrap();
 
@@ -2551,7 +2551,7 @@ mod tests {
         )
         .await
         .unwrap();
-        db.supersede_sync_changes_for_path(fs.id, &ph, &m_new.digest())
+        db.supersede_sync_changes_for_path(fs.id, &ph, &m_new.digest(), Some(&m_old.digest()))
             .await
             .unwrap();
 
@@ -2574,7 +2574,7 @@ mod tests {
     /// points at the stored blob itself — a client-sealed opaque payload, not a
     /// `ChunkManifest`. GC must pin it as a blob WITHOUT attempting (and
     /// failing) a manifest decode, so the sweep still runs and reclaims true
-    /// orphans (the example.com 2026-07-09 finding: 30 rail blobs warned
+    /// orphans (the live-nest 2026-07-09 finding: 30 rail blobs warned
     /// `NotCanonical {trailing data}` every cycle; under the fail-closed sweep
     /// gate, misclassifying them would disable GC permanently).
     #[tokio::test]
@@ -2621,7 +2621,7 @@ mod tests {
         .await
         .unwrap();
         // Snapshot the rail set too — snapshot_files rows carry the same
-        // direct-blob hash (the example.com population had both).
+        // direct-blob hash (the live-nest population had both).
         let _snap = db.create_snapshot(fs.id).await.unwrap();
 
         // A true orphan that the sweep must still reclaim.

@@ -120,7 +120,7 @@ def _receive_a_conversation_message(app, nest_instance, test_user, body: str) ->
         port, admin_signing_key=nest_instance["admin"]["signing_key"]
     )
     wait_until(
-        lambda: conv_api.keypackage_count(port, sender, me) > 0,
+        lambda: conv_api.keypackage_count(port, test_user, me) > 0,
         MLS_HANDSHAKE_S,
         diagnose=lambda: "the app never published a key package to be added by",
     )

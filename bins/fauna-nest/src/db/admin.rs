@@ -2168,6 +2168,49 @@ impl CacheDb {
             .context("prune denied invite requests")?;
         Ok(n)
     }
+
+    /// Move one actor's **denied** invite request's `decided_at` back by
+    /// `secs`, as if the deny had happened that much earlier. Returns whether
+    /// a denied row matched. Test-only: the `invite_request_prune_test_hook`
+    /// seam, so a tier_3 can reach the 90-day prune without waiting it out.
+    #[cfg(feature = "test-hooks")]
+    pub async fn test_age_denied_invite_request(
+        &self,
+        actor_id: &[u8; 32],
+        secs: i64,
+    ) -> Result<bool> {
+        let actor_id = *actor_id;
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE invite_requests SET decided_at = decided_at - ?1
+                 WHERE actor_id = ?2 AND status = 'denied'",
+                rusqlite::params![secs, actor_id.as_slice()],
+            )
+            .context("test_age_denied_invite_request")?;
+        Ok(n > 0)
+    }
+
+    /// Move one actor's eviction clock forward by `secs`: every stored
+    /// `eviction_{warned,suspend,delete}_at` moves back by that much, as if the
+    /// eviction had started `secs` earlier. Returns whether the actor has an
+    /// eviction standing. Test-only: the `eviction_test_hook` seam.
+    #[cfg(feature = "test-hooks")]
+    pub async fn test_shift_eviction_clock(&self, actor_id: &[u8; 32], secs: i64) -> Result<bool> {
+        let actor_id = *actor_id;
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE users SET
+                   eviction_warned_at = eviction_warned_at - ?1,
+                   eviction_suspend_at = eviction_suspend_at - ?1,
+                   eviction_delete_at = eviction_delete_at - ?1
+                 WHERE actor_id = ?2 AND eviction_status != ''",
+                rusqlite::params![secs, actor_id.as_slice()],
+            )
+            .context("test_shift_eviction_clock")?;
+        Ok(n > 0)
+    }
 }
 
 /// Default retention for a **denied** `invite_requests` row, from
@@ -2190,23 +2233,36 @@ pub fn spawn_invite_request_retention_sweeper(
     super::spawn_retention_sweeper(retention, move || {
         let db = db.clone();
         async move {
-            let cutoff = now_epoch_secs().saturating_sub(retention.as_secs() as i64);
-            match db.prune_denied_invite_requests_older_than(cutoff).await {
-                Ok(n) if n > 0 => tracing::info!(
-                    target: "invite_requests",
-                    pruned = n,
-                    cutoff,
-                    "pruned denied invite requests"
-                ),
-                Ok(_) => {}
-                Err(e) => tracing::warn!(
+            if let Err(e) = run_invite_request_retention_sweep(&db, retention).await {
+                tracing::warn!(
                     target: "invite_requests",
                     error = %e,
                     "invite-request retention sweep failed"
-                ),
+                );
             }
         }
     })
+}
+
+/// One pass of [`spawn_invite_request_retention_sweeper`]: delete every denied
+/// request whose decision is older than `retention`. Returns the number
+/// pruned. Also the body the `test-hooks` endpoint
+/// `invite_request_prune_test_hook` runs, so a test observes this exact sweep.
+pub async fn run_invite_request_retention_sweep(
+    db: &CacheDb,
+    retention: std::time::Duration,
+) -> Result<usize> {
+    let cutoff = now_epoch_secs().saturating_sub(retention.as_secs() as i64);
+    let n = db.prune_denied_invite_requests_older_than(cutoff).await?;
+    if n > 0 {
+        tracing::info!(
+            target: "invite_requests",
+            pruned = n,
+            cutoff,
+            "pruned denied invite requests"
+        );
+    }
+    Ok(n)
 }
 
 fn invite_request_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<InviteRequestRow> {

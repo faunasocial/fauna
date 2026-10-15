@@ -263,12 +263,12 @@ def test_vps_config_update_channel_rows_select_one_of_three(app):
     ``provision_update_channel_defaults_to_stable_then_follows_the_choice``
     (fauna-onboarding-machine).
     """
-    if not app.driver.is_tui():
+    if app.driver.is_macos() or app.driver.is_ios():
         skip_unbuilt(
             app.driver,
             surface="the vps-config-update-channel-row radios",
-            detail="tui is the lead app and the only one that renders the rows; "
-            "the other six apps have not built them yet",
+            detail="tui, linux, web, android and windows render the rows; "
+            "macos+ios (shared Swift) are queued on their machines",
             tracked="onboarding-provisioning.md",
         )
     app.onboarding.go_to_vps_config()

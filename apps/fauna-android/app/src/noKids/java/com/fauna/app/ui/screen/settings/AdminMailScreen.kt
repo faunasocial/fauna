@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.settings
 
+import com.fauna.app.ui.navigation.exitAdminToPrimary
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -10,8 +11,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -21,19 +26,24 @@ import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.FaunaGateVerdict
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.ValueFormat
 import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.AdminMailVM
 import uniffi.fauna_client_mail_settings.AliasPolicyView
 import uniffi.fauna_client_mail_settings.AuthPolicyView
 import uniffi.fauna_client_mail_settings.BaselinePublishView
+import uniffi.fauna_client_mail_settings.BaselineStateView
 import uniffi.fauna_client_mail_settings.ImapPolicyView
+import uniffi.fauna_client_mail_settings.MailHealthView
 import uniffi.fauna_client_mail_settings.MailPolicyStatus
 import uniffi.fauna_client_mail_settings.OutboundPolicyView
 import uniffi.fauna_client_mail_settings.SpamPolicyView
 import uniffi.fauna_client_mail_settings.SubmissionPolicyView
 import uniffi.fauna_client_mail_settings.fcrdnsModeOptions
 import uniffi.fauna_client_mail_settings.imapDeleteNonemptyOptions
+import uniffi.fauna_core.LocalizedText
 import social.fauna.generated.Ids
 
 /**
@@ -74,8 +84,12 @@ fun AdminMailScreen(
         outbound = snapshot.outbound,
         alias = snapshot.alias,
         baselinePublishResult = snapshot.baselinePublishResult,
+        baselineState = snapshot.baselineState,
+        health = snapshot.health,
+        onRecheckHealth = vm::recheckHealth,
+        onResetWarmup = vm::resetWarmup,
         working = snapshot.status == MailPolicyStatus.WORKING,
-        onBack = { navController.popBackStack() },
+        onBack = { navController.exitAdminToPrimary() },
         onSetMailEnabled = vm::setMailEnabled,
         onSaveSpam = vm::saveSpam,
         onSaveAuth = vm::saveAuth,
@@ -84,6 +98,7 @@ fun AdminMailScreen(
         onSaveOutbound = vm::saveOutbound,
         onSaveAlias = vm::saveAlias,
         onPublishBaseline = vm::publishSpamBaseline,
+        onSetBaselineStanding = vm::setBaselineStandingPublish,
     )
 }
 
@@ -110,6 +125,19 @@ fun AdminMailContent(
     // default keeps the Compose test-harness call site unchanged.
     baselinePublishResult: BaselinePublishView? = null,
     onPublishBaseline: () -> Unit = {},
+    // The served baseline's state (null = blank text) and the standing-publish
+    // toggle's own gesture — `SetBaselineStandingPublish`, never a Spam-group draft.
+    baselineState: BaselineStateView? = null,
+    onSetBaselineStanding: (Boolean) -> Unit = {},
+    // Local `YYYY-MM-DD` of an epoch-ms instant — the shared
+    // `fauna_core::format::format_unix_local_date_ms`, injected FFI-free for the
+    // Compose test like the parse lambdas below.
+    formatDate: (Long) -> String = { com.fauna.ffi.formatUnixLocalDateMs(it) },
+    // The mail health readout (null until the first read lands ⇒ no section).
+    // Defaults keep the Compose test-harness call site unchanged.
+    health: MailHealthView? = null,
+    onRecheckHealth: () -> Unit = {},
+    onResetWarmup: () -> Unit = {},
     // Mail-knob validation via the shared `fauna_core::format::parse_count`
     // (`u32`) and `parse_count_u64` (`u64`, the IMAP storage ceiling): trim +
     // parse; a `null` return ⇒ keep the persisted value (a full-PUT save never
@@ -173,7 +201,12 @@ fun AdminMailContent(
             )
             DisabledControlReasonText(mailEnabledGate.reason)
 
-            SpamGroup(spam, working, onSaveSpam, parseCount, baselinePublishResult, onPublishBaseline)
+            health?.let { HealthGroup(it, working, onRecheckHealth, onResetWarmup) }
+
+            SpamGroup(
+                spam, working, onSaveSpam, parseCount, baselinePublishResult, onPublishBaseline,
+                baselineState, onSetBaselineStanding, formatDate,
+            )
             AuthGroup(auth, working, onSaveAuth, parseCount)
             SubmissionGroup(submission, working, onSaveSubmission, parseCount)
             ImapGroup(imap, working, onSaveImap, parseCount, parseCountU64)
@@ -185,6 +218,111 @@ fun AdminMailContent(
 
 // ── Group composables ─────────────────────────────────────────────────────────
 
+/**
+ * The mail health readout (`mail-deliverability.md` § The mail health readout) —
+ * read-only, a dumb render of the shared fold: the status line, the seven
+ * indexed check rows, the conditional delist link and the two action buttons.
+ * Every sentence is shared Rust (`mailHealthStateLabel` / `mailHealthCheckStateLabel`
+ * / `mailHealthHeartbeatLabel`) or the nest's own row detail; rows 5 and 6 are the
+ * heartbeats, whose empty detail the stamp fills. The warm-up reset is a
+ * same-button two-click confirm; any new readout (a mail re-read) disarms it.
+ */
+@Composable
+private fun HealthGroup(
+    health: MailHealthView,
+    working: Boolean,
+    onRecheck: () -> Unit,
+    onResetWarmup: () -> Unit,
+) {
+    val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
+    var warmupArmed by remember(health) { mutableStateOf(false) }
+    val nowMs = System.currentTimeMillis()
+    fun heartbeat(atSecs: Long?): String =
+        ValueFormat.render(context, com.fauna.ffi.mailHealthHeartbeatLabel(atSecs, nowMs), nowMs)
+
+    val statusLine = stringResourceFmt(
+        R.string.admin_mail_page_health_status_line,
+        localized(com.fauna.ffi.mailHealthStateLabel(health.state)) ?: "",
+        heartbeat(health.lastOutboundDeliveredAt),
+        heartbeat(health.lastInboundAcceptedAt),
+    )
+
+    Column(
+        modifier = Modifier.testTag(Ids.ADMIN_MAIL_HEALTH_SECTION),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            stringResource(R.string.admin_mail_page_health_title),
+            style = MaterialTheme.typography.titleMedium,
+        )
+        Text(statusLine, modifier = Modifier.testTag(Ids.ADMIN_MAIL_HEALTH_STATUS))
+        health.checks.forEachIndexed { i, check ->
+            val detail = when (i) {
+                5 -> heartbeat(health.lastOutboundDeliveredAt)
+                6 -> heartbeat(health.lastInboundAcceptedAt)
+                else -> check.detail
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_MAIL_HEALTH_CHECK),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    resolveLocalized(context, LocalizedText(check.labelKey, emptyMap())) ?: "",
+                    modifier = Modifier.weight(2f).testTag(Ids.ADMIN_MAIL_HEALTH_CHECK_LABEL),
+                    style = MaterialTheme.typography.labelLarge,
+                )
+                Text(
+                    localized(com.fauna.ffi.mailHealthCheckStateLabel(check.state)) ?: "",
+                    modifier = Modifier.weight(1f).testTag(Ids.ADMIN_MAIL_HEALTH_CHECK_STATE),
+                )
+                Text(
+                    detail,
+                    modifier = Modifier.weight(3f).testTag(Ids.ADMIN_MAIL_HEALTH_CHECK_DETAIL),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        health.delistUrl?.let { url ->
+            OutlinedButton(
+                onClick = { uriHandler.openUri(url) },
+                // The link's target, readable as its `href` attribute (this
+                // app's one string-attribute carrier): the text is the label.
+                modifier = Modifier.testTag(Ids.ADMIN_MAIL_HEALTH_DELIST_LINK)
+                    .semantics { stateDescription = url },
+            ) { Text(stringResource(R.string.admin_mail_page_health_delist)) }
+        }
+        val recheckGate = faunaGate("fauna.bridges.blocklist_self_check_run", enabled = !working)
+        OutlinedButton(
+            onClick = {
+                // Any mail re-read disarms the warm-up reset's confirm — an
+                // unchanged readout would not re-key the `remember` above.
+                warmupArmed = false
+                onRecheck()
+            },
+            enabled = recheckGate.enabled,
+            modifier = Modifier.testTag(Ids.ADMIN_MAIL_HEALTH_RECHECK_BUTTON),
+        ) { Text(stringResource(R.string.admin_mail_page_health_recheck)) }
+        DisabledControlReasonText(recheckGate.reason)
+        val resetGate = faunaGate("fauna.bridges.outbound_warmup_reset", enabled = !working)
+        OutlinedButton(
+            onClick = {
+                if (warmupArmed) onResetWarmup() else warmupArmed = true
+            },
+            enabled = resetGate.enabled,
+            modifier = Modifier.testTag(Ids.ADMIN_MAIL_HEALTH_WARMUP_RESET_BUTTON),
+        ) {
+            Text(
+                stringResource(
+                    if (warmupArmed) R.string.admin_mail_page_health_warmup_reset_confirm
+                    else R.string.admin_mail_page_health_warmup_reset,
+                ),
+            )
+        }
+        DisabledControlReasonText(resetGate.reason)
+    }
+}
+
 @Composable
 private fun SpamGroup(
     initial: SpamPolicyView,
@@ -193,6 +331,9 @@ private fun SpamGroup(
     parseCount: (String) -> UInt?,
     baselineResult: BaselinePublishView?,
     onPublishBaseline: () -> Unit,
+    baselineState: BaselineStateView?,
+    onSetBaselineStanding: (Boolean) -> Unit,
+    formatDate: (Long) -> String,
 ) {
     var junk by remember(initial) { mutableStateOf(initial.maxScoreBeforeSpamFolder.toString()) }
     var reject by remember(initial) { mutableStateOf(initial.maxScoreBeforeReject.toString()) }
@@ -259,8 +400,9 @@ private fun SpamGroup(
                     bayesianFullConfidenceSamples = parseCount(bayesianFullConfidence) ?: initial.bayesianFullConfidenceSamples,
                     trainingHistoryRetentionDays = parseCount(trainingRetention) ?: initial.trainingHistoryRetentionDays,
                     unlistedRecipientPenalty = parseCount(unlistedRecipientPenalty) ?: initial.unlistedRecipientPenalty,
-                    // Not rendered yet: carried through so a save never turns the
-                    // standing baseline publish off (which withdraws the baseline).
+                    // Carried through so a save never turns the standing baseline
+                    // publish off (which withdraws the baseline); the toggle below is
+                    // its own gesture.
                     baselineStandingPublish = initial.baselineStandingPublish,
                 ),
             )
@@ -282,7 +424,11 @@ private fun SpamGroup(
         // client just picks the message + interpolates.
         Text(
             baselineResult?.let {
-                val base = if (it.published) {
+                // `deferred` first: a delta-floor deferral also carries
+                // `published = false` and must never read as "too few contributors".
+                val base = if (it.deferred) {
+                    stringResource(R.string.admin_mail_page_spam_baseline_waiting)
+                } else if (it.published) {
                     stringResourceFmt(R.string.admin_mail_page_spam_baseline_published, it.contributors, it.sampleCount)
                 } else {
                     stringResourceFmt(R.string.admin_mail_page_spam_baseline_withheld, it.contributors)
@@ -301,6 +447,38 @@ private fun SpamGroup(
             } ?: "",
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.testTag(Ids.ADMIN_MAIL_PUBLISH_SPAM_BASELINE_RESULT),
+        )
+        // Standing publish — dispatches immediately off the PERSISTED group (the
+        // shared machine flips the one field and re-reads), so a gate on its wire
+        // kind, never a draft buffer like the toggles above.
+        val standingGate = faunaGate("fauna.bridges.put_spam_policy", enabled = !working)
+        ToggleRow(
+            label = stringResource(R.string.admin_mail_page_spam_baseline_standing_label),
+            subtitle = stringResource(R.string.admin_mail_page_spam_baseline_standing_subtitle),
+            checked = initial.baselineStandingPublish,
+            enabled = standingGate.enabled,
+            onChange = onSetBaselineStanding,
+            testTag = Ids.ADMIN_MAIL_SPAM_BASELINE_STANDING_TOGGLE,
+        )
+        DisabledControlReasonText(standingGate.reason)
+        // The served baseline's state: published / none, then the waiting note
+        // when the last run was deferred. Blank until the state read answers.
+        Text(
+            baselineState?.let {
+                val published = it.published && it.publishedAtMs != null
+                val line = if (published) {
+                    stringResourceFmt(
+                        R.string.admin_mail_page_spam_baseline_state_published,
+                        it.contributors,
+                        formatDate(it.publishedAtMs!!),
+                    )
+                } else {
+                    stringResource(R.string.admin_mail_page_spam_baseline_state_none)
+                }
+                if (it.deferred) line + " " + stringResource(R.string.admin_mail_page_spam_baseline_waiting) else line
+            } ?: "",
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.testTag(Ids.ADMIN_MAIL_SPAM_BASELINE_STATE),
         )
     }
 }

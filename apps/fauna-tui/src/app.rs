@@ -77,7 +77,9 @@ pub enum DataMessage {
     /// every feed and conversation render (`family-safety.md` § Content policy:
     /// the own-threshold collapse is built "once, for every user", supervised or
     /// not). The tui twin of linux's `DataMessage::SpamPreferencesLoaded`.
-    SpamPreferencesLoaded(fauna_client_spam::spam::SpamPreferences),
+    /// Carries the [`App::session_generation`] the read was fired under, checked
+    /// at the fold like [`Self::Page`]'s.
+    SpamPreferencesLoaded(u64, fauna_client_spam::spam::SpamPreferences),
     /// The region relay's answers for the declared chain
     /// (`crate::region::spawn_refresh`), folded on the UI thread by
     /// `crate::region::apply_replies`. A failed ask rides as its `Err` and
@@ -198,6 +200,19 @@ pub enum DataMessage {
     /// row's surface (`onboarding.md` § App-launch routing: "the same verdict
     /// mid-session lands the same surface"), Retry live on its machine.
     SignInRefused,
+    /// The nest refused this app's subprotocol (`SubprotocolMismatch`): the app
+    /// is too old for it, and the reconnect supervisor stopped for good. Met by
+    /// the supervisor when the nest it is connected to is upgraded past this
+    /// app. Escalates to the launch flow, whose re-run challenge meets the same
+    /// 426 and lands the needs-update surface — no retry, the fallthrough kept
+    /// (`version-compatibility.md` § Dimension 4).
+    AppOutdated,
+    /// The nest was restarted into its degraded needs-update mode while this
+    /// session was signed in (`fauna.nest.outdated`, met by the reconnect
+    /// supervisor's re-mint). Escalates to the launch flow, whose re-run
+    /// challenge earns the same refusal and lands the non-retry
+    /// `LaunchSurface::NeedsUpdate` (`version-compatibility.md` § Dimension 4).
+    NestOutdated,
     /// The claimed successor was **verified** against the registration chain
     /// (`fauna_client_recovery::resolve_successor`), so the superseded screen may
     /// now name it: the message upgrades from the claim-free
@@ -234,7 +249,8 @@ pub enum DataMessage {
     LaunchRecoverBoxes(Vec<String>),
     /// A deployment-seed custody leg ended with an admin's custody unconfirmed
     /// (`box-recovery.md` § The plane-era recovery floor, (c) The writes) —
-    /// the text is the shared `fauna_client_config::custody_leg_warning`.
+    /// the text is the shared `fauna_client_config::custody_leg_warning`,
+    /// rendered through tui's `LocalizedText` resolver.
     /// Surfaced onto the shared `warning-message` element (`app.injected_warning`)
     /// so the admin learns total-box-loss recovery isn't protected rather than
     /// discovering it only at box loss — tui's idiom of linux's
@@ -501,6 +517,15 @@ impl PageOp {
                 // where the admin most needs its verdict.
                 | PageOp::Admin(crate::admin::Op::RotateDeploymentSeed { .. })
                 | PageOp::Settings(crate::settings::Op::RecoveryStolen { .. })
+                // Completing a manual issuance runs the propagation gate, which
+                // holds until the domain's own name servers serve the pasted
+                // record — up to 45 minutes (`tls-certificates.md` § Surviving an
+                // interrupted manual issuance). The paste card stays up until it
+                // lands, and that card is what every consumer polls.
+                | PageOp::Admin(crate::admin::Op::Dns {
+                    action: fauna_client_dns::DnsAction::CompleteManualIssueCert,
+                    ..
+                })
         ) || self.waits_on_the_other_person()
     }
 
@@ -1016,6 +1041,26 @@ impl PageErrors {
 
     pub fn get(&self, page: &Page) -> Option<&String> {
         self.map.get(page)
+    }
+
+    /// A background re-read's own error: paint `message` and remember it in
+    /// `own` (the surface's slot for "the error I put up"), so a later good
+    /// read can retire exactly it through [`Self::retire_own`].
+    pub fn insert_own(&mut self, page: Page, message: String, own: &mut Option<String>) {
+        *own = Some(message.clone());
+        self.insert(page, message);
+    }
+
+    /// Retire the error a background re-read put up — and only that one: when
+    /// a gesture's message has replaced it since, the slot is the gesture's and
+    /// stays (the level rule, `account-runtime.md` § Multi-instance
+    /// concurrency, part 4). Always forgets `own`.
+    pub fn retire_own(&mut self, page: &Page, own: &mut Option<String>) {
+        if let Some(message) = own.take()
+            && self.map.get(page) == Some(&message)
+        {
+            self.remove(page);
+        }
     }
 
     // Only ever asserted on, crate-wide — never read by production code.
@@ -2088,11 +2133,8 @@ impl App {
             // `inject_error_for_test` could set it, but no page arm ever read
             // it, so an injected (or, in production, a real background-fetch)
             // feed error painted nowhere.
-            crate::pages::Page::Feed => self
-                .feed
-                .snapshot()
-                .and_then(|s| s.error)
-                .map(|e| e.resolve(fauna_i18n::strings::lookup)),
+            // The thread page's own fetch error leads while it is open.
+            crate::pages::Page::Feed => crate::feed::page_error(&self.feed),
             _ => None,
         }
     }
@@ -2795,6 +2837,14 @@ impl App {
         // silent-challenge result must be gone before the sweep or it would
         // resurrect the identity the reset just destroyed.
         self.drop_authenticated_state(fauna_client_account_runtime::StopReason::SignOut);
+        // The dial budget is per process and survives this in-place reset, so a
+        // journey would spend the NEXT test's burst (the reset-ack timeout in
+        // `test_family.py`); a reset app is a new device
+        // (`transport-connection.md` § The dial budget). Gated like the rest of
+        // the reset arm: a debug e2e build without `e2e-agent` compiled a
+        // feature-only clear out, and a module's sign-ins spent the burst.
+        #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+        fauna_ws_substrate::dial_budget::clear_for_test();
         // A refused-command banner is scoped to ONE test, and `reset()` is what the
         // `app` fixture calls before each test body — so this is the clear point
         // that stops a refusal leaking into the next test of a reused app process
@@ -3232,8 +3282,16 @@ impl App {
             // enforcement. Fetched at login so it is live before the first feed
             // or thread paint; a guardian floor (if any) composes on top,
             // strictest-wins, inside the shared engine.
-            UiMessage::Data(DataMessage::SpamPreferencesLoaded(prefs)) => {
-                self.content_policy.set_spam_preferences(Some(&prefs));
+            UiMessage::Data(DataMessage::SpamPreferencesLoaded(session_generation, prefs)) => {
+                if session_generation == self.session_generation {
+                    self.content_policy.set_spam_preferences(Some(&prefs));
+                } else {
+                    tracing::debug!(
+                        "spam preferences: dropping a read from session generation \
+                         {session_generation} (now {})",
+                        self.session_generation
+                    );
+                }
             }
             UiMessage::Data(DataMessage::RegionReplies(replies)) => {
                 crate::region::apply_replies(self, replies);
@@ -3296,6 +3354,9 @@ impl App {
             // spawned refetches land back through `DataMessage::Page` /
             // `FeedChanged`, each of which redraws.
             UiMessage::Data(DataMessage::Reconnected) => {
+                // The socket may have come back to an upgraded nest: the
+                // landing re-read below asks for its identity afresh, since
+                // the transport's `fauna.nest.info` memo is per connection.
                 self.apply_resync(StaleSurfaces::on_reconnect());
             }
             // A server push arrived on the one authenticated socket: refetch only
@@ -3531,9 +3592,6 @@ impl App {
                     {
                         self.spawn_page_op(PageOp::Nostr(op));
                     }
-                    // The devices page's remove-device action's plane leg
-                    // (`devices.md` § Removing a Device) needs the handle too.
-                    self.settings.wire_fleet_removal(handle.clone());
                     // The conversations seams that rest on the store: a
                     // community room's wrap keypairs (its nest-side half
                     // registered at login) and the native rail's read
@@ -3593,27 +3651,51 @@ impl App {
             UiMessage::Data(DataMessage::CustodyCeremonyMoved) => {
                 self.spawn_custody_drive();
             }
-            // A sibling same-account process committed to the shared store:
-            // re-drive the open surface's own load (reload semantics — the
-            // same refetch a same-page nav fires). Exactly two surfaces render
-            // store-backed snapshots today: the store-reading Settings
-            // sub-pages, and the feed's sealed scorers (muted keywords /
-            // trained factors), which load only inside the feed's reload.
+            // The store changed — a sibling same-account process committed, or
+            // this runtime's own pump changed an entry: re-drive the open
+            // surface's own load (`account-runtime.md` § Multi-instance
+            // concurrency, part 4). Three kinds of surface render store-backed
+            // snapshots: the store-reading Settings sub-pages
+            // (`store_resync_op`), the Backups page's destination half, and
+            // the feed's sealed scorers (muted keywords / trained factors),
+            // which load only inside the feed's reload.
             UiMessage::Data(DataMessage::AccountStoreChanged) => {
                 // The reporter-side hide list is a render source on every
                 // page (like the spam thresholds), not a page's own data, so
                 // it re-reads whatever page is open — a sibling may have
-                // reported something.
+                // reported something. The succession ledger's review planes
+                // are the same kind of source (`ledger_resync_ops`).
                 crate::report::spawn_load_hidden(self);
+                for op in crate::settings::ledger_resync_ops(self) {
+                    self.spawn_page_op(PageOp::Settings(op));
+                }
                 match self.page {
                     Page::Settings => {
                         if let Some(op) = crate::settings::store_resync_op(&mut self.settings) {
                             self.spawn_page_op(PageOp::Settings(op));
                         }
                     }
+                    Page::Backups => {
+                        if let Some(op) = crate::backups::store_resync_op(
+                            &self.backups,
+                            self.sync_agent.custodian_store(),
+                        ) {
+                            self.spawn_page_op(PageOp::Backups(op));
+                        }
+                    }
                     Page::Feed => {
                         if let Some(op) = crate::feed::nav_enter_op(&self.feed) {
                             self.spawn_page_op(PageOp::Feed(op));
+                        }
+                    }
+                    // The refused-change list only (the calendars beside it
+                    // are the nest's): a refusal is the runtime's own
+                    // background write, a source of the notice (part 2).
+                    Page::Events => {
+                        if let Some(op) =
+                            crate::events::store_resync_op(self.settings.account_store.clone())
+                        {
+                            self.spawn_page_op(PageOp::Events(op));
                         }
                     }
                     _ => {}
@@ -3677,6 +3759,12 @@ impl App {
                 {
                     conv.set_self_address(addr);
                 }
+                // The profile SELF header's display handle rides the same
+                // refresh: `<handle>@<current primary>`, so a primary rename the
+                // nest's answer carries moves it (`mail-primary-domain-rename.md`
+                // § Display-handle interaction).
+                let display = crate::session::session_display_handle(self);
+                crate::profile::set_self_address(&mut self.profile, display);
             }
             UiMessage::Data(DataMessage::NestIdentityChanged) => {
                 // `security.md` § Post-auth surfacing: route the verdict to the
@@ -3741,6 +3829,28 @@ impl App {
                 // refused surface, whose Retry drives the new live machine —
                 // the admin's restore is the way back in. Credentials KEPT: the
                 // identity is still the user's.
+                self.escalate_to_launch_surface();
+            }
+            UiMessage::Data(DataMessage::AppOutdated) => {
+                // The nest was upgraded past this app. Same escalation, same
+                // reason: every connection this session opens is now refused
+                // before the upgrade, so the indicator's bare "Disconnected"
+                // would sit over a dead session with no reason and no way on.
+                // The re-run challenge meets the same 426 and `launch::route`
+                // lands the needs-update surface with the localized "your app
+                // is out of date" text. Credentials KEPT: an updated app signs
+                // straight back in.
+                self.escalate_to_launch_surface();
+            }
+            UiMessage::Data(DataMessage::NestOutdated) => {
+                // The nest was restarted into its degraded needs-update mode.
+                // Same escalation, same reason: it serves no session until a
+                // newer binary is deployed, so a per-screen error would sit over
+                // a dead session. The re-run challenge meets the same
+                // `fauna.nest.outdated` and `launch::route` lands the non-retry
+                // update surface the launch path shows — no Retry, "use a
+                // different nest" kept. Credentials KEPT: nothing is wrong with
+                // the identity.
                 self.escalate_to_launch_surface();
             }
             UiMessage::Data(DataMessage::AccountLocked) => {
@@ -3896,15 +4006,16 @@ impl App {
             // before the sub-page arm below — Esc over an open lightbox must
             // shut the lightbox, not leave `post_detail` behind it. ui.yaml
             // declares a dismiss element inside neither `image-lightbox` nor
-            // `feed-compose-dialog`, so this is the human-only affordance, the
-            // same shape as the conversations detail overlays (the agent
-            // re-opens via a fresh `reset`).
+            // `feed-compose-dialog`, so Esc is the way out — for the agent too,
+            // which presses it over a painted element (`press_key(id,
+            // "Escape")`, `automation.rs`), the same shape as the conversations
+            // detail overlays.
             KeyCode::Esc if self.feed.lightbox.is_some() => {
                 self.feed.lightbox = None;
             }
             // The tip attribution window is the same class — a modal overlay
-            // ui.yaml gives no dismiss element of its own, so Esc is the
-            // human-only affordance and the agent re-opens via a fresh `reset`.
+            // ui.yaml gives no dismiss element of its own, so Esc is the way
+            // out, the agent's `press_key(id, "Escape")` included.
             #[cfg(feature = "payments")]
             KeyCode::Esc if self.feed.tip_list_open.is_some() => {
                 self.feed.tip_list_open = None;
@@ -3914,16 +4025,20 @@ impl App {
             }
             // The reply dialog is the same class as the two above: ui.yaml
             // registers no dismiss element for `feed-reply-dialog`, so Esc is
-            // the human-only affordance (the agent closes one it opened via a
-            // fresh `reset`).
+            // the way out (the agent's `press_key(id, "Escape")` included).
             KeyCode::Esc if self.feed.reply_draft.is_some() => {
                 self.feed.reply_draft = None;
             }
             // Leave a feed sub-page (`create_feed` / `post_detail`) back to the
-            // list. ui.yaml gives `post_detail` no dismiss element of its own (a
-            // human-only affordance — the agent never opens one it doesn't also
-            // close via a fresh `reset`), so this is a keymap-only escape, not a
+            // list. ui.yaml gives `post_detail` no dismiss element of its own,
+            // so this keymap escape is the way back for a human and the agent
+            // alike (`press_key("feed-post-detail-dialog", "Escape")`) — not a
             // registered element.
+            // The thread page steps back one level, to the post detail it was
+            // opened from — not to the list.
+            KeyCode::Esc if matches!(self.feed.mode, crate::feed::Mode::Thread(_)) => {
+                crate::feed::close_thread(&mut self.feed);
+            }
             KeyCode::Esc if self.feed.mode != crate::feed::Mode::List => {
                 self.feed.mode = crate::feed::Mode::List;
             }
@@ -3932,22 +4047,22 @@ impl App {
             // GUI apps' modal dialogs (linux `add_participant_overlay` /
             // `rename_overlay`, closed on the dialog's Cancel). A second Esc then
             // leaves the thread. ui.yaml gives the overlays no dismiss element, so
-            // this is the human-only back affordance (the agent cancels an overlay
-            // it opened via a fresh `reset`).
+            // Esc is the back affordance (the agent's `press_key(id, "Escape")`
+            // included).
             KeyCode::Esc if crate::conversations::detail_overlay_open(&self.conversations) => {
                 crate::conversations::cancel_detail_overlay(&mut self.conversations);
             }
             // The same keymap-only escape for the conversations sub-pages (the
             // `compose` and `conversation_detail` panes) — ui.yaml gives neither a
-            // dismiss element of its own, so Esc is the human-only back affordance
-            // (the agent closes a sub-page it opened via a fresh `reset`).
+            // dismiss element of its own, so Esc is the back affordance (the
+            // agent's `press_key(id, "Escape")` included).
             KeyCode::Esc if self.conversations.mode != crate::conversations::Mode::List => {
                 crate::conversations::show_list(&mut self.conversations);
             }
             // Leave the Address Book's `card_detail` sub-page back to the card
             // list. Same keymap-only shape as the feed/conversations arms above:
-            // ui.yaml's `card_detail` declares no dismiss element (the agent
-            // re-opens via a fresh `reset`), so Esc is the human's way back.
+            // ui.yaml's `card_detail` declares no dismiss element, so Esc is the
+            // way back (the agent's `press_key(id, "Escape")` included).
             KeyCode::Esc if self.contacts.open_card.is_some() => {
                 self.contacts.open_card = None;
             }
@@ -4301,6 +4416,16 @@ impl App {
         {
             self.spawn_page_op(PageOp::Settings(op));
         }
+        // Page-gated like mail_spam — see `StaleSurfaces::mail_export`: one
+        // progress push lands per uploaded chunk, and a visit re-reads the
+        // wizard anyway. What the flag buys is another device's export (or its
+        // failure, or its dismissal) reaching the wizard open here.
+        if r.mail_export
+            && self.page == Page::Settings
+            && let Some(op) = crate::settings::mail_export_resync_op(&self.settings)
+        {
+            self.spawn_page_op(PageOp::Settings(op));
+        }
         // Page-gated, unlike every arm above — see `StaleSurfaces::media`. `Media` is
         // a cross-*set* aggregate whose nav-enter read already covers the
         // arrive-while-elsewhere case, so the flag buys exactly one thing: the
@@ -4321,6 +4446,13 @@ impl App {
         // login and on a Family-page visit.
         if r.family {
             crate::family::spawn_status_check(&self.family, &self.tx, self.session_generation);
+        }
+        // The viewer's own thresholds — the content-policy engine's every-user
+        // half, read at login like the family read above and, like it, re-read on
+        // reconnect (family-client-enforcement.md § Content policy). Safe to
+        // re-fire for the same reason: a failed read keeps the loaded thresholds.
+        if r.own_thresholds {
+            crate::content_policy::spawn_spam_preferences_check(self, &self.tx);
         }
     }
 
@@ -4416,6 +4548,7 @@ pub(crate) mod tests {
                 "http://127.0.0.1:1".to_string(),
                 fauna_core::identity::ActorKeypair::generate(),
             ),
+            bearer_machine: None,
         }
     }
 
@@ -4824,6 +4957,8 @@ pub(crate) mod tests {
             ("NestIdentityChanged", DataMessage::NestIdentityChanged),
             ("IdentitySuperseded", DataMessage::IdentitySuperseded),
             ("SignInRefused", DataMessage::SignInRefused),
+            ("AppOutdated", DataMessage::AppOutdated),
+            ("NestOutdated", DataMessage::NestOutdated),
             ("AccountLocked", DataMessage::AccountLocked),
         ] {
             let mut app = authed_app();
@@ -4884,6 +5019,47 @@ pub(crate) mod tests {
             app.session_generation, 2,
             "a reset is a teardown and must count itself — zeroing here would \
              erase the event the counter exists to report"
+        );
+    }
+
+    /// An own-threshold read fired under an earlier session generation never
+    /// lands: it would hand the outgoing account's thresholds to the incoming
+    /// one. The current generation's read does. Red-verify by dropping the
+    /// generation check in the `SpamPreferencesLoaded` arm.
+    #[tokio::test]
+    async fn a_spam_preferences_read_from_an_earlier_session_never_lands() {
+        use fauna_core::content_category::ContentLabelEntry;
+        use fauna_core::obligation::RenderVerdict;
+
+        let mut app = test_app();
+        app.session_generation = 2;
+        let borderline = [ContentLabelEntry {
+            category: "spam".into(),
+            confidence_per_mille: 300,
+        }];
+        let prefs = fauna_client_spam::spam::SpamPreferences {
+            spam_threshold: 200,
+            phishing_threshold: 200,
+            extra: Default::default(),
+        };
+
+        app.handle_message(UiMessage::Data(DataMessage::SpamPreferencesLoaded(
+            1,
+            prefs.clone(),
+        )));
+        assert_ne!(
+            app.content_policy.verdict_for(&borderline).verdict,
+            RenderVerdict::Collapse,
+            "a read from generation 1 must not set generation 2's thresholds"
+        );
+
+        app.handle_message(UiMessage::Data(DataMessage::SpamPreferencesLoaded(
+            2, prefs,
+        )));
+        assert_eq!(
+            app.content_policy.verdict_for(&borderline).verdict,
+            RenderVerdict::Collapse,
+            "the current generation's read binds its thresholds"
         );
     }
 
@@ -5984,12 +6160,12 @@ pub(crate) mod tests {
         // pointer. Keeping the index alone re-elects the reset actor, and the
         // next sign-in then 403-hangs on the bearer/keypair mismatch
         // (`fauna_credential_store::cred_file_remove`).
-        use fauna_client_accounts::{AccountRegistry, SecretStore};
+        use fauna_client_accounts::SecretStore;
         let mut app = test_app();
         let store = Arc::clone(&app.credentials);
 
         // A signed-in actor: account #1, active.
-        let registry = AccountRegistry::new(Arc::clone(&store) as Arc<dyn SecretStore>);
+        let registry = crate::session::registry(&app);
         let actor = registry
             .add_account(&"a".repeat(64), Some("https://a.example"), None)
             .expect("the actor registers");
@@ -6000,7 +6176,7 @@ pub(crate) mod tests {
         assert_eq!(store.get("fauna/index"), None, "the account index is gone");
         assert_eq!(store.get(&format!("fauna/{actor}/secret")), None);
         assert_eq!(
-            AccountRegistry::new(Arc::clone(&store) as Arc<dyn SecretStore>).active(),
+            crate::session::registry(&app).active(),
             None,
             "no active account survives a factory reset"
         );
@@ -6020,11 +6196,11 @@ pub(crate) mod tests {
     /// run alongside it wipes the namespace before the gate opens.
     #[tokio::test]
     async fn a_sign_out_hands_the_loop_back_and_the_erase_waits_for_the_stop() {
-        use fauna_client_accounts::{AccountRegistry, SecretStore};
+        use fauna_client_accounts::SecretStore;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::with_credentials(&tx, test_credentials());
         let store = Arc::clone(&app.credentials);
-        AccountRegistry::new(Arc::clone(&store) as Arc<dyn SecretStore>)
+        crate::session::registry(&app)
             .add_account(&"a".repeat(64), Some("https://a.example"), None)
             .expect("the actor registers");
         // A sign-out landing mid-assembly: the stop has to wait for it.

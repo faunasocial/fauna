@@ -389,17 +389,19 @@ struct CustodiedStores {
 /// Atomics so the `&self` dial pass can record outcomes without widening its
 /// signature; the passes are sequential, the atomics are just interior
 /// mutability.
+///
+/// Ungated (not `account-runtime`), like the pull core it brakes: the
+/// custodian-NEST runtime (`bins/fauna-nest`'s custody-hosting pump) holds one
+/// per hosted custody, so both custodian kinds carry the same mechanism.
 #[derive(Default)]
-#[cfg(feature = "account-runtime")]
-struct IngestBrake {
+pub struct IngestBrake {
     at_floor: std::sync::atomic::AtomicBool,
     metering_failures: std::sync::atomic::AtomicU32,
 }
 
 /// Consecutive budget-pass failures after which a custody's ingest stops
 /// until a pass meters successfully. A Rust constant — never a knob.
-#[cfg(feature = "account-runtime")]
-const METERING_FAILURES_BRAKE: u32 = 3;
+pub const METERING_FAILURES_BRAKE: u32 = 3;
 
 /// A generous per-owner-device ceiling for the whole dial → admit → pull
 /// interaction, and the custody twin of `peer_leg`'s `PER_SIBLING_BUDGET`
@@ -419,26 +421,52 @@ const METERING_FAILURES_BRAKE: u32 = 3;
 #[cfg(feature = "account-runtime")]
 const PER_CUSTODY_OWNER_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
 
-#[cfg(feature = "account-runtime")]
 impl IngestBrake {
     /// May the pull halves ingest for this custody this pass?
-    fn admits_ingest(&self) -> bool {
+    pub fn admits_ingest(&self) -> bool {
         use std::sync::atomic::Ordering;
         !self.at_floor.load(Ordering::Relaxed)
             && self.metering_failures.load(Ordering::Relaxed) < METERING_FAILURES_BRAKE
     }
 
     /// The budget arm metered successfully; `at_floor` is what it reported.
-    fn record_metered(&self, at_floor: bool) {
+    pub fn record_metered(&self, at_floor: bool) {
         use std::sync::atomic::Ordering;
         self.at_floor.store(at_floor, Ordering::Relaxed);
         self.metering_failures.store(0, Ordering::Relaxed);
     }
 
     /// The budget arm failed to meter at all.
-    fn record_metering_failure(&self) {
+    pub fn record_metering_failure(&self) {
         use std::sync::atomic::Ordering;
         self.metering_failures.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Why [`NestLegSession::connect`] produced no session.
+#[derive(Debug, thiserror::Error)]
+pub enum LegConnectError {
+    /// The owner's nest **authenticated and refused** the custody handshake
+    /// (`fauna.auth.not_registered`): the grant behind the witness is revoked,
+    /// expired or never existed there. Proven by the nest itself — the one
+    /// failure the custodian-NEST pump marks its row on
+    /// (`account-replica-posture.md` § Replica posture → *The custody grant +
+    /// ceremony*, the custodian-NEST serve door bullet, ruling 5).
+    #[error("the owner's nest refused the custody handshake (fauna.auth.not_registered)")]
+    Refused,
+    /// Anything else — an unreachable nest, a transport fault, any other
+    /// refusal. Nothing about the grant was proven either way.
+    #[error("custody handshake/connect failed: {0}")]
+    Failed(String),
+}
+
+impl LegConnectError {
+    /// Classify a failed custody-session connect.
+    pub fn from_connect(e: fauna_client::NestClientError) -> Self {
+        match e {
+            fauna_client::NestClientError::Rpc(ref rpc) if rpc.is_not_registered() => Self::Refused,
+            e => Self::Failed(e.to_string()),
+        }
     }
 }
 
@@ -473,12 +501,16 @@ impl NestLegSession {
     ///
     /// The caller owns the dial-policy check — this
     /// constructor assumes `url` was already validated this pass.
+    ///
+    /// The owner nest's authenticated refusal comes back as
+    /// [`LegConnectError::Refused`], apart from every other failure — the
+    /// custodian-NEST pump marks its row on exactly that one.
     pub async fn connect(
         url: &str,
         owner: [u8; 32],
         custodian_signing_key: ed25519_dalek::SigningKey,
         witness: fauna_core::encoding::EmbedAsBytes,
-    ) -> Result<Self> {
+    ) -> std::result::Result<Self, LegConnectError> {
         let device_id = custodian_signing_key.verifying_key().to_bytes();
         let client = fauna_client::ws_custody_handshake_bearer::custody_nest_client(
             url,
@@ -489,7 +521,7 @@ impl NestLegSession {
         client
             .connect()
             .await
-            .map_err(|e| anyhow::anyhow!("custody handshake/connect refused: {e}"))?;
+            .map_err(LegConnectError::from_connect)?;
         let bytes =
             crate::nest_client::SyncClient::new(std::sync::Arc::clone(client.auth()), &device_id);
         Ok(Self {
@@ -538,6 +570,11 @@ pub(crate) struct CustodyLegState {
     /// cannot drift apart.
     device_key: ed25519_dalek::SigningKey,
     held: HashMap<[u8; 32], CustodiedStores>,
+    /// Test-only metering fault: while set, the budget arm takes the `Err`
+    /// branch a failed [`meter_and_evict`] takes — so a pin drives the real
+    /// failure path rather than writing the brake directly.
+    #[cfg(test)]
+    meter_fault: std::sync::atomic::AtomicBool,
 }
 
 /// The ops whose relay payload is T15's always-present floor: "journal,
@@ -560,6 +597,8 @@ impl CustodyLegState {
             actor_id,
             device_key,
             held: HashMap::new(),
+            #[cfg(test)]
+            meter_fault: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -862,7 +901,7 @@ impl CustodyLegState {
             }
             let session = held.nest.as_ref().expect("just set");
             // The row's cap, in `meter_and_evict`'s terms (0 = none recorded).
-            let cap = (held.row.retained_bytes_cap != 0).then_some(held.row.retained_bytes_cap);
+            let cap = row_cap_bytes(held.row.retained_bytes_cap);
             match pull_from_owner_nest(&held.pull, session, &owner, &scopes, cap).await {
                 Ok(pulled) => {
                     report.pulled += 1;
@@ -909,7 +948,72 @@ impl CustodyLegState {
         exclusions: &fauna_peer_sync::admission::CustodiedExclusions,
     ) -> Result<CustodyDialPass> {
         let mut report = CustodyDialPass::default();
-        for (owner, held) in &self.held {
+        // What each held custody dials this pass, in `self.held`'s iteration
+        // order: `None` skips its DIALING only (braked, no transport, an
+        // unreadable witness) — its budget below still runs.
+        #[allow(clippy::type_complexity)] // the witness, its scopes, the targets
+        let plans: Vec<
+            Option<(
+                fauna_core::encoding::EmbedAsBytes,
+                PullableScopes,
+                Vec<fauna_peer_sync::PeerDialTarget>,
+            )>,
+        > = self
+            .held
+            .values()
+            .map(|held| {
+                transport?;
+                if !held.brake.admits_ingest() {
+                    return None;
+                }
+                let (witness, scopes) = self.dialable(held)?;
+                let targets = held
+                    .row
+                    .owner_devices
+                    .iter()
+                    .cloned()
+                    .map(|d| fauna_peer_sync::dial_target_from(d, lan_ips))
+                    .collect();
+                Some((witness, scopes, targets))
+            })
+            .collect();
+        // Every owner device of every held custody connects and admits AT
+        // ONCE, so a pass with several unreachable owner devices pays one
+        // connect budget, not one each; the pulls below then run one after
+        // another, as they always have. Admission rides with the connect — the
+        // owner's serving node drops a connection whose stream stays unopened
+        // past `INBOUND_STREAM_ACCEPT_TIMEOUT` (the sibling pass's twin,
+        // `peer_leg::dial_pass`).
+        let connected = match transport {
+            Some(transport) => {
+                futures_util::future::join_all(
+                    self.held
+                        .keys()
+                        .zip(&plans)
+                        .filter_map(|(owner, plan)| plan.as_ref().map(|plan| (owner, plan)))
+                        .flat_map(|(owner, (witness, _, targets))| {
+                            targets.iter().map(move |target| {
+                                tokio::time::timeout(
+                                    PER_CUSTODY_OWNER_BUDGET,
+                                    connect_and_admit_owner(
+                                        transport,
+                                        owner,
+                                        witness,
+                                        target,
+                                        now_secs,
+                                        own_endpoints,
+                                        exclusions,
+                                    ),
+                                )
+                            })
+                        }),
+                )
+                .await
+            }
+            None => Vec::new(),
+        };
+        let mut connected = connected.into_iter();
+        for ((owner, held), plan) in self.held.iter().zip(plans) {
             // T13 step 4: what the owner devices told us about themselves this
             // pass. Keyed by the channel-proven key, and folded in by the ONE
             // rule both write-back paths share — a device that did not answer
@@ -920,65 +1024,53 @@ impl CustodyLegState {
             // The dial half. Every early exit here (no transport, an unreadable
             // witness, no targets) skips DIALING only — the budget below still
             // runs, which is the whole point of hoisting it out of this block.
-            if !held.brake.admits_ingest() {
-                // The brake stops the PULL half only — the budget arm below
-                // still runs, which is how the brake releases.
-                report.braked += 1;
-            } else if let Some(transport) = transport
-                && let Some((witness, scopes)) = self.dialable(held)
-            {
-                {
-                    let targets: Vec<_> = held
-                        .row
-                        .owner_devices
-                        .iter()
-                        .cloned()
-                        .map(|d| fauna_peer_sync::dial_target_from(d, lan_ips))
-                        .collect();
-                    if !targets.is_empty() {
-                        report.custodies += 1;
-                    }
-                    for target in targets {
-                        let attempt = tokio::time::timeout(
+            // A custody has a plan only while its brake admits ingest
+            // (`plans` above), and only a plan consumes connect results — so
+            // the results stay aligned with the custodies that asked for them.
+            if let Some((_, scopes, targets)) = plan {
+                if !targets.is_empty() {
+                    report.custodies += 1;
+                }
+                let results: Vec<_> = connected.by_ref().take(targets.len()).collect();
+                for (target, connected) in targets.iter().zip(results) {
+                    let attempt = match connected {
+                        Ok(Ok((channel, peer_endpoints))) => tokio::time::timeout(
                             PER_CUSTODY_OWNER_BUDGET,
-                            self.dial_one_owner(
-                                transport,
-                                held,
-                                owner,
-                                &witness,
-                                &scopes,
-                                &target,
-                                now_secs,
-                                own_endpoints,
-                                exclusions,
-                            ),
+                            pull_from_owner(held, &scopes, &channel),
                         )
-                        .await;
-                        match attempt {
-                            Ok(Ok((recorded, peer_endpoints))) => {
-                                report.admitted += 1;
-                                report.recorded += recorded;
-                                if let Some(fresh) = peer_endpoints {
-                                    observed.insert(fresh.node_id, fresh);
-                                }
+                        .await
+                        .map(|pulled| pulled.map(|recorded| (recorded, peer_endpoints))),
+                        Ok(Err(e)) => Ok(Err(e)),
+                        Err(elapsed) => Err(elapsed),
+                    };
+                    match attempt {
+                        Ok(Ok((recorded, peer_endpoints))) => {
+                            report.admitted += 1;
+                            report.recorded += recorded;
+                            if let Some(fresh) = peer_endpoints {
+                                observed.insert(fresh.node_id, fresh);
                             }
-                            Ok(Err(e)) => {
-                                report.failed += 1;
-                                tracing::debug!(
-                                    node = %fauna_core::hex32::encode(&target.node_id),
-                                    "custody dial: owner device unreachable or refused: {e:#}"
-                                );
-                            }
-                            Err(_) => {
-                                report.failed += 1;
-                                tracing::debug!(
-                                    node = %fauna_core::hex32::encode(&target.node_id),
-                                    "custody dial: owner device blew its budget — abandoned this pass"
-                                );
-                            }
+                        }
+                        Ok(Err(e)) => {
+                            report.failed += 1;
+                            tracing::debug!(
+                                node = %fauna_core::hex32::encode(&target.node_id),
+                                "custody dial: owner device unreachable or refused: {e:#}"
+                            );
+                        }
+                        Err(_) => {
+                            report.failed += 1;
+                            tracing::debug!(
+                                node = %fauna_core::hex32::encode(&target.node_id),
+                                "custody dial: owner device blew its budget — abandoned this pass"
+                            );
                         }
                     }
                 }
+            } else if !held.brake.admits_ingest() {
+                // The brake stops the PULL half only — the budget arm below
+                // still runs, which is how the brake releases.
+                report.braked += 1;
             }
 
             // T15's budget, applied where the bytes just landed — from EITHER
@@ -989,8 +1081,15 @@ impl CustodyLegState {
             // on `CustodyHeld`), so the translation happens here, where that
             // field's history is visible — not inside `meter_and_evict`, whose
             // `Some(0)` means a real "hold the floor" budget.
-            let cap = (held.row.retained_bytes_cap != 0).then_some(held.row.retained_bytes_cap);
-            match meter_and_evict(&held.pull, cap).await {
+            let cap = row_cap_bytes(held.row.retained_bytes_cap);
+            let metered = meter_and_evict(&held.pull, cap).await;
+            #[cfg(test)]
+            let metered = if self.meter_fault.load(std::sync::atomic::Ordering::SeqCst) {
+                Err(anyhow::anyhow!("injected metering fault (test seam)"))
+            } else {
+                metered
+            };
+            match metered {
                 Ok(outcome) => {
                     held.brake.record_metered(outcome.unreclaimable > 0);
                     report.held_bytes = report.held_bytes.saturating_add(outcome.held_bytes);
@@ -1056,74 +1155,87 @@ impl CustodyLegState {
             }
         }
     }
+}
 
-    #[allow(clippy::too_many_arguments)]
-    async fn dial_one_owner(
-        &self,
-        transport: &Arc<dyn fauna_transport::PeerTransport>,
-        held: &CustodiedStores,
-        owner: &[u8; 32],
-        witness: &fauna_core::encoding::EmbedAsBytes,
-        scopes: &PullableScopes,
-        target: &fauna_peer_sync::PeerDialTarget,
-        now_secs: u64,
-        own_endpoints: Option<&DeviceEndpoints>,
-        exclusions: &fauna_peer_sync::admission::CustodiedExclusions,
-    ) -> Result<(usize, Option<DeviceEndpoints>)> {
-        let channel = crate::peer_leg::dial_and_open_channel(transport, target).await?;
-        // The reply witness is the owner device's `DeviceAuthorization`;
-        // custody replies are fail-closed-refused (no revocation view), which
-        // is correct — an owner device never answers with a custody grant.
-        // The removed-device half reads the SAME exclusion map the serve side
-        // does: this custodian cannot read the owner account's sealed
-        // `state-fleet` device-set rows, so the owner-signed lists on the
-        // grants it holds are its only exclusion set, and a device they name
-        // is walked in neither direction (`fauna_peer_sync::server::
-        // DeviceRemovedFn` states the bound).
-        let removed_view = exclusions.view();
-        // T13 step 4 in both directions: carry this custodian's own candidates
-        // (the owner fleet cannot read our `device-endpoints` kind either) and
-        // take the owner device's back, bound to the channel-proven key.
-        let outcome = fauna_peer_sync::admit_over_as(
-            &channel,
-            fauna_protocol::peer_sync::WITNESS_CUSTODY_GRANT,
-            witness.clone(),
-            owner,
-            now_secs,
-            fauna_peer_sync::AdmissionViews {
-                custody_revoked: None,
-                device_removed: Some(&removed_view),
-            },
-            own_endpoints.cloned(),
-        )
-        .await
-        .context("custody admission")?;
-        let requester = fauna_peer_sync::PeerRequester::new(Arc::clone(&channel));
-        let mut recorded = 0usize;
-        for scope in &scopes.account_state {
-            recorded += custody_pull(&held.pull, &requester, scope, None)
-                .await?
-                .recorded;
-        }
-        for cs in &scopes.content {
-            crate::peer_leg::walk_and_pull_content_scope(
-                &held.pull,
-                &requester,
-                &channel,
-                cs,
-                "custody content walk",
-                "custody blocks pull",
-                // Ruling 4 names the same-account peer leg and the share
-                // pump; the custody leg's nest is the OWNER's, whose
-                // per-custody reachability is not threaded here, so it
-                // pulls on any path as before — `Unavailable` is "not
-                // known to be available", the ruling's own exception.
-                fauna_transport::NestPath::Unavailable,
-            )
-            .await?;
-        }
-        Ok((recorded, outcome.peer_endpoints))
+/// One owner device's connect half: dial → channel → custody admission. Runs
+/// concurrently across the pass's targets ([`CustodyLegState::dial_pass`]);
+/// the pulls are [`pull_from_owner`]'s, serially after.
+#[cfg(feature = "account-runtime")]
+async fn connect_and_admit_owner(
+    transport: &Arc<dyn fauna_transport::PeerTransport>,
+    owner: &[u8; 32],
+    witness: &fauna_core::encoding::EmbedAsBytes,
+    target: &fauna_peer_sync::PeerDialTarget,
+    now_secs: u64,
+    own_endpoints: Option<&DeviceEndpoints>,
+    exclusions: &fauna_peer_sync::admission::CustodiedExclusions,
+) -> Result<(
+    Arc<fauna_peer_channel::PeerChannel>,
+    Option<DeviceEndpoints>,
+)> {
+    let channel = crate::peer_leg::dial_and_open_channel(transport, target).await?;
+    // The reply witness is the owner device's `DeviceAuthorization`;
+    // custody replies are fail-closed-refused (no revocation view), which
+    // is correct — an owner device never answers with a custody grant.
+    // The removed-device half reads the SAME exclusion map the serve side
+    // does: this custodian cannot read the owner account's sealed
+    // `state-fleet` device-set rows, so the owner-signed lists on the
+    // grants it holds are its only exclusion set, and a device they name
+    // is walked in neither direction (`fauna_peer_sync::server::
+    // DeviceRemovedFn` states the bound).
+    let removed_view = exclusions.view();
+    // T13 step 4 in both directions: carry this custodian's own candidates
+    // (the owner fleet cannot read our `device-endpoints` kind either) and
+    // take the owner device's back, bound to the channel-proven key.
+    let outcome = fauna_peer_sync::admit_over_as(
+        &channel,
+        fauna_protocol::peer_sync::WITNESS_CUSTODY_GRANT,
+        witness.clone(),
+        owner,
+        now_secs,
+        fauna_peer_sync::AdmissionViews {
+            custody_revoked: None,
+            device_removed: Some(&removed_view),
+        },
+        own_endpoints.cloned(),
+    )
+    .await
+    .context("custody admission")?;
+    Ok((channel, outcome.peer_endpoints))
+}
+
+/// One admitted owner device's pulls: every scope the custody witness names.
+#[cfg(feature = "account-runtime")]
+async fn pull_from_owner(
+    held: &CustodiedStores,
+    scopes: &PullableScopes,
+    channel: &Arc<fauna_peer_channel::PeerChannel>,
+) -> Result<usize> {
+    let requester = fauna_peer_sync::PeerRequester::new(Arc::clone(channel));
+    let mut recorded = 0usize;
+    for scope in &scopes.account_state {
+        recorded += custody_pull(&held.pull, &requester, scope, None)
+            .await?
+            .recorded;
     }
+    for cs in &scopes.content {
+        crate::peer_leg::walk_and_pull_content_scope(
+            &held.pull,
+            &requester,
+            channel,
+            cs,
+            "custody content walk",
+            "custody blocks pull",
+            // Ruling 4 names the same-account peer leg and the share
+            // pump; the custody leg's nest is the OWNER's, whose
+            // per-custody reachability is not threaded here, so it
+            // pulls on any path as before — `Unavailable` is "not
+            // known to be available", the ruling's own exception.
+            fauna_transport::NestPath::Unavailable,
+        )
+        .await?;
+    }
+    Ok(recorded)
 }
 
 /// What one custody's nest pull landed, split by plane — the relay rows the
@@ -1195,6 +1307,36 @@ async fn adopt_scope_segments<B: StoreBackend>(
     }
 }
 
+/// The headroom a custody's cap leaves over what the store already holds — the
+/// admission budget a pull adopts segment pairs within, and the bound on each
+/// download (`account-replica-posture.md` § Custody policy → *Admission*).
+///
+/// `cap_bytes` is in [`meter_and_evict`]'s terms: `None` = no cap recorded →
+/// the ceremony default; `Some(0)` is a real "hold the floor" budget, so the
+/// headroom is 0. Held bytes are the same meter the budget pass evicts against
+/// ([`AccountStore::custody_meter`]), so the two cannot disagree on what is full.
+pub(crate) async fn custody_admission_budget<B: StoreBackend>(
+    store: &AccountStore<B>,
+    cap_bytes: Option<u64>,
+) -> Result<u64> {
+    let cap = cap_bytes.unwrap_or(fauna_core::custody_ceremony::DEFAULT_RETAINED_BYTES_CAP);
+    let held = store
+        .custody_meter(CUSTODY_FLOOR_OPS)
+        .await
+        .context("custody nest leg: meter before segment adoption")?
+        .held_bytes();
+    Ok(cap.saturating_sub(held))
+}
+
+/// The device leg's `CustodyHeld.retained_bytes_cap` in [`meter_and_evict`]'s
+/// terms. The row field is `#[serde(default)]`, so 0 means "none recorded" and
+/// becomes `None` (the ceremony default); it must not reach the budget as
+/// `Some(0)`, which is a real zero-payload budget.
+#[cfg(any(feature = "account-runtime", test))]
+pub(crate) fn row_cap_bytes(retained_bytes_cap: u64) -> Option<u64> {
+    (retained_bytes_cap != 0).then_some(retained_bytes_cap)
+}
+
 /// One custody's pull from the owner's nest: every account-state scope the
 /// witness names, then every content scope's coordinate walk — both addressed
 /// with `of_owner`, which is what makes the nest re-derive the custody verdict
@@ -1228,16 +1370,10 @@ pub async fn pull_from_owner_nest<B: StoreBackend>(
             .await?
             .recorded;
     }
-    let cap = cap_bytes.unwrap_or(fauna_core::custody_ceremony::DEFAULT_RETAINED_BYTES_CAP);
     let mut budget = if scopes.content.is_empty() {
         0
     } else {
-        let held = store
-            .custody_meter(CUSTODY_FLOOR_OPS)
-            .await
-            .context("custody nest leg: meter before segment adoption")?
-            .held_bytes();
-        cap.saturating_sub(held)
+        custody_admission_budget(store, cap_bytes).await?
     };
     for cs in &scopes.content {
         tally.adopted_segments += adopt_scope_segments(store, session, cs, &mut budget).await;
@@ -1494,6 +1630,38 @@ mod tests {
     use std::sync::Mutex;
 
     const OWNER: [u8; 32] = [0xA1; 32];
+
+    /// Only the owner nest's authenticated refusal classifies as `Refused`;
+    /// an unreachable nest or any other refusal proves nothing about the
+    /// grant (ruling 5's "distinct from an unreachable nest or any other
+    /// failure").
+    #[test]
+    fn only_an_authenticated_refusal_classifies_as_refused() {
+        use fauna_client::NestClientError;
+        assert!(matches!(
+            LegConnectError::from_connect(NestClientError::Rpc(
+                fauna_protocol::RpcError::not_registered()
+            )),
+            LegConnectError::Refused
+        ));
+        for other in [
+            NestClientError::Auth("connection refused".into()),
+            NestClientError::WebSocket("reset".into()),
+            NestClientError::RpcTimeout,
+            NestClientError::Rpc(fauna_protocol::RpcError::new(
+                "fauna.auth.timestamp_drift",
+                "error.auth.timestamp_drift",
+            )),
+        ] {
+            assert!(
+                matches!(
+                    LegConnectError::from_connect(other),
+                    LegConnectError::Failed(_)
+                ),
+                "only not_registered is the owner's refusal"
+            );
+        }
+    }
 
     fn row(writer: u8, seq: u64, bytes: &[u8]) -> SyncChange {
         SyncChange {
@@ -1950,6 +2118,74 @@ mod tests {
         assert_eq!(outcome.evicted.bytes, dat1.len() as u64, "the older .dat");
         assert_eq!(outcome.held_bytes, held - dat1.len() as u64);
         assert!(outcome.held_bytes <= cap, "back under the cap");
+    }
+
+    /// The admission headroom is `cap − held`, over the SAME meter the budget
+    /// pass judges (adopted segment pairs included), saturating at 0, with
+    /// `None` meaning the ceremony default. Mutate:
+    /// return the cap whole (forget `held`), or read `held` from anything but
+    /// `custody_meter`, and the exact-value asserts red.
+    #[tokio::test]
+    async fn the_admission_budget_is_the_cap_less_what_the_store_holds() {
+        use fauna_account_store::conformance::fixtures::{
+            SEG_ACTOR, real_segment, seg_actor_hex, seg_post_scope,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = AccountStore::open(
+            SqliteBackend::open(dir.path()).unwrap(),
+            &seg_actor_hex(),
+            WriterId([0xC5; 32]),
+        )
+        .await
+        .unwrap();
+        let default = fauna_core::custody_ceremony::DEFAULT_RETAINED_BYTES_CAP;
+        assert_eq!(
+            custody_admission_budget(&store, None).await.unwrap(),
+            default,
+            "an empty store leaves the whole default"
+        );
+
+        let (dat, meta) = real_segment("post", 1, SEG_ACTOR, &[b"p1", b"p2"]);
+        store
+            .adopt_segment(&seg_post_scope(), &dat, &meta)
+            .await
+            .unwrap()
+            .unwrap();
+        let held = (dat.len() + meta.len()) as u64;
+        assert_eq!(
+            custody_admission_budget(&store, Some(held + 10))
+                .await
+                .unwrap(),
+            10,
+            "headroom = cap − the adopted pair"
+        );
+        assert_eq!(
+            custody_admission_budget(&store, None).await.unwrap(),
+            default - held,
+            "None is the ceremony default, not zero"
+        );
+        assert_eq!(
+            custody_admission_budget(&store, Some(held - 1))
+                .await
+                .unwrap(),
+            0,
+            "over the cap saturates at zero"
+        );
+        assert_eq!(
+            custody_admission_budget(&store, Some(0)).await.unwrap(),
+            0,
+            "Some(0) is a real hold-the-floor budget"
+        );
+    }
+
+    /// The device leg's 0-means-absent row field becomes `None` (the ceremony
+    /// default), never `Some(0)` — a zero would read as "hold the floor" and
+    /// refuse every pair. Mutate: map 0 to `Some(0)`.
+    #[test]
+    fn a_zero_row_cap_is_no_cap_recorded_and_any_other_is_itself() {
+        assert_eq!(row_cap_bytes(0), None);
+        assert_eq!(row_cap_bytes(1), Some(1));
+        assert_eq!(row_cap_bytes(8 << 30), Some(8 << 30));
     }
 
     /// The whole T15 contract over bytes a real pull put there: an over-budget
@@ -2862,6 +3098,95 @@ mod tests {
         assert_eq!(after.failed, 1, "the pull half runs again");
     }
 
+    /// The metering-FAILURE arm driven through the real budget
+    /// pass: with the meter faulted, each budget pass reports
+    /// `metering_failed`, the pulls before [`METERING_FAILURES_BRAKE`] still
+    /// run (one failure is weather), the threshold closes ingest, and one clean
+    /// meter reopens it. Red with the arm's `record_metering_failure()`
+    /// removed — the brake is written by the pass, never by the test. Same
+    /// harness and observable (the garbage witness) as the at-floor pin above.
+    #[cfg(feature = "account-runtime")]
+    #[tokio::test]
+    async fn a_persistently_failing_meter_stops_pulling_until_it_meters_clean() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let mut leg = CustodyLegState::new(
+            fauna_account_store::root::StoreRoot::at(store_dir.path()),
+            ActorId([0xC6; 32]),
+            ed25519_dalek::SigningKey::from_bytes(&[0x0E; 32]),
+        );
+        let owner = [0xA7u8; 32];
+        let grant_id = vec![0x33u8; 16];
+
+        let own_dir = tempfile::tempdir().unwrap();
+        let own = AccountStore::open(
+            SqliteBackend::open(own_dir.path()).unwrap(),
+            &hex::encode([0xC6; 32]),
+            WriterId([0xC6; 32]),
+        )
+        .await
+        .unwrap();
+        let kind = fauna_protocol::merge_policy::KIND_CUSTODIES_HELD;
+        own.put_state(fauna_account_store::types::StateEntry {
+            kind: kind.into(),
+            key: fauna_core::custody_grant::custody_entry_key(&grant_id),
+            scope: fauna_protocol::merge_policy::home_scope_for_kind(kind)
+                .unwrap()
+                .into(),
+            value: fauna_core::encoding::canonical_encode(
+                &fauna_core::custodies_held::CustodyHeld {
+                    grant_id: grant_id.clone(),
+                    owner,
+                    witness: vec![0xEE; 8], // non-empty, undecodable — the observable
+                    owner_devices: Vec::new(),
+                    owner_nest_url: Some("http://127.0.0.1:1".to_string()),
+                    retained_bytes_cap: 100_000,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .to_vec(),
+            merge_meta: None,
+            entry_version: 0,
+            tombstone: false,
+        })
+        .await
+        .unwrap();
+        leg.serve_refresh(&own, None, &Default::default())
+            .await
+            .unwrap();
+
+        leg.meter_fault
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        for i in 1..=METERING_FAILURES_BRAKE {
+            let budget = leg
+                .dial_pass(None, &[], 1_000, None, &Default::default())
+                .await
+                .unwrap();
+            assert_eq!(budget.metering_failed, 1, "failure #{i} is reported");
+            let pass = leg.nest_pass().await.unwrap();
+            if i < METERING_FAILURES_BRAKE {
+                assert_eq!(pass.braked, 0, "failure #{i} is weather: still pulling");
+                assert_eq!(pass.failed, 1, "the pull half runs after failure #{i}");
+            } else {
+                assert_eq!(pass.braked, 1, "{i} consecutive failures close ingest");
+                assert_eq!(pass.failed, 0, "the witness decode was never reached");
+            }
+        }
+
+        // The meter clears: the (always-running) budget arm meters clean and
+        // releases the brake — pulls resume.
+        leg.meter_fault
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let budget = leg
+            .dial_pass(None, &[], 1_000, None, &Default::default())
+            .await
+            .unwrap();
+        assert_eq!(budget.metering_failed, 0, "the meter is back");
+        let after = leg.nest_pass().await.unwrap();
+        assert_eq!(after.braked, 0, "a clean meter reopens ingest");
+        assert_eq!(after.failed, 1, "the pull half runs again");
+    }
+
     // ──  PER_CUSTODY_OWNER_BUDGET's witness ──
 
     /// `PER_CUSTODY_OWNER_BUDGET`'s elapsed arm must not stop the sequential
@@ -2871,23 +3196,30 @@ mod tests {
     /// witnessed on this leg too (`peer_leg`'s sibling test below is the
     /// twin).
     ///
-    /// `#[tokio::test(start_paused = true)]` turns the 120 s budget into an
-    /// instant clock advance (convention 14: no wall-clock wait). The OUTER
-    /// `tokio::time::timeout` is the mutation-verification guard: delete the
-    /// inner wrapper from `dial_pass` and the slow device's dial hangs with
-    /// no timer anywhere else in the test for the paused clock to advance
-    /// to — the outer guard is what turns that into a red `.expect()` panic
+    /// `#[tokio::test(start_paused = true)]` turns the budgets into instant
+    /// clock advances (convention 14: no wall-clock wait). The OUTER
+    /// `tokio::time::timeout` is the mutation-verification guard: delete both
+    /// inner budgets (this one and the shared dial's
+    /// `peer_leg::CONNECT_BUDGET`) and the slow device's dial hangs with no
+    /// timer anywhere else in the test for the paused clock to advance to —
+    /// the outer guard is what turns that into a red `.expect()` panic
     /// instead of a hung test.
+    ///
+    /// Two of the three devices stall, and the pass still costs ONE
+    /// `CONNECT_BUDGET` between them (`account-sync-plane.md` § The peer leg →
+    /// *Discovery*): every owner device connects at once, and only the pulls
+    /// run one after another. Dial them one by one again and the elapsed
+    /// assertion reds at two budgets.
     #[cfg(feature = "account-runtime")]
     #[tokio::test(start_paused = true)]
     async fn a_stalled_owner_device_does_not_block_the_next_owner_device() {
-        struct HangsForOneNode {
-            hangs: [u8; 32],
+        struct HangsForNodes {
+            hangs: Vec<[u8; 32]>,
             dialed: Arc<Mutex<Vec<[u8; 32]>>>,
         }
 
         #[async_trait::async_trait]
-        impl fauna_transport::PeerTransport for HangsForOneNode {
+        impl fauna_transport::PeerTransport for HangsForNodes {
             async fn dial(
                 &self,
                 peer: fauna_transport::EndpointKey,
@@ -2895,8 +3227,8 @@ mod tests {
             ) -> Result<Box<dyn fauna_transport::PeerConn>, fauna_transport::TransportError>
             {
                 self.dialed.lock().unwrap().push(*peer.as_bytes());
-                if *peer.as_bytes() == self.hangs {
-                    // Never resolves — the slow owner device. No timer of its
+                if self.hangs.contains(peer.as_bytes()) {
+                    // Never resolves — a slow owner device. No timer of its
                     // own; only the (inner, or absent-under-mutation outer)
                     // budget can ever make this `.await` return.
                     std::future::pending::<()>().await;
@@ -2945,6 +3277,7 @@ mod tests {
             .to_vec();
 
         let slow_node = [0x51u8; 32];
+        let second_slow_node = [0x53u8; 32];
         let fast_node = [0x52u8; 32];
 
         let own_dir = tempfile::tempdir().unwrap();
@@ -2975,6 +3308,10 @@ mod tests {
                         ..Default::default()
                     },
                     DeviceEndpoints {
+                        node_id: second_slow_node,
+                        ..Default::default()
+                    },
+                    DeviceEndpoints {
                         node_id: fast_node,
                         ..Default::default()
                     },
@@ -2997,11 +3334,12 @@ mod tests {
             .unwrap();
 
         let dialed: Arc<Mutex<Vec<[u8; 32]>>> = Arc::new(Mutex::new(Vec::new()));
-        let transport: Arc<dyn fauna_transport::PeerTransport> = Arc::new(HangsForOneNode {
-            hangs: slow_node,
+        let transport: Arc<dyn fauna_transport::PeerTransport> = Arc::new(HangsForNodes {
+            hangs: vec![slow_node, second_slow_node],
             dialed: Arc::clone(&dialed),
         });
 
+        let started = tokio::time::Instant::now();
         let report = tokio::time::timeout(
             PER_CUSTODY_OWNER_BUDGET * 3,
             leg.dial_pass(Some(&transport), &[], 1_000, None, &Default::default()),
@@ -3009,20 +3347,25 @@ mod tests {
         .await
         .expect(
             "dial_pass must return within an outer budget — if this fires, the inner \
-             PER_CUSTODY_OWNER_BUDGET timeout is gone and the slow device hung the whole pass",
+             budgets are gone and the slow device hung the whole pass",
         )
         .unwrap();
 
         assert_eq!(report.custodies, 1);
         assert_eq!(
-            report.failed, 2,
-            "the elapsed slow device and the fast refusal both count as failed"
+            report.failed, 3,
+            "the elapsed slow devices and the fast refusal all count as failed"
         );
         assert_eq!(report.admitted, 0);
         assert_eq!(
             *dialed.lock().unwrap(),
-            vec![slow_node, fast_node],
-            "the fast device must still be dialed after the slow one blows its budget"
+            vec![slow_node, second_slow_node, fast_node],
+            "the fast device must still be dialed after the slow ones blow their budget"
+        );
+        assert_eq!(
+            started.elapsed(),
+            crate::peer_leg::CONNECT_BUDGET,
+            "two unanswered owner devices must cost the pass one CONNECT_BUDGET between them"
         );
     }
 }

@@ -1670,6 +1670,7 @@ async fn a_member_reads_the_floor_roster_and_a_stranger_does_not() {
     let req = RoomListRosterRequest {
         room_id: created.room_id.clone(),
         at_policy_version: None,
+        policy_version_span: None,
         extra: std::collections::BTreeMap::new(),
     };
     let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
@@ -1787,6 +1788,7 @@ async fn the_roster_read_joins_the_handle_it_knows_and_elides_the_rest() {
         encode_canonical(&RoomListRosterRequest {
             room_id: created.room_id.clone(),
             at_policy_version: None,
+            policy_version_span: None,
             extra: std::collections::BTreeMap::new(),
         })
         .unwrap()
@@ -2788,6 +2790,7 @@ async fn the_roster_read_serves_the_signed_policy_its_version_names() {
                 encode_canonical(&RoomListRosterRequest {
                     room_id: created.room_id.clone(),
                     at_policy_version: None,
+                    policy_version_span: None,
                     extra: std::collections::BTreeMap::new(),
                 })
                 .unwrap()
@@ -2867,6 +2870,7 @@ async fn the_roster_read_serves_a_superseded_policy_version_by_number() {
                     encode_canonical(&RoomListRosterRequest {
                         room_id,
                         at_policy_version: at,
+                        policy_version_span: None,
                         extra: std::collections::BTreeMap::new(),
                     })
                     .unwrap()
@@ -2927,6 +2931,119 @@ async fn the_roster_read_serves_a_superseded_policy_version_by_number() {
     assert!(
         plain.policy_at_version.is_none() && plain.birth_salt.is_none(),
         "and a read that names none is the read it always was"
+    );
+}
+
+/// **The roster read serves a RUN of retained policy versions** — so a member
+/// anchoring an N-version chain pays one roster read per run, not one per
+/// version (`community-rooms.md` § Implementation status today, residual (c)).
+/// The run is consecutive from the asked version, ends at the first version the
+/// room never held, is capped by the nest, carries the birth salt beside it,
+/// and is every bit as unverified as the single version — the member's chain
+/// judge still checks each link.
+#[tokio::test]
+async fn the_roster_read_serves_a_run_of_policy_versions_up_to_a_cap() {
+    let (router, state) = router_with_db_only().await;
+    let owner = ActorKeypair::generate();
+    let created = create_room(&router, &state, &owner, birth_salt(0x9c)).await;
+    let top = u64::from(fauna_mls::room_policy::MAX_POLICY_VERSION_SPAN) + 2;
+    for v in 2..=top {
+        dispatch(
+            &router,
+            state.clone(),
+            owner.actor_id().0,
+            "fauna.conversations.room.set_policy",
+            set_policy_payload(
+                &created.room_id,
+                &owner,
+                &policy_at(&owner, v, &[], &format!("name-{v}")),
+            ),
+        )
+        .await
+        .expect("the owner supersedes the previous version");
+    }
+
+    let read = |at: Option<u64>, span: Option<u32>| {
+        let router = &router;
+        let state = state.clone();
+        let room_id = created.room_id.clone();
+        let actor = owner.actor_id().0;
+        async move {
+            let bytes = dispatch(
+                router,
+                state,
+                actor,
+                "fauna.conversations.room.list_roster",
+                Bytes::from(
+                    encode_canonical(&RoomListRosterRequest {
+                        room_id,
+                        at_policy_version: at,
+                        policy_version_span: span,
+                        extra: std::collections::BTreeMap::new(),
+                    })
+                    .unwrap()
+                    .to_vec(),
+                ),
+            )
+            .await
+            .expect("a member reads the roster");
+            decode::<RoomListRosterReply>(&bytes).unwrap()
+        }
+    };
+    let versions_of = |reply: &RoomListRosterReply| -> Vec<u64> {
+        reply
+            .policy_versions
+            .as_ref()
+            .expect("a run was asked for")
+            .iter()
+            .map(|blob| {
+                fauna_core::encoding::canonical_decode::<fauna_mls::room_policy::SignedRoomPolicy>(
+                    blob,
+                )
+                .expect("stored as signed")
+                .policy
+                .version
+            })
+            .collect()
+    };
+
+    // A run: consecutive from the asked version, the first the one
+    // `policy_at_version` already serves, the birth salt beside it.
+    let reply = read(Some(1), Some(3)).await;
+    assert_eq!(versions_of(&reply), vec![1, 2, 3]);
+    assert_eq!(
+        reply.policy_versions.as_ref().unwrap()[0],
+        reply
+            .policy_at_version
+            .clone()
+            .expect("the first is served alone too"),
+    );
+    assert!(reply.birth_salt.is_some(), "the salt anchors version 1");
+
+    // The nest caps one run, whatever the member asked for.
+    let capped = read(Some(1), Some(u32::MAX)).await;
+    assert_eq!(
+        versions_of(&capped).len(),
+        fauna_mls::room_policy::MAX_POLICY_VERSION_SPAN as usize,
+        "one read serves at most the nest's cap"
+    );
+
+    // The run starts where asked and ends at the first version never held.
+    let tail = read(Some(top - 1), Some(8)).await;
+    assert_eq!(versions_of(&tail), vec![top - 1, top]);
+    let none = read(Some(top + 1), Some(8)).await;
+    assert!(
+        none.policy_at_version.is_none() && none.policy_versions.is_none_or(|v| v.is_empty()),
+        "a version the room never held serves nothing — the member fails closed"
+    );
+
+    // No span asked for: the single-version read it always was.
+    let single = read(Some(2), None).await;
+    assert!(single.policy_at_version.is_some() && single.policy_versions.is_none());
+    let plain = read(None, Some(4)).await;
+    assert!(
+        plain.policy_versions.is_none() && plain.birth_salt.is_none(),
+        "a span with no version to start at is ignored"
     );
 }
 
@@ -6614,6 +6731,7 @@ async fn roster_tip_wraps(
             encode_canonical(&RoomListRosterRequest {
                 room_id: room_hex.into(),
                 at_policy_version: None,
+                policy_version_span: None,
                 extra: std::collections::BTreeMap::new(),
             })
             .unwrap()
@@ -9507,6 +9625,7 @@ async fn the_roster_read_serves_the_wrap_targets_a_minter_must_cover() {
             encode_canonical(&RoomListRosterRequest {
                 room_id: created.room_id.clone(),
                 at_policy_version: None,
+                policy_version_span: None,
                 extra: std::collections::BTreeMap::new(),
             })
             .unwrap()
@@ -11499,6 +11618,7 @@ async fn the_roster_read_serves_the_signed_labeler_set() {
                 encode_canonical(&RoomListRosterRequest {
                     room_id: room_hex.clone(),
                     at_policy_version: None,
+                    policy_version_span: None,
                     extra: std::collections::BTreeMap::new(),
                 })
                 .unwrap()
@@ -12320,6 +12440,7 @@ async fn a_poisoned_seat_is_skipped_not_frozen_and_heals_on_its_own_rekey() {
             encode_canonical(&RoomListRosterRequest {
                 room_id: created.room_id.clone(),
                 at_policy_version: None,
+                policy_version_span: None,
                 extra: std::collections::BTreeMap::new(),
             })
             .unwrap()

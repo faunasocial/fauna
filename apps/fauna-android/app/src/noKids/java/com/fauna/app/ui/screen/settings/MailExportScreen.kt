@@ -19,16 +19,24 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.testing.TestAgent
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.components.rememberTwoClickArm
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.MailTransferText
+import com.fauna.app.ui.util.ValueFormat
+import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.getStringFmt
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.shareFile
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.MailExportVM
 import uniffi.fauna_mail.ExportFormat
+import uniffi.fauna_client_mail_settings.ExportSessionState
 import uniffi.fauna_client_mail_settings.ExportStep
 import uniffi.fauna_client_mail_settings.MailExportSnapshot
 import uniffi.fauna_client_mail_settings.MailboxOption
 import uniffi.fauna_client_mail_settings.MailboxProgressView
+import uniffi.fauna_client_mail_settings.exportConfirmEstimate
 import uniffi.fauna_client_mail_settings.exportFormatLabel
 import social.fauna.generated.Ids
 import java.io.File
@@ -150,7 +158,7 @@ fun MailExportContent(
                 ExportStep.FORMAT -> FormatStep(snapshot.format, formatLabel, onSelectFormat, onNext)
                 ExportStep.SCOPE -> ScopeStep(snapshot, onToggleMailbox, onSetDateFrom, onSetDateTo, onSetStripHeaders, onPrev, onNext)
                 ExportStep.CONFIRM -> ConfirmStep(snapshot, formatLabel, onPrev, onStart)
-                ExportStep.PROGRESS -> ProgressStep(snapshot, onPause, onResume, onCancel)
+                ExportStep.PROGRESS -> ProgressStep(snapshot, onPause, onResume, onCancel, onDiscard)
                 ExportStep.DONE -> DoneStep(snapshot, formatLabel, onDownload, onDiscard)
             }
         }
@@ -275,6 +283,16 @@ private fun ScopeStep(
     }
 }
 
+/** The shared elapsed time / time left of this session (`mail-export.md` § Wizard steps steps 4–5). */
+private fun exportTiming(snapshot: MailExportSnapshot) = MailTransferText.timing(
+    startedAt = snapshot.startedAt,
+    lastProgressAt = snapshot.lastProgressAt,
+    running = snapshot.sessionState == ExportSessionState.RUNNING,
+    processed = snapshot.exportedCount.toULong() + snapshot.skippedCount.toULong() +
+        snapshot.erroredCount.toULong(),
+    total = snapshot.totalCount.toULong(),
+)
+
 @Composable
 private fun ConfirmStep(
     snapshot: MailExportSnapshot,
@@ -283,23 +301,55 @@ private fun ConfirmStep(
     onStart: () -> Unit,
 ) {
     Text(stringResource(R.string.mail_export_confirm_title), style = MaterialTheme.typography.titleMedium)
+    // The message total, estimated bytes and estimated time all come from the
+    // one shared computation (§ Wizard steps step 3); nothing is summed here.
+    val estimate = exportConfirmEstimate(snapshot.mailboxes)
+    val context = LocalContext.current
+    val counts = stringResourceFmt(
+        R.string.mail_export_confirm_summary_count_fmt,
+        formatLabel(snapshot.format),
+        snapshot.mailboxes.count { it.selected },
+        estimate.messages.toLong(),
+    )
+    // A nest that reports no sizes (selected messages, zero bytes) gets the bare
+    // counts plus the "not estimated" note, never an invented figure.
+    val summary = if (estimate.sealedBytes == 0uL) {
+        counts
+    } else {
+        context.getStringFmt(
+            R.string.mail_export_confirm_summary_estimated_fmt,
+            counts,
+            ValueFormat.byteSize(context, estimate.sealedBytes.toLong()),
+            ValueFormat.durationSecs(context, estimate.secs),
+        )
+    }
     Text(
-        stringResourceFmt(
-            R.string.mail_export_confirm_summary_fmt,
-            formatLabel(snapshot.format),
-            snapshot.mailboxes.count { it.selected },
-        ),
+        summary,
         style = MaterialTheme.typography.bodyMedium,
         modifier = Modifier.testTag(Ids.MAIL_EXPORT_CONFIRM_SUMMARY),
     )
+    if (estimate.messages > 0uL && estimate.sealedBytes == 0uL) {
+        Text(
+            stringResource(R.string.mail_export_confirm_estimate_unavailable),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    // Start opens an export session on the nest (OnlineOnly); Back stays live.
+    val startGate = faunaGate("fauna.bridges.start_export_session")
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(onClick = onPrev, modifier = Modifier.testTag(Ids.WIZARD_BACK_BUTTON)) {
             Text(stringResource(R.string.mail_export_back))
         }
-        Button(onClick = onStart, modifier = Modifier.testTag(Ids.MAIL_EXPORT_START_BUTTON)) {
+        Button(
+            onClick = onStart,
+            enabled = startGate.enabled,
+            modifier = Modifier.testTag(Ids.MAIL_EXPORT_START_BUTTON),
+        ) {
             Text(stringResource(R.string.mail_export_start_button))
         }
     }
+    DisabledControlReasonText(startGate.reason)
 }
 
 @Composable
@@ -308,12 +358,17 @@ private fun ProgressStep(
     onPause: () -> Unit,
     onResume: () -> Unit,
     onCancel: () -> Unit,
+    onDiscard: () -> Unit,
 ) {
     Text(stringResource(R.string.mail_export_progress_title), style = MaterialTheme.typography.titleMedium)
     Text(
-        stringResourceFmt(
-            R.string.mail_export_progress_summary_fmt,
-            snapshot.exportedCount, snapshot.totalCount, snapshot.skippedCount, snapshot.erroredCount,
+        MailTransferText.exportProgress(
+            LocalContext.current,
+            stringResourceFmt(
+                R.string.mail_export_progress_summary_fmt,
+                snapshot.exportedCount, snapshot.totalCount, snapshot.skippedCount, snapshot.erroredCount,
+            ),
+            exportTiming(snapshot),
         ),
         style = MaterialTheme.typography.bodyMedium,
         modifier = Modifier.testTag(Ids.MAIL_EXPORT_PROGRESS_SUMMARY),
@@ -327,18 +382,59 @@ private fun ProgressStep(
         },
         modifier = Modifier.fillMaxWidth().testTag(Ids.MAIL_EXPORT_PROGRESS_BAR),
     )
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedButton(onClick = onPause, modifier = Modifier.testTag(Ids.MAIL_EXPORT_PAUSE_BUTTON)) {
-            Text(stringResource(R.string.mail_export_pause_button))
-        }
-        OutlinedButton(onClick = onResume, modifier = Modifier.testTag(Ids.MAIL_EXPORT_RESUME_BUTTON)) {
-            Text(stringResource(R.string.mail_export_resume_button))
-        }
+    if (snapshot.sessionState == ExportSessionState.ERRORED) {
+        // A failed export is a record, not a run (`mail-export.md` § A failed
+        // export is a record the wizard shows until the user moves on): none of
+        // the three controls applies, and its one control is the Done step's
+        // discard under its own label.
+        val dismissGate = faunaGate("fauna.bridges.discard_export_blob")
         OutlinedButton(
-            onClick = onCancel,
+            onClick = onDiscard,
+            enabled = dismissGate.enabled,
             colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-            modifier = Modifier.testTag(Ids.MAIL_EXPORT_CANCEL_BUTTON),
-        ) { Text(stringResource(R.string.mail_export_cancel_button)) }
+            modifier = Modifier.testTag(Ids.MAIL_EXPORT_DISCARD_BUTTON),
+        ) {
+            Text(stringResource(R.string.mail_export_dismiss_failed_button))
+        }
+        DisabledControlReasonText(dismissGate.reason)
+    } else {
+        // Each control drives an export-session row on the nest (OnlineOnly).
+        val pauseGate = faunaGate("fauna.bridges.pause_export_session")
+        val resumeGate = faunaGate("fauna.bridges.resume_export_session")
+        val cancelGate = faunaGate("fauna.bridges.cancel_export_session")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = onPause,
+                enabled = pauseGate.enabled,
+                modifier = Modifier.testTag(Ids.MAIL_EXPORT_PAUSE_BUTTON),
+            ) {
+                Text(stringResource(R.string.mail_export_pause_button))
+            }
+            OutlinedButton(
+                onClick = onResume,
+                enabled = resumeGate.enabled,
+                modifier = Modifier.testTag(Ids.MAIL_EXPORT_RESUME_BUTTON),
+            ) {
+                Text(stringResource(R.string.mail_export_resume_button))
+            }
+            // Two-click confirm (`common.md` § Two-click confirm): Cancel
+            // stops a running export, so it arms before it performs.
+            val cancelArm = rememberTwoClickArm()
+            OutlinedButton(
+                onClick = { cancelArm.press(onCancel) },
+                enabled = cancelGate.enabled,
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                modifier = Modifier.testTag(Ids.MAIL_EXPORT_CANCEL_BUTTON),
+            ) {
+                Text(
+                    stringResource(
+                        if (cancelArm.armed) R.string.common_confirm_q else R.string.mail_export_cancel_button,
+                    ),
+                )
+            }
+        }
+        // One reason for the three controls: they gate on the same condition.
+        DisabledControlReasonText(pauseGate.reason)
     }
     // Per-mailbox progress list (indexed).
     Column(modifier = Modifier.testTag(Ids.MAIL_EXPORT_MAILBOX_PROGRESS_LIST)) {
@@ -369,18 +465,15 @@ private fun DoneStep(
     onDiscard: () -> Unit,
 ) {
     Text(stringResource(R.string.mail_export_done_title), style = MaterialTheme.typography.titleMedium)
+    val context = LocalContext.current
     Text(
         snapshot.blobBytes?.let {
             // Once the archive is on disk the summary says WHERE — the visible
             // answer to the Download press (tui's and linux's shape).
-            if (snapshot.savedArchivePath.isNotEmpty()) {
-                stringResourceFmt(
-                    R.string.mail_export_saved_summary_fmt,
-                    formatLabel(snapshot.format), it, snapshot.savedArchivePath,
-                )
-            } else {
-                stringResourceFmt(R.string.mail_export_done_summary_fmt, formatLabel(snapshot.format), it)
-            }
+            MailTransferText.exportDone(
+                context, snapshot.exportedCount, formatLabel(snapshot.format), it,
+                snapshot.savedArchivePath, exportTiming(snapshot),
+            )
         } ?: formatLabel(snapshot.format),
         style = MaterialTheme.typography.bodyMedium,
         modifier = Modifier.testTag(Ids.MAIL_EXPORT_DONE_SUMMARY),
@@ -391,6 +484,9 @@ private fun DoneStep(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.testTag(Ids.MAIL_EXPORT_DOWNLOAD_URL),
     )
+    // Discard deletes the stored archive on the nest (OnlineOnly); Download
+    // reads the already-minted URL and is not a gated kind.
+    val discardGate = faunaGate("fauna.bridges.discard_export_blob")
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Button(
             onClick = onDownload,
@@ -399,10 +495,12 @@ private fun DoneStep(
         ) { Text(stringResource(R.string.mail_export_download_button)) }
         OutlinedButton(
             onClick = onDiscard,
+            enabled = discardGate.enabled,
             colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
             modifier = Modifier.testTag(Ids.MAIL_EXPORT_DISCARD_BUTTON),
         ) { Text(stringResource(R.string.mail_export_discard_button)) }
     }
+    DisabledControlReasonText(discardGate.reason)
 }
 
 @Composable

@@ -395,6 +395,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_launch_machine_checksum_func_launch_lock_notice_holds()
+		})
+		if checksum != 15766 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_launch_machine: uniffi_fauna_launch_machine_checksum_func_launch_lock_notice_holds: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_launch_machine_checksum_method_launchmachine_current_bearer()
 		})
 		if checksum != 45461 {
@@ -2436,9 +2445,10 @@ type LaunchSnapshot struct {
 	// same § identity resolution must never delay conversation delivery: the
 	// app builds its session immediately, renders whatever it cached for
 	// "Welcome back", and refuses a send locally until a real address arrives.
-	// A token refresh does not clear it: a refresh ignores its verify reply's
-	// metadata (the launch owns the cached identity), so the last confirmed one
-	// stands.
+	// A successful token refresh replaces it with its own verify reply's
+	// identity (so a mid-session handle rename lands at the next re-mint); a
+	// failed one leaves the last confirmed identity standing. The launch alone
+	// persists it (`LaunchPersistence::save_authenticated`).
 	Identity *LaunchIdentity
 	// Set when the account index at `fauna/index` is present but this build
 	// cannot use it (`version-compatibility.md` § 5 item 9). `None` in every
@@ -4005,5 +4015,15 @@ func MintAndPersistPendingFactoryReset(store LaunchPersistence, nestUrl string, 
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_launch_machine_fn_func_mint_and_persist_pending_factory_reset(FfiConverterLaunchPersistenceINSTANCE.Lower(store), FfiConverterStringINSTANCE.Lower(nestUrl), FfiConverterStringINSTANCE.Lower(handle), _uniffiStatus),
 		}
+	}))
+}
+
+// [`LaunchSnapshot::lock_notice_holds`] as a free function — the UniFFI face
+// of the one notice rule (a method on a `uniffi::Record` is not exported), so
+// a native app's locked surface calls the shared rule rather than restating
+// it. The wasm twin is `fauna-wasm-launch`'s `lockNoticeHolds`.
+func LaunchLockNoticeHolds(snapshot LaunchSnapshot, shownLockedUntilSecs uint64) bool {
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_fauna_launch_machine_fn_func_launch_lock_notice_holds(FfiConverterLaunchSnapshotINSTANCE.Lower(snapshot), FfiConverterUint64INSTANCE.Lower(shownLockedUntilSecs), _uniffiStatus)
 	}))
 }

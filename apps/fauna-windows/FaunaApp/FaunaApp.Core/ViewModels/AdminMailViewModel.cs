@@ -230,14 +230,55 @@ public sealed record BaselinePublishValues(
     bool Published,
     uint Contributors,
     uint SampleCount,
-    uint SkippedContributors)
+    uint SkippedContributors,
+    bool Deferred)
 {
     internal static BaselinePublishValues From(BaselinePublishView v) => new(
         v.@published,
         v.@contributors,
         v.@sampleCount,
-        v.@skippedContributors);
+        v.@skippedContributors,
+        v.@deferred);
 }
+
+/// <summary>Read-only state of the served spam baseline
+/// (<c>admin-mail-spam-baseline-state</c>; mail-spam.md § Cold start Path 2 →
+/// <i>Standing publish</i>). <c>null</c> on the VM until the state read answers (and on
+/// a nest that refuses it). Mirrors the internal <c>BaselineStateView</c>.</summary>
+public sealed record BaselineStateValues(
+    bool Published,
+    uint Contributors,
+    uint SampleCount,
+    long? PublishedAtMs,
+    uint SkippedContributors,
+    bool Deferred,
+    bool Standing)
+{
+    internal static BaselineStateValues From(BaselineStateView v) => new(
+        v.@published,
+        v.@contributors,
+        v.@sampleCount,
+        v.@publishedAtMs,
+        v.@skippedContributors,
+        v.@deferred,
+        v.@standing);
+}
+
+/// <summary>One painted row of the mail health readout (<c>admin-mail-health-check</c>):
+/// the resolved label, the state word and the detail text, every sentence already
+/// finished by shared Rust or the nest (<c>mail-deliverability.md</c> § The mail health
+/// readout). Rows 5–6 are the heartbeats: the fold leaves their detail empty and the
+/// stamp is painted there.</summary>
+public sealed record MailHealthRow(string Label, string State, string Detail);
+
+/// <summary>The painted mail health readout (<c>admin-mail-health-section</c>):
+/// the <c>admin-mail-health-status</c> line, the check rows, and the delist URL
+/// (present only while the outbound IP is listed → <c>admin-mail-health-delist-link</c>).
+/// Projected from the internal <c>MailHealthView</c>.</summary>
+public sealed record MailHealthValues(
+    string StatusText,
+    IReadOnlyList<MailHealthRow> Checks,
+    string? DelistUrl);
 
 /// <summary>
 /// The admin <c>admin-mail</c> policy page (admin.md § Mail policy) — the admin's
@@ -302,9 +343,25 @@ public partial class AdminMailViewModel : ObservableObject
     /// outcome (not persisted policy) — a later re-read clears it.</summary>
     public BaselinePublishValues? BaselinePublish { get; private set; }
 
-    internal AdminMailViewModel(IMailPolicyMachine machine)
+    /// <summary>The served baseline's current state, or <c>null</c> until the state
+    /// read answers (<c>admin-mail-spam-baseline-state</c>).</summary>
+    public BaselineStateValues? BaselineState { get; private set; }
+
+    /// <summary>The mail health readout, or <c>null</c> while the machine holds none
+    /// (before the first hydrate) — the page then hides the whole section.</summary>
+    public MailHealthValues? Health { get; private set; }
+
+    /// <summary>True after the first press of <c>admin-mail-health-warmup-reset-button</c>:
+    /// the same button now reads the confirm sentence and the next press dispatches.
+    /// Any re-read (every <see cref="Apply"/>) disarms it.</summary>
+    public bool WarmupResetArmed { get; private set; }
+
+    private readonly Func<long> _nowMs;
+
+    internal AdminMailViewModel(IMailPolicyMachine machine, Func<long>? nowMs = null)
     {
         _machine = machine;
+        _nowMs = nowMs ?? (() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         // Seed the bound state from the machine's pre-hydrate snapshot — the shared
         // `MailPolicyMachine` starts on `MailPolicySnapshot::defaults()` (the catalog
         // defaults, no I/O), so this is the single source of truth for pre-load values
@@ -377,6 +434,34 @@ public partial class AdminMailViewModel : ObservableObject
     public Task PublishSpamBaselineAsync()
         => DispatchAsync(new MailPolicyAction.PublishSpamBaseline());
 
+    /// <summary>Flip the standing baseline publish
+    /// (<c>admin-mail-spam-baseline-standing-toggle</c> →
+    /// <c>SetBaselineStandingPublish</c>) — its own gesture off the persisted group,
+    /// never a Spam-group draft Save.</summary>
+    public Task SetBaselineStandingPublishAsync(bool enabled)
+        => DispatchAsync(new MailPolicyAction.SetBaselineStandingPublish(enabled));
+
+    /// <summary><c>admin-mail-health-recheck-button</c> → <c>RecheckHealth</c> (fresh
+    /// blocklist self-check + deliverability diagnostics, then a health re-read).</summary>
+    public Task RecheckHealthAsync()
+        => DispatchAsync(new MailPolicyAction.RecheckHealth());
+
+    /// <summary><c>admin-mail-health-warmup-reset-button</c>: the same-button two-click
+    /// confirm. The first press arms (the page relabels the button to the confirm
+    /// sentence) and dispatches nothing; the second dispatches <c>ResetWarmup</c>.
+    /// Returns <c>true</c> when this press dispatched.</summary>
+    public async Task<bool> PressWarmupResetAsync()
+    {
+        if (!WarmupResetArmed)
+        {
+            WarmupResetArmed = true;
+            OnPropertyChanged(nameof(WarmupResetArmed));
+            return false;
+        }
+        await DispatchAsync(new MailPolicyAction.ResetWarmup());
+        return true;
+    }
+
     /// <summary>Dispatch an action then re-project the snapshot. The machine captures
     /// any user-facing error into <c>snapshot.error</c> (and also throws), so the throw
     /// is swallowed and the error read from the snapshot — matching MailSpamViewModel /
@@ -395,6 +480,40 @@ public partial class AdminMailViewModel : ObservableObject
         }
     }
 
+    /// <summary>Paint the shared health fold into finished sentences: the status line
+    /// (<c>admin.mail_page.health_status_line</c> filled from the state label and the
+    /// two heartbeat facts), each row's label/state resolved, and the heartbeat rows 5–6
+    /// carrying the stamp. Every sentence is shared Rust (UniFFI twins of
+    /// <c>mail_health_state_label</c> / <c>_check_state_label</c> / <c>_heartbeat_label</c>)
+    /// or the nest's own detail.</summary>
+    private MailHealthValues ProjectHealth(MailHealthView health)
+    {
+        var now = _nowMs();
+        string Heartbeat(long? at) => ValueFormat.ResolveRelativeTimeDisplay(
+            uniffi.fauna_ffi.FaunaFfiMethods.MailHealthHeartbeatLabel(at, now),
+            (at ?? 0) * 1000);
+
+        var status = Strings.Get("admin/mail_page/health_status_line")
+            .Replace("{state}", Strings.Resolve(uniffi.fauna_ffi.FaunaFfiMethods.MailHealthStateLabel(health.state)))
+            .Replace("{delivered}", Heartbeat(health.lastOutboundDeliveredAt))
+            .Replace("{received}", Heartbeat(health.lastInboundAcceptedAt));
+
+        var stamps = new[] { health.lastOutboundDeliveredAt, health.lastInboundAcceptedAt };
+        var rows = new List<MailHealthRow>(health.checks.Length);
+        for (var i = 0; i < health.checks.Length; i++)
+        {
+            var check = health.checks[i];
+            var detail = i >= 5 && i - 5 < stamps.Length ? Heartbeat(stamps[i - 5]) : check.detail;
+            var slashed = check.labelKey.Replace('.', '/');
+            var label = Strings.Get(slashed);
+            rows.Add(new MailHealthRow(
+                label == slashed ? check.labelKey : label,
+                Strings.Resolve(uniffi.fauna_ffi.FaunaFfiMethods.MailHealthCheckStateLabel(check.state)),
+                detail));
+        }
+        return new MailHealthValues(status, rows, health.delistUrl);
+    }
+
     /// <summary>Project the machine snapshot onto the bound state: the mail-enable flag,
     /// each group's persisted values, and the last action error (null when empty).</summary>
     private void Apply(MailPolicySnapshot snap)
@@ -411,6 +530,14 @@ public partial class AdminMailViewModel : ObservableObject
         BaselinePublish = snap.baselinePublishResult is null
             ? null
             : BaselinePublishValues.From(snap.baselinePublishResult);
+        BaselineState = snap.baselineState is null
+            ? null
+            : BaselineStateValues.From(snap.baselineState);
+        WarmupResetArmed = false;
+        Health = snap.health is null ? null : ProjectHealth(snap.health);
+        OnPropertyChanged(nameof(Health));
+        OnPropertyChanged(nameof(WarmupResetArmed));
+        OnPropertyChanged(nameof(BaselineState));
         OnPropertyChanged(nameof(Spam));
         OnPropertyChanged(nameof(Auth));
         OnPropertyChanged(nameof(Submission));

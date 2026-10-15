@@ -92,6 +92,7 @@ fn nest_info_handler() -> RpcHandler {
                 },
                 web_serving_domain: Some(info.web_serving_domain),
                 room_read_pubkey: info.room_read_pubkey.map(hex::encode),
+                newest_release: info.newest_release,
                 extra: Default::default(),
             })
         })

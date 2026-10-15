@@ -29,12 +29,30 @@ pub fn guess_mime_type(filename: &str) -> &'static str {
     fauna_core::share::content_type_for_filename(filename)
 }
 
+/// How many rows the recipient picker's completion shows at most — a longer
+/// list is a scroll nobody reads (`docs/goal/ui/conversations.md` § Where
+/// logic lives → *Recipient suggestions*).
+pub const RECIPIENT_SUGGESTION_CAP: usize = 8;
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct RecipientPickerState {
     pub raw_input: String,
     pub chips: Vec<TypedAddress>,
+    /// `recipient-picker-suggestion[i]` — a completion over people this
+    /// account already knows (correspondents and contacts), derived by the
+    /// manager on every snapshot and never stored
+    /// (`docs/goal/ui/conversations.md` § Where logic lives → *Recipient
+    /// suggestions*). The click is `ConversationsManager::accept_suggestion(i)`.
     pub suggestions: Vec<TypedAddress>,
+    /// The finished label each suggestion row paints, index-parallel with
+    /// [`Self::suggestions`] (the `participants` / `participant_displays`
+    /// shape): a contact's nickname-or-public-name, a correspondent's member
+    /// chip name. The row shows the address spelling beside it when the two
+    /// differ; apps never resolve a name themselves.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = []))]
+    pub suggestion_displays: Vec<String>,
     pub resolve_state: ResolveState,
     /// The address the async backend probe (`ConversationsManager::resolve_recipient`)
     /// resolved `raw_input` to, when `resolve_state == Resolved`. Carries the

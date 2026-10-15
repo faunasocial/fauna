@@ -84,7 +84,14 @@ pub fn secret_store() -> CredentialStore {
 /// per-app dir was retired by the compat-remnant sweep —
 /// `version-compatibility.md` § Dimension 2, program 4.)
 pub fn install_disk_pin_store() {
-    let dir = fauna_client::cert_binding::install_scoped_trust_home();
+    // No absolute home → refuse: see linux's `install_disk_pin_store`.
+    let Some(dir) = fauna_client::cert_binding::install_scoped_trust_home() else {
+        tracing::error!(
+            "nest-identity pin store NOT persisted: {}",
+            fauna_core::platform_ids::NO_HOME_REFUSAL
+        );
+        return;
+    };
     let _ = std::fs::create_dir_all(&dir);
     fauna_client::trust::install_pin_store(Arc::new(
         fauna_client::cert_binding::DiskPinStore::open_in_dir(&dir),
@@ -138,7 +145,35 @@ pub(crate) fn config_dir() -> Option<std::path::PathBuf> {
 /// A registry view over the app's credential store. Cheap (both are stateless
 /// views), so callers build one per operation, exactly as linux and web do.
 pub(crate) fn registry(app: &App) -> AccountRegistry {
-    fauna_credential_store::account_registry(Arc::clone(&app.credentials) as Arc<dyn SecretStore>)
+    registry_over(Arc::clone(&app.credentials) as Arc<dyn SecretStore>)
+}
+
+/// **The one place tui builds an [`AccountRegistry`]** — [`registry`] over an
+/// explicit store, for the writers that hold a store but no `App` (the locked
+/// screen's and Settings' stolen-identity ceremonies, the wizard's
+/// pending-provision slot).
+///
+/// Mutations serialize under the cross-process file lock in [`config_dir`] —
+/// tui's install state base, the one its instance lock keys on (one per OS
+/// login, never per account) — because two tui instances on one install each
+/// rewrite the one `fauna/index` blob, and unserialized, one rewrite swallows
+/// the other's (`long-term-store.md` § Multi-account evolution → Cross-process
+/// mutation lock). No base resolvable (neither `XDG_CONFIG_HOME` nor `HOME`)
+/// → the unlocked build, the doc's advisory degrade. Both arms use the
+/// erase-complete constructor, so a sign-out also sweeps the shared
+/// account-store namespace (§ Cleanup contract).
+///
+/// A registry minted anywhere else carries the no-op lock and nothing
+/// observable fails; `account_registry_census_test` fails the build if one
+/// appears.
+pub(crate) fn registry_over(store: Arc<dyn SecretStore>) -> AccountRegistry {
+    match config_dir() {
+        Some(base) => fauna_credential_store::account_registry_with_lock(
+            store,
+            Arc::new(fauna_client_accounts::FileMutationLock::new(&base)),
+        ),
+        None => fauna_credential_store::account_registry(store),
+    }
 }
 
 /// THIS session's canonical mail address `<handle>@<domain>` — the SMTP
@@ -171,85 +206,129 @@ pub fn session_self_address(app: &App) -> Option<String> {
         .list()
         .into_iter()
         .find(|a| a.actor_id == session.actor_id)?;
-    resolve_self_address(
+    fauna_client_accounts::self_address(
         &session.handle,
         entry.handle.as_deref(),
         entry.domain.as_deref(),
     )
 }
 
-/// Pure resolution of `<handle>@<domain>` from the session handle + the registry
-/// entry's cached handle/domain — factored out of [`session_self_address`] so the
-/// branch table is unit-testable without building an `App`.
+/// The signed-in account's handle as the profile header DISPLAYS it —
+/// `<handle>@<current primary>` (`mail-primary-domain-rename.md` § Display-handle
+/// interaction: the display follows the primary, read at render time, so a
+/// rename moves it with no new alias). Same live registry entry as
+/// [`session_self_address`], resolved by [`fauna_client_accounts::display_handle`].
 ///
-/// A handle that already carries an `@domain` **is** the address (the
-/// onboarding-wizard path, where the entered handle is a full address).
-/// Otherwise the address is the registry's cached handle at the registry's
-/// cached domain — **both** must come from the nest.
-///
-/// The session handle is deliberately *not* a fallback for a missing registry
-/// handle. The nest does sender-handle verification on every `fauna.email.send`
-/// (`mail-app-surface.md` § First-party client send), so `<session-handle>@<domain>` for
-/// an actor whose nest row has no handle is an address this account does not
-/// own — the nest refuses it, and claiming it is what made every tui mail send
-/// fail as `fauna.email.permission_denied` for an admin-admitted actor.
-///
-/// The "no handle yet" and "no handle at all" cases are distinguishable here
-/// *because* the domain is required first: `entry_domain` is written only from
-/// a nest ceremony's reply (`silent_refresh`, or the launch machine), and that
-/// same reply carries the handle. So reaching the handle lookup at all proves
-/// the nest has answered — an absent handle there is the nest's answer, not a
-/// pending load.
-fn resolve_self_address(
-    session_handle: &str,
-    entry_handle: Option<&str>,
-    entry_domain: Option<&str>,
-) -> Option<String> {
-    if session_handle.contains('@') {
-        return Some(session_handle.to_string());
-    }
-    let domain = entry_domain.map(str::trim).filter(|d| !d.is_empty())?;
-    let handle = entry_handle.map(str::trim).filter(|h| !h.is_empty())?;
-    Some(format!("{handle}@{domain}"))
+/// Pushed into the profile page at attach and again on every
+/// `SelfAddressRefreshed` (the conversations self-address cell's shape), never
+/// baked from the attach-time session handle. `None` while nothing resolves.
+pub fn session_display_handle(app: &App) -> Option<String> {
+    let session = app.session.as_ref()?;
+    let entry = registry(app)
+        .list()
+        .into_iter()
+        .find(|a| a.actor_id == session.actor_id)?;
+    fauna_client_accounts::display_handle(
+        &session.handle,
+        entry.handle.as_deref(),
+        entry.domain.as_deref(),
+    )
 }
 
-/// Kick a best-effort background silent challenge and merge the nest's
-/// handle/domain/tier into the account registry for `actor_id`. Empty fields from
-/// the challenge preserve the existing cached values (never clear a good handle).
-/// Fire-and-forget; a challenge failure leaves the cache untouched.
+/// The signed-in account's handle as the nest knows it — the registry entry the
+/// self-identity follower keeps current ([`spawn_self_identity_follow`]) — for a
+/// surface that names something after the user at the moment of a gesture (the
+/// mail export's archive, `mail-export.md` § Compression wrapper).
 ///
-/// **This is also tui's post-auth identity re-check channel** (`security.md`
-/// § Post-auth surfacing — channel 3 of the three structural re-check points).
-/// The outcome therefore goes through the SHARED classifier rather than a local
-/// `let Success(..) else { return }`: that shape swallowed every non-success
-/// outcome, the `IdentityChanged` verdict included, which left a possible-MITM
-/// session running silently — the pre-2026-07-23 behavior the § forbids.
-fn spawn_domain_refresh(
+/// Read at the gesture, never baked at attach: the e2e `set_state` login skips
+/// the launch challenge and lands the handle only with the follower's first
+/// mint, and a handle change lands it mid-session. `None` until the nest has
+/// answered, so a caller keeps whatever it had rather than an empty name.
+pub fn session_account_handle(app: &App) -> Option<String> {
+    let session = app.session.as_ref()?;
+    registry(app)
+        .list()
+        .into_iter()
+        .find(|a| a.actor_id == session.actor_id)?
+        .handle
+        .filter(|h| !h.is_empty())
+}
+
+/// Keep the account registry's cached handle/domain/tier for `actor_id`
+/// current from the session client's identity watch
+/// (`NestClient::subscribe_self_identity`): the `VerifyReply` of the session's
+/// OWN bearer mint carries all three, so the sign-in pays no second challenge
+/// to learn them (`transport-connection.md` § The dial budget). Every value the
+/// watch holds is merged through [`apply_self_identity`] — the one merge the
+/// e2e [`run_silent_sign_in`] re-check shares — the current one at once (the
+/// launch machine's mint has usually landed already) and each later one, so a
+/// server-side handle rename lands at the next hourly re-mint.
+///
+/// **The identity re-check this used to double as** (`security.md` § Post-auth
+/// surfacing, channel 3) is the same mint's own verdict now: a changed pinned
+/// identity, a supersession or a `not_registered` refusal stops the client's
+/// supervisor, and the connection-state pump escalates that stop through
+/// [`session_ending_escalation`] — the classifier the challenge's arms below
+/// share.
+///
+/// Stops when the watch's sender goes (the bearer source was dropped), when
+/// the UI channel closes, or when the bearer source starts minting for another
+/// actor — a launch machine outlives one session's account, and its next
+/// account's identity must never land on this one's registry row.
+fn spawn_self_identity_follow(
     app: &App,
-    nest_url: &str,
-    secret: [u8; 32],
+    client: &NestClient,
     actor_id: String,
     tx: &UnboundedSender<UiMessage>,
 ) {
-    let fut = silent_refresh(
-        registry(app),
-        nest_url.to_string(),
-        secret,
-        actor_id,
-        tx.clone(),
-    );
-    tokio::spawn(fut);
+    let Some(mut identity) = client.subscribe_self_identity() else {
+        // Every session client tui builds (`NestClient::new`'s challenge mint,
+        // or the launch machine's bearer) can say; a source that cannot is a
+        // wiring fault, never a reason to dial.
+        tracing::warn!("[session] the session client cannot say who it is signed in as");
+        return;
+    };
+    let bearer = client.auth().bearer();
+    let registry = registry(app);
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        loop {
+            if let Some(minted_for) = bearer.bearer_actor_id()
+                && fauna_core::hex32::encode(&minted_for) != actor_id
+            {
+                return;
+            }
+            let current = identity.borrow_and_update().clone();
+            if let Some(minted) = current {
+                apply_self_identity(
+                    &registry,
+                    &actor_id,
+                    minted.handle,
+                    minted.domain,
+                    minted.tier,
+                    &tx,
+                );
+            }
+            if identity.changed().await.is_err() || tx.is_closed() {
+                return;
+            }
+        }
+    });
 }
 
-/// Run the post-auth silent challenge **to completion** over the active account
-/// and apply its verdict — the awaited form of [`spawn_domain_refresh`], for the
-/// `silent_sign_in` agent command.
+/// Run a post-auth silent challenge **to completion** over the active account
+/// and apply its verdict — the forced identity re-check the `silent_sign_in`
+/// agent command drives (`security.md` § Post-auth surfacing, channel 3; the
+/// harness contract in `test_nest_identity_pin_post_auth.py`). It keeps its own
+/// dial on purpose: a sign-in no longer runs one
+/// ([`spawn_self_identity_follow`] reads the session mint's reply instead), so
+/// this is the one place a challenge is run on demand.
 ///
-/// Deliberately the *same* body as the production background refresh rather than
-/// a test-only re-implementation: the e2e that drives this is proving the
-/// production classify → escalate → re-enter path, so a shortcut that synthesized
-/// the verdict would assert nothing about it (`security.md` § Post-auth
-/// surfacing; the harness contract in `test_nest_identity_pin_post_auth.py`).
+/// Its verdict goes through the same shared classifier and the same
+/// escalations the session mint's own stop does
+/// ([`session_ending_escalation`]), and a success through the same merge
+/// ([`apply_self_identity`]), so the e2e proves the production classify →
+/// escalate → re-enter path rather than a test-only re-implementation.
 ///
 /// `Err` is the convention-11 loud-failure reason: no active account to
 /// challenge with (pre-auth), or a malformed stored secret.
@@ -269,26 +348,35 @@ pub async fn run_silent_sign_in(app: &App, tx: &UnboundedSender<UiMessage>) -> R
     Ok(())
 }
 
-/// The one body behind both forms: challenge → shared classify → apply.
-///
 /// The message a stopped supervisor's reason escalates as, if it is a
-/// session-ending verdict — the same three the background silent refresh
-/// escalates, read through the one shared classifier
-/// (`NestClientError::session_ending_verdict`). Any other stop (a clean close,
-/// a version skew, a mint fault) stays the connection indicator's business.
+/// session-ending verdict, read through the one shared classifier
+/// (`NestClientError::session_ending_verdict`). Three are the identity verdicts
+/// the forced re-check ([`silent_refresh`]) escalates too; since the sign-in
+/// stopped running a challenge of its own, this is how the session mint's own
+/// verdict reaches the launch surface (`security.md` § Post-auth surfacing,
+/// channel 3). The other two are the version verdicts, each landing the
+/// non-retry needs-update surface on the re-run launch
+/// (`version-compatibility.md` § Dimension 4): the nest refused this app's
+/// subprotocol (the app is too old for it), or the nest refused the re-mint as
+/// outdated (it was restarted into its degraded needs-update mode — not a
+/// "Connecting…" that never ends). Any other stop (a clean close, a mint fault)
+/// stays the connection indicator's business.
 fn session_ending_escalation(stop: &fauna_client::NestClientError) -> Option<DataMessage> {
     use fauna_client::SessionEndingVerdict as V;
     Some(match stop.session_ending_verdict()? {
         V::NestIdentityChanged => DataMessage::NestIdentityChanged,
         V::Superseded => DataMessage::IdentitySuperseded,
         V::SignInRefused => DataMessage::SignInRefused,
+        V::AppOutdated => DataMessage::AppOutdated,
+        V::NestOutdated => DataMessage::NestOutdated,
     })
 }
 
-/// The session-ending verdicts escalate — `IdentityChanged`, `Superseded`,
-/// `NotRegistered`; every other failure class stays logged-and-swallowed,
-/// because a background refresh must not tear down a healthy session over a
-/// fault (`security.md` § Post-auth surfacing).
+/// The forced re-check's body: challenge → shared classify → apply. The
+/// session-ending verdicts escalate — `IdentityChanged`, `Superseded`,
+/// `NotRegistered`, `Locked`; every other failure class stays
+/// logged-and-swallowed, because a re-check must not tear down a healthy
+/// session over a fault (`security.md` § Post-auth surfacing).
 async fn silent_refresh(
     registry: fauna_client_accounts::AccountRegistry,
     nest_url: String,
@@ -356,9 +444,28 @@ async fn silent_refresh(
             return;
         }
     };
+    apply_self_identity(&registry, &actor_id, handle, domain, tier, &tx);
+}
+
+/// Merge a nest-confirmed handle/domain/tier into the account registry's cache
+/// for `actor_id`, then tell the app loop the self address may have moved — the
+/// one merge behind both the session mint's identity watch
+/// ([`spawn_self_identity_follow`]) and the forced re-check
+/// ([`run_silent_sign_in`]).
+fn apply_self_identity(
+    registry: &fauna_client_accounts::AccountRegistry,
+    actor_id: &str,
+    handle: String,
+    domain: String,
+    tier: String,
+    tx: &UnboundedSender<UiMessage>,
+) {
     // Merge: a returned empty field keeps whatever the cache already holds
     // (the launch-machine populated it, or an earlier refresh did).
-    let cur = registry.list().into_iter().find(|a| a.actor_id == actor_id);
+    let cur = registry
+        .list()
+        .into_iter()
+        .find(|a| a.actor_id == *actor_id);
     let handle = if handle.is_empty() {
         cur.as_ref().and_then(|a| a.handle.clone())
     } else {
@@ -375,7 +482,7 @@ async fn silent_refresh(
         Some(tier)
     };
     let _ = registry.update_cache(
-        &actor_id,
+        actor_id,
         handle.as_deref(),
         domain.as_deref(),
         tier.as_deref(),
@@ -394,6 +501,13 @@ pub struct Session {
     pub handle: String,
     pub actor_id: String,
     pub client: Arc<NestClient>,
+    /// The launch machine when IT holds this session's bearer (it was `Online`
+    /// at [`establish`], so the client mints over [`LaunchMachineBearer`]);
+    /// `None` when the client's own `WsChallengeBearer` cache is the holder —
+    /// the e2e session patch's case. Whoever answers "which ids are this
+    /// app's" must ask the holder (`devices.md` § The client's own session),
+    /// so the `launch_token` observable reads this to pick its source.
+    pub bearer_machine: Option<Arc<fauna_launch_machine::LaunchMachine>>,
 }
 
 /// Build the client for `(nest_url, secret_hex)`, spawn its connect + a
@@ -448,7 +562,8 @@ pub fn establish(
     // The `FeedManager` builds + signs posts itself, so it needs the raw signing
     // secret. Read it before the keypair moves into the client.
     let secret = *keypair.secret_bytes();
-    let client = match online_launch_machine(app) {
+    let bearer_machine = online_launch_machine(app);
+    let client = match bearer_machine.clone() {
         Some(machine) => {
             let bearer = Arc::new(fauna_nest_http::LaunchMachineBearer(machine));
             NestClient::with_auth(Arc::new(AuthClient::with_bearer_source(
@@ -484,17 +599,19 @@ pub fn establish(
         });
     }
 
-    // Opportunistically refresh the published mail content-sealing epoch
-    // schedule at this universal post-auth hook (encryption-at-rest.md
-    // § Capability tiering → Content-sealing epochs), mirroring linux's
-    // `refresh_mail_epoch_schedule` posture exactly. Best-effort/log-only;
-    // a no-op when mail is disabled.
-    crate::mail_glue::spawn_refresh_mail_epoch_schedule(
-        Arc::clone(&client),
-        secret_hex,
-        app.settings.mail_store(),
-        nest_url,
+    // The mail connect-time refresh (encryption-at-rest.md § Capability
+    // tiering → Content-sealing epochs; mail-credentials.md § Hard revoke →
+    // *Published before the nest moves*, rule (4)): once now and again after
+    // every reconnect of this client, for its life — the shared trigger every
+    // native app spawns at its post-auth edge. Best-effort/log-only; a no-op
+    // when mail is disabled.
+    tokio::spawn(
+        fauna_client_mail_settings::rpc_glue::refresh_epoch_schedule_on_every_connect(
+            &client,
+            app.settings.mail_store(),
+        ),
     );
+    spawn_publish_subscriber_encaps_key(Arc::clone(&client), secret_hex);
 
     // The deployment-seed custody leg (box-recovery.md § The plane-era
     // recovery floor, (c) The writes) runs at whichever of this post-auth edge
@@ -623,18 +740,19 @@ pub fn establish(
         let _supervisor = connect_client.connect().await;
     });
 
-    // Refresh the account registry's cached handle/domain/tier from a background
-    // silent challenge — linux's post-auth `silent_sign_in()` shape
-    // (client.rs, `do_silent_sign_in`). In the online returning-user path the
-    // shared launch machine has already populated these (via
-    // `RegistryLaunchPersistence::save_authenticated`), but the e2e `set_state`
-    // login (`apply_session_patch`) skips the challenge, so the domain would stay
-    // unset. When the refresh lands it emits `DataMessage::SelfAddressRefreshed`,
-    // whose handler pushes the resolved `<handle>@<domain>` into the
-    // conversations session's live self-address cell — the client's outbound
-    // `From:` and MLS routing domain (the whoami handle domain, NOT the
-    // mail-settings domain; tracked internally).
-    spawn_domain_refresh(app, nest_url, secret, actor_id.clone(), tx);
+    // Keep the account registry's cached handle/domain/tier current from the
+    // session client's own mint — no second challenge (`transport-connection.md`
+    // § The dial budget). In the online returning-user path the shared launch
+    // machine has already populated these (via
+    // `RegistryLaunchPersistence::save_authenticated`) and its watch holds the
+    // same identity; the e2e `set_state` login (`apply_session_patch`) skips
+    // the launch challenge, and there the session client's first mint fills
+    // them. Each merge emits `DataMessage::SelfAddressRefreshed`, whose handler
+    // pushes the resolved `<handle>@<domain>` into the conversations session's
+    // live self-address cell — the client's outbound `From:` and MLS routing
+    // domain (the whoami handle domain, NOT the mail-settings domain; tracked
+    // internally).
+    spawn_self_identity_follow(app, &client, actor_id.clone(), tx);
 
     // The HTTP/bulk plane for blob upload, built over the **same** bearer source
     // the WS client holds. `AuthClient::bearer()` hands back the `Arc<dyn
@@ -759,6 +877,7 @@ pub fn establish(
         handle: handle.clone(),
         actor_id: actor_id.clone(),
         client: Arc::clone(&client),
+        bearer_machine,
     });
     // Seed the session's live self-address cell with the best resolution now —
     // registry handle@domain when the launch machine already landed them, the
@@ -773,6 +892,8 @@ pub fn establish(
     // failure as *permanent* and leave a successor's conversations dark for the
     // whole session.
     let mls_predecessors = succession_predecessors.clone();
+    // The walk's actor half, for the restore door's park of a retired leaf.
+    let mls_predecessor_actors = succession_predecessor_actors(app, &actor_id);
     // The account-custody ceremony sink captures through the account store,
     // which lands after login: it resolves this slot per payload.
     let runtime = app.settings.account_runtime.clone();
@@ -785,6 +906,7 @@ pub fn establish(
         self_address,
         tx,
         mls_predecessors,
+        mls_predecessor_actors,
         attested_predecessors
             .actor_ids()
             .iter()
@@ -867,15 +989,16 @@ pub fn establish(
         &succession_predecessors,
     );
     // Profile rides the same hook — no observer manager (`ui/profile.md`
-    // § Persistence); it stores the identity inputs (own actor_id + cached
-    // handle for the SELF header fallback) and re-fetches on every open.
+    // § Persistence); it stores the identity inputs (own actor_id + the live
+    // display handle for the SELF header fallback, re-pushed on every
+    // `SelfAddressRefreshed`) and re-fetches on every open.
     app.profile = crate::profile::init(
         Arc::clone(&client),
         Arc::clone(&content),
         fauna_core::secret::SecretArray32::from(secret),
         crate::settings::period_key_door(app.settings.account_runtime.clone()),
         actor_id.clone(),
-        handle.clone(),
+        session_display_handle(app),
         nest_url.to_string(),
     );
     // The author-side reconcile loop (`monetization.md` § Pillar 1 grant path 2):
@@ -988,21 +1111,13 @@ pub fn establish(
     // residual), so the ordering here is free for every unsupervised user.
     crate::family::restore_supervision_snapshot(app, &actor_id);
     crate::family::spawn_status_check(&app.family, tx, app.session_generation);
-    // The once-per-sign-in look for a newer version (`installers/README.md`
-    // § Knowing a newer version is out): one unasked round trip through the
-    // shared `fauna_client::update_look`, painting the About block's notice
-    // only when a newer release is out. A failed look is silent; sign-out
-    // resets the block, so the next sign-in looks again.
-    app.spawn_page_op(crate::app::PageOp::Settings(
-        crate::settings::Op::LookForUpdatesAtSignIn,
-    ));
     // The content-policy engine's two halves are hydrated by two reads, both
     // fired here rather than on a nav edge because they gate a *render* on the
     // feed and conversations pages, not a page's own data (`family-safety.md`
     // § Content policy). The guardian floor rides the `fauna.family.status` read
     // above; this is the every-user half — the viewer's own spam/phishing
     // thresholds, which apply supervised or not.
-    crate::content_policy::spawn_spam_preferences_check(Arc::clone(&client), tx);
+    crate::content_policy::attach_session(app, Arc::clone(&client), tx);
     // The third source — the region content policies on the declared chain —
     // refreshes through this nest's relay (`region-blocking.md` § How an app
     // obtains its region's policy). The device record already armed the engine
@@ -1025,6 +1140,20 @@ pub fn establish(
         app.session_generation,
         ledger,
     );
+    // The once-per-sign-in look for a newer version (`installers/README.md`
+    // § Knowing a newer version is out): the newest release this nest
+    // reports, through the shared `fauna_client::update_look` — never the
+    // release host — painting the About block's notice only when a newer
+    // release is out. A failed look is silent; sign-out resets the block, so
+    // the next sign-in looks again. It reads the connection's one
+    // `fauna.nest.info` reply (`fauna_protocol::read_nest_info`, the
+    // transport's per-connection memo) — the landing load reads the same one,
+    // so the sign-in draws it once.
+    app.spawn_page_op(crate::app::PageOp::Settings(
+        crate::settings::Op::LookForUpdatesAtSignIn {
+            nest: Arc::clone(&client),
+        },
+    ));
     // The B3 member-row join-filter, wired here rather than inside
     // `attach_session` because the live `ConversationsSession` lives on
     // `App::conversations` (started above) and `SettingsState` cannot reach it.
@@ -1033,6 +1162,11 @@ pub fn establish(
     // Folders page (`settings::devices::TuiMlsQuery`).
     app.settings
         .wire_folder_join_filter(app.conversations.real_session.as_ref());
+    // The same join-filter on the Media page's machine (`media.md` § Layout &
+    // flow → *Where the offerable sets come from*): unwired it drops every
+    // member row, so a set shared WITH this user is never a filter option or
+    // an upload target — only an item-only option by name.
+    crate::media::wire_mls_query(&app.media, app.conversations.real_session.as_ref());
     // The reporter-side hide list (`moderation.md` § Corollary) — a render
     // source on the feed and the conversations, so read eagerly here like the
     // spam thresholds above; after `attach_session` because the read needs the
@@ -1131,12 +1265,16 @@ pub fn establish(
             },
             Arc::clone(&client),
             nest_url,
-        );
-        let params = fauna_client_account_runtime::with_session_wakes(
-            params,
-            client.subscribe_reconnects(),
-            client.subscribe_pushes(),
-        );
+        )
+        // No absolute home → the shared no-home refusal, which lands in the
+        // failed-assembly arm below like any other assembly failure.
+        .map(|params| {
+            fauna_client_account_runtime::with_session_wakes(
+                params,
+                client.subscribe_reconnects(),
+                client.subscribe_pushes(),
+            )
+        });
         let ready_tx = tx.clone();
         let ready_actor = actor_id.clone();
         let ctx = fauna_client_account_runtime::ResolveContext {
@@ -1179,7 +1317,11 @@ pub fn establish(
         // assembly of a retired session lands only in this orphaned one.
         let runtime_slot = Arc::clone(&app.settings.account_runtime);
         tokio::spawn(async move {
-            match fauna_client_account_runtime::resolve_and_start(params, ctx).await {
+            let started = match params {
+                Ok(params) => fauna_client_account_runtime::resolve_and_start(params, ctx).await,
+                Err(refusal) => Err(refusal),
+            };
+            match started {
                 Ok(handle) => {
                     // The teardown's clone FIRST: it is the one that must
                     // never be missed, and a dropped receiver (no teardown
@@ -1501,6 +1643,23 @@ pub(crate) fn succession_predecessor_backup_keys(
     // is silent — a dropped row reads as "no key opens it" forever — is precisely
     // the divergence priority #2 exists to prevent.
     registry(app).predecessor_backup_keys(actor_id)
+}
+
+/// The retired identities [`succession_predecessor_backup_keys`]' walk names —
+/// its actor half, off the same shared registry walk
+/// (`AccountRegistry::predecessor_backup_keys_by_actor`), for the `__mls`
+/// restore door's park of a retired leaf (`succession-propagation.md`
+/// § Propagation → *Own device fleet*, *Where the retired leaf rests on a
+/// device with no local MLS store*, rule (1)).
+pub(crate) fn succession_predecessor_actors(
+    app: &App,
+    actor_id: &str,
+) -> Vec<fauna_core::identity::ActorId> {
+    registry(app)
+        .predecessor_backup_keys_by_actor(actor_id)
+        .into_iter()
+        .map(|(actor, _)| actor)
+        .collect()
 }
 
 /// Read the open unattested-member reviews off the succession ledger and hand them to the
@@ -2381,11 +2540,51 @@ pub fn set_account_require_confirm(app: &App, actor_id: &str, require: bool) {
 }
 
 /// Remove an account from this install: refused while another instance serves
-/// it, else its registry entry and then its scoped local state go
-/// ([`crate::account_scope::remove_account`] owns the order and why). Returns
-/// the line for the caller to surface; also logged.
-pub fn remove_account(app: &App, actor_id: &str) -> Result<(), String> {
-    crate::account_scope::remove_account(&registry(app), actor_id)
+/// it, else its registry entry goes at once, this machine is retired from the
+/// account's nest as a sign-out retires it, and then its scoped local state
+/// goes ([`crate::account_scope::remove_account`] owns the order and why).
+/// Returns the line for the caller to surface; also logged.
+///
+/// Returns as soon as the registry step lands — the switcher shrinks then. The
+/// nest half is async and best-effort under
+/// [`fauna_client_account_runtime::REMOVED_ACCOUNT_RETIRE_BUDGET`], so it runs
+/// as a stop ([`spawn_stop`]) and the erase is queued behind it
+/// ([`App::after_stops`]): the same continuation shape a sign-out's stop and
+/// erase take, and for the same reason — the nest half's runtime has the
+/// account's store open, and the erase must never meet an open store.
+pub fn remove_account(app: &mut App, actor_id: &str) -> Result<(), String> {
+    let owed = crate::account_scope::remove_account(&registry(app), actor_id)?;
+    finish_removal(app, owed);
+    Ok(())
+}
+
+/// The nest half and the erase a removal owes once its registry step landed
+/// ([`remove_account`]'s second half, split so a test can hand it a removal
+/// made over its own bases).
+pub(crate) fn finish_removal(app: &mut App, owed: crate::account_scope::RemovalOwed) {
+    if !owed.removed.holds_device_authorization() {
+        // This machine never enrolled on the account: no grant to retire, so
+        // nothing to sign in to and nothing to wait for.
+        owed.erase();
+        return;
+    }
+    let removed = Arc::clone(&owed.removed);
+    let actor = removed.actor_id().to_string();
+    spawn_stop(app, async move {
+        // The outcome's log line is the shared routine's own.
+        let _ = fauna_client_account_runtime::retire_removed_account(
+            removed,
+            fauna_client_account_runtime::RemovedAccountInputs {
+                // The removed account's own id — its scope is still on disk,
+                // the erase being queued behind this stop.
+                own_device_id_hex: Box::new(move || crate::media::device_id_hex(&actor)),
+                // Desktop: the per-OS constant, as the live assembly passes.
+                store_container: None,
+            },
+        )
+        .await;
+    });
+    app.after_stops(move |_| owed.erase());
 }
 
 /// Set the active account through the registry — the raw registry write half of
@@ -2576,18 +2775,48 @@ pub fn apply_session_patch(
 /// runs a single pass rather than a second `run_alert_sweep_loop`, whose first
 /// copy is still looping (that function's doc carries the reasoning, and
 /// windows' e2e seam ratified the same one-shot posture).
+/// Publish the account's subscriber encapsulation-key registry entry
+/// (`post-quantum.md` § surface B) at the same post-auth hook the mail epoch
+/// schedule refreshes from, through the shared
+/// `SubscriptionsClient::publish_encaps_key`: idempotent (every device derives
+/// the same key), best-effort and log-only. A third-party follow under
+/// `fauna:follow:write` is refused while no entry exists
+/// (`authorization-server.md` § Scope grammar → *The sixth arm*), so an
+/// account that opens any app has one.
+fn spawn_publish_subscriber_encaps_key(client: Arc<NestClient>, secret_hex: &str) {
+    let keypair = match ActorKeypair::from_secret_hex(secret_hex) {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::warn!("publish subscriber encaps key: decode secret: {e}");
+            return;
+        }
+    };
+    tokio::spawn(async move {
+        let subs = fauna_client_subscriptions::SubscriptionsClient::new(client);
+        if let Err(e) = subs.publish_encaps_key(&keypair).await {
+            tracing::warn!(
+                "publish subscriber encaps key failed (best-effort; re-converges next connect): {e}"
+            );
+        }
+    });
+}
+
 fn reconverge_post_auth(app: &App, secret_hex: &str, node_url: &str) {
     let Some(client) = app.session.as_ref().map(|s| Arc::clone(&s.client)) else {
         return;
     };
     // Same order, same posture, same log-only contract as `establish`'s own:
-    // a nest that cannot answer must not make the patch fail.
+    // a nest that cannot answer must not make the patch fail. The mail
+    // refresh is one pass here: `establish`'s reconnect loop is still running
+    // for this client and covers its reconnects; the patch is a post-auth
+    // edge of its own.
     crate::mail_glue::spawn_refresh_mail_epoch_schedule(
         Arc::clone(&client),
         secret_hex,
         app.settings.mail_store(),
         node_url,
     );
+    spawn_publish_subscriber_encaps_key(Arc::clone(&client), secret_hex);
     // Every later post-auth edge re-runs the custody leg over the installed
     // handle (a no-op round-trip-free check in the steady state); before the
     // store is ready, the `AccountStoreReady` arm owns the run.
@@ -2651,8 +2880,9 @@ fn spawn_stop(app: &mut App, stop: impl std::future::Future<Output = ()> + Send 
 /// **What returns before the stop has finished — and what the caller owes.**
 /// Everything in memory is dropped before this returns: the session, both
 /// runtime slots, the agent surface, the share seat, the conversations engine.
-/// The waits are not — the agent's un-provision, the account runtime's stop
-/// and the session client's disconnect run on ONE spawned task
+/// The waits are not — the drafts rails' leave-flush, the agent's
+/// un-provision, the account runtime's stop and the session client's
+/// disconnect run on ONE spawned task
 /// ([`spawn_stop`]), so tui's UI loop keeps rendering while the account stops.
 /// So a caller hands [`App::after_stops`] everything that must follow the
 /// stop — the erase above all, which must never meet a store still open
@@ -2674,6 +2904,17 @@ pub fn sign_out(app: &mut App, reason: fauna_client_account_runtime::StopReason)
     // installed (e2e, non-unix, pre-auth). The loops stop now; the round trip
     // leads the spawned stop below.
     let unprovision = app.sync_agent.teardown();
+    // The leave-flush of every drafts rail (`reserved-folders.md` § The
+    // leave-flush promise — signing out and switching account are leave doors
+    // too). Captured FIRST, synchronously: the snapshots must be read while the
+    // managers still hold the user's last edit, before the conversations engine
+    // retires below and before `drop_authenticated_state` replaces the pages'
+    // state. The saves themselves lead the stop task, so they ride the session
+    // client before it disconnects and before a `SignOut` stop retires this
+    // machine's enrollment. Without this, an edit still inside the debounce
+    // window was lost — the autosave loops end when their channels close, never
+    // saving — and the next sign-in restored the draft from before it.
+    let drafts_flush = crate::drafts_autosave::LeaveFlush::capture(app);
     // The account-store runtime's deterministic teardown (charter § The
     // client-side lifecycle: teardown at sign-out AND quit — quit is the
     // drop path; sign-out shuts down NOW, so an account switch never briefly
@@ -2802,9 +3043,11 @@ pub fn sign_out(app: &mut App, reason: fauna_client_account_runtime::StopReason)
         }
     });
 
-    if unprovision.is_none() && store_stop.is_none() {
+    if unprovision.is_none() && store_stop.is_none() && drafts_flush.is_none() {
         // Nothing to wait for — every teardown before an account runtime was
         // ever assembled. Still no inline disconnect: the loop owns this task.
+        // A drafts flush is never in this arm: whatever follows the stop (the
+        // erase, the next session's launch restore) must find it landed.
         if let Some(client) = client {
             tokio::spawn(async move {
                 if let Some(push_drop) = push_drop {
@@ -2816,6 +3059,11 @@ pub fn sign_out(app: &mut App, reason: fauna_client_account_runtime::StopReason)
         return;
     }
     spawn_stop(app, async move {
+        // The drafts first: it needs the session's credentials and transport,
+        // both of which the steps below take away.
+        if let Some(drafts_flush) = drafts_flush {
+            drafts_flush.run().await;
+        }
         if let Some(push_drop) = push_drop {
             push_drop.await;
         }
@@ -2884,8 +3132,9 @@ pub(crate) mod tests {
 
     /// A supervisor that stopped because the nest refused its post-4401 re-mint
     /// — the user suspended mid-session — escalates to the launch surface
-    /// (`onboarding.md` § App-launch routing, the previously-signed-in row);
-    /// an ordinary stop does not.
+    /// (`onboarding.md` § App-launch routing, the previously-signed-in row), and
+    /// so does one the nest refused as too old for it (`version-compatibility.md`
+    /// § Dimension 4); an ordinary stop does not.
     #[test]
     fn a_stopped_supervisors_session_ending_reason_escalates_and_nothing_else_does() {
         use fauna_client::NestClientError as E;
@@ -2895,6 +3144,10 @@ pub(crate) mod tests {
             Some(DataMessage::SignInRefused)
         ));
         assert!(matches!(
+            session_ending_escalation(&E::Rpc(fauna_protocol::RpcError::nest_outdated())),
+            Some(DataMessage::NestOutdated)
+        ));
+        assert!(matches!(
             session_ending_escalation(&E::NestIdentityChanged {
                 host: "nest.example".into(),
                 pinned_hex: "aa".repeat(32),
@@ -2902,11 +3155,14 @@ pub(crate) mod tests {
             }),
             Some(DataMessage::NestIdentityChanged)
         ));
+        assert!(matches!(
+            session_ending_escalation(&E::SubprotocolMismatch),
+            Some(DataMessage::AppOutdated)
+        ));
         for ordinary in [
             E::RpcDisconnected {
                 was_in_flight: false,
             },
-            E::SubprotocolMismatch,
             E::Auth("(401) fauna.auth.signature_failed".into()),
         ] {
             assert!(
@@ -3057,6 +3313,41 @@ pub(crate) mod tests {
             before, after,
             "the patch must keep the live session's client — a new Arc means \
              `establish` re-ran over the live session's own MLS store"
+        );
+    }
+
+    /// The sign-out door's leave-flush (`reserved-folders.md` § The leave-flush
+    /// promise): a session with a drafts rail wired hands the flush to the
+    /// stop, so the erase and the next session's launch restore queue behind
+    /// it. Before, the rails' autosave loops simply ended with their channels
+    /// and an edit inside the debounce window was never saved — the e2e
+    /// witness is `test_drafts_sign_out_flush.py`; this pins the sequencing it
+    /// rests on without a nest.
+    ///
+    /// The control half is what makes the assertion mean the flush: the same
+    /// fixture with no rail wired has nothing to wait for.
+    #[tokio::test]
+    async fn a_sign_out_with_a_drafts_rail_waits_for_its_flush() {
+        let mut bare = crate::app::tests::authed_app();
+        sign_out(&mut bare, fauna_client_account_runtime::StopReason::SignOut);
+        assert!(
+            !bare.teardown_pending(),
+            "control: with no drafts rail and no runtime there is nothing to wait for"
+        );
+
+        let mut app = crate::app::tests::authed_app();
+        let keypair = fauna_core::identity::ActorKeypair::generate();
+        let client = Arc::clone(&app.session.as_ref().expect("authed fixture").client);
+        app.events.drafts_sync = Some(Arc::new(fauna_client_drafts::DraftsSync::new(
+            client,
+            &keypair,
+            fauna_protocol::drafts::RAIL_EVENTS,
+        )));
+        sign_out(&mut app, fauna_client_account_runtime::StopReason::SignOut);
+        assert!(
+            app.teardown_pending(),
+            "a wired drafts rail's flush must ride the stop, so what follows the \
+             sign-out waits for it"
         );
     }
 
@@ -3469,73 +3760,6 @@ pub(crate) mod tests {
         );
     }
 
-    // ── resolve_self_address (the SMTP rail's `From:` resolution) ───────────
-
-    #[test]
-    fn self_address_is_the_registry_handle_at_the_registry_domain() {
-        // The returning-user shape: the silent challenge cached BOTH the nest's
-        // handle and its domain on the registry entry → `<handle>@<domain>`.
-        assert_eq!(
-            resolve_self_address("alice", Some("alice"), Some("fauna.test")),
-            Some("alice@fauna.test".to_string()),
-        );
-    }
-
-    #[test]
-    fn self_address_prefers_the_registry_handle_over_the_session_one() {
-        // The nest's whoami handle wins when present (production); the session
-        // handle is only the fallback.
-        assert_eq!(
-            resolve_self_address("e2e-user", Some("bob"), Some("fauna.test")),
-            Some("bob@fauna.test".to_string()),
-        );
-    }
-
-    #[test]
-    fn self_address_is_none_without_a_domain() {
-        // No cached domain yet (the gap this whole change closes): no address,
-        // rather than a malformed `alice@` — the SMTP rail keeps its empty From.
-        assert_eq!(resolve_self_address("alice", None, None), None);
-        assert_eq!(resolve_self_address("alice", Some("bob"), Some("")), None);
-    }
-
-    #[test]
-    fn self_address_passes_through_a_handle_that_already_carries_a_domain() {
-        // The onboarding-wizard path: the entered handle is already a full
-        // address, so it IS the From regardless of the registry entry.
-        assert_eq!(
-            resolve_self_address("alice@fauna.test", None, None),
-            Some("alice@fauna.test".to_string()),
-        );
-        assert_eq!(
-            resolve_self_address("alice@fauna.test", Some("bob"), Some("other.test")),
-            Some("alice@fauna.test".to_string()),
-        );
-    }
-
-    #[test]
-    fn self_address_is_none_when_the_nest_reports_no_handle() {
-        // A registered actor whose nest handle is empty has NO address it may
-        // claim, and the session handle is not a substitute: the nest does
-        // sender-handle verification on every `fauna.email.send`
-        // (mail-app-surface.md § First-party client send), so `<session-handle>@<domain>`
-        // is an address this actor does not own and the nest refuses it.
-        //
-        // The empty-vs-absent distinction is decidable here precisely because
-        // the domain is present: `entry_domain` is written only by the silent
-        // refresh (`spawn_domain_refresh` → `silent_refresh`), so reaching this
-        // line proves the refresh has run and the nest genuinely reports no
-        // handle — this is not a not-yet-loaded race.
-        assert_eq!(
-            resolve_self_address("e2e-user", Some(""), Some("fauna.test")),
-            None,
-        );
-        assert_eq!(
-            resolve_self_address("e2e-user", None, Some("fauna.test")),
-            None
-        );
-    }
-
     /// `session_self_address` resolves the HELD SESSION's own actor id
     /// (`app.session`, never `registry.active()`) — the fix for the bound-
     /// launch identity mixup: on a bound
@@ -3565,6 +3789,7 @@ pub(crate) mod tests {
             handle: "bob".to_string(),
             actor_id: other_actor.clone(),
             client: NestClient::new("http://127.0.0.1:1".to_string(), ActorKeypair::generate()),
+            bearer_machine: None,
         });
 
         let addr = session_self_address(&app)
@@ -3677,9 +3902,9 @@ pub(crate) mod tests {
 
     #[test]
     fn remove_account_shrinks_the_switcher() {
-        let app = test_app();
+        let mut app = test_app();
         let (a, b) = seed_two_accounts(&app);
-        remove_account(&app, &b).expect("remove b");
+        remove_account(&mut app, &b).expect("remove b");
         let rows = account_switcher_rows(&app);
         assert_eq!(rows.len(), 1, "the removed account is gone");
         assert_eq!(rows[0].actor_id, a, "the survivor is the one kept");
@@ -3733,6 +3958,158 @@ pub(crate) mod tests {
             !account_requires_confirm(&app, &b),
             "an unflagged account switches straight through, no prompt"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The session mint's identity watch → the registry (no second challenge).
+    // -----------------------------------------------------------------------
+
+    /// A bearer source standing in for the session client's mint: it never
+    /// dials (nothing listens), names the actor the test sets, and publishes
+    /// whatever identity the test sends — what a `WsChallengeBearer` or the
+    /// launch machine does on each successful silent-challenge mint.
+    struct WatchedMint {
+        actor: std::sync::Mutex<[u8; 32]>,
+        identity: tokio::sync::watch::Sender<Option<fauna_nest_http::MintedIdentity>>,
+    }
+
+    #[async_trait::async_trait]
+    impl fauna_nest_http::BearerSource for WatchedMint {
+        async fn bearer(&self) -> Result<String, fauna_nest_http::ApiError> {
+            Err(fauna_nest_http::ApiError::Transport(
+                "this test mints nothing".into(),
+            ))
+        }
+        fn bearer_actor_id(&self) -> Option<[u8; 32]> {
+            Some(*self.actor.lock().unwrap())
+        }
+        fn subscribe_self_identity(&self) -> Option<fauna_nest_http::SelfIdentityWatch> {
+            Some(self.identity.subscribe())
+        }
+    }
+
+    fn minted(handle: &str) -> Option<fauna_nest_http::MintedIdentity> {
+        Some(fauna_nest_http::MintedIdentity {
+            handle: handle.into(),
+            domain: "nest.example".into(),
+            tier: "free".into(),
+        })
+    }
+
+    /// Wait (bounded) for the follower's `SelfAddressRefreshed`.
+    async fn next_self_address_refresh(rx: &mut tokio::sync::mpsc::UnboundedReceiver<UiMessage>) {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the follower merged within 5 s")
+            .expect("the UI channel is open");
+        assert!(
+            matches!(msg, UiMessage::Data(DataMessage::SelfAddressRefreshed)),
+            "the merge announces the self address may have moved"
+        );
+    }
+
+    /// Build a session client over `mint` for `me`, as `establish` does over
+    /// the launch machine's bearer.
+    fn client_over(mint: Arc<WatchedMint>, me: ActorKeypair) -> Arc<NestClient> {
+        NestClient::with_auth(Arc::new(AuthClient::with_bearer_source(
+            "http://127.0.0.1:1".into(),
+            me,
+            mint,
+            fauna_client::pinned_http_client("http://127.0.0.1:1"),
+        )))
+    }
+
+    /// **The `set_state` login's self address, with no second dial**
+    /// (`transport-connection.md` § The dial budget): the registry row the
+    /// e2e session patch leaves has no handle/domain/tier, and the session
+    /// mint's own reply — published on the client's identity watch — fills
+    /// them. Nothing here can dial (the bearer refuses, nothing listens), so the
+    /// filled row proves the identity came off the watch. A later mint naming a
+    /// renamed handle lands too.
+    #[tokio::test]
+    async fn the_session_mints_identity_fills_the_registry_without_a_dial() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = test_app();
+        let me = ActorKeypair::generate();
+        let my_hex = registry(&app)
+            .add_account(&fauna_core::hex32::encode(me.secret_bytes()), None, None)
+            .expect("my row");
+        let mint = Arc::new(WatchedMint {
+            actor: std::sync::Mutex::new(me.actor_id().0),
+            identity: tokio::sync::watch::Sender::new(None),
+        });
+        let client = client_over(Arc::clone(&mint), me);
+
+        spawn_self_identity_follow(&app, &client, my_hex.clone(), &tx);
+        mint.identity.send_replace(minted("alice"));
+        next_self_address_refresh(&mut rx).await;
+
+        let row = registry(&app)
+            .list()
+            .into_iter()
+            .find(|a| a.actor_id == my_hex)
+            .expect("my row");
+        assert_eq!(row.handle.as_deref(), Some("alice"));
+        assert_eq!(row.domain.as_deref(), Some("nest.example"));
+        assert_eq!(row.tier.as_deref(), Some("free"));
+        let session_handle = row.handle.clone().unwrap();
+        assert_eq!(
+            fauna_client_accounts::self_address(
+                &session_handle,
+                row.handle.as_deref(),
+                row.domain.as_deref()
+            ),
+            Some("alice@nest.example".into())
+        );
+
+        mint.identity.send_replace(minted("alice2"));
+        next_self_address_refresh(&mut rx).await;
+        let row = registry(&app)
+            .list()
+            .into_iter()
+            .find(|a| a.actor_id == my_hex)
+            .expect("my row");
+        assert_eq!(
+            row.handle.as_deref(),
+            Some("alice2"),
+            "a rename lands at the next mint"
+        );
+    }
+
+    /// A launch machine outlives one session's account: once its bearer mints
+    /// for another actor, the old session's follower stops, so the next
+    /// account's identity never lands on this row.
+    #[tokio::test]
+    async fn the_follower_stops_when_the_mint_moves_to_another_actor() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = test_app();
+        let me = ActorKeypair::generate();
+        let my_hex = registry(&app)
+            .add_account(&fauna_core::hex32::encode(me.secret_bytes()), None, None)
+            .expect("my row");
+        let mint = Arc::new(WatchedMint {
+            actor: std::sync::Mutex::new(me.actor_id().0),
+            identity: tokio::sync::watch::Sender::new(minted("alice")),
+        });
+        let client = client_over(Arc::clone(&mint), me);
+
+        spawn_self_identity_follow(&app, &client, my_hex.clone(), &tx);
+        next_self_address_refresh(&mut rx).await;
+
+        *mint.actor.lock().unwrap() = ActorKeypair::generate().actor_id().0;
+        mint.identity.send_replace(minted("someone-else"));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv())
+                .await
+                .is_err(),
+            "the follower must not merge another actor's identity"
+        );
+        let row = registry(&app)
+            .list()
+            .into_iter()
+            .find(|a| a.actor_id == my_hex)
+            .expect("my row");
+        assert_eq!(row.handle.as_deref(), Some("alice"));
     }
 }
 

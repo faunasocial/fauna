@@ -6,7 +6,7 @@ pipeline promoted an *artifact*; this one is a gate that proves an *exit code*
 while its suite never executed. `pytest -m cd_suite` exits 0 when every
 selected test SKIPS — and every `cd_suite` test skips silently on a missing
 `FAUNA_LIVE_*` env var, an unbuilt app binary, or an unreachable port. So the
-promote-after-verify pipeline's future CD gate (`build-system.md` § Image tags & channels) could promote `:latest` on the
+promote-after-verify pipeline's future CD gate (`image-pipeline.md` § Image tags & channels) could promote `:latest` on the
 strength of a summary line that reads like success in exactly the way
 convention 7 warns about ("a skip is not coverage"). Measured on the primary
 dev VM with no `FAUNA_LIVE_*` set (2026-08-13): `10 skipped, 2971 deselected in

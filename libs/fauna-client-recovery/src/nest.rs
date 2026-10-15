@@ -37,6 +37,9 @@ pub mod kinds {
     pub const REPLACEMENT_STATUS: &str = "fauna.recovery.replacement.status";
     pub const SUCCESSION_SUBMIT: &str = "fauna.recovery.succession.submit";
     pub const SUCCESSION_LOOKUP: &str = "fauna.recovery.succession.lookup";
+    /// The seed-signed emergency lockout (the signed-out door) — an account-plane
+    /// kind, named here because this crate owns the anonymous emergency plane.
+    pub const ACCOUNT_LOCKOUT: &str = "fauna.account.lockout";
 }
 
 /// A single-use challenge nonce a recovery kind issued.
@@ -359,6 +362,18 @@ where
                     .map_err(|e| RecoveryError::Malformed(format!("succession statement: {e}")))
             })
             .collect()
+    }
+
+    /// `fauna.account.lockout` — block every sign-in for the named identity for
+    /// the nest's fixed window. Pre-identity: the signature in `request` is the
+    /// whole authorization, so this rides the same anonymous connection the
+    /// other emergency kinds do. Prefer [`crate::lockout::lock_account_with_seed`],
+    /// which builds and signs the request.
+    pub async fn account_lockout(
+        &self,
+        request: fauna_protocol::account::AccountLockoutRequest,
+    ) -> Result<fauna_protocol::account::AccountLockoutReply> {
+        self.call(kinds::ACCOUNT_LOCKOUT, request).await
     }
 
     // ── internals ───────────────────────────────────────────────────────────

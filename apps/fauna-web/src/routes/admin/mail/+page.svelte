@@ -32,6 +32,8 @@
     type ReachPolicyOption,
   } from '$lib/wasm';
   import { resolveLocalized } from '$lib/i18n/localized';
+  import { mailHealthCheckStateLabel } from '$lib/wasm';
+  import { mailHealthHeartbeatText, mailHealthStatusText } from '$lib/value-format';
   import { onMount } from 'svelte';
   import MessageBanner from '$lib/components/MessageBanner.svelte';
   import { t } from '$lib/i18n/strings';
@@ -106,6 +108,35 @@
     contributors: number;
     sample_count: number;
     skipped_contributors: number;
+    // A delta-floor deferral also carries `published = false`; check it FIRST.
+    deferred: boolean;
+  }
+  // The served baseline's current state, mirroring the shared BaselineStateView
+  // (`null` on the snapshot = blank text: before hydrate, or a nest that refuses
+  // the read).
+  interface BaselineStateView {
+    published: boolean;
+    contributors: number;
+    sample_count: number;
+    published_at_ms: number | null;
+    skipped_contributors: number;
+    deferred: boolean;
+    standing: boolean;
+  }
+  // The mail health readout (`fauna.bridges.mail_health` projected by the shared
+  // machine; mail-deliverability.md § The mail health readout). `null` until the
+  // first hydrate — no section while absent.
+  interface MailHealthCheckView {
+    label_key: string;
+    state: string;
+    detail: string;
+  }
+  interface MailHealthView {
+    state: string;
+    checks: MailHealthCheckView[];
+    last_outbound_delivered_at: number | null;
+    last_inbound_accepted_at: number | null;
+    delist_url: string | null;
   }
   interface MailPolicySnapshot {
     mail_enabled: boolean;
@@ -118,6 +149,8 @@
     alias: AliasPolicyView;
     status: string; // "Idle" | "Loading" | "Working"
     baseline_publish_result: BaselinePublishView | null;
+    baseline_state: BaselineStateView | null;
+    health: MailHealthView | null;
     error: string | null;
   }
 
@@ -197,6 +230,11 @@
   let aliasSubaddressing = $state(false);
   let aliasWildcardPrefix = $state(false);
 
+  // The warm-up reset is a same-button two-click confirm: the first press arms
+  // (the label relabels to the confirm sentence), the second dispatches. Any mail
+  // re-read (`applySnapshot`) disarms.
+  let warmupArmed = $state(false);
+
   const busy = $derived(snap?.status === 'Working' || snap?.status === 'Loading');
 
   // Each integer knob parses through the shared `parse_count` / `parse_count_u64`
@@ -235,6 +273,7 @@
   function applySnapshot(): void {
     if (!machine) return;
     snap = machine.snapshot() as unknown as MailPolicySnapshot;
+    warmupArmed = false;
     error = snap?.error ?? '';
     if (!snap) return;
     mailEnabled = snap.mail_enabled;
@@ -378,6 +417,34 @@
     applySnapshot();
   }
 
+  async function handleRecheckHealth(): Promise<void> {
+    if (!machine) return;
+    try {
+      await machine.dispatch('RecheckHealth');
+    } catch {
+      /* the snapshot carries the error */
+    }
+    applySnapshot();
+  }
+
+  async function handleWarmupReset(): Promise<void> {
+    if (!machine) return;
+    if (!warmupArmed) {
+      warmupArmed = true;
+      return;
+    }
+    try {
+      await machine.dispatch('ResetWarmup');
+    } catch {
+      /* the snapshot carries the error */
+    }
+    applySnapshot();
+  }
+
+  function openDelist(url: string): void {
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
+
   async function handleSaveSpam(): Promise<void> {
     if (!machine || !snap) return;
     try {
@@ -484,6 +551,43 @@
     applySnapshot();
   }
 
+  // Standing publish is its own gesture (`SetBaselineStandingPublish`, dispatched
+  // immediately off the PERSISTED spam group), never a Spam-group draft.
+  async function handleToggleBaselineStanding(): Promise<void> {
+    if (!machine || !snap) return;
+    try {
+      await machine.dispatch({
+        SetBaselineStandingPublish: { enabled: !snap.spam.baseline_standing_publish },
+      });
+    } catch {
+      /* the snapshot carries the error */
+    }
+    applySnapshot();
+  }
+
+  // The local `YYYY-MM-DD` date of an epoch-ms instant (the web twin of
+  // `fauna_core::format::format_unix_local_date_ms`, which needs the OS tz
+  // database wasm lacks).
+  function localDate(ms: number): string {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  // The `admin-mail-spam-baseline-state` text: published / none, then the
+  // waiting note when the last run was deferred. Blank until the read answers.
+  function baselineStateText(st: BaselineStateView | null | undefined): string {
+    if (!st) return '';
+    let line =
+      st.published && st.published_at_ms != null
+        ? t.admin.mail_page.spam_baseline_state_published({
+            contributors: String(st.contributors),
+            date: localDate(st.published_at_ms),
+          })
+        : t.admin.mail_page.spam_baseline_state_none;
+    if (st.deferred) line += ` ${t.admin.mail_page.spam_baseline_waiting}`;
+    return line;
+  }
+
   // Publish the opt-in aggregate as the deployment baseline. Unit-variant action
   // ⇒ dispatched as a bare string; the outcome lands in
   // snapshot.baseline_publish_result (rendered below the button).
@@ -530,6 +634,68 @@
     />
   </label>
 </section>
+
+<!-- ── Mail health readout (fauna.bridges.mail_health; read-only, a dumb render of
+     the shared fold — mail-deliverability.md § The mail health readout) ── -->
+{#if snap?.health}
+  {@const health = snap.health}
+  <section class="section" data-testid={IDS.ADMIN_MAIL_HEALTH_SECTION}>
+    <h2>{t.admin.mail_page.health_title}</h2>
+    <p class="small" data-testid={IDS.ADMIN_MAIL_HEALTH_STATUS}>
+      {mailHealthStatusText(
+        health.state,
+        health.last_outbound_delivered_at,
+        health.last_inbound_accepted_at,
+      )}
+    </p>
+    {#each health.checks as check, i (i)}
+      <div class="health-row" data-testid={IDS.ADMIN_MAIL_HEALTH_CHECK}>
+        <span class="label-text" data-testid={IDS.ADMIN_MAIL_HEALTH_CHECK_LABEL}>
+          {resolveLocalized({ key: check.label_key })}
+        </span>
+        <span class="small" data-testid={IDS.ADMIN_MAIL_HEALTH_CHECK_STATE}>
+          {resolveLocalized(mailHealthCheckStateLabel(check.state))}
+        </span>
+        <span class="muted small" data-testid={IDS.ADMIN_MAIL_HEALTH_CHECK_DETAIL}>
+          {#if i === 5}
+            {mailHealthHeartbeatText(health.last_outbound_delivered_at)}
+          {:else if i === 6}
+            {mailHealthHeartbeatText(health.last_inbound_accepted_at)}
+          {:else}
+            {check.detail}
+          {/if}
+        </span>
+      </div>
+    {/each}
+    {#if health.delist_url}
+      {@const delistUrl = health.delist_url}
+      <button
+        class="btn"
+        data-testid={IDS.ADMIN_MAIL_HEALTH_DELIST_LINK}
+        data-href={delistUrl}
+        onclick={() => openDelist(delistUrl)}
+      >
+        {t.admin.mail_page.health_delist}
+      </button>
+    {/if}
+    <button
+      class="btn"
+      data-testid={IDS.ADMIN_MAIL_HEALTH_RECHECK_BUTTON}
+      disabled={busy}
+      onclick={handleRecheckHealth}
+    >
+      {t.admin.mail_page.health_recheck}
+    </button>
+    <button
+      class="btn"
+      data-testid={IDS.ADMIN_MAIL_HEALTH_WARMUP_RESET_BUTTON}
+      disabled={busy}
+      onclick={handleWarmupReset}
+    >
+      {warmupArmed ? t.admin.mail_page.health_warmup_reset_confirm : t.admin.mail_page.health_warmup_reset}
+    </button>
+  </section>
+{/if}
 
 <!-- ── Spam / inbound perimeter (put_spam_policy) ── -->
 <section class="section">
@@ -632,7 +798,9 @@
   <p class="muted small">{t.admin.mail_page.publish_spam_baseline_subtitle}</p>
   <p class="muted small" data-testid={IDS.ADMIN_MAIL_PUBLISH_SPAM_BASELINE_RESULT}>
     {#if snap?.baseline_publish_result}
-      {snap.baseline_publish_result.published
+      {snap.baseline_publish_result.deferred
+        ? t.admin.mail_page.spam_baseline_waiting
+        : snap.baseline_publish_result.published
         ? t.admin.mail_page.spam_baseline_published({
             contributors: String(snap.baseline_publish_result.contributors),
             samples: String(snap.baseline_publish_result.sample_count),
@@ -646,6 +814,22 @@
         })}
       {/if}
     {/if}
+  </p>
+  <label class="switch-row">
+    <span>
+      <span class="label-text">{t.admin.mail_page.spam_baseline_standing_label}</span>
+      <span class="muted small">{t.admin.mail_page.spam_baseline_standing_subtitle}</span>
+    </span>
+    <input
+      type="checkbox"
+      data-testid={IDS.ADMIN_MAIL_SPAM_BASELINE_STANDING_TOGGLE}
+      checked={snap?.spam.baseline_standing_publish ?? false}
+      disabled={busy || !snap}
+      onchange={handleToggleBaselineStanding}
+    />
+  </label>
+  <p class="muted small" data-testid={IDS.ADMIN_MAIL_SPAM_BASELINE_STATE}>
+    {baselineStateText(snap?.baseline_state)}
   </p>
 </section>
 
@@ -870,6 +1054,12 @@
     justify-content: space-between;
     gap: 1rem;
     margin: 0.75rem 0;
+  }
+  .health-row {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 3fr);
+    gap: 0.75rem;
+    margin: 0.5rem 0;
   }
   .switch-row span { display: flex; flex-direction: column; gap: 0.125rem; }
   .label-text {

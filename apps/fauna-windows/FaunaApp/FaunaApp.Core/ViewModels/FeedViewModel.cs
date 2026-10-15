@@ -108,6 +108,23 @@ internal partial class FeedViewModel : ViewModelBase
         // transport-agnostic, so the re-query is wired here (the deterministic guard
         // for the tier_3 test_nest_flip_feed_rehydrate windows fan-out).
         RefreshOnReconnect(rpc, ReloadCommand);
+
+        // …and on the shared store-change notice (account-runtime.md § A runtime's
+        // own pump is a source of the notice too, part 4): the feed's sealed
+        // scorers read through the account store, so another device's re-score
+        // re-ranks the OPEN feed. The page calls CleanupStoreChange on navigate-away
+        // beside CleanupReconnect.
+        WatchStoreChange(rpc, StoreResyncAsync);
+    }
+
+    /// <summary>The store-change re-read: the same reload the reconnect arm runs,
+    /// skipped while a reload is already running. The manager's own observer
+    /// repaints the page, so there is no separate <see cref="ViewModelBase.StoreResynced"/>
+    /// to raise (<c>false</c>).</summary>
+    internal async Task<bool> StoreResyncAsync()
+    {
+        if (!ReloadCommand.IsRunning) await ReloadCommand.ExecuteAsync(null);
+        return false;
     }
 
     /// <summary>The shared manager — exposed for the page's direct mutator calls
@@ -128,6 +145,9 @@ internal partial class FeedViewModel : ViewModelBase
     /// `bridge-feed-subscribe-toggle` (hidden when empty), matching web/linux/android/apple
     /// (version-compatibility.md § Dimension 3 — the feed-selector capability gate).</summary>
     public IReadOnlyList<AvailableBridge> AvailableBridges => Snapshot.availableBridges;
+    /// <summary>The roster a post's source token resolves its bridge against
+    /// (<c>ui/feed.md</c> § Implementation status today, <c>SourceKind::Bridged</c>).</summary>
+    public uniffi.fauna_core.BridgeIdentitySnapshot[] BridgeRoster => Snapshot.bridgeRoster;
     public string? SelectedFeedId => Snapshot.selectedFeed;
 
     /// <summary>Whether the built-in Trending virtual feed is the current
@@ -177,6 +197,16 @@ internal partial class FeedViewModel : ViewModelBase
     /// reaches the composer with no re-entry into the feed.</summary>
     public IReadOnlyList<GateRoomOption> OwnRooms => Snapshot.ownRooms;
 
+    /// <summary>The Bluesky thread page (`bridges.md` § Bluesky-native thread view) — the
+    /// shared <c>FeedSnapshot.thread</c> (<c>FeedManager::open_thread</c>): loading, then
+    /// loaded or failed; <c>null</c> when no page is open.</summary>
+    public ThreadPage? Thread => Snapshot.thread;
+
+    /// <summary>The open thread page's fetch failure, resolved like <see cref="ErrorText"/>.
+    /// While the page is open it leads on `error-message`, ahead of the feed's own (tui's
+    /// <c>page_error</c>).</summary>
+    public string? ThreadErrorText => Snapshot.thread?.error is { } e ? Strings.Resolve(e) : null;
+
     // ── Actions (delegate to the manager; NO ConfigureAwait(false) — a WinUI VM
     //    must resume on the UI thread, else bound-state mutation throws a silent
     //    COMException). Page-/form-level failures land in the snapshot, not here. ──
@@ -209,6 +239,16 @@ internal partial class FeedViewModel : ViewModelBase
     public async Task ClearSearchAsync() => await _manager.ClearSearch();
 
     public async Task LoadMoreAsync() => await _manager.LoadMore();
+
+    /// <summary>`feed-post-view-thread-button` — open the thread page on
+    /// <paramref name="postId"/>. Its loading, loaded and failed states ride
+    /// <see cref="Thread"/> through the snapshot observer, so the page paints from the
+    /// ticks, never from this await; a result lands only while the page is still open on
+    /// that post.</summary>
+    public async Task OpenThreadAsync(string postId) => await _manager.OpenThread(postId);
+
+    /// <summary>Leave the thread page — back to the post detail it was opened from.</summary>
+    public void CloseThread() => _manager.CloseThread();
 
     /// <summary>Stage the composer's text/tags/attachment as an explicit GESTURE —
     /// the user's own pick or remove of a file (<c>attachedFile</c> is the new
@@ -480,6 +520,44 @@ internal partial class FeedViewModel : ViewModelBase
     /// Implementation status today).</summary>
     public async Task ReplyAsync(string postId, string body) => await _manager.Reply(postId, body);
 
+    /// <summary>The loaded post a reply dialog targets (<c>null</c> when it left the snapshot).</summary>
+    internal PostSummary? FindPost(string postId) => Posts.FirstOrDefault(p => p.postId == postId);
+
+    /// <summary>The reply send behind <c>feed-reply-submit-button</c> (restricted-posts.md §
+    /// Encryption at rest → *Ruling 5's build — the shape*, (c)): a checked
+    /// <c>feed-reply-public-confirm</c> sends through <c>reply_public_confirmed</c>; otherwise
+    /// <c>prepare_sealed_reply</c> decides — bytes go through the composer's own upload +
+    /// <see cref="SubmitGatedPostAsync"/> / <see cref="AbortGatedSubmit"/> pair (an upload failure
+    /// aborts the staged submit and rethrows), nothing to upload falls through to
+    /// <c>reply</c> (public, or a stated refusal under a restricted post this reader cannot
+    /// author under). The audience is the manager's answer, never decided here — tui's
+    /// <c>send_reply</c>.</summary>
+    public async Task SendReplyAsync(INestHttpClient? nest, string postId, string body, bool publicConfirmed)
+    {
+        if (publicConfirmed)
+        {
+            await _manager.ReplyPublicConfirmed(postId, body);
+            return;
+        }
+        var sealedBlob = await _manager.PrepareSealedReply(postId, body);
+        if (sealedBlob is null)
+        {
+            await _manager.Reply(postId, body);
+            return;
+        }
+        try
+        {
+            if (nest is null) throw new System.InvalidOperationException("no nest connection to upload the sealed reply");
+            var hash = await nest.UploadSealedBlobAsync(GatedUploadSidecar(), sealedBlob);
+            await SubmitGatedPostAsync(hash);
+        }
+        catch (System.Exception upload)
+        {
+            AbortGatedSubmit(Strings.Error(upload));
+            throw;
+        }
+    }
+
     /// <summary>Quote-repost with commentary (<c>feed-quote-button</c>) through
     /// <c>FfiFeedManager::quote</c>, NOT <c>InteractAsync(id, "quote", body)</c> — same
     /// discarding door as reply above (feed.md § Interaction bar; § Implementation status
@@ -538,6 +616,9 @@ public partial class FeedPostItem : ObservableObject
     /// the wire's micros by 1000 — do NOT divide again).</summary>
     public long Timestamp { get; }
     public bool HasMedia { get; }
+    /// <summary>True only for PLAYABLE media (video, or media not yet resolved) —
+    /// the cue capture's media-subject reading; a still image is a non-media subject.</summary>
+    public bool PlaysMedia { get; }
     public bool IsReplyPost { get; }
     public string MediaHashHex { get; }
 
@@ -556,9 +637,20 @@ public partial class FeedPostItem : ObservableObject
 
     /// <summary>The nest-relative path of a bridged post's video (its first folded
     /// <c>ProxiedVideo</c>), or <c>""</c> when the post carries none or has a blob video
-    /// (render-model.md § D6c → Proxied video). Painted as text only — never
-    /// byte-loaded.</summary>
+    /// (render-model.md § D6c → Proxied video). Painted as text — never byte-loaded before
+    /// the tap.</summary>
     public string VideoProxiedPath { get; }
+
+    private readonly uniffi.fauna_core.RenderBlock? _videoBlock;
+
+    /// <summary>The block <c>video-thumbnail</c> plays — the folded <c>Video</c>, else the
+    /// <c>ProxiedVideo</c>, else <c>null</c>
+    /// (<see cref="FaunaApp.Core.Helpers.DocumentRenderer.MediaVideoBlock"/>); a tap asks the
+    /// shared <c>playback_source</c> about it (render-model.md § D6c → Inline playback).
+    /// Typed <c>object</c> because the UniFFI-generated <c>RenderBlock</c> is
+    /// <c>internal</c>, which the XAML compiler cannot bind; the runtime value is the
+    /// block itself.</summary>
+    public object? VideoBlock => _videoBlock;
 
     /// <summary>What <c>video-thumbnail</c> paints beside the play glyph: the content hash
     /// of a blob <c>Video</c>, else the path of a bridged <c>ProxiedVideo</c>, else
@@ -642,6 +734,12 @@ public partial class FeedPostItem : ObservableObject
     /// (<see cref="RepostedPostId"/> is <c>Some</c>) — mirrors tui/linux/web's
     /// <c>is_repost_row</c>.</summary>
     public bool IsRepostRow => RepostedPostId is { Length: > 0 };
+
+    /// <summary>The post THIS card quotes (<c>PostSummary.quoted_post_id</c>, hex id) —
+    /// the quote carrier, published in harness state beside <see cref="RepostedPostId"/>:
+    /// an empty-commentary quote's card text is only its folded embed, so a test finds
+    /// the quote by the post it quotes (tui's key; ui/feed.md § The read model).</summary>
+    public string? QuotedPostId { get; }
 
     /// <summary>The connection actor's own live repost of THIS row's post
     /// (<c>PostSummary.viewer_repost_id</c>) — presence = "reposted by me", and the next
@@ -1091,7 +1189,10 @@ public partial class FeedPostItem : ObservableObject
     /// mirroring linux's identical reuse for its own list-card badge.</summary>
     public string C2paTooltip => Strings.Get("conversations/detail/badge_c2pa");
 
-    internal FeedPostItem(PostSummary p, FfiFeedManager? manager = null)
+    internal FeedPostItem(
+        PostSummary p,
+        FfiFeedManager? manager = null,
+        uniffi.fauna_core.BridgeIdentitySnapshot[]? bridgeRoster = null)
     {
         // Read once at construction — a manager query over the loaded sealed
         // scorers (topic-factors.md § Scoring), not a PostSummary field. `null`
@@ -1099,6 +1200,9 @@ public partial class FeedPostItem : ObservableObject
         IsMuted = manager?.IsMuted(p.postId) ?? false;
         PostId = p.postId;
         AuthorHex = p.author;
+        using (var names = ContactOverlayNames.Open())
+            AuthorLabel = names.PeerLabel(
+                p.authorDisplay?.displayName, p.authorDisplay?.handle, p.author).primary;
         BodyText = p.body;
         // Twin of the quoted embed's own legal-takedown paint below (see
         // QuotedPostIsLegalTakedown) — the shared reference resolves through
@@ -1109,6 +1213,7 @@ public partial class FeedPostItem : ObservableObject
             : "";
         Timestamp = p.timestamp;
         HasMedia = p.hasMedia;
+        PlaysMedia = p.playsMedia;
         IsReplyPost = p.isReply;
         LikeCount = p.likeCount;
         ReplyCount = p.replyCount;
@@ -1116,6 +1221,7 @@ public partial class FeedPostItem : ObservableObject
         QuoteCount = p.quoteCount;
         ViewerLiked = p.viewerLiked;
         RepostedPostId = p.repostedPostId;
+        QuotedPostId = p.quotedPostId;
         ViewerRepostId = p.viewerRepostId;
         GatedTier = p.gatedTier;
         RoomLabel = p.roomLabel;
@@ -1162,11 +1268,14 @@ public partial class FeedPostItem : ObservableObject
         // projection as linux, web, and android (priority #1/#4). Both extractors now delegate
         // to the shared UniFFI faces rather than re-walking the block tree here.
         MediaHashHex = FaunaApp.Core.Helpers.DocumentRenderer.MediaImageHash(p.document) ?? "";
-        VideoHashHex = FaunaApp.Core.Helpers.DocumentRenderer.MediaVideoHash(p.document) ?? "";
         // A bridged post's media folds in as ProxiedImage / ProxiedVideo — a nest-relative
-        // path instead of a content hash (render-model.md § D6c).
+        // path instead of a content hash (render-model.md § D6c). The video slot's hash and
+        // path are read off the one block it plays, so what it paints and what a tap asks
+        // about cannot disagree.
         MediaProxiedPath = FaunaApp.Core.Helpers.DocumentRenderer.MediaProxiedPath(p.document) ?? "";
-        VideoProxiedPath = FaunaApp.Core.Helpers.DocumentRenderer.MediaProxiedVideoPath(p.document) ?? "";
+        _videoBlock = FaunaApp.Core.Helpers.DocumentRenderer.MediaVideoBlock(p.document);
+        VideoHashHex = _videoBlock is uniffi.fauna_core.RenderBlock.Video video ? video.hash : "";
+        VideoProxiedPath = _videoBlock is uniffi.fauna_core.RenderBlock.ProxiedVideo proxied ? proxied.path : "";
         var quote = FaunaApp.Core.Helpers.DocumentRenderer.QuotedPost(p.document);
         HasQuotedPost = quote is not null;
         QuotedPostAuthor = quote is not null ? FaunaFfiMethods.ShortId(quote.author) : "";
@@ -1225,10 +1334,14 @@ public partial class FeedPostItem : ObservableObject
         RemoteImages = FaunaApp.Core.Helpers.RemoteImageCardModel.All(p.document);
         foreach (var tag in p.tags)
             Tags.Add(tag);
-        SourceBadges = FaunaFfiMethods.ClassifySources(p.source)
+        // A token naming a bridge on the snapshot's roster is that bridge's badge
+        // (ui/feed.md § Implementation status today, SourceKind::Bridged); the pill
+        // already paints every badge's label.
+        SourceBadges = FaunaFfiMethods.ClassifySources(p.source, bridgeRoster ?? [])
             .Select(b => new PostSourceBadge(
                 b.id, b.label, FaunaApp.Core.Helpers.SourceGlyphAsset.Emoji(b.glyph)))
             .ToList();
+        OffersThreadView = FaunaFeedMethods.PostOffersThreadView(p);
         // Walked once at construction (the snapshot is immutable). Drives the muted
         // unverified-source-badge; Failed only ever arrives on a decode path, never
         // the feed-list projection (security.md § App display of unverified content).
@@ -1285,6 +1398,13 @@ public partial class FeedPostItem : ObservableObject
     internal static FeedPostItem ForSourceTest(string source) =>
         new FeedPostItem(PostSummaryFixture.Make(postId: "", author: "", source: source));
 
+    /// <summary>Test-only: <see cref="ForSourceTest(string)"/> with the snapshot's
+    /// bridges roster the source token resolves against.</summary>
+    internal static FeedPostItem ForSourceTest(
+        string source, uniffi.fauna_core.BridgeIdentitySnapshot[] bridgeRoster) =>
+        new FeedPostItem(
+            PostSummaryFixture.Make(postId: "", author: "", source: source), null, bridgeRoster);
+
     /// <summary>
     /// Whether <paramref name="other"/> would render this card identically — the
     /// <see cref="FaunaApp.Core.Helpers.ObservableCollectionReconcile"/> key that lets
@@ -1301,9 +1421,11 @@ public partial class FeedPostItem : ObservableObject
         if (other is null) return false;
         return PostId == other.PostId
             && AuthorHex == other.AuthorHex
+            && AuthorLabel == other.AuthorLabel
             && BodyText == other.BodyText
             && Timestamp == other.Timestamp
             && HasMedia == other.HasMedia
+            && PlaysMedia == other.PlaysMedia
             && IsReplyPost == other.IsReplyPost
             && MediaHashHex == other.MediaHashHex
             && VideoHashHex == other.VideoHashHex
@@ -1316,6 +1438,7 @@ public partial class FeedPostItem : ObservableObject
             && QuoteCount == other.QuoteCount
             && ViewerLiked == other.ViewerLiked
             && RepostedPostId == other.RepostedPostId
+            && QuotedPostId == other.QuotedPostId
             && ViewerRepostId == other.ViewerRepostId
             && GatedTier == other.GatedTier
             && RoomLabel == other.RoomLabel
@@ -1373,12 +1496,18 @@ public partial class FeedPostItem : ObservableObject
             // reveal look like a content change and defeat the point of Reconcile
             // keeping the same instance.
             && Tags.SequenceEqual(other.Tags)
-            && SourceBadges.SequenceEqual(other.SourceBadges);
+            && SourceBadges.SequenceEqual(other.SourceBadges)
+            && OffersThreadView == other.OffersThreadView;
     }
 
-    // Shared short-id form (first 12 + …); never the old ASCII "...".
-    // (docs/goal/behavior/value-formatting.md § Short id; priority #1/#4).
-    public string ShortAuthor => FaunaFfiMethods.ShortId(AuthorHex);
+    /// <summary>What the card and the detail dialog call the author: the shared
+    /// overlay resolver's answer for <c>(author_display's name, handle, author id)</c>
+    /// — the viewer's nickname, else the bridged author's public name, else the
+    /// canonical short id (contacts.md § The private overlay → <i>Where the nickname
+    /// paints</i>; value-formatting.md § Peer display label). Read once at
+    /// construction and part of <see cref="ContentEquals"/>, so a rename rebuilds
+    /// exactly the cards it touches.</summary>
+    public string AuthorLabel { get; }
 
     // The timestamp is already epoch-MILLIS (the manager scaled the wire micros);
     // the bucket decision + localized strings live in shared Rust via
@@ -1396,6 +1525,11 @@ public partial class FeedPostItem : ObservableObject
     // conversations rail uses, so badge and rail can't drift). The label text is
     // the shared canonical label (feed.md § Where logic lives).
     public IReadOnlyList<PostSourceBadge> SourceBadges { get; }
+
+    /// <summary>Whether this post's detail offers <c>feed-post-view-thread-button</c>
+    /// (`bridges.md` § Bluesky-native thread view) — the exported
+    /// <c>post_offers_thread_view</c>, never a page-side source check.</summary>
+    public bool OffersThreadView { get; }
 }
 
 /// One classified post-source badge for binding: a stable lowercase id

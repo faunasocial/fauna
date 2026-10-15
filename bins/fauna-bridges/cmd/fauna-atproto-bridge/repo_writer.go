@@ -175,7 +175,9 @@ func (w *funnelRepoWriter) ResolveRecordRefs(
 // shared-Rust walk (fauna_bridge_atproto::record_refs) the nest stamps
 // `referenced_at` from, so what the `#commit` frame announces and what the
 // nest guards against GC can never disagree about which blobs a record names.
-func (w *funnelRepoWriter) ExtractBlobRefs(recordCBOR []byte) []string {
+//
+// A record past the walk's cap is an error, never a shortened list.
+func (w *funnelRepoWriter) ExtractBlobRefs(recordCBOR []byte) ([]string, error) {
 	return faunaFfi.AtprotoExtractBlobRefs(recordCBOR)
 }
 
@@ -193,7 +195,10 @@ func (w *funnelRepoWriter) ExtractBlobRefs(recordCBOR []byte) []string {
 func (w *funnelRepoWriter) ResolveBlobRefs(
 	ctx context.Context, did string, recordCBOR []byte,
 ) (map[string]string, error) {
-	cids := faunaFfi.AtprotoExtractBlobRefs(recordCBOR)
+	cids, err := faunaFfi.AtprotoExtractBlobRefs(recordCBOR)
+	if err != nil {
+		return nil, fmt.Errorf("walk the record's blob refs: %w", err)
+	}
 	if len(cids) == 0 {
 		return nil, nil
 	}

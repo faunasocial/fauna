@@ -64,9 +64,9 @@ Stamped 2026-09-23 at 6605debcb9.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+c9fb0cf1 standalone |
-| linux | ✅ full | 0.1.2-dev+c4a95c20 standalone |
-| windows | ✅ full | 0.1.2-dev+c4a95c20 standalone |
+| web | ✅ full | 0.1.2-dev+c9fb0cf1 standalone |
+| linux | ✅ full | 0.1.3-dev+862c7d57 standalone |
+| windows | ✅ full | 0.1.3-dev+862c7d57 standalone |
 | macos | ✅ full | 0.1.2-dev+96eae039 standalone |
 | ios | ✅ full | 0.1.2-dev+96eae039 standalone |
 | android |  no run recorded | |
@@ -82,7 +82,7 @@ Stamped 2026-09-23 at 6605debcb9.
 | 5 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_direct_url_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_host_only_autodiscovery` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_carddav_direct_url_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_cards_from_a_contacts_app_never_become_fauna_contacts` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_carddav_roundtrip.py::test_cards_from_a_contacts_app_never_become_fauna_contacts` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_a_contacts_app_away_too_long_is_sent_to_a_full_resync` | nest (linux): passed, nest (windows): passed |
 | 9 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_editing_or_deleting_from_an_out_of_date_copy_is_refused` | nest (linux): passed, nest (windows): passed |
 | 10 | nest | `tests/e2e-unified/tests/test_carddav_nest_outcomes.py::test_both_vcard_formats_are_accepted_and_a_malformed_card_is_refused` | nest (linux): passed, nest (windows): passed |

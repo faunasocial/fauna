@@ -58,6 +58,14 @@ impl PermanentApplyFailure {
         reason: "manifest shape refused",
     };
 
+    /// A manifest whose size table contradicts its chunk list
+    /// (`ChunkManifest::check_sizes`): a `total_size` that is not the sum of
+    /// the chunk sizes, a count mismatch, or an oversize chunk. A property of
+    /// the stored bytes; refetching them reproduces it.
+    pub const MANIFEST_SIZE_REFUSED: Self = Self {
+        reason: "manifest sizes refused",
+    };
+
     /// The reassembled bytes do not address the hash the change recorded. The
     /// bytes are wrong at rest; refetching them reproduces the same mismatch.
     pub const CONTENT_UNADDRESSED: Self = Self {
@@ -103,6 +111,41 @@ impl PermanentApplyFailure {
     /// (a retired seed's, a lying nest's) stall every later row of the set.
     pub const STAMP_BOUND: Self = Self {
         reason: "stamped with a generation this owner-only reader does not hold",
+    };
+
+    /// A plaintext manifest (`stored_hashes = None`) reaching a **sealed-only**
+    /// reader (`FileDownloadKeys::sealed_only`) — an owner-only reader whose
+    /// manifest address came from a party's unsigned word, where only the seal
+    /// authenticates the bytes. A property of the stored bytes; refetching
+    /// them reproduces it.
+    pub const PLAINTEXT_REFUSED: Self = Self {
+        reason: "plaintext manifest refused by a sealed-only reader",
+    };
+
+    /// A snapshot entry that no judged change row of the snapshot's set names
+    /// — exactly its manifest under the hash of the path it restores to
+    /// (`backup-restore.md` § Security Properties → Integrity). The entry's
+    /// address is the home nest's unsigned word, and a seal proves only that
+    /// the owner sealed the bytes under the set's root, never that they are
+    /// this path's at this version — so the row is the licence, sealed or
+    /// plaintext, and without one the nest built the manifest, listed another
+    /// path's or version's, or serves a history that does not name it. A
+    /// property of the listing against the history the nest serves; reading
+    /// it again reproduces it (a history read that *fails* stays transient).
+    pub const ENTRY_UNLICENSED: Self = Self {
+        reason: "snapshot entry named by no judged change row of its set",
+    };
+
+    /// A peer-served file the transfer gate's per-operation cap kept out of
+    /// the pull (`p2p.md` § Cross-user shared-set transfer, the metering
+    /// paragraph). The cap is a rule a rule-setter may later lift, so this
+    /// is the one marker whose cause CAN change — but the ruling makes a
+    /// capped file a skip that lets the cursor pass, never a hold: a hold
+    /// would re-list the same page on every pass and stall every file
+    /// behind it while the cap stands, and the skipped file still reaches
+    /// the device by the nest path.
+    pub const PER_OPERATION_CAP: Self = Self {
+        reason: "file kept out by the per-operation transfer cap",
     };
 
     pub const fn new(reason: &'static str) -> Self {

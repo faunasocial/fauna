@@ -16,7 +16,9 @@ use fauna_core::grant_event::GrantEvent;
 use crate::error::{NestError, SignerError};
 use crate::machine::{FetchedSpamModel, IdentitySigner, NestClient};
 use fauna_protocol::bridge_routing::EpochSealKey;
-use fauna_protocol::wrapped_blob::{HolderSealTarget, PutSpamModelOutcome, SpamModelHolderCopy};
+use fauna_protocol::wrapped_blob::{
+    HolderSealTarget, PutSpamModelOutcome, SpamModelHolderCopy, SpamModelPrecondition,
+};
 
 /// Records every nest call so tests can assert the right blobs
 /// flowed in the right order. Cheap-clone via `Arc<Mutex<...>>`.
@@ -48,6 +50,9 @@ pub struct FakeNestState {
     /// registered via `provision_recipient_mls_pubkey` — see
     /// [`RecipientPubkeyRecord`].
     pub provision_recipient_pubkey: Vec<RecipientPubkeyRecord>,
+    /// If set, `fetch_own_recipient_pubkey` returns this error — the read
+    /// the connect-time refresh takes before it re-seals.
+    pub fail_fetch_recipient_pubkey_with: Option<NestError>,
     /// The capability tokens this fake nest "advertises" in `fauna.nest.info`
     /// (consumed by `nest_supports`). Empty by default ⇒ `nest_supports` is
     /// `false` for everything (e.g. `spam-model-sealed-at-rest` off ⇒ the
@@ -68,6 +73,10 @@ pub struct FakeNestState {
     /// each call; the next call after it reaches zero succeeds.
     /// Use to simulate a mid-rotation transient nest failure.
     pub fail_provision_wrapped_mls_for_n_calls: u32,
+    /// The submission-token twin of `fail_provision_wrapped_mls_for_n_calls`:
+    /// simulates a first-enable stopped between its wrapped MSEK (step 3) and
+    /// its submission token (step 4).
+    pub fail_provision_submission_token_for_n_calls: u32,
     /// If set, `set_mail_enabled` returns this error instead of recording the
     /// call. `Rejected` simulates a non-admin actor (design A's server-enforced
     /// scoping); `Transient` simulates a connectivity failure.
@@ -130,6 +139,14 @@ pub struct FakeNestState {
     /// (`mail-spam.md` § 3) — the fake then keeps `spam_model` UNCHANGED, as
     /// the nest keeps its row.
     pub put_spam_model_outcome: PutSpamModelOutcome,
+    /// Writes ANOTHER writer lands just before the next `put_spam_model`s are
+    /// answered, oldest first — one per put: a test plays a concurrent train on
+    /// a second device that fetched the same model and put first. The fake
+    /// then evaluates the compare-and-swap precondition against the model it
+    /// left, as the nest does (`mail-spam.md` § Transactional update).
+    pub concurrent_spam_model_writes: std::collections::VecDeque<Vec<u8>>,
+    /// Every `put_spam_model` call's `expected_model` precondition, in order.
+    pub put_spam_model_expected: Vec<Option<SpamModelPrecondition>>,
     /// Every `mint_grant` call's canonical `GrantBlob` bytes, in order — a test
     /// asserts the contribute toggle-ON minted the keyless `content.read{spam-model}`
     /// grant to the volunteered holder.
@@ -191,11 +208,12 @@ impl NestClient for FakeNestClient {
         &self,
         blob: WrappedSubmissionTokenBlob,
     ) -> Result<(), NestError> {
-        self.inner
-            .lock()
-            .unwrap()
-            .provision_submission_token
-            .push(blob);
+        let mut s = self.inner.lock().unwrap();
+        if s.fail_provision_submission_token_for_n_calls > 0 {
+            s.fail_provision_submission_token_for_n_calls -= 1;
+            return Err(NestError::Transient("simulated provision failure".into()));
+        }
+        s.provision_submission_token.push(blob);
         Ok(())
     }
     async fn revoke_wrapped_mls_blob(
@@ -235,6 +253,21 @@ impl NestClient for FakeNestClient {
             .provision_recipient_pubkey
             .push((actor_id, pubkey, mlkem_ek, epoch_keys));
         Ok(())
+    }
+    async fn fetch_own_recipient_pubkey(
+        &self,
+        actor_id: [u8; 32],
+    ) -> Result<Option<[u8; 32]>, NestError> {
+        let s = self.inner.lock().unwrap();
+        if let Some(e) = &s.fail_fetch_recipient_pubkey_with {
+            return Err(e.clone());
+        }
+        // The nest's row is the last provision's (an atomic replace).
+        Ok(s.provision_recipient_pubkey
+            .iter()
+            .rev()
+            .find(|r| r.0 == actor_id)
+            .map(|r| r.1))
     }
     async fn nest_supports(&self, token: &str) -> Result<bool, NestError> {
         Ok(fauna_protocol::discovery::capability::supports(
@@ -296,12 +329,26 @@ impl NestClient for FakeNestClient {
         sample_count: u32,
         history_op: Option<fauna_protocol::bridge_routing::SpamHistoryOp>,
         holder_copy: Option<SpamModelHolderCopy>,
+        expected_model: Option<SpamModelPrecondition>,
     ) -> Result<PutSpamModelOutcome, NestError> {
         let mut s = self.inner.lock().unwrap();
+        s.put_spam_model_expected.push(expected_model);
+        if let Some(concurrent) = s.concurrent_spam_model_writes.pop_front() {
+            s.spam_model = Some(concurrent);
+            s.spam_model_is_cold_start_seed = false;
+        }
         let outcome = s.put_spam_model_outcome;
         if outcome == PutSpamModelOutcome::DuplicateSignal {
             // The nest wrote nothing — not the model, not the row, not the copy.
             return Ok(outcome);
+        }
+        let stored = s
+            .spam_model
+            .as_deref()
+            .filter(|_| !s.spam_model_is_cold_start_seed);
+        if expected_model.is_some_and(|expected| !expected.holds_for(stored)) {
+            // Another write landed since the writer's fetch: nothing is written.
+            return Ok(PutSpamModelOutcome::StaleModel);
         }
         s.spam_model = Some(sealed_model);
         s.spam_model_is_cold_start_seed = false;
@@ -439,7 +486,43 @@ pub fn a_mail_import_snapshot(step: crate::ImportStep) -> crate::MailImportSnaps
         errored_count: 0,
         total_count: 0,
         error_log: Vec::new(),
+        mailbox_progress: Vec::new(),
+        started_at: 0,
+        last_progress_at: 0,
         status: crate::ImportStatus::Idle,
+        error: None,
+        pause_reason: None,
+        resume_needs_credentials: false,
+        microsoft_signin_available: false,
+        microsoft_signin: None,
+    }
+}
+
+/// A fresh `MailExportSnapshot` on `step` — the export twin of
+/// [`a_mail_import_snapshot`]. tui's and linux's mail-export page tests each
+/// hand-built this exact shape; one copy here means a field added to the
+/// snapshot is one edit, not one per app.
+pub fn a_mail_export_snapshot(step: crate::ExportStep) -> crate::MailExportSnapshot {
+    crate::MailExportSnapshot {
+        step,
+        format: crate::ExportFormat::Mbox,
+        mailboxes: Vec::new(),
+        date_from: String::new(),
+        date_to: String::new(),
+        strip_headers: false,
+        session_state: None,
+        exported_count: 0,
+        skipped_count: 0,
+        errored_count: 0,
+        total_count: 0,
+        mailbox_progress: Vec::new(),
+        error_log: Vec::new(),
+        blob_bytes: None,
+        download_url: String::new(),
+        saved_archive_path: String::new(),
+        started_at: 0,
+        last_progress_at: 0,
+        status: crate::ExportStatus::Idle,
         error: None,
     }
 }

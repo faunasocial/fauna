@@ -115,6 +115,7 @@ import time
 import pytest
 
 from common.launch_harness import make_launch_harness, reached_authenticated_app
+from helpers.app_launch import app_launch_config
 from conftest import _trust_seeder, get_available_apps
 
 pytestmark = [
@@ -217,22 +218,11 @@ def journey_env(request, journey_client, tmp_path):
         )
     else:
         nest = request.getfixturevalue("rotatable_tls_nest")
-        if journey_client == "ios":
-            # No bare `ios_app_path` fixture exists — iOS's direct-launch
-            # fixture (`ios_setup`) returns `{"udid", "app_path"}` together,
-            # because `drivers/ios.py`'s `launch()` requires both. Same
-            # branch as `test_nest_identity_pin.py`'s `pin_env`.
-            ios_setup = request.getfixturevalue("ios_setup")
-            harness = make_launch_harness(
-                "ios", tmp_path=tmp_path, app_path=ios_setup["app_path"],
-                udid=ios_setup["udid"], seed_trust=_trust_seeder(request),
-            )
-        else:
-            app_path = request.getfixturevalue(f"{journey_client}_app_path")
-            harness = make_launch_harness(
-                journey_client, tmp_path=tmp_path, app_path=app_path,
-                seed_trust=_trust_seeder(request),
-            )
+        harness = make_launch_harness(
+            journey_client, tmp_path=tmp_path,
+            **app_launch_config(journey_client, request),
+            seed_trust=_trust_seeder(request),
+        )
         env = _JourneyEnv(
             harness=harness,
             node_url=nest["url"],

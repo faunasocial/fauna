@@ -14,7 +14,7 @@ use axum::{
     response::Response,
     routing::any,
 };
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 /// The provider-key → upstream-base table the forwarder resolves against.
 /// Injected as router state so tests can point it at a local stub upstream.
@@ -53,7 +53,34 @@ fn app(bases: Bases) -> Router {
         .route("/{provider}/{*path}", any(forward))
         .route("/healthz", any(|| async { "ok" }))
         .layer(tower_http::cors::CorsLayer::permissive())
-        .with_state(bases)
+        .with_state(ProxyState {
+            bases,
+            client: upstream_client(),
+        })
+}
+
+/// Per-request ceiling on an upstream call. Hard-coded: no human chooses it.
+const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The one client every forwarded request shares (one connection pool, one TLS
+/// setup). It relays exactly ONE request: redirects are never chased here — a
+/// `3xx` goes back to the caller as-is, and the caller re-points the
+/// `Location` at the proxy itself (the ACME comment above). Chasing it from the
+/// proxy would aim a provider-controlled `Location` at the proxy's own network
+/// position, loopback behind the front door included.
+fn upstream_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(UPSTREAM_TIMEOUT)
+        .build()
+        .expect("static reqwest client config is valid")
+}
+
+/// Router state: the provider table plus the shared upstream client.
+#[derive(Clone)]
+struct ProxyState {
+    bases: Bases,
+    client: reqwest::Client,
 }
 
 /// Resolve an incoming `/{provider}/{path}?{query}` request to its upstream URL.
@@ -105,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn forward(
-    State(bases): State<Bases>,
+    State(ProxyState { bases, client }): State<ProxyState>,
     Path((provider, path)): Path<(String, String)>,
     RawQuery(query): RawQuery,
     method: Method,
@@ -115,7 +142,6 @@ async fn forward(
     let url =
         upstream_url(bases, &provider, &path, query.as_deref()).ok_or(StatusCode::NOT_FOUND)?;
 
-    let client = reqwest::Client::new();
     let mut req = client.request(method, &url).body(body);
     for (k, v) in headers.iter() {
         // Forward all headers except Host (reqwest sets it from URL).
@@ -143,6 +169,100 @@ mod tests {
     use super::*;
 
     const STUB: Bases = &[("stub", "https://api.example.test/v1")];
+
+    /// Serve `router` on an ephemeral loopback port; returns its address.
+    async fn serve(router: Router) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        addr
+    }
+
+    /// The real `app()` over a one-entry table pointing `stub` at `upstream`.
+    async fn proxy_to(upstream: SocketAddr) -> SocketAddr {
+        let base: &'static str = Box::leak(format!("http://{upstream}").into_boxed_str());
+        let bases: Bases = Box::leak(Box::new([("stub", base)]));
+        serve(app(bases)).await
+    }
+
+    fn no_redirect_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+    }
+
+    /// The forwarder relays ONE request. A `302` from the upstream must come
+    /// back as that `302` (with its `Location`), never as the body of the page
+    /// it points at — chasing it would fetch from the proxy's own network
+    /// position, loopback behind the front door included.
+    #[tokio::test]
+    async fn upstream_redirect_is_relayed_not_followed() {
+        let target =
+            serve(Router::new().route("/final", any(|| async { "REDIRECTED BODY" }))).await;
+        let location = format!("http://{target}/final");
+        let upstream = serve(Router::new().route(
+            "/hop",
+            any(move || {
+                let location = location.clone();
+                async move {
+                    Response::builder()
+                        .status(StatusCode::FOUND)
+                        .header("location", location)
+                        .body(axum::body::Body::empty())
+                        .unwrap()
+                }
+            }),
+        ))
+        .await;
+        let proxy = proxy_to(upstream).await;
+
+        let resp = no_redirect_client()
+            .get(format!("http://{proxy}/stub/hop"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::FOUND);
+        assert_eq!(
+            resp.headers().get("location").unwrap().to_str().unwrap(),
+            format!("http://{target}/final"),
+        );
+        assert!(resp.text().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unknown_provider_is_404() {
+        let upstream = serve(Router::new()).await;
+        let proxy = proxy_to(upstream).await;
+        let resp = reqwest::get(format!("http://{proxy}/nope/some/path"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    }
+
+    /// `Host` is the caller's view of the proxy; the upstream must see its own.
+    #[tokio::test]
+    async fn host_header_is_not_forwarded() {
+        let upstream = serve(Router::new().route(
+            "/host",
+            any(|headers: HeaderMap| async move {
+                headers
+                    .get(axum::http::header::HOST)
+                    .and_then(|h| h.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned()
+            }),
+        ))
+        .await;
+        let proxy = proxy_to(upstream).await;
+        let seen = reqwest::get(format!("http://{proxy}/stub/host"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(seen, upstream.to_string());
+    }
 
     #[test]
     fn unknown_provider_has_no_upstream() {

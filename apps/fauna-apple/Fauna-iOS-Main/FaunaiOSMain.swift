@@ -5,7 +5,7 @@ import Foundation
 /// The iOS entry point — a thin shell over `FaunaiOSLib`, compiled by BOTH the
 /// SwiftPM `FaunaiOS` executable (the e2e simulator bundle) and the `.xcodeproj`
 /// `Fauna-iOS` app target (the appex-carrying bundle), so the two build worlds
-/// share one entry point and cannot drift (M4, file-sync.md § On-Demand Files →
+/// share one entry point and cannot drift (M4, on-demand-files-apple.md § On-Demand Files →
 /// Apple File Provider binding; mirrors `FaunaMacOSMain`).
 @main
 enum FaunaiOSMain {

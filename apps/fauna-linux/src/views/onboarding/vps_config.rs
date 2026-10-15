@@ -8,6 +8,8 @@
 //!   `vps-verify-button`, `vps-location-picker` (indexed dropdown,
 //!   one option per region returned by verify), `vps-server-type-radio`
 //!   (indexed by position; ≤5 from `cfg.server_types`),
+//!   `vps-config-update-channel-row` (container, with one radio per channel
+//!   named `vps-config-update-channel-row[<channel_id>]`),
 //!   `vps-config-back-button`, `vps-config-continue-button`.
 //!
 //! All widgets are built once up front; the refresh closure handles every
@@ -29,6 +31,7 @@ use crate::testid::set_test_id;
 use fauna_onboarding_machine::{
     OnboardingMachine, server_type_allowed_for_mail, server_type_label,
 };
+use fauna_provisioning::cloud_init::UpdateChannel;
 use fauna_provisioning::{Capability, PROVIDERS};
 
 use crate::async_helper;
@@ -92,6 +95,14 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
         .spacing(8)
         .build();
     root.append(&provider_section);
+
+    // -- Update channel: which builds the box's updater follows. Outside the
+    //    per-provider section on purpose — the choice does not depend on the
+    //    provider, so it is shown before one is picked (and tui renders it the
+    //    same way). Built once; the refresh closure re-syncs the selection from
+    //    the machine, never a per-app copy. --
+    let (channel_box, channel_radios) = build_update_channel_rows(m.clone());
+    root.append(&channel_box);
 
     // -- Continue / Back row --
     let row = gtk::Box::builder()
@@ -170,6 +181,7 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
         let error_label = error_label.clone();
         let hosted_auth_buttons = hosted_auth_buttons.clone();
         move || {
+            sync_update_channel_rows(&channel_radios, m.provision_update_channel());
             let cfg = m.vps_config();
             if *last_pid.borrow() != cfg.selected_provider_id {
                 *hosted_auth_buttons.borrow_mut() =
@@ -197,6 +209,90 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
     });
 
     (root, refresh)
+}
+
+/// The `vps-config-update-channel-row` container and one radio per channel,
+/// keyed `vps-config-update-channel-row[<channel id>]`, in
+/// `UpdateChannel::ALL` order. Each radio shows its label and one-line
+/// description; a click calls the shared setter. Returns the radios so the
+/// refresh closure can repaint the selection.
+fn build_update_channel_rows(
+    m: Arc<OnboardingMachine>,
+) -> (gtk::Box, Vec<(UpdateChannel, CheckButton)>) {
+    let container = gtk::Box::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(4)
+        .accessible_role(gtk::AccessibleRole::Group)
+        .build();
+    set_test_id(&container, ids::VPS_CONFIG_UPDATE_CHANNEL_ROW);
+
+    let heading = Label::new(Some(&resolve(
+        "onboarding.vps_config.update_channel_heading",
+    )));
+    heading.add_css_class("heading");
+    heading.set_halign(gtk::Align::Start);
+    container.append(&heading);
+
+    let selected = m.provision_update_channel();
+    let mut radios: Vec<(UpdateChannel, CheckButton)> = Vec::new();
+    for c in UpdateChannel::ALL {
+        // The shared getters pick the keys (the compat-line wording for Test /
+        // Dev while the product major is 0); the app only resolves them.
+        let (label_key, desc_key) = (c.label_key(), c.description_key());
+        let radio = match radios.first() {
+            None => CheckButton::new(),
+            Some((_, first)) => CheckButton::builder().group(first).build(),
+        };
+        radio.set_label(Some(&format!(
+            "{} — {}",
+            resolve(label_key),
+            resolve(desc_key)
+        )));
+        set_test_id(
+            &radio,
+            &format!("vps-config-update-channel-row[{}]", c.id()),
+        );
+        // Exactly one on at any time; activate before connecting so seeding the
+        // selection does not echo back into the setter.
+        radio.set_active(c == selected);
+        mark_channel_state(&radio, c == selected);
+        {
+            let m = m.clone();
+            radio.connect_toggled(move |r| {
+                if r.is_active() {
+                    m.set_provision_update_channel(c);
+                }
+            });
+        }
+        container.append(&radio);
+        radios.push((c, radio));
+    }
+    (container, radios)
+}
+
+/// Repaint the channel radios from the machine's selection (the shared getter
+/// is the only source; nothing is cached here).
+fn sync_update_channel_rows(radios: &[(UpdateChannel, CheckButton)], selected: UpdateChannel) {
+    for (c, radio) in radios {
+        let on = *c == selected;
+        if radio.is_active() != on {
+            radio.set_active(on);
+        }
+        mark_channel_state(radio, on);
+    }
+}
+
+/// Carry the row's `on`/`off` on an explicit `state` marker class —
+/// `automation::agent::attr` prefers it to an unmarked `CheckButton`'s
+/// `true`/`false`, and the cross-app test reads `get_attr(row, "state")`.
+fn mark_channel_state(radio: &CheckButton, on: bool) {
+    radio.remove_css_class("test-attr-state-on");
+    radio.remove_css_class("test-attr-state-off");
+    radio.add_css_class(if on {
+        "test-attr-state-on"
+    } else {
+        "test-attr-state-off"
+    });
 }
 
 /// Rebuild the per-provider section's widget tree (link, open-browser, help,

@@ -8,6 +8,9 @@ dependency for web users; native clients never talk to it.
 - Forwards `POST /<provider>/<path>` to `https://api.<provider>.com/<path>`.
 - Preserves the request body byte-for-byte and forwards all headers except `Host`.
 - Adds permissive CORS headers so browser WASM can call it.
+- Relays exactly one upstream request: it **never follows redirects** (a `3xx`
+  and its `Location` go back to the caller, who re-points it at the proxy) and
+  gives up on an upstream that does not answer within 30 seconds.
 - **Does not** parse bodies, log credentials, store state, or see anything
   the provider's own origin server wouldn't see (TLS terminates at the provider).
 

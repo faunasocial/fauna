@@ -94,10 +94,44 @@ def refuse_seal_key_write_on_shared_identity(kind: str, payload) -> None:
     )
 
 
-def remember_shared_actor(actor_id_hex: str | None) -> None:
-    """Record an actor whose signability the rest of the run depends on."""
+#: Each shared actor's own session, where its fixture knows it: ``(nest url,
+#: signing-key seed)``. Read by a discarded driver that must remove the shared
+#: actor's row nest-side because its app could not sign out
+#: (``drivers/http_bridge.py::_retire_discarded_machine``).
+_SHARED_SESSIONS: dict[str, tuple[str, bytes]] = {}
+
+
+def remember_shared_actor(
+    actor_id_hex: str | None, *, nest_url: str | None = None, signing_key=None
+) -> None:
+    """Record an actor whose signability the rest of the run depends on — and,
+    when the caller holds them, the nest and key that reach its own session."""
+    global _SHARED_ACTORS
     if actor_id_hex:
-        _SHARED_ACTORS.add(actor_id_hex.strip().lower())
+        actor = actor_id_hex.strip().lower()
+        # `|=`, not `.add(...)`: `test_user` calls this, and `kind_reach`'s
+        # call graph is keyed on the bare method name — `add` merges with
+        # `MutedWords.add`, which hands the session identity the admin shell's
+        # element IDs and excludes every `logged_in_app` test from live.
+        _SHARED_ACTORS |= {actor}
+        if nest_url and signing_key is not None:
+            _SHARED_SESSIONS[actor] = (nest_url, bytes(signing_key))
+
+
+def forget_shared_actor(actor_id_hex: str | None) -> None:
+    """Drop one actor a test registered for its own duration — a dedicated
+    account standing in for a shared one (`test_discarded_machine_retirement.py`)."""
+    if actor_id_hex:
+        actor = actor_id_hex.strip().lower()
+        _SHARED_ACTORS.discard(actor)
+        _SHARED_SESSIONS.pop(actor, None)
+
+
+def shared_actor_session(actor_id_hex: str | None) -> tuple[str, bytes] | None:
+    """``(nest url, signing-key seed)`` of a shared actor, if its fixture gave it."""
+    if not actor_id_hex:
+        return None
+    return _SHARED_SESSIONS.get(actor_id_hex.strip().lower())
 
 
 def is_shared_actor(actor_id_hex: str | None) -> bool:
@@ -112,6 +146,7 @@ def shared_actors() -> frozenset[str]:
 def _forget_all_for_test() -> None:
     """Drop the registry. Only ``test_no_succession_on_the_shared_identity``."""
     _SHARED_ACTORS.clear()
+    _SHARED_SESSIONS.clear()
 
 
 def refuse_ceremony_on_shared_identity(driver, *, ceremony: str) -> None:

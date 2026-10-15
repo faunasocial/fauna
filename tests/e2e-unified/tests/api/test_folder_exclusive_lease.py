@@ -34,6 +34,7 @@ import fauna_ffi
 
 from clients._ws_rpc_core import RpcCallError
 from common.auth import create_actor_and_register
+from helpers.set_names import addressed
 
 from tests.api.test_web_paywall_folder import _actor_client
 
@@ -54,14 +55,14 @@ def _register(ws, device_id: bytes, label: str) -> None:
 def _acquire(ws, device_id: bytes) -> dict:
     return ws.call(
         "fauna.folders.lease.acquire",
-        {"name": FOLDER, "device_id": device_id.hex()},
+        addressed(FOLDER, device_id=device_id.hex()),
     )
 
 
 def _release(ws, device_id: bytes) -> dict:
     return ws.call(
         "fauna.folders.lease.release",
-        {"name": FOLDER, "device_id": device_id.hex()},
+        addressed(FOLDER, device_id=device_id.hex()),
     )
 
 

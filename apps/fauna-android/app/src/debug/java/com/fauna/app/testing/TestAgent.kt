@@ -1,6 +1,7 @@
 package com.fauna.app.testing
 
 import android.content.Context
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.ui.text.AnnotatedString
 import com.fauna.app.core.AppMessages
 import com.fauna.app.core.AppState
@@ -29,6 +30,7 @@ import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
 import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.*
+import kotlin.coroutines.resume
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -53,6 +55,9 @@ interface TestAgentEntryPoint {
     fun screenTimeStore(): com.fauna.app.core.ScreenTimeStore
     fun atprotoSettingsHost(): com.fauna.app.core.atproto.AtprotoSettingsHost
     fun secureStorage(): SecureStorage
+
+    /** The photo-backup engine — the same `@Singleton` the Folders screen and the worker drive; read for the `photo_backup` state key. */
+    fun photoBackupEngine(): com.fauna.app.core.PhotoBackupEngine
 
     /**
      * The multi-account registry — the only identity store
@@ -147,6 +152,8 @@ object TestAgent {
     @Volatile private var screenTimeStore: com.fauna.app.core.ScreenTimeStore? = null
     @Volatile private var atprotoSettingsHost: com.fauna.app.core.atproto.AtprotoSettingsHost? = null
     @Volatile private var actorScope: com.fauna.app.core.ActorScope? = null
+    @Volatile private var accountStores: com.fauna.app.core.AccountStores? = null
+    @Volatile private var photoBackupEngine: com.fauna.app.core.PhotoBackupEngine? = null
 
     /** See [TestAgentEntryPoint.accountRegistry]. `null` until [start] (unit tests). */
     @Volatile private var registry: com.fauna.ffi.FfiAccountRegistry? = null
@@ -187,6 +194,46 @@ object TestAgent {
     var moreReactionPick: ((String) -> Unit)? = null
 
     /**
+     * The open profile edit form's picture-pick handler — the very function its
+     * two `GetContent()` picker callbacks call with the picked bytes and their
+     * mime type (EXIF-strip, then `ProfileEditVM.stageAvatar`/`stageBanner`),
+     * keyed by the ui.yaml target (`profile-edit-avatar`/`-banner`).
+     * `ProfileEditForm.kt`'s `ProfileEditFormSection` registers it while the
+     * form is shown and clears it when the form leaves composition — the VM
+     * itself outlives the form (it is scoped to the profile screen), so the
+     * registration follows the form, as [moreReactionPick] follows its sheet.
+     * `null` when no edit form is open. Read by the `compose.file` profile arms
+     * ([attachProfileEditImage]).
+     */
+    @Volatile
+    var profileEditImagePick: ((target: String, rawBytes: ByteArray, mimeType: String) -> Unit)? = null
+
+    /**
+     * The Media page's file pick — the very staging its `file-upload`
+     * `GetContent()` picker callback calls (the picked Uri becomes the page's
+     * pick, read and sealed by `MediaVM.upload` on `upload-button`), handed the
+     * staged file's on-device path. `MediaScreen.kt`'s upload row registers it
+     * while shown and clears it when it leaves composition — a followed
+     * (read-only) scope removes the row, so it holds no handler then. `null`
+     * when no upload row is shown. Read by the `compose.file`[file-upload] arm
+     * ([attachMediaFile]).
+     */
+    @Volatile
+    var mediaFilePick: ((path: String) -> Unit)? = null
+
+    /**
+     * The Events page's `.ics` pick — the very staging its
+     * `calendar-import-file` `GetContent()` picker callback calls (the picked
+     * Uri fills the choice, `calendar-import-button` reads and imports it),
+     * handed the staged file's on-device path. `EventsScreen.kt`'s import row
+     * registers it while shown (a calendar is selected) and clears it when it
+     * leaves composition. `null` when no import row is shown. Read by the
+     * `compose.file`[calendar-import-file] arm ([attachCalendarImportFile]).
+     */
+    @Volatile
+    var calendarImportPick: ((path: String) -> Unit)? = null
+
+    /**
      * Last `call_machine_method` result — the JSON-serialized return value for a
      * reader method (`provisioning_snapshot`, `provider_base_url`), or null for a
      * setter. Read back by [serializeState] into `machine_method_result`, which
@@ -204,6 +251,15 @@ object TestAgent {
      * first), so the poll waits rather than reading a previous request's answer.
      */
     @Volatile private var webdavServeReply: JSONObject? = null
+
+    /**
+     * The last `enable_caldav_mailbox` outcome — `{"ok": true}` or
+     * `{"ok": false, "error": …}`, the shape linux/tui/windows/apple publish and
+     * `tests/e2e-unified/helpers/mail_dedicated_nest.py::mint_caldav_mailbox`
+     * polls as `caldav_mailbox_reply`. `null` while a request is in flight (and
+     * before the first), as for [webdavServeReply].
+     */
+    @Volatile private var caldavMailboxReply: JSONObject? = null
 
     /** The application context, for the pokes that enqueue through WorkManager. */
     @Volatile private var appContext: Context? = null
@@ -228,6 +284,19 @@ object TestAgent {
         // registry + install store the UI does.
         val storage = entryPoint.secureStorage()
         onboardingHost = entryPoint.onboardingHost()
+        // The `nest_retire` page's machine takes the vps base-URL override at
+        // construction, so it reads the value `set_provider_base_urls` put on the
+        // wizard machine (JSON-serialized `Option<String>`: `null` or `"url"`).
+        com.fauna.app.core.E2eProviderOverride.vps = {
+            onboardingHost?.machine?.callMachineMethodWithResult("provider_base_url", "\"vps\"")
+                ?.let { runCatching { org.json.JSONTokener(it).nextValue() as? String }.getOrNull() }
+        }
+        // The same read for the `doh` entry: the retire machine's public-DNS
+        // attribution asks the fake resolver the harness seeded.
+        com.fauna.app.core.E2eProviderOverride.doh = {
+            onboardingHost?.machine?.callMachineMethodWithResult("provider_base_url", "\"doh\"")
+                ?.let { runCatching { org.json.JSONTokener(it).nextValue() as? String }.getOrNull() }
+        }
         // The same Hilt @Singleton the conversations screens observe, so
         // `conversations_inject_send_failure` drives the on-screen manager.
         conversationsManagerHost = entryPoint.conversationsManagerHost()
@@ -238,6 +307,7 @@ object TestAgent {
         // login must reconnect THIS instance, not a throwaway one (see
         // applySessionPatch's reconnect step below).
         apiClient = entryPoint.apiClient()
+        photoBackupEngine = entryPoint.photoBackupEngine()
         // The same Hilt @Singleton the real app UI drives — `screen_time_heartbeat`
         // must poke the same store the ward's screen-time-lock overlay reads.
         screenTimeStore = entryPoint.screenTimeStore()
@@ -249,6 +319,7 @@ object TestAgent {
         // go through, so this agent's own teardown arms cannot drift from them.
         actorScope = entryPoint.actorScope()
         registry = entryPoint.accountRegistry()
+        accountStores = entryPoint.accountStores()
         registerSessionOverrideDrop(appState, entryPoint.accountStores())
         // `painted_errors` is fed per frame from the composition, in process;
         // MainActivity hands itself in here, after `setContent()`.
@@ -350,6 +421,14 @@ object TestAgent {
      */
     fun observeConnectionReport(state: com.fauna.ffi.FfiConnectionState) =
         E2eLoudSurfaces.observeConnectionReport(state)
+
+    /**
+     * The auto-renew tick's wait, raceable by `auto_renew_wake` — called once
+     * per loop by `KidsExcisedApi.startAutoRenewCadence`. Production code, so it
+     * reaches the test-flavor wake through this delegate, whose shipping twin
+     * is a bare `delay` ([AutoRenewWake]).
+     */
+    suspend fun autoRenewWaiter(): suspend (Long) -> Unit = AutoRenewWake.waiter()
 
     // ── Convention 14's negative-assert counters ─────────────────────────────
     //
@@ -688,8 +767,21 @@ object TestAgent {
             put("authenticated", appState.session.isAuthenticated || !appState.isOnboarding)
             put("node_url", appState.session.nodeUrl ?: storage.nestUrl ?: JSONObject.NULL)
             put("secret_hex", appState.session.secretHex ?: storage.secretHex ?: JSONObject.NULL)
-            put("device_id", appState.session.deviceId ?: storage.deviceId ?: JSONObject.NULL)
-            put("actor_id", appState.session.actorId ?: JSONObject.NULL)
+            // The stored slot, never the get-or-create: this snapshot is polled
+            // through the whole wizard run, and a resolve would persist an id
+            // onto an identity the user may yet abandon, which keeps it from
+            // its moment-1 retirement (`long-term-store.md` § Eager vs. lazy
+            // migration at native boot; TestAgentDeviceIdTest).
+            put("device_id", appState.session.deviceId ?: storage.storedDeviceId ?: JSONObject.NULL)
+            // The live session's actor, as every app publishes it: the login
+            // shortcut's explicit override first, else the actor the connected
+            // client authenticates as — derived from its own secret
+            // (`ApiClient.sessionActorHex`), never the registry's active
+            // pointer, which a switch moves before the session follows. Until
+            // 2026-10-08 only the shortcut ever set this key, so a
+            // registry-seeded launch or a switch published `null` and
+            // `helpers/waiting.py::await_session_actor` could never pass here.
+            put("actor_id", appState.session.actorId ?: apiClient?.sessionActorHex() ?: JSONObject.NULL)
             put("handle", appState.session.handle ?: JSONObject.NULL)
         }
 
@@ -742,6 +834,13 @@ object TestAgent {
             ?.let { m -> runCatching { org.json.JSONTokener(m.conversationThreadsJson()).nextValue() as? JSONArray }.getOrNull() }
             ?: JSONArray()
 
+        // `data.conversation_sort` — the list's active sort order, the same
+        // passthrough: `conversationSortJson()` is a bare JSON string
+        // (`"LatestActivity"` / `"OldestFirst"` / `"Unread"`), republished as
+        // the string the sort witness reads. Absent before a manager exists.
+        val convSort = convThreadsManager
+            ?.let { m -> runCatching { org.json.JSONTokener(m.conversationSortJson()).nextValue() as? String }.getOrNull() }
+
         // `data.succession_witness` — the MEMBER side of a succession: what this
         // seat's inbound poll did with the statements it saw, what its harvest
         // producer managed per peer, and what its witness made of each identity.
@@ -768,6 +867,7 @@ object TestAgent {
         val data = JSONObject().apply {
             put("conversations", JSONArray().apply { repeat(convCount) { put(JSONObject()) } })
             put("conversation_threads", convThreads)
+            put("conversation_sort", convSort ?: JSONObject.NULL)
             put("succession_witness", successionWitness ?: JSONObject.NULL)
             // The stolen ceremony's pre-switch sweep (or a retry's / an owed
             // sweep's fresh one) in the shared `SweepStatus::state_json`
@@ -838,6 +938,26 @@ object TestAgent {
         // branch verbatim — `{0, 0, runtime: false, holder: false}` — rather than
         // omitting the key, because omission means "this app has no leg" and
         // android does.
+        // `custody_ceremony_ingest` — what the custody ceremony sink did with
+        // each received payload, the host-side barrier for the
+        // `custody_owner_resend_now` poke below
+        // (`fauna_e2e_agent::CUSTODY_CEREMONY_INGEST_KEY`, which owns the
+        // contract). The shape is the shared `custody_ceremony_ingest_json`,
+        // only re-parsed here. A `test-helpers` export, so it is called straight
+        // on the connected `FfiNestClient` (the `device_set_state` reason). The
+        // counts are process-wide and android registers the sink, so no
+        // connected client still publishes zeros rather than omitting the key.
+        val custodyCeremonyIngest = apiClient
+            ?.let { runCatching { it.nestRpc() }.getOrNull() }
+            ?.custodyCeremonyIngestJson()
+            ?.let { j -> runCatching { org.json.JSONTokener(j).nextValue() as? JSONObject }.getOrNull() }
+            ?: JSONObject()
+                .put("seen", 0)
+                .put("moved", 0)
+                .put("duplicate", 0)
+                .put("refused", 0)
+                .put("uncaptured", 0)
+
         val accountPumpCycles = apiClient?.accountPumpCyclesJson()
             ?.let { j -> runCatching { org.json.JSONTokener(j).nextValue() as? JSONObject }.getOrNull() }
             ?: JSONObject()
@@ -861,6 +981,19 @@ object TestAgent {
         val feedReloads = apiClient?.feedReloadsJson()
             ?.let { j -> runCatching { org.json.JSONTokener(j).nextValue() as? JSONObject }.getOrNull() }
             ?: JSONObject().put("started", 0).put("completed", 0).put("committed_gen", 0)
+
+        // `serving_enablement` — convention 14's post-claim serving-enablement
+        // observable (`fauna_e2e_agent::SERVING_ENABLEMENT_KEY`): the shared
+        // per-actor run-record shape `{started, completed, runs: [{actor_id,
+        // decided, completed}]}`, re-parsed from the UniFFI free function (no
+        // live client needed, unlike `feed_reloads` above) so it is published
+        // unconditionally and the shape is never re-derived per app. The leg the
+        // authed `MailEnableGlueVM.applyPostClaimServingEnablement` feeds. A
+        // parse failure publishes `null`, the reader's refusal, never a
+        // hand-spelled zero.
+        val servingEnablement = runCatching {
+            org.json.JSONTokener(com.fauna.ffi.servingEnablementJson()).nextValue() as? JSONObject
+        }.getOrNull()
 
         // `connection` — the cross-app **connection barrier**'s observable
         // (`fauna_e2e_agent::CONNECTION_KEY`), `{state, online}`. Every app
@@ -909,22 +1042,60 @@ object TestAgent {
             org.json.JSONTokener(messageBannersJsonText()).nextValue() as? JSONObject
         }.getOrNull()
 
+        val launchToken = apiClient
+            ?.let { runCatching { it.nestRpc() }.getOrNull() }
+            ?.let { client ->
+                runCatching {
+                    org.json.JSONTokener(client.launchTokenJsonForTest()).nextValue() as? JSONObject
+                }.getOrNull()
+            }
+
         return JSONObject().apply {
             put("session", session)
             put("nav", nav)
-            put("settings", JSONObject())
+            // `session_token_ids` — the token id behind each painted
+            // `session-card`, in order (`actions/sessions.py::painted_token_ids`);
+            // absent before the Sessions page's first hydrate.
+            put("settings", JSONObject().apply {
+                com.fauna.app.ui.viewmodel.SessionsTestState.paintedTokenIds?.let {
+                    put("session_token_ids", org.json.JSONArray(it))
+                }
+            })
             put("data", data)
             put("messages", msgs)
             put("machine_method_result", machineMethodResultValue)
             put("webdav_serve_reply", webdavServeReply ?: JSONObject.NULL)
+            put("caldav_mailbox_reply", caldavMailboxReply ?: JSONObject.NULL)
             put("conv_receive_cycles", convReceiveCycles)
             put("mls_folded_commits", mlsFoldedCommits)
             put("account_pump_cycles", accountPumpCycles)
+            put("custody_ceremony_ingest", custodyCeremonyIngest)
             put("feed_reloads", feedReloads)
+            // Convention 17's "a region Block never renders silent" counts
+            // (`helpers/frame_invariants.py`): on-screen items the region blocks,
+            // registered at the verdict, vs. block placeholders composed —
+            // `RegionPlaneHost`'s two witness sets (windows' `BlockRenderState`).
+            put("region_block_render", com.fauna.app.core.RegionPlaneHost.blockRenderState().let { (blocked, painted) ->
+                JSONObject().put("blocked", blocked).put("placeholders", painted)
+            })
+            put("serving_enablement", servingEnablement ?: JSONObject.NULL)
             // `fauna_e2e_agent::WIDGET_REFRESH_KEY` — bumped by the widget
             // worker's pass and nothing else, so the poke below has a barrier.
             put("widget_refresh", com.fauna.app.widget.WidgetRefreshPasses.stateJson())
             put("message_banners", messageBanners ?: JSONObject.NULL)
+            // `fauna_e2e_agent::PHOTO_BACKUP_KEY` — the pass cycle counters and the
+            // in-flight countdown (a SUBSET of apple's funnel: android has no
+            // authorization / already-synced / export-failed legs, and a field it
+            // does not have is absent, not zero — convention 11). Plain field reads
+            // off the engine, never a round trip. Absent before [start] resolved it.
+            photoBackupEngine?.let { engine ->
+                put("photo_backup", JSONObject().apply {
+                    put("passes_started", engine.progress.passesStarted)
+                    put("passes_completed", engine.progress.passesCompleted)
+                    put("pending", engine.progress.pendingCount.value)
+                    put("uploaded", engine.uploadedCount.value)
+                })
+            }
             put("connection", connection)
             // Top-level, like every app's: `helpers/waiting.py` reads both keys
             // at depth one (`session_generation` / `activation_gestures`).
@@ -940,6 +1111,14 @@ object TestAgent {
                 put("offset_secs", launchClockOffsetSecsForTest())
                 put("now_secs", launchClockNowSecsForTest())
             })
+            // `launch_token` — the held session bearer's anchored lifetime, the
+            // tui/linux/web/apple twin (`fauna_e2e_agent::LAUNCH_TOKEN_KEY`; shape
+            // owned by `fauna_e2e_contract::launch_token_json`). The held bearer is
+            // `FfiNestClient`'s, so this re-parses its UniFFI text face (the
+            // `message_banners` passthrough idiom above). No live client, or a mint
+            // still in flight (the text `"null"`), publishes JSON `null` —
+            // convention 11: the reader's refusal, never a hand-spelled zero.
+            put("launch_token", launchToken ?: JSONObject.NULL)
             // `barrier_probe` / `barrier_ack_probe` — top-level, like every app's.
             BarrierTestCommand.putState(this)
             // `connection_reports` / `painted_errors` / `alert_sweep_passes` —
@@ -971,6 +1150,9 @@ object TestAgent {
         }
     }
 
+    /** The longest `open_route`'s page work may take: one nest round trip behind a fresh visit's read. */
+    private const val OPEN_ROUTE_DEADLINE_MS = 30_000L
+
     /** Mirrors `fauna_e2e_agent::FOCUS_MOVE_MAX_TIMES` — see `focus_move`'s arm. */
     private const val FOCUS_MOVE_MAX_TIMES = 256
 
@@ -995,6 +1177,85 @@ object TestAgent {
         val manager = host.manager()
             ?: return Result.failure(IllegalStateException("$action: no feed manager (pre-auth)"))
         return Result.success(manager)
+    }
+
+    /**
+     * One engagement-cue test-clock command (see its arm in [dispatchCommand]);
+     * throws the refusal. The clock lives on the auth's ONE tracker
+     * ([com.fauna.app.core.feed.FeedManagerHost.cueTracker]), so freeze, thaw
+     * and advance work off the Feed page too; the probe's measuring sample and
+     * the pixel step need the mounted list
+     * ([com.fauna.app.ui.screen.feed.CueCapture.active]).
+     *
+     * Every sample taken here resolves only once the exposures it ended are
+     * recorded — the engine's train and any put included — so an ack means
+     * nothing more is on its way: android has no quit door a test can wait
+     * out, so this is its barrier, as on web.
+     */
+    private suspend fun feedCueCommand(action: String, cmd: JSONObject): Any {
+        val manager = feedManagerFor(action).getOrThrow()
+        val tracker = feedManagerHost!!.cueTracker(manager)
+        val capture = com.fauna.app.ui.screen.feed.CueCapture.active
+        fun probe(): JSONObject = JSONObject(tracker.probeForTest())
+        return when (action) {
+            "feed_cue_clock_freeze" -> {
+                tracker.freezeClockForTest(
+                    android.os.SystemClock.elapsedRealtime().toULong(),
+                    System.currentTimeMillis().toULong(),
+                )
+                JSONObject().put("ok", true)
+            }
+            "feed_cue_clock_thaw" -> {
+                tracker.thawClockForTest()
+                JSONObject().put("ok", true)
+            }
+            "feed_cue_clock_advance" -> {
+                // Sample at once, so each step lands as exactly one sample's
+                // credit (the 250 ms tick could fold two advances into one
+                // capped sample).
+                tracker.advanceClockForTest(cmd.optLong("ms", 0L).toULong())
+                capture?.let { it.record(it.sample()) }
+                JSONObject().put("ok", true)
+            }
+            "feed_cue_probe" -> {
+                // Frozen, a sample credits nothing — it only measures — so the
+                // probe reads the list as laid out now, not as the last tick saw it.
+                if (capture != null && probe().optBoolean("frozen")) {
+                    awaitLaidOutFrame()
+                    capture.record(capture.sample())
+                }
+                probe()
+            }
+            "feed_cue_scroll_by" -> {
+                // Scroll the post list's real offset by `px`, then answer after
+                // the next frame's layout from a sample of its own, with the
+                // probe as THAT sample left it — a later read could already show
+                // the feed's re-rank in answer to an exposure the step ended.
+                // `moved: false` at the end of the list.
+                capture ?: throw IllegalStateException("the feed page is not mounted")
+                val consumed = capture.listState.scrollBy(cmd.optDouble("px", 0.0).toFloat())
+                awaitLaidOutFrame()
+                val left = capture.sample()
+                val after = probe()
+                capture.record(left)
+                JSONObject().put("ok", true).put("moved", consumed != 0f).put("probe", after)
+            }
+            else -> throw IllegalArgumentException("unhandled feed cue command")
+        }
+    }
+
+    /**
+     * Resume once the next frame has run whole — a Choreographer frame
+     * callback fires before that frame's traversal (Compose's measure and
+     * layout), and a message posted from it runs after the frame — so a
+     * `LazyListState.layoutInfo` read sees the list as just laid out. linux's
+     * `after_next_frame` twin.
+     */
+    private suspend fun awaitLaidOutFrame() = suspendCancellableCoroutine<Unit> { cont ->
+        val main = android.os.Handler(android.os.Looper.getMainLooper())
+        android.view.Choreographer.getInstance().postFrameCallback {
+            main.post { if (cont.isActive) cont.resume(Unit) }
+        }
     }
 
     /**
@@ -1107,6 +1368,90 @@ object TestAgent {
                     applyTypeTextPatch(typed)?.let { return it }
                 }
             }
+            "open_route" -> {
+                // The e2e seam of the `fauna://` in-app routes (android.md §
+                // Navigation → *In-app routes*; tui's `open_route` arm and
+                // FaunaKit's `OpenRouteTestCommand` are the twins): the URI goes
+                // through the SAME door `MainActivity`'s intent intake takes,
+                // so a journey needs no relaunch inside PAR's 90-second window.
+                // Awaited: signed in, the page's visit opens the staged request
+                // and clears it, and this acks only then, so the card is painted
+                // on return. Signed out, the door holds the route and this acks
+                // at once. An unparseable URI the intent intake drops silently
+                // is a refusal here — a driver that sent one must hear it.
+                val uri = cmd.optString("uri").ifEmpty {
+                    return "open_route: the command carried no `uri`"
+                }
+                val handoff = com.fauna.app.core.ConsentHandoff.shared
+                if (!handoff.offer(uri, appState)) {
+                    return "open_route: `$uri` is not a route this app takes " +
+                        "(only `fauna://consent/<request_uri>` has a producer on android)"
+                }
+                if (appState.isOnboarding || appState.isAddingAccount) return null
+                if (!handoff.waitUntilDrained(OPEN_ROUTE_DEADLINE_MS)) {
+                    return "open_route: the Connected apps page did not open the request within " +
+                        "${OPEN_ROUTE_DEADLINE_MS / 1000} s (no live page, or no machine in this session)"
+                }
+            }
+            "custodian_pull_run_now" -> {
+                // Android twin of tui's / linux's / windows's arm and of ios's
+                // in-app door (`CustodianPullTestCommand.swift`): run ONE real
+                // custodian pull pass and stash its report where
+                // `HttpBridgeDriver.call_command` reads it back, so
+                // `test_backups.py`'s orphaned-store witness asserts state, never
+                // timing (convention 14). Android hosts its replica IN the app
+                // process (no external agent), so this is the same construct →
+                // `runAllKinds()` → close the periodic `CustodianHostWorker`
+                // runs, over the same unscoped store base.
+                //
+                // The pass reads the wall clock itself and takes no offset, so a
+                // shifted clock would be silently ignored and a 24-hour-jump test
+                // would pass against the real clock proving nothing — refused by
+                // name (convention 11), exactly as ios does.
+                val offset = cmd.optLong("now_offset_secs", 0L)
+                if (offset != 0L) {
+                    return "custodian_pull_run_now: this device hosts its replica in the app " +
+                        "process, whose pass (`FfiCustodianHost.runAllKinds`) takes no clock " +
+                        "offset, so now_offset_secs=$offset cannot be honoured — only 0 is"
+                }
+                val api = apiClient
+                    ?: return "custodian_pull_run_now: no ApiClient wired (TestAgent.start " +
+                        "has not run yet), so there is no device to host a replica"
+                val stores = accountStores
+                    ?: return "custodian_pull_run_now: no AccountStores wired (TestAgent.start " +
+                        "has not run yet), so there is no store base to host a replica under"
+                val deviceId = storage.resolveDeviceId()
+                    ?: return "custodian_pull_run_now: no device id yet (pre-onboarding), so " +
+                        "this device cannot be the subject of a registry row"
+                try {
+                    // `null` is NOT an enrolled custodian: the source nest's
+                    // destination registry has no row for this device yet — the
+                    // ordinary state until enrollment lands, never an error.
+                    val host = api.buildCustodianHost(deviceId, stores.custodianStoreBaseDir())
+                    val body = JSONObject().put("via", "in-app")
+                    if (host == null) {
+                        // `held_bytes` stays present at 0, as the agent's
+                        // not-hosting report has it.
+                        body.put("hosting", false).put("held_bytes", 0)
+                    } else {
+                        try {
+                            val s = host.runAllKinds()
+                            body.put("hosting", true)
+                                .put("held_bytes", s.heldBytes.toLong())
+                                .put("stored_segments", s.storedSegments.toLong())
+                                .put("tombstoned_segments", s.tombstonedSegments.toLong())
+                                .put("cap_reached", s.capReached)
+                                .put("checked_in", s.checkedIn)
+                        } finally {
+                            host.close()
+                        }
+                    }
+                    machineMethodResult = body.toString()
+                } catch (e: Exception) {
+                    machineMethodResult = null
+                    return "custodian_pull_run_now threw ${e::class.simpleName}: ${e.message}"
+                }
+            }
             "call_machine_method" -> {
                 // docs/goal/behavior/onboarding.md §"E2E bridge contract": dispatch
                 // the named OnboardingMachine method with the JSON-encoded
@@ -1149,8 +1494,10 @@ object TestAgent {
                 //
                 // No connected client is a legitimate quiet "not found" — the
                 // same default the shared `device_set_state_json` returns for
-                // a `None` handle (tui/linux never refuse this either) —
-                // rather than a convention-11 refusal.
+                // a `None` handle — rather than a convention-11 refusal. A
+                // missing or non-string `device_id_hex` IS one (the bad-payload
+                // clause), on every app: a typo'd key must not read as "the row
+                // is NOT there".
                 //
                 // Called straight on the connected `FfiNestClient` from here,
                 // never through an `ApiClient` wrapper: `device_set_state_json`
@@ -1159,11 +1506,55 @@ object TestAgent {
                 // (convention 15), so a `src/main` wrapper broke the release
                 // and storeSafe builds. `nestRpc()` throws when not connected,
                 // which is the same quiet "not found" as above.
-                val deviceIdHex = cmd.optString("device_id_hex", "")
+                // `opt` + `as?` rather than `optString`, which coerces a number
+                // to its text and would honour `{"device_id_hex": 7}`.
+                val deviceIdHex = cmd.opt("device_id_hex") as? String
+                if (deviceIdHex == null) {
+                    machineMethodResult = null
+                    return "device_set_state: needs a `device_id_hex` string"
+                }
                 machineMethodResult = apiClient
                     ?.let { runCatching { it.nestRpc() }.getOrNull() }
                     ?.deviceSetStateJson(deviceIdHex)
                     ?: JSONObject().put("found", false).toString()
+            }
+            "read_marker_state" -> {
+                // e2e-only: android twin of tui's `read_marker_state` arm — this
+                // app's own account-store read marker for `channel_id_hex`, the
+                // read-state relaunch witness's durability barrier
+                // (`conversation-read-state.md` § The read-marker record). The
+                // `device_set_state` shape above, same reasons: a `test-helpers`
+                // export called straight on the connected `FfiNestClient`, no
+                // connected client a quiet "not found", the value riding
+                // `machine_method_result`.
+                val channelIdHex = cmd.optString("channel_id_hex", "")
+                machineMethodResult = apiClient
+                    ?.let { runCatching { it.nestRpc() }.getOrNull() }
+                    ?.readMarkerStateJson(channelIdHex)
+                    ?: JSONObject().put("found", false).toString()
+            }
+            "launch_refresh_token" -> {
+                // `fauna_e2e_agent::LAUNCH_REFRESH_TOKEN` — force the held session
+                // bearer's refresh NOW, AWAITED so the ack lands after the outcome:
+                // the wrong-clock refresh witness's ceremony leg (launch-routing
+                // smoke case M, `login.md` § E2E test login). The bearer is
+                // `FfiNestClient`'s, so this drives `refreshHeldBearerForTest` —
+                // clear the cached bearer, re-mint over the silent challenge — and
+                // the paired `launch_token` state key reads the re-anchored
+                // deadline back. A `test-helpers` export called straight on the
+                // connected client (convention 15), like `device_set_state`.
+                // Apple twin: `LaunchRefreshTokenTestCommand`. Refuses loudly
+                // (convention 11) with no client or on a failed re-mint.
+                val client = apiClient
+                    ?.let { runCatching { it.nestRpc() }.getOrNull() }
+                    ?: return "launch_refresh_token: no live nest connection, so no held bearer to refresh"
+                try {
+                    client.refreshHeldBearerForTest()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    return "launch_refresh_token: the re-mint failed: ${e::class.simpleName}: ${e.message}"
+                }
             }
             "conversations_inject_inbound" -> {
                 // The payload rides the command envelope top-level
@@ -1262,6 +1653,27 @@ object TestAgent {
                 } else {
                     manager.releaseHeldReloadForTest()
                 }
+            }
+            "feed_cue_clock_freeze", "feed_cue_clock_thaw", "feed_cue_clock_advance",
+            "feed_cue_probe", "feed_cue_scroll_by" -> {
+                // The engagement-cue test clock (convention 14; the shared
+                // tracker's seam, `fauna_feed::CueTracker` § The test clock,
+                // through `FfiCueTracker`'s test-helpers faces). Twins of tui's,
+                // linux's (`feed::viewport::test_clock`) and web's
+                // (`$lib/feed-cues-e2e`) arms, with their reply shapes: `{ok}`
+                // for a step, the `CueProbe` for the probe, `{ok, moved, probe}`
+                // for the pixel step, and `{error}` for a refusal — which is
+                // also reported on `error-message` (convention 11).
+                val reply = try {
+                    feedCueCommand(action, cmd)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    val reason = "$action: ${e.message}"
+                    machineMethodResult = JSONObject().put("error", reason).toString()
+                    return reason
+                }
+                machineMethodResult = reply.toString()
             }
             "conversations_inject_send_failure" -> {
                 // Stamp thread_id's compose into send_state = Failed { reason }
@@ -1381,6 +1793,22 @@ object TestAgent {
                     }
                 }
             }
+            "custody_owner_resend_now" -> {
+                // The custody owner sends again, android's twin of tui's and
+                // linux's arm (`fauna_e2e_agent::CUSTODY_OWNER_RESEND_NOW` owns
+                // the contract): every granted ceremony re-posts its newest sent
+                // step through the shared body, recording nothing — `devices`
+                // outcome 15's trigger. Fire-and-forget like `account_pump_now`
+                // above: the barrier is the HOST's `custody_ceremony_ingest`
+                // counts. A `test-helpers` export, so called straight on the
+                // connected `FfiNestClient`; pre-auth is a quiet no-op.
+                pokeScope.launch {
+                    val nest = apiClient?.let { runCatching { it.nestRpc() }.getOrNull() }
+                    if (!(nest?.custodyOwnerResendNow() ?: false)) {
+                        android.util.Log.i("TestAgent", "custody_owner_resend_now: no session yet (pre-auth)")
+                    }
+                }
+            }
             "serve_enable_folder" -> {
                 // Arrange a WebDAV-served, content-keyed folder for the logged-in
                 // actor, optionally creating it first — the twin of apple's
@@ -1402,6 +1830,36 @@ object TestAgent {
                         if (create) api.nestRpc().folders().create(folder, null)
                         val served = api.serveSetFolder(folder, null, true)
                         JSONObject().put("ok", true).put("served_sets", served.toLong())
+                    } catch (e: Exception) {
+                        JSONObject().put("ok", false).put("error", "${e::class.simpleName}: ${e.message}")
+                    }
+                }
+            }
+            "enable_caldav_mailbox" -> {
+                // Mint the logged-in actor's shared MSEK + `default` mail credential
+                // through the shared `MailSettingsMachine` — the twin of apple's
+                // `CaldavMailboxTestCommand` and linux's `enable_caldav_mailbox_for_test`
+                // (one recipe, shared Rust): a `password` mints a credential the test
+                // knows (an organizer a stock CalDAV client AUTHs as), none generates
+                // one (an attendee who never speaks raw CalDAV). Answered
+                // asynchronously into `caldav_mailbox_reply`, cleared first, like
+                // the `serve_enable_folder` arm above.
+                caldavMailboxReply = null
+                val api = apiClient
+                    ?: return "enable_caldav_mailbox arrived before the ApiClient was wired"
+                val password = cmd.optString("password", "").ifEmpty { null }
+                pokeScope.launch {
+                    caldavMailboxReply = try {
+                        val machine = api.buildMailSettingsMachine()
+                            ?: throw IllegalStateException("no nest connection for the mail-settings machine")
+                        machine.use {
+                            if (password != null) {
+                                it.enableCaldavMailboxWithPassword("Default", password)
+                            } else {
+                                it.enableCaldavMailboxWithGeneratedPassword("Default")
+                            }
+                        }
+                        JSONObject().put("ok", true)
                     } catch (e: Exception) {
                         JSONObject().put("ok", false).put("error", "${e::class.simpleName}: ${e.message}")
                     }
@@ -1571,6 +2029,12 @@ object TestAgent {
                 // The loud surfaces' two command seams — the sweep loop's wake
                 // and the reconnect pace — live in [E2eLoudSurfaces].
                 E2eLoudSurfaces.apply(action, cmd, apiClient?.nestClient)?.let { return it }
+            }
+            AutoRenewWake.AUTO_RENEW_WAKE -> {
+                // End the current session's auto-renew wait so the production
+                // tick passes now; the caller's barrier is the tick's own
+                // `auto-renew pass:` log line, never this ack.
+                AutoRenewWake.apply(action)?.let { return it }
             }
             "switch_pane" -> {
                 // DELIBERATE, DOCUMENTED REFUSAL (convention 11's second half — same
@@ -1804,7 +2268,14 @@ object TestAgent {
         val incomingUrl =
             if (session.has("node_url")) session.getString("node_url") else storage.nestUrl
         if (patchLogsIn && !incomingHex.isNullOrEmpty() && !incomingUrl.isNullOrEmpty()) {
-            actorScope?.dropActorScopedState()
+            // A re-login as the identity this process is already signed in as
+            // (the fixture re-establishing its session) keeps that identity's
+            // standing critical alerts and sweep loop; any other patch ends it.
+            // Read BEFORE the drop, which clears the client's secret.
+            val sameIdentity = apiClient?.sweepIdentityKey()?.let {
+                it == apiClient?.sweepIdentityKey(incomingHex, incomingUrl)
+            } == true
+            actorScope?.dropActorScopedState(identityEnds = !sameIdentity)
         }
         val patchUrl = if (session.has("node_url")) session.getString("node_url") else null
         val patchDeviceId = if (session.has("device_id")) session.getString("device_id") else null
@@ -1871,6 +2342,11 @@ object TestAgent {
                     it.nodeUrl = url
                     try {
                         it.authenticate(hex)
+                        // The universal post-auth hook the nav host's effect runs
+                        // in production; this patch recomposes nothing on a
+                        // same-actor re-establish, so it would never run again
+                        // (the loop-vs-one-pass split makes a repeat safe).
+                        it.startCriticalAlertSweep()
                     } catch (e: Exception) {
                         android.util.Log.e("TestAgent", "session patch reconnect failed: ${e.message}")
                     }
@@ -1956,14 +2432,14 @@ object TestAgent {
      * `applyComposePatch` dispatch — same four targets the shared driver sends,
      * same implement-or-refuse discipline (convention 11: a command MUST NOT
      * be silently dropped). `compose-file` (the feed composer) and
-     * `attachment-button` (the conversations composers) are implemented below;
-     * the profile pair names real android production doors
-     * (`ProfileEditVM.stageAvatar`/`stageBanner`) that a TestAgent instance
-     * cannot yet REACH — unlike [FeedManagerHost] and
-     * [ConversationsManagerHost], `ProfileEditVM` has no singleton host, only a
-     * plain per-navigation `@HiltViewModel` — so they refuse loudly rather than
-     * silently no-op, which convention 11 treats identically to "not
-     * implemented".
+     * `attachment-button` (the conversations composers) reach their managers
+     * through the singleton hosts; the profile pair reaches the open edit
+     * form's pick handler ([profileEditImagePick]) — `ProfileEditVM` has no
+     * singleton host, so the form registers its handler while shown;
+     * `file-upload` reaches the Media page's upload row the same way
+     * ([mediaFilePick]) — the page holds its pick as screen state, not on
+     * `MediaVM`; and `calendar-import-file` the Events page's import row
+     * ([calendarImportPick]), likewise screen state.
      */
     private fun applyComposePatch(compose: JSONObject): String? {
         val path = compose.optString("file").ifEmpty {
@@ -1973,12 +2449,82 @@ object TestAgent {
         return when (target) {
             "compose-file" -> attachFeedComposeFile(path)
             "attachment-button" -> attachConversationComposerFile(path)
-            "profile-edit-avatar", "profile-edit-banner" ->
-                "compose.file[$target]: not implemented on android yet — ProfileEditVM " +
-                    "is a plain per-navigation @HiltViewModel with no singleton host a " +
-                    "TestAgent instance can reach"
+            "profile-edit-avatar", "profile-edit-banner" -> attachProfileEditImage(target, path)
+            "file-upload" -> attachMediaFile(path)
+            "calendar-import-file" -> attachCalendarImportFile(path)
             else -> "compose.file: unknown target \"$target\""
         }
+    }
+
+    /**
+     * `compose.file`[profile-edit-avatar|profile-edit-banner]: stand in for the
+     * edit form's `GetContent()` picker result — read the staged file and hand
+     * its bytes and mime type to the form's own pick handler
+     * ([profileEditImagePick], which EXIF-strips and calls
+     * `ProfileEditVM.stageAvatar`/`stageBanner`, uploading eagerly as a human
+     * pick does). The form must already be open: the `profile-edit-button`
+     * click stays part of the journey, so a pick with no form is refused by
+     * name (convention 11). The mime type is guessed from the path, as
+     * [attachFeedComposeFile] does — the picker reads it off the content URI.
+     */
+    private fun attachProfileEditImage(target: String, path: String): String? {
+        val pick = profileEditImagePick
+            ?: return "compose.file[$target]: the profile edit form is not open " +
+                "— click profile-edit-button first"
+        val rawBytes = try {
+            java.io.File(path).readBytes()
+        } catch (e: Exception) {
+            return "compose.file[$target]: could not read $path: ${e.message}"
+        }
+        val mimeType = java.net.URLConnection.guessContentTypeFromName(path)
+            ?: "application/octet-stream"
+        pick(target, rawBytes, mimeType)
+        android.util.Log.i("TestAgent", "compose.file[$target]: staged $path")
+        return null
+    }
+
+    /**
+     * `compose.file`[calendar-import-file]: stand in for the Events page's
+     * `GetContent()` picker result — hand the staged `.ics` to the import
+     * row's own pick handler ([calendarImportPick]), which fills the page's
+     * choice exactly as the picker callback does; `calendar-import-button` then
+     * reads and imports it (never imported here). The import row must be
+     * shown: no Events page, or no selected calendar, is refused by name
+     * (convention 11). A staged file that is not there is refused too, rather
+     * than handed on to fail silently at import.
+     */
+    private fun attachCalendarImportFile(path: String): String? {
+        val pick = calendarImportPick
+            ?: return "compose.file[calendar-import-file]: the Events page's import row is not open " +
+                "— navigate to events and select a calendar first"
+        if (!java.io.File(path).canRead()) {
+            return "compose.file[calendar-import-file]: could not read $path"
+        }
+        pick(path)
+        android.util.Log.i("TestAgent", "compose.file[calendar-import-file]: staged $path")
+        return null
+    }
+
+    /**
+     * `compose.file`[file-upload]: stand in for the Media page's `GetContent()`
+     * picker result — hand the staged file to the upload row's own pick
+     * handler ([mediaFilePick]), which makes it the page's pick exactly as the
+     * picker callback does; `upload-button` then reads and seals it through
+     * `MediaVM.upload` (never uploaded here). The upload row must be shown:
+     * no Media page, or a followed (read-only) scope, is refused by name
+     * (convention 11). A staged file that is not there is refused too, rather
+     * than handed on to fail silently at upload.
+     */
+    private fun attachMediaFile(path: String): String? {
+        val pick = mediaFilePick
+            ?: return "compose.file[file-upload]: the Media page's upload row is not open " +
+                "— navigate to media (an own set, not a followed scope) first"
+        if (!java.io.File(path).canRead()) {
+            return "compose.file[file-upload]: could not read $path"
+        }
+        pick(path)
+        android.util.Log.i("TestAgent", "compose.file[file-upload]: staged $path")
+        return null
     }
 
     /**

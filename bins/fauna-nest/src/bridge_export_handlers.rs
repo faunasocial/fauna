@@ -329,6 +329,7 @@ fn list_own_mailboxes_handler() -> crate::rpc_router::RpcHandler {
                 .list_bridge_imap_mailbox_state(&actor_id)
                 .await
                 .map_err(internal)?;
+            let sealed_bytes = mailbox_sealed_bytes(&state, &actor_id).await?;
             let mut mailboxes = Vec::with_capacity(rows.len());
             for row in rows {
                 let (exists, _unseen) = state
@@ -337,6 +338,7 @@ fn list_own_mailboxes_handler() -> crate::rpc_router::RpcHandler {
                     .await
                     .map_err(internal)?;
                 mailboxes.push(ExportMailboxEntry {
+                    sealed_bytes: sealed_bytes.get(&row.name).copied().unwrap_or(0),
                     name: row.name,
                     exists,
                     uid_validity: row.uid_validity,
@@ -354,6 +356,31 @@ fn list_own_mailboxes_handler() -> crate::rpc_router::RpcHandler {
             })
         })
     })
+}
+
+/// Σ sealed record bytes per mailbox over the actor's live placements — the
+/// listing's `sealed_bytes` (`mail-export.md` § Wire shapes). Sized through the
+/// CARv2 segment index by `record_cid` (`segments::record_sizes`), the source
+/// IMAP STATUS / QUOTA read, never a SQL byte column and never a block body; a
+/// record whose segment can't be opened counts 0 (`record_sizes` logs it).
+async fn mailbox_sealed_bytes(
+    state: &std::sync::Arc<crate::routes::AppState>,
+    actor: &[u8; 32],
+) -> Result<std::collections::HashMap<String, u64>, fauna_protocol::RpcError> {
+    let refs = state
+        .db
+        .list_bridge_imap_mailbox_size_refs(actor)
+        .await
+        .map_err(internal)?;
+    let pairs: Vec<(u32, fauna_cbor::Cid)> = refs.iter().map(|(_, s, c)| (*s, *c)).collect();
+    let sizes = crate::segments::record_sizes(&state.mail_segments, actor, &pairs)
+        .await
+        .map_err(internal)?;
+    let mut by_mailbox = std::collections::HashMap::new();
+    for ((mailbox, _, _), size) in refs.into_iter().zip(sizes) {
+        *by_mailbox.entry(mailbox).or_insert(0u64) += size.unwrap_or(0);
+    }
+    Ok(by_mailbox)
 }
 
 // ── start_export_session ──────────────────────────────────────────
@@ -561,7 +588,15 @@ fn fetch_export_chunk_ciphertext_handler() -> crate::rpc_router::RpcHandler {
                             uid: meta.uid,
                             message_id: meta.message_id.to_vec(),
                             flags: split_flags(&meta.flags),
-                            internal_date: floor.timestamp,
+                            // The mailbox's own INTERNALDATE — the row IMAP
+                            // lists and SEARCHes on (`imap-server.md` § SEARCH
+                            // → *INTERNALDATE is the nest's own receipt
+                            // time*), never the floor's `timestamp`, which
+                            // for inbound mail is the sender's `Date:` header.
+                            // The export ranges on, and every format stamps,
+                            // this value (`mail-export.md` § Wizard steps
+                            // step 2).
+                            internal_date: meta.internal_date,
                             // ms → unix seconds, the unknown `0` passing
                             // through — `inbox.fetch`'s projection exactly.
                             stored_at: meta.stored_at.max(0) / 1000,
@@ -576,7 +611,7 @@ fn fetch_export_chunk_ciphertext_handler() -> crate::rpc_router::RpcHandler {
                             uid: meta.uid,
                             message_id: meta.message_id.to_vec(),
                             flags: split_flags(&meta.flags),
-                            internal_date: floor.timestamp,
+                            internal_date: meta.internal_date,
                             stored_at: meta.stored_at.max(0) / 1000,
                             sealed_body: body,
                             ciphertext_size: floor.ciphertext_size,
@@ -2214,6 +2249,60 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
         assert_eq!(names, sorted, "mailboxes must come back byte-ordered");
+    }
+
+    /// Each mailbox reports the bytes its live records rest in — sized through
+    /// the segment index exactly as IMAP QUOTA sizes them — which is what the
+    /// confirm step's byte and time estimates are made from (`mail-export.md`
+    /// § Wizard steps step 3). A mailbox with nothing in it reports 0.
+    #[tokio::test]
+    async fn own_mailboxes_report_the_sealed_bytes_their_records_rest_in() {
+        use crate::bridge_imap_handlers::tests::{
+            real_record_size, seed_message_for_handler_with_hint,
+        };
+        let (state, _dir) = fixture().await;
+        let mut expected: std::collections::HashMap<&str, u64> = Default::default();
+        for (i, (mailbox, len)) in [("INBOX", 300usize), ("INBOX", 1_200), ("Sent", 50)]
+            .into_iter()
+            .enumerate()
+        {
+            let (_uid, msg_id) = seed_message_for_handler_with_hint(
+                &state,
+                &USER,
+                mailbox,
+                &vec![b'x'; len],
+                1_700_000_000 + i as i64,
+                "",
+                &[7u8; 4],
+            )
+            .await;
+            *expected.entry(mailbox).or_default() += real_record_size(&state, &USER, &msg_id).await;
+        }
+        let bytes =
+            list_own_mailboxes_handler()(state.clone(), USER, payload(&ListOwnMailboxesRequest {}))
+                .await
+                .expect("list own mailboxes ok");
+        let reply: ListOwnMailboxesReply = fauna_cbor::decode_strict(&bytes).unwrap();
+        let sealed = |name: &str| {
+            reply
+                .mailboxes
+                .iter()
+                .find(|m| m.name == name)
+                .unwrap_or_else(|| panic!("{name} listed, got {:?}", reply.mailboxes))
+                .sealed_bytes
+        };
+        assert!(expected["INBOX"] > 1_500, "real records carry their bodies");
+        assert_eq!(sealed("INBOX"), expected["INBOX"]);
+        assert_eq!(sealed("Sent"), expected["Sent"]);
+        assert!(
+            reply
+                .mailboxes
+                .iter()
+                .filter(|m| m.name != "INBOX" && m.name != "Sent")
+                .all(|m| m.sealed_bytes == 0),
+            "an empty mailbox rests in no bytes: {:?}",
+            reply.mailboxes
+        );
     }
 
     // ── fetch_export_chunk_ciphertext ─────────────────────────────

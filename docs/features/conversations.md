@@ -21,6 +21,8 @@ Stamped 2026-08-31 at 4a2dfda4dc.
    - `tests/e2e-unified/tests/test_messaging.py::test_new_conversation_compose_opens`
    - `tests/e2e-unified/tests/test_recipient_picker.py::test_resolves_fauna_handle`
    - `tests/e2e-unified/tests/test_recipient_picker.py::test_multi_recipient_creates_group`
+   - `tests/e2e-unified/tests/test_recipient_picker.py::test_typed_prefix_suggests_known_contact`
+   - `tests/e2e-unified/tests/test_recipient_picker.py::test_empty_input_has_no_suggestions`
    - `tests/e2e-unified/tests/test_conversations_new_thread_keeps_threads_reachable.py::test_new_conversation_keeps_existing_threads_reachable`
 2. [app] A message you send is delivered end-to-end encrypted and the other person's app shows it — `docs/goal/behavior/direct-messages.md` § User Experience
    - `tests/e2e-unified/tests/test_fauna_mls_real_roundtrip.py::test_fauna_mls_real_roundtrip`
@@ -80,6 +82,8 @@ Stamped 2026-08-31 at 4a2dfda4dc.
 | 1 | app | `tests/e2e-unified/tests/test_messaging.py::test_new_conversation_compose_opens` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_recipient_picker.py::test_resolves_fauna_handle` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_recipient_picker.py::test_multi_recipient_creates_group` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_recipient_picker.py::test_typed_prefix_suggests_known_contact` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_recipient_picker.py::test_empty_input_has_no_suggestions` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_conversations_new_thread_keeps_threads_reachable.py::test_new_conversation_keeps_existing_threads_reachable` | windows (windows): passed |
 | 2 | app | `tests/e2e-unified/tests/test_fauna_mls_real_roundtrip.py::test_fauna_mls_real_roundtrip` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 2 | app | `tests/e2e-unified/tests/test_fauna_mls_two_client_inbox_drain.py::test_fauna_mls_two_client_inbox_drain` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
@@ -105,7 +109,7 @@ Stamped 2026-08-31 at 4a2dfda4dc.
 | 9 | nest | `tests/e2e-unified/tests/api/test_mls_replica_sync.py::test_replica_round_trip_across_devices` | nest (linux): passed, nest (macos): passed |
 | 10 | app | `tests/e2e-unified/tests/test_fauna_mls_cross_nest_roundtrip.py::test_known_peer_unreachable_never_downgrades_to_email` | web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 10 | app | `tests/e2e-unified/tests/test_fauna_mls_cross_nest_roundtrip.py::test_first_contact_with_unreachable_authority_is_email` | web (windows): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 11 | app | `tests/e2e-unified/tests/test_conversations_message_banner.py::test_new_message_raises_a_banner_except_in_the_open_thread` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
-| 12 | app | `tests/e2e-unified/tests/test_conversations_read_state_across_restart.py::test_a_native_message_sent_while_the_app_was_closed_is_unread_at_launch` | linux (linux): skipped, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_conversations_message_banner.py::test_new_message_raises_a_banner_except_in_the_open_thread` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
+| 12 | app | `tests/e2e-unified/tests/test_conversations_read_state_across_restart.py::test_a_native_message_sent_while_the_app_was_closed_is_unread_at_launch` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_a_bridged_room_renders_and_a_reply_reaches_only_the_bridge` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

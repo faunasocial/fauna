@@ -109,11 +109,18 @@ impl fauna_protocol::RpcErrorClass for NestClientError {
     fn is_rejection(&self) -> bool {
         self.as_rpc_error().is_some()
     }
+
+    fn is_subprotocol_mismatch(&self) -> bool {
+        matches!(self, NestClientError::SubprotocolMismatch)
+    }
 }
 
-/// A post-auth verdict a signed-in session cannot survive — each one routed
-/// by the apps to the launch surface, never a banner (`security.md`
-/// § Post-auth surfacing).
+/// A verdict a signed-in session cannot survive — each one routed by the apps
+/// to the launch surface, never a banner. Three are post-auth verdicts on the
+/// identity (`security.md` § Post-auth surfacing); [`Self::AppOutdated`] is the
+/// version one: the nest refuses this app's subprotocol, so no reconnect and
+/// no bearer refresh can bring the session back (`version-compatibility.md`
+/// § Dimension 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionEndingVerdict {
     /// The nest's pinned deployment identity changed.
@@ -123,6 +130,16 @@ pub enum SessionEndingVerdict {
     /// The nest stopped signing this identity in (`fauna.auth.not_registered`)
     /// — suspended or removed while signed in.
     SignInRefused,
+    /// The nest refused this app's subprotocol (`SubprotocolMismatch` — the
+    /// pre-upgrade 426, or a 4426 close): the app is too old for the nest, and
+    /// the way back is updating the app (`transport-connection.md`
+    /// § Connection lifecycle).
+    AppOutdated,
+    /// The nest needs updating (`RpcError::action` → `NeedsUpdate`, the
+    /// degraded boot's `fauna.nest.outdated`) — restarted into its needs-update
+    /// mode while signed in. Routed to the same non-retry update surface the
+    /// launch path shows (`version-compatibility.md` § Dimension 4).
+    NestOutdated,
 }
 
 impl NestClientError {
@@ -136,6 +153,16 @@ impl NestClientError {
                 Some(SessionEndingVerdict::Superseded)
             }
             Self::Rpc(e) if e.is_not_registered() => Some(SessionEndingVerdict::SignInRefused),
+            Self::SubprotocolMismatch => Some(SessionEndingVerdict::AppOutdated),
+            // Classified by action, never by string: every code the shared
+            // classifier routes to an update prompt ends the session the same
+            // way. Only a supervisor stop reaches here, and the supervisor
+            // stops on one only at a connect or re-mint (`reconnect.rs`'s
+            // `connect_error_is_terminal`) — a single request refused this way
+            // never ends a session.
+            Self::Rpc(e) if e.action() == fauna_protocol::RpcErrorAction::NeedsUpdate => {
+                Some(SessionEndingVerdict::NestOutdated)
+            }
             _ => None,
         }
     }
@@ -195,6 +222,25 @@ mod tests {
             NestClientError::Rpc(r) => assert_eq!(r.code, "fauna.test.boom"),
             other => panic!("expected Rpc, got {other:?}"),
         }
+    }
+
+    /// A supervisor stopped by `SubprotocolMismatch` cannot be brought back by a
+    /// reconnect or a bearer refresh — the app is too old for the nest — so it
+    /// is session-ending, and the apps route it to the needs-update surface
+    /// (`version-compatibility.md` § Dimension 4). A plain disconnect is not.
+    #[test]
+    fn session_ending_verdict_names_an_app_too_old_for_its_nest() {
+        assert_eq!(
+            NestClientError::SubprotocolMismatch.session_ending_verdict(),
+            Some(SessionEndingVerdict::AppOutdated)
+        );
+        assert_eq!(
+            NestClientError::RpcDisconnected {
+                was_in_flight: false
+            }
+            .session_ending_verdict(),
+            None
+        );
     }
 
     #[test]

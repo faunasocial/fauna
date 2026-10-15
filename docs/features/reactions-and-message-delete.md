@@ -19,6 +19,7 @@ Stamped 2026-09-19 at eb7ece9829.
 1. [app] A message's menu offers quick reactions, and a reaction from someone else shows on your copy — `docs/goal/ui/conversations.md` § Reactions & message delete
    - `tests/e2e-unified/tests/test_conversations_reactions.py::test_reaction_option_elements_present_in_flyout`
    - `tests/e2e-unified/tests/test_conversations_reactions.py::test_react_cross_member_peer_sees_pill`
+   - `tests/e2e-unified/tests/test_conversations_reactions.py::test_native_peer_reaction_shows_pill_on_senders_copy`
 2. [app] Deleting your own message, with confirmation, leaves a tombstone; other people's messages offer no delete — `docs/goal/ui/conversations.md` § Reactions & message delete
    - `tests/e2e-unified/tests/test_conversations_message_delete.py::test_delete_own_message_shows_tombstone`
    - `tests/e2e-unified/tests/test_conversations_message_delete.py::test_peer_message_delete_button_absent`
@@ -28,6 +29,8 @@ Stamped 2026-09-19 at eb7ece9829.
    - `tests/e2e-unified/tests/test_conversations_reaction_toggle_and_picker.py::test_tapping_your_own_reaction_takes_it_back`
 5. [app] Beyond the six quick reactions, a fuller picker lets you react with any emoji — `docs/goal/ui/conversations.md` § Reactions & message delete
    - `tests/e2e-unified/tests/test_conversations_reaction_toggle_and_picker.py::test_the_fuller_picker_reacts_with_an_emoji_outside_the_quick_set`
+6. [app] A deleted message's tombstone and a reaction pill are still there after you quit and reopen the app — `docs/goal/ui/conversations.md` § Reactions & message delete
+   - `tests/e2e-unified/tests/test_conversations_tombstone_and_reactions_survive_restart.py::test_tombstone_and_reaction_pill_survive_restart`
 
 ## Status
 
@@ -35,20 +38,22 @@ Stamped 2026-09-19 at eb7ece9829.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | 0.1.2-dev+55c383bf standalone |
-| linux | ✅ full | |
+| linux | ⚠ partial | |
 | windows | ⚠ partial | |
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+a20190e6 live |
+| tui | ✅ full | 0.1.2-dev+a20190e6 live |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_conversations_reactions.py::test_reaction_option_elements_present_in_flyout` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
 | 1 | app | `tests/e2e-unified/tests/test_conversations_reactions.py::test_react_cross_member_peer_sees_pill` | web (linux): passed, web (windows): error, linux (linux): passed, tui (linux): error |
+| 1 | app | `tests/e2e-unified/tests/test_conversations_reactions.py::test_native_peer_reaction_shows_pill_on_senders_copy` | linux (linux): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_conversations_message_delete.py::test_delete_own_message_shows_tombstone` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_conversations_message_delete.py::test_peer_message_delete_button_absent` | web (linux): passed, linux (linux): passed, windows (windows): error, macos (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_conversations_reactions.py::test_capability_gate_no_button_on_smtp_thread` | web (linux): passed, web (windows): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed, tui (windows): passed |
-| 4 | app | `tests/e2e-unified/tests/test_conversations_reaction_toggle_and_picker.py::test_tapping_your_own_reaction_takes_it_back` | linux (linux): passed, windows (windows): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_conversations_reaction_toggle_and_picker.py::test_the_fuller_picker_reacts_with_an_emoji_outside_the_quick_set` | linux (linux): passed, windows (windows): passed, ios (macos): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_conversations_reaction_toggle_and_picker.py::test_tapping_your_own_reaction_takes_it_back` | web (linux): passed, linux (linux): passed, windows (windows): passed, ios (macos): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_conversations_reaction_toggle_and_picker.py::test_the_fuller_picker_reacts_with_an_emoji_outside_the_quick_set` | web (linux): passed, linux (linux): passed, windows (windows): passed, ios (macos): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_conversations_tombstone_and_reactions_survive_restart.py::test_tombstone_and_reaction_pill_survive_restart` | tui (linux): passed |
 <!-- features-render:end -->

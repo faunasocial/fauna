@@ -944,11 +944,8 @@ mod tests {
         // Registrable public domains ARE public DNS names.
         assert!(is_public_dns_name("example.com"));
         assert!(is_public_dns_name("nest.example.com"));
-        // A second, unrelated registrable domain. ⚠ Not `example.com`: the
-        // publish scrub rules rewrite it to `example.com`, which would make this
-        // a duplicate of the first line in the shipped tree — a silently weaker
-        // test rather than a failing one; the `verify_no_scrub_collisions` gate
-        // in transform.py enforces this.
+        // A second, unrelated registrable domain — distinct from the first
+        // line, or this is a silently weaker test rather than a failing one.
         assert!(is_public_dns_name("example.net"));
         // The bare label `local` (no dot) is not an mDNS name.
         assert!(is_public_dns_name("local"));

@@ -15,9 +15,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.semantics
@@ -31,10 +33,15 @@ import com.fauna.app.R
 import com.fauna.app.ui.components.CopyButton
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.AutomationAttributePack
 import com.fauna.app.ui.util.SuppressScreenCapture
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.resolveComposed
 import com.fauna.app.ui.util.stringResourceFmt
+import com.fauna.ffi.connectedAppsFactsSeparator
+import com.fauna.ffi.connectedAppsRequestCardLines
+import com.fauna.ffi.connectedAppsRosterRowText
 import com.fauna.app.ui.viewmodel.ConnectedAppsVM
 import kotlinx.coroutines.launch
 import social.fauna.generated.Ids
@@ -246,7 +253,6 @@ fun ConnectedAppsContent(
                         onToggleReveal = onToggleReveal,
                         readSecret = readSecret,
                         resolveUsername = resolveUsername,
-                        formatTime = formatTime,
                     )
                 }
             }
@@ -304,34 +310,24 @@ private fun RequestCard(
 ) {
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.CONNECTED_APPS_REQUEST_CARD)) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(
-                stringResource(R.string.atproto_settings_consent_heading),
-                style = MaterialTheme.typography.titleSmall,
-            )
-            Text(
-                request.clientName?.let {
-                    stringResourceFmt(R.string.atproto_settings_consent_client, it, request.clientId)
-                } ?: stringResourceFmt(R.string.atproto_settings_consent_client_unnamed, request.clientId),
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            Text(
-                stringResource(R.string.atproto_settings_consent_scopes_heading),
-                style = MaterialTheme.typography.bodySmall,
-            )
-            request.scopeDescriptions.forEach { line ->
-                Text("  •  $line", style = MaterialTheme.typography.bodySmall)
+            // The card's lines are composed once in shared Rust
+            // (`compose::request_card_lines`): the heading, who is asking, the
+            // scopes heading and its bullets, the permission sets, then what the
+            // approve ends besides granting (a key replacement's line). Only the
+            // type ramp is the shell's: heading, who, then the body lines.
+            val context = LocalContext.current
+            val lines = remember(request) {
+                connectedAppsRequestCardLines(request).map { resolveComposed(context, it) }
             }
-            request.sets.forEach { set ->
+            lines.forEachIndexed { i, line ->
                 Text(
-                    set.title?.let {
-                        stringResourceFmt(R.string.atproto_settings_consent_set_heading, it, set.nsid)
-                    } ?: stringResourceFmt(R.string.atproto_settings_consent_set_heading_unnamed, set.nsid),
-                    style = MaterialTheme.typography.bodySmall,
+                    line,
+                    style = when (i) {
+                        0 -> MaterialTheme.typography.titleSmall
+                        1 -> MaterialTheme.typography.bodyMedium
+                        else -> MaterialTheme.typography.bodySmall
+                    },
                 )
-                set.details?.let { Text("  $it", style = MaterialTheme.typography.bodySmall) }
-                set.memberDescriptions.forEach { line ->
-                    Text("  •  $line", style = MaterialTheme.typography.bodySmall)
-                }
             }
             Text(
                 stringResourceFmt(R.string.atproto_settings_consent_code, request.code),
@@ -382,19 +378,6 @@ private fun RequestCard(
     }
 }
 
-/** The class badge's words — the one per-app half of the grouping key, which the
- *  machine derives. An unknown class paints no badge rather than a guess. */
-private fun classLabelRes(cls: String): Int? = when (cls) {
-    "remote" -> R.string.connected_apps_class_remote
-    "device" -> R.string.connected_apps_class_device
-    "wasm" -> R.string.connected_apps_class_wasm
-    "container" -> R.string.connected_apps_class_container
-    "app_password" -> R.string.connected_apps_class_app_password
-    "signer" -> R.string.connected_apps_class_signer
-    "oauth" -> R.string.connected_apps_class_oauth
-    else -> null
-}
-
 /**
  * One `connected-apps-item` roster row. The joined description is the item's own
  * text (the `nostr-bunker-app-item` shape — ui.yaml mints no per-field leaves for
@@ -417,38 +400,25 @@ private fun RosterRow(
     onToggleReveal: (String) -> Unit,
     readSecret: suspend (String) -> String?,
     resolveUsername: (String) -> String,
-    formatTime: (Long) -> String,
 ) {
     val name = localized(row.name) ?: row.name.key
-    val badge = classLabelRes(row.`class`)?.let { stringResource(it) }
-    val head = if (badge != null) "$name · $badge" else name
-    val burned = row.mail?.revoked == true
-    val burnedLine = stringResource(R.string.settings_mail_credential_revoked)
-    val publisherLine = if (row.clientId != null && row.publisher != null) {
-        stringResourceFmt(R.string.connected_apps_publisher, row.publisher) + " — " + row.clientId
-    } else {
-        null
-    }
-    val scopes = row.scopeDescriptions.map { "  • ${localized(it) ?: it.key}" }
-    val facts = buildList {
-        if (!row.connected) add(stringResource(R.string.connected_apps_not_connected))
-        add(stringResourceFmt(R.string.connected_apps_created, formatTime(row.createdAtMillis)))
-        add(
-            row.lastUsedAtMillis?.let { stringResourceFmt(R.string.connected_apps_last_used, formatTime(it)) }
-                ?: stringResource(R.string.connected_apps_never_used),
-        )
-        add(
-            row.lastsUntilMillis?.let { stringResourceFmt(R.string.connected_apps_lasts_until, formatTime(it)) }
-                ?: stringResource(R.string.connected_apps_open_ended),
-        )
-    }.joinToString(" · ")
-    val itemText = buildList {
-        add(head)
-        if (burned) add(burnedLine)
-        publisherLine?.let { add(it) }
-        addAll(scopes)
-        add(facts)
-    }.joinToString("\n")
+    val mailBurned = row.mail?.revoked == true
+    val burned = mailBurned || row.signerBurned
+    // The whole row's text is composed once in shared Rust
+    // (`compose::roster_row_text`): the head with its class badge, the burned
+    // state, the publisher, the scopes, the permission sets, the oracle summary,
+    // then the facts the app joins as the last line. This shell resolves each
+    // through its string table and paints; it words nothing.
+    val context = LocalContext.current
+    val composed = remember(row) { connectedAppsRosterRowText(row) }
+    val separator = remember { connectedAppsFactsSeparator() }
+    val lines = remember(composed) { composed.lines.map { resolveComposed(context, it) } }
+    val facts = remember(composed) { composed.facts.joinToString(separator) { resolveComposed(context, it) } }
+    val head = lines.first()
+    // The burned line sits directly under the head, when there is one.
+    val burnedLine = if (burned) lines.getOrNull(1) else null
+    val body = lines.drop(if (burned) 2 else 1)
+    val itemText = (lines + facts).joinToString("\n")
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -458,20 +428,31 @@ private fun RosterRow(
                 .testTag(Ids.CONNECTED_APPS_ITEM)
                 .semantics {
                     text = AnnotatedString(itemText)
-                    if (burned) stateDescription = "true"
+                    // Three attributes (`revoked`, `oracle_ops`, `status`) ride
+                    // the one stateDescription, so they are always packed; an
+                    // empty `revoked` or `oracle_ops` reads as not set (the
+                    // latter present exactly on a row the oracle served).
+                    stateDescription = AutomationAttributePack.pack(
+                        "revoked" to if (burned) "true" else "",
+                        "oracle_ops" to (row.oracle?.opsInWindow?.toString() ?: ""),
+                        "status" to when {
+                            row.paused -> "paused"
+                            row.connected -> "connected"
+                            else -> "not_connected"
+                        },
+                    )
                 },
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(head, style = MaterialTheme.typography.titleSmall)
-            if (burned) {
+            burnedLine?.let {
                 Text(
-                    burnedLine,
+                    it,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                 )
             }
-            publisherLine?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-            scopes.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+            body.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
             Text(
                 facts,
                 style = MaterialTheme.typography.bodySmall,

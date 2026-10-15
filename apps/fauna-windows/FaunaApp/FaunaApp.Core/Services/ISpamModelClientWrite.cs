@@ -21,22 +21,20 @@ internal readonly record struct SpamWriteResult(bool Sealed, uint SampleCount);
 /// moderation-queue <c>train-correction-button</c> writes the caller's tier-1 Bayesian
 /// model through the shared <c>MailSettingsMachine::apply_spam_model_write</c> (fetch →
 /// unwrap → mutate → re-seal → <c>put_spam_model</c>) when the nest advertises the
-/// <c>spam-model-sealed-at-rest</c> capability, else degrades to
-/// <c>fauna.moderation.train</c>.
+/// <c>spam-model-sealed-at-rest</c> capability; the server-row correction itself is
+/// the one shared <c>train_moderation_correction</c> flow (sealed write, then the nest's
+/// <c>fauna.moderation.train</c> always).
 ///
-/// <para>A thin hand-written seam over the shared-Rust machine — the windows twin of
-/// linux's <c>client.rs::train_moderation_flow</c> — so <c>ModerationViewModel</c>'s
-/// train dispatch is unit-testable: the real
-/// <see cref="MailSettingsMachine"/> is a sealed UniFFI object that cannot be faked. A
-/// <c>null</c> seam on the VM means "no sealed-write path" → the correction always takes
-/// the server-side train (a queue with no mail machine, e.g. mail not enabled).</para>
+/// <para>A thin hand-written seam over the shared-Rust machine so
+/// <c>ModerationViewModel</c>'s train dispatch is unit-testable: the real
+/// <see cref="MailSettingsMachine"/> is a sealed UniFFI object that cannot be faked.</para>
 /// </summary>
 internal interface ISpamModelClientWrite
 {
     /// <summary>Cheap pre-check: would a write take the sealed client path? True iff the
     /// nest advertises <c>spam-model-sealed-at-rest</c> and the actor has an MSEK seal
-    /// key (<c>MailSettingsMachine::sealed_spam_write_available</c>). A server row runs
-    /// this <b>before</b> paying for the post-body fetch. Any failure ⇒ <c>false</c>
+    /// key (<c>MailSettingsMachine::sealed_spam_write_available</c>). A caller runs
+    /// this <b>before</b> a blind sealed write. Any failure ⇒ <c>false</c>
     /// (degrade — never a blind sealed write, which would double-seal a v-older nest's
     /// model → the user's model becomes unreadable, <c>version-compatibility.md</c>
     /// I1/I2).</summary>
@@ -65,6 +63,14 @@ internal interface ISpamModelClientWrite
     /// content the nest can't read), so the caller degrades to a silent no-op.</summary>
     Task<SpamWriteResult> TrainSpamModelClientMailAsync(
         string text, bool isSpam, byte[] messageId, string mailbox, string subject);
+
+    /// <summary>The moderation-queue server-row correction — the ONE shared flow
+    /// (<c>MailSettingsMachine::train_moderation_correction</c>; moderation.md §
+    /// Training correction submission): the sealed model write when allowed, then
+    /// <c>fauna.moderation.train</c> always (read gate + report capture). Unlike the
+    /// writes above, a failure is NOT swallowed — the flow's error is the surface's
+    /// error, so the caller shows it.</summary>
+    Task TrainModerationCorrectionAsync(string contentId, bool isSpam);
 }
 
 /// <summary>
@@ -122,5 +128,12 @@ internal sealed class MachineSpamModelClientWrite : ISpamModelClientWrite
             return new SpamWriteResult(w.@sealed, w.@sampleCount);
         }
         catch { return new SpamWriteResult(false, 0); }
+    }
+
+    public async Task TrainModerationCorrectionAsync(string contentId, bool isSpam)
+    {
+        var m = await MachineAsync()
+            ?? throw new System.InvalidOperationException("mail settings machine unavailable");
+        await m.TrainModerationCorrection(contentId, isSpam);
     }
 }

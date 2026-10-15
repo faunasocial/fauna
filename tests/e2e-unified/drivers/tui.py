@@ -441,6 +441,17 @@ class TuiDriver(HttpBridgeDriver):
         leaf = getattr(self, "_sync_agent_pipe_leaf", None)
         return rf"\\.\pipe\{leaf}" if leaf else None
 
+    @property
+    def sync_agent_socket(self) -> str | None:
+        """The unix socket THIS launch's agent serves (linux:
+        `$XDG_RUNTIME_DIR/fauna/sync-agent.sock`, the private runtime dir
+        `build_launch_env` made; `fauna_ipc::unix_transport::linux_socket_path`)
+        — `None` on windows and darwin, or before launch."""
+        if os.name == "nt" or sys.platform == "darwin":
+            return None
+        runtime = getattr(self, "_xdg_runtime", None)
+        return os.path.join(runtime, "fauna", "sync-agent.sock") if runtime else None
+
     # The tui agent serves POST /element/scroll-into-view as a REAL scroll: its
     # viewport follows the focus ring, so the agent lands the ring on the target
     # (or the first focusable element after it) exactly as the arrow keys would,
@@ -651,6 +662,9 @@ class TuiDriver(HttpBridgeDriver):
         # Windows only: the pipe leaf this launch's agent serves — see
         # `sync_agent_pipe`.
         self._sync_agent_pipe_leaf = env.get("FAUNA_E2E_SYNC_PIPE")
+        # The private runtime dir the agent's unix socket derives from — see
+        # `sync_agent_socket`.
+        self._xdg_runtime = env.get("XDG_RUNTIME_DIR")
         # The unified account-store root THIS launch resolved, as shared Rust's
         # `production_base()` resolves it on each seat (`fauna_account_store::
         # root`): `LOCALAPPDATA` on windows, the relocated HOME's Application
@@ -842,7 +856,7 @@ class TuiDriver(HttpBridgeDriver):
             # gone, which is all this primitive promises.
             pass
 
-    def teardown(self) -> None:
+    def _stop_app(self) -> None:
         # `terminate_tree`, per PtyBackend's own contract (a backend is
         # Popen-compatible precisely so it can be handed to it): fauna-tui
         # spawns `fauna-sync-agent` as a group child, and that agent is built to
@@ -972,7 +986,7 @@ class TuiDriver(HttpBridgeDriver):
         if config is None:
             return False
         try:
-            self.teardown()
+            self._stop_app()
         except Exception:
             pass
         try:

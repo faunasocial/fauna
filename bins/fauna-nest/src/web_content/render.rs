@@ -366,6 +366,29 @@ pub struct PaywallContext {
     pub tier: String,
     pub price_hint: Option<String>,
     pub payment_url: Option<String>,
+    /// The resource's path exactly as a paywall token scopes it
+    /// (`post/<slug>.html`, or the sealed file's path) — the claim-code
+    /// form's hidden `path` field (`monetization.md` § Pillar 2 → *Visitor
+    /// entitlement doors* ruling (4)).
+    pub path: String,
+    /// The redeem door the claim-code form posts to; `None` on a nest built
+    /// without the `payments` feature, where the door does not exist and the
+    /// built-in teasers render no form. See [`paywall_redeem_url`].
+    pub redeem_url: Option<String>,
+}
+
+/// The claim-code form's target for [`PaywallContext::redeem_url`]: the
+/// shared `fauna_payments::REDEEM_PATH` the nest registers its route from,
+/// or `None` when the money plane is compiled away.
+pub fn paywall_redeem_url() -> Option<String> {
+    #[cfg(feature = "payments")]
+    {
+        Some(fauna_payments::REDEEM_PATH.to_string())
+    }
+    #[cfg(not(feature = "payments"))]
+    {
+        None
+    }
 }
 
 /// Top-level data structure passed to every Handlebars template render.
@@ -564,6 +587,9 @@ const DEFAULT_PAYWALL_TEMPLATE: &str = r#"<!DOCTYPE html>
     .paywall h2 { margin-top: 0; font-size: 1.1rem; }
     .paywall .price { font-weight: 600; }
     .paywall a.subscribe { display: inline-block; margin-top: 0.75rem; padding: 0.5rem 1rem; background: #0066cc; color: #fff; text-decoration: none; border-radius: 6px; }
+    .paywall form.redeem { margin-top: 1rem; }
+    .paywall form.redeem input[name=code] { font: inherit; padding: 0.35rem 0.5rem; border: 1px solid #ccc; border-radius: 6px; }
+    .paywall form.redeem button { font: inherit; padding: 0.35rem 0.9rem; border: 1px solid #0066cc; background: #fff; color: #0066cc; border-radius: 6px; }
     .nav { margin-top: 2.5rem; font-size: 0.9rem; }
     .nav a { color: #0066cc; text-decoration: none; }
   </style>
@@ -576,6 +602,7 @@ const DEFAULT_PAYWALL_TEMPLATE: &str = r#"<!DOCTYPE html>
     <h2>Subscribers only</h2>
     <p>The full post is available to <strong>{{post.paywall.tier}}</strong> subscribers.{{#if post.paywall.price_hint}} <span class="price">{{post.paywall.price_hint}}</span>{{/if}}</p>
     {{#if post.paywall.payment_url}}<a class="subscribe" href="{{post.paywall.payment_url}}">Subscribe</a>{{/if}}
+    {{#if post.paywall.redeem_url}}<form class="redeem" method="post" action="{{post.paywall.redeem_url}}"><input type="hidden" name="path" value="{{post.paywall.path}}"><label>Have a code? <input name="code" autocomplete="on" required></label> <button type="submit">Unlock</button></form>{{/if}}
   </div>
   <div class="nav"><a href="/">Home</a></div>
 </body>
@@ -615,6 +642,9 @@ const DEFAULT_FOLDER_PAYWALL_TEMPLATE: &str = r#"<!DOCTYPE html>
     .paywall h2 { margin-top: 0; font-size: 1.1rem; }
     .paywall .price { font-weight: 600; }
     .paywall a.subscribe { display: inline-block; margin-top: 0.75rem; padding: 0.5rem 1rem; background: #0066cc; color: #fff; text-decoration: none; border-radius: 6px; }
+    .paywall form.redeem { margin-top: 1rem; }
+    .paywall form.redeem input[name=code] { font: inherit; padding: 0.35rem 0.5rem; border: 1px solid #ccc; border-radius: 6px; }
+    .paywall form.redeem button { font: inherit; padding: 0.35rem 0.9rem; border: 1px solid #0066cc; background: #fff; color: #0066cc; border-radius: 6px; }
     .nav { margin-top: 2.5rem; font-size: 0.9rem; }
     .nav a { color: #0066cc; text-decoration: none; }
   </style>
@@ -626,6 +656,7 @@ const DEFAULT_FOLDER_PAYWALL_TEMPLATE: &str = r#"<!DOCTYPE html>
     <h2>This file is for subscribers</h2>
     <p>It is available to <strong>{{paywall.tier}}</strong> subscribers.{{#if paywall.price_hint}} <span class="price">{{paywall.price_hint}}</span>{{/if}}</p>
     {{#if paywall.payment_url}}<a class="subscribe" href="{{paywall.payment_url}}">Subscribe</a>{{/if}}
+    {{#if paywall.redeem_url}}<form class="redeem" method="post" action="{{paywall.redeem_url}}"><input type="hidden" name="path" value="{{paywall.path}}"><label>Have a code? <input name="code" autocomplete="on" required></label> <button type="submit">Unlock</button></form>{{/if}}
   </div>
   <div class="nav"><a href="/">Home</a></div>
 </body>

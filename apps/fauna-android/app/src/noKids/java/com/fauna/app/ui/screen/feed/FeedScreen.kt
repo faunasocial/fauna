@@ -43,6 +43,11 @@ import androidx.navigation.NavController
 import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.app.core.ContentPolicyInputs
+import com.fauna.app.core.RegionPlaneHost
+import com.fauna.app.core.RegionSubject
+import com.fauna.app.core.post
+import com.fauna.app.ui.components.RegionBlockWitness
+import com.fauna.app.ui.components.RegionPlaceholder
 import com.fauna.app.ui.components.ContentLabelBadge
 import com.fauna.app.ui.components.DocumentBlocks
 import com.fauna.app.ui.components.GatedPostBadge
@@ -75,6 +80,7 @@ import uniffi.fauna_feed.PostSummary
 import uniffi.fauna_feed.TipView
 import uniffi.fauna_feed.TrainVerb
 import uniffi.fauna_feed.UnlockOfferView
+import uniffi.fauna_feed.postCardGate
 import social.fauna.generated.Ids
 
 /**
@@ -106,6 +112,9 @@ fun FeedScreen(navController: NavController, vm: FeedVM = hiltViewModel()) {
     // affordance) from this set, not a hard-coded list, is the Dim 3 capability
     // consumption (version-compatibility.md): never offer an unsupported protocol.
     val availableBridges = snapshot?.availableBridges ?: emptyList()
+    // The roster a post's source token resolves its bridge against (`ui/feed.md`
+    // § Implementation status today, `SourceKind::Bridged`).
+    val bridgeRoster = snapshot?.bridgeRoster ?: emptyList()
     val selectedFeedId = snapshot?.selectedFeed
     // The built-in Trending virtual feed's selection (trending.md § The Trending
     // feed) — additive beside `selectedFeed`, never both set.
@@ -434,6 +443,7 @@ fun FeedScreen(navController: NavController, vm: FeedVM = hiltViewModel()) {
                                 vm = vm,
                                 navController = navController,
                                 ownActorId = ownActorId,
+                                bridgeRoster = bridgeRoster,
                                 muteRevealed = post.postId in revealedMuted,
                                 onRevealMuted = { if (post.postId !in revealedMuted) revealedMuted.add(post.postId) },
                                 contentPolicyInputs = contentPolicyInputs,
@@ -716,9 +726,8 @@ internal fun PostActionsMenu(
  * composition doesn't single out one trained topic (topic-factors.md
  * § Authoring surface). Lists the user's trained factors (stable `topic:<hex>`
  * key; display = the user's chosen name, the `feed-factor-select` pattern)
- * plus a "New trained topic…" link out to the Personalization home — matching
- * web/windows' richer sheet over linux's existing-factors-only one (priority
- * #4). FFI-touching (fetches [FeedVM.trainedTopicsList] on open) — kept OUT of
+ * plus a "New trained topic…" link out to the Personalization home — the
+ * sheet shape every app shares (priority #4). FFI-touching (fetches [FeedVM.trainedTopicsList] on open) — kept OUT of
  * [PostActionsMenu] so that composable stays Robolectric-testable FFI-free.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -804,6 +813,7 @@ private fun PostCard(
     vm: FeedVM,
     navController: NavController,
     ownActorId: String?,
+    bridgeRoster: List<uniffi.fauna_core.BridgeIdentitySnapshot>,
     muteRevealed: Boolean,
     onRevealMuted: () -> Unit,
     contentPolicyInputs: ContentPolicyInputs,
@@ -826,13 +836,19 @@ private fun PostCard(
     // they reported, comes back `block` with `reported` set, so the card paints
     // "You reported this" and no body. Keyed by the report subject — the post's
     // cid and author.
-    val reported = remember(post.postId, post.author, contentPolicyInputs) {
-        contentPolicyInputs.isReported(post.postId, post.author)
+    //
+    // The region content policy is the third source (region-blocking.md § Where
+    // it composes): `RegionPlaneHost.render` composes it in shared Rust and hands
+    // back the region's placeholder when the region drove the verb — painted
+    // AHEAD of the family arm below, same verb, better attributed. Keyed on the
+    // plane's revision so a refresh that changed the record repaints.
+    val regionRevision by RegionPlaneHost.revision.collectAsState()
+    val decision = remember(post, contentPolicyInputs, regionRevision) {
+        RegionPlaneHost.render(post.labels, contentPolicyInputs, RegionSubject.post(post))
     }
-    val policyVerdict = remember(post.labels, contentPolicyInputs) {
-        contentPolicyInputs.verdictFor(post.labels)
-    }
-    val contentVerdict = if (reported) "block" else policyVerdict
+    val reported = decision.reported
+    val contentVerdict = decision.verdict
+    RegionBlockWitness("feed:${post.postId}", decision.isRegionBlocked)
     // A `collapse` floor hides the body behind a one-tap reveal, session-local
     // (the floor persists) — mirrors linux `build_content_collapse`. A `block`
     // is never revealable.
@@ -858,8 +874,18 @@ private fun PostCard(
         // precedence is block → muted-keyword → content-collapse → normal (the
         // linux ordering). A guardian `block` floor replaces the WHOLE card body
         // with a notice, checked FIRST so a block is never revealable — not even
-        // past a muted reveal.
-        if (contentVerdict == "block") {
+        // past a muted reveal. A REGION verdict goes ahead of it: the region's own
+        // placeholder (its authority, the reason verbatim); a revealed region
+        // `collapse` falls through to the ordinary arms, sharing the family reveal.
+        val regionPlaceholder = decision.placeholder
+        if (regionPlaceholder != null && (regionPlaceholder.verb == "block" || !contentRevealed)) {
+            RegionPlaceholder(
+                regionPlaceholder,
+                witnessKey = "feed:${post.postId}",
+                onReveal = { contentRevealed = true },
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+        } else if (contentVerdict == "block") {
             ContentPolicyBlockedBody(reported = reported)
         } else if (!muteRevealed && vm.isMuted(post.postId)) {
             Column(modifier = Modifier.padding(16.dp)) {
@@ -921,7 +947,7 @@ private fun PostCard(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         if (post.source.isNotEmpty()) {
-                            ProtocolBadge(source = post.source)
+                            ProtocolBadge(source = post.source, bridgeRoster = bridgeRoster)
                         }
                         // The "unverified source" caveat (`unverified-source-badge`),
                         // shown iff THIS client could not verify the signed envelope
@@ -945,7 +971,10 @@ private fun PostCard(
                         // bullet); the card shows only the teaser until the reader opens
                         // the detail and the manager unseals (feed.md § Encryption at
                         // rest).
-                        post.gatedTier?.let { GatedPostBadge(it, roomLabel = post.roomLabel) }
+                        // A repost row paints its TARGET's gate: the shared
+                        // `postCardGate` pick (own gate, else the target's), badge only —
+                        // `post.gatedTier` alone still says the row itself is sealed.
+                        postCardGate(post)?.let { GatedPostBadge(it.tier, roomLabel = it.roomLabel) }
                         // The self-serve teaser-buy affordance (monetization.md § Per-post
                         // pay-to-unlock, gap (2c)) — same row as the badge, mirrors
                         // windows' FeedPage.xaml / linux's post_list.rs top_line group.
@@ -1059,7 +1088,7 @@ private fun PostCard(
                 if (post.hasMedia) {
                     Spacer(Modifier.height(8.dp))
                     FeedPostImage(document = post.document, postId = post.postId, mediaHash = post.mediaHash, vm = vm)
-                    FeedPostVideo(document = post.document)
+                    FeedPostVideo(document = post.document, postId = post.postId, vm = vm)
                     // `c2pa-badge` on the list card — the same
                     // `PostImageC2paBadge`/`FeedVM.checkBlobC2pa` pair `feed.post_detail`
                     // already uses (`PostDetailScreen.kt`), lifted onto the list card too.
@@ -1287,25 +1316,83 @@ internal fun InteractionButton(
  */
 @Composable
 internal fun ReplyComposerDialog(post: PostSummary, vm: FeedVM, onDismiss: () -> Unit) {
+    ReplyComposerDialogContent(
+        audience = post.replyAudience,
+        roomLabel = post.roomLabel,
+        gatedTier = post.gatedTier,
+        onSend = { text, publicConfirmed -> vm.reply(post.postId, text, publicConfirmed) },
+        onDismiss = onDismiss,
+    )
+}
+
+/**
+ * The dialog over plain inputs (the manager's `reply_audience` answer and the
+ * labels it states, never a decision made here — restricted-posts.md § Encryption
+ * at rest → *Ruling 5's build — the shape*, (d) + (e)), so `ReplyComposerDialogTest`
+ * pins it without a [FeedVM] or the native lib. [onSend] gets `publicConfirmed`
+ * true only when the checkbox — present only under *public by confirmation*,
+ * unchecked at every open — is checked.
+ */
+@Composable
+internal fun ReplyComposerDialogContent(
+    audience: uniffi.fauna_feed.ReplyAudience?,
+    roomLabel: String?,
+    gatedTier: String?,
+    onSend: (text: String, publicConfirmed: Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
     var replyText by remember { mutableStateOf("") }
+    // Born unchecked at every open, never remembered (restricted-posts.md (e)).
+    var publicConfirmed by remember { mutableStateOf(false) }
+    val audienceCopy = when (audience) {
+        uniffi.fauna_feed.ReplyAudience.SEALED_TO_ROOM ->
+            stringResource(R.string.feed_post_reply_audience_room)
+                .replace("{room}", roomLabel.orEmpty())
+        uniffi.fauna_feed.ReplyAudience.SEALED_TO_TIER ->
+            stringResource(R.string.feed_post_reply_audience_tier)
+                .replace("{tier}", gatedTier.orEmpty())
+        uniffi.fauna_feed.ReplyAudience.PUBLIC_BY_CONFIRMATION ->
+            stringResource(R.string.feed_post_reply_audience_public)
+        null -> null
+    }
+    val needsConfirm = audience == uniffi.fauna_feed.ReplyAudience.PUBLIC_BY_CONFIRMATION
     AlertDialog(
         onDismissRequest = onDismiss,
         modifier = Modifier.testTag(Ids.FEED_REPLY_DIALOG),
         title = { Text(stringResource(R.string.common_reply)) },
         text = {
-            OutlinedTextField(
-                value = replyText,
-                onValueChange = { replyText = it },
-                placeholder = { Text(stringResource(R.string.feed_post_write_reply)) },
-                modifier = Modifier.fillMaxWidth().testTag(Ids.FEED_REPLY_TEXT_FIELD),
-                minLines = 2,
-            )
+            Column {
+                if (audienceCopy != null) {
+                    Text(
+                        audienceCopy,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.testTag(Ids.FEED_REPLY_AUDIENCE),
+                    )
+                }
+                OutlinedTextField(
+                    value = replyText,
+                    onValueChange = { replyText = it },
+                    placeholder = { Text(stringResource(R.string.feed_post_write_reply)) },
+                    modifier = Modifier.fillMaxWidth().testTag(Ids.FEED_REPLY_TEXT_FIELD),
+                    minLines = 2,
+                )
+                if (needsConfirm) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = publicConfirmed,
+                            onCheckedChange = { publicConfirmed = it },
+                            modifier = Modifier.testTag(Ids.FEED_REPLY_PUBLIC_CONFIRM),
+                        )
+                        Text(stringResource(R.string.feed_post_reply_public_confirm))
+                    }
+                }
+            }
         },
         confirmButton = {
             TextButton(
                 onClick = {
                     if (replyText.isNotBlank()) {
-                        vm.reply(post.postId, replyText)
+                        onSend(replyText, needsConfirm && publicConfirmed)
                         onDismiss()
                     }
                 },
@@ -1319,6 +1406,19 @@ internal fun ReplyComposerDialog(post: PostSummary, vm: FeedVM, onDismiss: () ->
 }
 
 /**
+ * A rejected verb's banner copy: the resolved string for the i18n key
+ * [refusalKey] (the shared `feed_refusal_i18n_key`) names, else [raw] unchanged.
+ * Pure over its inputs so `FeedVerbErrorCopyTest` pins it without the native lib.
+ */
+internal fun verbErrorCopy(
+    context: android.content.Context,
+    raw: String,
+    refusalKey: (String) -> String?,
+): String = refusalKey(raw)
+    ?.let { resolveLocalized(context, uniffi.fauna_core.LocalizedText(key = it, args = emptyMap())) }
+    ?: raw
+
+/**
  * Paint a composed verb's failure (reply / quote / repost) on the page's
  * `error-message` banner: the shared `feed_refusal_i18n_key` names the copy for
  * a refusal it knows — a restricted post's `feed.reference_restricted` (feed.md
@@ -1330,8 +1430,8 @@ internal fun ReplyComposerDialog(post: PostSummary, vm: FeedVM, onDismiss: () ->
 internal fun VerbErrorEffect(vm: FeedVM) {
     val appMessages = LocalAppMessages.current
     val raw by vm.verbError.collectAsState()
-    val key = raw?.let { com.fauna.ffi.feedRefusalI18nKey(it) }
-    val copy = key?.let { localized(uniffi.fauna_core.LocalizedText(key = it, args = emptyMap())) } ?: raw
+    val context = LocalContext.current
+    val copy = raw?.let { verbErrorCopy(context, it) { text -> com.fauna.ffi.feedRefusalI18nKey(text) } }
     LaunchedEffect(copy) {
         copy?.let {
             appMessages.showError(it)
@@ -1465,36 +1565,6 @@ fun FeedPostImage(document: RenderDocument, postId: String, mediaHash: String?, 
         Box(modifier = Modifier.fillMaxWidth().testTag(Ids.POST_IMAGE)) {
             if (proxiedPath != null) Text(proxiedPath, style = MaterialTheme.typography.labelSmall)
         }
-    }
-}
-
-/**
- * The feed post video attachment (ui.yaml `video-thumbnail`) — painted from
- * the folded `RenderBlock.Video` in the post `document` (render-model.md §
- * D6b), the exact twin of [FeedPostImage]'s `RenderBlock.Image` read: one
- * fold makes the image-vs-video branch, so a document never carries both for
- * the same attachment. [FeedPostImage]'s own `LaunchedEffect` already
- * triggers the fire-once `resolve_media` fold regardless of which block it
- * resolves to, so this composable only needs to read the result. No poster
- * frame exists to paint (`MediaItem.thumbnail`/`dimensions` are `None` from
- * every writer, deliberately — a poster field would be dead on arrival), so
- * this paints a play glyph + hash, the same choice tui made
- * (`video_thumbnail_element`). Renders nothing when the document has no
- * video block, unlike `post-image`'s stable-placeholder shape — there is no
- * async load to keep the element stable across. A bridged post's `ProxiedVideo`
- * (render-model.md § D6c → *Proxied video*) paints here too when there is no
- * blob video, its nest-relative path in the hash's place — never byte-loaded.
- */
-@Composable
-fun FeedPostVideo(document: RenderDocument) {
-    val hash = documentMediaVideoHash(document) ?: documentProxiedPostVideoPath(document) ?: return
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.testTag(Ids.VIDEO_THUMBNAIL),
-    ) {
-        Icon(Icons.Default.PlayCircleOutline, contentDescription = null, modifier = Modifier.size(20.dp))
-        Spacer(Modifier.width(4.dp))
-        Text(hash, style = MaterialTheme.typography.labelSmall)
     }
 }
 

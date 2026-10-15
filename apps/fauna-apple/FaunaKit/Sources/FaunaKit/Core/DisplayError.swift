@@ -46,7 +46,8 @@ public enum DisplayError {
         guard !isCancellation(error) else { return nil }
         if let ffi = error as? FfiError {
             switch ffi {
-            case .General(let msg), .NestOutdated(let msg), .GuardianApprovalRequired(let msg): return msg
+            case .General(let msg), .NestOutdated(let msg), .GuardianApprovalRequired(let msg),
+                 .StateNeedsNewerApp(let msg): return msg
             case .NestIdentityChanged, .IdentitySuperseded, .AccountLocked: break
             }
         }

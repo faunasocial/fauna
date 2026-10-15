@@ -198,15 +198,23 @@ class SubscriptionsActions:
         with the trickle-down lifts. Windows joined
         2026-09-22: the gate had kept it out on the strength of a citation
         nobody had re-run, and the leg went green there unchanged — the Tiers
-        tab's create form, §2 approve and roster surfaces are all built."""
-        if not (self.driver.is_linux() or self.driver.is_tui() or self.driver.is_windows()):
+        tab's create form, §2 approve and roster surfaces are all built. Web
+        joined 2026-10-09 on the same terms: its Tiers tab carries the same
+        three surfaces, and the leg's witnesses ran there once the gate let
+        them."""
+        if not (
+            self.driver.is_linux()
+            or self.driver.is_tui()
+            or self.driver.is_windows()
+            or self.driver.is_web()
+        ):
             from helpers.app_surface import skip_unbuilt
 
             skip_unbuilt(
                 self.driver,
                 surface="the §1 tier-create + §2 approve surfaces (sell-post "
                         "seller fan-out leg)",
-                detail="linux + tui + windows today",
+                detail="linux + tui + windows + web today",
                 tracked="",
             )
 
@@ -305,6 +313,82 @@ class SubscriptionsActions:
             time.sleep(0.3)
         return name in self.tier_names()
 
+    def tier_index(self, name: str) -> int:
+        """The §1 row index of the tier named ``name``; raises when no row
+        carries it (convention 6: name the rows that ARE there)."""
+        names = self.tier_names()
+        if name not in names:
+            raise LookupError(f"no §1 tier row named {name!r}; rows={names!r}")
+        return names.index(name)
+
+    def tier_rank(self, name: str) -> str:
+        """The rendered rank cell (`subscription-tier-rank`) of tier ``name``."""
+        return self.driver.get_text("subscription-tier-rank", index=self.tier_index(name))
+
+    def tier_price(self, name: str) -> str:
+        """The rendered price cell (`subscription-tier-price`) of tier ``name``."""
+        return self.driver.get_text("subscription-tier-price", index=self.tier_index(name))
+
+    def edit_tier(
+        self,
+        name: str,
+        *,
+        rank: int | None = None,
+        description: str | None = None,
+        price_hint: str | None = None,
+        payment_url: str | None = None,
+        flip_auto_approve: bool = False,
+    ) -> None:
+        """Open tier ``name``'s edit form (`subscription-tier-edit-button`,
+        prefilled from the row), replace the fields given, and save
+        (`fauna.subscriptions.tiers.update`).
+
+        Only REPLACES values: a field left ``None`` keeps its prefilled value.
+        There is deliberately no "clear this field" argument — `tiers.update`
+        has no clear verb (`monetization.md` § Implementation status today), so
+        an emptied input means keep-current on every app and a caller asserting
+        a cleared field would be asserting a promise the product does not make.
+        ``flip_auto_approve`` clicks the toggle once."""
+        self.driver.click("subscription-tier-edit-button", index=self.tier_index(name))
+        self.driver.wait_for("subscription-tier-form", timeout=10.0)
+        if rank is not None:
+            self.driver.clear_and_type("subscription-tier-form-rank", str(rank))
+        if description is not None:
+            self.driver.clear_and_type("subscription-tier-form-description", description)
+        if price_hint is not None:
+            self.driver.clear_and_type("subscription-tier-form-price-hint", price_hint)
+        if payment_url is not None:
+            self.driver.clear_and_type("subscription-tier-form-payment-url", payment_url)
+        if flip_auto_approve:
+            self.driver.click("subscription-tier-form-auto-approve")
+        self.driver.click("subscription-tier-form-save")
+
+    def wait_for_tier_rank(self, name: str, rank: int, timeout: float = 10.0) -> bool:
+        """Poll until tier ``name``'s rank cell reads ``rank`` — the §1 re-read
+        after an edit lands asynchronously."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                if self.tier_rank(name).strip() == str(rank):
+                    return True
+            except LookupError:
+                pass
+            time.sleep(0.3)
+        return False
+
+    def delete_tier(self, name: str) -> None:
+        """Delete tier ``name`` from its §1 row (`subscription-tier-delete-button`,
+        `fauna.subscriptions.tiers.delete`)."""
+        self.driver.click("subscription-tier-delete-button", index=self.tier_index(name))
+
+    def wait_for_tier_gone(self, name: str, timeout: float = 10.0) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if name not in self.tier_names():
+                return True
+            time.sleep(0.3)
+        return name not in self.tier_names()
+
     # --- §2 Pending requests ---
 
     def pending_request_count(self) -> int:
@@ -321,8 +405,28 @@ class SubscriptionsActions:
     def approve_first_request(self) -> None:
         """Approve the first pending request → the transparent mint+upload
         (`SubscriptionsAuthor::approve_subscriber`), showing
-        `subscription-request-busy` for its duration."""
+        `subscription-request-busy` for its duration.
+
+        Returns on the click, BEFORE the mint lands: wait on an observable
+        (the roster, or `wait_for_pending_request_count`) before switching
+        account, or the switch can drop the in-flight approve."""
         self.driver.click("subscription-request-approve-button")
+
+    def reject_request(self, index: int = 0) -> None:
+        """Turn pending request ``index`` down (`subscription-request-reject-button`,
+        `fauna.subscriptions.requests.reject`)."""
+        self.driver.click("subscription-request-reject-button", index=index)
+
+    def wait_for_pending_request_count(self, count: int, timeout: float = 15.0) -> bool:
+        """Poll until §2 holds exactly ``count`` rows (the twin of
+        `wait_for_pending_request`, which waits for AT LEAST n — a reject or
+        approve needs the exact drop)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.pending_request_count() == count:
+                return True
+            time.sleep(0.5)
+        return self.pending_request_count() == count
 
     def pending_request_ids(self) -> list[str]:
         """The hex actor id of every rendered §2 pending-request row — the
@@ -344,9 +448,24 @@ class SubscriptionsActions:
         app whose row really is just the id working unchanged.
         """
         return [
-            _row_actor_id(self.driver.get_text("subscription-request-row", index=i))
+            self._row_id("subscription-request-row", "subscription-request-subscriber", i)
             for i in range(self.pending_request_count())
         ]
+
+    def _row_id(self, row_id: str, child_id: str, index: int) -> str:
+        """The actor id of roster row ``index``: from the row's own text where
+        the app folds it in (linux), else from the row's subscriber child
+        (``child_id``, scoped to the row). tui paints a row container with no
+        text of its own and carries the id on the child alone — measured
+        2026-10-09, when both reads below returned ``['']`` there."""
+        own = _row_actor_id(self.driver.get_text(row_id, index=index))
+        if _ACTOR_ID_RE.fullmatch(own):
+            return own
+        try:
+            return _row_actor_id(
+                self.driver.get_text(child_id, scope=f"{row_id}[{index}]"))
+        except LookupError:
+            return own
 
     def request_paid(self, index: int = 0) -> bool:
         """Whether request ``index`` shows the "paid" badge
@@ -387,9 +506,26 @@ class SubscriptionsActions:
         id through `_row_actor_id` now.
         """
         return [
-            _row_actor_id(self.driver.get_text("subscription-subscriber-row", index=i))
+            self._row_id("subscription-subscriber-row", "subscription-subscriber-handle", i)
             for i in range(self.subscriber_count())
         ]
+
+    def remove_subscriber(self, index: int = 0) -> None:
+        """Remove §3 roster row ``index`` (`subscription-subscriber-remove-button`)
+        — the roster-rotating removal (`SubscriptionsAuthor::remove_subscriber`):
+        it mints a reduced-roster KeyBlob under a fresh period key, so what the
+        author posts to the tier afterwards no longer opens for the removed
+        subscriber."""
+        self.driver.click("subscription-subscriber-remove-button", index=index)
+
+    def wait_for_subscriber_count(self, count: int, timeout: float = 20.0) -> bool:
+        """Poll until the §3 roster holds exactly ``count`` rows."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.subscriber_count() == count:
+                return True
+            time.sleep(0.5)
+        return self.subscriber_count() == count
 
     # --- §4 Payment providers (Pillar 3 — monetization.md § Pillars 2+3) ---
 

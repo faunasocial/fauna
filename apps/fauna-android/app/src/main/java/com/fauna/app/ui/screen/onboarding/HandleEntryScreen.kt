@@ -183,6 +183,7 @@ private fun inFlightPhaseString(phase: HandleCheckPhase): String? = when (phase)
 
 internal const val RECOVERY_KIT_ROUTE = "onboarding/recovery-kit"
 internal const val RECOVERY_ENTRY_ROUTE = "onboarding/recovery-entry"
+internal const val EMERGENCY_LOCKOUT_ENTRY_ROUTE = "onboarding/emergency-lockout-entry"
 
 internal fun routeForStep(step: OnboardingStep): String = when (step) {
     OnboardingStep.IDENTITY_CHOICE -> "onboarding/identity-choice"
@@ -201,6 +202,9 @@ internal fun routeForStep(step: OnboardingStep): String = when (step) {
     // and the phrase restore (identity_choice's restore-from-recovery-kit-button).
     OnboardingStep.RECOVERY_KIT -> RECOVERY_KIT_ROUTE
     OnboardingStep.RECOVERY_ENTRY -> RECOVERY_ENTRY_ROUTE
+    // The signed-out lock door (ui/sessions.md § The signed-out door), reached
+    // from identity_choice's `emergency-lockout-entry-button`.
+    OnboardingStep.EMERGENCY_LOCKOUT_ENTRY -> EMERGENCY_LOCKOUT_ENTRY_ROUTE
     // The one-tap trust offer (onboarding.md § 3b-ter) — android declares
     // setRendersTrustPrompt (OnboardingHost), so the machine routes both
     // nat_mode_choice exits through it.

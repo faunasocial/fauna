@@ -231,6 +231,7 @@ async fn engine_control_plane_round_trips_via_adapter() {
             Some(seal.clone()),
             None, // derived_through
             None, // is_resolution
+            None, // row
         )
         .await
         .expect("record");
@@ -238,7 +239,7 @@ async fn engine_control_plane_round_trips_via_adapter() {
 
     // catch-up poll (engine pull path), no device exclusion → sees the change
     let list = client
-        .changes_list(Some("docs".into()), None, 0)
+        .changes_list(Some("docs".into()), None, 0, None)
         .await
         .expect("list");
     assert_eq!(list.changes.len(), 1);
@@ -254,14 +255,14 @@ async fn engine_control_plane_round_trips_via_adapter() {
 
     // the recording device excludes its own echo (engine self-echo filter)
     let excluded = client
-        .changes_list(Some("docs".into()), Some(dev.clone()), 0)
+        .changes_list(Some("docs".into()), Some(dev.clone()), 0, None)
         .await
         .expect("list excl");
     assert!(excluded.changes.is_empty(), "own device's changes excluded");
 
     // a read naming no folder is refused: there is no actor-wide feed
     assert!(
-        client.changes_list(None, None, 0).await.is_err(),
+        client.changes_list(None, None, 0, None).await.is_err(),
         "a folder-less list is refused"
     );
 }
@@ -296,6 +297,7 @@ async fn reseal_supersede_round_trips_via_adapter() {
                 Some(owner_seal("prebind.bin")), // S9: sealed like the engine
                 None,
                 None,
+                None,
             )
             .await
             .expect("record");
@@ -303,7 +305,14 @@ async fn reseal_supersede_round_trips_via_adapter() {
 
     // The owner verified the re-sealed head end-to-end, then supersedes.
     let reply = client
-        .changes_supersede("shared", dev.clone(), "prebind.bin", m_resealed.clone())
+        .changes_supersede(
+            "shared",
+            dev.clone(),
+            "prebind.bin",
+            m_resealed.clone(),
+            m_prebind.clone(),
+            None,
+        )
         .await
         .expect("supersede");
     assert_eq!(reply.superseded, 1, "the pre-bind row is marked");
@@ -311,7 +320,7 @@ async fn reseal_supersede_round_trips_via_adapter() {
     // A catching-up member/device sees only the re-sealed head — it can never
     // attempt a fetch of the reclaimable pre-bind manifest.
     let list = client
-        .changes_list(Some("shared".into()), None, 0)
+        .changes_list(Some("shared".into()), None, 0, None)
         .await
         .expect("list");
     assert_eq!(list.changes.len(), 1);
@@ -323,7 +332,14 @@ async fn reseal_supersede_round_trips_via_adapter() {
 
     // Naming a stale (non-head) manifest refuses with the typed error.
     let err = client
-        .changes_supersede("shared", dev, "prebind.bin", m_prebind)
+        .changes_supersede(
+            "shared",
+            dev,
+            "prebind.bin",
+            m_prebind.clone(),
+            m_prebind,
+            None,
+        )
         .await
         .expect_err("stale manifest refused");
     // Asserted on the wire `code` the handler returned — now reachable through

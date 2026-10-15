@@ -404,6 +404,9 @@ impl<R: RpcRequester> AtprotoSettingsClient<R> {
     /// caller's own authed WS-RPC connection: the grant is Ed25519-rooted and the
     /// browser never holds a Fauna secret.
     ///
+    /// `folder` is the card's choice for a row carrying a bare folder-plane
+    /// scope (`ResolveConsentRequest::folder`) — `None` on any other answer.
+    ///
     /// `resolved: false` is a normal answer, not an error — there was nothing
     /// live to resolve: already answered (possibly on the user's other device),
     /// expired, or not this caller's row. Nest decides that with the UPDATE's own
@@ -413,6 +416,7 @@ impl<R: RpcRequester> AtprotoSettingsClient<R> {
         &self,
         consent_id: Vec<u8>,
         approved: bool,
+        folder: Option<i64>,
     ) -> Result<ResolveConsentReply, R::Error> {
         self.nest
             .request(
@@ -420,6 +424,7 @@ impl<R: RpcRequester> AtprotoSettingsClient<R> {
                 ResolveConsentRequest {
                     consent_id,
                     approved,
+                    folder,
                     ..Default::default()
                 },
             )

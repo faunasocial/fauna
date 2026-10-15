@@ -103,7 +103,8 @@ use serde::Serialize;
 use crate::backup_store::{BackupWriteError, load_backup_state_refiled, mutate_backup};
 use crate::mutate::{
     FolderCoverageLabel, add_backup_destination, attach_backup_destination_folder,
-    detach_backup_destination_folder, keep_backup_destination, remove_backup_destination,
+    detach_backup_destination_folder, keep_backup_destination,
+    refresh_backup_destination_folder_labels, remove_backup_destination,
 };
 use crate::store_seam::{BackupStateStore, StoreError};
 
@@ -146,6 +147,13 @@ pub enum EnrollError<E, DE> {
     /// Nothing was recorded — the source nest's grant from step (1) is inert
     /// without a destination row and is replaced on the next add.
     WriterGrant(DE),
+    /// The destination refused the writer grant because it already keeps this
+    /// account's backup from another box (`fauna.backup.writer_seat_held`;
+    /// `backup-destinations.md` § Create / edit / remove protocol, step 3).
+    /// Nothing was recorded, as on any refused grant. `holder_nest_id` is the
+    /// hex nest id of the box holding the seat, when the destination named it.
+    /// `Display` is the shared, localized add-flow error every app renders.
+    WriterSeatHeld { holder_nest_id: Option<String> },
     /// The `fauna.backup.destination.register` call (source) failed.
     DestinationRegister(E),
     /// Recording the destination row failed — the list is full
@@ -166,6 +174,13 @@ impl<E: core::fmt::Display, DE: core::fmt::Display> core::fmt::Display for Enrol
                     "registering the nest-writer grant at the destination: {e}"
                 )
             }
+            Self::WriterSeatHeld { .. } => {
+                write!(
+                    f,
+                    "{}",
+                    fauna_i18n::strings::error::backup::WRITER_SEAT_HELD
+                )
+            }
             Self::DestinationRegister(e) => {
                 write!(f, "registering the destination with the source nest: {e}")
             }
@@ -177,6 +192,26 @@ impl<E: core::fmt::Display, DE: core::fmt::Display> core::fmt::Display for Enrol
 impl<E: core::fmt::Display + core::fmt::Debug, DE: core::fmt::Display + core::fmt::Debug>
     std::error::Error for EnrollError<E, DE>
 {
+}
+
+/// Map a refused writer-grant call: the seat held by another box is its own
+/// typed refusal, anything else stays the destination's error.
+fn writer_grant_error<E, DE: RpcErrorClass>(e: DE) -> EnrollError<E, DE> {
+    match e.as_rpc_error() {
+        Some(rpc) if rpc.code == "fauna.backup.writer_seat_held" => {
+            let holder_nest_id = match rpc.details.as_deref() {
+                Some(fauna_protocol::Value::Map(details)) => details
+                    .get(fauna_protocol::backup::WRITER_SEAT_HELD_HOLDER)
+                    .and_then(|v| match v {
+                        fauna_protocol::Value::String(s) => Some(s.clone()),
+                        _ => None,
+                    }),
+                _ => None,
+            };
+            EnrollError::WriterSeatHeld { holder_nest_id }
+        }
+        _ => EnrollError::WriterGrant(e),
+    }
 }
 
 /// Enroll a resolved backup destination: grant the source nest this owner's
@@ -207,6 +242,7 @@ pub async fn enroll_backup_destination<R: RpcRequester, D: RpcRequester>(
 ) -> Result<Vec<BackupDestination>, EnrollError<R::Error, D::Error>>
 where
     R::Error: RpcErrorClass,
+    D::Error: RpcErrorClass,
 {
     let display_name = if resolved.requested_name.trim().is_empty() {
         resolved.domain
@@ -264,6 +300,7 @@ async fn enroll_nest_row<R: RpcRequester, D: RpcRequester>(
 ) -> Result<Vec<BackupDestination>, EnrollError<R::Error, D::Error>>
 where
     R::Error: RpcErrorClass,
+    D::Error: RpcErrorClass,
 {
     let source = BackupClient::new(nest);
 
@@ -299,7 +336,7 @@ where
         Some(holder) => destination.writer_grant_succeed(writer, holder).await,
         None => destination.writer_grant_register(writer).await,
     }
-    .map_err(EnrollError::WriterGrant)?;
+    .map_err(writer_grant_error)?;
 
     // (4) Tell the source nest where to back this owner up — its own
     //     coordinator cannot read the `fauna.state.backup` destination list. Idempotent
@@ -655,9 +692,9 @@ impl<E: core::fmt::Display + core::fmt::Debug> std::error::Error for FolderCover
 /// (`fauna.backup.destination.list`'s `CoveredFolder`) right after the attach.
 /// After a box loss that row is the one place the label survives for a folder
 /// a nest destination holds, and the nest-held pull-back names the restored
-/// folder from it (`segment-backup-protocol.md` § Client-device custodian
-/// (pull) → *Restore* → *Where a restored folder's name comes from*). A
-/// re-attach refreshes it.
+/// folder from it (`client-device-custodian.md` § *Where a restored folder's
+/// name comes from*). A re-attach — and every folders-page read
+/// ([`list_folder_destinations`]) — refreshes it.
 ///
 /// `nest` is the **source** nest transport.
 pub async fn attach_folder_to_destination<R: RpcRequester>(
@@ -760,6 +797,15 @@ pub struct FolderDestinationPlace {
 /// A list read failure degrades every label to its raw id rather than
 /// blanking the coverage read — the same asymmetry [`read_backup_status`]
 /// draws between a status truth and its cosmetic dressing.
+///
+/// **The read also refreshes the coverage rows' folder labels.** The listing
+/// already carries every covered folder's current name, so a folder renamed
+/// after its attach is re-recorded on its list row here — one `mutate_backup`
+/// write, only when a name differs, an absent field erasing nothing — and the
+/// nest-held pull-back names it as the custodian leg does
+/// (`client-device-custodian.md` § *Where a restored folder's name comes
+/// from*). A failed heal write degrades like the label join: the coverage read
+/// is returned regardless.
 pub async fn list_folder_destinations<R: RpcRequester + Clone>(
     nest: R,
     store: &dyn BackupStateStore,
@@ -767,9 +813,38 @@ pub async fn list_folder_destinations<R: RpcRequester + Clone>(
     folder_id: i64,
 ) -> Result<Vec<FolderDestinationPlace>, R::Error> {
     let listed = BackupClient::new(nest).destination_list().await?;
-    let names: std::collections::HashMap<String, String> =
-        match store.backup_state(source_nest).await {
-            Ok(state) => state
+    let healed = {
+        let labels: Vec<(&str, &str, FolderCoverageLabel)> = listed
+            .destinations
+            .iter()
+            .flat_map(|d| {
+                d.covered_folders.iter().map(|c| {
+                    (
+                        d.destination_id.as_str(),
+                        c.folder_set.as_str(),
+                        FolderCoverageLabel::of_listing(c),
+                    )
+                })
+            })
+            .collect();
+        if labels.is_empty() {
+            None
+        } else {
+            mutate_backup(store, source_nest, |st| {
+                refresh_backup_destination_folder_labels(st, &labels)
+            })
+            .await
+            .ok()
+            .map(|(state, _)| state)
+        }
+    };
+    let state = match healed {
+        Some(state) => Some(state),
+        None => store.backup_state(source_nest).await.ok(),
+    };
+    let names: std::collections::HashMap<String, String> = state
+        .map(|state| {
+            state
                 .backup
                 .destinations
                 .iter()
@@ -778,9 +853,9 @@ pub async fn list_folder_destinations<R: RpcRequester + Clone>(
                         .clone()
                         .map(|n| (d.destination_id.clone(), n))
                 })
-                .collect(),
-            Err(_) => Default::default(),
-        };
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(listed
         .destinations
         .into_iter()
@@ -1076,6 +1151,7 @@ pub async fn reenroll_nest_destination_after_reseed<R: RpcRequester, D: RpcReque
 ) -> Option<Result<Vec<BackupDestination>, EnrollError<R::Error, D::Error>>>
 where
     R::Error: RpcErrorClass,
+    D::Error: RpcErrorClass,
 {
     if !outcome.is_whole() {
         return None;
@@ -1440,7 +1516,19 @@ mod tests {
                         (None, Some(_)) => false,
                     };
                     if !allowed {
-                        return Err(FakeError::new("fauna.backup.writer_seat_held"));
+                        let mut e = RpcError::new(
+                            "fauna.backup.writer_seat_held",
+                            "error.backup.writer_seat_held",
+                        );
+                        if let Some(holder) = &*seat {
+                            let mut details = std::collections::BTreeMap::new();
+                            details.insert(
+                                fauna_protocol::backup::WRITER_SEAT_HELD_HOLDER.to_string(),
+                                fauna_protocol::Value::String(holder.clone()),
+                            );
+                            e.details = Some(Box::new(fauna_protocol::Value::Map(details)));
+                        }
+                        return Err(FakeError("fauna.backup.writer_seat_held".into(), Some(e)));
                     }
                     *seat = Some(req.writer_nest_id.clone());
                     *self.registered_writer_nest_id.lock().unwrap() = Some(req.writer_nest_id);
@@ -1914,6 +2002,40 @@ mod tests {
             !nest.kinds().contains(&BACKUP_STATE_WRITE),
             "the list write must not be attempted after a refused grant"
         );
+    }
+
+    /// A destination already keeping this account's backup from another box
+    /// refuses the grant: the add flow gets its own typed error naming the
+    /// holder, whose text is the shared add-flow copy, and nothing is recorded
+    /// (`backup-destinations.md` § Create / edit / remove protocol, step 3).
+    #[test]
+    fn a_destination_seated_for_another_box_is_refused_with_its_own_error() {
+        let other_box = "ee".repeat(32);
+        let nest = Arc::new(FakeSourceNest::default());
+        let destination = Arc::new(FakeDestinationNest {
+            seat: Mutex::new(Some(other_box.clone())),
+            ..Default::default()
+        });
+        let err = block_on(enroll_backup_destination(
+            nest.clone(),
+            destination,
+            &nest.store,
+            OWNER_SEED,
+            resolved("x"),
+            SOURCE_BOUND_ID,
+        ))
+        .expect_err("the held seat refuses the grant");
+        match &err {
+            EnrollError::WriterSeatHeld { holder_nest_id } => {
+                assert_eq!(holder_nest_id.as_deref(), Some(other_box.as_str()));
+            }
+            other => panic!("expected WriterSeatHeld, got {other:?}"),
+        }
+        assert_eq!(
+            err.to_string(),
+            fauna_i18n::strings::error::backup::WRITER_SEAT_HELD
+        );
+        assert_eq!(nest.store.writes(), 0, "nothing is recorded");
     }
 
     /// A refused writer-grant registration at the destination also records
@@ -2912,7 +3034,7 @@ mod tests {
 
     /// **A re-attach refreshes the folder's name, and a listing that carries
     /// none erases nothing** — the custodian store's rule for the same label
-    /// (`segment-backup-protocol.md` § *Where a restored folder's name comes
+    /// (`client-device-custodian.md` § *Where a restored folder's name comes
     /// from*): a renamed folder's next attach records the new name, and a set
     /// sealed past its plaintext name keeps the last name this row learned.
     #[test]
@@ -2943,6 +3065,67 @@ mod tests {
         *nest.listed_folder_name.lock().unwrap() = None;
         assert_eq!(
             name_of(&attach()).as_deref(),
+            Some("Pictures"),
+            "a listing with no plaintext name keeps the recorded one"
+        );
+    }
+
+    /// **A folders-page read refreshes the coverage row's folder name** — the
+    /// custodian leg's every-pass rule (`client-device-custodian.md` § *Where a
+    /// restored folder's name comes from*) on the nest-held leg's source: a
+    /// folder renamed after its attach is re-recorded by the next
+    /// `list_folder_destinations`, a read that changes nothing writes nothing,
+    /// and a listing carrying no name erases none.
+    #[test]
+    fn a_folders_page_read_refreshes_a_renamed_folders_coverage_name() {
+        let nest = Arc::new(FakeSourceNest::default());
+        nest.store
+            .seed_list(SOURCE_BOUND_ID, vec![unenrolled_destination("dest-1")]);
+        block_on(attach_folder_to_destination(
+            nest.clone(),
+            &nest.store,
+            SOURCE_BOUND_ID,
+            "dest-1",
+            7,
+        ))
+        .expect("attach");
+        let read = || {
+            block_on(list_folder_destinations(
+                nest.clone(),
+                &nest.store,
+                SOURCE_BOUND_ID,
+                7,
+            ))
+            .expect("read")
+        };
+        let recorded_name = || {
+            block_on(nest.store.backup_state(SOURCE_BOUND_ID))
+                .expect("state")
+                .backup
+                .destinations
+                .iter()
+                .find(|d| d.folder_name.ends_with("/7"))
+                .and_then(|d| d.folder_display_name.clone())
+        };
+        assert_eq!(recorded_name().as_deref(), Some("Photos"));
+
+        let writes = nest.store.writes();
+        read();
+        assert_eq!(
+            nest.store.writes(),
+            writes,
+            "an unchanged read writes nothing"
+        );
+
+        *nest.listed_folder_name.lock().unwrap() = Some("Pictures".to_string());
+        read();
+        assert_eq!(recorded_name().as_deref(), Some("Pictures"));
+        assert_eq!(nest.store.writes(), writes + 1);
+
+        *nest.listed_folder_name.lock().unwrap() = None;
+        read();
+        assert_eq!(
+            recorded_name().as_deref(),
             Some("Pictures"),
             "a listing with no plaintext name keeps the recorded one"
         );

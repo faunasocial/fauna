@@ -149,6 +149,16 @@ pub mod chunk_store {
     /// the hash finds it. A malformed value is `404`, never a fall back to the
     /// plaintext hint.
     pub const FOLDER_HASH_HINT_PARAM: &str = "folder_hash";
+
+    /// The folder hint's **row** form (`?folder_ref=<FolderRef wire>`):
+    /// `local:<id>` under a session bearer, `foreign:<channel hex>` under a
+    /// cross-nest byte-plane token. Preferred over both name forms when
+    /// present, and never falls back to them — a name finds the caller's own
+    /// same-named set first, so a member who owns a set named like the shared
+    /// set it reads can reach the shared set only this way (`file-sync.md`
+    /// § Relay serving, step (4)). A ref the caller may not read, a malformed
+    /// one, or the form the bearer's kind does not take is `404`.
+    pub const FOLDER_REF_HINT_PARAM: &str = "folder_ref";
 }
 
 /// **PERMANENT.** Account data export — a streaming `application/zip` byte

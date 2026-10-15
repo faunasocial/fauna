@@ -81,7 +81,22 @@ fn row_signed_under(
     manifest: Option<ContentHash>,
     device: &str,
 ) -> SyncChange {
+    row_at_generation(nonce, signer, served_as, seq, manifest, device, None)
+}
+
+/// [`row_signed_under`] stamped as sealed under content-key generation
+/// `content_key_version` (signed with it, as a writer stamps it).
+fn row_at_generation(
+    nonce: [u8; 32],
+    signer: &ActorKeypair,
+    served_as: &ActorKeypair,
+    seq: i64,
+    manifest: Option<ContentHash>,
+    device: &str,
+    content_key_version: Option<u64>,
+) -> SyncChange {
     let mut row = SyncChange {
+        content_key_version,
         seq,
         path_hash: hex::encode(fauna_core::sync::path_hash("inherited.bin")),
         manifest_hash: manifest.map(|m| hex::encode(m.digest())),
@@ -174,6 +189,87 @@ async fn a_members_signature_refusal_asks_for_the_envelope_once_per_batch() {
     let asked = counted(&owning);
     let (kept, _) = owning.verify_served_rows(rows(), &[]).await;
     assert!(kept.is_empty());
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "an owner never asks");
+}
+
+/// `writer-signed-change-records.md` ruling (7)(b)(ii) rule (6)(b), the
+/// backstop: a member's engine that admits rows sealed under a content-key
+/// generation its custody holds none of — the owner rotated (a serve-off) and
+/// re-published with no commit — asks its host for the envelope, once for the
+/// batch, as a row it cannot verify already does. A generation it holds, a
+/// row stamped with none (pre-bind), and the owner's own engine ask nothing.
+#[tokio::test]
+async fn a_row_naming_a_generation_custody_lacks_asks_for_the_envelope_once_per_batch() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let server = MockServer::start().await;
+    let (owner, member) = (predecessor(), successor());
+    let watch = tempfile::tempdir().unwrap();
+    let counted = |engine: &SyncEngine| {
+        let asked = std::sync::Arc::new(AtomicUsize::new(0));
+        let count = std::sync::Arc::clone(&asked);
+        engine.set_custody_refetch_request(std::sync::Arc::new(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        }));
+        asked
+    };
+    let device = hex::encode([0xAA; 32]);
+    let rows = |generation: Option<u64>| -> Vec<SyncChange> {
+        (5..8)
+            .map(|seq| row_at_generation(SET_NONCE, &owner, &owner, seq, None, &device, generation))
+            .collect()
+    };
+    // Custody holds generation 1 only.
+    let engine_as = |identity: ActorKeypair, key: BackupKey| {
+        crate::download_file_bytes_test::build_test_engine_as(
+            &server.uri(),
+            watch.path().to_path_buf(),
+            None,
+            Some(key),
+            Some(vec![0xD0, 0xD1]),
+            Some(fauna_core::folder_keys::FolderContentKeys::genesis(
+                [5; 32], 1,
+            )),
+            identity,
+        )
+    };
+
+    let engine = engine_as(successor(), successor_key());
+    engine.set_reader_binding(ReaderBinding {
+        set_nonce: Some(SET_NONCE),
+        owner: Some(owner.actor_id().0),
+        account: Some(member.actor_id().0),
+        ..Default::default()
+    });
+    let asked = counted(&engine);
+
+    let (kept, _) = engine.verify_served_rows(rows(Some(1)), &[]).await;
+    assert_eq!(kept.len(), 3);
+    let (kept, _) = engine.verify_served_rows(rows(None), &[]).await;
+    assert_eq!(kept.len(), 3);
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        0,
+        "a held generation, or none named, asks nothing"
+    );
+
+    let (kept, _) = engine.verify_served_rows(rows(Some(2)), &[]).await;
+    assert_eq!(
+        kept.len(),
+        3,
+        "admitted: the row verifies; its bytes wait on the keys"
+    );
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        1,
+        "one request for the batch, not one per row"
+    );
+
+    // The owner's own engine: its custody is the source, there is no
+    // envelope to fetch.
+    let owning = engine_as(predecessor(), predecessor_key());
+    owning.set_reader_binding(binding(&owner, &[]));
+    let asked = counted(&owning);
+    owning.verify_served_rows(rows(Some(2)), &[]).await;
     assert_eq!(asked.load(Ordering::SeqCst), 0, "an owner never asks");
 }
 
@@ -412,8 +508,7 @@ fn successor_engine(uri: &str, watch: &std::path::Path) -> SyncEngine {
     engine
 }
 
-/// A Library blob — one whole-file primary sealed under the bare `key`, as a
-/// Media-page upload rests.
+/// A Library blob sealed under the bare `key`, as a thumbnail rests.
 fn store_blob(
     store: &crate::test_support::BlobStore,
     plaintext: &[u8],
@@ -483,34 +578,8 @@ async fn an_inherited_version_is_resealed_into_a_manifest_the_current_root_alone
     );
 }
 
-/// The same act on a Media-page upload, which rests as one blob primary under
-/// the bare owner key: opened under the predecessor's key, re-sealed as a
-/// chunk manifest under the current root.
-#[tokio::test]
-async fn an_inherited_library_blob_version_is_resealed_as_a_current_root_manifest() {
-    let server = MockServer::start().await;
-    let store = MockNest::new().with_blob_plane().mount(&server).await;
-    let p = predecessor();
-    let inherited: Vec<u8> = (0..3_000u32).map(|i| (i % 239) as u8).collect();
-    let blob = store_blob(&store, &inherited, &predecessor_key());
-    let watch = tempfile::tempdir().unwrap();
-    let engine = successor_engine(&server.uri(), watch.path());
-
-    let resealed = engine
-        .reseal_inherited_version("inherited.bin", blob, Some(p.actor_id().0))
-        .await
-        .expect("the predecessor's key opens its Library blob");
-    assert_eq!(resealed.size_bytes, inherited.len() as i64);
-    assert_eq!(
-        read_under_the_current_root_alone(&server.uri(), watch.path(), resealed.manifest_hash)
-            .await
-            .expect("re-sealed under the current root"),
-        inherited
-    );
-}
-
 /// **The attack.** A version under a predecessor's signature that names bytes
-/// the CURRENT root sealed — a manifest or a Library blob — opens under no
+/// the CURRENT root sealed opens under no
 /// root that signature may reach: refused with the reason, and nothing is
 /// uploaded. So is a version no retired identity of this account signed.
 #[tokio::test]
@@ -523,7 +592,6 @@ async fn a_version_sealed_under_the_current_root_is_refused_and_nothing_is_uploa
         store_sealed_fixture(&store, &body, &successor_key().convergent_chunk_root());
     let under_predecessor =
         store_sealed_fixture(&store, &body, &predecessor_key().convergent_chunk_root());
-    let current_blob = store_blob(&store, &body, &successor_key());
     let watch = tempfile::tempdir().unwrap();
     let engine = successor_engine(&server.uri(), watch.path());
     let before = stored(&store);
@@ -531,7 +599,6 @@ async fn a_version_sealed_under_the_current_root_is_refused_and_nothing_is_uploa
     let stranger = ActorKeypair::from_secret([0x53; 32]).actor_id().0;
     for (manifest, signed_as, what) in [
         (under_current, Some(p), "a current-root manifest"),
-        (current_blob, Some(p), "a current-root blob"),
         (
             under_predecessor,
             Some(stranger),
@@ -702,7 +769,7 @@ async fn a_forged_link_binds_no_predecessor_on_the_engine() {
     assert!(engine.reader_binding().account_predecessors.is_empty());
 }
 
-// ── The corpus re-seal's Library plane (ruling (8)(c), the bare-key arms) ────
+// ── The corpus re-seal's thumbnail move (ruling (8)(c), the bare-key arm) ────
 
 fn later_predecessor() -> ActorKeypair {
     ActorKeypair::from_secret([0x53; 32])
@@ -784,41 +851,6 @@ async fn a_predecessor_signed_thumbnail_under_a_later_root_is_not_moved() {
             assert_eq!(
                 fauna_core::crypto::decrypt_backup_chunk(&successor_key(), &sealed).unwrap(),
                 pixels
-            );
-        }
-    }
-}
-
-/// The same bound on the re-seal's Library-blob primary: a blob a later
-/// retired root sealed, named by a head the earlier predecessor signed, is
-/// not re-sealed (the entry stays owed, nothing uploaded); one the signer's
-/// own root sealed is.
-#[tokio::test]
-async fn a_predecessor_signed_library_blob_under_a_later_root_is_not_resealed() {
-    for (blob_key, moves) in [(later_predecessor_key(), false), (predecessor_key(), true)] {
-        let server = MockServer::start().await;
-        let store = MockNest::new().with_blob_plane().mount(&server).await;
-        let watch = tempfile::tempdir().unwrap();
-        let engine = twice_succeeded_engine(&server.uri(), watch.path());
-
-        let body: Vec<u8> = (0..9_000u32).map(|i| (i % 239) as u8).collect();
-        let blob = store_blob(&store, &body, &blob_key);
-        seed_synced_entry(&engine, "inherited.bin", &body, blob);
-        admit_predecessor_row(&engine, blob).await;
-
-        engine.reseal_predecessor_sealed().await.unwrap();
-
-        assert_eq!(
-            store.blob_posts() > 0,
-            moves,
-            "the blob is re-sealed only off a root its record's signer may reach (moves: {moves})"
-        );
-        if moves {
-            let moved = store.last_blob_hash.lock().unwrap().clone().unwrap();
-            let sealed = store.blobs.lock().unwrap().get(&moved).cloned().unwrap();
-            assert_eq!(
-                fauna_core::crypto::decrypt_backup_chunk(&successor_key(), &sealed).unwrap(),
-                body
             );
         }
     }

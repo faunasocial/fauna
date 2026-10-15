@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use fauna_client::NestClient;
 use fauna_core::label_custody::LabelCustody;
-use fauna_devices_machine::{DevicesMachine, DevicesObserver, DevicesSnapshot, MlsQuery};
+use fauna_devices_machine::{DevicesMachine, DevicesObserver, DevicesSnapshot};
 use fauna_i18n::strings::devices as t;
 
 use super::Action;
@@ -75,6 +75,10 @@ pub struct DevicesState {
     /// `custody.held` and re-seeded at every custody fold — the backups-page
     /// typed-byte-size idiom (`parse_byte_size` at commit).
     pub custody_budget_drafts: Vec<String>,
+    /// The error a store-change re-read put on `error-message`, so the next
+    /// good re-read retires that one and never a gesture's
+    /// (`PageErrors::retire_own`).
+    pub read_error: Option<String>,
     /// Whether the offer-initiation (mint) flow is revealed
     /// (`custody-mint-button` → host select + floor + confirm/cancel).
     pub custody_mint_open: bool,
@@ -107,10 +111,6 @@ pub struct DevicesState {
     /// co-located sync agent's pump met reaches this page even though the app
     /// runs no pump pass of its own. `None` = nothing refused, or healed.
     pub enrollment_refusal: Option<fauna_sync_engine::account_runtime::EnrollmentRefusal>,
-    /// The account runtime the machine's fleet-scope removal door reads —
-    /// empty until [`wire_fleet_removal`] fills it, and while it is empty the
-    /// door refuses every removal ([`FleetRuntimeSlot`]).
-    fleet_runtime: FleetRuntimeSlot,
     /// Which `device-member-card` has its removal ARMED — the confirm/cancel
     /// pair painted on that card — the two-step the user chose because the
     /// removal is permanent and the card has no name to recognise the device
@@ -144,6 +144,23 @@ pub use fauna_client_capabilities::view_model::CustodyFacetSnapshot;
 /// event.
 pub use fauna_client_custody::{CustodyAct, CustodyCtx, load_custody_facet, run_custody_act};
 
+/// Fold a re-read custody facet under the level rule: the drafts re-seed only
+/// while they still read what the held facet seeded (untouched), or when the
+/// held rows changed count, which leaves no draft aligned with its row — never
+/// over a budget the user is typing (the `reseed_nest_place_if_untouched`
+/// posture). A custody gesture's own answer re-seeds unconditionally instead.
+pub fn fold_reread_custody(state: &mut DevicesState, facet: CustodyFacetSnapshot) {
+    let seeded = seed_budget_drafts(&facet);
+    let untouched = state
+        .custody
+        .as_ref()
+        .is_none_or(|held| state.custody_budget_drafts == seed_budget_drafts(held));
+    if untouched || seeded.len() != state.custody_budget_drafts.len() {
+        state.custody_budget_drafts = seeded;
+    }
+    state.custody = Some(facet);
+}
+
 /// Re-seed the per-row budget drafts from a fresh facet — called at every
 /// custody fold so the inputs always start from the budget in force.
 pub fn seed_budget_drafts(facet: &CustodyFacetSnapshot) -> Vec<String> {
@@ -176,21 +193,28 @@ impl DevicesState {
     /// and no foreign rows — the same fail-safe posture as an app that has not
     /// wired either seam yet.
     ///
-    /// `follows` is the account's followed-folders door
-    /// ([`super::follows_door`]) — the followed-rows source reads it, and it
-    /// needs no secret, so it is wired whatever the secret decodes to.
+    /// `runtime` is the settings-owned account-store slot
+    /// ([`SettingsState::account_runtime`](super::SettingsState)) — every
+    /// account-plane door of the page reads it, the account's followed-folders
+    /// door ([`super::follows_door`]) included, which needs no secret and so
+    /// is wired whatever the secret decodes to.
     pub fn build(
         nest: Arc<NestClient>,
         secret_hex: &str,
         succession_predecessors: &[fauna_core::crypto::BackupKey],
-        follows: Arc<dyn fauna_client_config::FollowsStore>,
+        runtime: super::AccountRuntimeSlot,
     ) -> Self {
+        let follows = super::follows_door(Arc::clone(&runtime));
         let observer: Arc<dyn DevicesObserver> = Arc::new(NoopObserver);
         // One runtime slot for every account-plane door of the page — the fleet
         // door, the participation door and the folder-key custody the create /
-        // delete helpers, the foreign-set list and the label resolver read.
-        let fleet_runtime = FleetRuntimeSlot::default();
-        let folder_keys = crate::settings::folder_key_door(Arc::clone(&fleet_runtime));
+        // delete helpers, the foreign-set list and the label resolver read —
+        // and it is the settings-owned slot the session's assembly task fills
+        // the instant the runtime settles, never one only the
+        // `AccountStoreReady` UI message fills: the automation agent awaits a
+        // click's op ON that queue, so a wizard create's custody write would
+        // wait out its whole bound on the message it is blocking.
+        let folder_keys = crate::settings::folder_key_door(Arc::clone(&runtime));
         let machine = fauna_devices_machine::build_devices_machine(
             Arc::clone(&nest),
             Some(Arc::clone(&folder_keys)),
@@ -204,8 +228,8 @@ impl DevicesState {
         machine.set_followed_folders_source(Arc::new(
             fauna_devices_machine::StoreFollowedFoldersSource::new(Arc::clone(&nest), follows),
         ));
-        machine.set_fleet_removal(fleet_removal_door(Arc::clone(&fleet_runtime)));
-        machine.set_p2p_participation_door(p2p_participation_door(Arc::clone(&fleet_runtime)));
+        machine.set_fleet_removal(fleet_removal_door(Arc::clone(&runtime)));
+        machine.set_p2p_participation_door(p2p_participation_door(Arc::clone(&runtime)));
         let secret = decode_secret(secret_hex);
         match secret {
             Some(secret) => {
@@ -238,49 +262,13 @@ impl DevicesState {
             machine: Some(machine),
             snapshot: None,
             local_device_id,
-            fleet_runtime,
             ..Default::default()
         }
     }
 }
 
-/// The tui impl of the B3 member-row join-filter seam ([`MlsQuery`]) — the
-/// per-app glue the centralized `DevicesMachine` filter delegates to. `DevicesMachine::refresh` drops
-/// every `role == "member"` row this answers `false` for, so a
-/// rostered-but-un-joined knock never reaches the snapshot the Folders page
-/// renders — a stranger's share surfaces ONLY as a `folder-pending-share`
-/// (`ui/folders.md` § Sharing: "a stranger cannot force a set into your list").
-///
-/// ⚠ **Until this is wired the machine is fail-safe, which means EVERY member row
-/// is dropped** (`libs/fauna-devices-machine/src/machine.rs:141`) — so a set
-/// legitimately shared *with* this user is invisible, badge and leave button
-/// included, no matter what the page paints. tui shipped un-wired from the core
-/// control plane (2026-07-22) until 2026-07-30; the recipient half of the sharing
-/// slice could not work without it.
-///
-/// Reads the ONE live per-actor `MlsEngine` off the conversations rail
-/// (`ConversationsSession::engine`, over the single `mls_state.db`) — never a
-/// second engine racing the SQLite file. Unlike linux's `LinuxMlsQuery`, which
-/// re-resolves a process-global `active_session()` on every call, tui holds the
-/// session `Arc` directly: `session.rs` starts the conversations session *before*
-/// `settings.attach_session`, so the handle exists by wiring time, and a re-login
-/// rebuilds both. Derives the set's `ChannelId` the SAME way the nest does
-/// (`ChannelId::from_group_id` over a plain-`hex` decode — openMLS group ids are
-/// variable length, so NOT `hex32`; see `folders::channel_id_from_group_id_hex`).
-struct TuiMlsQuery {
-    session: Arc<fauna_conversations::ConversationsSession>,
-}
-
-impl MlsQuery for TuiMlsQuery {
-    fn is_joined_shared_set(&self, mls_group_id_hex: &str) -> bool {
-        let Ok(channel_id) = super::folders::channel_id_from_group_id_hex(mls_group_id_hex) else {
-            return false;
-        };
-        self.session.engine().has_group(&channel_id)
-    }
-}
-
-/// Wire the B3 join-filter once the conversations session is live. Called from
+/// Wire the B3 join-filter ([`crate::mls_query::TuiMlsQuery`] — the per-app glue
+/// the centralized `DevicesMachine` filter delegates to) once the conversations session is live. Called from
 /// `session.rs`'s post-auth hook right after `attach_session`, because the
 /// session handle lives on `App::conversations` rather than on `SettingsState`.
 /// A no-op when either half is missing — the machine then keeps its fail-safe
@@ -296,33 +284,33 @@ pub fn wire_mls_query(
         );
         return;
     };
-    machine.set_mls_query(Arc::new(TuiMlsQuery {
-        session: Arc::clone(session),
-    }));
+    machine.set_mls_query(crate::mls_query::TuiMlsQuery::new(session));
 }
 
 /// Where tui's fleet-scope removal door
 /// ([`fauna_devices_machine::FleetRemoval`]) reads its runtime — the devices
 /// page's remove-device action's second leg beside `fauna.sync.devices.delete`
 /// (`docs/goal/behavior/devices.md` § Removing a Device;
-/// `docs/goal/architecture/account-data-taxonomy.md` § The generation
-/// machinery → *Fleet-scope reclamation*, clause (4)).
+/// `docs/goal/architecture/fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (4)).
 ///
 /// The door itself is the shared adapter every runtime-hosting seat wires
 /// (`fauna_client_account_runtime::fleet_removal`, which owns the rule that an
 /// absent runtime refuses the removal; web's core chunk serves the same
 /// adapter through the account port). What is tui's own is only where the
-/// handle lives: [`FleetRuntimeSlot`], `App`-owned state rather than the
-/// process static linux and the `fauna-ffi` seat read (this app's no-globals
-/// shape — `SettingsState::account_store_assembly`'s docs). **The door is
-/// wired when the machine is built, never at the account-store-ready edge**:
-/// wiring it there left the machine door-less until the assembly settled —
-/// and for the whole session when it failed — and a door-less machine deletes
-/// the nest row alone — a removal no runtime-hosting app may make.
-type FleetRuntimeSlot =
-    Arc<std::sync::Mutex<Option<fauna_sync_engine::account_runtime::AccountStoreHandle>>>;
-
-fn fleet_removal_door(slot: FleetRuntimeSlot) -> Arc<dyn fauna_devices_machine::FleetRemoval> {
+/// handle lives: the settings-owned [`super::AccountRuntimeSlot`], `App`-owned
+/// state rather than the process static linux and the `fauna-ffi` seat read
+/// (this app's no-globals shape — `SettingsState::account_store_assembly`'s
+/// docs). While it is empty — before the assembly settles, or for a whole
+/// session whose assembly failed — the door refuses every removal. **The door
+/// is wired when the machine is built, never at the account-store-ready
+/// edge**: wiring it there left the machine door-less until the assembly
+/// settled — and for the whole session when it failed — and a door-less
+/// machine deletes the nest row alone — a removal no runtime-hosting app may
+/// make.
+fn fleet_removal_door(
+    slot: super::AccountRuntimeSlot,
+) -> Arc<dyn fauna_devices_machine::FleetRemoval> {
     Arc::new(
         fauna_client_account_runtime::fleet_removal::RuntimeFleetRemoval::new(move || {
             slot.lock().ok().and_then(|handle| handle.clone())
@@ -337,7 +325,7 @@ fn fleet_removal_door(slot: FleetRuntimeSlot) -> Arc<dyn fauna_devices_machine::
 /// holds the engine, the switch asks it for its pass through the seat's
 /// holder nudge, which `sync_agent` publishes with its provisioner.
 fn p2p_participation_door(
-    slot: FleetRuntimeSlot,
+    slot: super::AccountRuntimeSlot,
 ) -> Arc<dyn fauna_devices_machine::P2pParticipation> {
     use fauna_client_account_runtime::p2p_participation::{
         EngineHolderNudgeSlot, RuntimeP2pParticipation,
@@ -346,20 +334,6 @@ fn p2p_participation_door(
         RuntimeP2pParticipation::new(move || slot.lock().ok().and_then(|handle| handle.clone()))
             .with_holder_nudge(EngineHolderNudgeSlot::seat()),
     )
-}
-
-/// Hand the fleet-scope removal door its runtime once the account-store
-/// handle lands (`UiMessage::Data(DataMessage::AccountStoreReady)` in
-/// `app.rs`, beside `wire_account_store_seams`) — and again whenever the
-/// machine is rebuilt under a runtime that is already up. Until then the door
-/// refuses every removal.
-pub fn wire_fleet_removal(
-    state: &DevicesState,
-    handle: fauna_sync_engine::account_runtime::AccountStoreHandle,
-) {
-    if let Ok(mut slot) = state.fleet_runtime.lock() {
-        *slot = Some(handle);
-    }
 }
 
 /// The session identity seed as raw bytes, or `None` if it will not decode.
@@ -619,8 +593,8 @@ pub(super) fn short_actor(id: &[u8; 32]) -> String {
 }
 
 /// The signed-in devices without a matching entry (`ui/devices.md` § Members
-/// without a matching entry; `account-data-taxonomy.md` § The generation
-/// machinery → *Fleet-scope reclamation*, clause (4), *A disagreement is the
+/// without a matching entry; `fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (4), *A disagreement is the
 /// user's to settle*) — a separately-labelled group below the roster, never
 /// intermixed with `device-card` rows: one `device-member-card` per verified
 /// fleet member no roster row accounts for (`DevicesSnapshot::members`, the
@@ -1061,12 +1035,7 @@ mod tests {
             "http://127.0.0.1:1".to_string(),
             fauna_core::identity::ActorKeypair::generate(),
         );
-        let state = DevicesState::build(
-            nest,
-            "",
-            &[],
-            crate::settings::follows_door(Default::default()),
-        );
+        let state = DevicesState::build(nest, "", &[], Default::default());
         let door = state
             .machine
             .as_ref()
@@ -1081,6 +1050,143 @@ mod tests {
             refusal,
             fauna_devices_machine::FleetRemovalRefusal::Unavailable(_)
         ));
+    }
+
+    /// No nest behind the scratch runtime: every request fails as a transport
+    /// fault the pump absorbs.
+    #[derive(Debug)]
+    struct NoNestError(&'static str);
+
+    impl std::fmt::Display for NoNestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "no nest in this test: {}", self.0)
+        }
+    }
+
+    impl fauna_protocol::RpcErrorClass for NoNestError {
+        fn is_rejection(&self) -> bool {
+            false
+        }
+    }
+
+    #[derive(Clone)]
+    struct NoNest;
+
+    impl fauna_protocol::RpcRequester for NoNest {
+        type Error = NoNestError;
+
+        async fn request<Req, Reply>(
+            &self,
+            kind: &'static str,
+            _payload: Req,
+        ) -> Result<Reply, Self::Error>
+        where
+            Req: serde::Serialize,
+            Reply: serde::de::DeserializeOwned,
+        {
+            Err(NoNestError(kind))
+        }
+    }
+
+    impl fauna_protocol::KeyedRpcRequester for NoNest {
+        async fn request_keyed<Req, Reply>(
+            &self,
+            kind: &'static str,
+            _idempotency_key: [u8; 16],
+            _payload: Req,
+        ) -> Result<Reply, Self::Error>
+        where
+            Req: serde::Serialize,
+            Reply: serde::de::DeserializeOwned,
+        {
+            Err(NoNestError(kind))
+        }
+    }
+
+    /// A real account runtime over a scratch store — the handle the session's
+    /// assembly task would land.
+    async fn scratch_runtime(
+        base: &std::path::Path,
+    ) -> fauna_sync_engine::account_runtime::AccountStoreHandle {
+        use fauna_sync_engine::account_runtime::{
+            AccountRuntimeParams, AccountStoreRuntime, CRED_NAMESPACE, CloudBackupExclusion,
+            RuntimePrincipal, StoreRoot, fixed_holders,
+        };
+        let root = fauna_core::identity::ActorKeypair::from_secret([0x5au8; 32]);
+        AccountStoreRuntime::start(AccountRuntimeParams {
+            store_backup_exclusion: CloudBackupExclusion::NotApplicable {
+                platform: "test".into(),
+            },
+            store_root: StoreRoot::at(base.join("state")),
+            actor_id_hex: root.actor_id_hex(),
+            rpc: NoNest,
+            process_rpc: None,
+            principal: RuntimePrincipal::SeedHolding(root.into()),
+            credentials: fauna_credential_store::CredentialStore::with_file_backend(
+                CRED_NAMESPACE,
+                base.join("creds"),
+            ),
+            reconnects: None,
+            pushes: None,
+            backstop_interval: std::time::Duration::from_secs(3600),
+            memberships: None,
+            trusted_escrow_holders: fixed_holders(Vec::new()),
+            attested_predecessors: Default::default(),
+            linked_nests: None,
+            owed_nests: None,
+            peer_transport: None,
+            enrollment_target_device_id: "ab".repeat(32),
+        })
+        .await
+        .expect("the scratch runtime starts")
+    }
+
+    /// The page's doors read the settings-owned slot the session's assembly
+    /// task fills the instant the runtime settles (`session.rs`) — never a
+    /// slot of their own that only the `AccountStoreReady` UI message fills.
+    ///
+    /// ⚠ The tui automation agent awaits a click's op ON the UI queue, so a
+    /// door whose slot waits on a UI message waits on the message it is
+    /// blocking: a `wizard-create-button` press right after a sign-in sat in
+    /// the folder-key custody write's ~30 s `wait_for_handle`, silently, past
+    /// the agent's 25 s reply budget (2026-10-06, a 504 on
+    /// `test_the_website_toggle_is_orthogonal_to_the_audience[tui]`). The
+    /// wizard's custody door, the removal door and the participation door
+    /// share the one slot, so the removal door's answer is the observable.
+    ///
+    /// Mutation: give `DevicesState::build` a private `FleetRuntimeSlot`
+    /// again → the door answers `Unavailable` → this pin reds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_doors_see_the_runtime_the_moment_the_assembly_lands_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let slot = crate::settings::AccountRuntimeSlot::default();
+        let state = DevicesState::build(
+            NestClient::new(
+                "http://127.0.0.1:1".to_string(),
+                fauna_core::identity::ActorKeypair::generate(),
+            ),
+            "",
+            &[],
+            Arc::clone(&slot),
+        );
+        let handle = scratch_runtime(tmp.path()).await;
+        // What the assembly task does — and nothing else: no UI message runs.
+        *slot.lock().unwrap() = Some(handle.clone());
+        let door = state
+            .machine
+            .as_ref()
+            .expect("DevicesState::build always constructs a machine")
+            .fleet_removal()
+            .expect("DevicesState::build must wire the fleet-removal door");
+        let answer = door.resolve_removal("aa", Some([0x11; 32])).await;
+        handle.shutdown().await;
+        assert!(
+            !matches!(
+                answer,
+                Err(fauna_devices_machine::FleetRemovalRefusal::Unavailable(_))
+            ),
+            "the door must read the runtime the assembly landed, got {answer:?}"
+        );
     }
 
     fn device(id: &str, label: &str, online: bool, guardian_marked: bool) -> DeviceSummary {

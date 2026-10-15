@@ -188,6 +188,7 @@ impl HeldRow {
             size_bytes: self.size_bytes,
             stored_at: self.stored_at,
             deleted: self.deleted,
+            pinned: false,
         }
     }
 
@@ -944,9 +945,10 @@ impl CustodianStore {
         if remaining.len() != standing.len() {
             let _writer = self.write_lock.lock().await;
             // Re-read under the lock: an audit may have answered afresh while
-            // this pass was re-fetching, and its answer is the newer one.
+            // this pass was re-fetching, and its answer is the newer one — so
+            // only what this pass proved is dropped from it.
             let mut record = self.audit_record().await;
-            record.failed_paths.retain(|p| remaining.contains(p));
+            trim_repaired(&mut record.failed_paths, &standing, &remaining);
             self.write_audit_record(&record).await?;
         }
         Ok(remaining.len())
@@ -956,8 +958,12 @@ impl CustodianStore {
     /// this store holds at generation `held` — a refused pull pass.
     ///
     /// A pass that finds the same regression again leaves the record as it
-    /// was, so `observed_at` stays the first sighting; a different `held` or
-    /// `served` replaces it.
+    /// was, so `observed_at` stays the first sighting and a landed floor
+    /// (`floored_at`) stands. A different `held` or `served` replaces the
+    /// figures and asks for the floor afresh — the source went below what was
+    /// floored — but keeps the first sighting's `observed_at`, which is what
+    /// dates the generations the entry holds up
+    /// ([`SourceRegression::observed_at`]).
     ///
     /// # Errors
     ///
@@ -971,11 +977,8 @@ impl CustodianStore {
     ) -> Result<()> {
         let _writer = self.write_lock.lock().await;
         let mut record = self.audit_record().await;
-        if record
-            .source_regressions
-            .get(ledger)
-            .is_some_and(|r| r.held == held && r.served == served)
-        {
+        let standing = record.source_regressions.get(ledger).copied();
+        if standing.is_some_and(|r| r.held == held && r.served == served) {
             return Ok(());
         }
         record.source_regressions.insert(
@@ -983,14 +986,36 @@ impl CustodianStore {
             SourceRegression {
                 held,
                 served,
-                observed_at: now,
+                observed_at: standing.map_or(now, |r| r.observed_at),
+                floored_at: None,
             },
         );
         self.write_audit_record(&record).await
     }
 
+    /// Record that the source's counter was floored at the generation the
+    /// entry against `ledger` holds — `fauna.segments.counter_floor` answered.
+    /// A no-op when no entry stands or one is already floored.
+    ///
+    /// # Errors
+    ///
+    /// If the record cannot be written.
+    pub async fn record_source_floor(&self, ledger: &str, now: i64) -> Result<()> {
+        let _writer = self.write_lock.lock().await;
+        let mut record = self.audit_record().await;
+        let Some(entry) = record.source_regressions.get_mut(ledger) else {
+            return Ok(());
+        };
+        if entry.floored_at.is_some() {
+            return Ok(());
+        }
+        entry.floored_at = Some(now);
+        self.write_audit_record(&record).await
+    }
+
     /// Drop the regression recorded against `ledger`, if any — the pass that
-    /// found the source's counter back at or above the held generation.
+    /// found the store holds nothing the source lost (the standing rule,
+    /// `custodian_pull`), or the recovery's duty.
     ///
     /// # Errors
     ///
@@ -1189,6 +1214,69 @@ impl CustodianStore {
         }
         index.folder_labels.insert(set.to_string(), label);
         self.write_index(&index).await?;
+        Ok(true)
+    }
+
+    /// Re-key the covered-folder mirror set `from` as `to` — every row of
+    /// `from` re-pathed through [`path_in_set`] and [`held_path`], its display
+    /// name and sealed label moved with it, and any audit flag standing on one
+    /// of its rows moved too. The custodian's leg of a source rotation
+    /// (`segment-backup-protocol.md` § Cross-location backup protocol → *The
+    /// writer seat* → *Where the carry runs, and what else follows the
+    /// identity*): the caller decides, on a verified chain, that `from` and
+    /// `to` name one folder; this door only moves the name.
+    ///
+    /// Moves no byte — blobs and manifests are content-addressed, never keyed
+    /// by set — and keeps every row's `stored_at`, so the grace clock and the
+    /// pull's change detector read the set exactly as before.
+    ///
+    /// Returns `false` and changes nothing when `to` already holds a row: that
+    /// set is the newer copy and `from` keeps its own — the destination's rule
+    /// for a set already resting under the successor's name. Also `false`
+    /// when `from` holds nothing.
+    pub async fn rename_folder_set(&self, from: &str, to: &str) -> Result<bool> {
+        let _writer = self.write_lock.lock().await;
+        let mut index = self.read_index().await?;
+        if index
+            .generations
+            .iter()
+            .any(|r| path_in_set(to, &r.path).is_some())
+        {
+            return Ok(false);
+        }
+        let mut renamed = HashMap::new();
+        for row in &mut index.generations {
+            if let Some(within) = path_in_set(from, &row.path) {
+                let path = held_path(to, within);
+                renamed.insert(std::mem::replace(&mut row.path, path.clone()), path);
+            }
+        }
+        if renamed.is_empty() {
+            return Ok(false);
+        }
+        // A name or label the successor's set already carries is the newer.
+        if let Some(name) = index.folder_names.remove(from) {
+            index.folder_names.entry(to.to_string()).or_insert(name);
+        }
+        if let Some(label) = index.folder_labels.remove(from) {
+            index.folder_labels.entry(to.to_string()).or_insert(label);
+        }
+        self.write_index(&index).await?;
+
+        // The audit's flags name rows by path. A crash before this write
+        // leaves a flag on a path no longer live, which the next audit drops
+        // ([`Self::record_audit`]) — a repair deferred, never a row lost.
+        let mut record = self.audit_record().await;
+        let mut moved = false;
+        for path in &mut record.failed_paths {
+            if let Some(to_path) = renamed.get(path.as_str()) {
+                *path = to_path.clone();
+                moved = true;
+            }
+        }
+        if moved {
+            self.write_audit_record(&record).await?;
+        }
         Ok(true)
     }
 
@@ -1551,10 +1639,25 @@ impl CustodianStore {
         let digest = fauna_core::hex32::decode(&row.manifest_hash).map_err(|e| {
             anyhow::anyhow!("custodian row {path} has a malformed manifest hash: {e}")
         })?;
+        self.open_generation(path, ContentHash::from_digest_raw(digest), keys)
+            .await
+    }
+
+    /// Open one held generation of `path` by its manifest hash — live or
+    /// retained alike. [`Self::open`] is this over the live row; the recovery's
+    /// store end ([`crate::reseed::RecoveryStore`]) reads every generation the
+    /// store holds of a set, the retained lost one beside a reused id's live
+    /// one included.
+    pub async fn open_generation(
+        &self,
+        path: &str,
+        manifest_hash: ContentHash,
+        keys: &FileDownloadKeys,
+    ) -> Result<Vec<u8>> {
         fauna_core::file_download::download_file_bytes_by_manifest(
             &LocalBlobs { store: self },
             keys,
-            ContentHash::from_digest_raw(digest),
+            manifest_hash,
             None, // a custodian's corpus is owner-sealed — no M2 generation
             path,
         )
@@ -1835,11 +1938,13 @@ pub struct AuditRecord {
     /// The ledgers whose source served a saved counter **below** the
     /// generation this store holds — each a pull pass refused, keyed by the
     /// ledger's own held path (one per set and family). Written by
-    /// [`CustodianStore::record_source_regression`], dropped by
-    /// [`CustodianStore::clear_source_regression`] on the first pass that finds
-    /// the counter back at or above the held generation
-    /// (`segment-backup-protocol.md` § Client-device custodian (pull) → *The
-    /// pull never tombstones against a source below its copy*).
+    /// [`CustodianStore::record_source_regression`], floored by
+    /// [`CustodianStore::record_source_floor`], and dropped by
+    /// [`CustodianStore::clear_source_regression`] only when a pass finds the
+    /// store holds nothing the source lost, or by the recovery — never on the
+    /// counter alone: while an entry stands the pull holds the lost copy
+    /// (`segment-backup-protocol.md` § Client-device custodian (pull) →
+    /// *Restore* → *Recovery from this device's own store*, part (0′)).
     ///
     /// Here rather than in the index for the reason the timestamps are: it is
     /// no fact about any held row, and the index's read-modify-write paths
@@ -1859,8 +1964,16 @@ pub struct SourceRegression {
     pub held: u32,
     /// The counter the source served (a reply without one counts as zero).
     pub served: u32,
-    /// Unix seconds of the first pass that found the source at `served`.
+    /// Unix seconds of the first pass that found the source below `held`. A
+    /// generation below `held` that was live at this instant is one the entry
+    /// holds up: the source lost it, so the copy keeps it until recovered.
     pub observed_at: i64,
+    /// Unix seconds of the pass whose `fauna.segments.counter_floor` raised the
+    /// source's counter to `held`; `None` until one lands, and every refused
+    /// pass asks again. Absent from a record written before the floor existed,
+    /// which loads as not yet floored.
+    #[serde(default)]
+    pub floored_at: Option<i64>,
 }
 
 impl AuditRecord {
@@ -2029,6 +2142,15 @@ impl BlobFetcher for LocalBlobs<'_> {
     }
 }
 
+/// Drop from `current` (the standing list re-read under the writer lock) the
+/// paths this pass proved producible: those in its `standing` snapshot that
+/// are not in `remaining`. A path absent from the snapshot was added by an
+/// audit that ran while the pass was re-fetching; the pass never evaluated it,
+/// so it keeps its flag — clearing it would be clearing on non-observation.
+fn trim_repaired(current: &mut Vec<String>, standing: &[String], remaining: &[String]) {
+    current.retain(|p| remaining.contains(p) || !standing.contains(p));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2065,6 +2187,19 @@ mod tests {
                 vec!["__mail/aa/seg-00000001.dat".into()]
             },
         }
+    }
+
+    /// A flag an audit added between the pass's snapshot and its locked
+    /// rewrite was never re-produced by the pass, so it must survive; a
+    /// snapshot path the pass proved producible still leaves.
+    #[test]
+    fn trim_repaired_keeps_a_flag_the_pass_never_saw() {
+        let s = |p: &str| p.to_string();
+        let standing = vec![s("seg-01"), s("seg-02")];
+        let remaining = vec![s("seg-02")];
+        let mut current = vec![s("seg-20"), s("seg-01"), s("seg-02")];
+        trim_repaired(&mut current, &standing, &remaining);
+        assert_eq!(current, vec![s("seg-20"), s("seg-02")]);
     }
 
     /// The kind's strongest property: bytes sealed locally come back out with no

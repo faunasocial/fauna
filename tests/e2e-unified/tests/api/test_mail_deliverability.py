@@ -19,10 +19,14 @@ build installs the Null STARTTLS prober (no real gmail connect), so the run is
 deterministic + fast.
 """
 
+import secrets
+
 import pytest
 
 from clients.ws_rpc_admin_client import RpcCallError, WsRpcAdminClient
 from common.auth import create_actor_and_register
+from helpers.mail_wire import outbound_clock_now
+from helpers.recipient_seal_key import provision_recipient_seal_key
 
 pytestmark = pytest.mark.tier_3
 
@@ -257,6 +261,45 @@ def test_admin_reads_blocklist_self_check_history(nest_instance):
             assert set(r) >= {"server", "listed", "reason", "error"}, f"bad row: {r!r}"
 
 
+@pytest.mark.feature("admin-mail-policy", "admin-mail-health")
+def test_nest_runs_its_daily_blocklist_self_check_unasked(nest_instance):
+    """The nest's own daily pass — the one its timer runs at ~03:00 UTC, driven
+    here once through the `test-hooks` endpoint that calls the same function —
+    records a blocklist check of the default DNSBL set that no admin asked for,
+    is not held back by the admin's one-a-minute refresh limit, and records a
+    diagnostics run made by the nest itself, not by an admin."""
+    from conftest import _bridge_admin_post
+
+    def _limited(row):
+        return any("rate-limited" in (r.get("error") or "") for r in row["results"])
+
+    admin = _admin_client(nest_instance)
+    with admin:
+        _ensure_domain(admin)
+        # Two admin force-refreshes just before leave the per-DNSBL limit hot
+        # (the second is always rate-limited). The daily pass is the cadence,
+        # not a force-refresh, so that limit must not touch it.
+        admin.call("fauna.bridges.blocklist_self_check_run", {})
+        limited = admin.call("fauna.bridges.blocklist_self_check_run", {})
+    assert _limited(limited), f"precondition: the second admin refresh is rate-limited: {limited!r}"
+    ran = _bridge_admin_post(nest_instance["url"], nest_instance["admin"]["token"],
+                             "/api/v1/test/mail/blocklist-self-check/run", {}, timeout=120.0)
+    assert ran == {"ran": True}, ran
+    with admin:
+        rows = admin.call("fauna.bridges.list_blocklist_self_check_history",
+                          {"window_days": 30})["rows"]
+        diagnostics = admin.call("fauna.bridges.list_deliverability_diagnostic_runs",
+                                 {"limit": 1})["rows"]
+
+    daily = [row for row in rows if row["checked_at"] >= limited["checked_at"] and not _limited(row)]
+    assert daily, (
+        f"the nest's own pass is recorded and, not being an admin force-refresh, is never "
+        f"rate-limited: {rows[:3]!r}")
+    assert {r["server"] for r in daily[0]["results"]} == DEFAULT_DNSBLS, daily[0]
+    assert diagnostics and bytes(diagnostics[0]["ran_by_actor_id"]) == bytes(32), (
+        f"the same daily pass records a diagnostics run made by the nest, not an admin: {diagnostics!r}")
+
+
 @pytest.mark.feature("admin-mail-policy")
 def test_admin_reads_diagnostic_run_history(nest_instance):
     """After a diagnostic run is recorded, the history read returns it with the
@@ -310,4 +353,80 @@ def test_non_admin_denied_on_diagnostic_run_history(nest_instance):
             client.call("fauna.bridges.list_deliverability_diagnostic_runs", {"limit": 10})
     assert excinfo.value.code == "fauna.bridges.permission_denied", (
         f"User on the Admin diagnostic-history kind must be denied; got {excinfo.value.code!r}"
+    )
+
+
+# ── the warm-up's hold on the sender's Sent read ─────────────────────
+#
+# `mail-deliverability.md` § Enforcement at submission time, the deferred-state
+# bullet: a message the warm-up holds back says, where its sender reads their
+# sent mail, that it is held, when it will be delivered and how many held
+# messages are ahead of it. The list fan-out is a warm-up-counted door, so a
+# list wider than the day-1 ramp (50) is held in part however much of today's
+# budget earlier tests on this session's nest spent. Nothing here delivers:
+# held or not, the rows only sit in the queue.
+
+# Wider than the day-1 cap of 50, so at least five of its rows are held.
+_HELD_LIST_MEMBERS = 55
+
+
+def _list_send(client, domain, *, members, subject):
+    local_part = "warmup-" + secrets.token_hex(4)
+    list_id = client.call(
+        "fauna.bridges.create_account_list",
+        {"local_part": local_part, "local_domain": domain},
+    )["list_id"]
+    for _ in range(members):
+        client.call(
+            "fauna.bridges.add_list_member",
+            {"list_id": list_id, "recipient_address": f"m-{secrets.token_hex(4)}@external.test"},
+        )
+    message = (
+        f"From: {local_part}@{domain}\r\nTo: {local_part}@{domain}\r\nSubject: {subject}\r\n"
+        f"Message-ID: <{secrets.token_hex(8)}@{domain}>\r\n"
+        "Date: Fri, 09 Oct 2026 12:00:00 +0000\r\n\r\nA warm-up-held list message.\r\n"
+    ).encode()
+    client.call("fauna.bridges.send_list_message", {"list_id": list_id, "message": message})
+
+
+@pytest.mark.feature("mail-server")
+def test_warmup_held_list_send_reads_back_held_on_sent(nest_instance):
+    """Two list sends past the day's ramp read back, through the owner's own
+    `fauna.email.sent.fetch`, as held by the warm-up until the next 00:00 UTC,
+    the later one behind the earlier one in the held queue."""
+    user = create_actor_and_register(
+        nest_instance["port"], admin_signing_key=nest_instance["admin"]["signing_key"]
+    )
+    try:
+        with _admin_client(nest_instance) as admin:
+            _ensure_domain(admin)
+        with _user_client(nest_instance, user) as client:
+            # The Sent copy is sealed to the sender, so the sender needs a key.
+            provision_recipient_seal_key(client, user["actor_id_bytes"])
+            # The hold is stamped on the nest's outbound clock, which an earlier
+            # test on this session's nest may have moved off the real one.
+            before, _ = outbound_clock_now(nest_instance["url"])
+            _list_send(client, DOMAIN, members=_HELD_LIST_MEMBERS, subject="first")
+            _list_send(client, DOMAIN, members=_HELD_LIST_MEMBERS, subject="second")
+            after, _ = outbound_clock_now(nest_instance["url"])
+            sent = client.call("fauna.email.sent.fetch", {"after_uid": 0, "limit": 50})
+    finally:
+        # Hand later tests on this session's nest a fresh day's budget; the held
+        # rows stay held until their release (a reset never releases them).
+        with _admin_client(nest_instance) as admin:
+            admin.call("fauna.bridges.outbound_warmup_reset", {})
+
+    messages = sent["messages"]
+    assert len(messages) == 2, f"each list send files one Sent copy: {messages!r}"
+    holds = [m.get("warmup_hold") for m in messages]
+    assert all(holds), (
+        f"both sends are wider than the day's ramp, so the warm-up holds both: {holds!r}"
+    )
+    # The next 00:00 UTC after the submission — either side of a midnight the
+    # test straddled.
+    releases = {(before // 86_400 + 1) * 86_400, (after // 86_400 + 1) * 86_400}
+    for hold in holds:
+        assert hold["release_at"] in releases, f"held until the next 00:00 UTC: {hold!r}"
+    assert holds[1]["messages_ahead"] > holds[0]["messages_ahead"], (
+        f"the later send waits behind the earlier one: {holds!r}"
     )

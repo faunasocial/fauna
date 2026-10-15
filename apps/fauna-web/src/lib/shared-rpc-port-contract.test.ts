@@ -95,13 +95,34 @@ Deno.test("sharedRpcPort resolves the live singleton on every request", () => {
   const rest = src.slice(start + 1);
   const end = rest.search(/\n(?:export )?(?:async )?function /);
   const body = end < 0 ? rest : rest.slice(0, end);
-  if (!/request:\s*async\s*\([^)]*\)\s*=>\s*\{[^}]*await getClient\(secretHex\)/.test(body)) {
+  const req = body.slice(body.indexOf("request:"));
+  const refuse = req.search(/throw new Error\(\s*'shared rpc port refused/);
+  const dial = req.indexOf("await getClient(secretHex)");
+  if (dial < 0) {
     throw new Error(
       "sharedRpcPort's `request` must `await getClient(secretHex)` on EACH call: " +
-        "getClient re-keys on an identity or nest change and retires the old " +
-        "client (close() is one-way), and a chunk machine that outlives that " +
-        "swap — the devices session memo, the atproto singleton — must follow the " +
-        "socket rather than hold a retired one.",
+        "getClient re-keys on a nest change and retires the old client (close() " +
+        "is one-way), and a chunk machine that outlives that swap — the devices " +
+        "session memo, the atproto singleton — must follow the socket rather " +
+        "than hold a retired one.",
+    );
+  }
+  // A port is minted for one actor: once the identity moved on in
+  // place, getClient(secretHex) would re-key the singleton BACK to the retired
+  // actor, retiring the current identity's client. So the refusal must come
+  // first, keyed on the port's actor vs the singleton's and the current identity.
+  if (refuse < 0 || refuse > dial) {
+    throw new Error(
+      "sharedRpcPort's `request` must refuse (throw 'shared rpc port refused…') " +
+        "BEFORE `await getClient(secretHex)` when the port's actor is no longer " +
+        "the current one — otherwise a stale port retires the current identity's " +
+        "client and dials the old one.",
+    );
+  }
+  if (!/clientActorId\s*!==\s*mine/.test(req) || !/get\(identity\)/.test(req)) {
+    throw new Error(
+      "the stale-port refusal must compare the port's actor against BOTH the " +
+        "singleton's actor (`clientActorId`) and the current `get(identity)`.",
     );
   }
   if (!body.includes(".requestRaw(")) {
@@ -110,5 +131,22 @@ Deno.test("sharedRpcPort resolves the live singleton on every request", () => {
         "`WsRpcClient.requestRaw` — the owner's half of the port, which takes the " +
         "same reconnect-wait and per-kind deadline every core request takes.",
     );
+  }
+});
+
+// The 15 s page-machine polls write the current actor's state, so
+// the canonical drop must retire them: each registers with the actor-scoped
+// reset and refuses to start if a drop landed during its mount awaits.
+Deno.test("the Folders and Bluesky settings polls register with the actor-scoped reset", () => {
+  for (const name of ["components/FoldersSection.svelte", "components/AtprotoSettingsSection.svelte"]) {
+    const src = Deno.readTextFileSync(new URL(name, HERE));
+    if (!/registerActorScopedReset\(stopTimer\)/.test(src) || !/sameActorSince\(\)/.test(src)) {
+      throw new Error(
+        `${name} runs a setInterval poll but does not register it with ` +
+          `registerActorScopedReset / guard the start with sameActorSince — a ` +
+          `poll that outlives an in-place identity change pings the old actor's ` +
+          `machine (account-scoping.md § The scoping taxonomy).`,
+      );
+    }
   }
 });

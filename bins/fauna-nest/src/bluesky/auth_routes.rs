@@ -50,9 +50,16 @@ fn get_oauth(
     ))
 }
 
+/// Where the browser lands after the Bluesky OAuth callback when no safe
+/// `return_url` rode the app state: the AT Protocol page, which owns the
+/// consume-side link since the 2026-07-22 hand-over (`bridges.md` § Goal — the
+/// Bridges page no longer renders a Bluesky card; `ui/atproto.md`). The path is
+/// the web app's route for that page.
+pub(super) const DEFAULT_RETURN_URL: &str = "/settings/atproto";
+
 /// Validate an OAuth `return_url` as a **same-origin relative path** before it is
-/// used as a redirect target, returning the candidate iff safe else the default
-/// `/bridges`. The open-redirect guard: the `return_url` a caller hands
+/// used as a redirect target, returning the candidate iff safe else
+/// [`DEFAULT_RETURN_URL`]. The open-redirect guard: the `return_url` a caller hands
 /// `link` rides the OAuth app state back to the callback, so an unvalidated one
 /// would 302 a victim off our trusted origin (and a CR/LF in it would panic
 /// `Redirect::to`). The callback no longer reads it from the attacker-controlled
@@ -62,14 +69,13 @@ fn get_oauth(
 /// backslash-smuggled `/\host`, and no CR/LF. Applied at both the construction
 /// site (`bridge_provider::link`) and here, the load-bearing use site.
 pub(super) fn sanitize_return_url(candidate: &str) -> &str {
-    const DEFAULT: &str = "/bridges";
     // Some browsers fold `\` to `/` when resolving the authority, so normalize
     // before the `//` test to catch `/\evil` / `/\/evil`.
     let normalized = candidate.replace('\\', "/");
     let safe = normalized.starts_with('/')
         && !normalized.starts_with("//")
         && !candidate.contains(['\n', '\r']);
-    if safe { candidate } else { DEFAULT }
+    if safe { candidate } else { DEFAULT_RETURN_URL }
 }
 
 // ---------------------------------------------------------------------------
@@ -115,7 +121,7 @@ pub async fn auth_callback(
     // `callback()` below, once the key has matched a stored state. So until the
     // callback succeeds, where the user came from is unknown and every early
     // exit redirects to the default.
-    let return_url = "/bridges";
+    let return_url = DEFAULT_RETURN_URL;
 
     // Handle error from the authorization server
     if let Some(error) = &params.error {
@@ -237,7 +243,7 @@ mod tests {
     }
 
     /// Load-bearing: every cross-origin / injection shape clamps to the
-    /// `/bridges` default — absolute URLs, protocol-relative `//host`, the
+    /// [`DEFAULT_RETURN_URL`] — absolute URLs, protocol-relative `//host`, the
     /// backslash-smuggled `/\host` variants, a scheme with no leading slash, the
     /// empty string, and a CR/LF that would otherwise panic `Redirect::to`.
     #[test]
@@ -255,7 +261,7 @@ mod tests {
         ] {
             assert_eq!(
                 sanitize_return_url(evil),
-                "/bridges",
+                DEFAULT_RETURN_URL,
                 "{evil:?} must clamp to the default"
             );
         }
@@ -288,7 +294,7 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         assert!(
-            loc.starts_with("/bridges?"),
+            loc.starts_with("/settings/atproto?"),
             "open redirect not clamped: Location = {loc:?}"
         );
     }

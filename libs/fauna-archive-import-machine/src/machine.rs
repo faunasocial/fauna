@@ -15,8 +15,11 @@
 //! platform's [`ArchiveOpener`] (§ Architectural rules — the app parses and
 //! signs; the nest only ever stores the sealed folder).
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 use fauna_archive::{ArchiveSummary, Category, ExportFormat, Platform};
 use fauna_core::data::Timestamp;
@@ -28,6 +31,7 @@ use crate::snapshot::{
     ArchiveSourceKind, ArchiveSummaryView, CategoryRow, RunState,
 };
 use crate::state::{ArchiveMarker, ImportState, STATE_PATH, SUMMARY_PATH};
+use crate::timing::RunClock;
 
 /// Everything a dispatch can go wrong with. `Nest` is a seam failure,
 /// `Archive` a refusal by the parser layer (an unrecognized zip, the HTML
@@ -83,6 +87,53 @@ pub enum StopRequest {
     Cancel,
 }
 
+/// The one-shot e2e anchors (convention 14), each armed BEFORE Start and
+/// firing once `n` records have settled in the current `run_import` loop.
+/// `None` in production by construction: the only setters are compiled into
+/// test-capable builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TestAnchor {
+    /// Pause through the ordinary `Pause` arm — the restart-resume journey.
+    PauseAfter(u64),
+    /// Hold the run, still `Running`, until a `Pause` or `Cancel` arrives —
+    /// so the pause/cancel journey presses the real buttons against a run
+    /// that cannot finish before the click lands.
+    HoldAfter(u64),
+}
+
+impl TestAnchor {
+    fn records(self) -> u64 {
+        match self {
+            Self::PauseAfter(n) | Self::HoldAfter(n) => n,
+        }
+    }
+}
+
+/// [`ArchiveImportMachine::stop_requested_wait`]'s future. Runtime-agnostic:
+/// it parks its waker where `request_stop` wakes it, registering BEFORE it
+/// reads the flag so a request landing between the two is never lost.
+pub(crate) struct StopRequestedWait<'a> {
+    machine: &'a ArchiveImportMachine,
+}
+
+impl Future for StopRequestedWait<'_> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        *self.machine.stop_waker.lock().expect("stop waker mutex") = Some(cx.waker().clone());
+        if *self.machine.stop.lock().expect("stop mutex") == StopRequest::None {
+            Poll::Pending
+        } else {
+            self.machine
+                .stop_waker
+                .lock()
+                .expect("stop waker mutex")
+                .take();
+            Poll::Ready(())
+        }
+    }
+}
+
 /// One instance per user client. Holds the rendered snapshot and drives both
 /// seams; the UI is a read-only observer of [`Self::snapshot`].
 ///
@@ -110,11 +161,14 @@ pub struct ArchiveImportMachine {
     /// loop is in flight, so a second one is refused rather than left to
     /// author and checkpoint against its own `RunHandle` clone.
     pub(crate) running: AtomicBool,
-    /// A one-shot test anchor: pause through the ordinary `Pause` arm once
-    /// this many records have settled in the current run (convention 14 —
-    /// the e2e restart-resume journey's causal anchor). `None` in production
-    /// by construction: the only setter is compiled into test-capable builds.
-    pub(crate) test_pause_after: Mutex<Option<u64>>,
+    /// The armed one-shot e2e anchor, if any ([`TestAnchor`]).
+    pub(crate) test_anchor: Mutex<Option<TestAnchor>>,
+    /// The waker of a run held by [`TestAnchor::HoldAfter`]; a stop request
+    /// wakes it. Never set outside a held run.
+    pub(crate) stop_waker: Mutex<Option<Waker>>,
+    /// The Progress step's elapsed/ETA clock (`timing.rs`). Lock order:
+    /// never held while taking [`Self::inner`].
+    pub(crate) clock: Mutex<RunClock>,
 }
 
 /// The claim [`index_archive`] is written to protect, pinned at compile time:
@@ -141,36 +195,87 @@ impl ArchiveImportMachine {
             run: Mutex::new(None),
             stop: Mutex::new(StopRequest::None),
             running: AtomicBool::new(false),
-            test_pause_after: Mutex::new(None),
+            test_anchor: Mutex::new(None),
+            stop_waker: Mutex::new(None),
+            clock: Mutex::new(RunClock::default()),
         }
     }
 
+    /// The page's state, with the derived fields filled at the moment of the
+    /// read: step 1's export link, and step 5's elapsed time and estimate
+    /// (which advance with the clock, not with an action).
     pub fn snapshot(&self) -> ArchiveImportSnapshot {
-        fauna_core::clone_locked(&self.inner, |s| s)
+        let mut snap = fauna_core::clone_locked(&self.inner, |s| s);
+        snap.source_export_url = snap.source_kind.export_request_url().to_string();
+        if snap.run_state.is_some() {
+            let (elapsed, eta) = self.clock.lock().expect("clock mutex").timing(
+                Timestamp::now().0,
+                snap.imported + snap.skipped,
+                snap.total,
+            );
+            snap.elapsed_secs = elapsed;
+            snap.eta_secs = eta;
+        }
+        snap
     }
 
-    /// Arm the one-shot pause-after-N-records anchor (field doc). Test-capable
-    /// builds only — the tui automation surface's `archive_import_pause_after`
-    /// command is its one caller.
+    /// The run is running from now (`timing.rs`); `fresh` restarts the clock
+    /// for a new run.
+    pub(crate) fn clock_start(&self, settled: u64, fresh: bool) {
+        let mut clock = self.clock.lock().expect("clock mutex");
+        if fresh {
+            clock.reset();
+        }
+        clock.start(Timestamp::now().0, settled);
+    }
+
+    /// The run stopped (paused, cancelled, completed or errored).
+    pub(crate) fn clock_stop(&self) {
+        self.clock
+            .lock()
+            .expect("clock mutex")
+            .stop(Timestamp::now().0);
+    }
+
+    /// Arm the one-shot pause-after-N-records anchor ([`TestAnchor::PauseAfter`]).
+    /// Test-capable builds only — the tui automation surface's
+    /// `archive_import_pause_after` command is its one caller.
     ///
     /// N greater than or equal to the records the run still has to settle
     /// never pauses — the run completes and the arm is spent; N = 0 behaves
-    /// as 1 (the check runs after a record settles).
+    /// as 1 (the check runs after a record settles). Arming replaces any
+    /// other armed anchor.
     #[cfg(any(debug_assertions, feature = "test-helpers"))]
     pub fn set_test_pause_after_records(&self, records: u64) {
-        *self.test_pause_after.lock().expect("test pause mutex") = Some(records);
+        *self.test_anchor.lock().expect("test anchor mutex") =
+            Some(TestAnchor::PauseAfter(records));
     }
 
-    /// `true` exactly once, when the armed count is reached; spends the arm.
-    pub(crate) fn test_pause_due(&self, settled: u64) -> bool {
-        let mut slot = self.test_pause_after.lock().expect("test pause mutex");
+    /// Arm the one-shot hold-after-N-records anchor ([`TestAnchor::HoldAfter`]):
+    /// the run stays `Running` with N records settled until the user's own
+    /// `Pause` or `Cancel` arrives, which it then takes at the next record.
+    /// Test-capable builds only — the tui automation surface's
+    /// `archive_import_hold_after` command is its one caller. The same N
+    /// rules as [`Self::set_test_pause_after_records`]; a hold armed at or
+    /// past the run's last record never holds.
+    #[cfg(any(debug_assertions, feature = "test-helpers"))]
+    pub fn set_test_hold_after_records(&self, records: u64) {
+        *self.test_anchor.lock().expect("test anchor mutex") = Some(TestAnchor::HoldAfter(records));
+    }
+
+    /// The armed anchor, exactly once, when its count is reached; spends it.
+    pub(crate) fn test_anchor_due(&self, settled: u64) -> Option<TestAnchor> {
+        let mut slot = self.test_anchor.lock().expect("test anchor mutex");
         match *slot {
-            Some(n) if settled >= n => {
-                *slot = None;
-                true
-            }
-            _ => false,
+            Some(anchor) if settled >= anchor.records() => slot.take(),
+            _ => None,
         }
+    }
+
+    /// Resolves once a `Pause` or `Cancel` has been requested — what a run
+    /// held by [`TestAnchor::HoldAfter`] awaits.
+    pub(crate) fn stop_requested_wait(&self) -> StopRequestedWait<'_> {
+        StopRequestedWait { machine: self }
     }
 
     /// Initial page load — and the `Refresh` action, which is the same thing.
@@ -349,6 +454,7 @@ impl ArchiveImportMachine {
                 // the run that just finished, in this process; a fresh hydrate
                 // over a finished folder is a fresh wizard.)
                 *self.run.lock().expect("run mutex") = None;
+                self.clock.lock().expect("clock mutex").reset();
                 clear_run_fields(&mut snap);
                 snap.step = ArchiveImportStep::Source;
             }
@@ -364,6 +470,7 @@ impl ArchiveImportMachine {
     /// resumable), and a running one has no `Back` at all.
     fn reset_wizard(&self) {
         *self.run.lock().expect("run mutex") = None;
+        self.clock.lock().expect("clock mutex").reset();
         let mut snap = self.inner.lock().expect("snapshot mutex");
         clear_run_fields(&mut snap);
         snap.step = ArchiveImportStep::Source;
@@ -566,7 +673,10 @@ impl ArchiveImportMachine {
         if snap.resume_available && self.run.lock().expect("run mutex").is_some() {
             return;
         }
-        snap.step = ArchiveImportStep::Source;
+        // Step 2, where the path is entered — never step 1: an open that the
+        // new path then fails must leave the user where they can try another
+        // file (§ The wizard and its machine, step 2: refused *here*).
+        snap.step = ArchiveImportStep::Archive;
         drop(snap);
         self.forget_archive();
     }
@@ -802,7 +912,7 @@ mod tests {
             .expect_err("HTML is refused");
         assert!(err.to_string().contains("JSON"), "{err}");
         let s = m.snapshot();
-        assert_eq!(s.step, ArchiveImportStep::Source);
+        assert_eq!(s.step, ArchiveImportStep::Archive, "refused on step 2");
         assert!(s.error.as_deref().unwrap_or("").contains("JSON"));
     }
 
@@ -1044,12 +1154,9 @@ mod tests {
         assert_eq!(s.summary, None);
         assert!(s.categories.is_empty());
         assert_eq!((s.confirm_records, s.confirm_bytes), (0, 0));
-        assert_eq!(s.step, ArchiveImportStep::Source);
+        assert_eq!(s.step, ArchiveImportStep::Archive);
 
-        // Step 1 → 2 still walks, but with no archive indexed the wizard
-        // cannot advance past step 2.
-        m.dispatch(ArchiveImportAction::Next).await.unwrap();
-        assert_eq!(m.snapshot().step, ArchiveImportStep::Archive);
+        // With no archive indexed the wizard cannot advance past step 2.
         assert!(m.dispatch(ArchiveImportAction::Next).await.is_err());
         assert_eq!(m.snapshot().step, ArchiveImportStep::Archive);
     }
@@ -1079,6 +1186,9 @@ mod tests {
         assert_eq!(s.summary, None);
         assert!(s.categories.is_empty());
         assert!(s.error.is_some());
+        // Refused on step 2, the wizard stays there for another file
+        // (§ The wizard and its machine, step 2).
+        assert_eq!(s.step, ArchiveImportStep::Archive);
     }
 
     /// The resume fields describe a folder that exists right now. A finished

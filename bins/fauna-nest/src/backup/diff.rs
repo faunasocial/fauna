@@ -145,15 +145,23 @@ pub async fn snapshot_diff(
         }
     }
 
-    let added_bytes: i64 = added.iter().map(|e| e.size_bytes).sum();
-    let removed_bytes: i64 = removed.iter().map(|e| e.size_bytes).sum();
+    // Saturating: the sizes are owner-declared, and a plain `sum()` past
+    // `i64::MAX` panics under release overflow checks.
+    let added_bytes = added
+        .iter()
+        .map(|e| e.size_bytes)
+        .fold(0i64, i64::saturating_add);
+    let removed_bytes = removed
+        .iter()
+        .map(|e| e.size_bytes)
+        .fold(0i64, i64::saturating_add);
     let summary = DiffSummary {
         added_count: added.len(),
         removed_count: removed.len(),
         modified_count: modified.len(),
         added_bytes,
         removed_bytes,
-        net_bytes: added_bytes - removed_bytes,
+        net_bytes: added_bytes.saturating_sub(removed_bytes),
     };
 
     // Both snapshots share this id (verified above), so one lookup names the

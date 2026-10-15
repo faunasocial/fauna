@@ -328,6 +328,48 @@ def test_create_feed_with_factor_weight_sets_local_composition(
 
 
 @pytest.mark.feature("custom-feeds")
+def test_watched_to_the_end_and_skipped_past_weigh_into_a_feed(
+    logged_in_app, nest_instance, test_user
+):
+    """The shared Layer-B signals — how many people watched a post to the end,
+    and how many skipped it — are offered by name in `feed-factor-select` and
+    compose into a feed of the user's own under the nest's `signal:*` keys
+    (engagement-cues.md § Layer B → *Composition*: "a quality-seeking feed
+    weights `signal:watch-complete` positive and `signal:skip` negative")."""
+    app = logged_in_app
+    port = nest_instance["port"]
+
+    app.feed.navigate()
+    app.driver.click("feed-create-feed-button")
+    app.driver.wait_for("feed-create-feed-name")
+    try:
+        options = app.driver.option_texts("feed-factor-select")
+        assert options is not None, "feed-factor-select publishes no options attr"
+        for label in ("Watched to the end", "Skipped past"):
+            assert label in options, (
+                f"the picker must offer {label!r} by name; it paints {options!r}"
+            )
+    finally:
+        app.feed.close_create_feed_form()
+
+    for factor, weight, permille in (
+        ("signal:watch-complete", "2.0", 2000),
+        ("signal:skip", "-1.0", -1000),
+    ):
+        feed_name = _unique("signal-feed")
+        app.feed.create_feed_with_factor(
+            name=feed_name, factor_label=factor, weight=weight,
+        )
+        feeds = ws_api.list_feeds(port, test_user)
+        matches = [f for f in feeds if f["name"] == feed_name]
+        assert matches, f"created feed {feed_name!r} not in fauna.feed.list: {feeds}"
+        got = ws_api.get_feed(port, test_user, matches[0]["feed_id"])
+        assert got.get("composition") == [
+            {"factor": factor, "weight_permille": permille}
+        ], f"expected {factor}@{permille}, got {got.get('composition')!r}"
+
+
+@pytest.mark.feature("custom-feeds")
 def test_create_feed_with_global_factor_merges_into_factor_set(
     logged_in_app, nest_instance, test_user, request
 ):

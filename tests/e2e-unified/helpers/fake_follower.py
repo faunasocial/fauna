@@ -168,6 +168,8 @@ class FakeFollower:
         # Headers of every actor GET we served or refused, so a test can assert
         # what the nest actually sent rather than infer it from the outcome.
         self.actor_gets: list[dict] = []
+        # The `resource` of every WebFinger query the nest made.
+        self.webfinger_queries: list[str] = []
         self._lock = threading.Lock()
         self._key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         self.public_pem = (
@@ -224,6 +226,10 @@ class FakeFollower:
                 pass  # keep pytest output readable
 
             def do_GET(self):
+                path, _, query = self.path.partition("?")
+                if path == "/.well-known/webfinger":
+                    follower._serve_webfinger(self, query)
+                    return
                 if self.path != f"/users/{follower.username}":
                     self.send_error(404)
                     return
@@ -272,6 +278,35 @@ class FakeFollower:
                 self.end_headers()
 
         return Handler
+
+    @property
+    def handle(self) -> str:
+        """The two-`@` account this server serves, as a user types it —
+        ``@<username>@127.0.0.1:<port>``, what WebFinger answers for."""
+        return f"@{self.username}@127.0.0.1:{self.port}"
+
+    def _serve_webfinger(self, handler, query: str) -> None:
+        """RFC 7033: the JRD naming :attr:`actor_uri` for
+        ``acct:<username>@127.0.0.1:<port>``, 404 for any other resource."""
+        resource = (urllib.parse.parse_qs(query).get("resource") or [""])[0]
+        with self._lock:
+            self.webfinger_queries.append(resource)
+        if resource != f"acct:{self.handle.removeprefix('@')}":
+            handler.send_error(404)
+            return
+        jrd = json.dumps({
+            "subject": resource,
+            "links": [{
+                "rel": "self",
+                "type": "application/activity+json",
+                "href": self.actor_uri,
+            }],
+        }).encode()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/jrd+json")
+        handler.send_header("Content-Length", str(len(jrd)))
+        handler.end_headers()
+        handler.wfile.write(jrd)
 
     def _record_actor_get(self, headers) -> None:
         with self._lock:

@@ -24,16 +24,22 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.ui.components.sourceGlyphEmoji
+import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.util.ValueFormat
+import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.viewmodel.ConversationsVM
 import uniffi.fauna_core.LocalizedText
+import kotlinx.coroutines.launch
 import uniffi.fauna_conversations.GuardianState
+import uniffi.fauna_conversations.RoomInvitationSnapshot
 import uniffi.fauna_conversations.SortOrder
 import uniffi.fauna_conversations.ThreadSummary
 import uniffi.fauna_conversations.guardianStateAttrToken
 import uniffi.fauna_conversations.guardianStateLabel
 import uniffi.fauna_conversations.nextSortOrder
+import uniffi.fauna_conversations.roomInvitationText
+import uniffi.fauna_conversations.roomRoleAttrToken
 import social.fauna.generated.Ids
 
 /**
@@ -60,9 +66,22 @@ fun ConversationListScreen(
     // ValueFormat.conversationTimestamp is an FFI call (shared fauna_core::format)
     // — keep it in the stateful Screen so the Content stays JVM/Robolectric-testable.
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     ConversationsListContent(
         threads = snapshot?.threads ?: emptyList(),
+        invitations = snapshot?.roomInvitations ?: emptyList(),
+        // Accept follows the manager into the room's thread — it selects it on
+        // success, so the page pushes the detail screen like a tapped row.
+        // Decline is `fauna.inbox.ack` and tells the room nothing.
+        onAcceptInvitation = { id ->
+            scope.launch {
+                manager.acceptRoomInvitation(id)?.let { threadId ->
+                    navController.navigate("conversation/$threadId")
+                }
+            }
+        },
+        onDeclineInvitation = { id -> scope.launch { manager.declineRoomInvitation(id) } },
         sort = snapshot?.sort ?: SortOrder.LATEST_ACTIVITY,
         searchQuery = snapshot?.searchQuery ?: "",
         // The floor of the `error-message` stack (`ui/conversations.md` §
@@ -108,6 +127,17 @@ fun ConversationsListContent(
     threads: List<ThreadSummary>,
     sort: SortOrder,
     searchQuery: String,
+    // The community-room invitations standing for this account, atop the list
+    // below its own controls (`ui/conversations.md` § Element IDs → *The
+    // community room's three controls*). Empty keeps the Content/test harness
+    // FFI-free; the sentence is shared Rust (`roomInvitationText`).
+    invitations: List<RoomInvitationSnapshot> = emptyList(),
+    onAcceptInvitation: (Long) -> Unit = {},
+    onDeclineInvitation: (Long) -> Unit = {},
+    // The shared sentence and `role` token, injected so the Content stays
+    // FFI-free for Robolectric like [formatTime]; defaults call the real faces.
+    invitationText: (RoomInvitationSnapshot) -> String = { roomInvitationText(it) },
+    invitationRoleToken: (RoomInvitationSnapshot) -> String = { roomRoleAttrToken(it.role) },
     onOpenThread: (String) -> Unit,
     onNewConversation: () -> Unit,
     onSort: () -> Unit,
@@ -182,6 +212,15 @@ fun ConversationsListContent(
                         .testTag(Ids.ERROR_MESSAGE),
                 )
             }
+            invitations.forEach { invitation ->
+                RoomInvitationRow(
+                    invitation = invitation,
+                    text = invitationText(invitation),
+                    roleToken = invitationRoleToken(invitation),
+                    onAccept = { onAcceptInvitation(invitation.id) },
+                    onDecline = { onDeclineInvitation(invitation.id) },
+                )
+            }
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -219,6 +258,45 @@ fun ConversationsListContent(
                 }
             }
         }
+    }
+}
+
+/**
+ * `room-invitation[i]` with its accept / decline pair. The sentence is the
+ * shared `roomInvitationText` and the `role` attribute the shared
+ * `roomRoleAttrToken` (rides `stateDescription`, the driver's attribute); the
+ * rows are verified against their signers in shared Rust. Accept gates on
+ * `fauna.conversations.room.accept_invite`; decline (`fauna.inbox.ack`) is
+ * offline-safe and carries no gate.
+ */
+@Composable
+private fun RoomInvitationRow(
+    invitation: RoomInvitationSnapshot,
+    text: String,
+    roleToken: String,
+    onAccept: () -> Unit,
+    onDecline: () -> Unit,
+) {
+    val acceptGate = faunaGate("fauna.conversations.room.accept_invite")
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+        Text(
+            text,
+            modifier = Modifier
+                .testTag(Ids.ROOM_INVITATION)
+                .semantics { stateDescription = roleToken },
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = onAccept,
+                enabled = acceptGate.enabled,
+                modifier = Modifier.testTag(Ids.ROOM_INVITATION_ACCEPT_BUTTON),
+            ) { Text(stringResource(R.string.common_accept)) }
+            OutlinedButton(
+                onClick = onDecline,
+                modifier = Modifier.testTag(Ids.ROOM_INVITATION_DECLINE_BUTTON),
+            ) { Text(stringResource(R.string.common_decline)) }
+        }
+        DisabledControlReasonText(acceptGate.reason)
     }
 }
 
@@ -290,10 +368,15 @@ private fun ThreadRow(thread: ThreadSummary, formatTime: (Long) -> String, onCli
                             },
                         ),
                 )
-                Text(
-                    formatTime(thread.lastActivityMs),
-                    style = MaterialTheme.typography.labelSmall,
-                )
+                // Tagged `conversation-item-timestamp`; absent while the thread
+                // has no activity time (`last_activity_ms` = 0, ui.yaml).
+                if (thread.lastActivityMs > 0) {
+                    Text(
+                        formatTime(thread.lastActivityMs),
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.testTag(Ids.CONVERSATION_ITEM_TIMESTAMP),
+                    )
+                }
             }
         },
         modifier = Modifier

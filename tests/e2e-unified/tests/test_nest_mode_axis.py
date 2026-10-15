@@ -55,7 +55,7 @@ def test_default_is_standalone_with_no_argument():
     ("docker:ghcr.io/faunasocial/nest:sha-abc123", nm.DOCKER,
      "ghcr.io/faunasocial/nest:sha-abc123"),
     ("live", nm.LIVE, None),
-    ("live:https://example.com", nm.LIVE, "https://example.com"),
+    ("live:https://example.net", nm.LIVE, "https://example.net"),
     # Surrounding whitespace is a `just`-recipe artifact, not user intent.
     ("  docker  ", nm.DOCKER, None),
 ])
@@ -778,11 +778,21 @@ _COMPOSED_AUTHORITY_IS_NOT_A_NEST = {
         "the mail bridge's own CalDAV listener (`handle.caldav_port`, the "
         "MDA's self-signed HTTPS endpoint the stock organizer client dials) — "
         "a bridge authority, never the nest's API listener",
+    "tests/test_caldav_nest_outcomes.py":
+        "the mail bridge's own CalDAV/WebDAV listener (`handle.caldav_port` / "
+        "`venue.caldav_port`, the MDA's self-signed HTTPS endpoint a stock "
+        "calendar or files client dials) — a bridge authority, never the "
+        "nest's API listener",
     "tests/test_carddav_nest_outcomes.py":
         "the mail bridge's own DAV listener (`handle.caldav_port` / "
         "`venue.caldav_port`, the MDA's self-signed HTTPS endpoint a stock "
         "contacts app dials) — a bridge authority, never the nest's API "
         "listener, which the module reaches only as `nest['url']`",
+    "tests/test_mail_abuse_refused.py":
+        "the mail bridge's `clamd_addr` / `rspamd_url` scanner addresses on "
+        "free loopback ports nothing listens on — the deployment shape of a "
+        "scanner that is down; a bridge-side scanner authority, never the "
+        "nest's API listener",
     "tests/api/test_backup_lease_handback.py":
         "a synthetic `destination_nest_url` on a `find_free_port()` port "
         "nothing serves — deliberately unreachable so the sweep fails to "
@@ -1955,7 +1965,7 @@ def test_a_live_capability_error_states_the_reason_and_the_marker():
     live's reasons must reach the message the same way."""
     mode = nm.parse_nest_mode("live")
     handle = nm.NestHandle(
-        {"url": "https://example.com"}, mode, absent=nm.absent_capabilities(mode),
+        {"url": "https://example.net"}, mode, absent=nm.absent_capabilities(mode),
     )
     with pytest.raises(nm.NestCapabilityError) as exc:
         handle["db_path"]
@@ -2017,6 +2027,8 @@ def test_the_global_admin_fixtures_live_only_exclusion_is_accounted_for():
         "dedicated_mail_nest",
         "dedicated_mail_nest_handle_domain",
         "registration_posture_nest",
+        "report_origin_nest",
+        "two_nest_custody_rig",
     }
     unaccounted = sorted(
         ns.GLOBAL_ADMIN_FIXTURES - structural - by_closure_only - by_shared_box_rule_only
@@ -2177,8 +2189,13 @@ def _kinds_test_user_sends(monkeypatch, mode: str, tiers: tuple) -> list:
     monkeypatch.setattr(auth, "_authed_call", wire)
     monkeypatch.setattr(auth, "_resolve_base", lambda port, url: (url, None))
     monkeypatch.setattr(auth, "_coerce_admin_signing_key", lambda sk: sk)
-    monkeypatch.setattr(conftest, "_make_user", lambda nest: {"actor_id_hex": "ab"})
-    monkeypatch.setattr(shared_identity, "remember_shared_actor", lambda _a: None)
+    monkeypatch.setattr(
+        conftest, "_make_user",
+        lambda nest: {"actor_id_hex": "ab", "signing_key": b"\x00" * 32},
+    )
+    monkeypatch.setattr(
+        shared_identity, "remember_shared_actor", lambda _a, **_kw: None
+    )
     nest = {"port": 1, "url": "http://127.0.0.1:1", "admin": {"signing_key": "sk"}}
     conftest.test_user.__wrapped__(nest)
     return sent
@@ -2495,7 +2512,7 @@ def test_the_reap_suspends_before_it_schedules_the_delete():
         return {"ok": True}
 
     residue = live_accounts.reap(
-        "https://example.com", None, call=fake_call, log=lambda m: None
+        "https://example.net", None, call=fake_call, log=lambda m: None
     )
     assert residue == []
     assert calls == ["fauna.admin.users.suspend", "fauna.admin.users.delete"]
@@ -2515,7 +2532,7 @@ def test_a_failed_reap_warns_loudly_and_never_raises():
         raise RuntimeError("nest said no")
 
     residue = live_accounts.reap(
-        "https://example.com", None, call=fake_call, log=lines.append
+        "https://example.net", None, call=fake_call, log=lines.append
     )
     assert len(residue) == 1
     assert "suspend failed" in residue[0]["problem"]
@@ -2565,7 +2582,7 @@ def test_the_reap_follows_a_noted_handle_to_the_successor_that_holds_it():
         return {}
 
     lines = []
-    residue = live_accounts.reap("https://example.com", None, call=fake_call, log=lines.append)
+    residue = live_accounts.reap("https://example.net", None, call=fake_call, log=lines.append)
     assert residue == []
     assert sorted(suspended) == sorted([retired, successor]), (
         "the successor holding the run's handle must be reaped, and nobody else"
@@ -2587,7 +2604,7 @@ def test_a_reap_that_cannot_list_users_warns_about_unfollowed_successors():
         return {}
 
     lines = []
-    live_accounts.reap("https://example.com", None, call=fake_call, log=lines.append)
+    live_accounts.reap("https://example.net", None, call=fake_call, log=lines.append)
     text = "\n".join(lines)
     assert "[live] reaped 1" in text
     assert "successor" in text and "e2e-dddd" in text, text
@@ -2609,7 +2626,7 @@ def test_the_reap_report_reaches_the_terminal_summary_not_the_fixture_capture():
             return {"users": [], "total": 0}
         return {}
 
-    live_accounts.reap("https://example.com", None, call=fake_call)
+    live_accounts.reap("https://example.net", None, call=fake_call)
     report = live_accounts.drain_report()
     assert any("[live] reaped 1" in line for line in report), report
     assert live_accounts.drain_report() == [], "draining empties the report"
@@ -3273,7 +3290,7 @@ def test_a_registered_non_loopback_nest_still_verifies():
     """The live-box guard, and the reason the rule is a conjunction.
 
     `_LiveProvider` also hands back `serve_tls: True`, so `mark_tls_nest` fires
-    for a real box at `https://example.com` holding a real ACME cert. Keying the
+    for a real box at `https://example.net` holding a real ACME cert. Keying the
     relaxation on the port ALONE would silently stop verifying it — turning the
     one mode where a cert failure is a genuine production incident into a green
     run. Host classification is asserted directly here: binding a non-loopback
@@ -3284,7 +3301,7 @@ def test_a_registered_non_loopback_nest_still_verifies():
     port = 59_233
     auth.mark_tls_nest(port)
     assert auth._is_floor_cert_authority(f"127.0.0.1:{port}")
-    assert not auth._is_floor_cert_authority(f"example.com:{port}")
+    assert not auth._is_floor_cert_authority(f"example.net:{port}")
 
 
 def test_an_explicit_context_still_wins_over_the_installed_opener():
@@ -3376,7 +3393,7 @@ def test_ws_sslopt_keeps_verifying_a_registered_non_loopback_nest():
     CONJUNCTION rather than keying on the scheme the way the WS-RPC clients'
     `_ssl_opt` does.
 
-    `_LiveProvider` declares `serve_tls`, so a real box at `https://example.com` on
+    `_LiveProvider` declares `serve_tls`, so a real box at `https://example.net` on
     a real ACME cert is `mark_tls_nest`-marked too. A scheme-only rule would
     silently stop verifying it — turning the one mode where a cert failure is a
     genuine production incident into a green run.
@@ -3386,7 +3403,7 @@ def test_ws_sslopt_keeps_verifying_a_registered_non_loopback_nest():
     port = 59_234
     auth.mark_tls_nest(port)
     assert auth.ws_sslopt(f"wss://127.0.0.1:{port}/api/v1/ws") == {"cert_reqs": ssl.CERT_NONE}
-    assert auth.ws_sslopt(f"wss://example.com:{port}/api/v1/ws") is None
+    assert auth.ws_sslopt(f"wss://example.net:{port}/api/v1/ws") is None
 
 
 @contextlib.contextmanager
@@ -3548,7 +3565,7 @@ def test_upstream_tls_context_keeps_verifying_a_registered_non_loopback_nest():
     port = 59_235
     auth.mark_tls_nest(port)
     assert auth.upstream_tls_context(f"https://127.0.0.1:{port}").verify_mode == ssl.CERT_NONE
-    assert auth.upstream_tls_context(f"https://example.com:{port}").verify_mode == ssl.CERT_REQUIRED
+    assert auth.upstream_tls_context(f"https://example.net:{port}").verify_mode == ssl.CERT_REQUIRED
     assert auth.upstream_tls_context(f"http://127.0.0.1:{port}") is None
 
 
@@ -4582,10 +4599,18 @@ def test_every_rule_id_is_declared_in_the_registry():
 #: 2026-09-02 on the strength of `common.nest.OWN_DIAL_AUTHORITY`, and the only
 #: sites that may pass that sentinel.
 _OWN_AUTHORITY_FIXTURES = (
+    "_start_handled_tls_nest",
     "caldav_cross_nest_peer",
-    "cross_nest_foreign",
     "cross_nest_foreign_ephemeral",
     "smoke_handled_nest",
+)
+
+#: The fixtures that reach the sentinel through `_start_handled_tls_nest` (the
+#: shared start helper above), so the AST walk sees the helper and not them.
+#: Each is a fixture in its own right and must declare `handle_domain_seed`.
+_OWN_AUTHORITY_VIA_HELPER_FIXTURES = (
+    "cross_nest_foreign",
+    "report_origin_nest",
 )
 
 #: Every fixture whose start options include `handle_domain_seed` — class (4)'s
@@ -4677,7 +4702,8 @@ def test_the_own_authority_sentinel_is_only_passed_by_fixtures_that_declare_it()
     )
 
     from helpers import nest_surface as ns
-    for name in _OWN_AUTHORITY_FIXTURES:
+    for name in (set(_OWN_AUTHORITY_FIXTURES) - {"_start_handled_tls_nest"}
+                 | set(_OWN_AUTHORITY_VIA_HELPER_FIXTURES)):
         assert "handle_domain_seed" in ns.FIXTURE_START_OPTIONS.get(name, frozenset()), (
             f"{name} passes the sentinel but does not declare handle_domain_seed"
         )
@@ -6324,6 +6350,11 @@ _PEER_FIELDS_REVIEWED_AS_CLIENT_DIALS = {
     # client dialling the nest it belongs to, none is a relay.
     "mail_bridge_mta",         # the MTA bridge dials ITS OWN nest
     "provision_caldav_on_running_nest",   # the nest this helper just started
+    # Registering a shared actor's own session (`remember_shared_actor(...,
+    # nest_url=…)`) so a discarded driver can retire its machine nest-side: the
+    # nest the actor lives on, not a peer a nest is asked to dial.
+    "test_user",
+    "test_discarded_machines_leave_no_live_grant_on_a_shared_account",
     "test_activitypub_federation_live_three_party",  # `_ui_claim`: the app's own nest
     "test_private_relay_behind_hetzner_public_node",  # ditto, private axis
     "test_provision_drives_nest_url_without_device_toml",  # sync-agent → its nest
@@ -6700,6 +6731,15 @@ _PROVIDER_ROUTED_MODULE_LOCAL_NESTS = (
     "tests/api/test_bluesky_oauth.py::domained_bluesky_nest",
     "tests/api/test_bluesky_oauth.py::domainless_bluesky_nest",
     "tests/test_bridges.py::bridges_nest",
+    # The Nostr page's nest witnesses (2026-10-09): the half observed at the
+    # nest's own doors — its relay, its NIP-05 document, its link door — needs
+    # nothing the image lacks, so it routes (`claim_domain`, which docker
+    # declares) and a container run witnesses the shipped nest. The signer nest
+    # is only ever dialed, so it routes with no option at all. Their file's
+    # other half, the relays the nest DIALS, is PREMISE in
+    # `_NEST_BINARY_DISPOSITIONS`.
+    "tests/api/test_nostr_nest.py::nostr_home_nest",
+    "tests/api/test_nostr_nest.py::nostr_signer_nest",
 )
 
 
@@ -7467,6 +7507,80 @@ _NEST_BINARY_DISPOSITIONS = {
         "plaintext marker. A container's data dir is not the host's, so the "
         "routed form would read no disk at all and pass vacuously.",
 
+    # The Nostr page's nest witnesses that watch a relay the nest dials
+    # (2026-10-09). The file's other half routes
+    # (`_PROVIDER_ROUTED_MODULE_LOCAL_NESTS`).
+    "tests/api/test_nostr_nest.py::test_automatic_publishing_sends_your_new_posts_to_your_relays":
+        "PREMISE: the witness is a relay the NEST dials — a harness "
+        "`FakeRelay` on 127.0.0.1 — and a production nest refuses a loopback "
+        "relay both when it is stored and when it is dialed "
+        "(`network-exposure.md` § Rulings F7). Only a `test-hooks` build with "
+        "`FAUNA_TEST_NOSTR_ALLOW_LOOPBACK` set admits one "
+        "(`relays.rs::relay_dial_policy`); the image compiles no "
+        "`test-hooks`, so the routed form would refuse the relay list and "
+        "assert nothing. The loopback topology, not the compilation of "
+        "`nostr`, is what makes the binary load-bearing — the `paired` pair's "
+        "reason, one protocol over.",
+    "tests/api/test_nostr_nest.py::test_a_room_post_is_never_published_to_nostr":
+        "PREMISE: `nostr_dialing_nest`, for the reason its file-mate "
+        "`test_automatic_publishing_sends_your_new_posts_to_your_relays` "
+        "records — the nest dials the user's publish relay with the control "
+        "post whose arrival settles the outbound channel.",
+    "tests/api/test_nostr_nest.py::test_your_reply_threads_under_a_nostr_post_and_your_quote_links_it":
+        "PREMISE: `nostr_dialing_nest`, for the reason its file-mate "
+        "`test_automatic_publishing_sends_your_new_posts_to_your_relays` "
+        "records — the nest dials the followed author's relay for the note, "
+        "and the user's publish relay with the reply.",
+    "tests/api/test_nostr_nest.py::test_with_publishing_replies_off_your_replies_stay_off_your_relays":
+        "PREMISE: `nostr_dialing_nest`, for the reason its file-mate "
+        "`test_automatic_publishing_sends_your_new_posts_to_your_relays` "
+        "records — the nest dials the user's publish relay.",
+    "tests/api/test_nostr_nest.py::test_deleting_a_published_post_takes_it_back_on_nostr":
+        "PREMISE: `nostr_dialing_nest`, for the reason its file-mate "
+        "`test_automatic_publishing_sends_your_new_posts_to_your_relays` "
+        "records — the nest dials the user's publish relay with the deletion.",
+    "tests/api/test_nostr_nest.py::test_an_empty_relay_list_publishes_nowhere":
+        "PREMISE: `nostr_dialing_nest`, for the reason its file-mate "
+        "`test_automatic_publishing_sends_your_new_posts_to_your_relays` "
+        "records — the nest dials the user's publish relay with the control "
+        "post.",
+    "tests/api/test_nostr_nest.py::test_a_remote_signer_key_links_only_once_its_bunker_proves_it":
+        "PREMISE: `nostr_dialing_nest`, for the reason its file-mate "
+        "`test_automatic_publishing_sends_your_new_posts_to_your_relays` "
+        "records — the nest dials the signer nest's relay, on loopback, for "
+        "the NIP-46 handshake.",
+    "tests/api/test_nostr_nest.py::test_unlinking_disconnects_every_signer_app":
+        "PREMISE: `nostr_dialing_nest`, for the reason its file-mate "
+        "`test_automatic_publishing_sends_your_new_posts_to_your_relays` "
+        "records — the nest dials the signer nest's relay, on loopback, for "
+        "the NIP-46 handshake.",
+
+    # Outcome 15 of upgrades-never-lose-data (2026-10-10): the app too old for
+    # its nest.
+    "tests/test_version_mismatch_launch.py::"
+    "test_an_app_too_old_for_its_nest_says_to_update_and_offers_no_retry":
+        "PREMISE: the witness needs a nest whose WebSocket upgrade requires a "
+        "subprotocol this build's apps do not speak. Only a `test-hooks` build "
+        "with `FAUNA_TEST_REQUIRED_SUBPROTOCOL` set requires anything but "
+        "`fauna.v1` (`routes.rs::required_client_subprotocol`); the image "
+        "compiles no `test-hooks`, so the routed form would accept the app and "
+        "assert nothing.",
+    "tests/test_version_mismatch_launch.py::"
+    "test_an_app_too_old_for_its_nest_says_to_update_and_offers_no_retry_web":
+        "PREMISE: the web arm of the same witness — it rides the same "
+        "`too_new_nest` fixture, so the nest must be a `test-hooks` build with "
+        "`FAUNA_TEST_REQUIRED_SUBPROTOCOL` set (`routes.rs::"
+        "required_client_subprotocol`); the image compiles no `test-hooks`, so "
+        "the routed form would accept the browser and assert nothing.",
+    "tests/test_version_mismatch_launch.py::"
+    "test_a_signed_in_app_whose_nest_is_upgraded_past_it_shows_the_update_surface":
+        "PREMISE: the mid-session half of the same witness — the signed-in "
+        "app's nest is re-spawned in place with "
+        "`FAUNA_TEST_REQUIRED_SUBPROTOCOL` set, which only a `test-hooks` build "
+        "reads (`routes.rs::required_client_subprotocol`); the image compiles "
+        "no `test-hooks`, so the routed form would keep accepting the app and "
+        "assert nothing.",
+
     # The forward-queue pair — the same topology as the `paired` pair above,
     # driven through an app instead of the wire.
     "tests/test_forward_queue.py::"
@@ -7588,6 +7702,15 @@ _NEST_BINARY_DISPOSITIONS = {
         "reliable way to read it rather than a brittle message scrape.",
 
 
+    # The impostor half of the login's-pin journey on a publicly trusted nest.
+    "tests/test_nest_identity_pin_webpki.py::"
+    "test_a_login_on_a_publicly_trusted_nest_pins_it_and_an_impostor_warns":
+        "OPEN: nest A comes from `webpki_lan_nest` through the provider; the "
+        "binary is requested only to start the impostor — a fresh data dir on "
+        "A's PORT and address after A stops — and no provider start option "
+        "takes a port. Routable once one does (docker would publish the same "
+        "host port for the second container).",
+
     # PREMISE, and ratified in the file's own docstring rather than inferred.
     "tests/test_version_skew_real_binary.py::"
     "test_previous_client_journey_against_head_nest":
@@ -7606,6 +7729,24 @@ _NEST_BINARY_DISPOSITIONS = {
         "different builds — the control that keeps its file-mate from passing "
         "vacuously. There is no form of that assertion that does not hold two "
         "binaries.",
+    "tests/test_version_skew_real_binary.py::"
+    "test_one_head_app_keeps_working_across_accounts_on_both_nests":
+        "PREMISE: the same subject as its file-mates — one HEAD app dialling a "
+        "locally-compiled PINNED nest and a HEAD nest at once. Two nests at "
+        "different commits is what the cell witnesses, and the image carries "
+        "only one build.",
+
+    # The upgrade witness: the pinned build's data dir reopened by HEAD.
+    "tests/test_nest_data_upgrade.py::"
+    "test_the_upgrade_crossed_two_genuinely_different_builds":
+        "PREMISE: the control that keeps the upgrade witness from greening "
+        "vacuously — it asserts the two nests report different builds, which "
+        "needs both locally-compiled binaries.",
+    "tests/test_nest_data_upgrade.py::"
+    "test_everything_the_previous_build_held_reads_back_after_the_upgrade":
+        "PREMISE: the data dir is written by the pinned previous build and "
+        "reopened by HEAD's binary on the same path; the subject is that "
+        "binary-to-binary hand-over, which no routed nest can express.",
 
     # ---- the machine-specific half — triaged 2026-09-02 -------------------
     # `tests/platform/windows/` (17) and `tests/platform/macos/` (2): the last
@@ -8025,6 +8166,70 @@ def test_every_triaged_nest_binary_consumer_carries_a_disposition():
     assert not unexplained, (
         f"a survivor with no disposition: {unexplained} — say PREMISE (the "
         "binary is the subject) or OPEN (routable, not yet routed)"
+    )
+
+
+def _graded_fact(rule: str) -> bool:
+    return rule in _fact_rules()
+
+
+def test_the_nest_binary_grade_follows_its_dispositions():
+    """The audit grades `nest_binary` MIXED exactly while the split is unfinished.
+
+    MIXED says "somebody can close this", which is honest only while a consumer
+    is OPEN or a file still awaits triage; once every consumer is a PREMISE the
+    class is a fact about what those tests witness. So the grade is DERIVED from
+    the pin above rather than restated beside it: the commit that routes the
+    last OPEN consumer must re-grade the class to FACT, and a new consumer that
+    lands OPEN (the pin forces it to say which) must grade it back. Measured on
+    2026-10-13, when one did, a week after the routing arm had read as finished.
+    """
+    from helpers import nest_surface as ns
+
+    open_ = sorted(
+        q for q, why in _NEST_BINARY_DISPOSITIONS.items() if why.startswith("OPEN")
+    )
+    unfinished = bool(open_) or bool(_NEST_BINARY_FILES_AWAITING_TRIAGE)
+    assert _graded_fact(ns.RULE_NEST_BINARY) is not unfinished, (
+        f"`nest_binary` is graded "
+        f"{'FACT' if _graded_fact(ns.RULE_NEST_BINARY) else 'MIXED'} while its "
+        f"OPEN consumers are {open_} and its untriaged files "
+        f"{sorted(_NEST_BINARY_FILES_AWAITING_TRIAGE)}: re-grade it in "
+        "features_mode_audit.RULE_VERDICTS and nest_surface.FACT_RULES together"
+    )
+
+
+def test_every_local_nest_fixture_carries_a_disposition():
+    """Each `LOCAL_NEST_FIXTURES` resident says why it is still here — PREMISE
+    (routing frees no cell) or OPEN (routable, the missing piece named) — in
+    the idiom of `_NEST_BINARY_DISPOSITIONS`, so the list reads as a partition
+    rather than a backlog nobody has sized."""
+    from helpers import nest_surface as ns
+
+    unexplained = sorted(
+        name for name, why in ns.LOCAL_NEST_FIXTURE_DISPOSITIONS.items()
+        if not why.startswith(("PREMISE: ", "OPEN: "))
+    )
+    assert not unexplained, (
+        f"a local-nest fixture with no disposition: {unexplained} — say PREMISE "
+        "(routing would free no cell) or OPEN (routable onto `_start_mail_venue`)"
+    )
+
+
+def test_the_local_nest_fixture_grade_follows_its_dispositions():
+    """`local_nest_fixture` is MIXED exactly while a resident is OPEN — the
+    twin of `test_the_nest_binary_grade_follows_its_dispositions`, one layer up."""
+    from helpers import nest_surface as ns
+
+    open_ = sorted(
+        name for name, why in ns.LOCAL_NEST_FIXTURE_DISPOSITIONS.items()
+        if why.startswith("OPEN")
+    )
+    assert _graded_fact(ns.RULE_LOCAL_NEST_FIXTURE) is not bool(open_), (
+        f"`local_nest_fixture` is graded "
+        f"{'FACT' if _graded_fact(ns.RULE_LOCAL_NEST_FIXTURE) else 'MIXED'} while "
+        f"its OPEN residents are {open_}: re-grade it in "
+        "features_mode_audit.RULE_VERDICTS and nest_surface.FACT_RULES together"
     )
 
 
@@ -9159,8 +9364,8 @@ def test_a_run_declares_a_shared_box_unless_it_says_otherwise():
 @pytest.mark.parametrize("url", [
     "https://dev.example.com",
     "https://dev.example.com/",
-    "https://test.example.com",
-    "https://test.example.com:8443",
+    "https://test.fauna.build",
+    "https://test.fauna.build:8443",
     "  https://dev.example.com  ",
 ])
 def test_the_declaration_is_accepted_for_a_named_staging_box(url):
@@ -9172,12 +9377,13 @@ def test_the_declaration_is_accepted_for_a_named_staging_box(url):
 
 def test_the_declaration_is_refused_for_the_production_box():
     """The whole reason the declaration is gated on a list: a `cd_suite` run
-    pointed at example.com must still deselect its factory-resetting residents."""
+    pointed at the acceptance nest, where humans are signed in, must still
+    deselect its factory-resetting residents."""
     with pytest.raises(nm.NestModeError) as info:
-        nm.declare_box(_live("https://example.com"), nm.BOX_DISPOSABLE)
+        nm.declare_box(_live("https://fauna.build"), nm.BOX_DISPOSABLE)
     message = str(info.value)
-    assert "example.com" in message
-    assert "dev.example.com" in message and "test.example.com" in message
+    assert "declare https://fauna.build disposable" in message
+    assert "dev.fauna.build" in message and "test.fauna.build" in message
     assert "shared-box rule" in message
 
 
@@ -9190,17 +9396,19 @@ def test_the_declaration_resolves_the_url_exactly_as_the_provider_does(monkeypat
     """`--nest live` with no URL falls back to `FAUNA_LIVE_NEST_URL`, then the
     project's live box — the provider's precedence — so the refusal reads the
     box the run would actually hit, never a flag-only view of it."""
-    monkeypatch.setenv("FAUNA_LIVE_NEST_URL", "https://test.example.com")
-    assert nm.live_url(nm.parse_nest_mode("live")) == "https://test.example.com"
+    monkeypatch.setenv("FAUNA_LIVE_NEST_URL", "https://test.fauna.build")
+    assert nm.live_url(nm.parse_nest_mode("live")) == "https://test.fauna.build"
     assert nm.declare_box(nm.parse_nest_mode("live"), nm.BOX_DISPOSABLE).disposable_box is True
 
     monkeypatch.delenv("FAUNA_LIVE_NEST_URL", raising=False)
-    assert nm.live_url(nm.parse_nest_mode("live")) == "https://example.com"
-    with pytest.raises(nm.NestModeError, match="example.com"):
-        nm.declare_box(nm.parse_nest_mode("live"), nm.BOX_DISPOSABLE)
+    # The project's own live box is the dev nest, a staging box the gate can declare.
+    assert nm.live_url(nm.parse_nest_mode("live")) == "https://dev.fauna.build"
+    assert nm.declare_box(nm.parse_nest_mode("live"), nm.BOX_DISPOSABLE).disposable_box is True
 
     # The flag's URL beats the env, as for every other harness input.
-    monkeypatch.setenv("FAUNA_LIVE_NEST_URL", "https://example.com")
+    monkeypatch.setenv("FAUNA_LIVE_NEST_URL", "https://fauna.build")
+    with pytest.raises(nm.NestModeError, match="https://fauna.build disposable"):
+        nm.declare_box(nm.parse_nest_mode("live"), nm.BOX_DISPOSABLE)
     assert nm.live_url(_live("https://dev.example.com/")) == "https://dev.example.com"
     assert nm.declare_box(_live(), nm.BOX_DISPOSABLE).disposable_box is True
 
@@ -9292,14 +9500,21 @@ def test_the_staging_boxes_are_the_ones_the_pipeline_verifies_against():
     workflows = pathlib.Path(__file__).resolve().parents[3] / ".github" / "workflows"
     verify_hosts = set()
     for path in sorted(workflows.glob("*.yml")):
-        for match in re.finditer(r"^\s*VERIFY_HOST:\s*(\S+)", path.read_text(), re.M):
-            verify_hosts.add(match.group(1).strip("'\""))
+        for match in re.finditer(r"^\s*VERIFY_HOST:\s*(.+)$", path.read_text(), re.M):
+            value = match.group(1).strip()
+            if "${{" in value:
+                # One file serves both repositories, so the host is a repository
+                # expression (`a && 'x' || 'y'`): every quoted host it can yield.
+                verify_hosts.update(re.findall(r"'([a-z0-9-]+(?:\.[a-z0-9-]+)+)'", value))
+            else:
+                verify_hosts.add(value.strip("'\""))
     assert verify_hosts, "no workflow declares a VERIFY_HOST — the pin lost its source"
     assert verify_hosts <= nm.DISPOSABLE_BOX_HOSTS, (
         f"a workflow verifies against {sorted(verify_hosts - nm.DISPOSABLE_BOX_HOSTS)}, "
         "which the CD gate could not declare disposable"
     )
-    assert "example.com" not in nm.DISPOSABLE_BOX_HOSTS
+    # The acceptance nest serves humans and is never a test target.
+    assert "fauna.build" not in nm.DISPOSABLE_BOX_HOSTS
 
 
 # ── The live-mode harness gaps (2026-10-05) ──────────────────────────────────

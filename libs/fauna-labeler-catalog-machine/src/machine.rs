@@ -36,6 +36,18 @@ const INSPECT_ERROR_KEY: &str = "labeler_catalog.error_inspect";
 const SUBSCRIBE_ERROR_KEY: &str = "labeler_catalog.error_subscribe";
 /// i18n key for an `unsubscribe` failure.
 const UNSUBSCRIBE_ERROR_KEY: &str = "labeler_catalog.error_unsubscribe";
+/// i18n key for a `subscribe` refused because the labeler's re-inspect read
+/// unverified — the inspect-before-subscribe gate
+/// (`content-moderation-and-ranking.md` § Tier-3: "`verified` reads false and
+/// subscribe stays disabled"). One of
+/// [`LabelerInspectView::subscribe_refusal_key`]'s answers.
+pub const SUBSCRIBE_UNVERIFIED_KEY: &str = "labeler_catalog.error_subscribe_unverified";
+/// i18n key for a labeler whose module declares a `label_abi` newer than this
+/// build reads ([`LabelerInspectView::newer_than_this_app`]): the inspect
+/// panel's inert notice AND the refusal a subscribe names — one sentence, so
+/// the panel and the refusal cannot disagree (`content-moderation-and-ranking.md`
+/// § Tier-3 → *The output half of the `label()` ABI*, position (ii)).
+pub const NEEDS_NEWER_APP_KEY: &str = "labeler_catalog.inspect_needs_newer_app";
 /// i18n key for the honest degrade after subscribing a `wasm` mail labeler
 /// with no `mda` holder enrolled on the nest to seal its grant to: the row is
 /// registered, and the labeler will not run until a holder exists.
@@ -245,6 +257,13 @@ impl LabelerCatalogMachine {
         }
     }
 
+    /// Whether the catalog row at `index` paints its subscribe button enabled
+    /// ([`LabelerCatalogSnapshot::subscribe_enabled`] over the current state) —
+    /// the method every app's subscribe-enable reads.
+    pub fn subscribe_enabled(&self, index: u32) -> bool {
+        self.snapshot().subscribe_enabled(index)
+    }
+
     // ── Gestures ────────────────────────────────────────────────────────
 
     /// Re-read the full catalog (`fauna.labelers.list`). On a read failure the
@@ -298,6 +317,11 @@ impl LabelerCatalogMachine {
 
     /// Subscribe to the catalog row at `index`, then refresh.
     ///
+    /// **Inspect before subscribe, always:** the labeler is re-inspected first
+    /// and a view that is not [`LabelerInspectView::subscribable`] — a
+    /// signature that does not check out — stops the gesture before anything
+    /// is minted or sent (`Self::verify_before_subscribe`).
+    ///
     /// **Subscribing a `wasm` labeler over sealed content IS minting it a
     /// capability** (`content-moderation-and-ranking.md` § Tier-3 →
     /// *Subscribing = minting a capability*): the per-labeler bounded mail
@@ -337,6 +361,10 @@ impl LabelerCatalogMachine {
             return;
         };
         let labeler_id = hex_decode(&entry.labeler_id);
+        if !self.verify_before_subscribe(&labeler_id).await {
+            self.observer.on_changed();
+            return;
+        }
         let minted = if needs_per_labeler_grant(&entry) {
             match self.mint_labeler_grant(&labeler_id).await {
                 Ok(outcome) => outcome,
@@ -422,6 +450,42 @@ impl LabelerCatalogMachine {
         let err = LocalizedText::key_arg(key, "message", detail.to_string());
         tracing::warn!(target: "fauna_labeler_catalog", "{}", err.log_line());
         self.state.lock().unwrap().error = Some(err);
+    }
+
+    /// The inspect-before-subscribe gate, run by every subscribe: re-inspect
+    /// the labeler (`fauna.labelers.inspect`, whose seam re-verifies the
+    /// signed hash/size/signature binding client-side) and let the gesture
+    /// proceed only when [`LabelerInspectView::subscribable`] holds. Re-read at
+    /// the gesture rather than trusted from an open panel or the catalog row,
+    /// because the subscribe button paints on every catalog row whether or not
+    /// the user inspected it, and the artifact the nest serves can change in
+    /// between.
+    ///
+    /// On refusal the page error names why and the panel opens on the failing
+    /// view, so the user sees the unverified labeler rather than a bare
+    /// refusal; an inspect that fails fails the subscribe closed (what cannot
+    /// be inspected cannot be verified). Returns whether to proceed.
+    async fn verify_before_subscribe(&self, labeler_id: &[u8]) -> bool {
+        match self.nest_api.inspect(labeler_id.to_vec()).await {
+            Ok(result) if result.view.subscribable() => true,
+            Ok(result) => {
+                let refusal = LocalizedText::key(
+                    result
+                        .view
+                        .subscribe_refusal_key()
+                        .unwrap_or(SUBSCRIBE_UNVERIFIED_KEY),
+                );
+                tracing::warn!(target: "fauna_labeler_catalog", "{}", refusal.log_line());
+                let mut s = self.state.lock().unwrap();
+                s.inspecting = Some(result.view);
+                s.error = Some(refusal);
+                false
+            }
+            Err(e) => {
+                self.set_error(SUBSCRIBE_ERROR_KEY, e.detail());
+                false
+            }
+        }
     }
 
     /// Set an honest-degrade notice on the page's one text slot (a subscribe
@@ -659,6 +723,21 @@ mod tests {
         (m, api, store, kp)
     }
 
+    /// The calls a subscribe made PAST its inspect-before-subscribe gate:
+    /// asserts the gate's re-inspect led, and returns the rest.
+    fn calls_past_gate(api: &FakeLabelerCatalogNestApi) -> Vec<crate::nest_api::FakeCall> {
+        let mut calls = api.calls();
+        assert!(
+            matches!(
+                calls.first(),
+                Some(crate::nest_api::FakeCall::Inspect { .. })
+            ),
+            "a subscribe must re-inspect first: {calls:?}"
+        );
+        calls.remove(0);
+        calls
+    }
+
     /// The i18n key the snapshot's one text slot carries, if any.
     fn snapshot_key(m: &LabelerCatalogMachine) -> Option<String> {
         m.snapshot().error.map(|t| t.key)
@@ -679,7 +758,7 @@ mod tests {
 
         m.subscribe(0).await;
 
-        let calls = api.calls();
+        let calls = calls_past_gate(&api);
         assert_eq!(calls.len(), 3, "holders, deposit, subscribe: {calls:?}");
         assert_eq!(calls[0], crate::nest_api::FakeCall::ContentProcessorHolders);
         let crate::nest_api::FakeCall::MintGrant { grant_blob } = &calls[1] else {
@@ -747,7 +826,7 @@ mod tests {
         m.subscribe(0).await;
 
         assert_eq!(
-            api.calls(),
+            calls_past_gate(&api),
             vec![crate::nest_api::FakeCall::Subscribe {
                 labeler_id: vec![0xAA; 32],
                 grant_id: None,
@@ -768,7 +847,7 @@ mod tests {
         m.subscribe(0).await;
 
         assert_eq!(
-            api.calls(),
+            calls_past_gate(&api),
             vec![
                 crate::nest_api::FakeCall::ContentProcessorHolders,
                 crate::nest_api::FakeCall::Subscribe {
@@ -829,7 +908,7 @@ mod tests {
         m.subscribe(0).await;
 
         assert_eq!(
-            api.calls(),
+            calls_past_gate(&api),
             vec![crate::nest_api::FakeCall::ContentProcessorHolders],
             "no deposit and no subscribe past a failed record"
         );
@@ -854,7 +933,7 @@ mod tests {
         m.subscribe(0).await;
 
         assert_eq!(
-            api.calls(),
+            calls_past_gate(&api),
             vec![crate::nest_api::FakeCall::ContentProcessorHolders],
             "no deposit and no subscribe past an unpublished record"
         );
@@ -880,7 +959,7 @@ mod tests {
 
         m.subscribe(0).await;
 
-        let calls = api.calls();
+        let calls = calls_past_gate(&api);
         assert_eq!(calls.len(), 2, "holders + the refused deposit: {calls:?}");
         assert!(matches!(
             calls[1],
@@ -904,7 +983,7 @@ mod tests {
 
         m.subscribe(0).await;
 
-        let calls = api.calls();
+        let calls = calls_past_gate(&api);
         assert_eq!(calls.len(), 4, "{calls:?}");
         let crate::nest_api::FakeCall::Subscribe {
             grant_id: Some(grant_id),
@@ -1172,6 +1251,8 @@ mod tests {
                     needs_media_metadata: false,
                     needs_author: false,
                     needs_attachment_bytes: false,
+                    label_abi: 1,
+                    newer_than_this_app: false,
                     verified: true,
                     list_name: None,
                     model_name: None,
@@ -1224,6 +1305,8 @@ mod tests {
                     needs_media_metadata: false,
                     needs_author: false,
                     needs_attachment_bytes: false,
+                    label_abi: 1,
+                    newer_than_this_app: false,
                     verified: true,
                     list_name: None,
                     model_name: None,
@@ -1255,7 +1338,7 @@ mod tests {
         m.subscribe(0).await;
 
         assert_eq!(
-            api.calls(),
+            calls_past_gate(&api),
             vec![crate::nest_api::FakeCall::Subscribe {
                 labeler_id: hex_decode(&e.labeler_id),
                 grant_id: None,
@@ -1309,6 +1392,222 @@ mod tests {
         m.subscribe(5).await;
         assert!(api.calls().is_empty());
         assert_eq!(observer.count(), 0);
+    }
+
+    /// The inspect view the fake answers for `e`, `verified` as given.
+    fn view_of(e: &LabelerCatalogEntry, verified: bool) -> LabelerInspectView {
+        LabelerInspectView {
+            labeler_id: e.labeler_id.clone(),
+            version: e.version,
+            artifact_kind: e.artifact_kind.clone(),
+            wasm_hash: e.wasm_hash.clone(),
+            wasm_size: e.wasm_size,
+            needs_text: true,
+            needs_hashtags: false,
+            needs_media_metadata: false,
+            needs_author: false,
+            needs_attachment_bytes: false,
+            label_abi: 1,
+            newer_than_this_app: false,
+            verified,
+            list_name: None,
+            model_name: None,
+            list_entries: Vec::new(),
+            model_ngrams: Vec::new(),
+        }
+    }
+
+    /// A labeler whose signature does not check out is never subscribed
+    /// (`content-moderation-and-ranking.md` § Tier-3: "`verified` reads false
+    /// and subscribe stays disabled"): subscribe re-inspects first, and an
+    /// unverified view stops the gesture before the nest hears of it — the
+    /// panel opens on the failing view, so the user sees why.
+    #[tokio::test]
+    async fn subscribe_refuses_a_labeler_whose_signature_does_not_check_out() {
+        let (m, api, _observer) = machine();
+        let e = entry(0xAA, false);
+        api.set_entries(vec![e.clone()]);
+        m.refresh().await;
+        api.set_inspect_response(
+            hex_decode(&e.labeler_id),
+            Ok(InspectResult {
+                view: view_of(&e, false),
+            }),
+        );
+
+        m.subscribe(0).await;
+
+        assert_eq!(
+            api.calls(),
+            vec![crate::nest_api::FakeCall::Inspect {
+                labeler_id: hex_decode(&e.labeler_id)
+            }],
+            "an unverified labeler must never reach fauna.labelers.subscribe"
+        );
+        let snap = m.snapshot();
+        assert_eq!(
+            snap.error.map(|t| t.key).as_deref(),
+            Some(SUBSCRIBE_UNVERIFIED_KEY)
+        );
+        let view = snap
+            .inspecting
+            .expect("the refusal opens the panel on the failing view");
+        assert!(!view.verified);
+        assert!(!snap.entries[0].subscribed);
+    }
+
+    /// A verified labeler whose module emits a `label_abi` this build cannot
+    /// read is never subscribed either (`content-moderation-and-ranking.md`
+    /// § Tier-3 → *The output half of the `label()` ABI*, position (ii)): the
+    /// refusal names THAT reason — not the tampering one — and the row's
+    /// subscribe reads disabled.
+    #[tokio::test]
+    async fn subscribe_refuses_a_labeler_newer_than_this_app_and_says_why() {
+        let (m, api, _observer) = machine();
+        let e = entry(0xAA, false);
+        api.set_entries(vec![e.clone()]);
+        m.refresh().await;
+        let mut view = view_of(&e, true);
+        view.label_abi = fauna_core::scoring::LABEL_ABI_CURRENT + 1;
+        view.newer_than_this_app = true;
+        api.set_inspect_response(hex_decode(&e.labeler_id), Ok(InspectResult { view }));
+
+        m.subscribe(0).await;
+
+        assert_eq!(
+            api.calls(),
+            vec![crate::nest_api::FakeCall::Inspect {
+                labeler_id: hex_decode(&e.labeler_id)
+            }],
+            "a labeler newer than this app must never reach fauna.labelers.subscribe"
+        );
+        let snap = m.snapshot();
+        assert_eq!(
+            snap.error.map(|t| t.key).as_deref(),
+            Some(NEEDS_NEWER_APP_KEY)
+        );
+        assert!(snap.inspecting.expect("panel opens").newer_than_this_app);
+        assert!(!m.subscribe_enabled(0));
+        assert!(!snap.entries[0].subscribed);
+    }
+
+    /// The subscribe-enable read every app paints from: an open inspect view
+    /// that fails `subscribable` disables THAT row's subscribe and only that
+    /// row's; a verified view (or no open view) leaves every row enabled, and
+    /// a row that does not exist offers nothing.
+    #[tokio::test]
+    async fn subscribe_enabled_follows_the_inspected_rows_subscribable() {
+        let (m, api, _observer) = machine();
+        let (a, b) = (entry(0xAA, false), entry(0xBB, false));
+        api.set_entries(vec![a.clone(), b.clone()]);
+        m.refresh().await;
+        assert!(m.subscribe_enabled(0) && m.subscribe_enabled(1));
+        assert!(!m.subscribe_enabled(2), "no row, no subscribe");
+
+        for (verified, want) in [(false, (false, true)), (true, (true, true))] {
+            api.set_inspect_response(
+                hex_decode(&a.labeler_id),
+                Ok(InspectResult {
+                    view: view_of(&a, verified),
+                }),
+            );
+            m.inspect(0).await;
+            assert_eq!(
+                (m.subscribe_enabled(0), m.subscribe_enabled(1)),
+                want,
+                "verified={verified}"
+            );
+        }
+    }
+
+    /// A sealed-kind labeler that does not verify is refused before any grant
+    /// is minted — a capability must never be handed to a module whose
+    /// signature fails.
+    #[tokio::test]
+    async fn an_unverified_mail_labeler_mints_no_grant() {
+        let (m, api, store, _kp) = granting_machine();
+        let e = mail_entry(0xAA, false);
+        api.set_entries(vec![e.clone()]);
+        api.set_holders(vec![mda_holder()]);
+        m.refresh().await;
+        api.set_inspect_response(
+            hex_decode(&e.labeler_id),
+            Ok(InspectResult {
+                view: view_of(&e, false),
+            }),
+        );
+
+        m.subscribe(0).await;
+
+        assert_eq!(
+            api.calls(),
+            vec![crate::nest_api::FakeCall::Inspect {
+                labeler_id: hex_decode(&e.labeler_id)
+            }],
+            "no holder read, no deposit, no subscribe"
+        );
+        assert_eq!(store.merges(), 0, "nothing recorded in the grant log");
+        assert_eq!(snapshot_key(&m).as_deref(), Some(SUBSCRIBE_UNVERIFIED_KEY));
+    }
+
+    /// What cannot be inspected cannot be verified: an inspect that fails at
+    /// subscribe fails the subscribe closed.
+    #[tokio::test]
+    async fn subscribe_fails_closed_when_the_labeler_cannot_be_inspected() {
+        let (m, api, _observer) = machine();
+        let e = entry(0xAA, false);
+        api.set_entries(vec![e.clone()]);
+        m.refresh().await;
+        api.set_inspect_response(
+            hex_decode(&e.labeler_id),
+            Err(LabelerCatalogApiError::Transient {
+                detail: "gone".into(),
+            }),
+        );
+
+        m.subscribe(0).await;
+
+        assert!(
+            !api.calls()
+                .iter()
+                .any(|c| matches!(c, crate::nest_api::FakeCall::Subscribe { .. })),
+            "{:?}",
+            api.calls()
+        );
+        assert_eq!(snapshot_key(&m).as_deref(), Some(SUBSCRIBE_ERROR_KEY));
+    }
+
+    /// A verified labeler subscribes as before, the re-inspect leading.
+    #[tokio::test]
+    async fn a_verified_labeler_is_inspected_then_subscribed() {
+        let (m, api, _observer) = machine();
+        let e = entry(0xAA, false);
+        api.set_entries(vec![e.clone()]);
+        m.refresh().await;
+        api.set_inspect_response(
+            hex_decode(&e.labeler_id),
+            Ok(InspectResult {
+                view: view_of(&e, true),
+            }),
+        );
+        api.set_entries(vec![entry(0xAA, true)]);
+
+        m.subscribe(0).await;
+
+        assert_eq!(
+            api.calls(),
+            vec![
+                crate::nest_api::FakeCall::Inspect {
+                    labeler_id: hex_decode(&e.labeler_id)
+                },
+                crate::nest_api::FakeCall::Subscribe {
+                    labeler_id: hex_decode(&e.labeler_id),
+                    grant_id: None,
+                },
+            ]
+        );
+        assert!(m.snapshot().entries[0].subscribed);
+        assert!(m.snapshot().error.is_none());
     }
 
     #[tokio::test]

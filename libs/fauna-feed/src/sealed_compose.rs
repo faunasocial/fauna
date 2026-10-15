@@ -96,12 +96,16 @@ pub fn adjusted_score_micro(base_score_micro: i64, terms: &[(i64, i64)]) -> i64 
 
 /// Re-rank the **loaded window** in place by descending adjusted key.
 ///
-/// Stable, so posts with equal adjusted keys keep their relative nest order:
-/// the nest's `ORDER BY …, c.created_at DESC` tiebreak survives, and — the
+/// Equal adjusted keys fall back to the nest's own tiebreak, newest first (the
+/// scored query's `ORDER BY …, c.created_at DESC`), then stay stable. So — the
 /// property that matters — a factor shifting every post by the same constant
 /// (an untrained model returns a flat `500` per-mille) leaves the order
 /// **exactly** as the nest sent it. That is what makes an untrained topic factor
 /// a no-op rather than a reshuffle (owner doc § The model → cold-model damping).
+/// The tiebreak is explicit rather than left to sort stability because the
+/// window this sorts is the previous re-rank's output, not the nest's page:
+/// taking a topic's last example back makes every key equal again, and the feed
+/// must return to the order it had before the train, not keep the trained one.
 ///
 /// **All-or-nothing.** If any loaded post is missing from `adjusted`, the window
 /// is left in nest order untouched. A partial sort would interleave scored and
@@ -111,7 +115,11 @@ pub fn rerank_loaded_window(posts: &mut [PostSummary], adjusted: &HashMap<String
     if posts.iter().any(|p| !adjusted.contains_key(&p.post_id)) {
         return;
     }
-    posts.sort_by(|a, b| adjusted[&b.post_id].cmp(&adjusted[&a.post_id]));
+    posts.sort_by(|a, b| {
+        adjusted[&b.post_id]
+            .cmp(&adjusted[&a.post_id])
+            .then(b.timestamp.cmp(&a.timestamp))
+    });
 }
 
 #[cfg(test)]
@@ -176,6 +184,34 @@ mod tests {
             vec!["a", "b", "c"],
             "a flat factor reshuffled the feed"
         );
+    }
+
+    #[test]
+    fn equal_keys_fall_back_to_newest_first_whatever_order_the_window_is_in() {
+        // The window a re-rank sorts is the PREVIOUS re-rank's output, not the
+        // nest's page: train "old" up, then take the example back, and every
+        // key is equal again. A stable sort alone would leave "old" on top for
+        // good; the nest's own tiebreak (`created_at DESC`) puts the feed back
+        // exactly as it was before the train (`topic-factors.md` § Training
+        // signals: un-marking applies the inverse alone).
+        let at = |id: &str, timestamp: i64| {
+            TestPostSpec {
+                post_id: id.to_string(),
+                timestamp,
+                ..Default::default()
+            }
+            .into_summary()
+        };
+        let mut posts = vec![at("old", 1_000), at("new", 3_000), at("mid", 2_000)];
+        let adjusted: HashMap<String, i64> = ["old", "new", "mid"]
+            .iter()
+            .map(|id| (id.to_string(), adjusted_score_micro(0, &[(5000, 500)])))
+            .collect();
+
+        rerank_loaded_window(&mut posts, &adjusted);
+
+        let order: Vec<&str> = posts.iter().map(|p| p.post_id.as_str()).collect();
+        assert_eq!(order, vec!["new", "mid", "old"]);
     }
 
     #[test]

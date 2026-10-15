@@ -518,6 +518,18 @@ pub fn mail_health_check_state_label(state: String) -> LocalizedText {
     fauna_core::format::mail_health_check_state_label(&state)
 }
 
+/// `fauna_core::format::mail_health_heartbeat_label` → the `RelativeTimeDisplay` of
+/// one mail-health heartbeat stamp (`last_outbound_delivered_at` /
+/// `last_inbound_accepted_at`, Unix **seconds**; `None` = never → "Never"). The text
+/// of heartbeat rows 5–6 and of the two facts on the `admin-mail-health-status`
+/// line; `localized` renders through the app's i18n, `absolute_epoch_ms` (past a
+/// week) through its date formatter. See `mail-deliverability.md` § The mail health
+/// readout.
+#[uniffi::export]
+pub fn mail_health_heartbeat_label(at_secs: Option<i64>, now_ms: i64) -> RelativeTimeDisplay {
+    fauna_core::format::mail_health_heartbeat_label(at_secs, now_ms)
+}
+
 /// `fauna_core::format::contact_matches_filter` → does a contact roster row match
 /// the `contacts-search-field` query? Case-insensitive substring of the trimmed
 /// query over `handle` / `domain` / hex `actor_id` (empty query matches all). Lifts
@@ -819,11 +831,16 @@ pub fn backup_audit_alert_label(
 /// `fauna_core::format::backup_backlog_label` → a complete `LocalizedText`
 /// (`backups.backup_destination_backlog` + `{count}`) for the
 /// `backup-destination-backlog-count` row text; `None` (no status read yet)
-/// carries the shared 0 baseline. See value-formatting.md § Backup destination
-/// status labels.
+/// carries the shared 0 baseline. `writer_state` is the row's own
+/// [`crate::segment_backup::FfiBackupDestinationStatus::writer_state`]: a
+/// refused writer reads the refusal in place of the count. See
+/// value-formatting.md § Backup destination status labels.
 #[uniffi::export]
-pub fn backup_backlog_label(backlog_count: Option<u32>) -> LocalizedText {
-    fauna_core::format::backup_backlog_label(backlog_count)
+pub fn backup_backlog_label(
+    backlog_count: Option<u32>,
+    writer_state: Option<String>,
+) -> LocalizedText {
+    fauna_core::format::backup_backlog_label(backlog_count, writer_state.as_deref())
 }
 
 /// `fauna_core::format::backup_destination_kind_label` → the

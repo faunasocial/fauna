@@ -322,7 +322,14 @@ def build_node(release: bool = False, features: str = "test-hooks,nostr") -> str
             exe = msg.get("executable")
             if exe and Path(exe).stem == "fauna-nest":
                 pinned.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(exe, pinned)
+                # Copy beside, then rename over: a nest another run spawned
+                # from the pinned copy holds it open, and writing into a
+                # running executable fails ETXTBSY ("Text file busy") on
+                # Linux, while a rename swaps the name and leaves the running
+                # nest its old inode.
+                staged = pinned.with_name(f"{pinned.name}.{os.getpid()}.tmp")
+                shutil.copy2(exe, staged)
+                os.replace(staged, pinned)
                 _load_build_if_stale().commit_stamp(
                     stamp, instant,
                     "fauna-nest e2e variant freshness stamp; mtime = build start (slot grant)\n"
@@ -480,21 +487,21 @@ def build_sync_service_win() -> str:
     return str(binary)
 
 
-def _recovery_fixture_build_paths(target_dir: Path) -> tuple[Path, Path]:
-    """(built exe, freshness stamp) for the test-only `recovery_fixture`
-    example — one debug shape, same single-shape reasoning as
+def _example_build_paths(target_dir: Path, example: str) -> tuple[Path, Path]:
+    """(built exe, freshness stamp) for a test-only workspace `examples/`
+    binary — one debug shape, same single-shape reasoning as
     `_sync_service_win_build_paths`."""
     examples_dir = target_dir / "debug" / "examples"
     suffix = ".exe" if sys.platform == "win32" else ""
     return (
-        examples_dir / f"recovery_fixture{suffix}",
-        target_dir / "debug" / ".recovery-fixture-e2e.stamp",
+        examples_dir / f"{example}{suffix}",
+        target_dir / "debug" / f".{example.replace('_', '-')}-e2e.stamp",
     )
 
 
-def _recovery_fixture_newest_source_mtime(repo: Path) -> float:
-    """Newest mtime across the fixture's build inputs: it links the shared
-    protocol/client crates, so a bare comparison against its own source (the
+def _example_newest_source_mtime(repo: Path) -> float:
+    """Newest mtime across a test-only example's build inputs: each links
+    shared crates, so a bare comparison against its own source (the
     pre-2026-09-29 rule) let a binary built against an older wire shape run
     against a newer nest — every path dep points into libs/."""
     bis = _load_build_if_stale()
@@ -504,27 +511,28 @@ def _recovery_fixture_newest_source_mtime(repo: Path) -> float:
     )
 
 
-def build_recovery_fixture() -> str:
-    """Build the `recovery_fixture` example (`libs/fauna-client-recovery`) and
-    return its path — the builder behind
-    `tests/e2e-unified/helpers/succession.py::recovery_fixture_binary`.
+def _build_workspace_example(package: str, example: str) -> str:
+    """Build the test-only `example` of workspace crate `package` and return
+    its path — the shared builder behind `build_recovery_fixture` and
+    `build_render_cloud_init`.
 
     Load + freshness discipline mirrors `build_sync_service_win()`: the cargo
     run holds a machine-wide `build` slot, goes through `_cargo_cmd` (bare
     `cargo` fails on Windows, where Git Bash's `link.exe` shadows the MSVC linker),
     and a warm tree — stamp newer than every workspace source — runs no cargo
-    and takes no slot. The stamp, not the binary, carries freshness: the helper
-    signs profiles and statements with the SHARED crates' encoders, so a binary
-    older than any of them produced a body the nest's strict decode refused
-    (`fauna.profile.invalid_request … SchemaMismatch`, measured 2026-09-29).
+    and takes no slot. The stamp, not the binary, carries freshness: the
+    recovery helper signs profiles and statements with the SHARED crates'
+    encoders, so a binary older than any of them produced a body the nest's
+    strict decode refused (`fauna.profile.invalid_request … SchemaMismatch`,
+    measured 2026-09-29).
 
     Never trusts cargo's own exit code (it lies on win-arm64) — success is the
     known exe path existing after the run.
     """
     repo = get_repo_root()
-    binary, stamp = _recovery_fixture_build_paths(_cargo_target_dir(repo))
+    binary, stamp = _example_build_paths(_cargo_target_dir(repo), example)
     if _variant_build_is_fresh(
-        binary, stamp, lambda: _recovery_fixture_newest_source_mtime(repo)
+        binary, stamp, lambda: _example_newest_source_mtime(repo)
     ):
         return str(binary)
 
@@ -532,19 +540,34 @@ def build_recovery_fixture() -> str:
     result, instant = _load_build_if_stale().run_for_stamp(
         _build_slot_cmd(repo)
         + _cargo_cmd(repo)
-        + ["build", "-p", "fauna-client-recovery", "--example", "recovery_fixture"],
+        + ["build", "-p", package, "--example", example],
         run=subprocess.run, cwd=repo, capture_output=True, text=True,
     )
     if not binary.exists():
         tail = result.stderr[-3000:] if result.stderr else result.stdout[-3000:]
         raise RuntimeError(
-            f"recovery_fixture not found at {binary}\nBuild output tail:\n{tail}"
+            f"{example} not found at {binary}\nBuild output tail:\n{tail}"
         )
     _load_build_if_stale().commit_stamp(
         stamp, instant,
-        "recovery_fixture e2e freshness stamp; mtime = build start (slot grant)\n",
+        f"{example} e2e freshness stamp; mtime = build start (slot grant)\n",
     )
     return str(binary)
+
+
+def build_recovery_fixture() -> str:
+    """Build the `recovery_fixture` example (`libs/fauna-client-recovery`) and
+    return its path — the builder behind
+    `tests/e2e-unified/helpers/succession.py::recovery_fixture_binary`."""
+    return _build_workspace_example("fauna-client-recovery", "recovery_fixture")
+
+
+def build_render_cloud_init() -> str:
+    """Build the `render_cloud_init` example (`libs/fauna-provisioning`) and
+    return its path: it prints the cloud-init user-data `build_cloud_init`
+    renders, so the host-maintenance witness runs the shipped coordinator
+    script rather than a copy lifted from source."""
+    return _build_workspace_example("fauna-provisioning", "render_cloud_init")
 
 
 def build_app() -> str:

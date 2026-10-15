@@ -29,8 +29,8 @@ public struct VideoThumbnailView: View {
     }
 
     /// A bridged post's `ProxiedVideo` (render-model.md § D6c → *Proxied video*): the glyph + the
-    /// opaque nest-relative `path` as text. Never fetched or parsed, and inert — the shared
-    /// `playback_source` answers `Unplayable` for it until the ticket arm lands.
+    /// opaque nest-relative `path` as text. Never fetched or parsed, and inert until this view
+    /// plays the ticketed `Url` the shared `playback_source` now answers for it.
     public init(proxiedPath: String) {
         self.text = proxiedPath
         self.resolve = nil

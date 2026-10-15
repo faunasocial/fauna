@@ -102,9 +102,10 @@ type RepoWriter interface {
 	// (fauna_bridge_atproto::record_refs, the generic blob-shape walk the nest
 	// stamps `referenced_at` from) reached over the FFI, and a Go walker that
 	// learned only the embeds it knows would silently under-announce. Pure —
-	// no I/O, no error to surface: unreadable bytes announce nothing, which
-	// only ever hurts the record's own author.
-	ExtractBlobRefs(recordCBOR []byte) []string
+	// no I/O: unreadable bytes announce nothing, but a record naming more
+	// distinct blobs than the walk's cap is an ERROR, never a shortened list
+	// (the nest refuses such a write before it commits; this is the backstop).
+	ExtractBlobRefs(recordCBOR []byte) ([]string, error)
 	// ResolveBlobRefs maps every blob CID this record references to the Fauna
 	// ContentHash (base32) those bytes are, for the refs THIS repo has already
 	// published — skipping the ones it has not.
@@ -399,7 +400,7 @@ func (s *Server) applyRecordWrite(w http.ResponseWriter, r *http.Request, caller
 		return
 	}
 
-	results, err := wsrpc.IngestExternalWrite(ctx, s.nest, caller.ActorID, []wsrpc.ExternalWrite{{
+	results, err := wsrpc.IngestExternalWrite(ctx, s.nest, caller.ActorID, caller.SessionID, []wsrpc.ExternalWrite{{
 		Collection:      rw.collection,
 		Action:          rw.action,
 		Rkey:            &rkey,
@@ -457,15 +458,22 @@ func (s *Server) applyRecordWrite(w http.ResponseWriter, r *http.Request, caller
 	// ever short-circuits when the bytes already match, so a real content
 	// change (any ordinary post) is committed exactly as before.
 	commitOpts := append(rw.cas.batchOptions(), atprotorepo.SkipUnchangedRecords())
+	// Walked from the COMMITTED bytes — after the override replacement
+	// above — so the frame announces the blobs of the record that lands,
+	// never the caller's superseded draft of it.
+	blobCIDs, err := s.writer.ExtractBlobRefs(recordCBOR)
+	if err != nil {
+		s.logger.Error(rw.verb+": walk the committed record's blob refs",
+			"did", caller.DID, "at_uri", *res.AtURI, "err", err)
+		xrpc.WriteError(w, xrpc.InternalError())
+		return
+	}
 	commit, err := s.writer.Commit(ctx, caller.ActorID, caller.DID, []atprotorepo.RepoOp{{
-		Action:     rw.commitOp,
-		Collection: rw.collection,
-		Rkey:       *res.Rkey,
-		RecordCBOR: recordCBOR,
-		// Walked from the COMMITTED bytes — after the override replacement
-		// above — so the frame announces the blobs of the record that lands,
-		// never the caller's superseded draft of it.
-		BlobCIDs:    s.writer.ExtractBlobRefs(recordCBOR),
+		Action:      rw.commitOp,
+		Collection:  rw.collection,
+		Rkey:        *res.Rkey,
+		RecordCBOR:  recordCBOR,
+		BlobCIDs:    blobCIDs,
 		FaunaPostID: derefString(res.FaunaPostID),
 	}}, commitOpts...)
 	if err != nil {
@@ -556,7 +564,7 @@ func (s *Server) deleteRecord(w http.ResponseWriter, r *http.Request, caller *xr
 		}
 	}
 
-	results, err := wsrpc.IngestExternalWrite(ctx, s.nest, caller.ActorID, []wsrpc.ExternalWrite{{
+	results, err := wsrpc.IngestExternalWrite(ctx, s.nest, caller.ActorID, caller.SessionID, []wsrpc.ExternalWrite{{
 		Collection:      body.Collection,
 		Action:          wsrpc.ExternalWriteActionDelete,
 		Rkey:            &rkey,
@@ -716,7 +724,7 @@ func (s *Server) applyWrites(w http.ResponseWriter, r *http.Request, caller *xrp
 		statuses = append(statuses, status)
 	}
 
-	results, err := wsrpc.IngestExternalWrite(ctx, s.nest, caller.ActorID, writes)
+	results, err := wsrpc.IngestExternalWrite(ctx, s.nest, caller.ActorID, caller.SessionID, writes)
 	if err != nil {
 		s.logger.Warn("applyWrites: nest ingest failed", "err", err)
 		xrpc.WriteError(w, xrpc.InternalError())
@@ -728,7 +736,11 @@ func (s *Server) applyWrites(w http.ResponseWriter, r *http.Request, caller *xrp
 	// true state rather than papering over a partial application.
 	for i, res := range results {
 		if e := refusalError(res.Refusal); e != nil {
-			e.Message = fmt.Sprintf("write %d (%s): %s", i, members[i].Collection, e.Message)
+			// A whole-batch oracle refusal is about the caller, not this
+			// row: it keeps its uniform message.
+			if !wholeBatchRefusal(res.Refusal) {
+				e.Message = fmt.Sprintf("write %d (%s): %s", i, members[i].Collection, e.Message)
+			}
 			xrpc.WriteError(w, e)
 			return
 		}
@@ -766,7 +778,13 @@ func (s *Server) applyWrites(w http.ResponseWriter, r *http.Request, caller *xrp
 			op.RecordCBOR = recordCBOR
 			// From the committed bytes, override included — same rule as the
 			// single-record path.
-			op.BlobCIDs = s.writer.ExtractBlobRefs(recordCBOR)
+			blobCIDs, err := s.writer.ExtractBlobRefs(recordCBOR)
+			if err != nil {
+				s.logger.Warn("applyWrites: walk the committed record's blob refs", "err", err)
+				xrpc.WriteError(w, xrpc.InternalError())
+				return
+			}
+			op.BlobCIDs = blobCIDs
 			out = append(out, applyWritesResult{
 				Type:             resultTypeFor(m.Type),
 				URI:              *res.AtURI,
@@ -1271,6 +1289,13 @@ func refusalError(r *wsrpc.ExternalWriteRefusal) *xrpc.Error {
 		return nil
 	}
 	switch r.SubType {
+	case wsrpc.RefusalSessionRevoked:
+		// The oracle's live check: the session (or its grant) was revoked
+		// after this access token was minted. The same uniform answer as a
+		// bad token, so a client re-authenticates and learns nothing more.
+		return xrpc.AuthRequired()
+	case wsrpc.RefusalRateLimited:
+		return xrpc.RateLimited()
 	case wsrpc.RefusalDeferred:
 		e := xrpc.MethodNotImplemented()
 		e.Message = r.Message
@@ -1286,6 +1311,12 @@ func refusalError(r *wsrpc.ExternalWriteRefusal) *xrpc.Error {
 			Status: http.StatusBadRequest, Name: "InvalidRequest", Message: r.Message,
 		}
 	}
+}
+
+// wholeBatchRefusal reports a refusal the nest raises for the whole batch —
+// the oracle's session and ceiling refusals — rather than for one write.
+func wholeBatchRefusal(r *wsrpc.ExternalWriteRefusal) bool {
+	return r.SubType == wsrpc.RefusalSessionRevoked || r.SubType == wsrpc.RefusalRateLimited
 }
 
 func commitRefOf(c atprotorepo.CommitResult) *commitRef {

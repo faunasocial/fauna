@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.settings
 
+import com.fauna.app.ui.navigation.exitAdminToPrimary
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -51,7 +52,7 @@ fun AdminAliasesScreen(
         localDomains = snapshot.localDomains,
         actionError = snapshot.error,
         working = snapshot.status == ForwarderStatus.WORKING,
-        onBack = { navController.popBackStack() },
+        onBack = { navController.exitAdminToPrimary() },
         onCreate = vm::create,
         onDelete = vm::delete,
     )

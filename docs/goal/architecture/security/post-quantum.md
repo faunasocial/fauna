@@ -656,6 +656,17 @@ not drift to discover:
   (apple on macOS; android `:app:compileDebugKotlin` + web `deno task check` + tui native
   `cargo build -p fauna-tui` all on a Linux dev machine; windows `FaunaApp.Core` MSBuild on
   Windows). **Surface B is COMPLETE.**
+  **The registry entry (§ surface B's "a new registry entry") — built 2026-10-10:** the nest
+  table `subscriber_encaps_keys` (one row per account, the 1184-byte ek, Purge on deletion,
+  Stay on succession), written by the User kind `fauna.subscriptions.encaps_key.publish` from
+  the one shared builder `fauna_client_subscriptions::encaps_key_publish_request`, which
+  `SubscriptionsClient::publish_encaps_key` sends at session start (idempotent: every device
+  derives the same bytes). Its reader is the third-party follow under `fauna:follow:write`,
+  which fills the subscribe's ek from it and refuses while it is absent
+  ([`../../behavior/authorization-server.md`](../../behavior/authorization-server.md) § Scope
+  grammar → *The sixth arm*); the first-party subscribe still sends its key in the request —
+  reading the registry there is a later unification. **The session-start publish is wired on
+  tui, linux, web and android** (UniFFI `subscriptions_publish_encaps_key`, WASM `subscriptionsPublishEncapsKey`, each at the post-auth edge that refreshes the mail epoch schedule); macos, ios and windows are owed.
 - **Reserved but HNDL-safe (no action):** `BackupKey` version byte
   (`libs/fauna-core/src/crypto.rs`).
 - **P2P transport PQ (surface C) — now wholly the § 7.3 `ring → aws-lc-rs` question.**

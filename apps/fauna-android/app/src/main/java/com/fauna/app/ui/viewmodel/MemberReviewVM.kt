@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.R
 import com.fauna.app.core.ApiClient
+import com.fauna.app.core.SuccessionAftermathHost
 import com.fauna.app.ui.util.getStringFmt
 import com.fauna.app.ui.util.resolveLocalized
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -49,6 +50,7 @@ data class MemberReviewRow(
 class MemberReviewVM @Inject constructor(
     private val api: ApiClient,
     @ApplicationContext private val context: Context,
+    private val aftermath: SuccessionAftermathHost,
 ) : ViewModel() {
 
     /** The open roster, resolved for display, and whether a read has
@@ -60,6 +62,11 @@ class MemberReviewVM @Inject constructor(
 
     init {
         load()
+        // The aftermath's raises have settled: a roster item raised by the
+        // ceremony this very session appears without a re-open
+        // (`succession-aftermath.md` § Propagation: "behind the aftermath's
+        // raise").
+        viewModelScope.launch { aftermath.configStageSettled.collect { load() } }
     }
 
     /** Re-read the roster. A verdict another device recorded must not be

@@ -280,6 +280,9 @@ class _OnboardingLaunch:
     launch_failed = "Startup hit a problem. Your data is safe — you can retry, or continue setup below."
     identity_changed_warning = "This nest's identity has changed, or it can no longer prove the identity you previously trusted. It may have been re-deployed or had its key rotated — or someone may be impersonating it. Don't continue unless you were expecting this change."
     identity_changed_trust = "Trust this nest and continue"
+    @staticmethod
+    def identity_fork_warning(*, pinned: str, seen: str) -> str:
+        return f"This nest's identity history has split: it now shows two competing successors. The one you accepted is {pinned}; the one it presents now is {seen}. Two copies of this nest may be running, or someone may be impersonating it. There is no safe way to trust either from here — contact your nest's admin."
     identity_superseded = "This identity was succeeded — import the new identity to continue. Your account now belongs to a new identity, and this one can no longer sign in."
     @staticmethod
     def identity_superseded_verified(*, successor: str) -> str:
@@ -324,6 +327,7 @@ class _OnboardingIdentity_choice:
     import_existing = "Import from Another Device"
     recover_lost_box = "Recover a lost box"
     restore_from_recovery_kit = "Restore my account from a recovery phrase"
+    emergency_lockout_entry = "Lock my account for 24 hours"
 
 
 class _OnboardingAdd_account:
@@ -373,6 +377,26 @@ class _OnboardingRecovery_entry:
         return f"Your account was restored. But part of the sealed backup — material from a previous identity of yours — could not be opened, so content still encrypted under that older identity may be unreadable. If another of your devices still has that identity, sign in there to finish moving your content over. ({reason})"
 
 
+class _OnboardingEmergency_lockout:
+    title = "Lock Your Account"
+    desc = "Lock your account from this device without signing in. Paste your secret key and enter your handle. Nothing you enter here is saved on this device."
+    secret_label = "Secret key"
+    account_hint = "Your handle (user@domain) says where your account lives. If your secret key link names it, you can leave it empty."
+    @staticmethod
+    def locked(*, until: str) -> str:
+        return f"Your account is locked until {until}. Nothing was saved on this device."
+    invalid_secret = "That isn't a secret key. Paste the 64-character key or the fauna://identity link — not your recovery phrase."
+    account_needed = "Enter the handle of the account to lock (user@domain) — a secret key alone doesn't say where the account lives."
+    account_malformed = "Enter the full handle including the domain, in the form user@domain."
+    superseded = "This identity was replaced after it was compromised, so there is nothing to lock. Import the new identity to continue."
+    @staticmethod
+    def refused(*, reason: str) -> str:
+        return f"The lock was refused. ({reason})"
+    @staticmethod
+    def unreachable(*, reason: str) -> str:
+        return f"Could not reach that account's nest. Check the handle and your connection, then try again. ({reason})"
+
+
 class _OnboardingIdentity_import:
     title = "Import Identity"
     scan_subtitle = "Scan the QR code shown on your other device."
@@ -407,7 +431,7 @@ class _OnboardingRetire:
     title = "Retire a server"
     subtitle = "Delete a server Fauna created in your cloud account and clean up the DNS records that pointed at it, or get your domain's transfer code. Your cloud token is used for this visit only and is never saved."
     list_label = "Servers Fauna created in this account"
-    empty_message = "No servers created by Fauna were found in this account. Servers set up some other way carry no Fauna marker and are not listed — retire those from your provider's dashboard."
+    empty_message = "No servers created by Fauna were found in this account. Servers created before 2026-07-08 predate the Fauna marker and are not listed — retire those from your provider's dashboard."
     domain_label = "Domain"
     secondary_domains_label = "Also serves"
     address_label = "Address"
@@ -620,9 +644,11 @@ class _OnboardingVps_config:
     update_channel_stable_label = "Stable"
     update_channel_stable_desc = "Released versions. Recommended."
     update_channel_test_label = "Test"
-    update_channel_test_desc = "Release candidates that are still being checked."
+    update_channel_test_desc = "Numbered releases being accepted by users before they become Stable."
+    update_channel_test_desc_same_version = "Numbered releases being accepted before they become Stable. For now the server works only with apps of exactly the same version — pair it with the app stores' test tracks."
     update_channel_dev_label = "Dev"
-    update_channel_dev_desc = "The newest development builds, before any checking. Expect breakage."
+    update_channel_dev_desc = "The newest development builds, before any checking, for people who build the apps from source. Expect breakage."
+    update_channel_dev_desc_same_version = "The newest development builds, before any checking. For now the server works only with apps built from the same source. Expect breakage."
     mail_mode_label = "Run mail on this box"
     mail_mode_desc = "A mail box runs email (SMTP, IMAP) and calendar, which needs the spam and virus scanners and at least 2 GB of RAM. Turn this off for a social-only box: it runs lean and works on the cheapest 1 GB plan, but cannot add mail later without resizing the VPS."
 
@@ -874,6 +900,7 @@ class _Onboarding:
     identity_created = _OnboardingIdentity_created
     recovery_kit = _OnboardingRecovery_kit
     recovery_entry = _OnboardingRecovery_entry
+    emergency_lockout = _OnboardingEmergency_lockout
     identity_import = _OnboardingIdentity_import
     recovery = _OnboardingRecovery
     retire = _OnboardingRetire
@@ -905,7 +932,7 @@ class _Launch:
     retry_button = "Try again"
     use_different_nest = "Use a different nest"
     recovery_custody_mismatch = "Off-box recovery isn't protected: this box handed off an inconsistent recovery key."
-    recovery_custody_failed = "Off-box recovery custody wasn't saved — couldn't reach the box to confirm. Your nest still works, but it isn't protected against total box loss yet."
+    recovery_custody_failed = "Off-box recovery custody wasn't saved — this box's recovery key couldn't be confirmed. Your nest still works, but it isn't protected against total box loss yet; the app tries again on the next connection."
 
 
 class _Credential_store:
@@ -1012,6 +1039,8 @@ class _FeedCreate:
     factors = "Factors"
     factor_engagement = "Engagement"
     factor_trending = "Trending"
+    factor_watch_complete = "Watched to the end"
+    factor_skip = "Skipped past"
     factor_weight_placeholder = "1.0"
     factor_global_toggle = "Apply to all feeds"
     add_factor = "Add Factor"
@@ -1134,6 +1163,8 @@ class _Feed:
         return f"Attach {filename} again — the file is not on this device."
     compose_sell_price_invalid = "Enter a smaller price"
     compose_sell_rank_unavailable = "Could not check your tiers to price this post — try again"
+    compose_sell_account_not_ready = "Your account is still loading on this device — try again in a moment"
+    compose_sell_tier_unavailable = "Could not set up this sale — try again"
     @staticmethod
     def error_load(*, message: str) -> str:
         return f"Failed to load posts: {message}"
@@ -1146,6 +1177,9 @@ class _Feed:
     @staticmethod
     def error_subscribe(*, message: str) -> str:
         return f"Failed to subscribe: {message}"
+    @staticmethod
+    def error_thread(*, message: str) -> str:
+        return f"Could not load the thread: {message}"
     @staticmethod
     def error_gated_unlock(*, message: str) -> str:
         return f"Could not unseal this post: {message}"
@@ -1195,6 +1229,7 @@ class _Feed:
 
 class _ConversationsErrors:
     served_elsewhere = "Conversations are open in another instance of this app. Use them there — everything else works here."
+    state_needs_newer_app = "This version of the app is too old to open the conversations it saved here. They are intact — update the app to see them again."
     receive_stopped = "New messages stopped arriving because of an internal error. Restart the app (or reload the page) to receive them again."
     @staticmethod
     def mail_unopenable(*, count: str) -> str:
@@ -1546,6 +1581,7 @@ class _Events:
     end_optional = "End (optional)"
     description = "Description"
     location = "Location"
+    discard_event = "Discard"
     location_placeholder = "Add a location..."
     attendance_mode = "Attendance Mode"
     capacity = "Capacity (0 = unlimited)"
@@ -1598,6 +1634,7 @@ class _Events:
         return f"Imported: {imported}, Skipped: {skipped}, Total: {total}"
     ics_path_required = "Type the path to an .ics file first, then press Import."
     ics_file_required = "Choose an .ics file first, then press Import."
+    ics_unreadable = "The chosen .ics file could not be read. Choose it again."
     set_reminder = "Set Reminder"
     setting = "Setting..."
     rsvp = _EventsRsvp
@@ -1704,6 +1741,7 @@ class _Atproto_settings:
     session_status_live = "Working"
     session_status_suspended = "Paused — turn Bluesky back on to let this app work again"
     external_apps_toggle = "Allow external apps"
+    external_apps_hint = "When this is off, every connected app is paused — apps that use Fauna directly too — until you turn it back on. Nothing is disconnected."
     depth_heading = "Integration depth"
     depth_off_title = "Off"
     depth_off_desc = "No Bluesky presence."
@@ -1729,6 +1767,9 @@ class _Atproto_settings:
     def handle_either_way(*, handle: str) -> str:
         return f"Your Bluesky handle will be @{handle} either way."
     history_backfill_label = "Also publish my existing public posts."
+    @staticmethod
+    def history_backfill_count_label(*, count: str) -> str:
+        return f"Also publish my {count} existing public posts."
     @staticmethod
     def hosted_handle_prefix(*, handle: str) -> str:
         return f"Your Bluesky handle: @{handle}"
@@ -1918,6 +1959,13 @@ class _Critical_alerts:
     @staticmethod
     def domain_lapsing_resident(*, domain: str, status: str) -> str:
         return f"Urgent: the registration for {domain} — the name this deployment runs on — is being withdrawn ({status}). Mail to your address there will stop arriving, and recovering your account from your recovery phrase alone will stop working. Contact whoever runs this nest, and make sure you know its direct address."
+    @staticmethod
+    def eviction_warning(*, days: str, suspend_at: str, delete_at: str) -> str:
+        return f"Your account on this nest is being closed by its admin. Your access ends in {days} days, at {suspend_at} UTC, and your account and everything in it will be deleted at {delete_at} UTC. Until your access ends you can export all your data from Settings → Account → Export My Data."
+    eviction_warning_undated = "Your account on this nest is being closed by its admin, and it will then be deleted with everything in it. Export all your data now from Settings → Account → Export My Data."
+    @staticmethod
+    def eviction_warning_reason(*, reason: str) -> str:
+        return f"The admin gave this reason: {reason}"
 
 
 class _Bridges:
@@ -2059,6 +2107,7 @@ class _Media:
         return f"Couldn't read that followed folder: {message}"
     error_followed_read_only = "You follow this folder — it's read-only here. Switch to one of your own folders to upload."
     error_metadata_only_folder = "This folder's content stays on your devices, so it can't be uploaded here. Put the file in the folder on a device that syncs it."
+    error_read_only_shared_folder = "This folder was shared with you to read, not to add to. Ask its owner for write access, or pick one of your own folders."
     versions_title = "Version history"
     versions_loading = "Loading versions…"
     @staticmethod
@@ -2375,6 +2424,7 @@ class _Backups:
     @staticmethod
     def backup_destination_backlog(*, count: str) -> str:
         return f"{count} queued"
+    backup_destination_writer_refused = "Not accepted — this destination keeps your backup from another box"
     backup_destination_last_audit_never = "Last checked: never"
     @staticmethod
     def backup_destination_last_audit(*, when: str) -> str:
@@ -2446,6 +2496,9 @@ class _Backups:
     reseed_result_whole = "Your data is back on this nest."
     reseed_result_incomplete = "The restore is not complete yet. Run it again to finish what is missing."
     reseed_set_mail = "Mail"
+    reseed_set_post = "Posts"
+    reseed_set_calendar = "Calendar"
+    reseed_set_card = "Contacts"
     @staticmethod
     def reseed_set_restored(*, set: str, count: str) -> str:
         return f"{set}: {count} restored"
@@ -2470,6 +2523,33 @@ class _Backups:
     @staticmethod
     def reseed_gap_unnamed_files(*, count: str) -> str:
         return f"{count} files arrived without their names, so some files are still missing."
+    backup_audit_recover_button = "Recover what your nest lost"
+    backup_recover_confirm_title = "Recover what your nest lost from this backup?"
+    backup_recover_confirm_body = "This copies everything your nest lost back into it from this backup, as new items in the places they were. Nothing is deleted, here or at the backup, and anything you changed or deleted since stays as it is. Running it again never recovers anything twice."
+    backup_recover_confirm_button = "Recover"
+    backup_recover_cancel_button = "Not now"
+    backup_recover_running = "Recovering what your nest lost…"
+    @staticmethod
+    def backup_recover_failed(*, reason: str) -> str:
+        return f"The recovery stopped before it finished: {reason}. Run it again to finish — nothing is recovered twice."
+    recover_result_whole = "Everything your nest lost is back."
+    recover_result_incomplete = "The recovery is not complete yet. Run it again to finish what is missing."
+    recover_result_nothing = "There was nothing left to recover."
+    @staticmethod
+    def recover_set_recovered(*, set: str, count: str) -> str:
+        return f"{set}: {count} recovered"
+    @staticmethod
+    def recover_set_nothing(*, set: str) -> str:
+        return f"{set}: nothing to recover"
+    @staticmethod
+    def recover_set_refused(*, set: str, remedy: str) -> str:
+        return f"{set}: not recovered. {remedy}"
+    @staticmethod
+    def recover_gap_unplaceable(*, set: str, count: str) -> str:
+        return f"{set}: {count} entries could not be put back where they belong, so they were not recovered."
+    @staticmethod
+    def recover_gap_duties(*, set: str, reason: str) -> str:
+        return f"{set}: recovered, but the backup could not be tidied up afterwards ({reason}). Run the recovery again to finish."
     backup_destination_remove_reclaim_checkbox = "Also delete this device's copy now"
     @staticmethod
     def backup_reclaim_after_remove_failed(*, reason: str) -> str:
@@ -2738,6 +2818,7 @@ class _Devices:
     @staticmethod
     def own_fingerprint(*, fingerprint: str) -> str:
         return f"Key {fingerprint}"
+    unnamed_device = "Unnamed device"
     members_title = "Signed-in devices without a matching entry"
     @staticmethod
     def member_fingerprint(*, fingerprint: str) -> str:
@@ -2765,6 +2846,7 @@ class _Devices:
     selective_sync = "Selective Sync"
     include_paths = "Include Paths (comma-separated)"
     exclude_paths = "Exclude Paths (comma-separated)"
+    paths_unavailable = "Unavailable on this device"
     save_paths = "Save Paths"
     nest_place_section = "What your nest keeps"
     nest_snapshots = "Keep snapshots"
@@ -2860,7 +2942,6 @@ class _Devices:
     folder_residency_metadata_only = "Metadata only — content stays on my devices"
     folder_residency_hint = "The nest keeps a copy of this folder's content, so a device can catch up while your other devices are offline."
     folder_residency_metadata_only_hint = "This folder's content stays on your devices only. It moves between them while one of them holding it is online, and the nest cannot restore it. File names, changes and snapshots still sync through the nest."
-    residency_blocked_by_serving = "Turn off website serving, WebDAV serving and any paywall first — those serve this folder's content from the nest, which needs a copy of it."
     residency_confirm_title = "Stop keeping this folder's content on the nest?"
     residency_confirm_body = "The nest's copy of this folder's content is deleted now, and your devices become the only holders. Content moves between your devices only while one of them holding it is online. If your devices lose it, the nest cannot restore it."
     residency_confirm = "Delete the nest's copy"
@@ -3142,10 +3223,6 @@ class _SettingsRecovery_kit:
     @staticmethod
     def sweep_partial(*, removed: str, groups: str) -> str:
         return f"Your old identity was removed from {removed} of your {groups} group conversations. It can still read the rest — press Finish Moving Your Groups below to finish, or ask another member of those to remove it."
-    sweep_none_no_retry = "Your conversations were not running, so your groups still include your old identity, and your new one is not in them. Ask another member of each group to remove the old identity and add your new one."
-    @staticmethod
-    def sweep_partial_no_retry(*, removed: str, groups: str) -> str:
-        return f"Your old identity was removed from {removed} of your {groups} group conversations. It can still read the rest — ask another member of those to remove it."
     @staticmethod
     def sweep_unattested(*, count: str) -> str:
         return f"There are {count} other members across your groups that this cannot confirm you added yourself. If your identity was stolen, one of them could be the thief under another name."
@@ -3346,7 +3423,7 @@ class _SettingsAccount_page:
     data_export = "Data Export"
     export_my_data = "Export My Data"
     delete_account = "Delete Account"
-    delete_confirm_text = "This permanently removes your handle and data from this node. Your key is not affected."
+    delete_confirm_text = "This permanently removes your handle and data from this node. Your key is not affected. Take your data first: use Export My Data in Settings → Account and, if you have mail, Export in Settings → Mail."
     connected_services = "Connected Services"
     usage = "Usage"
     bridges_description = "Connect to other social networks"
@@ -3931,7 +4008,6 @@ class _Mail_export:
     scope_strip_headers_label = "Strip transit headers"
     scope_strip_headers_subtitle = "Removes the headers mail servers add in transit — relay hops, server names and IP addresses. Off keeps full forensic fidelity."
     confirm_title = "Step 3 — Confirm"
-    confirm_pending = "Estimate unavailable until the export backend is ready."
     start_button = "Start export"
     progress_title = "Step 4 — Exporting"
     pause_button = "Pause"
@@ -3942,12 +4018,10 @@ class _Mail_export:
     download_button = "Download export"
     download_url_label = "Download link (for another device)"
     discard_button = "Discard now"
+    dismiss_failed_button = "Dismiss"
     next = "Next"
     back = "Back"
     backend_unbuilt = "Mailbox export is not available on this nest yet."
-    @staticmethod
-    def confirm_summary_fmt(*, format: str, mailboxes: str) -> str:
-        return f"{format} · {mailboxes} mailbox(es)"
     @staticmethod
     def progress_summary_fmt(*, exported: str, total: str, skipped: str, errored: str) -> str:
         return f"{exported} of {total} · {skipped} skipped · {errored} errored"
@@ -3957,6 +4031,25 @@ class _Mail_export:
     @staticmethod
     def saved_summary_fmt(*, format: str, bytes: str, path: str) -> str:
         return f"{format} · {bytes} bytes · saved to {path}"
+    @staticmethod
+    def confirm_summary_count_fmt(*, format: str, mailboxes: str, messages: str) -> str:
+        return f"{format} · {mailboxes} mailbox(es) · {messages} messages"
+    @staticmethod
+    def confirm_summary_estimated_fmt(*, summary: str, bytes: str, duration: str) -> str:
+        return f"{summary} · about {bytes} · about {duration} to export"
+    confirm_estimate_unavailable = "The archive's size and how long it will take are not estimated yet."
+    @staticmethod
+    def progress_elapsed_fmt(*, summary: str, elapsed: str) -> str:
+        return f"{summary} · {elapsed} elapsed"
+    @staticmethod
+    def progress_remaining_fmt(*, summary: str, elapsed: str, remaining: str) -> str:
+        return f"{summary} · {elapsed} elapsed · about {remaining} left"
+    @staticmethod
+    def done_summary_timed_fmt(*, exported: str, format: str, bytes: str, elapsed: str) -> str:
+        return f"{exported} messages · {format} · {bytes} bytes · took {elapsed}"
+    @staticmethod
+    def saved_summary_timed_fmt(*, exported: str, format: str, bytes: str, elapsed: str, path: str) -> str:
+        return f"{exported} messages · {format} · {bytes} bytes · took {elapsed} · saved to {path}"
 
 
 class _Mail_lists:
@@ -4017,7 +4110,28 @@ class _Mail_import:
     source_app_password_label = "App password"
     source_app_password_help_gmail = "Requires 2FA on your Google account. Generate one at myaccount.google.com/apppasswords and paste it here."
     source_app_password_help_icloud = "Requires 2FA on your Apple ID. Generate one at appleid.apple.com and paste it here."
-    source_oauth_button = "Connect with Microsoft"
+    source_oauth_button = "Sign in with Microsoft"
+    source_outlook_address_label = "Your Outlook address"
+    @staticmethod
+    def microsoft_code_fmt(*, url: str, code: str) -> str:
+        return f"Go to {url} and enter the code {code}."
+    microsoft_open_browser = "Open in browser"
+    microsoft_waiting = "Waiting for you to finish signing in with Microsoft…"
+    microsoft_needs_address = "Type your Outlook address before signing in with Microsoft."
+    microsoft_sign_in_required = "Sign in with Microsoft to connect your Outlook account."
+    microsoft_declined = "The Microsoft sign-in was declined."
+    microsoft_expired = "The sign-in code expired. Sign in with Microsoft again to get a new one."
+    @staticmethod
+    def microsoft_admin_consent_fmt(*, url: str) -> str:
+        return f"Your organisation's administrator has to approve Fauna first. They can do so at {url}"
+    microsoft_failed = "Could not sign in with Microsoft. Try again."
+    microsoft_sign_in_again = "Sign in with Microsoft again"
+    microsoft_unavailable = "Microsoft sign-in is not available yet."
+    microsoft_session_sign_in_again = "The import stopped: Microsoft no longer accepts this sign-in. Sign in with Microsoft again to start a new import — mail already imported is kept."
+    resume_needs_password = "Enter the password for your old mailbox again to resume the import."
+    resume_needs_microsoft = "Sign in with Microsoft again to resume the import."
+    password_session_sign_in_again = "The import stopped: your old provider no longer accepts this password. Try again with new credentials to start a new import — mail already imported is kept."
+    error_budget_exceeded = "The import stopped: too many messages could not be brought over. The reasons are listed below — mail already imported is kept."
     source_host_placeholder = "Server hostname"
     source_port_placeholder = "Port (default 993)"
     tls_implicit = "Implicit TLS (993)"
@@ -4025,6 +4139,12 @@ class _Mail_import:
     source_username_placeholder = "Username"
     source_password_placeholder = "Password"
     connect_button = "Connect"
+    connect_failed_sign_in = "Could not sign in: the server refused the username or password."
+    connect_failed_reach = "Could not reach the server. Check the server name and port, and your network connection."
+    connect_failed_secure = "Could not secure the connection to the server. Check the security setting and the port."
+    connect_hint_gmail = "Gmail needs an app password, made with 2-Step Verification switched on — not your Google password — and IMAP switched on in Gmail's settings."
+    connect_hint_outlook = "Outlook needs IMAP switched on in its settings, and the address you typed must be the account you signed in with."
+    connect_hint_icloud = "iCloud needs an app-specific password made at appleid.apple.com — not your Apple ID password."
     scope_title = "Step 2 — What to import"
     scope_mailboxes_label = "Mailboxes"
     scope_mailboxes_empty = "No mailboxes found on the source server."
@@ -4035,6 +4155,9 @@ class _Mail_import:
     @staticmethod
     def confirm_summary_fmt(*, source: str, mailboxes: str, messages: str) -> str:
         return f"{source} · {mailboxes} mailbox(es) · {messages} messages"
+    @staticmethod
+    def confirm_summary_sized_fmt(*, source: str, mailboxes: str, messages: str, size: str) -> str:
+        return f"{source} · {mailboxes} mailbox(es) · {messages} messages · about {size}"
     start_button = "Start import"
     progress_title = "Step 4 — Importing"
     @staticmethod
@@ -4043,14 +4166,28 @@ class _Mail_import:
     @staticmethod
     def progress_row_fmt(*, count: str) -> str:
         return f"{count} messages"
+    @staticmethod
+    def progress_row_counts_fmt(*, imported: str, count: str, skipped: str, errored: str) -> str:
+        return f"{imported} of {count} · {skipped} skipped · {errored} errored"
     pause_button = "Pause"
     resume_button = "Resume"
     cancel_button = "Cancel"
+    paused_mailbox_full = "Import paused: your Fauna mailbox is full. Ask your admin for more room, then resume — the import picks up from the first message that did not fit."
+    paused_connection_lost = "Import paused: the connection was lost and did not come back after several tries. Check your network, then resume — the import picks up where it stopped."
     error_log_title = "Skipped / errored messages"
     done_title = "Step 5 — Done"
     @staticmethod
     def done_summary_fmt(*, imported: str, skipped: str, errored: str) -> str:
         return f"{imported} imported · {skipped} skipped · {errored} errored"
+    @staticmethod
+    def progress_elapsed_fmt(*, summary: str, elapsed: str) -> str:
+        return f"{summary} · {elapsed} elapsed"
+    @staticmethod
+    def progress_remaining_fmt(*, summary: str, elapsed: str, remaining: str) -> str:
+        return f"{summary} · {elapsed} elapsed · about {remaining} left"
+    @staticmethod
+    def done_summary_timed_fmt(*, imported: str, skipped: str, errored: str, elapsed: str) -> str:
+        return f"{imported} imported · {skipped} skipped · {errored} errored · took {elapsed}"
     view_imported_button = "View imported messages"
     review_skipped_button = "Review skipped"
     next = "Next"
@@ -4064,6 +4201,9 @@ class _Archive_import:
     source_title = "Step 1 — Where the archive comes from"
     source_help_facebook = "On Facebook, open Settings & privacy → Settings → Accounts Center → Your information and permissions → Download your information. Choose \"Download to device\", format JSON, any media quality. The download link expires after a few days, so save the zip as soon as it is ready."
     source_help_instagram = "On Instagram, open Settings → Accounts Center → Your information and permissions → Download your information. Choose \"Download to device\", format JSON. The download link expires after a few days, so save the zip as soon as it is ready."
+    @staticmethod
+    def source_link_fmt(*, url: str) -> str:
+        return f"Request your export here: {url}"
     archive_title = "Step 2 — The archive"
     archive_path_placeholder = "Path to the export .zip"
     archive_open_button = "Open archive"
@@ -4100,6 +4240,12 @@ class _Archive_import:
     @staticmethod
     def progress_summary_fmt(*, state: str, imported: str, total: str, skipped: str) -> str:
         return f"{state} · {imported} of {total} · {skipped} skipped"
+    @staticmethod
+    def progress_timing_fmt(*, elapsed: str, eta: str) -> str:
+        return f"{elapsed} elapsed · about {eta} left"
+    @staticmethod
+    def progress_timing_estimating_fmt(*, elapsed: str) -> str:
+        return f"{elapsed} elapsed · estimating the time left"
     @staticmethod
     def progress_row_fmt(*, imported: str, count: str, skipped: str) -> str:
         return f"{imported} of {count} · {skipped} skipped"
@@ -4478,6 +4624,14 @@ class _AdminDashboard:
     nest_dashboard = "Nest Dashboard"
     suspended = "Suspended"
     connections = "Connections"
+    inbox_storage = "Inbox Storage"
+    file_storage = "File Storage"
+    secure_connections = "Secure Connections"
+    secure_on = "On"
+    secure_off = "Off"
+    @staticmethod
+    def verbatim(*, text: str) -> str:
+        return f"{text}"
     no_users = "No users"
 
 
@@ -4720,6 +4874,12 @@ class _AdminNest_page:
     @staticmethod
     def web_app_origin_scope(*, origin: str) -> str:
         return f"This changes only what this server's own address answers. Anyone who opens {origin} directly loads the app from there either way, and an address someone types or bookmarks always wins."
+    @staticmethod
+    def web_app_origin_load_error(*, message: str) -> str:
+        return f"Failed to load the web app choice: {message}"
+    @staticmethod
+    def web_app_origin_save_error(*, message: str) -> str:
+        return f"Failed to save the web app choice: {message}"
     os_up_to_date = "OS up to date"
     os_updates_pending = "Security updates pending"
     os_restart_pending = "Restart pending — will restart automatically when idle"
@@ -5047,6 +5207,10 @@ class _AdminMail_page:
     fcrdns_off = "Off"
     fcrdns_score_signal = "Score signal"
     fcrdns_enforce = "Enforce"
+    dmarc_fo_any_failure = "Any check fails (default)"
+    dmarc_fo_all_fail = "Every check fails"
+    dmarc_fo_dkim = "DKIM fails"
+    dmarc_fo_spf = "SPF fails"
     helo_identity_label = "Require HELO identity"
     reject_fcrdns_fail_label = "Reject on FCrDNS failure"
     max_message_bytes_label = "Max message size (bytes)"
@@ -5230,6 +5394,10 @@ class _AdminDns:
     catch_all_cleared_by_succession = "A succession cleared this domain's catch-all — unmatched mail now bounces. Re-designate below if you want a new one."
     role_address_label = "Role addresses:"
     role_address_admin_default = "Admin (default)"
+    dmarc_policy_label = "DMARC policy:"
+    dmarc_policy_reject = "Reject (default)"
+    dmarc_policy_quarantine = "Quarantine"
+    dmarc_policy_none = "None — reports only"
     cert = _AdminDnsCert
     rename = _AdminDnsRename
 
@@ -5540,6 +5708,8 @@ class _Labeler_catalog:
     @staticmethod
     def error_unsubscribe(*, message: str) -> str:
         return f"Failed to unsubscribe: {message}"
+    error_subscribe_unverified = "This labeler cannot be subscribed to: its signature does not check out."
+    inspect_needs_newer_app = "This labeler needs a newer version of the app. Until you update, it does nothing and cannot be subscribed to."
     subscribed_without_mail_holder = "Subscribed, but this labeler cannot run over your mail yet: this nest has no mail service to trust with it."
     subscribed_without_mail = "Subscribed, but this labeler cannot run over your mail until mail is set up for your account."
 
@@ -5743,6 +5913,9 @@ class _Family:
     @staticmethod
     def supervised_notice_onboarding(*, guardian: str) -> str:
         return f"This account will be supervised by {guardian}"
+    @staticmethod
+    def supervised_notice_onboarding_band(*, guardian: str, band: str) -> str:
+        return f"This account will be supervised by {guardian} as a {band} account"
     wards_heading = "Accounts you supervise"
     no_wards = "You are not supervising any accounts."
     policy_contact_approval_label = "Require my approval for new contacts"
@@ -5909,6 +6082,22 @@ class _Notifications:
     def row_interaction(*, sender: str) -> str:
         return f"{sender} interacted with your content"
     @staticmethod
+    def row_tip_sats(*, sender: str, value: str) -> str:
+        return f"{sender} tipped {value} sats on your post"
+    @staticmethod
+    def row_tip_msats(*, sender: str, value: str) -> str:
+        return f"{sender} tipped {value} msats on your post"
+    @staticmethod
+    def row_tip(*, sender: str) -> str:
+        return f"{sender} tipped your post"
+    @staticmethod
+    def row_tip_anonymous_sats(*, value: str) -> str:
+        return f"Someone tipped {value} sats on your post"
+    @staticmethod
+    def row_tip_anonymous_msats(*, value: str) -> str:
+        return f"Someone tipped {value} msats on your post"
+    row_tip_anonymous = "Someone tipped your post"
+    @staticmethod
     def row_knock(*, sender: str, message: str) -> str:
         return f"{sender} wants to connect: {message}"
     @staticmethod
@@ -5957,13 +6146,13 @@ class _Notifications:
         return f"Security: a recovery key replacement was requested (new key {new_key}) and lands at {lands_at}. If this was not you, veto it within 30 days."
     @staticmethod
     def row_security_recovery_replacement_landed(*, new_key: str) -> str:
-        return f"Security: your recovery key was replaced (new key {new_key})."
+        return f"Security: your recovery key was replaced (new key {new_key}). Your recovery phrase cannot recover this account until you restore phrase recovery under Settings → Account → Recovery Kit. If you did not request this replacement, your account may be compromised — contact your nest administrator."
     @staticmethod
     def row_security_recovery_replacement_cancelled(*, cancelled_by: str) -> str:
         return f"Security: the pending recovery key replacement was cancelled by {cancelled_by}."
     @staticmethod
     def row_security_identity_succeeded(*, new_actor_id: str) -> str:
-        return f"Security: this identity was succeeded. Your account moved to a new key ({new_actor_id})."
+        return f"Security: this identity was succeeded. Your account moved to a new key ({new_actor_id}). If you did NOT perform this recovery, whoever holds your recovery kit now controls the account — contact your nest administrator immediately."
     @staticmethod
     def row_security_archive_exported(*, ip: str) -> str:
         return f"Security: your full account archive was downloaded from {ip}. If this was not you, change your keys and contact your nest administrator."
@@ -6047,6 +6236,7 @@ class _Profile:
     @staticmethod
     def private_save_failed(*, reason: str) -> str:
         return f"Could not save your private notes: {reason}"
+    private_save_elsewhere = "Your private notes can only be saved in the other open instance of this app"
 
 
 class _Subscriptions:
@@ -6201,10 +6391,26 @@ class _ErrorProfile:
 class _ErrorBridges:
     recipient_on_local_domain = "That address is on your own server, so it can't be a list member. Add it as an alias instead."
     forward_target_on_local_domain = "That address is on your own server, so mail can't be forwarded to it. Add it as an alias instead."
+    send_disabled = "Sending is turned off for your mail account. Turn it back on in Mail settings to send."
+    sender_not_owned = "The From address isn't one of yours. Send from your own address or one of your aliases."
+    submitter_not_proven = "Your mail app's sign-in couldn't be verified. Sign in again with a current app password, then resend."
+    alias_not_extendable = "Only a disposable address that hasn't expired yet can be extended. Generate a new one instead."
+    conflicts_with_existing_alias = "That address is already in use on this domain. Choose another one."
+    reserved_local_part = "That name is reserved for the server and can't be used as an address. Choose another one."
+    import_source_locked = "This account is already being imported, here or on another of your devices. Finish or cancel that import first."
     over_quota = "Your storage is full, so this wasn't saved. Delete something to make room, or ask your nest admin for more space."
     address_refused = "None of your connected bridges can reach that address. Check how it is written."
     conversation_store_full = "This bridge has too many messages waiting, so this wasn't sent. Try again once it catches up."
     guardian_approval_required = "This account can only message approved contacts."
+
+
+class _ErrorFolders:
+    residency_blocked_by_website = "This folder is served as a website, which needs its content on the nest. Turn off website serving first, then choose Metadata only."
+    residency_blocked_by_webdav = "This folder is served over WebDAV, which needs its content on the nest. Turn off WebDAV serving first, then choose Metadata only."
+    residency_blocked_by_paywall = "This folder is behind a paywall, which needs its content on the nest. Remove the paywall first, then choose Metadata only."
+    metadata_only_cannot_serve = "This folder's content is kept only on your devices, so the nest can't serve it. To serve it as a website, over WebDAV or behind a paywall, set it back to full first under Content kept on the nest."
+    residency_blocked_by_public = "This folder is public, so its followers read its content from the nest. Make the folder private or shared first, then choose Metadata only."
+    metadata_only_cannot_go_public = "This folder's content is kept only on your devices, so the nest has nothing to publish. Set it back to full first under Content kept on the nest, then make it public."
 
 
 class _ErrorActivitypub:
@@ -6214,6 +6420,9 @@ class _ErrorActivitypub:
 
 class _ErrorBluesky:
     not_linked = "This post came from Bluesky, and no Bluesky account is linked for you. Link one on the AT Protocol page first."
+    not_found = "this post is no longer on Bluesky."
+    blocked = "a block between you and its author on Bluesky hides this post."
+    upstream = "Bluesky could not be reached. Check that your Bluesky account is still linked on the AT Protocol page, then try again."
 
 
 class _ErrorNostr:
@@ -6226,6 +6435,10 @@ class _ErrorNostr:
 class _ErrorNest:
     outdated = "This nest is running an outdated version and must be updated before you can connect."
     schema_mismatch = "This nest's database does not match its software version and must be updated."
+
+
+class _ErrorBackup:
+    writer_seat_held = "This destination already keeps your account's backup from another box. Nothing was added."
 
 
 class _ErrorFederation:
@@ -6283,10 +6496,12 @@ class _Error:
     conversations = _ErrorConversations
     profile = _ErrorProfile
     bridges = _ErrorBridges
+    folders = _ErrorFolders
     activitypub = _ErrorActivitypub
     bluesky = _ErrorBluesky
     nostr = _ErrorNostr
     nest = _ErrorNest
+    backup = _ErrorBackup
     federation = _ErrorFederation
     protocol = _ErrorProtocol
     email = _ErrorEmail
@@ -6568,6 +6783,8 @@ class _Connected_apps:
     class_signer = "Nostr signer app"
     class_oauth = "Signed-in app"
     not_connected = "Not connected right now"
+    signer_revoked = "Access revoked — connect this signer app again with a new connection"
+    paused = "Paused — turn Allow external apps back on to let this app work again"
     @staticmethod
     def created(*, time: str) -> str:
         return f"Added {time}"
@@ -6579,6 +6796,21 @@ class _Connected_apps:
     def lasts_until(*, time: str) -> str:
         return f"Until {time}"
     open_ended = "Until you disconnect it"
+    @staticmethod
+    def row_head(*, name: str, badge: str) -> str:
+        return f"{name} · {badge}"
+    @staticmethod
+    def publisher_line(*, publisher: str, client_id: str) -> str:
+        return f"{publisher} — {client_id}"
+    @staticmethod
+    def bullet(*, text: str) -> str:
+        return f"  • {text}"
+    @staticmethod
+    def indented(*, text: str) -> str:
+        return f"  {text}"
+    @staticmethod
+    def oracle_summary(*, ops: str, requests: str) -> str:
+        return f"{ops} · {requests}"
     @staticmethod
     def error_refresh(*, message: str) -> str:
         return f"Failed to load connected apps: {message}"
@@ -6597,6 +6829,23 @@ class _Connected_apps:
     @staticmethod
     def error_secret(*, message: str) -> str:
         return f"Could not read the secret: {message}"
+    @staticmethod
+    def error_record(*, message: str) -> str:
+        return f"Could not read what your nest did for this app: {message}"
+    @staticmethod
+    def oracle_ops(*, count: str) -> str:
+        return f"Your nest used your keys for this app {count} times in the current window"
+    oracle_ops_one = "Your nest used your keys for this app once in the current window"
+    @staticmethod
+    def oracle_requests(*, count: str) -> str:
+        return f"{count} requests answered in all"
+    oracle_requests_one = "1 request answered in all"
+    @staticmethod
+    def oracle_latest(*, time: str, operation: str, detail: str) -> str:
+        return f"Most recent, {time}: {operation} — {detail}"
+    @staticmethod
+    def oracle_latest_bare(*, time: str, operation: str) -> str:
+        return f"Most recent, {time}: {operation}"
     blocked_heading = "Blocked apps"
     blocked_hint = "Requests from these apps are never shown to you."
     @staticmethod

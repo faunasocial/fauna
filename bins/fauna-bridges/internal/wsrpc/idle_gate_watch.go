@@ -117,6 +117,14 @@ func IdleUntilGatesOpen(
 	if inst, ok := client.(interface{ SetOnPush(PushHandler) }); ok {
 		inst.SetOnPush(dispatcher.Handle)
 	}
+	// One re-fetch now that the subscription is in place: the role's startup
+	// fetch ran before it, so a gate opened in between — the admin's enable
+	// and its one config_changed push — would otherwise never be seen. A push
+	// arriving while this is queued coalesces into it (trigger is size-1).
+	select {
+	case reloader.trigger <- struct{}{}:
+	default:
+	}
 	go reloader.Run(watchCtx)
 
 	<-watchCtx.Done()

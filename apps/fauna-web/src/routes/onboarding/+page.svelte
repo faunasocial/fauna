@@ -1,7 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { onDestroy, onMount } from 'svelte';
-  import { identity } from '$lib/store';
+  import { identity, deliverWithheldActorChange } from '$lib/store';
   // The launch-path error classes (`TransientAuthError` / `NestOutdatedError` /
   // `NestIdentityChangedError`) and `forgetNestIdentityPin` are no longer imported
   // here: the shared `LaunchMachine` classifies the launch row and owns the
@@ -16,9 +16,12 @@
     deploymentSeeds,
     linkedNestsMachineWithTrust,
     recoveryRegisterDeferredKit,
+    retireRpcClient,
+    succeedStolenIdentityLocked,
   } from '$lib/rpc';
   import { qrDisplayFromUri } from '$lib/qr-display';
-  import { primeTokenCache, storedNestUrlOrNull } from '$lib/api';
+  import NestRetirePage from '$lib/components/NestRetirePage.svelte';
+  import { primeTokenCache, storedNestUrlOrNull, latchAccountLocked } from '$lib/api';
   import { setTabNestUrl } from '$lib/tabPin';
   import {
     initOnboardingMachine,
@@ -47,7 +50,6 @@
   } from '$lib/onboarding/pending-invite-store';
   import {
     loadPendingFactoryReset,
-    deletePendingFactoryReset,
   } from '$lib/onboarding/pending-factory-reset-store';
   import {
     loadAwaitingDnsJson,
@@ -62,9 +64,11 @@
     phaseNameOf,
     offlineTransientOf,
     identityChangedOf,
+    identityForkOf,
     supersededSuccessorOf,
     accountIndexRefusalOf,
     tokenExpiryOf,
+    lockedUntilOf,
     type LaunchMachine,
     type LaunchSnapshot,
     type AccountIndexRefusal,
@@ -79,6 +83,7 @@
     accountsPersistRestoredPredecessors,
     accountsSwitch,
   } from '$lib/accounts';
+  import { localizedRejectionText } from '$lib/rejection';
   import { PROVIDERS, type ProviderMeta } from '$lib/generated/providers';
   import {
     formatPrice,
@@ -91,9 +96,10 @@
     inviteRecheckPollMs,
     awaitingDnsPollMs,
     handleTld as handleTldShared,
+    emergencyLockoutLockedMessage,
   } from '$lib/wasm-onboarding';
   import { t } from '$lib/i18n/strings';
-  import { resolveLocalized, resolveKey } from '$lib/i18n/localized';
+  import { resolveLocalized, resolveLocalizedNested, resolveKey, type LocalizedText } from '$lib/i18n/localized';
   import { IDS } from '$lib/generated/uiIds';
 
   // Step values produced by the OnboardingMachine. Snake-case translated
@@ -110,6 +116,7 @@
     | 'identity_import'
     | 'recovery_kit'
     | 'recovery_entry'
+    | 'emergency_lockout_entry'
     | 'handle_entry'
     | 'dns_config'
     | 'vps_config'
@@ -174,6 +181,12 @@
   const awaitingDnsCopyEnabled: boolean = $derived.by(() => {
     void machineTick.value;
     return awaitingDns ? (m?.awaitingDnsCopyEnabled() ?? false) : false;
+  });
+  // The exit is live except while a claim is in flight — the machine's rule, and
+  // deliberately NOT `awaitingDnsBusy` (a bare probe must not hide the exit).
+  const awaitingDnsFallthroughEnabled: boolean = $derived.by(() => {
+    void machineTick.value;
+    return awaitingDns ? (m?.awaitingDnsFallthroughEnabled() ?? false) : false;
   });
 
   // Snapshot reads tracked via machineTick. Templates use these `$derived`
@@ -352,6 +365,26 @@
     void machineTick.value;
     return m?.provisionMailModeEnabled() ?? true;
   });
+  // vps-config-update-channel-row: the selected channel's id, read from the
+  // shared machine (never a page-local copy). `UPDATE_CHANNEL_IDS` is
+  // `UpdateChannel::ALL`'s order — the ids are the ui.yaml row keys.
+  const UPDATE_CHANNEL_IDS = ['stable', 'test', 'dev'] as const;
+  const provisionUpdateChannelValue: string = $derived.by(() => {
+    void machineTick.value;
+    return m?.provisionUpdateChannel() ?? 'stable';
+  });
+  function updateChannelCopy(id: (typeof UPDATE_CHANNEL_IDS)[number]): { label: string; desc: string } {
+    const v = t.onboarding.vps_config;
+    // The shared getter picks the description key (the compat-line wording for
+    // Test / Dev while the product major is 0); the page only resolves it.
+    const descKey = m?.updateChannelDescriptionKey(id) ?? '';
+    const desc = descKey ? resolveKey(descKey) : '';
+    switch (id) {
+      case 'stable': return { label: v.update_channel_stable_label, desc: desc || v.update_channel_stable_desc };
+      case 'test': return { label: v.update_channel_test_label, desc: desc || v.update_channel_test_desc };
+      case 'dev': return { label: v.update_channel_dev_label, desc: desc || v.update_channel_dev_desc };
+    }
+  }
   const canContinueVpsValue: boolean = $derived.by(() => {
     void machineTick.value;
     return m?.canContinueVps() ?? false;
@@ -377,16 +410,13 @@
     void machineTick.value;
     return m?.inviteRequestSnapshot();
   });
-  // The guardian a verified out-of-band invite code designates, if any — the
-  // `supervised_by` field on `fauna.account.invite_code.verify`'s reply
-  // (family-safety.md § Wire & data shape). Surfaced as
-  // `invite-code-supervised-notice` BEFORE redemption: supervision is declared at
-  // account creation, never sprung on the account afterwards (§ The trust shape,
-  // invariant 4). Null for an ordinary code.
-  const oobSupervisedBy = $derived.by(() => {
-    const oob = inviteRequestSnapshotValue?.out_of_band_code_state;
-    return oob && typeof oob === 'object' && 'Valid' in oob ? (oob.Valid.supervised_by ?? null) : null;
-  });
+  // The "this account will be supervised by …" notice a verified out-of-band
+  // invite code carries, derived in the shared machine (guardian plus the
+  // code's age band; family-safety.md § App surface → *Age-band surfaces*).
+  // Surfaced as `invite-code-supervised-notice` BEFORE redemption: supervision
+  // is declared at account creation, never sprung on the account afterwards
+  // (§ The trust shape, invariant 4). Null for an ordinary code.
+  const oobSupervisedNotice = $derived(inviteRequestSnapshotValue?.supervised_notice ?? null);
   // Snapshot driving the claim_code page (target §3a). Reached only when
   // handle-check returns UnregisteredUnclaimedNest. Mirrors
   // `fauna_onboarding_machine::ClaimCodeSnapshot`.
@@ -606,7 +636,28 @@
     | 'needs_update'
     | 'sign_in_refused'
     | 'identity_changed'
+    | 'identity_forked'
+    | 'account_locked'
+    | 'identity_stolen_entry'
     | 'account_index_refusal' = $state('idle');
+  // `'account_locked'`: the machine is parked on `fauna.auth.account_locked`
+  // (the snapshot's `locked_until_secs`) — page `launch_account_locked`: the
+  // standing notice and ONE action, never a retry or a fallthrough (nothing
+  // clears a lock before its time). `'identity_stolen_entry'` is that action's
+  // step, the stolen-identity ceremony with no session (`ui/sessions.md`
+  // § Layout & flow → *The locked surface*; `devices.md` § The locked state).
+  // `lockedShownUntil` is the unlock time the notice shows: the notice follows
+  // the machine's snapshot through the shared `lock_notice_holds` rule and
+  // keeps no timer of its own — the machine's one refresh at the unlock time
+  // is what signs the tab back in.
+  let lockedShownUntil: number | null = $state(null);
+  let stolenPhrase = $state('');
+  let stolenConfirmWord = $state('');
+  let stolenBusy = $state(false);
+  // `'identity_forked'`: `IdentityChanged` plus the snapshot's `identity_fork`
+  // bit — fork evidence (`box-recovery.md` § Client acceptance). The surface names
+  // both heads and offers the fallthrough ONLY: no trust button, no retry.
+  let identityForkHeads: { pinnedHex: string; seenHex: string } | null = $state(null);
   let needsUpdateMessage = $state('');
   let accountIndexRefusal: AccountIndexRefusal | null = $state(null);
   let accountIndexResetConfirming = $state(false);
@@ -638,7 +689,7 @@
     disarmLaunchWatchdog();
     launchWatchdog = setTimeout(() => {
       launchWatchdog = null;
-      if (m !== null || appendMode) return; // something rendered — not stuck
+      if (m !== null || appendMode || retireEntry !== null) return; // something rendered — not stuck
       if (launchState !== 'idle' && launchState !== 'in_flight') return; // a launch surface is up
       console.error('[launch] watchdog: launch sequence never settled');
       void surfaceLaunchFailure(new Error(`launch did not settle within ${LAUNCH_WATCHDOG_MS / 1000}s`));
@@ -697,6 +748,29 @@
   // success, register + activate the new account rather than overwriting the one
   // session (handleWizardExit append branch). Mirrors linux's `append` window.
   let appendMode = $state(false);
+
+  // The `nest_retire` page (nest-retirement.md § Layout & flow), hosted here
+  // exactly as `nest_recovery` is — including over a live session. Non-null
+  // while the page is up, naming the entry that opened it: `launch-retire-button`
+  // on the launch retry surface, or `admin-nest-retire-button`, which navigates
+  // here with `?retire=1` (the `?add=1` append-entry precedent) over the live
+  // session. While it is up the page owns the screen, whatever the step.
+  let retireEntry: 'launch' | 'admin' | null = $state(null);
+
+  /** Leave the retire page: back to the entry that opened it — or, after
+   *  retiring this session's own box from `admin-nest`, into launch routing
+   *  afresh: a full load drops the session and keeps the stored credentials,
+   *  and routing then finds the nest gone (the launch retry surface). */
+  function closeRetire(retiredCurrent: boolean) {
+    const entry = retireEntry;
+    retireEntry = null;
+    if (entry !== 'admin') return;
+    if (retiredCurrent) {
+      window.location.replace('/app/onboarding');
+    } else {
+      void goto('/app/admin/nest', { replaceState: true });
+    }
+  }
 
   // The pending-invite journey's own append adoption (`persistInviteSlotIfActionable`)
   // is one-shot per request — re-persisting the slot on every recheck poll must
@@ -760,6 +834,16 @@
         return;
       }
 
+      // The retire page's admin entry (`?retire=1` from `admin-nest-retire-button`):
+      // hosted over the LIVE session, so no launch routing runs — the session,
+      // its client and its account runtime stay exactly as they are, and Back
+      // returns to `admin-nest` (nest-retirement.md § Layout & flow).
+      if (new URLSearchParams(window.location.search).get('retire') === '1') {
+        retireEntry = 'admin';
+        disarmLaunchWatchdog();
+        return;
+      }
+
       // The registry's active account — the identity the launch machine routes
       // on (`RegistryLaunchPersistence`), read through the same registry.
       const active = accountsActiveSessionMaterial();
@@ -778,7 +862,13 @@
       // CR-2) + onboarding.md § App-launch routing.
       console.debug('[launch] createLaunchMachine');
       launchMachine = await createLaunchMachine(
-        { onChanged() { /* the surfaces render off `launchState` / the wizard, set by applyLaunchPhase */ } },
+        // The surfaces render off `launchState` / the wizard, set by
+        // applyLaunchPhase. The one change this follows by itself is the locked
+        // notice's: while it shows, a snapshot on which the shared
+        // `lock_notice_holds` rule no longer holds (the machine's refresh at the
+        // unlock time signed in, or a new lock) is routed afresh. Deferred a
+        // task so the read never re-enters the machine from its own callback.
+        { onChanged() { setTimeout(followLockedNotice, 0); } },
       );
       // Show the loader while the machine classifies. Stash the launch row so the
       // launch-surface CTAs (Retry / trust-this-nest / Online bearer-prime) act on
@@ -813,6 +903,106 @@
       await surfaceLaunchFailure(err);
     }
   });
+
+  /** The locked notice follows the launch machine's snapshot
+   *  (`devices.md` § The locked state): nothing to do while it holds. */
+  function followLockedNotice() {
+    const machine = launchMachine;
+    if (!machine || launchState !== 'account_locked' || lockedShownUntil === null) return;
+    if (machine.lockNoticeHolds(lockedShownUntil)) return;
+    void applyLaunchPhase();
+  }
+
+  /** The notice's three sentences, in order: the lock, its end, and what a
+   *  lock the owner did not set means. The unlock time is formatted here —
+   *  `format_unix_local` is native-only — in its shape, `YYYY-MM-DD HH:MM`. */
+  function lockedNoticeText(until: number): string {
+    const d = new Date(until * 1000);
+    const p = (n: number): string => String(n).padStart(2, '0');
+    const time = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    return [
+      t.onboarding.launch.account_locked,
+      t.onboarding.launch.account_locked_until({ time }),
+      t.onboarding.launch.account_locked_not_yours,
+    ].join(' ');
+  }
+
+  /** `launch-account-locked-stolen-button` → the `identity_stolen_entry` step. */
+  function openStolenEntry() {
+    error = '';
+    stolenPhrase = '';
+    stolenConfirmWord = '';
+    launchState = 'identity_stolen_entry';
+  }
+
+  /** `recovery-entry-back-button` → back to the locked notice; nothing typed
+   *  is kept. Re-routes off the current snapshot, so a lock that ended while
+   *  the step was open lands where the machine now is. */
+  function closeStolenEntry() {
+    error = '';
+    stolenPhrase = '';
+    stolenConfirmWord = '';
+    launchState = 'account_locked';
+    void applyLaunchPhase();
+  }
+
+  /** `identity-stolen-button` on the locked surface — the stolen-identity
+   *  ceremony with NO session: the locked account mints no bearer, so it rides
+   *  an anonymous connection (`devices.md` § The two panic buttons, point 5).
+   *  The whole orchestration is shared (`libs/fauna-wasm/src/succession.rs`,
+   *  the same body the signed-in Settings path runs); this only collects,
+   *  refuses, and routes the outcome exactly as Settings does. */
+  async function succeedFromLocked() {
+    const secret = accountsActiveSessionMaterial()?.secret_hex ?? '';
+    const phrase = stolenPhrase.trim();
+    if (!phrase) {
+      error = t.settings.recovery_kit.kit_phrase_required;
+      return;
+    }
+    if (!secret) {
+      error = t.onboarding.launch.launch_failed;
+      return;
+    }
+    error = '';
+    stolenBusy = true;
+    try {
+      const outcome = await succeedStolenIdentityLocked(secret, phrase);
+      const landed = outcome.landed;
+      console.info(
+        '[launch] stolen-identity ceremony from the locked surface:',
+        outcome.kind,
+        landed ? `successor ${landed.newActorId} persisted=${landed.persisted}` : '',
+      );
+      if (!landed) {
+        // Every arm but `landed` is the shared sentence, painted verbatim.
+        error = resolveLocalized(outcome.message ?? null);
+        stolenBusy = false;
+        return;
+      }
+      stolenPhrase = '';
+      stolenConfirmWord = '';
+      if (!landed.persisted) {
+        // The succession LANDED although the save did not: the seed in the
+        // message is the only way back, so no switch takes the page away.
+        error = t.settings.recovery_kit.stolen_persist_failed({ secret: landed.secretHex });
+        stolenBusy = false;
+        return;
+      }
+      // The account is the successor's: launch as it — the account switch's
+      // own shape (set active, count the teardown, full reload).
+      await accountsSwitch(landed.newActorId);
+      console.info('[launch] switched to the successor', landed.newActorId, '— relaunching');
+      if (__FAUNA_E2E_AUTOMATION__) {
+        (window as unknown as { __fauna_recordSessionTeardown?: () => void })
+          .__fauna_recordSessionTeardown?.();
+      }
+      window.location.assign(`${base}/feed`);
+    } catch (e) {
+      console.warn('[launch] stolen-identity ceremony from the locked surface failed:', e);
+      error = e instanceof Error ? e.message : String(e);
+      stolenBusy = false;
+    }
+  }
 
   // An ASYNC onMount cannot register cleanup (Svelte only honors a
   // synchronously-returned function), so the watchdog disarm on unmount —
@@ -913,6 +1103,15 @@
       // impersonated nest, and never offer a Retry (a retry cannot change the
       // verdict, and must never silently re-pin). The bearer is already dropped
       // machine-side. Recovery is explicit: trust-this-nest, or a different nest.
+      // FORK evidence (`snap.identity_fork`) swaps in the hard-warning surface
+      // naming both heads with no re-trust path (`box-recovery.md` § Client
+      // acceptance); the ordinary surface is unchanged when the bit is clear.
+      const fork = identityForkOf(snap);
+      if (fork !== null) {
+        identityForkHeads = fork;
+        launchState = 'identity_forked';
+        return;
+      }
       launchState = 'identity_changed';
       return;
     }
@@ -931,6 +1130,22 @@
       await routeSupersededToImport(claimedSuccessor, nodeUrlStored, secret);
       return;
     }
+
+    // The account is LOCKED (`devices.md` § The locked state). Checked before
+    // the generic `Offline` rows for the reason the superseded arm above is:
+    // the machine parks the lock on `Offline { transient: false }`, the
+    // outdated-nest row's phase, and carries the unlock time on a side channel.
+    const lockedUntil = lockedUntilOf(snap);
+    if (lockedUntil !== null) {
+      // Nothing else on this tab may keep asking the nest: latch the lock for
+      // both bearer mint paths (`$lib/api`), the web twin of the native mints'
+      // locked latch. The machine's own refresh at the unlock time is the way out.
+      if (secret) latchAccountLocked(secret, lockedUntil);
+      lockedShownUntil = lockedUntil;
+      if (launchState !== 'identity_stolen_entry') launchState = 'account_locked';
+      return;
+    }
+    lockedShownUntil = null;
 
     const transient = offlineTransientOf(snap);
     if (transient === true) {
@@ -1628,6 +1843,70 @@
     m?.back();
   }
 
+  // --- emergency_lockout_entry (ui/sessions.md § Layout & flow → *The
+  // signed-out door*; devices.md § The signed-out door) ---
+  //
+  // Lock an account from a device that holds nothing: the secret key and the
+  // handle are typed here, the lock is signed over an anonymous connection by
+  // the shared machine (`OnboardingMachine::submit_emergency_lockout` — the
+  // handle resolution, the secret parse and the word check are all its), and
+  // NOTHING is persisted. The fields are page-local and dropped on every
+  // visit and on a landed lock; tui's `wizard/emergency_lockout_entry.rs` and
+  // linux's `views/onboarding/emergency_lockout_entry.rs` are the same step.
+  let lockoutSecret = $state('');
+  let lockoutAccount = $state('');
+  let lockoutWord = $state('');
+  let lockoutBusy = $state(false);
+  // The literal `LOCK` — never localized; the machine re-checks it.
+  const LOCKOUT_CONFIRM_WORD = 'LOCK';
+
+  function openEmergencyLockoutEntry() {
+    error = '';
+    lockoutSecret = '';
+    lockoutAccount = '';
+    lockoutWord = '';
+    m?.beginEmergencyLockoutEntry();
+  }
+
+  function backFromEmergencyLockout() {
+    lockoutSecret = '';
+    lockoutAccount = '';
+    lockoutWord = '';
+    backToIdentityChoice();
+  }
+
+  async function submitEmergencyLockout() {
+    if (!m || lockoutBusy) return;
+    error = '';
+    lockoutBusy = true;
+    try {
+      // The account rides the machine's one handle slot — forwarded as shown,
+      // empty included, so a pasted `handle=` or the typed field locates the
+      // nest, never a stale earlier handle.
+      m.setCurrentHandle(lockoutAccount.trim());
+      const raw = await m.submitEmergencyLockout(lockoutSecret, lockoutWord);
+      const outcome = JSON.parse(raw) as { lockedUntil: number | null; message: LocalizedText | null };
+      if (outcome.lockedUntil !== null) {
+        // Landed: the wizard is back on identity_choice. Drop what was typed,
+        // and say when the lock ends — web formats the time itself, in the
+        // shared `format_unix_local` shape.
+        lockoutSecret = '';
+        lockoutAccount = '';
+        lockoutWord = '';
+        const d = new Date(outcome.lockedUntil * 1000);
+        const pad = (n: number): string => String(n).padStart(2, '0');
+        const time = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        error = resolveLocalized(emergencyLockoutLockedMessage(time));
+      } else {
+        error = resolveLocalized(outcome.message);
+      }
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      lockoutBusy = false;
+    }
+  }
+
   // --- recovery_kit (onboarding.md § 1 Identity) ---
   //
   // The screen mints and displays only; registration + escrow run at the
@@ -1832,6 +2111,11 @@
           appendAdoptedRequestId = slot.request_id;
         } catch (e) {
           logMessage('warn', 'fauna_web::onboarding', `append pending-invite adopt failed: ${e}`);
+          // A full account list rejects with the shared line: paint it, the
+          // wizard stays up (`long-term-store.md` § Multi-account evolution →
+          // *The index is bounded*).
+          const refusal = localizedRejectionText(e);
+          if (refusal) error = refusal;
           readyToPersist = false;
         }
       } else {
@@ -2108,7 +2392,8 @@
     if (!outcome) return;
     if ('LoggedIn' in outcome) {
       void deletePendingInvite();
-      void deletePendingFactoryReset();
+      // The pending-factory-reset slot needs no clear here: `accountsPersistLoggedIn`
+      // spends it, and append mode must not spend the live account's slot.
       // The deferred-DNS flow's ONE claim terminal for the awaiting slot
       // (onboarding.md § Long-term store contract, ratified 2026-09-21): the
       // launch row outranks every other row, so a slot surviving into the
@@ -2143,6 +2428,10 @@
       const reachIpv4 = m?.provisionReachIpv4() ?? null;
       const handoffs = captureLoggedInHandoffs();
       let addedActor: string | null = null;
+      // The shared "account list is full" line when the append add was refused
+      // for that reason: the wizard stays up to show it, rather than entering
+      // the app as if the add had landed.
+      let appendRefusal: string | null = null;
       void runLoggedInTerminal({
         register: async () => {
           if (appendMode) {
@@ -2167,15 +2456,31 @@
           }
         },
         persistRestoredPredecessors: () => handoffs.persistRestoredPredecessors(secret),
+        // The account exists now: retire any client built before it (a dial
+        // made while the identity had no account can have stopped it for good
+        // on `not_registered`, and neither half of its key changed), then run
+        // the signed-in handlers the missing home nest held back — the
+        // registry write above recorded that nest.
+        beginSession: () => {
+          retireRpcClient();
+          deliverWithheldActorChange();
+        },
         activate: appendMode
           ? async () => {
               if (addedActor) await accountsSwitch(addedActor);
             }
           : undefined,
         handoffs: () => handoffs.handoffs(secret),
-        enterApp: () => void goto('/app/feed', { replaceState: true }),
+        enterApp: () => {
+          if (appendRefusal) {
+            error = appendRefusal;
+            return;
+          }
+          void goto('/app/feed', { replaceState: true });
+        },
         onFailure: (step, e) => {
           if (step === 'register') {
+            if (appendMode) appendRefusal = localizedRejectionText(e);
             logMessage(
               'error',
               'fauna_web::onboarding',
@@ -2323,7 +2628,16 @@
        (where `step` is already 'done') and the relaunch hydration (where the
        machine's step is whatever seed_identity left it on). Structural twin of
        launch_retry, likewise a non-step surface with a ui.yaml page. -->
-  {#if awaitingDns}
+  {#if retireEntry !== null}
+    <!-- nest_retire, over whatever the screen showed (nest-retirement.md):
+         the page owns the screen until it closes back to its entry. -->
+    <NestRetirePage
+      entry={retireEntry}
+      nestUrl={accountsActiveSessionMaterial()?.nest_url ?? null}
+      secretHex={accountsActiveSessionMaterial()?.secret_hex ?? null}
+      onclose={closeRetire}
+    />
+  {:else if awaitingDns}
     <div class="center">
       <h1>{t.onboarding.awaiting_dns.title}</h1>
 
@@ -2349,6 +2663,16 @@
           disabled={awaitingDnsBusy}
           onclick={() => { void recheckAwaitingDns(); }}
         >{t.onboarding.awaiting_dns.recheck_button}</button>
+        <!-- The exit for a box that never answers: the machine clears the slot
+             and re-lands at handle_entry; the surface then disappears on its own
+             (it is derived off the wizard outcome). Enablement is the machine's
+             answer — never the recheck button's `awaitingDnsBusy`. -->
+        <button
+          class="btn link"
+          data-testid={IDS.AWAITING_DNS_FALLTHROUGH_BUTTON}
+          disabled={!awaitingDnsFallthroughEnabled}
+          onclick={() => { m?.abandonAwaitingManualDns(); }}
+        >{t.onboarding.launch.use_different_nest}</button>
       </div>
 
       {#if errorMessageValue}
@@ -2387,6 +2711,14 @@
               onclick={() => { void recoverFromLaunch(); }}
             >{t.onboarding.launch.recover_lost_box}</button>
           {/if}
+          <!-- Retire entry (nest-retirement.md § Layout & flow): always shown
+               here — unlike recovery it needs no custodied seed, only a
+               cloud token. -->
+          <button
+            class="btn link"
+            data-testid={IDS.LAUNCH_RETIRE_BUTTON}
+            onclick={() => { retireEntry = 'launch'; }}
+          >{t.onboarding.launch.retire_server}</button>
         </div>
       {:else if launchState === 'needs_update'}
         <!-- Nest authoritatively reported it is outdated (`fauna.nest.outdated`):
@@ -2403,6 +2735,61 @@
             onclick={() => { void fallThroughToHandleEntry(); }}
           >{t.onboarding.launch.use_different_nest}</button>
         </div>
+      {:else if launchState === 'account_locked' && lockedShownUntil !== null}
+        <!-- The locked surface (page `launch_account_locked`; ui/sessions.md
+             § Layout & flow → *The locked surface*): the standing notice and
+             ONE action. No retry and no fallthrough — nothing clears a lock
+             before its time, and "use a different nest" would misstate it. -->
+        <h1>{t.onboarding.launch.account_locked_title}</h1>
+        <p data-testid={IDS.LAUNCH_ACCOUNT_LOCKED_NOTICE} class="muted">
+          {lockedNoticeText(lockedShownUntil)}
+        </p>
+        <div class="button-group">
+          <button
+            class="btn danger"
+            data-testid={IDS.LAUNCH_ACCOUNT_LOCKED_STOLEN_BUTTON}
+            onclick={openStolenEntry}
+          >{t.settings.recovery_kit.stolen}</button>
+        </div>
+      {:else if launchState === 'identity_stolen_entry'}
+        <!-- Step `identity_stolen_entry`: the stolen-identity ceremony from a
+             locked app, composed of existing elements only. The confirm token
+             is the fixed literal every app shares (`STOLEN_CONFIRM_WORD`), never
+             localized. -->
+        <h1>{t.onboarding.launch.account_locked_title}</h1>
+        <p class="muted">{t.settings.recovery_kit.stolen_warning}</p>
+        <input
+          data-testid={IDS.RECOVERY_ENTRY_PHRASE_FIELD}
+          type="text"
+          class="input"
+          autocomplete="off"
+          bind:value={stolenPhrase}
+        />
+        <input
+          data-testid={IDS.IDENTITY_STOLEN_CONFIRM_FIELD}
+          type="text"
+          class="input"
+          autocomplete="off"
+          placeholder={t.settings.recovery_kit.stolen_confirm_placeholder}
+          bind:value={stolenConfirmWord}
+        />
+        <div class="button-group">
+          <button
+            class="btn danger"
+            data-testid={IDS.IDENTITY_STOLEN_BUTTON}
+            disabled={stolenBusy || stolenConfirmWord.trim() !== 'SUCCEED'}
+            onclick={() => { void succeedFromLocked(); }}
+          >{t.settings.recovery_kit.stolen}</button>
+          <button
+            class="btn link"
+            data-testid={IDS.RECOVERY_ENTRY_BACK_BUTTON}
+            disabled={stolenBusy}
+            onclick={closeStolenEntry}
+          >{t.common.back}</button>
+        </div>
+        {#if errorMessageValue}
+          <div data-testid={IDS.ERROR_MESSAGE} class="error">{errorMessageValue}</div>
+        {/if}
       {:else if launchState === 'sign_in_refused'}
         <!-- The saved nest no longer signs this identity in (page
              `launch_sign_in_refused`): the honest sentence in its own element,
@@ -2441,6 +2828,23 @@
             data-testid={IDS.NEST_IDENTITY_CHANGED_TRUST_BUTTON}
             onclick={() => { void trustChangedNestIdentity(); }}
           >{t.onboarding.launch.identity_changed_trust}</button>
+          <button
+            class="btn link"
+            data-testid={IDS.LAUNCH_FALLTHROUGH_BUTTON}
+            onclick={() => { void fallThroughToHandleEntry(); }}
+          >{t.onboarding.launch.use_different_nest}</button>
+        </div>
+      {:else if launchState === 'identity_forked' && identityForkHeads}
+        <!-- Fork evidence: a hard warning naming both heads, the fallthrough
+             only — no trust button, no retry (`box-recovery.md` § Client
+             acceptance; ui.yaml `launch_identity_changed` FORK VARIANT). -->
+        <div data-testid={IDS.NEST_IDENTITY_FORK_WARNING} class="error" role="alert">
+          {t.onboarding.launch.identity_fork_warning({
+            pinned: identityForkHeads.pinnedHex,
+            seen: identityForkHeads.seenHex,
+          })}
+        </div>
+        <div class="button-group">
           <button
             class="btn link"
             data-testid={IDS.LAUNCH_FALLTHROUGH_BUTTON}
@@ -2533,6 +2937,12 @@
           data-testid={IDS.RECOVER_LOST_BOX_BUTTON}
           onclick={recoverLostBox}
         >{t.onboarding.identity_choice.recover_lost_box}</button>
+        <!-- The signed-out lock door (ui/sessions.md § The signed-out door). -->
+        <button
+          class="btn link"
+          data-testid={IDS.EMERGENCY_LOCKOUT_ENTRY_BUTTON}
+          onclick={openEmergencyLockoutEntry}
+        >{t.onboarding.identity_choice.emergency_lockout_entry}</button>
       </div>
 
       <!-- What a sign-out's erase could not remove from this browser
@@ -2705,6 +3115,69 @@
       >{t.onboarding.recovery_entry.submit}</button>
 
       <button data-testid={IDS.RECOVERY_ENTRY_BACK_BUTTON} class="btn link" onclick={backToIdentityChoice}>{t.common.back}</button>
+
+      {#if errorMessageValue}
+        <div data-testid={IDS.ERROR_MESSAGE} class="error">{errorMessageValue}</div>
+      {/if}
+    </div>
+
+  {:else if step === 'emergency_lockout_entry'}
+    <!-- The signed-out lock door (ui/sessions.md § Layout & flow → *The
+         signed-out door*): existing and leg-1 elements plus its own back
+         button. The warning is the Sessions page's REQUIRED copy, always
+         visible. Every refusal's words are the shared table on
+         `error-message`; nothing typed is persisted. -->
+    <div class="center">
+      <h1>{t.onboarding.emergency_lockout.title}</h1>
+      <p class="subtitle">{t.onboarding.emergency_lockout.desc}</p>
+
+      <div class="form-group">
+        <label class="field-label" for="lockout-secret">{t.onboarding.emergency_lockout.secret_label}</label>
+        <input
+          id="lockout-secret"
+          type="password"
+          class="input"
+          autocomplete="off"
+          data-testid={IDS.PASTE_SECRET_FIELD}
+          bind:value={lockoutSecret}
+        />
+      </div>
+      <div class="form-group">
+        <label class="field-label" for="lockout-account">{t.common.handle}</label>
+        <input
+          id="lockout-account"
+          type="text"
+          class="input"
+          autocomplete="off"
+          data-testid={IDS.RECOVERY_ENTRY_ACCOUNT_FIELD}
+          bind:value={lockoutAccount}
+        />
+        <p class="muted">{t.onboarding.emergency_lockout.account_hint}</p>
+      </div>
+
+      <p data-testid={IDS.SESSIONS_LOCKOUT_WARNING} class="muted">{t.sessions.lockout_warning}</p>
+      <input
+        type="text"
+        class="input"
+        autocomplete="off"
+        placeholder={t.sessions.lockout_confirm_placeholder}
+        data-testid={IDS.SESSIONS_LOCKOUT_CONFIRM_FIELD}
+        bind:value={lockoutWord}
+      />
+
+      <button
+        class="btn danger large"
+        data-testid={IDS.SESSIONS_LOCKOUT_BUTTON}
+        disabled={lockoutBusy || lockoutWord !== LOCKOUT_CONFIRM_WORD}
+        onclick={() => { void submitEmergencyLockout(); }}
+      >{t.sessions.lockout_button}</button>
+
+      <button
+        data-testid={IDS.EMERGENCY_LOCKOUT_BACK_BUTTON}
+        class="btn link"
+        disabled={lockoutBusy}
+        onclick={backFromEmergencyLockout}
+      >{t.common.back}</button>
 
       {#if errorMessageValue}
         <div data-testid={IDS.ERROR_MESSAGE} class="error">{errorMessageValue}</div>
@@ -3131,6 +3604,28 @@
         {/each}
       </div>
 
+      <!-- Which builds the box's updater follows. Outside the per-provider
+           detail on purpose: the choice does not depend on the provider, so it
+           is shown before one is picked. One keyed radio per channel
+           (`vps-config-update-channel-row[<id>]`), exactly one on. -->
+      <fieldset data-testid={IDS.VPS_CONFIG_UPDATE_CHANNEL_ROW} class="update-channel-picker">
+        <legend>{t.onboarding.vps_config.update_channel_heading}</legend>
+        {#each UPDATE_CHANNEL_IDS as id (id)}
+          {@const copy = updateChannelCopy(id)}
+          <label>
+            <input
+              type="radio"
+              name="vps-update-channel"
+              data-testid={`vps-config-update-channel-row[${id}]`}
+              data-state={provisionUpdateChannelValue === id ? 'on' : 'off'}
+              checked={provisionUpdateChannelValue === id}
+              onchange={() => m?.setProvisionUpdateChannel(id)}
+            />
+            {copy.label} — {copy.desc}
+          </label>
+        {/each}
+      </fieldset>
+
       <div class="button-group">
         <button
           class="btn link"
@@ -3249,9 +3744,9 @@
           <p data-testid={IDS.INVITE_CODE_STATUS} class="status-line">
             {Lookup(inviteRequestSnapshotValue.oob_message)}
           </p>
-          {#if oobSupervisedBy}
+          {#if oobSupervisedNotice}
             <p data-testid={IDS.INVITE_CODE_SUPERVISED_NOTICE} class="status-line">
-              {t.family.supervised_notice_onboarding({ guardian: oobSupervisedBy })}
+              {resolveLocalizedNested(oobSupervisedNotice)}
             </p>
           {/if}
         </div>

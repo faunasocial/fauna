@@ -169,7 +169,8 @@ Authority: what a conversation compose draft keeps and how it survives — the p
   pins for each app's own epoch read (which the library test cannot see): tui
   and linux `a_load_the_outgoing_account_started_fills_nothing_after_the_switch`,
   windows `RestoreOnLaunch_ReadsTheIdentityEpochBeforeTheLoad_NotAfter`, apple
-  `ConversationsDraftsRestoreEpochTests`.
+  `ConversationsDraftsRestoreEpochTests`, android
+  `DraftsRestoreCaptureTest.aLoadTheOutgoingAccountStartedFillsNothingAfterTheSwitch`.
   Adopted by tui, linux, android, web, apple and windows — every app leg now calls `restore_drafts_at`.
 - **A restored draft's attachment is a handle, not a file — its send refuses
   rather than going without it (ruled 2026-09-14, on the posts rail's

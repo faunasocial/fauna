@@ -22,7 +22,7 @@ import "time"
 // that, once it fell into the past during a long failure streak,
 // collapsed the wait to zero and span the loop at full CPU — flooding
 // the logs until the disk filled (a single 69 GB mail-bridge json log on
-// example.com, 2026-06-01). Keeping the policy a pure function of
+// the live nest, 2026-06-01). Keeping the policy a pure function of
 // retryAttempt makes that class of bug impossible.
 func NextDelay(retryAttempt int, interval time.Duration, schedule []time.Duration) time.Duration {
 	if retryAttempt <= 0 || len(schedule) == 0 {

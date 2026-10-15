@@ -103,7 +103,30 @@ pub trait BearerSource: Send + Sync {
     async fn current_token_id(&self) -> Option<String> {
         None
     }
+
+    /// **The account identity this source's latest successful mint
+    /// confirmed**, as a watch — the `handle`/`domain`/`tier` the
+    /// silent challenge's `VerifyReply` carries beside the token
+    /// ([`MintedIdentity`]). `None` (the default) means this source cannot
+    /// say: a [`StaticBearer`] mints nothing, and a handshake mint's reply
+    /// carries no identity. A source that can say returns a receiver whose
+    /// value is `None` until its first silent-challenge mint lands, and is
+    /// replaced on every later one (so a server-side handle rename shows at
+    /// the next re-mint); a refused mint leaves it untouched.
+    ///
+    /// This is how an app learns who its session is signed in as without a
+    /// second challenge of its own (`transport-connection.md` § The dial
+    /// budget). Sync, like [`Self::bearer_actor_id`]: subscribing reads no
+    /// mint state, it only clones a receiver.
+    fn subscribe_self_identity(&self) -> Option<SelfIdentityWatch> {
+        None
+    }
 }
+
+pub use fauna_protocol::auth::MintedIdentity;
+
+/// The receiving half of a [`BearerSource::subscribe_self_identity`] watch.
+pub type SelfIdentityWatch = tokio::sync::watch::Receiver<Option<MintedIdentity>>;
 
 /// Forward through an `Arc`, so an already-shared `Arc<dyn BearerSource>` (e.g.
 /// the one `fauna_client::AuthClient` holds + hands its own content API) can
@@ -130,6 +153,9 @@ impl<T: BearerSource + ?Sized> BearerSource for Arc<T> {
     }
     async fn current_token_id(&self) -> Option<String> {
         (**self).current_token_id().await
+    }
+    fn subscribe_self_identity(&self) -> Option<SelfIdentityWatch> {
+        (**self).subscribe_self_identity()
     }
 }
 
@@ -192,6 +218,15 @@ impl BearerSource for LaunchMachineBearer {
         // known-bad secret. This keeps the client reconnectable after a factory
         // reset (the client-state-recoverability invariant) on both the HTTP and
         // WS surfaces, which share this `BearerSource`.
+        //
+        // Never from the refused state, though, which the machine's retry also
+        // honours: that retry belongs to the user, on the refused surface. Run
+        // here it re-enters the LAUNCH arm, whose claim probe finds a freshly
+        // factory-reset box unclaimed and parks a member's session on the claim
+        // wizard — the verdict lost, the session "Connecting…" for good.
+        if self.0.snapshot().sign_in_refused {
+            return Err(ApiError::SignInRefused);
+        }
         self.0.retry_silent_challenge().await;
         if let Some((b, exp)) = self.0.current_bearer_with_expiry() {
             return Ok((b, Some(exp)));
@@ -235,6 +270,20 @@ impl BearerSource for LaunchMachineBearer {
         if let Some(new_actor_id_hex) = snapshot.superseded_successor {
             return Err(ApiError::Superseded { new_actor_id_hex });
         }
+        // And for a version skew: the refresh met `fauna.nest.outdated` (a nest
+        // restarted into its degraded needs-update mode) or the nest's 426 (a
+        // nest upgraded past this app), and the phase alone reads as a generic
+        // terminal offline. Without this carry the supervisor re-mints behind
+        // "Connecting…" for as long as the skew lasts. The machine keeps the
+        // side, so each carries its own verdict (`version-compatibility.md`
+        // § Dimension 4).
+        match self.0.needs_update() {
+            Some(fauna_launch_machine::OutdatedSide::Nest) => return Err(ApiError::NestOutdated),
+            Some(fauna_launch_machine::OutdatedSide::App) => {
+                return Err(ApiError::SubprotocolMismatch);
+            }
+            None => {}
+        }
         Err(ApiError::Transport(
             "token refresh failed; LaunchMachine not Online".into(),
         ))
@@ -259,6 +308,13 @@ impl BearerSource for LaunchMachineBearer {
 
     async fn current_token_id(&self) -> Option<String> {
         self.0.current_token_id()
+    }
+
+    /// The machine mints over the silent challenge on its launch and every
+    /// refresh, and publishes each reply's identity — so its watch is this
+    /// source's.
+    fn subscribe_self_identity(&self) -> Option<SelfIdentityWatch> {
+        Some(self.0.subscribe_identity())
     }
 }
 
@@ -472,8 +528,7 @@ mod launch_machine_bearer_tests {
     /// transport fault a reconnect supervisor would treat as retryable.
     ///
     /// Scripted as the real chain: signed in, then every later challenge
-    /// refused (the bearer's own `retry_silent_challenge` re-asks once — the
-    /// refused state is the one terminal offline a retry may clear).
+    /// refused.
     #[tokio::test]
     async fn a_machine_whose_sign_in_was_refused_mid_session_says_so_instead_of_a_transport_fault()
     {
@@ -502,6 +557,127 @@ mod launch_machine_bearer_tests {
             err,
             ApiError::SignInRefused,
             "the verdict must not be flattened to a transport fault"
+        );
+    }
+
+    /// The bearer reports a refusal the machine already holds; it never re-asks
+    /// on its own. The member of a nest whose admin has just factory-reset it:
+    /// the reconnect's refresh meets `not_registered` and parks the machine
+    /// refused — and a bearer-side retry would re-run the LAUNCH arm, whose
+    /// claim probe finds the freshly wiped box unclaimed and parks the member's
+    /// machine on the claim wizard, where every later mint is "not Online" and
+    /// the session sits on "Connecting…" for good with the verdict gone. A
+    /// retry from the refused state is the user's, from the refused surface's
+    /// Retry (`onboarding.md` § App-launch routing, the previously-signed-in
+    /// row).
+    #[tokio::test]
+    async fn a_refused_machine_is_reported_without_a_retry_that_would_lose_the_verdict() {
+        let connector = Arc::new(
+            MockAuthConnector::new()
+                .push_silent_challenge(SilentChallengeOutcome::Success(verify_reply("a.bearer")))
+                .push_silent_challenge(SilentChallengeOutcome::NotRegistered)
+                .with_claim_probe(fauna_launch_machine::ClaimProbe::Unclaimed),
+        );
+        let machine = LaunchMachine::new_with_connector(
+            Arc::new(NullObserver),
+            persistence(),
+            Arc::clone(&connector) as Arc<dyn fauna_launch_machine::AuthConnector>,
+        );
+        machine.start().await;
+        assert_eq!(machine.snapshot().phase, LaunchPhase::Online);
+
+        let bearer = LaunchMachineBearer(Arc::clone(&machine));
+        bearer.notify_401().await;
+        assert!(machine.snapshot().sign_in_refused, "precondition");
+
+        assert_eq!(bearer.bearer().await, Err(ApiError::SignInRefused));
+        assert!(
+            machine.snapshot().sign_in_refused,
+            "the bearer must leave the machine on its verdict, not re-run the launch \
+             arm onto the claim wizard: {:?}",
+            machine.snapshot().phase
+        );
+        assert_eq!(connector.claim_probe_calls(), 0, "no launch-arm retry ran");
+    }
+
+    /// The same seam for a nest restarted into its degraded needs-update mode
+    /// mid-session (`version-compatibility.md` § Dimension 4): the post-`401`
+    /// re-mint meets `fauna.nest.outdated`, and the bearer must say so as the
+    /// typed verdict the supervisor stops on — never the transport fault it
+    /// would re-mint behind "Connecting…" for as long as the nest stays stale.
+    #[tokio::test]
+    async fn a_machine_whose_nest_needs_updating_mid_session_says_so_instead_of_a_transport_fault()
+    {
+        let outdated = || SilentChallengeOutcome::NeedsUpdate {
+            message: "this nest must be updated".into(),
+            outdated: fauna_launch_machine::OutdatedSide::Nest,
+        };
+        let connector = MockAuthConnector::new()
+            .push_silent_challenge(SilentChallengeOutcome::Success(verify_reply("a.bearer")))
+            .push_silent_challenge(outdated())
+            .push_silent_challenge(outdated());
+        let machine = LaunchMachine::new_with_connector(
+            Arc::new(NullObserver),
+            persistence(),
+            Arc::new(connector),
+        );
+        machine.start().await;
+        assert_eq!(machine.snapshot().phase, LaunchPhase::Online);
+
+        let bearer = LaunchMachineBearer(Arc::clone(&machine));
+        bearer.notify_401().await;
+        assert_eq!(
+            machine.needs_update(),
+            Some(fauna_launch_machine::OutdatedSide::Nest),
+            "precondition: the machine itself must have reached the verdict"
+        );
+
+        let err = bearer.bearer().await.expect_err("no bearer is available");
+        assert_eq!(
+            err,
+            ApiError::NestOutdated,
+            "the verdict must not be flattened to a transport fault"
+        );
+    }
+
+    /// The other direction on the same seam: the nest was upgraded under a
+    /// signed-in app to one that refuses the app's subprotocol (HTTP 426 at the
+    /// re-mint's upgrade — the app is too old). The bearer must name THAT
+    /// verdict — the app is the side to update — never the nest-outdated one
+    /// the machine's shared needs-update state would otherwise read as, and
+    /// never a transport fault (`version-compatibility.md` § Dimension 4).
+    #[tokio::test]
+    async fn a_machine_whose_app_is_too_old_for_its_nest_mid_session_says_so_instead_of_nest_outdated()
+     {
+        let too_old = || SilentChallengeOutcome::NeedsUpdate {
+            message: "your app is out of date".into(),
+            outdated: fauna_launch_machine::OutdatedSide::App,
+        };
+        let connector = MockAuthConnector::new()
+            .push_silent_challenge(SilentChallengeOutcome::Success(verify_reply("a.bearer")))
+            .push_silent_challenge(too_old())
+            .push_silent_challenge(too_old());
+        let machine = LaunchMachine::new_with_connector(
+            Arc::new(NullObserver),
+            persistence(),
+            Arc::new(connector),
+        );
+        machine.start().await;
+        assert_eq!(machine.snapshot().phase, LaunchPhase::Online);
+
+        let bearer = LaunchMachineBearer(Arc::clone(&machine));
+        bearer.notify_401().await;
+        assert_eq!(
+            machine.needs_update(),
+            Some(fauna_launch_machine::OutdatedSide::App),
+            "precondition: the machine itself must have reached the verdict"
+        );
+
+        let err = bearer.bearer().await.expect_err("no bearer is available");
+        assert_eq!(
+            err,
+            ApiError::SubprotocolMismatch,
+            "a too-old app is not a nest that needs updating"
         );
     }
     /// The same seam for the succession refusal — the one a device's OWN

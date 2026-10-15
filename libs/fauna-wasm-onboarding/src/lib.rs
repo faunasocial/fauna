@@ -3,7 +3,7 @@
 //! Split rationale tracked internally. This crate is loaded only when the
 //! user enters the onboarding wizard.
 
-use fauna_wasm_panic_hook::err_to_js;
+use fauna_wasm_panic_hook::{err_to_js, to_js};
 use wasm_bindgen::prelude::*;
 
 // ── Provisioning bindings ────────────────────────────────────
@@ -268,6 +268,19 @@ pub fn vps_list_server_types(
             .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))?;
         Ok(JsValue::from_str(&json))
     })
+}
+
+/// The confirmation line for a signed-out lock that landed — the shared
+/// `EmergencyLockoutOutcome::message` table's `Locked` arm, as JSON
+/// `LocalizedText`, over `unlock_time` the SPA already formatted from
+/// `submitEmergencyLockout`'s `lockedUntil` (web formats times itself;
+/// `ui/sessions.md` § State & data shape). `error-message` on
+/// `identity_choice` carries it.
+#[wasm_bindgen(js_name = emergencyLockoutLockedMessageJson)]
+pub fn emergency_lockout_locked_message_json(unlock_time: &str) -> String {
+    let line = fauna_onboarding_machine::EmergencyLockoutOutcome::Locked { locked_until: 0 }
+        .message(unlock_time);
+    serde_json::to_string(&line).unwrap_or_default()
 }
 
 // ── Onboarding machine ──────────────────────────────────────────────────
@@ -863,6 +876,16 @@ impl OnboardingMachine {
         self.0.provision_update_channel().id().to_string()
     }
 
+    /// The i18n key of channel `channel_id`'s row description at the running
+    /// product version, or `""` for an id that names no channel. The WASM twin
+    /// of the UniFFI `update_channel_description_key`.
+    #[wasm_bindgen(js_name = updateChannelDescriptionKey)]
+    pub fn update_channel_description_key(&self, channel_id: String) -> String {
+        fauna_provisioning::cloud_init::UpdateChannel::from_id(&channel_id)
+            .map(|c| c.description_key().to_string())
+            .unwrap_or_default()
+    }
+
     #[wasm_bindgen(js_name = selectVpsLocation)]
     pub fn select_vps_location(&self, id: String) {
         self.0.select_vps_location(id)
@@ -1051,6 +1074,8 @@ impl OnboardingMachine {
     /// "the only write moment" (`onboarding.md` § 3 Persistence callouts).
     #[wasm_bindgen(js_name = pendingInviteSlot)]
     pub fn pending_invite_slot(&self) -> JsValue {
+        // Deliberately the default serializer and `undefined` for an absent
+        // slot: the SPA types this `| undefined` (`wasm-onboarding.ts`).
         match self.0.pending_invite_slot() {
             Some(slot) => serde_wasm_bindgen::to_value(&slot).unwrap_or(JsValue::UNDEFINED),
             None => JsValue::UNDEFINED,
@@ -1356,6 +1381,45 @@ impl OnboardingMachine {
         })
     }
 
+    /// `emergency-lockout-entry-button` on `identity_choice` — the signed-out
+    /// lock door (`ui/sessions.md` § Layout & flow → *The signed-out door*).
+    #[wasm_bindgen(js_name = beginEmergencyLockoutEntry)]
+    pub fn begin_emergency_lockout_entry(&self) {
+        self.0.begin_emergency_lockout_entry()
+    }
+
+    /// `sessions-lockout-button` on `emergency_lockout_entry` — resolves to
+    /// JSON `{"lockedUntil": number|null, "message": LocalizedText|null}`.
+    /// `lockedUntil` (epoch seconds) is set when the lock landed: the wizard
+    /// is back on `identity_choice`, and the confirmation line is
+    /// [`emergency_lockout_locked_message_json`] over the unlock time the SPA
+    /// formatted itself (`format_unix_local` is native-only). On every other
+    /// outcome `message` is the shared refusal line for `error-message` and the
+    /// wizard stays on the step. Nothing typed is persisted.
+    #[wasm_bindgen(js_name = submitEmergencyLockout)]
+    pub fn submit_emergency_lockout(
+        &self,
+        secret_input: String,
+        confirm_word: String,
+    ) -> js_sys::Promise {
+        use fauna_onboarding_machine::EmergencyLockoutOutcome as O;
+        let m = Arc::clone(&self.0);
+        wasm_bindgen_futures::future_to_promise(async move {
+            let outcome = m.submit_emergency_lockout(secret_input, confirm_word).await;
+            let json = match outcome {
+                O::Locked { locked_until } => serde_json::json!({
+                    "lockedUntil": locked_until,
+                    "message": null,
+                }),
+                refusal => serde_json::json!({
+                    "lockedUntil": null,
+                    "message": refusal.message(""),
+                }),
+            };
+            Ok(JsValue::from_str(&json.to_string()))
+        })
+    }
+
     /// JSON `[{actor_id_hex, seed_hex}]` of the predecessor seeds a phrase
     /// restore recovered — empty on every ordinary onboarding. Read at the
     /// signed-in handoff and handed to the account registry's
@@ -1519,6 +1583,26 @@ impl OnboardingMachine {
     #[wasm_bindgen(js_name = awaitingDnsCopyEnabled)]
     pub fn awaiting_dns_copy_enabled(&self) -> bool {
         self.0.awaiting_dns_copy_enabled()
+    }
+
+    /// Whether `awaiting-dns-fallthrough-button` ("Use a different nest") may be
+    /// taken now — bind the button's `disabled` to its negation. Off only while
+    /// a claim is in flight; deliberately ON during a bare probe, since a box
+    /// that never answers spends its life there. Asked, not re-derived, so web
+    /// cannot disagree with the other six apps.
+    #[wasm_bindgen(js_name = awaitingDnsFallthroughEnabled)]
+    pub fn awaiting_dns_fallthrough_enabled(&self) -> bool {
+        self.0.awaiting_dns_fallthrough_enabled()
+    }
+
+    /// The "Almost ready" surface's exit: clears the awaiting slot of the
+    /// identity being onboarded through the machine's own injected
+    /// pending-provision store, then lands the wizard at `handle_entry` holding
+    /// the same identity. The caller does nothing else — in particular it must
+    /// not call the active-account `registryClearAwaitingDns`.
+    #[wasm_bindgen(js_name = abandonAwaitingManualDns)]
+    pub fn abandon_awaiting_manual_dns(&self) {
+        self.0.abandon_awaiting_manual_dns()
     }
 
     /// Relaunch hydration from the stored slot, taking its opaque
@@ -1983,7 +2067,7 @@ pub fn provisioning_elapsed_wasm(
         finished_at_ms.map(|v| v as u64),
         now_ms as u64,
     );
-    serde_wasm_bindgen::to_value(&lt).map_err(err_to_js)
+    to_js(&lt).map_err(err_to_js)
 }
 
 /// `fauna_provisioning::progress::status_glyph` → the canonical
@@ -2013,7 +2097,7 @@ pub fn provisioning_step_label_wasm(kind: &str) -> Result<JsValue, JsValue> {
         serde_json::from_value(serde_json::Value::String(kind.to_string()))
             .map_err(|e| JsValue::from_str(&format!("invalid ProvisionStep: {e}")))?;
     let lt = fauna_provisioning::progress::step_label(kind);
-    serde_wasm_bindgen::to_value(&lt).map_err(err_to_js)
+    to_js(&lt).map_err(err_to_js)
 }
 
 /// `fauna_provisioning::progress::substep_label` → the sub-step text as a
@@ -2030,7 +2114,7 @@ pub fn provisioning_substep_label_wasm(
         serde_json::from_value(serde_json::Value::String(key.to_string()))
             .map_err(|e| JsValue::from_str(&format!("invalid SubstepKey: {e}")))?;
     let lt = fauna_provisioning::progress::substep_label(key, cause);
-    serde_wasm_bindgen::to_value(&lt).map_err(err_to_js)
+    to_js(&lt).map_err(err_to_js)
 }
 
 /// The `invite_request` page's poll cadence, in ms — the wasm twin of the
@@ -2146,6 +2230,7 @@ impl NestRetireMachine {
         held_dns_provider_ids: Vec<String>,
         held_dns_creds_json: Vec<String>,
         provider_base_url: Option<String>,
+        doh_base_url: Option<String>,
     ) -> NestRetireMachine {
         NestRetireMachine(fauna_onboarding_machine::NestRetireMachine::new(
             candidate_domains,
@@ -2153,6 +2238,7 @@ impl NestRetireMachine {
             held_dns_provider_ids,
             held_dns_creds_json,
             provider_base_url,
+            doh_base_url,
         ))
     }
 
@@ -2173,6 +2259,21 @@ impl NestRetireMachine {
     ) {
         self.0
             .set_held_dns_json(held_dns_provider_ids, held_dns_creds_json);
+    }
+
+    /// The remembered Fauna slot names of the held DNS record
+    /// (`fauna.state.dns` `dkim_published_names` / `atproto_published_names` /
+    /// `fauna_self_published_names`), each a `{"<domain>": ["<fqdn>", …]}` JSON
+    /// object. Without them the retire run's remembered-slot arm visits nothing.
+    #[wasm_bindgen(js_name = setRememberedSlotsJson)]
+    pub fn set_remembered_slots_json(
+        &self,
+        dkim_json: String,
+        atproto_json: String,
+        fauna_self_json: String,
+    ) {
+        self.0
+            .set_remembered_slots_json(dkim_json, atproto_json, fauna_self_json);
     }
 
     /// JSON-serialized `RetireSnapshot`.
@@ -2272,6 +2373,17 @@ impl NestRetireMachine {
         self.0.set_current_ipv4(ipv4);
     }
 
+    /// Resolve this session's nest host through the public resolver and badge
+    /// the row it points at — the browser has no resolver of its own.
+    /// Resolves `true` when an address was recorded.
+    #[wasm_bindgen(js_name = resolveCurrentHost)]
+    pub fn resolve_current_host(&self, host: String) -> js_sys::Promise {
+        let m = Arc::clone(&self.0);
+        wasm_bindgen_futures::future_to_promise(async move {
+            Ok(JsValue::from_bool(m.resolve_current_host(&host).await))
+        })
+    }
+
     // ── hosted-auth (the bundled provider's sign-in, reused from vps_config) ──
 
     /// Step 1: resolves to a JSON `HostedAuthPrompt`, or `null` when the
@@ -2310,7 +2422,85 @@ impl NestRetireMachine {
         self.0.hosted_auth_can_begin(field_id)
     }
 
+    /// The `hosted-auth` button's label — the wizard's one mapping.
+    #[wasm_bindgen(js_name = hostedAuthButtonText)]
+    pub fn hosted_auth_button_text(&self, field_id: String) -> String {
+        self.0.hosted_auth_button_text(field_id)
+    }
+
+    // ── the credential form (reused from vps_config) ──
+
+    /// The provider the credential form is for, once one is picked.
+    #[wasm_bindgen(js_name = selectedProvider)]
+    pub fn selected_provider(&self) -> Option<String> {
+        self.0.selected_provider()
+    }
+
+    /// JSON `FieldMetaPlain[]` — the selected provider's VPS credential fields.
+    #[wasm_bindgen(js_name = visibleFieldsJson)]
+    pub fn visible_fields_json(&self) -> String {
+        serde_json::to_string(&self.0.visible_fields()).unwrap_or_default()
+    }
+
+    /// Whether `vps-verify-button` is pressable.
+    #[wasm_bindgen(js_name = canVerify)]
+    pub fn can_verify(&self) -> bool {
+        self.0.can_verify()
+    }
+
+    // ── inputs the app reads after the page opened ──
+
+    /// Hold verify until [`Self::app_inputs_landed`] — call before starting the
+    /// live reads (held DNS credentials, the admin entry's local domains).
+    #[wasm_bindgen(js_name = expectAppInputs)]
+    pub fn expect_app_inputs(&self) {
+        self.0.expect_app_inputs();
+    }
+
+    /// The announced inputs have landed (or their read failed): verify is
+    /// pressable again.
+    #[wasm_bindgen(js_name = appInputsLanded)]
+    pub fn app_inputs_landed(&self) {
+        self.0.app_inputs_landed();
+    }
+
+    /// Surface why an input could not be read (a first-listing not-ready
+    /// refusal) as the page's error.
+    #[wasm_bindgen(js_name = setInputError)]
+    pub fn set_input_error(&self, message: String) {
+        self.0.set_input_error(message);
+    }
+
     // ── the view's sentences (JSON `LocalizedText` / arrays of it) ──
+
+    /// JSON `LocalizedText` naming a step row; `step` is `"Dns"` or `"Server"`.
+    #[wasm_bindgen(js_name = stepLabelJson)]
+    pub fn step_label_json(&self, step: String) -> Result<String, JsValue> {
+        let step = match step.as_str() {
+            "Dns" => fauna_onboarding_machine::retire::RetireStep::Dns,
+            "Server" => fauna_onboarding_machine::retire::RetireStep::Server,
+            other => return Err(JsValue::from_str(&format!("unknown RetireStep: {other}"))),
+        };
+        Ok(serde_json::to_string(&self.0.step_label(step)).unwrap_or_default())
+    }
+
+    /// JSON `LocalizedText | null` — why a step was skipped. `stateJson` is a
+    /// step's `StepState` as `snapshotJson` carries it.
+    #[wasm_bindgen(js_name = stepNoteJson)]
+    pub fn step_note_json(&self, state_json: String) -> Result<String, JsValue> {
+        let state: fauna_onboarding_machine::retire::StepState =
+            serde_json::from_str(&state_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        Ok(serde_json::to_string(&self.0.step_note(state)).unwrap_or_default())
+    }
+
+    /// JSON `StepStatus` the `provisioning-step-row` glyph renders for a
+    /// step's `StepState` (as `snapshotJson` carries it).
+    #[wasm_bindgen(js_name = stepStatusJson)]
+    pub fn step_status_json(&self, state_json: String) -> Result<String, JsValue> {
+        let state: fauna_onboarding_machine::retire::StepState =
+            serde_json::from_str(&state_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        Ok(serde_json::to_string(&state.progress_status()).unwrap_or_default())
+    }
 
     #[wasm_bindgen(js_name = confirmSummaryJson)]
     pub fn confirm_summary_json(&self) -> String {

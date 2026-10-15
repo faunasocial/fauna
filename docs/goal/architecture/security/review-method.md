@@ -380,7 +380,7 @@ ratified here at that finding's verify-back.
 
   ```
   DISPOSED: <sha> graded — foreign-resolve fail direction, one finding filed
-  DISPOSED: <sha> out-of-scope — openMLS fork prune, per the standing ruling
+  DISPOSED: <sha> out-of-scope — dependency-tree prune, per the standing ruling
   DISPOSED: <sha> ranked-out — wraps a row's citations, no security surface
   ```
 
@@ -579,11 +579,16 @@ itself the `DISPOSED:` corpus and had the live work queue back inside it, then t
 advancement, which this doc forbids by name. So over a span where the marks were not being
 written, a probe's *silence* is ambiguous: "no mark" does not mean "never read" there, though it
 does wherever the marks were kept. A reviewer inheriting such a span must re-establish the
-dispositions before treating the base as honest. **Re-establishing them has two stages, and only
-the first is done.** Since 2026-09-19 every code-bearing commit from 2026-08-01 to the base is
-*named* by at least one record. But **naming is not marking**. Over a thousand commits in the
-2026-08-01 → 08-27 span are named only by rankings or enumerations and still carry no
-`DISPOSED:` line, so they are still in the window. **The span before 2026-08-01 is ruled owed**
+dispositions before treating the base as honest. **Re-establishing them has two stages.** Since
+2026-09-19 every code-bearing commit from 2026-08-01 to the base is *named* by at least one
+record. But **naming is not marking**, and the second stage — a `DISPOSED:` line for every member
+— is done over the 2026-08-01 → 08-27 span only for the members no live row owns. Measured
+2026-10-13, `--since '2026-08-01 00:00:00'
+--until '2026-08-27 00:00:00'`: set 2242, arm 1 2212, arm 2 3, **RESIDUAL 27**, never-named 0,
+**`UN-OWNED, EVERY CLASS` 0**. The 27 left are each named by a live finding or fix row (15
+fix-closing, 12 other-class), and each is graded by that owner, so check 4 calls the window empty.
+But its RESIDUAL is not 0, so no coverage claim reaches across the tranche until those owners
+close. **The span before 2026-08-01 is ruled owed**
 (2026-09-20; the ruling is § Scope and process's *no span of history* bullet). **Its tranche from
 2026-06-23 to 2026-08-01 is drained in the marking sense (2026-10-08): RESIDUAL 0, all 2130
 commits marked; the span before 2026-06-23 is owed and unfunded.**

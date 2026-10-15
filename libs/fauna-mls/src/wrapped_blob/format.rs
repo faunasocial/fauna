@@ -1131,7 +1131,7 @@ impl ScopeTuple {
     /// is. Constructed by [`Self::content_write`].
     pub const CLASS_CONTENT_WRITE: &'static str = fauna_core::grant_event::CLASS_CONTENT_WRITE;
     /// A third-party principal's write-only ingress into one folder
-    /// (`file-sync.md` § Third-party deposit ingress) — **keyless always**:
+    /// (`folder-deposit.md`) — **keyless always**:
     /// the nest seals what the holder posts to the owner's recipient key, so
     /// the tuple wraps nothing and is the audit + revocation record the
     /// deposit door re-resolves at every deposit. Its `set` is the folder's
@@ -1199,11 +1199,12 @@ impl ScopeTuple {
         }
     }
 
-    /// The `content.read` tuple over one `ext.*` kind — its wrap carries the
-    /// kind's delegable pair (`third-party-kinds.md` § Principal write
-    /// authority: tuples are per kind, `kind` the full string).
+    /// The `content.read` tuple over one delegable account-plane kind — its
+    /// wrap carries the kind's delegable pair (`DelegableSchedule::for_kind`),
+    /// `kind` the full string. The ordinary delegable unit an `ext.*` kind's
+    /// grant and the `fauna:personalization:rw` twin are both built from.
     #[must_use]
-    pub fn ext_kind_read(kind: &str) -> Self {
+    pub fn delegable_kind_read(kind: &str) -> Self {
         Self {
             class: Self::CLASS_CONTENT_READ.to_string(),
             kind: Some(kind.to_string()),
@@ -1211,6 +1212,14 @@ impl ScopeTuple {
             set: None,
             factor: None,
         }
+    }
+
+    /// The `content.read` tuple over one `ext.*` kind — its wrap carries the
+    /// kind's delegable pair (`third-party-kinds.md` § Principal write
+    /// authority: tuples are per kind, `kind` the full string).
+    #[must_use]
+    pub fn ext_kind_read(kind: &str) -> Self {
+        Self::delegable_kind_read(kind)
     }
 
     /// The keyless `content.write` tuple over one `ext.*` kind, confined to

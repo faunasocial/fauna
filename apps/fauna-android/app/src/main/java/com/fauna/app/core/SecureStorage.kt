@@ -36,8 +36,10 @@ class SecureStorage @Inject constructor(
     private val installSecretStore: InstallSecretStore,
 ) : SessionAccount {
     // The same encrypted `fauna_secure_prefs` file the multi-account registry's
-    // SharedPrefsSecretBackend opens (openSecurePrefs).
-    private val prefs: SharedPreferences = openSecurePrefs(context)
+    // SharedPrefsSecretBackend opens (openSecurePrefs). Opened on first use: only
+    // the photo-backup toggle and [clear] touch it, so the identity reads above
+    // stay constructible on a host JVM, which has no Android keystore.
+    private val prefs: SharedPreferences by lazy { openSecurePrefs(context) }
 
     /** The session account's material, or null when no account is in session. */
     private fun material(): FfiSessionMaterial? = runCatching {
@@ -50,23 +52,28 @@ class SecureStorage @Inject constructor(
     override val nestUrl: String?
         get() = material()?.nestUrl?.ifEmpty { null }
 
+    /** The session account's device-id slot as it stands — a pure read. */
+    override val storedDeviceId: String?
+        get() = material()?.deviceId?.ifEmpty { null }
+
     /**
      * The session account's sync device id — lowercase hex, non-null in normal
      * operation. Resolved through [deviceIdFor] for the session account's own
-     * secret: the account's persisted id, else
+     * secret: the account's persisted id when it is a 32-byte-hex sync id (any
+     * other stored value is never served verbatim — the export replaces it), else
      * `derive_device_id(install_secret, actor_id)`, which the shared
      * get-or-create persists into the account's own slot. So a sign-out →
      * sign-in comes back to the SAME named `sync_devices` row
      * (`sync-agent-credentials.md` § Credential model, the 2026-09-20 ruling).
      *
-     * Resolving HERE, in the getter, is deliberate: ~14 read sites across the
-     * workers, kicks and VMs all take a `?: return` null branch, so one
-     * get-or-create serves all of them and no future consumer has to know the
-     * rule. Concurrent first reads are safe: the shared mint is serialized
-     * in-process and derives from the one secret that read back.
+     * One get-or-create serves the ~14 consumers across the workers, kicks and
+     * VMs (each takes a `?: return` null branch), so no consumer has to know the
+     * rule. It is a method, not a property, because it writes ([SessionAccount]'s
+     * own doc says why that matters). Concurrent first calls are safe: the shared
+     * mint is serialized in-process and derives from the one secret that read back.
      */
-    override val deviceId: String?
-        get() = material()?.let { it.deviceId?.ifEmpty { null } ?: deviceIdFor(it.secretHex) }
+    override fun resolveDeviceId(): String? =
+        material()?.let { deviceIdFor(it.secretHex) }
 
     override fun deviceIdFor(secretHex: String?): String? = DeviceIdSlot.resolve(secretHex, cryptoOps) { actor ->
         registry.deviceIdForActor(installSecretStore.store, actor)

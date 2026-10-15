@@ -68,6 +68,7 @@ class AdminBridgesPendingContentTest {
         onApprove: (String, String) -> Unit = { _, _ -> },
         onReject: (String) -> Unit = {},
         onRotate: (String) -> Unit = {},
+        formatTimestamp: (Long) -> String = { ms -> "ts:$ms" },
     ) {
         composeTestRule.setContent {
             AdminBridgesPendingContent(
@@ -79,6 +80,7 @@ class AdminBridgesPendingContentTest {
                 onApprove = onApprove,
                 onReject = onReject,
                 onRotate = onRotate,
+                formatTimestamp = formatTimestamp,
             )
         }
     }
@@ -102,6 +104,23 @@ class AdminBridgesPendingContentTest {
         assertEquals(2, composeTestRule.onAllNodesWithTag("admin-bridges-pending-approve-button").fetchSemanticsNodes().size)
         assertEquals(2, composeTestRule.onAllNodesWithTag("admin-bridges-pending-reject-button").fetchSemanticsNodes().size)
         assertEquals(2, composeTestRule.onAllNodesWithTag("admin-bridges-pending-card-name").fetchSemanticsNodes().size)
+    }
+
+    @Test
+    fun timestampsRouteThroughInjectedFormatter() {
+        // value-formatting.md § Absolute local timestamp display: first-seen and
+        // approved-at both render through the shared formatter the Screen injects,
+        // never a locale-native DateFormat. An absent approved-at keeps the dash.
+        render(
+            pending = listOf(bridge()),
+            approved = listOf(approvedBridge(pubkey = "aa"), approvedBridge(pubkey = "bb", approvedAt = null)),
+        )
+        composeTestRule.onNodeWithTag("admin-bridges-pending-first-seen-at")
+            .performScrollTo().assertTextEquals("ts:1717000000000")
+        composeTestRule.onAllNodesWithTag("admin-bridges-approved-approved-at")[0]
+            .performScrollTo().assertTextEquals("ts:1717000000000")
+        composeTestRule.onAllNodesWithTag("admin-bridges-approved-approved-at")[1]
+            .performScrollTo().assertTextEquals("—")
     }
 
     @Test

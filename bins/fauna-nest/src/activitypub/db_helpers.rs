@@ -153,6 +153,13 @@ pub fn delete_account(conn: &Connection, actor_id: &str) -> Result<()> {
         [actor_id],
     )?;
     conn.execute("DELETE FROM ap_accounts WHERE actor_id = ?1", [actor_id])?;
+    // The oracle's record goes with the actor key it signed with; a later
+    // enable mints a new key, and the principal's grant still decides.
+    conn.execute("DELETE FROM ap_oracle_ops WHERE actor_id = ?1", [actor_id])?;
+    conn.execute(
+        "DELETE FROM ap_oracle_principals WHERE actor_id = ?1",
+        [actor_id],
+    )?;
     Ok(())
 }
 

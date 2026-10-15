@@ -446,4 +446,12 @@ impl MailStore for AccountMailStore {
             .retire_generation(generation)
             .await
     }
+
+    async fn publish(&self) -> Result<(), StoreError> {
+        self.handle(false).await?.publish().await
+    }
+
+    async fn walk(&self) -> Result<(), StoreError> {
+        self.handle(true).await?.walk().await
+    }
 }

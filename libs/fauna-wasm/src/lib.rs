@@ -120,12 +120,24 @@ pub use accounts::*;
 #[cfg(target_arch = "wasm32")]
 pub mod account_runtime;
 
+// The private contact overlay's face — the projection's reads, the private
+// section's staging and its Save (contacts.md § The private overlay).
+#[cfg(target_arch = "wasm32")]
+pub mod contact_overlays;
+
 // Web's account-scope erase — what a sign-out and a remove-account erase for
 // an account beyond the registry's own slots (the account store), behind the
 // sign-out record a later load finishes; account-scoping.md § The scoping
 // taxonomy → Erasure follows scope, the web paragraph.
 #[cfg(target_arch = "wasm32")]
 pub mod account_scope;
+
+// The let-go of a dead generation — the Settings recovery-kit section's fifth
+// act, over this tab's account-runtime handle; the twin of `fauna-ffi`'s
+// `generation_let_go` door (`settings.md` § Recovery kit). Wasm-only for
+// `account_runtime`'s reason: the handle is the whole surface.
+#[cfg(target_arch = "wasm32")]
+pub mod generation_let_go;
 
 // The account port's core half: `accountPortCall`, which answers a door of a
 // consumer seam for a page machine in another chunk from this tab's runtime;
@@ -139,6 +151,15 @@ pub mod account_port;
 // `docs/goal/ui/backups.md` § Audit-alert surface.
 #[cfg(target_arch = "wasm32")]
 pub mod backup_audit;
+
+// The lived-in recovery's web composition — `backupRecoverFromDestination`, the
+// browser twin of `fauna_sync_engine::recovery::recover_from_destination` over
+// the shared `fauna_client_backup::recover_leg`. Wasm-only (the page's own
+// byte plane and `localStorage` audit store). See
+// `docs/goal/architecture/segment-backup-protocol.md` § Recovery into the
+// lived-in nest that regressed.
+#[cfg(target_arch = "wasm32")]
+pub mod backup_recover;
 
 // Browser WS-RPC façade — wasm-only (depends on `fauna-rpc-wasm`, which only
 // exists on wasm). Exposes the `WsRpcClient` handle + typed bridges/email
@@ -159,6 +180,11 @@ pub mod push_registration;
 // Wasm-only, same reason as `rpc` (its refresh rides `WsRpcClient`).
 #[cfg(target_arch = "wasm32")]
 pub mod region;
+// The Sessions page's face (`ui/sessions.md` § Where logic lives) — the web
+// twin of the UniFFI `src/sessions.rs`. Wasm-only, same reason as `rpc` (its
+// calls ride `WsRpcClient`).
+#[cfg(target_arch = "wasm32")]
+pub mod sessions;
 
 // The feature plane's authoring editor (`dynamic-features.md` § Authoring
 // surfaces) — `WasmPolicyEditor`, the web twin of the UniFFI `FfiPolicyEditor`.
@@ -646,6 +672,15 @@ pub fn parse_cap(input: &str) -> Option<f64> {
     fauna_core::format::parse_cap(input).map(|v| v as f64)
 }
 
+/// `fauna_protocol::admin::DEFAULT_LAPSE_TIER` → the tier a member lapses to when
+/// an admin has not chosen one. Web's `admin/settings/+page.svelte` seeds a
+/// membership draft's `lapseTier` from it, so no app keeps a private `'free'`
+/// mirror of the constant. See monetization.md § Pillar 4.
+#[wasm_bindgen(js_name = defaultLapseTier)]
+pub fn default_lapse_tier() -> String {
+    fauna_protocol::admin::DEFAULT_LAPSE_TIER.to_string()
+}
+
 /// `fauna_core::format::parse_count` → parse an admin-mail integer knob
 /// (`admin-mail-*-input`) to the non-negative `u32`, or `undefined` for empty /
 /// non-numeric / negative / fractional / overflowing input. A leading `+` is
@@ -773,11 +808,18 @@ pub fn backup_last_upload_label(
 /// `fauna_core::format::backup_backlog_label` → a complete `LocalizedText`
 /// `{ key, args }` (`backups.backup_destination_backlog` + `{count}`) for the
 /// `backup-destination-backlog-count` row text; `undefined` (no status read
-/// yet) carries the shared 0 baseline. See value-formatting.md § Backup
-/// destination status labels.
+/// yet) carries the shared 0 baseline, and a row whose `writer_state` is
+/// refused reads the refusal in place of the count. See value-formatting.md
+/// § Backup destination status labels.
 #[wasm_bindgen(js_name = backupBacklogLabel)]
-pub fn backup_backlog_label(backlog_count: Option<u32>) -> Result<JsValue, JsValue> {
-    crate::rpc::to_js(&fauna_core::format::backup_backlog_label(backlog_count))
+pub fn backup_backlog_label(
+    backlog_count: Option<u32>,
+    writer_state: Option<String>,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_core::format::backup_backlog_label(
+        backlog_count,
+        writer_state.as_deref(),
+    ))
 }
 
 /// `fauna_core::format::backup_last_audit_label` → the
@@ -1116,6 +1158,17 @@ pub fn can_add_rule(input_kind: &str, value: &str, threshold: &str) -> Result<bo
 pub fn matches_muted_keywords(body: &str, muted_keywords: JsValue) -> Result<bool, JsValue> {
     let muted: Vec<fauna_core::data::MutedKeyword> = crate::rpc::from_js(muted_keywords)?;
     Ok(fauna_core::scoring::muted_keywords_collapse(&muted, body))
+}
+
+/// `preference_surfaces::refused_as_not_ready` → whether a preference page's
+/// load-failure text is the first-listing gate's refusal (`common.needs_nest`
+/// / `common.needs_other_device`). The web twin of the FFI
+/// `refused_as_not_ready`: a page that logs a background read's failure shows
+/// this one on `error-message` instead (`account-client-lifecycle.md`
+/// § The client-side lifecycle → *The first listing*, clauses (4) and (5)).
+#[wasm_bindgen(js_name = refusedAsNotReady)]
+pub fn refused_as_not_ready(reason: &str) -> bool {
+    fauna_account_plane::preference_surfaces::refused_as_not_ready(reason)
 }
 
 /// `fauna_core::scoring::MutedKeywordLevel::of` → the level the muted-words
@@ -1949,6 +2002,27 @@ pub fn parse_daily_minutes(input: &str) -> Result<Option<u16>, JsValue> {
     fauna_core::screen_time::parse_daily_minutes(input).map_err(JsValue::from_str)
 }
 
+/// `fauna_core::screen_time::ScreenTimePolicy::validate` → the cross-field write
+/// rule the nest refuses by at `policy.update` (half-set bounds, `start == end`,
+/// an out-of-range bound or budget), run on the three parsed editor values
+/// BEFORE the RPC. The parsers above judge one field each; only this sees the
+/// pair, so without it a half-set window reaches the guardian as a generic
+/// transport failure. **Throws** the reason string, like the parsers.
+#[wasm_bindgen(js_name = validateScreenTime)]
+pub fn validate_screen_time(
+    window_start: Option<u16>,
+    window_end: Option<u16>,
+    daily_minutes: Option<u16>,
+) -> Result<(), JsValue> {
+    fauna_core::screen_time::ScreenTimePolicy {
+        window_start,
+        window_end,
+        daily_minutes,
+    }
+    .validate()
+    .map_err(JsValue::from_str)
+}
+
 /// `fauna_core::format::approval_display_text` → what a `family-approval-item`
 /// row should display verbatim, or `null` when the caller should render its
 /// own localized no-sender placeholder (`family.approval_no_sender`).
@@ -1970,6 +2044,26 @@ pub fn approval_display_text(
         bridge_id,
         operation,
         target,
+    ))
+}
+
+/// `fauna_core::format::approval_timestamp_display` → when a held mail arrived,
+/// beside `approvalDisplayText`'s sender: `{ clock?, localized?,
+/// absolute_epoch_ms? }` (the `conversationTimestamp` shape, over the entry's
+/// `created_at` unix seconds), or `null` for every kind but `mail_hold` and for
+/// a hold with no stamp — the row then shows its sender alone.
+#[wasm_bindgen(js_name = approvalTimestamp)]
+pub fn approval_timestamp(
+    kind: &str,
+    created_at_secs: f64,
+    now_ms: f64,
+    utc_offset_seconds: i32,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_core::format::approval_timestamp_display(
+        kind,
+        created_at_secs as i64,
+        now_ms as i64,
+        utc_offset_seconds,
     ))
 }
 
@@ -2035,31 +2129,18 @@ pub fn mail_health_check_state_label(state: &str) -> Result<JsValue, JsValue> {
     crate::rpc::to_js(&fauna_core::format::mail_health_check_state_label(state))
 }
 
-/// `fauna_core::format::contact_matches_filter` → does a contact roster row match
-/// the `contacts-search-field` query? Case-insensitive substring of the trimmed
-/// query over `handle` / `domain` / hex `actor_id` (empty query matches all), so
-/// web filters the roster through the same predicate the native apps use instead
-/// of its own actor-id-only match. `handle`/`domain` are `null`/`undefined` for a
-/// federated peer. Local-only — never a nest query. See `docs/goal/ui/contacts.md`
-/// § Where logic lives → Contact roster filter.
-#[wasm_bindgen(js_name = contactMatchesFilter)]
-pub fn contact_matches_filter(
-    query: &str,
-    handle: Option<String>,
-    domain: Option<String>,
-    actor_id: &str,
-) -> bool {
-    fauna_core::format::contact_matches_filter(
-        query,
-        handle.as_deref(),
-        domain.as_deref(),
-        actor_id,
-        // The private overlay's nickname + labels join this face with web's
-        // leg of contacts.md § The private overlay (ordered behind its
-        // account-store backend).
-        None,
-        &[],
-    )
+/// `fauna_core::format::mail_health_heartbeat_label` → `{ localized?: {key,args},
+/// absolute_epoch_ms?: number }` for one mail-health heartbeat stamp (Unix
+/// **seconds**; `undefined`/`null` = never → "Never"): render `localized` via `L()`,
+/// else format `absolute_epoch_ms` with a native date formatter. `atSecs` is `f64`
+/// (wasm `i64` becomes `bigint`). See `mail-deliverability.md` § The mail health
+/// readout.
+#[wasm_bindgen(js_name = mailHealthHeartbeatLabel)]
+pub fn mail_health_heartbeat_label(at_secs: Option<f64>, now_ms: f64) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_core::format::mail_health_heartbeat_label(
+        at_secs.map(|s| s as i64),
+        now_ms as i64,
+    ))
 }
 
 /// `fauna_core::format::contact_toggle_block_label` → a `LocalizedText` `{ key, args }`
@@ -2447,6 +2528,45 @@ pub fn export_format_label(format: JsValue) -> Result<JsValue, JsValue> {
     crate::rpc::to_js(&fauna_client_mail_settings::export_format_label(format))
 }
 
+/// `fauna_client_mail_settings::export_confirm_estimate` →
+/// `{ messages, sealed_bytes, secs }` — the export confirm step's message total,
+/// estimated bytes and estimated seconds over the snapshot's selected
+/// `mailboxes` (`mail-export.md` § Wizard steps step 3), so the SPA never sums
+/// the options itself.
+#[wasm_bindgen(js_name = exportConfirmEstimate)]
+pub fn export_confirm_estimate(mailboxes: JsValue) -> Result<JsValue, JsValue> {
+    let mailboxes: Vec<fauna_client_mail_settings::MailboxOption> = crate::rpc::from_js(mailboxes)?;
+    crate::rpc::to_js(&fauna_client_mail_settings::export_confirm_estimate(
+        mailboxes,
+    ))
+}
+
+/// `fauna_client_mail_settings::transfer_timing` → `{ elapsed_secs, remaining_secs }`
+/// (each a number or absent) — the elapsed time and time left both mail wizards
+/// print on their progress summary, and the time the Done card reports
+/// (`mail-export.md` § Wizard steps steps 4–5, `mailbox-migration.md` steps 5–6).
+/// Times are epoch seconds (JS numbers); `running` is the session state
+/// being `Running`; `processed` counts every message dealt with (done, skipped
+/// and failed alike) against `total`.
+#[wasm_bindgen(js_name = transferTiming)]
+pub fn transfer_timing(
+    started_at: f64,
+    last_progress_at: f64,
+    running: bool,
+    processed: f64,
+    total: f64,
+    now_secs: f64,
+) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_mail_settings::transfer_timing(
+        started_at as i64,
+        last_progress_at as i64,
+        running,
+        processed as u64,
+        total as u64,
+        now_secs as i64,
+    ))
+}
+
 /// `fauna_client_mail_settings::import_source_kind_label` → a `LocalizedText`
 /// `{ key, args }` the SPA resolves through `resolveLocalized` — the canonical
 /// Gmail / Outlook / iCloud / Generic map the `mail-import` wizard's source
@@ -2457,6 +2577,19 @@ pub fn export_format_label(format: JsValue) -> Result<JsValue, JsValue> {
 pub fn import_source_kind_label(kind: JsValue) -> Result<JsValue, JsValue> {
     let kind: fauna_client_mail_settings::ImportSourceKind = crate::rpc::from_js(kind)?;
     crate::rpc::to_js(&fauna_client_mail_settings::import_source_kind_label(kind))
+}
+
+/// `fauna_client_mail_settings::import_selected_totals` → `{ mailboxes, messages,
+/// bytes }` (`bytes` is `null` unless every selected mailbox was sized) — the
+/// `mail-import` Confirm step's sum, so the SPA never re-sums `message_count`
+/// (`mailbox-migration.md` § Wizard steps step 4). `snapshot` is the machine's
+/// `MailImportSnapshot`.
+#[wasm_bindgen(js_name = importSelectedTotals)]
+pub fn import_selected_totals(snapshot: JsValue) -> Result<JsValue, JsValue> {
+    let snapshot: fauna_client_mail_settings::MailImportSnapshot = crate::rpc::from_js(snapshot)?;
+    crate::rpc::to_js(&fauna_client_mail_settings::import_selected_totals(
+        snapshot,
+    ))
 }
 
 /// `fauna_client_mail_settings::import_tls_mode_label` → a `LocalizedText` —
@@ -2575,8 +2708,7 @@ pub fn notification_type_glyph(notif_type: &str) -> String {
 pub fn notification_destination(row: JsValue) -> Result<JsValue, JsValue> {
     let item: fauna_client_notifications::notifications::NotifItem =
         serde_wasm_bindgen::from_value(row).map_err(crate::rpc::err_to_js)?;
-    serde_wasm_bindgen::to_value(&fauna_client_notifications::notification_destination(&item))
-        .map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&fauna_client_notifications::notification_destination(&item))
 }
 
 /// What a notification row says — the localized body, the English `summary`,
@@ -2956,8 +3088,7 @@ pub fn count_remote_images(md: &str) -> usize {
 /// conversations/feed legs adopt it in P2/P3).
 #[wasm_bindgen(js_name = markdownToDocument)]
 pub fn markdown_to_document(md: &str) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_core::render::markdown_to_document(md))
-        .map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&fauna_core::render::markdown_to_document(md))
 }
 
 /// `fauna_core::render::RenderDocument::has_blocked_remote_images` → whether the document carries
@@ -3013,7 +3144,7 @@ pub fn render_document_first_video_hash(doc: JsValue) -> Result<Option<String>, 
 pub fn render_document_media_blocks(doc: JsValue) -> Result<JsValue, JsValue> {
     let doc: fauna_core::render::RenderDocument =
         serde_wasm_bindgen::from_value(doc).map_err(crate::rpc::err_to_js)?;
-    serde_wasm_bindgen::to_value(&doc.media_blocks()).map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&doc.media_blocks())
 }
 
 /// `fauna_core::render::RenderDocument::proxied_images` → every `ProxiedImage` block in body
@@ -3027,7 +3158,7 @@ pub fn render_document_proxied_images(doc: JsValue) -> Result<JsValue, JsValue> 
         serde_wasm_bindgen::from_value(doc).map_err(crate::rpc::err_to_js)?;
     let owned: Vec<fauna_core::render::ProxiedImageRefOwned> =
         doc.proxied_images().into_iter().map(Into::into).collect();
-    serde_wasm_bindgen::to_value(&owned).map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&owned)
 }
 
 /// `fauna_core::render::RenderDocument::proxied_videos` → every `ProxiedVideo` block in body
@@ -3041,7 +3172,7 @@ pub fn render_document_proxied_videos(doc: JsValue) -> Result<JsValue, JsValue> 
         serde_wasm_bindgen::from_value(doc).map_err(crate::rpc::err_to_js)?;
     let owned: Vec<fauna_core::render::ProxiedVideoRefOwned> =
         doc.proxied_videos().into_iter().map(Into::into).collect();
-    serde_wasm_bindgen::to_value(&owned).map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&owned)
 }
 
 /// `fauna_core::render::RenderDocument::quoted_post` → the folded feed quote-post embed,
@@ -3053,7 +3184,7 @@ pub fn render_document_quoted_post(doc: JsValue) -> Result<JsValue, JsValue> {
     let doc: fauna_core::render::RenderDocument =
         serde_wasm_bindgen::from_value(doc).map_err(crate::rpc::err_to_js)?;
     let owned: Option<fauna_core::render::QuotedPostEmbedOwned> = doc.quoted_post().map(Into::into);
-    serde_wasm_bindgen::to_value(&owned).map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&owned)
 }
 
 /// `fauna_core::render::RenderDocument::resolving_link_preview_urls` → the urls of link
@@ -3083,7 +3214,7 @@ pub fn render_document_resolved_link_previews(doc: JsValue) -> Result<JsValue, J
         .into_iter()
         .map(Into::into)
         .collect();
-    serde_wasm_bindgen::to_value(&owned).map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&owned)
 }
 
 /// `fauna_core::render::RenderDocument::link_previews` → every link preview in body
@@ -3097,7 +3228,7 @@ pub fn render_document_link_previews(doc: JsValue) -> Result<JsValue, JsValue> {
         serde_wasm_bindgen::from_value(doc).map_err(crate::rpc::err_to_js)?;
     let owned: Vec<fauna_core::render::LinkPreviewStateOwned> =
         doc.link_previews().into_iter().map(Into::into).collect();
-    serde_wasm_bindgen::to_value(&owned).map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&owned)
 }
 
 /// `fauna_core::render::RenderDocument::remote_images` → every [`RenderBlock::RemoteImage`]
@@ -3110,7 +3241,7 @@ pub fn render_document_remote_images(doc: JsValue) -> Result<JsValue, JsValue> {
         serde_wasm_bindgen::from_value(doc).map_err(crate::rpc::err_to_js)?;
     let owned: Vec<fauna_core::render::RemoteImageRefOwned> =
         doc.remote_images().into_iter().map(Into::into).collect();
-    serde_wasm_bindgen::to_value(&owned).map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&owned)
 }
 
 /// `fauna_core::markdown::decoration_map` → the compose field's inline markdown styling
@@ -3121,8 +3252,7 @@ pub fn render_document_remote_images(doc: JsValue) -> Result<JsValue, JsValue> {
 /// message never disagree. See `conversations.md` § Compose-field inline markdown styling.
 #[wasm_bindgen(js_name = decorationMap)]
 pub fn decoration_map(src: &str) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_core::markdown::decoration_map(src))
-        .map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&fauna_core::markdown::decoration_map(src))
 }
 
 /// `fauna_core::markdown::inline_reveal_ranges` → the Notes editor's caret-edge reveal set:
@@ -3134,8 +3264,7 @@ pub fn decoration_map(src: &str) -> Result<JsValue, JsValue> {
 /// See the Notes editor design spec § Inline conceal.
 #[wasm_bindgen(js_name = inlineRevealRanges)]
 pub fn inline_reveal_ranges(src: &str, caret: usize) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_core::markdown::inline_reveal_ranges(src, caret))
-        .map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&fauna_core::markdown::inline_reveal_ranges(src, caret))
 }
 
 /// `fauna_core::markdown::compose_show_markers_dim_ranges` → the compose field's "show markers"
@@ -3148,10 +3277,9 @@ pub fn inline_reveal_ranges(src: &str, caret: usize) -> Result<JsValue, JsValue>
 /// "show markers" (dim) mode.
 #[wasm_bindgen(js_name = composeShowMarkersDimRanges)]
 pub fn compose_show_markers_dim_ranges(src: &str, caret: usize) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_core::markdown::compose_show_markers_dim_ranges(
+    crate::rpc::to_js(&fauna_core::markdown::compose_show_markers_dim_ranges(
         src, caret,
     ))
-    .map_err(crate::rpc::err_to_js)
 }
 
 /// `fauna_core::notes::parse_note` → the Notes editor block model for a markdown buffer: a
@@ -3160,7 +3288,7 @@ pub fn compose_show_markers_dim_ranges(src: &str, caret: usize) -> Result<JsValu
 /// editor design spec § The block-model sketch.
 #[wasm_bindgen(js_name = parseNote)]
 pub fn parse_note(md: &str) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_core::notes::parse_note(md)).map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&fauna_core::notes::parse_note(md))
 }
 
 /// `fauna_core::notes::note_line_map` → the per-buffer-line structural projection for a Notes
@@ -3175,8 +3303,7 @@ pub fn parse_note(md: &str) -> Result<JsValue, JsValue> {
 pub fn note_line_map(value: &str, blocks: JsValue) -> Result<JsValue, JsValue> {
     let blocks: Vec<fauna_core::notes::Block> =
         serde_wasm_bindgen::from_value(blocks).map_err(crate::rpc::err_to_js)?;
-    serde_wasm_bindgen::to_value(&fauna_core::notes::note_line_map(value, &blocks))
-        .map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&fauna_core::notes::note_line_map(value, &blocks))
 }
 
 /// `fauna_core::notes::caret_to_block_caret` → map a **whole-buffer UTF-8 byte** caret to a shared
@@ -3195,7 +3322,7 @@ pub fn caret_to_block_caret(
         serde_wasm_bindgen::from_value(blocks).map_err(crate::rpc::err_to_js)?;
     let line_map = fauna_core::notes::note_line_map(value, &blocks);
     let caret = fauna_core::notes::caret_to_block_caret(&line_map, &blocks, caret_byte);
-    serde_wasm_bindgen::to_value(&caret).map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&caret)
 }
 
 /// `fauna_core::notes::block_caret_to_byte` → the inverse of `caretToBlockCaret`: map a shared
@@ -3224,8 +3351,7 @@ pub fn block_caret_to_byte(value: &str, blocks: JsValue, caret: JsValue) -> Resu
 /// for web + native.
 #[wasm_bindgen(js_name = composeDecorationPlan)]
 pub fn compose_decoration_plan(src: &str, caret: usize) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_core::markdown::compose_decoration_plan(src, caret))
-        .map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&fauna_core::markdown::compose_decoration_plan(src, caret))
 }
 
 /// `fauna_core::notes::serialize_note` → the lossless markdown for a Notes block document (the
@@ -3258,10 +3384,9 @@ pub fn apply_structural_gesture(
         serde_wasm_bindgen::from_value(gesture).map_err(crate::rpc::err_to_js)?;
     let new_id: fauna_core::notes::BlockId =
         serde_wasm_bindgen::from_value(new_id).map_err(crate::rpc::err_to_js)?;
-    serde_wasm_bindgen::to_value(&fauna_core::notes::apply_structural_gesture(
+    crate::rpc::to_js(&fauna_core::notes::apply_structural_gesture(
         &doc, caret, gesture, new_id,
     ))
-    .map_err(crate::rpc::err_to_js)
 }
 
 /// `fauna_core::notes::apply_edits` → apply a `BlockEdit` list to a Notes block document (the
@@ -3273,8 +3398,7 @@ pub fn apply_edits(doc: JsValue, edits: JsValue) -> Result<JsValue, JsValue> {
         serde_wasm_bindgen::from_value(doc).map_err(crate::rpc::err_to_js)?;
     let edits: Vec<fauna_core::notes::BlockEdit> =
         serde_wasm_bindgen::from_value(edits).map_err(crate::rpc::err_to_js)?;
-    serde_wasm_bindgen::to_value(&fauna_core::notes::apply_edits(&doc, &edits))
-        .map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&fauna_core::notes::apply_edits(&doc, &edits))
 }
 
 /// `fauna_core::markdown::wrap_selection` → wrap a compose-toolbar selection in
@@ -3352,6 +3476,16 @@ pub fn hex_short(bytes: &[u8]) -> String {
 #[wasm_bindgen(js_name = hexFull)]
 pub fn hex_full(bytes: &[u8]) -> String {
     fauna_core::format::hex_full(bytes)
+}
+
+/// Lowercase-hex `blake3` of a blob's bytes — the content address the nest
+/// computes on ingest (`fauna_media::pipeline::bytes_content_hash_hex`). Web's
+/// `uploadBlobMultipart` compares the nest's echoed hash against it before any
+/// caller signs over the echo (`security.md` § Signed-envelope shape, the
+/// client-computed media hash rule).
+#[wasm_bindgen(js_name = blobContentHashHex)]
+pub fn blob_content_hash_hex(bytes: &[u8]) -> String {
+    fauna_media::pipeline::bytes_content_hash_hex(bytes)
 }
 
 /// `fauna_core::format::url_host` → the display host of a `scheme://host[:port]/…`
@@ -3776,7 +3910,8 @@ async fn challenge_verify_inner(secret_hex: &str, origin: &str) -> Result<JsValu
 /// prefix: connection/timeout failures get `"transient: …"` (→ Retry CTA); a
 /// degraded nest's `fauna.nest.outdated` gets `"outdated: …"` carrying the
 /// localized actionable banner (→ a non-retry "update your nest" surface,
-/// version-compatibility.md Dim 4); everything else (a server RPC error other
+/// version-compatibility.md Dim 4); a 4426 close gets `"app-outdated: …"` (→ the
+/// same surface naming the app); everything else (a server RPC error other
 /// than the `not_registered` handled at the call site, or a codec failure)
 /// surfaces as-is (→ unreachable).
 #[cfg(target_arch = "wasm32")]
@@ -3793,6 +3928,14 @@ fn map_silent_err(e: fauna_rpc_wasm::WsRpcError) -> JsValue {
         && rpc.action() == RpcErrorAction::NeedsUpdate
     {
         return outdated_js(rpc.localized());
+    }
+    // The nest closed the anonymous dial 4426: it no longer serves this app's
+    // subprotocol, so the APP is the one too old — its own non-retry signal,
+    // kept apart from the nest-outdated one above (`version-compatibility.md`
+    // § Dimension 4, *The other direction*). Keyed on the typed arm, never
+    // the text.
+    if matches!(e, SubprotocolMismatch) {
+        return app_outdated_js(&e.to_string());
     }
     // The identity was SUCCEEDED — account-level and permanent, not transport.
     // Without this arm it fell into the opaque bucket below, where the SPA's
@@ -3863,6 +4006,16 @@ fn locked_js(locked_until_secs: u64) -> JsValue {
 #[cfg(target_arch = "wasm32")]
 fn outdated_js(detail: &str) -> JsValue {
     JsValue::from_str(&format!("outdated: {detail}"))
+}
+
+/// A 4426 close of the anonymous dial — the nest does not serve this app's
+/// subprotocol — the SPA routes to the non-retry "update your app" surface,
+/// the web sibling of the launch machine's `OutdatedSide::App`
+/// (version-compatibility.md Dim 4, *The other direction*). `detail` is the
+/// already-localized `errors.subprotocol_mismatch` text.
+#[cfg(target_arch = "wasm32")]
+fn app_outdated_js(detail: &str) -> JsValue {
+    JsValue::from_str(&format!("app-outdated: {detail}"))
 }
 
 // ── Pre-identity public discovery ───────────────────────────────────────────
@@ -3989,6 +4142,51 @@ async fn actor_by_handle_inner(
     ))
 }
 
+/// The Contacts Find User lookup with cross-nest peer discovery — the wasm face of
+/// `fauna_client_core::find_user::find_user_across_nests`, twin of the UniFFI
+/// `find_user` (`contacts.md` § Implementation status today → *Cross-nest
+/// knocks*). `origin` is the home nest; `domain` the typed `@domain` qualifier
+/// (`undefined` for a bare handle). A foreign domain is dialed **directly** at its
+/// derived base URL — not through `nestResolve`, whose nest-proxied hop refuses
+/// loopback / IP / `.local` authorities. Resolves the JSON `{ actor_id, handle,
+/// domain, nest_url }`: `nest_url` is the peer nest the actor resolved on (the
+/// knock's `recipient_nest_url`), `null` for a home-nest actor.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = findUser)]
+pub fn find_user(handle: String, origin: String, domain: Option<String>) -> js_sys::Promise {
+    wasm_bindgen_futures::future_to_promise(async move {
+        find_user_inner(&handle, &origin, domain).await
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn find_user_inner(
+    handle: &str,
+    origin: &str,
+    domain: Option<String>,
+) -> Result<JsValue, JsValue> {
+    let home = fauna_rpc_wasm::AnonymousWsRpcClient::connect(origin)
+        .map_err(|e| transient_js(&format!("anonymous connect {origin}: {e}")))?;
+    let hit = fauna_client_core::find_user::find_user_across_nests(
+        &home,
+        handle,
+        domain.as_deref(),
+        |d| fauna_provisioning::probe::peer_nest_url(Some(d.to_string())),
+        |url| async move { fauna_rpc_wasm::AnonymousWsRpcClient::connect(&url) },
+    )
+    .await
+    .map_err(|e| transient_js(&e))?;
+    Ok(JsValue::from_str(
+        &serde_json::json!({
+            "actor_id": hit.found.actor_id,
+            "handle": hit.found.handle,
+            "domain": hit.found.domain,
+            "nest_url": hit.nest_url,
+        })
+        .to_string(),
+    ))
+}
+
 // ── Launch-path succession verification ─────────────────────────────────────
 
 /// The **verified** successor of a refused identity — the wasm face of
@@ -4109,17 +4307,14 @@ pub fn adopt_held_successor(predecessor_actor_id_hex: String, verified_successor
     crate::succession::adopt_held_successor(&predecessor_actor_id_hex, &verified_successor)
 }
 
-/// Discharge a relaunch adoption's owed group sweep — `null` when nothing was
-/// owed, else the unbidden press's answer as a `LocalizedText` for
-/// `error-message`. Claims once; see `succession::discharge_owed_sweep`.
+/// Whether this identity is owed a relaunch adoption's group sweep — a
+/// **peek**, so the Settings page brings conversations up only on the launch
+/// that owes one. The discharge itself sweeps over the live session and the
+/// live engine, so it is a `WsRpcClient` method (`dischargeOwedSuccessionSweep`).
 #[cfg(target_arch = "wasm32")]
-#[wasm_bindgen(js_name = dischargeOwedSuccessionSweep)]
-pub fn discharge_owed_succession_sweep(actor_id_hex: String) -> Result<JsValue, JsValue> {
-    match crate::succession::discharge_owed_sweep(&actor_id_hex) {
-        // `to_js` for `successionSweepCopy`'s reason: `args` is a map.
-        Some(sentence) => crate::rpc::to_js(&sentence),
-        None => Ok(JsValue::NULL),
-    }
+#[wasm_bindgen(js_name = successionSweepOwed)]
+pub fn succession_sweep_owed(actor_id_hex: String) -> bool {
+    crate::succession::succession_sweep_owed(&actor_id_hex)
 }
 
 /// Classify a user-entered link-form value (shared `fauna_client_pair::
@@ -4906,6 +5101,35 @@ pub fn issuer_forced_confirm_view(arm: JsValue, view: JsValue) -> Result<JsValue
 #[wasm_bindgen(js_name = takedownVerdict)]
 pub fn takedown_verdict(restore: bool, error: Option<String>) -> Result<JsValue, JsValue> {
     crate::rpc::to_js(&fauna_client_moderation::takedown_verdict(restore, error))
+}
+
+/// `fauna_client_moderation::row_is_appealable` → whether a merged queue row
+/// (`moderationQueue`'s output) carries a nest-issued decision to appeal
+/// (`moderation.md` § Legal takedown — the transparency triple's second leg).
+/// True for a server row only. The wasm twin of the UniFFI `row_is_appealable`.
+#[wasm_bindgen(js_name = moderationRowIsAppealable)]
+pub fn moderation_row_is_appealable(row: JsValue) -> Result<bool, JsValue> {
+    let row: fauna_client_moderation::QueueRow = crate::rpc::from_js(row)?;
+    Ok(fauna_client_moderation::row_is_appealable(&row))
+}
+
+/// `fauna_client_moderation::appeal_form_view` → `{ can_submit, blocked_reason,
+/// submit_label, summary }` (text fields as `LocalizedText` `{key, args}`): what
+/// the queue's appeal form renders, from the content id captured at open time
+/// and the reason as typed. The wasm twin of the UniFFI `appeal_form_view`.
+#[wasm_bindgen(js_name = appealFormView)]
+pub fn appeal_form_view(content_id: String, reason: String) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_moderation::appeal_form_view(
+        &fauna_client_moderation::AppealForm { content_id, reason },
+    ))
+}
+
+/// `fauna_client_moderation::appeal_verdict` → the appeal's outcome line
+/// (`appeal-status`) — the rejection's error string on failure, `null` on
+/// success. The wasm twin of the UniFFI `appeal_verdict`.
+#[wasm_bindgen(js_name = appealVerdict)]
+pub fn appeal_verdict(error: Option<String>) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_moderation::appeal_verdict(error))
 }
 
 /// `fauna_client_admin::admin_user_row_controls` → `{ suspend, evict, restore,

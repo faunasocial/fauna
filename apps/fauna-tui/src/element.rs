@@ -303,6 +303,12 @@ pub enum SelectTarget {
     RuleType,
     Combination,
     Factor,
+    /// `feed-post-train-target-sheet` — which trained factor the open post's
+    /// training verbs target. A raw-value picker over the stable `topic:<hex>`
+    /// keys (the [`Self::Factor`] split: the user's topic name is paint-only),
+    /// plus `crate::feed::NEW_TRAINED_TOPIC_OPTION`, which leaves for the
+    /// Trained-topics facet.
+    TrainTarget,
     /// `bridge-form-bridge-select` — the stable bridge **id** (what
     /// `subscribe_bridge` encodes) is both what `get_text` returns and what
     /// `select` takes; the human-readable name is the paint-only
@@ -428,10 +434,15 @@ pub enum SelectTarget {
     /// picker like [`Self::MediaSort`]; the ordering itself runs in shared Rust
     /// (`MediaSnapshot::view`'s `descending`), never per client.
     MediaSortDirection,
-    /// `media-folder-filter` — a folder **name**, or `crate::media`'s
-    /// `__all__` sentinel for the all-media default view. A raw-value picker:
-    /// the set name is both what `get_text` returns and what `select` takes
-    /// (the linux/web `FILTER_ALL_VALUE` contract).
+    /// `media-folder-filter` — a set's **identity value** as the media
+    /// machine mints it (an own set's name, a shared set's `local:<id>`, a
+    /// followed scope's value), or `crate::media`'s `__all__` sentinel for the
+    /// all-media default view. A raw-value picker: the value is both what
+    /// `get_text` returns and what `select` takes (the linux/web
+    /// `FILTER_ALL_VALUE` contract); the labels (`<name> (<owner>)` on a set
+    /// the caller does not own) are paint-only, through `option_labels` and
+    /// `display_value` (`media.md` § Encryption at rest → *The filter and the
+    /// upload target address the row*).
     MediaFolderFilter,
     /// `share-link-expiry-select` — the raw expiry value (`"1d"` / `"7d"` /
     /// `"30d"` / `"1y"`, `fauna_client_share::EXPIRY_OPTIONS`); the localized
@@ -499,6 +510,12 @@ pub enum SelectTarget {
     /// choosing a tier). A raw-value picker like [`Self::InviteTier`]; LOCAL
     /// draft, committed by `admin-users-admit-button`.
     AdmitTier,
+    /// `admin-users-admit-guardian-select` — the guardian a directly-admitted
+    /// account is supervised by (`family-safety.md` § The guardianship link,
+    /// *Set at admission*). A LABEL picker with the same contract as
+    /// [`Self::InviteGuardian`]; LOCAL draft, committed by
+    /// `admin-users-admit-button`.
+    AdmitGuardian,
     /// `admin-users-invite-guardian-select` — the guardian for a supervised
     /// admission via a minted code (family-safety). **A LABEL picker** like
     /// [`Self::FamilyUnknownSender`]: the option value is the user's handle (the
@@ -712,6 +729,16 @@ pub enum SelectTarget {
     DnsCatchAll {
         row: usize,
     },
+    /// `admin-dns-domain-dmarc-policy-select[row]` — the `row`-th domain's
+    /// published DMARC policy. A **raw-value** picker like
+    /// [`Self::MailFcrdnsMode`]: the RFC 7489 tag (`reject` / `quarantine` /
+    /// `none`) is both what `get_text` returns and what `select` takes, the
+    /// localized option text from the shared
+    /// `fauna_client_mail_settings::local_domains::dmarc_policy_options`; the
+    /// row index is baked in at paint time, as for [`Self::DnsCatchAll`].
+    DnsDmarcPolicy {
+        row: usize,
+    },
     /// `admin-dns-domain-role-address-<role>-select[row]` — which actor receives
     /// the `row`-th domain's `<role>@` mail, or "Admin (default)" (clear). Same
     /// label round-trip as [`Self::DnsCatchAll`]; the role rides the target because
@@ -755,6 +782,7 @@ impl SelectTarget {
             SelectTarget::Combination => Gesture::Feed(crate::feed::Action::SetCombination(value)),
             SelectTarget::Factor => Gesture::Feed(crate::feed::Action::SetFactor(value)),
             SelectTarget::BridgeKind => Gesture::Feed(crate::feed::Action::SetBridgeKind(value)),
+            SelectTarget::TrainTarget => Gesture::Feed(crate::feed::Action::PickTrainTarget(value)),
             SelectTarget::ReminderOffset => {
                 Gesture::Events(crate::events::Action::SetReminderOffset(value))
             }
@@ -880,6 +908,9 @@ impl SelectTarget {
             SelectTarget::DnsCatchAll { row } => {
                 Gesture::Admin(crate::admin::Action::SelectDnsCatchAll { row, label: value })
             }
+            SelectTarget::DnsDmarcPolicy { row } => {
+                Gesture::Admin(crate::admin::Action::SelectDnsDmarcPolicy { row, tag: value })
+            }
             SelectTarget::DnsRoleAddress { row, role } => {
                 Gesture::Admin(crate::admin::Action::SelectDnsRoleAddress {
                     row,
@@ -907,6 +938,9 @@ impl SelectTarget {
             }
             SelectTarget::InviteTier => Gesture::Admin(crate::admin::Action::SetInviteTier(value)),
             SelectTarget::AdmitTier => Gesture::Admin(crate::admin::Action::SetAdmitTier(value)),
+            SelectTarget::AdmitGuardian => {
+                Gesture::Admin(crate::admin::Action::SetAdmitGuardian(value))
+            }
             SelectTarget::InviteGuardian => {
                 Gesture::Admin(crate::admin::Action::SetInviteGuardian(value))
             }
@@ -1546,6 +1580,22 @@ impl Element {
             debug_assert!(false, "display_value is a Select-only builder");
         }
         self
+    }
+
+    /// The paint-only human form of EVERY option of a [`Role::Select`], in
+    /// option order — what the select paints as each option comes round. It
+    /// answers the automation `options` attribute (`option_texts` reads the
+    /// option texts a picker paints, never its wire keys), which otherwise
+    /// falls back to the raw option values. For a select whose values are wire
+    /// keys with a human form, the [`display_value`](Self::display_value) of
+    /// the whole list. Select-only; a debug build asserts on misuse.
+    pub fn option_labels(self, labels: Vec<String>) -> Self {
+        debug_assert!(
+            matches!(&self.role, Role::Select { options, .. } if options.len() == labels.len()),
+            "option_labels is a Select-only builder, one label per option"
+        );
+        let encoded = serde_json::to_string(&labels).unwrap_or_default();
+        self.attr("options", encoded)
     }
 
     /// Attach an automation attribute the agent reads via `get_attr(id, key)`

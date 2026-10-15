@@ -35,7 +35,30 @@ public sealed partial class ThreadHeader : UserControl
 
     public void SetLabel(string label) => ThreadLabel.Text = label;
 
-    public void SetProtocolIcon(string glyph) => ProtocolIcon.Text = glyph;
+    /// <summary><paramref name="bridgeId"/> is the <c>bridge</c> attribute (HelpText);
+    /// null off a bridged room.</summary>
+    public void SetProtocolIcon(string glyph, string? bridgeId = null)
+    {
+        ProtocolIcon.Text = glyph;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
+            ProtocolIcon, bridgeId ?? string.Empty);
+    }
+
+    /// <summary><c>conversation-guardian-state</c> in the thread header: the shared
+    /// label and its <c>state</c> token, both from shared Rust. A null label collapses
+    /// the marker (absent); the thread's text stays readable either way.</summary>
+    public void SetGuardianState(string? label, string? stateToken)
+    {
+        if (label is null)
+        {
+            GuardianStateLabel.Visibility = Visibility.Collapsed;
+            return;
+        }
+        GuardianStateLabel.Text = label;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
+            GuardianStateLabel, stateToken ?? string.Empty);
+        GuardianStateLabel.Visibility = Visibility.Visible;
+    }
 
     /// <summary>
     /// Gate the header's affordances. <paramref name="canInvite"/> and
@@ -95,6 +118,26 @@ public sealed partial class ThreadHeader : UserControl
         RoomClassLabel.Visibility = Visibility.Visible;
         RoomSettingsButton.Visibility = Visibility.Visible;
         RoomSettingsButton.IsEnabled = true;
+    }
+
+    /// <summary>
+    /// <c>thread-room-notice</c>: the room's standing notice, painted only while one
+    /// holds. Both arguments come from shared Rust — <c>RoomNoticeLabel</c> and
+    /// <c>RoomNoticeAttrToken</c> over the notice <c>RoomNoticeFor</c> derived from
+    /// the projected room, never re-decided here. <c>null</c> collapses the
+    /// element (absent).
+    /// </summary>
+    public void SetRoomNotice(string? label, string? stateToken)
+    {
+        if (label is null)
+        {
+            RoomNoticeLabel.Visibility = Visibility.Collapsed;
+            return;
+        }
+        RoomNoticeLabel.Text = label;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
+            RoomNoticeLabel, stateToken ?? string.Empty);
+        RoomNoticeLabel.Visibility = Visibility.Visible;
     }
 
     private void OnRenameClicked(object sender, RoutedEventArgs e)

@@ -1820,6 +1820,20 @@ internal partial class OnboardingViewModel : ObservableObject
     /// Called from the view's codebehind. Per onboarding.md §5.</summary>
     public void SetProvisionMailMode(bool enabled) => _m.SetProvisionMailMode(enabled);
 
+    /// <summary>The update channel the box will be provisioned on (Stable until
+    /// the user picks another). The shared getter is the only source — the view
+    /// re-reads it each tick and caches nothing. onboarding-provisioning.md §5.</summary>
+    public UpdateChannel ProvisionUpdateChannel => _m.ProvisionUpdateChannel();
+
+    /// <summary>Radio click → record the channel in the shared machine, which
+    /// feeds it into the cloud-init image tag.</summary>
+    public void SetProvisionUpdateChannel(UpdateChannel channel) => _m.SetProvisionUpdateChannel(channel);
+
+    /// <summary>The i18n key of a channel's one-line description at the running
+    /// product version (the shared compat-line wording), for the view to look up.</summary>
+    public static string UpdateChannelDescriptionKey(UpdateChannel channel)
+        => FaunaOnboardingMachineMethods.UpdateChannelDescriptionKey(channel);
+
     /// <summary>
     /// Curated server-type options for the selected provider, RAM-gated by
     /// the mail-mode toggle (mail ON ⇒ only <c>mem_gb &gt;= 2</c> plans, via

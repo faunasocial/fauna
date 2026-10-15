@@ -85,11 +85,19 @@ pub fn resolve_pump_secs(raw: Option<String>) -> u64 {
 
 /// [`resolve_pump_secs`] over this process's `FAUNA_SHARE_PUMP_SECS` — what
 /// an app passes to [`SharePlane::pump_interval`] unless it is a test
-/// injecting its own.
+/// injecting its own. Compile-gated outer, env inner (convention 15, the
+/// `always_resident::rescan_interval` pair): a production release build never
+/// reads the var and runs [`DEFAULT_PUMP_SECS`].
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
 pub fn pump_interval_from_env() -> std::time::Duration {
     std::time::Duration::from_secs(resolve_pump_secs(
         std::env::var("FAUNA_SHARE_PUMP_SECS").ok(),
     ))
+}
+
+#[cfg(not(any(debug_assertions, feature = "e2e-agent")))]
+pub fn pump_interval_from_env() -> std::time::Duration {
+    std::time::Duration::from_secs(DEFAULT_PUMP_SECS)
 }
 
 /// One bound folder's replica as the plane uses it — the serve half of a
@@ -459,14 +467,13 @@ pub trait SharePlaneHost: Send + Sync + 'static {
     /// `group_roster`, the peer witness door's evaluator this driver refreshes
     /// from the account store every pass. Returns
     /// the seat and its bound socket addresses (the publish half crosses them
-    /// with the interface list). ⚠ The transport's relay stays `None` today —
-    /// by ruling, until the nest's relay serves address discovery; the
+    /// with the interface list). The seat takes `evidence`'s relay URL; the
     /// ceremony's own dials carry `relay_available: false` by construction,
     /// so a relay on the seat hands it no dial path (`p2p.md` § The relay →
     /// *The cross-user seat and the relay*).
     async fn bind_seat(
         &self,
-        evidence: Option<Vec<String>>,
+        evidence: Option<crate::peer_leg::PeerLegNestFacts>,
         membership: &Arc<dyn fauna_peer_share::admission::SetMembership + Send + Sync>,
         group_roster: &Arc<dyn fauna_peer_share::admission::GroupRosterState + Send + Sync>,
     ) -> Result<(Arc<Self::Seat>, Vec<std::net::SocketAddr>), String>;
@@ -489,9 +496,10 @@ pub trait SharePlaneHost: Send + Sync + 'static {
     /// actually moved the state.
     fn state_changed(&self);
 
-    /// Rule 7's LIVE half: `fauna.nest.info`'s capability list when the nest
-    /// answers. An `Err` is *no evidence*, never optimism.
-    async fn live_capabilities(&self) -> Result<Vec<String>, String>;
+    /// Rule 7's LIVE half: `fauna.nest.info`'s facts — the capability list
+    /// and the relay URL — when the nest answers. An `Err` is *no evidence*,
+    /// never optimism.
+    async fn live_nest_facts(&self) -> Result<crate::peer_leg::PeerLegNestFacts, String>;
 
     /// The `p2p-share.transfer` policy when the nest answers; `None` falls
     /// back to the tier-1 constants (`dynamic-features.md` § Evaluation
@@ -508,17 +516,18 @@ pub trait SharePlaneHost: Send + Sync + 'static {
 }
 
 /// Rule 7's LIVE half, read through the app's nest connection — the body
-/// every leg's [`SharePlaneHost::live_capabilities`] is, so no leg decides
+/// every leg's [`SharePlaneHost::live_nest_facts`] is, so no leg decides
 /// how a `fauna.nest.info` failure reads. An `Err` here is *no evidence*
 /// (the caller's `.ok()`), never optimism.
 ///
 /// A free function rather than a default method: the trait cannot reach a
 /// leg's nest handle, and a leg's own field is the only thing that differs.
-pub async fn live_capabilities(nest: Arc<fauna_client::NestClient>) -> Result<Vec<String>, String> {
-    fauna_client_features::FeaturesClient::new(nest)
-        .node_capabilities()
+pub async fn live_nest_facts(
+    nest: Arc<fauna_client::NestClient>,
+) -> Result<crate::peer_leg::PeerLegNestFacts, String> {
+    crate::peer_leg::fetch_nest_facts(&nest)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// The `p2p-share` transfer policy, read through the app's nest connection —
@@ -721,18 +730,14 @@ pub async fn run<H: SharePlaneHost>(plane: SharePlane<H>) {
                 None
             } else {
                 composed_evidence(
-                    plane.host.live_capabilities().await,
-                    plane
-                        .account
-                        .cached_nest_capabilities()
-                        .await
-                        .ok()
-                        .flatten(),
+                    plane.host.live_nest_facts().await,
+                    plane.account.cached_nest_facts().await.ok().flatten(),
                 )
             };
             // A refusal shapes only the cell: rule 7 says no evidence refuses,
             // and the status line says so rather than hiding the plane.
-            match pass_gate(!specs.is_empty(), evidence.as_deref()) {
+            let capabilities = evidence.as_ref().map(|f| f.capabilities.as_slice());
+            match pass_gate(!specs.is_empty(), capabilities) {
                 PassGate::NoSets => {
                     update_cell(&plane, ServeStatus::NoSets, Vec::new());
                     continue;
@@ -778,17 +783,12 @@ pub async fn run<H: SharePlaneHost>(plane: SharePlane<H>) {
         }
 
         // The publish half. The composition mirrors the same-account leg's
-        // published facts, except relay: this transport is bound with NO
-        // relay until the nest's relay serves address discovery (`p2p.md`
-        // § The relay → *The cross-user seat and the relay*), so advertising
-        // one would name a rendezvous nothing answers.
+        // published facts; the relay is the one this seat was bound with, so
+        // the advertisement tells the truth about its transport — `None` for a
+        // seat bound relay-less, for that seat's life (`p2p.md` § The relay →
+        // *The cross-user seat and the relay*, rulings 1 and 3).
         let lan_ips = crate::share_pump::discover_lan_candidates();
-        let endpoints = fauna_core::device_endpoints::DeviceEndpoints {
-            node_id: plane.own_actor.0,
-            lan_addrs: fauna_core::device_endpoints::lan_socket_addrs(bound_addrs, &lan_ips),
-            public_addrs: Vec::new(),
-            relay_url: None,
-        };
+        let endpoints = share_advertisement(&plane.own_actor, bound_addrs, &lan_ips, node);
         let now = std::time::Instant::now();
         for due in advertise.due(&specs, &plane.own_actor, &endpoints, now) {
             match plane
@@ -968,14 +968,34 @@ pub fn compose_specs(
     specs
 }
 
+/// What the publish half advertises on each set's channel: the seat's bound
+/// addresses crossed with the interface list, no public address (`p2p.md`
+/// § The relay → *Address discovery*, ruling 3), and the relay the seat was
+/// bound with — the advertisement tells the truth about its transport, so a
+/// seat bound relay-less advertises none (*The cross-user seat and the
+/// relay*, rulings 1 and 3).
+pub fn share_advertisement(
+    own_actor: &ActorId,
+    bound_addrs: &[std::net::SocketAddr],
+    lan_ips: &[std::net::Ipv4Addr],
+    seat: &CeremonyNode,
+) -> fauna_core::device_endpoints::DeviceEndpoints {
+    fauna_core::device_endpoints::DeviceEndpoints {
+        node_id: own_actor.0,
+        lan_addrs: fauna_core::device_endpoints::lan_socket_addrs(bound_addrs, lan_ips),
+        public_addrs: Vec::new(),
+        relay_url: seat.relay_url().map(str::to_owned),
+    }
+}
+
 /// Rule 7's evidence composition: the live `fauna.nest.info` read when the
-/// nest answers, else the peer leg's cached last-known capabilities. `None`
-/// (no cache either) reaches the shared verdict, which refuses — no evidence
-/// never binds.
+/// nest answers, else the peer leg's cached last-known facts. `None` (no
+/// cache either) reaches the shared verdict, which refuses — no evidence
+/// never binds. The relay URL the seat takes rides the same composition.
 pub fn composed_evidence(
-    live: Result<Vec<String>, String>,
-    cached: Option<Vec<String>>,
-) -> Option<Vec<String>> {
+    live: Result<crate::peer_leg::PeerLegNestFacts, String>,
+    cached: Option<crate::peer_leg::PeerLegNestFacts>,
+) -> Option<crate::peer_leg::PeerLegNestFacts> {
     live.ok().or(cached)
 }
 
@@ -1068,8 +1088,9 @@ pub const TRANSFER_SOURCE_FREE_SPACE: &str = "folders.share_transfer_source_free
 
 /// The `share-transfer-state` reading for one outcome — including the honest
 /// "limited by …" (Dim-3: a bound names what set it, never a silent stall):
-/// the transfer gate's binding tier, or this device's free space when the
-/// storage floor kept a wanted body from landing
+/// the transfer gate's binding tier (a refused page, or a file the
+/// per-operation cap kept out — [`SetPullOutcome::capped`]), or this device's
+/// free space when the storage floor kept a wanted body from landing
 /// (`crate::share_landing::STORAGE_FLOOR_BYTES`).
 ///
 /// ⚠ The limited arm's `{source}` argument is itself an i18n **key**
@@ -1077,7 +1098,7 @@ pub const TRANSFER_SOURCE_FREE_SPACE: &str = "folders.share_transfer_source_free
 /// so this one resolves through `LocalizedText::resolve_nested`, not
 /// `resolve` — a plain resolve would paint the raw key at the user.
 pub fn transfer_state_label(outcome: &SetPullOutcome) -> LocalizedText {
-    if let Some(refusal) = &outcome.refusal {
+    if let Some(refusal) = outcome.refusal.as_ref().or(outcome.capped.as_ref()) {
         let tier = refusal
             .binding_tier()
             .map(|tier| fauna_client_features::tier_label(tier).key)
@@ -1145,24 +1166,40 @@ mod tests {
     /// evidence at all refuses.
     #[test]
     fn cold_start_binds_on_the_cached_token_and_refuses_with_no_cache() {
-        let token = || vec!["p2p-share".to_string()];
+        let token = |relay: &str| crate::peer_leg::PeerLegNestFacts {
+            capabilities: vec!["p2p-share".to_string()],
+            iroh_relay_url: Some(relay.to_string()),
+        };
+        let capabilities = |facts: &Option<crate::peer_leg::PeerLegNestFacts>| {
+            facts.as_ref().map(|f| f.capabilities.clone())
+        };
 
-        let live = composed_evidence(Ok(token()), None);
+        let live = composed_evidence(Ok(token("https://live/")), Some(token("https://cached/")));
         assert!(matches!(
-            ceremony_bind_verdict(live.as_deref()),
+            ceremony_bind_verdict(capabilities(&live).as_deref()),
             CeremonyBindVerdict::Bind
         ));
+        assert_eq!(
+            live.and_then(|f| f.iroh_relay_url).as_deref(),
+            Some("https://live/"),
+            "the live read's relay wins with its brake"
+        );
 
-        let cached = composed_evidence(Err("nest down".into()), Some(token()));
+        let cached = composed_evidence(Err("nest down".into()), Some(token("https://cached/")));
         assert!(matches!(
-            ceremony_bind_verdict(cached.as_deref()),
+            ceremony_bind_verdict(capabilities(&cached).as_deref()),
             CeremonyBindVerdict::Bind
         ));
+        assert_eq!(
+            cached.and_then(|f| f.iroh_relay_url).as_deref(),
+            Some("https://cached/"),
+            "an offline start binds with the last-known relay"
+        );
 
         let nothing = composed_evidence(Err("nest down".into()), None);
         assert!(
             !matches!(
-                ceremony_bind_verdict(nothing.as_deref()),
+                ceremony_bind_verdict(capabilities(&nothing).as_deref()),
                 CeremonyBindVerdict::Bind
             ),
             "no evidence at all must refuse the bind"
@@ -1407,6 +1444,35 @@ mod tests {
         assert_eq!(
             transfer_state_label(&outcome).args.get("source"),
             Some(&fauna_client_features::tier_label(fauna_core::feature_gate::RuleTier::Admin).key)
+        );
+    }
+
+    /// A file the per-operation cap kept out reads "limited by" the tier that
+    /// set the cap, though the rest of the pull went on — a bound that stopped
+    /// a file is never silent.
+    #[test]
+    fn a_file_held_back_by_the_per_operation_cap_reads_limited_by_its_tier() {
+        let outcome = SetPullOutcome {
+            admitted: true,
+            rows_accepted: 3,
+            materialized: 2,
+            capped: Some(fauna_core::feature_gate::FeatureVerdict::OverQuota {
+                dimension: fauna_core::feature_gate::QuotaDimension::Volume,
+                window: None,
+                limit: 1_000,
+                observed: 5_000,
+                tier: fauna_core::feature_gate::RuleTier::SelfImposed,
+            }),
+            ..SetPullOutcome::default()
+        };
+        let limited = transfer_state_label(&outcome);
+        assert_eq!(limited.key, "folders.share_transfer_state_limited");
+        assert_eq!(
+            limited.args.get("source"),
+            Some(
+                &fauna_client_features::tier_label(fauna_core::feature_gate::RuleTier::SelfImposed)
+                    .key
+            )
         );
     }
 

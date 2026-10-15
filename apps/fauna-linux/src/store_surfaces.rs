@@ -43,6 +43,19 @@ pub enum StoreSurface {
     Devices,
     /// Settings → Nests (the custody facet, the escrow holders).
     Nests,
+    /// Settings → Privacy (the email filters' inherited-rule marks).
+    Privacy,
+    /// Settings → Members to review (the succession ledger's roster).
+    MemberReview,
+    /// Settings → Personalization's Trained topics facet (the sealed
+    /// registry).
+    TrainedTopics,
+    /// The Backups page's destinations (an account-plane read).
+    Backups,
+    /// The Events page's refused-change list (an account-plane read; the
+    /// calendars beside it are the nest's) — a refusal is the runtime's own
+    /// background write, a source of the notice (part 2).
+    Events,
 }
 
 /// Which store-backed surface is open, from the content stack's visible child
@@ -51,12 +64,17 @@ pub enum StoreSurface {
 pub fn open_surface(content: Option<&str>, settings_sub: Option<&str>) -> Option<StoreSurface> {
     match content? {
         "feed" => Some(StoreSurface::Feed),
+        "backups" => Some(StoreSurface::Backups),
+        "events" => Some(StoreSurface::Events),
         "settings" => match settings_sub? {
             "muted-words" => Some(StoreSurface::MutedWords),
             "task-delegation" => Some(StoreSurface::TaskDelegation),
             "folders" => Some(StoreSurface::Folders),
             "devices" => Some(StoreSurface::Devices),
             "nests" => Some(StoreSurface::Nests),
+            "privacy" => Some(StoreSurface::Privacy),
+            "member-review" => Some(StoreSurface::MemberReview),
+            "personalization" => Some(StoreSurface::TrainedTopics),
             _ => None,
         },
         _ => None,
@@ -83,12 +101,20 @@ mod tests {
     fn only_the_open_store_backed_surface_is_named() {
         use StoreSurface::*;
         assert_eq!(open_surface(Some("feed"), Some("muted-words")), Some(Feed));
+        assert_eq!(
+            open_surface(Some("backups"), Some("privacy")),
+            Some(Backups)
+        );
+        assert_eq!(open_surface(Some("events"), Some("privacy")), Some(Events));
         for (sub, surface) in [
             ("muted-words", MutedWords),
             ("task-delegation", TaskDelegation),
             ("folders", Folders),
             ("devices", Devices),
             ("nests", Nests),
+            ("privacy", Privacy),
+            ("member-review", MemberReview),
+            ("personalization", TrainedTopics),
         ] {
             assert_eq!(open_surface(Some("settings"), Some(sub)), Some(surface));
             // The sub-stack keeps its child while another top-level page shows.

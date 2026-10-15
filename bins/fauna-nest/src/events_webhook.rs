@@ -275,15 +275,7 @@ async fn notification(nest: &Nest, account: &[u8; 32], target: &Target) -> anyho
         .and_then(|r| r.did);
     let sub = grant_subject(&target.scopes, login_did.as_deref(), account)
         .unwrap_or_else(|| hex::encode(account));
-    let cursor = nest
-        .db
-        .ext_scope_heads_since(account, 0, u32::MAX)
-        .await?
-        .into_iter()
-        .filter(|(scope, _)| fauna_scope::event_reaches(&target.scopes, scope))
-        .map(|(_, head)| head)
-        .max()
-        .unwrap_or(0);
+    let cursor = cursor_for(&nest.db, account, &target.scopes).await?;
     let claims = EventClaims::scope_changed(
         nest.issuer.clone(),
         target.hook.client_id.clone(),
@@ -292,6 +284,28 @@ async fn notification(nest: &Nest, account: &[u8; 32], target: &Target) -> anyho
         crate::db::now_epoch_secs(),
     )?;
     mint_event_token(&signer, &claims)
+}
+
+/// The cursor a notification carries for a principal granted `scopes`: the
+/// highest head among the account's scopes the filter lets it hear — the
+/// poll's own coordinate, so the receiver's next poll starts no further back
+/// than the change it was told of.
+///
+/// # Errors
+/// A DB read failing.
+pub async fn cursor_for(
+    db: &CacheDb,
+    account: &[u8; 32],
+    scopes: &[String],
+) -> anyhow::Result<i64> {
+    Ok(db
+        .event_scope_heads_since(account, 0, u32::MAX)
+        .await?
+        .into_iter()
+        .filter(|(scope, _)| fauna_scope::event_reaches(scopes, scope))
+        .map(|(_, head)| head)
+        .max()
+        .unwrap_or(0))
 }
 
 /// How one `POST` ended.

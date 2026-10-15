@@ -1807,13 +1807,13 @@ func (_ FfiDestroyerSubstepKey) Destroy(value SubstepKey) {
 // `vps-config-update-channel-row` choice on `vps_config`
 // (`docs/goal/behavior/onboarding-provisioning.md` § 5). [`Self::image_tag`]
 // is the ONE place a channel becomes an image tag; which pipeline moves each
-// tag is `docs/goal/architecture/build-system.md` § Image tags & channels.
+// tag is `docs/goal/architecture/image-pipeline.md` § Image tags & channels.
 type UpdateChannel uint
 
 const (
 	// Released builds. The default.
 	UpdateChannelStable UpdateChannel = 1
-	// Release candidates under verification.
+	// Numbered releases under user acceptance before they become Stable.
 	UpdateChannelTest UpdateChannel = 2
 	// The newest development builds, not yet verified.
 	UpdateChannelDev UpdateChannel = 3

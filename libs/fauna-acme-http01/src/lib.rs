@@ -586,7 +586,13 @@ async fn obtain_certificate_inner(
                     .ok_or_else(|| anyhow::anyhow!("order did not become ready after 20 polls"))?;
             }
             OrderStatus::Invalid => {
-                anyhow::bail!("ACME order became invalid: {:?}", state.error);
+                // The order-level error is usually empty; the reason lives on
+                // the failed authorization's challenge. Capture it owned first
+                // so `state`'s `&mut order` borrow is released before the
+                // authorization re-walk.
+                let order_error = state.error.as_ref().map(|e| format!("{e:?}"));
+                let detail = fauna_acme_core::describe_invalid_order(&mut order, order_error).await;
+                anyhow::bail!("{detail}");
             }
         }
     };
@@ -779,7 +785,66 @@ pub struct RetryState {
     /// budget consumed.
     #[serde(default)]
     pub recent_failures: Vec<u64>,
+    /// The last error of each order the nest places — at most one entry per
+    /// [`IssuanceOrder`], oldest first — for the admin's cert-status row
+    /// (`tls-certificates.md` § Keeping the cert alive, *The admin sees why
+    /// issuance is failing*). Kept per order because the domain and IP-bridge
+    /// orders share this one budget: [`Self::reset`] after a domain success must
+    /// not erase why the bridge is failing, so it leaves this list alone and
+    /// each order clears only its own entry ([`Self::clear_order_error`]).
+    #[serde(default)]
+    pub last_errors: Vec<IssuanceError>,
 }
+
+/// Which nest-placed ACME order an [`IssuanceError`] belongs to.
+///
+/// Deliberately not a serde type: the state file stores [`Self::as_str`], and a
+/// tag this build does not know (a newer build's order, read after a downgrade)
+/// stays a string that every save writes back unchanged — the file is rewritten
+/// on every attempt, so a collapsing `Unknown` arm would erase it
+/// (`transport.md` § Schema and forward-compat discipline, rule 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssuanceOrder {
+    /// The listener cert: one order over the whole desired SAN set.
+    Domain,
+    /// The IP bridge cert over the box's public addresses (§ B-IP).
+    IpBridge,
+}
+
+impl IssuanceOrder {
+    /// The tag stored in [`IssuanceError::order`].
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Domain => "domain",
+            Self::IpBridge => "ip_bridge",
+        }
+    }
+
+    /// The order a stored tag names; `None` for a tag this build does not know.
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        [Self::Domain, Self::IpBridge]
+            .into_iter()
+            .find(|o| o.as_str() == tag)
+    }
+}
+
+/// One order's most recent failure, as the CA described it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IssuanceError {
+    /// [`IssuanceOrder::as_str`] — or a newer build's tag, carried verbatim.
+    pub order: String,
+    /// The error chain as logged (`{e:#}`): the failing identifier plus the
+    /// challenge's problem type and detail. CA-supplied text — every reader
+    /// renders it as data. Capped at [`ISSUANCE_ERROR_DETAIL_MAX_BYTES`].
+    pub detail: String,
+    /// When the order failed, unix seconds.
+    pub failed_at_unix: u64,
+}
+
+/// Cap on a stored [`IssuanceError::detail`]: room for a multi-SAN order
+/// naming every failed identifier, while a runaway CA body cannot grow the
+/// state file or the admin reply without bound.
+pub const ISSUANCE_ERROR_DETAIL_MAX_BYTES: usize = 4096;
 
 impl RetryState {
     fn path(acme_dir: &std::path::Path) -> PathBuf {
@@ -837,9 +902,33 @@ impl RetryState {
         self.prune(now);
     }
 
-    /// Reset to healthy after a successful issuance.
+    /// Reset to healthy after a successful issuance. Leaves [`Self::last_errors`]
+    /// alone — the caller clears its own order's entry.
     pub fn reset(&mut self) {
         self.recent_failures.clear();
+    }
+
+    /// Record `order`'s failure at `now`, replacing that order's previous entry.
+    pub fn record_order_error(&mut self, order: IssuanceOrder, detail: &str, now: u64) {
+        let mut end = detail.len().min(ISSUANCE_ERROR_DETAIL_MAX_BYTES);
+        while !detail.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.last_errors.retain(|e| e.order != order.as_str());
+        self.last_errors.push(IssuanceError {
+            order: order.as_str().to_string(),
+            detail: detail[..end].to_string(),
+            failed_at_unix: now,
+        });
+    }
+
+    /// Drop `order`'s entry — on that same order's success, or once it is no
+    /// longer wanted. Returns whether anything changed (so a caller saves only
+    /// then).
+    pub fn clear_order_error(&mut self, order: IssuanceOrder) -> bool {
+        let before = self.last_errors.len();
+        self.last_errors.retain(|e| e.order != order.as_str());
+        self.last_errors.len() != before
     }
 }
 
@@ -1022,6 +1111,20 @@ pub mod test_support {
         let cert = params.self_signed(&key).expect("self-signed");
         (cert.pem().into_bytes(), key.serialize_pem().into_bytes())
     }
+
+    /// [`make_multi_san_cert_and_key_pem`] with a validity window that ended
+    /// years ago — the on-disk chain a restart finds after the § B-IP bridge
+    /// has run out its own `notAfter`.
+    pub fn make_expired_multi_san_cert_and_key_pem(sans: &[&str]) -> (Vec<u8>, Vec<u8>) {
+        let key = rcgen::KeyPair::generate().expect("keypair");
+        let mut params =
+            rcgen::CertificateParams::new(sans.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                .expect("params");
+        params.not_before = rcgen::date_time_ymd(2020, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2020, 1, 8);
+        let cert = params.self_signed(&key).expect("self-signed");
+        (cert.pem().into_bytes(), key.serialize_pem().into_bytes())
+    }
 }
 
 #[cfg(test)]
@@ -1108,6 +1211,99 @@ mod tests {
         assert!(state.recent_failures.is_empty());
     }
 
+    // The admin-visible last error per order (`tls-certificates.md` § Keeping the
+    // cert alive, *The admin sees why issuance is failing*).
+
+    #[test]
+    fn order_errors_are_kept_per_order_and_cleared_only_by_their_own_order() {
+        let mut state = RetryState::default();
+        state.record_order_error(IssuanceOrder::Domain, "first", 10);
+        state.record_order_error(IssuanceOrder::IpBridge, "bridge", 11);
+        state.record_order_error(IssuanceOrder::Domain, "second", 12);
+        assert_eq!(
+            state.last_errors,
+            vec![
+                IssuanceError {
+                    order: "ip_bridge".into(),
+                    detail: "bridge".into(),
+                    failed_at_unix: 11,
+                },
+                IssuanceError {
+                    order: "domain".into(),
+                    detail: "second".into(),
+                    failed_at_unix: 12,
+                },
+            ],
+            "a second failure of one order replaces its entry; the other order's stays"
+        );
+
+        // A domain success resets the shared budget but must not clear the
+        // bridge's error — nor does `reset` itself touch either error.
+        state.reset();
+        assert!(state.clear_order_error(IssuanceOrder::Domain));
+        assert_eq!(state.last_errors.len(), 1);
+        assert_eq!(state.last_errors[0].order, "ip_bridge");
+        assert!(
+            !state.clear_order_error(IssuanceOrder::Domain),
+            "clearing an absent entry reports no change"
+        );
+        assert!(state.clear_order_error(IssuanceOrder::IpBridge));
+        assert!(state.last_errors.is_empty());
+    }
+
+    #[test]
+    fn order_error_detail_is_capped_on_a_char_boundary() {
+        let mut state = RetryState::default();
+        let long = "é".repeat(ISSUANCE_ERROR_DETAIL_MAX_BYTES);
+        state.record_order_error(IssuanceOrder::Domain, &long, 1);
+        let kept = &state.last_errors[0].detail;
+        assert!(kept.len() <= ISSUANCE_ERROR_DETAIL_MAX_BYTES);
+        assert!(long.starts_with(kept.as_str()));
+    }
+
+    #[test]
+    fn order_errors_round_trip_and_an_older_file_reads_without_them() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = RetryState::default();
+        state.record_failure(5);
+        state.record_order_error(IssuanceOrder::IpBridge, "ca said no", 5);
+        state.save(dir.path());
+        assert_eq!(RetryState::load(dir.path()), state);
+
+        // A state file written before the field existed keeps its budget log.
+        std::fs::write(
+            dir.path().join(RETRY_STATE_FILENAME),
+            br#"{"recent_failures":[7]}"#,
+        )
+        .unwrap();
+        let old = RetryState::load(dir.path());
+        assert_eq!(old.recent_failures, vec![7]);
+        assert!(old.last_errors.is_empty());
+    }
+
+    #[test]
+    fn an_order_tag_this_build_does_not_know_is_carried_through_a_save() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(RETRY_STATE_FILENAME),
+            br#"{"recent_failures":[],"last_errors":[{"order":"newer_kind","detail":"d","failed_at_unix":3}]}"#,
+        )
+        .unwrap();
+        let mut state = RetryState::load(dir.path());
+        assert_eq!(
+            state.last_errors.len(),
+            1,
+            "an unknown tag never fails the load"
+        );
+        assert_eq!(IssuanceOrder::from_tag(&state.last_errors[0].order), None);
+        state.record_order_error(IssuanceOrder::Domain, "x", 4);
+        state.clear_order_error(IssuanceOrder::IpBridge);
+        state.save(dir.path());
+        let reloaded = RetryState::load(dir.path());
+        assert_eq!(reloaded.last_errors[0].order, "newer_kind");
+        assert_eq!(reloaded.last_errors.len(), 2);
+    }
+
     #[test]
     fn next_attempt_delay_expedites_within_budget_and_holds_at_the_limit() {
         use std::time::Duration;
@@ -1122,6 +1318,7 @@ mod tests {
         // Under budget → paced evenly (window / budget) from the last attempt.
         let one = RetryState {
             recent_failures: vec![now],
+            ..Default::default()
         };
         let min_interval = ACME_RATE_WINDOW_SECS / ACME_FAILED_VALIDATION_BUDGET_PER_HOUR as u64;
         assert_eq!(
@@ -1138,6 +1335,7 @@ mod tests {
             recent_failures: (0..ACME_FAILED_VALIDATION_BUDGET_PER_HOUR as u64)
                 .map(|i| now + i) // all within the window, oldest = now
                 .collect(),
+            ..Default::default()
         };
         assert_eq!(
             next_attempt_delay(&spent, now + 10),

@@ -29,8 +29,9 @@ export function approvalText(
     operation: string,
     target: string,
   ) => string | null,
+  when: (kind: string, createdAtSecs: number) => string | null = () => null,
 ): string {
-  return raw(
+  const who = raw(
     a.kind,
     a.peer_address,
     a.peer_handle ?? '',
@@ -39,4 +40,8 @@ export function approvalText(
     a.operation ?? '',
     a.target ?? '',
   ) ?? t.family.approval_no_sender;
+  // A held mail also reads when it arrived ("sender · 14:03") — the shared
+  // rule (`approvalTimestamp`) decides which kinds carry a time.
+  const time = when(a.kind, a.created_at);
+  return time == null ? who : `${who} · ${time}`;
 }

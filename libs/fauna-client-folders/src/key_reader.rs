@@ -7,7 +7,7 @@
 //! that owns its source: the account's own store handle, for a process that
 //! hosts the account runtime, and a capability host's throwaway fleet replica
 //! (`fauna_sync_engine::cold_folder_keys::ColdReplicaFolderKeys`), for a
-//! process that hosts no account store (`on-demand-files.md` § Shared sets on
+//! process that hosts no account store (`on-demand-files-shared-sets.md` § Shared sets on
 //! a capability host, decision 1′).
 //!
 //! The reader is read-only on purpose. A capability host never writes custody —
@@ -75,11 +75,12 @@ pub trait FolderKeyReader: fauna_core::MaybeSendSync {
     /// The account's mail-custody MSEKs, current first, then the retained
     /// prior generations (`fauna.state.mail`) — what a set's engine derives
     /// the owner's recipient key from to open the folder's parked third-party
-    /// deposits (`file-sync.md` § Third-party deposit ingress, adoption). Not
+    /// deposits (`folder-deposit.md`, adoption). Not
     /// folder-key custody, but the same source answers it: the account store
-    /// a runtime-hosting process mounts. A source that holds no mail custody —
-    /// a capability host's cold replica — answers empty, and its engines
-    /// adopt nothing: another seat of the owner's does.
+    /// a runtime-hosting process mounts, or a capability host's cold replica,
+    /// which opens the sealed mail rows as it opens the folder keys. A source
+    /// that holds no mail custody answers empty (this default), and its
+    /// engines adopt nothing: another seat of the owner's does.
     async fn recipient_mseks(&self) -> anyhow::Result<Vec<fauna_core::secret::SecretArray32>> {
         Ok(Vec::new())
     }

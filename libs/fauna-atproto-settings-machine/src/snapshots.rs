@@ -259,6 +259,57 @@ pub struct ConsentCardRow {
     #[serde(default)]
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     pub ends: Option<LocalizedText>,
+    /// The install section, present only on an admin's install card for a
+    /// hosted plugin (`third-party.md` § The runner contract → *The
+    /// install-approval leg*): what approving it would install and run.
+    /// The scopes the plugin may ask each user for are this card's own
+    /// [`scope_descriptions`](Self::scope_descriptions) — a ceiling, since
+    /// installing grants nothing over anyone's data.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub install: Option<ConsentInstallRow>,
+}
+
+/// The install section of the one consent card, composed (and
+/// control-stripped) in [`consent_card_row`](crate::consent_card_row) so all
+/// seven apps paint the same facts about the same plugin. Every string but
+/// `execution_form` is publisher-authored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ConsentInstallRow {
+    /// The execution form — the badge (`wasm` today), verbatim.
+    pub execution_form: String,
+    /// The `ext.*` kinds the verified manifest declares.
+    pub requested_kinds: Vec<String>,
+    /// The settings schema's fields, in its order: the card's settings
+    /// summary (field names and types).
+    pub settings: Vec<ConsentInstallSettingRow>,
+    /// The publisher's domain — the document's own host the signature was
+    /// verified against; `localhost` for a development plugin.
+    pub publisher_domain: String,
+    /// The publisher's `did:key`. `None` for a development plugin, which has
+    /// none — the card names it as a development plugin instead, never an
+    /// empty key row.
+    pub publisher_key: Option<String>,
+    /// The pinned module digest (`sha256:…`) the fetched bytes matched.
+    pub module_digest: String,
+    /// The hosts the plugin may dial; empty reaches nothing.
+    pub hosts: Vec<String>,
+    /// The ingress paths the nest would terminate for it.
+    pub ingress_paths: Vec<String>,
+    /// A development plugin (`third-party.md` § Developer loop).
+    pub development: bool,
+}
+
+/// One field of the install card's settings summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ConsentInstallSettingRow {
+    pub key: String,
+    /// The field's declared label (its key when it declares none).
+    pub label: String,
+    /// The `BridgeProvider` settings vocabulary's type, verbatim.
+    pub setting_type: String,
 }
 
 /// One permission set on the consent card — what the user is being asked to
@@ -345,6 +396,10 @@ pub struct TransitionCardModel {
     /// Render the `atproto-history-backfill` checkbox on the card (the second
     /// explicit opt-in; only a minting transition offers it).
     pub show_history_backfill: bool,
+    /// The checkbox's label, naming how many posts a backfill would publish
+    /// ("Also publish my N existing public posts") — the count is part of
+    /// the consent (`atproto-pds-bridge.md` § Projection & backfill).
+    pub history_backfill_label: LocalizedText,
     /// The confirm is in flight (a PLC mint round-trips): the card shows
     /// progress and the confirm control disables.
     pub in_progress: bool,

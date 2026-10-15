@@ -138,6 +138,27 @@ pub fn reset_actor_scoped_state(
     reason: fauna_client_account_runtime::StopReason,
     then: impl FnOnce() + 'static,
 ) {
+    drop_actor_scoped_caches();
+    bump_actor_generation_in(&ACTOR_GENERATION);
+    // LAST: the W3 (account-data-plane.md § Workstreams) account-store runtime
+    // this app hosts. Actor-scoped by class 1: it holds an open store for one
+    // account and pumps the plane AS that account, so a handle surviving an
+    // actor change is the outgoing account still being written by this
+    // process. The stop is deterministic (`shutdown()` drains the in-flight
+    // pass) and runs OFF this thread; `then` — everything the caller must not
+    // do until the account has stopped (its writers-down, its erase, its next
+    // window) — runs on the main loop once it has
+    // (`account_runtime::teardown`).
+    crate::account_runtime::teardown(reason, then);
+}
+
+/// The synchronous drop half of [`reset_actor_scoped_state`] — every
+/// process-global in-memory cache the outgoing identity filled. Split out so a
+/// test can drive the canonical list without the account runtime's stop or the
+/// generation bump (`account-scoping.md` § The scoping taxonomy → the in-memory
+/// corollary: the drop "needs a red-first test at the identity change"), which
+/// is how an unhooked line here reddens a test.
+fn drop_actor_scoped_caches() {
     crate::content_policy::clear_for_identity_change();
     // …but the region source is the DEVICE's, not the departing identity's:
     // re-arm it on the fresh engine, and forget only the session's refresh
@@ -185,22 +206,60 @@ pub fn reset_actor_scoped_state(
     // `destroy()`, so without the retire every later link flip would still
     // re-decide them (`offline_gate::retire_outgoing_window`).
     crate::offline_gate::retire_outgoing_window();
-    bump_actor_generation_in(&ACTOR_GENERATION);
-    // LAST: the W3 (account-data-plane.md § Workstreams) account-store runtime
-    // this app hosts. Actor-scoped by class 1: it holds an open store for one
-    // account and pumps the plane AS that account, so a handle surviving an
-    // actor change is the outgoing account still being written by this
-    // process. The stop is deterministic (`shutdown()` drains the in-flight
-    // pass) and runs OFF this thread; `then` — everything the caller must not
-    // do until the account has stopped (its writers-down, its erase, its next
-    // window) — runs on the main loop once it has
-    // (`account_runtime::teardown`).
-    crate::account_runtime::teardown(reason, then);
+    // The outgoing window's feed and thread views, which subscribed to
+    // hide-list repaints and outlive `destroy()` with it: a repaint after the
+    // switch painted the OUTGOING account's cards under the incoming account's
+    // content policy — and counted them into the incoming ward's Guardian
+    // Notify report (`report::clear_repaint_subscribers`).
+    crate::report::clear_repaint_subscribers();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The canonical drop includes the web-publish origin cache**
+    /// (`account-scoping.md` § The scoping taxonomy → the in-memory
+    /// corollary): driven through
+    /// the list itself, so deleting the `clear_for_actor_change()` line from
+    /// [`drop_actor_scoped_caches`] reddens this test — the direct call in
+    /// `settings::web`'s own pin could not.
+    #[test]
+    fn the_canonical_drop_clears_the_web_publish_origin_cache() {
+        crate::testid::run_on_gtk_thread(|| {
+            crate::settings::web::seed_cache_for_test();
+            assert!(crate::settings::web::cached_site_link().is_some());
+
+            drop_actor_scoped_caches();
+
+            assert!(
+                crate::settings::web::cached_site_link().is_none(),
+                "the canonical actor-scoped drop left the outgoing actor's web origin cached"
+            );
+        });
+    }
+
+    /// **The canonical drop closes every hide-list repaint subscription.** The
+    /// outgoing window's feed and thread views outlive `destroy()` (the tree
+    /// never finalizes), so their repaint loops never saw their root go; a
+    /// subscription left open let the incoming account's hide-list landing
+    /// repaint the outgoing account's cards — through `note_enforcement`, into
+    /// the incoming ward's Guardian Notify counter (`family-safety.md`
+    /// § Guardian Notify: three earlier tests' spam posts read as "Spam: 3").
+    #[test]
+    fn the_canonical_drop_closes_the_outgoing_views_repaint_subscriptions() {
+        crate::testid::run_on_gtk_thread(|| {
+            let rx = crate::report::subscribe_repaint();
+            assert!(!rx.is_closed());
+
+            drop_actor_scoped_caches();
+
+            assert!(
+                rx.is_closed(),
+                "the canonical actor-scoped drop left an outgoing view subscribed to hide-list repaints"
+            );
+        });
+    }
 
     #[test]
     fn poll_slot_is_claimed_once_per_actor() {

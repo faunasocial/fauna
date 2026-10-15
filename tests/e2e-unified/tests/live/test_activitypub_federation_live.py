@@ -30,7 +30,7 @@ claim-registered `identity_domain` cache the way mail + the TLS apex do
 where a domainless box thinks it is localhost while mail knows the real
 domain"). On any provisioned+claimed box that left WebFinger answering
 "ActivityPub not configured" and every other AP route serving `localhost` URLs,
-until a restart baked the domain into nest.toml — which is why example.com
+until a restart baked the domain into nest.toml — which is why the live nest
 (long-restarted) worked and a fresh box did not. **FIXED 2026-07-23**: every AP
 surface now resolves the domain per request via `AppState::handle_domain()`, and
 the same class of bug was fixed in nostr, video and federated Welcome delivery.
@@ -77,7 +77,7 @@ Chain proven end to end:
 
 Gating (all pre-existing conventions):
   * `HETZNER_API_TOKEN` + `FAUNA_E2E_LIVE=1` — the live-provision gate
-    (`tests/live/conftest.py`; real € cost). This test does NOT touch example.com,
+    (`tests/live/conftest.py`; real € cost). This test does NOT touch the shared live nest,
     so it takes no `live_box` flock.
   * Docker (the private nest container).
 
@@ -291,7 +291,7 @@ def test_activitypub_federation_live_three_party(app, box, ghcr_latest_image,
 
     token = os.environ["HETZNER_API_TOKEN"].strip()
     secret_hex = box.identity_secret_hex
-    handle = box.handle                       # admin@e2e-<runid>.example.com
+    handle = box.handle                       # admin@e2e-<runid>.<zone>
     ap_username = handle.split("@", 1)[0]     # "admin" — handle-verbatim
     marker = uuid.uuid4().hex
 

@@ -24,6 +24,7 @@ use crate::observation_intake::{Observation, ObservationOutcome, record_observat
 use crate::preference_put::put_preference_local;
 use crate::principal_custody::{EnrollmentRefusal, PrincipalBundleStatus, PrincipalCustody};
 
+use super::e2e_holds::Prompt;
 use super::enrollment::EnrollmentRetirement;
 use super::now_ms;
 use super::pass::PumpReport;
@@ -66,8 +67,8 @@ pub(crate) enum Cmd {
     GroupCeremonyAuthority {
         reply: oneshot::Sender<Option<GroupCeremonyAuthority>>,
     },
-    CachedNestCapabilities {
-        reply: oneshot::Sender<Option<Vec<String>>>,
+    CachedNestFacts {
+        reply: oneshot::Sender<Option<crate::host_legs::PeerLegNestFacts>>,
     },
     /// One caller-owned meta-table row, read
     /// ([`AccountStoreHandle::meta_get`]).
@@ -294,7 +295,11 @@ pub(crate) enum Cmd {
         reply: oneshot::Sender<Result<bool>>,
     },
     /// The refused-change list's write door
-    /// ([`AccountStoreHandle::write_refused_scheduling_changes`]).
+    /// ([`AccountStoreHandle::write_refused_scheduling_changes`]). Its
+    /// `Record` and `Merge` are the runtime's own machinery's — a background
+    /// write, the one local command that is a source of the store-change
+    /// notice ([`Cmd::is_background_write`]); `Dismiss` is the owner's
+    /// gesture.
     WriteRefusedChanges {
         write: crate::refused_change_rows::RefusedChangeWrite,
         reply: oneshot::Sender<Result<bool>>,
@@ -372,12 +377,19 @@ pub(crate) enum Cmd {
     },
     ReconcileNow {
         reply: oneshot::Sender<PumpReport>,
+        /// [`Prompt::Awaited`] for [`AccountStoreHandle::walk_fleet`]'s pass
+        /// alone — the one an e2e walk hold never keeps back.
+        fleet_walk: Prompt,
     },
-    /// The grant-mint door's publish ([`AccountStoreHandle::publish_ledger`]):
-    /// the publish step run now, answered `Ok` only when no succession-ledger
-    /// row this device wrote stays unsent. Pass-bound, like the local-write
-    /// wake's publish it runs early.
-    PublishLedger {
+    /// An awaited publish ([`AccountStoreHandle::publish_ledger`], the
+    /// grant-mint door's; [`AccountStoreHandle::publish_mail`], the mail
+    /// rotation's): the publish step run now, answered `Ok` only when no row
+    /// of `kind` this device wrote stays unsent. `what` names those rows in
+    /// the refusal. Pass-bound, like the local-write wake's publish it runs
+    /// early.
+    PublishOwn {
+        kind: &'static str,
+        what: &'static str,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// The explicit pass barrier ([`AccountStoreHandle::settled`]): a
@@ -432,6 +444,11 @@ pub(crate) enum Cmd {
     /// ([`AccountStoreHandle::removed_device_ids`]).
     RemovedDeviceIds {
         reply: oneshot::Sender<Result<std::collections::HashSet<[u8; 32]>>>,
+    },
+    /// Every fleet id this replica's verified fleet view names, members and
+    /// removed alike ([`AccountStoreHandle::fleet_device_ids`]).
+    FleetDeviceIds {
+        reply: oneshot::Sender<Result<Vec<[u8; 32]>>>,
     },
     /// The member-addressed door's one leg: resolve `member` by its fleet id
     /// and write its `Removed` row ([`AccountStoreHandle::remove_fleet_member`]).
@@ -490,8 +507,8 @@ impl Cmd {
     ///   `RemoveFleetMember`) — local, for the quartet's reasons: the list is
     ///   the same store read as resolve, and the removal is that read followed
     ///   by the same `Gen0` local write with no yield between them.
-    /// - **`RemovedDeviceIds`** — local: the same device-set store read, and
-    ///   nothing written.
+    /// - **`RemovedDeviceIds`**, **`FleetDeviceIds`** — local: the same
+    ///   device-set store read, and nothing written.
     /// - **`AdoptGroupRows`** — local: store transactions of its own on a
     ///   group scope, with no feed. A pass's group leg (the authority-
     ///   revocation severance) does read and write group scopes across its
@@ -505,7 +522,7 @@ impl Cmd {
     ///   own tip-sealed put may be holding — so inside a pass the put is
     ///   parked instead ([`serve_local_cmd`] asks
     ///   [`AccountStatePlane::origination_mints`] first) and mints after it.
-    /// - **Pass-bound:** `ReconcileNow` (a pass of its own); `PublishLedger`
+    /// - **Pass-bound:** `ReconcileNow` (a pass of its own); `PublishOwn`
     ///   (the publish step, which a pass runs too); `Settled` (the
     ///   barrier — answered between passes by definition); `RetireEnrollment`
     ///   and `Shutdown` (they end the principal's sessions, which no pass may
@@ -523,7 +540,7 @@ impl Cmd {
             | Cmd::EnqueueIntent { .. }
             | Cmd::PrincipalBundleStatus { .. }
             | Cmd::GroupCeremonyAuthority { .. }
-            | Cmd::CachedNestCapabilities { .. }
+            | Cmd::CachedNestFacts { .. }
             | Cmd::GroupScopeStates { .. }
             | Cmd::GroupRosterSnapshot { .. }
             | Cmd::KeyedPrincipals { .. }
@@ -575,18 +592,41 @@ impl Cmd {
             | Cmd::ResolveFleetRemoval { .. }
             | Cmd::UnaccountedFleetMembers { .. }
             | Cmd::RemovedDeviceIds { .. }
+            | Cmd::FleetDeviceIds { .. }
             | Cmd::RemoveFleetMember { .. }
             | Cmd::MetaGet { .. }
             | Cmd::MetaPut { .. }
             | Cmd::Listed { .. }
             | Cmd::UnkeyedHold { .. } => true,
             Cmd::ReconcileNow { .. }
-            | Cmd::PublishLedger { .. }
+            | Cmd::PublishOwn { .. }
             | Cmd::Settled { .. }
             | Cmd::RetireEnrollment { .. }
             | Cmd::DeadGenerations { .. }
             | Cmd::LetGo { .. }
             | Cmd::Shutdown { .. } => false,
+        }
+    }
+
+    /// Whether this local command is a **background write** — one the
+    /// runtime's own machinery sends with no surface waiting on its answer,
+    /// which is therefore a source of the store-change notice like a pump
+    /// run, moving the change generation at once when it changed an entry
+    /// (`account-runtime.md` § Multi-instance concurrency → *A runtime's own
+    /// pump is a source of the notice too*, part 2). Every other local
+    /// command is a gesture: a surface sent it and repaints from its answer,
+    /// so its write is never a source. The origin is named here, per
+    /// command, by who calls the door — never inferred from what it writes.
+    pub(crate) fn is_background_write(&self) -> bool {
+        use crate::refused_change_rows::RefusedChangeWrite;
+        match self {
+            // The inbound sinks' record of a refusal and the inbox's adoption
+            // of what it held; the dismiss is the Events page's own gesture.
+            Cmd::WriteRefusedChanges { write, .. } => matches!(
+                write,
+                RefusedChangeWrite::Record(_) | RefusedChangeWrite::Merge(_)
+            ),
+            _ => false,
         }
     }
 
@@ -667,19 +707,42 @@ pub struct PumpCycles {
     started: std::sync::atomic::AtomicU64,
     completed: std::sync::atomic::AtomicU64,
     holder: std::sync::atomic::AtomicBool,
+    /// The same role as a watch, moved beside [`Self::holder`] at every
+    /// [`Self::set_holder`] that changes it — what
+    /// [`AccountStoreHandle::subscribe_engine_role`] hands out, so a host can
+    /// react to the role's edges (the yield's nudge to the agent,
+    /// `account-runtime.md` § Multi-instance concurrency → *The agent holds
+    /// the role when present*, part 4) without polling the atomic. Its last
+    /// sender drops once the driver has exited and the runtime's last handle
+    /// is gone, which ends every watcher.
+    role: watch::Sender<bool>,
+    /// How many times this runtime owed the engine holder beside it a pass:
+    /// a seed pass recovered a generation key from escrow — keys that open
+    /// nothing until that holder's next full reconcile re-presents the rows
+    /// — or a removal wrote a `Removed` row, which severs nothing until that
+    /// holder's withdrawal snapshot re-derives (`account-sync-plane.md`
+    /// § The admission seam → *Validity and severance*). What
+    /// [`AccountStoreHandle::subscribe_holder_pass_owed`] hands out, so the
+    /// host asks the holder for that pass now rather than at its backstop
+    /// tick (`account-runtime.md` § Multi-instance concurrency → *The
+    /// seed-leg role*, part 4, *Escrow recovery*).
+    holder_pass_owed: watch::Sender<u64>,
     /// Woken at every [`Self::end`] — what
     /// [`AccountStoreHandle::pass_completed_after`] waits on.
     ended: tokio::sync::Notify,
     /// The change generation — NOT a pass counter, though it sits beside
     /// them: moved once at the end of every run of the pump (a full pass, a
     /// nudge's walk, a publish step, a seed pass) that changed an entry a
-    /// read can answer, and by nothing else. A gesture's own write served
-    /// inside the run is not counted, a run that changed only bookkeeping
-    /// moves nothing, and a non-holder (which runs no pass) moves it only by
-    /// the publish and seed runs it does run — its notice is the
-    /// `data_version` floor (`account-runtime.md` § Multi-instance
-    /// concurrency → *A runtime's own pump is a source of the notice
-    /// too*, parts 1–3). Measured in `drive::drive_pass`.
+    /// read can answer — and once at every background write
+    /// ([`Cmd::is_background_write`]) that changed one, wherever it is
+    /// served — and by nothing else. A gesture's own write served inside
+    /// the run is not counted, a run that changed only bookkeeping moves
+    /// nothing, and a non-holder (which runs no pass) moves it only by the
+    /// publish and seed runs it does run and its background writes — its
+    /// notice is otherwise the `data_version` floor (`account-runtime.md`
+    /// § Multi-instance concurrency → *A runtime's own pump is a source of
+    /// the notice too*, parts 1–3). Measured in `drive::drive_pass` and
+    /// `drive::serve_counted`.
     generation: std::sync::atomic::AtomicU64,
     /// Woken at every move of [`Self::generation`] — what
     /// [`AccountStoreHandle::changed_after`] waits on.
@@ -713,6 +776,28 @@ impl PumpCycles {
     pub(crate) fn set_holder(&self, held: bool) {
         self.holder
             .store(held, std::sync::atomic::Ordering::Relaxed);
+        // Moves only on a change, so a watcher sees edges, never re-statements
+        // (the start publishes `false` onto a `false` role when it lost).
+        self.role.send_if_modified(|role| {
+            let changed = *role != held;
+            *role = held;
+            changed
+        });
+    }
+    /// A watch of the role [`Self::is_holder`] reads — current value seen.
+    pub fn subscribe_role(&self) -> watch::Receiver<bool> {
+        self.role.subscribe()
+    }
+    /// This runtime did something the engine holder beside it acts on only
+    /// at its next pass — a seed pass keyed a generation it must re-present,
+    /// or a removal wrote a `Removed` row its withdrawal snapshot must
+    /// re-derive ([`Self::holder_pass_owed`]).
+    pub(crate) fn owe_holder_pass(&self) {
+        self.holder_pass_owed.send_modify(|owed| *owed += 1);
+    }
+    /// A watch of the owed-pass count — current value seen.
+    pub fn subscribe_holder_pass_owed(&self) -> watch::Receiver<u64> {
+        self.holder_pass_owed.subscribe()
     }
     pub(crate) fn begin(&self) {
         self.started
@@ -727,7 +812,8 @@ impl PumpCycles {
     pub fn change_generation(&self) -> u64 {
         self.generation.load(std::sync::atomic::Ordering::Relaxed)
     }
-    /// A run of the pump changed an entry a read can answer.
+    /// A run of the pump — or a background write — changed an entry a read
+    /// can answer.
     pub(crate) fn changed(&self) {
         self.generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -757,6 +843,43 @@ impl PumpCycles {
             }
             ended.await;
         }
+    }
+}
+
+/// The engine-role holder walking the fleet scope on a non-holder's behalf —
+/// the reach [`AccountStoreHandle::walk_fleet`] hands an awaited walk to when
+/// another process on this device holds the role (`account-runtime.md`
+/// § Multi-instance concurrency → *A non-holder's awaited fleet walk reaches
+/// the holder*). Awaited by contract, unlike the holder nudge: `Ok` only once
+/// the holder's walk landed, an `Err` naming why it did not (no holder seated,
+/// none answering within its bound, the holder's own walk failed).
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait HolderWalk: Send + Sync {
+    async fn walk_fleet_for_non_holder(&self) -> std::result::Result<(), String>;
+}
+
+/// Where a runtime's [`HolderWalk`] rests — seated by the host after start
+/// ([`AccountStoreHandle::seat_holder_walk`]), shared by every clone of the
+/// handle. The desktop hosts seat the process's one engine-holder slot
+/// (`fauna_client_account_runtime`'s `EngineHolderNudgeSlot::seat()`, which
+/// reads the agent provisioner published into it later and reads absent once
+/// it is gone), so the reach follows the slot without a re-seat; web and the
+/// phones seat nothing — the app is the holder there.
+#[derive(Clone, Default)]
+pub struct HolderWalkSeat(Arc<std::sync::Mutex<Option<Arc<dyn HolderWalk>>>>);
+
+impl std::fmt::Debug for HolderWalkSeat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HolderWalkSeat")
+            .field("seated", &self.current().is_some())
+            .finish()
+    }
+}
+
+impl HolderWalkSeat {
+    fn current(&self) -> Option<Arc<dyn HolderWalk>> {
+        self.0.lock().ok()?.clone()
     }
 }
 
@@ -793,6 +916,9 @@ pub struct AccountStoreHandle {
     /// (`impl SuccessionLedgerStore for AccountStoreHandle`). `None` when the
     /// host's actor id did not decode; the seam then refuses every call.
     pub(super) ledger_identity: Option<Arc<LedgerIdentity>>,
+    /// The holder reach [`Self::walk_fleet`] hands a non-holder's walk to —
+    /// empty until the host seats one ([`Self::seat_holder_walk`]).
+    pub(super) holder_walk: HolderWalkSeat,
 }
 
 /// The identity half of the succession-ledger seam: the account this runtime
@@ -885,6 +1011,28 @@ impl AccountStoreHandle {
     /// serialization path (convention 11 corollary).
     pub fn is_engine_holder(&self) -> bool {
         self.cycles.is_holder()
+    }
+
+    /// [`Self::is_engine_holder`] as a watch, moved on every role edge the
+    /// driver makes — the election at start, a tick or `reconcile_now`
+    /// acquire, and a seed-holding holder's yield to its agent. The current
+    /// role counts as seen. The watch closes once the driver has exited and
+    /// the runtime's last handle is gone. Hold the receiver, not a handle: a watcher that kept a handle
+    /// would keep the store open past the host's plain-quit teardown.
+    pub fn subscribe_engine_role(&self) -> watch::Receiver<bool> {
+        self.cycles.subscribe_role()
+    }
+
+    /// Moves each time this runtime owes the engine holder beside it a pass —
+    /// its seed pass recovered a generation key from escrow (the rows it
+    /// opens wait for that holder's next full reconcile), or a removal wrote
+    /// a `Removed` row (it severs at that holder's next snapshot refresh) —
+    /// which the host asks for now
+    /// (`fauna_client_account_runtime::holder_yield`). The current count
+    /// counts as seen; the watch closes as [`Self::subscribe_engine_role`]'s
+    /// does, and the same advice holds: keep the receiver, not a handle.
+    pub fn subscribe_holder_pass_owed(&self) -> watch::Receiver<u64> {
+        self.cycles.subscribe_holder_pass_owed()
     }
 
     /// Which device principals hold the generation key at this store's
@@ -2317,18 +2465,19 @@ impl AccountStoreHandle {
         rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
     }
 
-    /// The peer leg's **cached last-known nest capabilities** — the offline
-    /// brake evidence rule 7 names (`p2p.md` § Wormability walk, rule 7): the
-    /// share plane's bind reads these when the live `fauna.nest.info` fetch
-    /// fails, so a cold start with no nest reachable can still bind under the
-    /// last-witnessed advertisement. `None` = no evidence at all (never
-    /// fetched, or the cache is unreadable) — the bind's refusing arm, by
-    /// design. One cache, one owner: the peer leg's pump writes it on every
-    /// pass; this read only re-serves it. A local read — never a network call.
-    pub async fn cached_nest_capabilities(&self) -> Result<Option<Vec<String>>> {
+    /// The peer leg's **cached last-known nest facts** — the offline brake
+    /// evidence rule 7 names (`p2p.md` § Wormability walk, rule 7) and the
+    /// relay URL beside it: the share plane's bind reads these when the live
+    /// `fauna.nest.info` fetch fails, so a cold start with no nest reachable
+    /// can still bind under the last-witnessed advertisement, with the
+    /// last-witnessed relay. `None` = no evidence at all (never fetched, or
+    /// the cache is unreadable) — the bind's refusing arm, by design. One
+    /// cache, one owner: the peer leg's pump writes it on every pass; this
+    /// read only re-serves it. A local read — never a network call.
+    pub async fn cached_nest_facts(&self) -> Result<Option<crate::host_legs::PeerLegNestFacts>> {
         let (reply, rx) = oneshot::channel();
         self.cmd
-            .send(Cmd::CachedNestCapabilities { reply })
+            .send(Cmd::CachedNestFacts { reply })
             .await
             .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
         rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))
@@ -2515,9 +2664,13 @@ impl AccountStoreHandle {
     /// barrier the tier_1 tests sequence on (e2e convention 14: a poke, not
     /// a sleep).
     pub async fn reconcile_now(&self) -> Result<PumpReport> {
+        self.reconcile_now_walking(Prompt::Unprompted).await
+    }
+
+    async fn reconcile_now_walking(&self, fleet_walk: Prompt) -> Result<PumpReport> {
         let (reply, rx) = oneshot::channel();
         self.cmd
-            .send(Cmd::ReconcileNow { reply })
+            .send(Cmd::ReconcileNow { reply, fleet_walk })
             .await
             .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
         rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))
@@ -2531,9 +2684,84 @@ impl AccountStoreHandle {
     /// An `Err` names why a row stays owed: the nest offline or refusing the
     /// push, a rotated writer (the runtime reassembles), the runtime gone.
     pub async fn publish_ledger(&self) -> Result<()> {
+        self.publish_own(
+            fauna_protocol::merge_policy::KIND_SUCCESSION_LEDGER,
+            "the grant log",
+        )
+        .await
+    }
+
+    /// Publish this device's unsent rows now and answer whether the bound
+    /// nest acknowledged every mail-custody row it wrote — the rotation's
+    /// barrier before a nest write that leans on a custody row
+    /// (`mail-credentials.md` § Hard revoke → *Published before the nest
+    /// moves*). An `Err` names why a row stays owed, as
+    /// [`Self::publish_ledger`]'s does.
+    pub async fn publish_mail(&self) -> Result<()> {
+        self.publish_own(fauna_protocol::merge_policy::KIND_MAIL, "the mail rows")
+            .await
+    }
+
+    /// Seat the holder reach [`Self::walk_fleet`] hands a non-holder's walk
+    /// to, on every clone of this handle — the host's act after start
+    /// ([`HolderWalkSeat`]). A later seat replaces an earlier one.
+    pub fn seat_holder_walk(&self, reach: Arc<dyn HolderWalk>) {
+        if let Ok(mut seat) = self.holder_walk.0.lock() {
+            *seat = Some(reach);
+        }
+    }
+
+    /// Walk the fleet scope now and answer whether THIS call's walk landed —
+    /// the mail refresh's barrier before it re-seals under a custody the
+    /// nest's published recipient key says is behind (`mail-credentials.md`
+    /// § Hard revoke → *Published before the nest moves*, the stale-sibling
+    /// rule). It runs a full pass ([`Self::reconcile_now`]). A runtime that
+    /// pumps none — another process on this device holds the engine role —
+    /// hands the walk to the holder reach its host seated
+    /// ([`Self::seat_holder_walk`]) and answers that walk's outcome, the rows
+    /// it walked then read from the store the two share; with no reach seated
+    /// it answers the role refusal. A pass cut for a reassembly and a pass
+    /// whose fleet walk failed answer an `Err` — nothing was walked.
+    pub async fn walk_fleet(&self) -> Result<()> {
+        let report = self.reconcile_now_walking(Prompt::Awaited).await?;
+        if report.fleet_rewalk.is_some() || report.fleet_walk.is_some() {
+            return Ok(());
+        }
+        if report.skipped_non_holder {
+            // The holder walks for us and we read the store the two share
+            // afterwards — the single-writer contract untouched
+            // (`account-runtime.md` § Multi-instance concurrency → *A
+            // non-holder's awaited fleet walk reaches the holder*).
+            let Some(reach) = self.holder_walk.current() else {
+                anyhow::bail!("another process on this device holds the engine role");
+            };
+            reach.walk_fleet_for_non_holder().await.map_err(|why| {
+                anyhow::anyhow!(
+                    "another process on this device holds the engine role, and its walk did not land: {why}"
+                )
+            })?;
+            tracing::info!(
+                "walk_fleet: the engine holder walked the fleet scope for this non-holder"
+            );
+            return Ok(());
+        }
+        if report.stale_writer {
+            anyhow::bail!("the account runtime reassembled before the walk");
+        }
+        anyhow::bail!(
+            "the fleet walk did not land: {}",
+            if report.errors.is_empty() {
+                "no walk ran".to_string()
+            } else {
+                report.errors.join("; ")
+            }
+        )
+    }
+
+    async fn publish_own(&self, kind: &'static str, what: &'static str) -> Result<()> {
         let (reply, rx) = oneshot::channel();
         self.cmd
-            .send(Cmd::PublishLedger { reply })
+            .send(Cmd::PublishOwn { kind, what, reply })
             .await
             .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
         rx.await
@@ -2613,6 +2841,7 @@ impl AccountStoreHandle {
         removal: PendingFleetRemoval,
         outcome: NestDeletion,
     ) -> Result<()> {
+        let wrote_rows = matches!(outcome, NestDeletion::Gone);
         let (reply, rx) = oneshot::channel();
         self.cmd
             .send(Cmd::SettleFleetRemoval {
@@ -2622,7 +2851,23 @@ impl AccountStoreHandle {
             })
             .await
             .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
-        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+        let settled = rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        // A `Gone` settle journals its rows even when it then fails.
+        if wrote_rows {
+            self.owe_holder_pass_for_removal();
+        }
+        settled
+    }
+
+    /// A `Removed` row this runtime just wrote severs nothing until the
+    /// engine holder's withdrawal snapshot re-derives, at its next pass
+    /// (`account-sync-plane.md` § The admission seam → *Validity and
+    /// severance*). Beside a co-located agent that holder is the agent, whose
+    /// next pass may be a whole backstop tick away, so the write asks for it
+    /// now — through the same owed-pass watch the host's
+    /// `holder_yield::spawn_holder_pass_owed_nudge` forwards to the agent.
+    fn owe_holder_pass_for_removal(&self) {
+        self.cycles.owe_holder_pass();
     }
 
     /// Which fleet members removing nest row `row` must exclude — the devices
@@ -2688,6 +2933,31 @@ impl AccountStoreHandle {
         rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
     }
 
+    /// Every fleet id `actor`'s verified fleet view names — members and
+    /// removed ids alike (`fleet_removal::fleet_device_ids`) — read by the
+    /// device that runs a succession ceremony, before it switches, and
+    /// recorded in its registry's predecessor row as the departed devices the
+    /// successor attests (`crate::departed_fleet::record_departed_fleet`;
+    /// `succession-aftermath.md` § Re-key scope → *Predecessor devices are
+    /// departed devices*). Refused unless this
+    /// runtime serves `actor`: a host's runtime slot holds whichever account
+    /// is live, and another account's fleet is never this predecessor's. A
+    /// local read.
+    pub async fn fleet_device_ids(
+        &self,
+        actor: fauna_core::identity::ActorId,
+    ) -> Result<Vec<[u8; 32]>> {
+        if self.ledger_identity.as_ref().map(|i| i.self_actor) != Some(actor) {
+            anyhow::bail!("this runtime does not serve the account whose fleet was asked for");
+        }
+        let (reply, rx) = oneshot::channel();
+        self.cmd
+            .send(Cmd::FleetDeviceIds { reply })
+            .await
+            .map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?;
+        rx.await.map_err(|_| anyhow::anyhow!(RUNTIME_GONE))?
+    }
+
     /// The member-addressed door's one leg: the user picked `member` by its
     /// fleet id (`device-member-remove-button`), and that id is the target —
     /// no nest input, so a hostile nest cannot aim it; no row statement read,
@@ -2708,7 +2978,11 @@ impl AccountStoreHandle {
             .send(Cmd::RemoveFleetMember { member, reply })
             .await
             .map_err(|_| gone())?;
-        rx.await.map_err(|_| gone())?
+        let removed = rx.await.map_err(|_| gone())?;
+        if removed.is_ok() {
+            self.owe_holder_pass_for_removal();
+        }
+        removed
     }
 
     /// Retire this machine's enrollment nest-side, then [`Self::shutdown`] —
@@ -2771,8 +3045,8 @@ impl AccountStoreHandle {
     /// device, listed in no verified member's reach and wrapped by no holder
     /// — with its mint stamp and live-row count: what the Settings
     /// recovery-kit section renders its let-go from, only while this answers
-    /// non-empty (`crate::generation_let_go`; `account-data-taxonomy.md`
-    /// § The generation machinery → *Fleet-scope reclamation*, clause
+    /// non-empty (`crate::generation_let_go`; `fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause
     /// (3)(j)). Pass-bound: it may ask the holder.
     pub async fn dead_generations(&self) -> Result<Vec<crate::generation_let_go::DeadGeneration>> {
         let (reply, rx) = oneshot::channel();
@@ -3181,6 +3455,18 @@ impl fauna_client_config::MailStore for AccountStoreHandle {
         self.retire_mail_generation(generation)
             .await
             .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
+    }
+
+    async fn publish(&self) -> Result<(), fauna_client_config::StoreError> {
+        self.publish_mail()
+            .await
+            .map_err(|e| fauna_client_config::StoreError::Save(format!("{e:#}")))
+    }
+
+    async fn walk(&self) -> Result<(), fauna_client_config::StoreError> {
+        self.walk_fleet()
+            .await
+            .map_err(|e| fauna_client_config::StoreError::Load(format!("{e:#}")))
     }
 }
 
@@ -3931,6 +4217,10 @@ where
             let _ = reply
                 .send(crate::fleet_removal::removed_device_ids(local.store, local.trust).await);
         }
+        Cmd::FleetDeviceIds { reply } => {
+            let _ =
+                reply.send(crate::fleet_removal::fleet_device_ids(local.store, local.trust).await);
+        }
         Cmd::RemoveFleetMember { member, reply } => {
             let targets = match crate::fleet_removal::removal_facts(
                 local.store,
@@ -4124,12 +4414,8 @@ where
         // plane's bind (rule 7: cached last-known for offline starts). One cache, one owner: the peer
         // leg's pump writes it, this read only re-serves it; a corrupt or
         // absent cache is `None` (no evidence — the refusing arm).
-        Cmd::CachedNestCapabilities { reply } => {
-            let _ = reply.send(
-                crate::host_legs::cached_nest_facts(local.store)
-                    .await
-                    .map(|facts| facts.capabilities),
-            );
+        Cmd::CachedNestFacts { reply } => {
+            let _ = reply.send(crate::host_legs::cached_nest_facts(local.store).await);
         }
         Cmd::P2pParticipation { reply } => {
             let _ = reply.send(crate::p2p_participation::load(local.store).await);
@@ -4243,7 +4529,10 @@ fn escrow_holders_of(entries: &[StateEntry]) -> Vec<[u8; 32]> {
 /// answers with `let _ =`), without awaiting.
 fn wake_chain_carry(cmd: &mpsc::Sender<Cmd>) {
     let (reply, _unread) = oneshot::channel();
-    match cmd.try_send(Cmd::ReconcileNow { reply }) {
+    match cmd.try_send(Cmd::ReconcileNow {
+        reply,
+        fleet_walk: Prompt::Unprompted,
+    }) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Full(_)) => {
             tracing::debug!(

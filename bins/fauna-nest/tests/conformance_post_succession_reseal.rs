@@ -152,7 +152,7 @@ async fn resign_as_predecessor(
     signer: &fauna_protocol::sync_writer_sig::ChangeSigner,
 ) {
     let rows = fauna_client_sync::SyncClient::new(Arc::clone(nest_client))
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list")
         .changes;
@@ -183,7 +183,7 @@ async fn resign_as_predecessor(
 /// The newest seq the nest lists for [`FOLDER`].
 async fn newest_seq(nest_client: &Arc<fauna_client::NestClient>) -> i64 {
     fauna_client_sync::SyncClient::new(Arc::clone(nest_client))
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list")
         .changes
@@ -260,7 +260,7 @@ async fn nest_head_thumbnail(
     path: &str,
 ) -> Option<String> {
     let listed = fauna_client_sync::SyncClient::new(nest_client)
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list");
     let want = hex::encode(fauna_core::sync::path_hash(path));
@@ -303,7 +303,7 @@ fn stamp_head_signed_as_owner(engine: &SyncEngine, path: &str, manifest_hex: &st
 /// authoritative head, read independently of any engine's local row.
 async fn nest_head_manifest(nest_client: Arc<fauna_client::NestClient>, path: &str) -> String {
     let listed = fauna_client_sync::SyncClient::new(nest_client)
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list");
     // Keyed on `path_hash`, not the plaintext `path`: `changes.list` does not
@@ -463,6 +463,111 @@ async fn a_successor_reseals_a_corpus_it_holds_no_bytes_of() {
         0,
         "and it terminates: the next pass is one indexed query"
     );
+}
+
+/// A stale reissue never buries a newer edit
+/// (`mls-group-key-material.md` § M2 → *(B) Reclaim*, property (1)).
+///
+/// The offline-device shape: the successor's row still names X when a peer
+/// records X′ over it, and the successor — not having pulled — re-seals X from
+/// the nest. Its reissue takes the highest `seq` and so becomes the head the
+/// supersede verifies; without the source check the nest then marked every
+/// live row below it, X′ included, hiding the peer's edit from `changes.list`
+/// and handing its chunks to GC. The engine names X as the re-seal's source,
+/// the row below the head is X′, so the nest refuses and marks nothing.
+///
+/// ⚠ Read back from the nest's own `changes.list`, independently of any
+/// engine's local row: the property is about what every other device can
+/// still fetch.
+#[tokio::test]
+async fn a_stale_reissue_does_not_bury_a_peers_newer_edit() {
+    let owner = ActorKeypair::from_secret(OWNER_SECRET).actor_id().0;
+    let (url, token) = start_test_nest(owner).await;
+
+    let rel = "notes/draft.txt";
+    let first: Vec<u8> = (0..90_000u32).map(|i| (i % 241) as u8).collect();
+    let newer: Vec<u8> = (0..90_000u32).map(|i| (i % 239) as u8 ^ 0x5a).collect();
+
+    // ── X: the peer's first version, sealed under the retired root ──
+    let peer_watch = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(peer_watch.path().join("notes")).unwrap();
+    std::fs::write(peer_watch.path().join(rel), &first).unwrap();
+    let (peer, peer_ctl) = connected_engine(
+        &url,
+        &token,
+        peer_watch.path().to_path_buf(),
+        PREDECESSOR_SEED,
+        PREDECESSOR_DEVICE,
+    )
+    .await;
+    assert!(peer.upload_file(rel).await.expect("upload X").recorded);
+    let x = nest_head_manifest(Arc::clone(&peer_ctl), rel).await;
+
+    // ── The successor's row names X; then it goes offline ──
+    let succ_watch = tempfile::tempdir().unwrap();
+    let (mut succ, succ_ctl) = connected_engine(
+        &url,
+        &token,
+        succ_watch.path().to_path_buf(),
+        SUCCESSOR_SEED,
+        SUCCESSOR_DEVICE,
+    )
+    .await;
+    succ.set_predecessor_backup_keys(vec![BackupKey::derive(&PREDECESSOR_SEED).into()]);
+    succ.db()
+        .upsert_entry(
+            rel,
+            None,
+            None,
+            Some(manifest_hash_of(&x)),
+            SyncState::Placeholder,
+            0,
+            0,
+            first.len() as i64,
+            1,
+            None,
+        )
+        .expect("seed the successor's row at X");
+    stamp_head_signed_as_owner(&succ, rel, &x);
+
+    // ── X′: the peer's newer edit, which the successor never pulls ──
+    std::fs::write(peer_watch.path().join(rel), &newer).unwrap();
+    assert!(peer.upload_file(rel).await.expect("upload X′").recorded);
+    let x_prime = nest_head_manifest(Arc::clone(&peer_ctl), rel).await;
+    assert_ne!(x_prime, x);
+
+    // ── The stale re-seal: X reissued as the newest head ──
+    assert_eq!(
+        succ.reseal_predecessor_sealed()
+            .await
+            .expect("re-seal pass"),
+        1,
+        "the successor re-seals the head its row names"
+    );
+    let reissue = nest_head_manifest(Arc::clone(&succ_ctl), rel).await;
+    assert!(
+        reissue != x && reissue != x_prime,
+        "the reissue is the newest row the nest lists"
+    );
+
+    // ── X′ is still live: listed, so every device can still fetch it ──
+    let listed = fauna_client_sync::SyncClient::new(Arc::clone(&succ_ctl))
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
+        .await
+        .expect("changes.list")
+        .changes;
+    assert!(
+        listed
+            .iter()
+            .any(|c| c.manifest_hash.as_deref() == Some(x_prime.as_str())),
+        "the peer's newer edit must stay live after a stale reissue's supersede — \
+         marking it hides it from every catching-up device and hands its chunks to GC"
+    );
+    let bytes = succ
+        .download_file_bytes_by_manifest(manifest_hash_of(&x_prime), None, rel)
+        .await
+        .expect("X′ still fetches");
+    assert_eq!(bytes, newer);
 }
 
 /// A successor's inherited **thumbnail** moves off the retired root with its

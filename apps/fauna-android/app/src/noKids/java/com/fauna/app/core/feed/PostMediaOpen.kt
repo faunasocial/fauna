@@ -2,6 +2,7 @@ package com.fauna.app.core.feed
 
 import com.fauna.app.core.ApiClient
 import com.fauna.ffi.FfiFeedManager
+import com.fauna.ffi.detectMediaC2pa
 
 /**
  * Fetch a feed post's media blob and open it for rendering — the android leg of
@@ -42,5 +43,19 @@ object PostMediaOpen {
         val fetched = runCatching { api.fetchBlobBytes(hash) }.getOrNull() ?: return null
         if (manager == null) return fetched
         return manager.openMediaBytes(hash, fetched)
+    }
+
+    /**
+     * The `c2pa-badge` verdict (`media.md` § Encryption at rest → *C2PA provenance*).
+     * The `x-c2pa` response header is the uploader's own assertion — a UI hint, not a
+     * security boundary — so it is only a pre-filter here: `false` ends the check
+     * without fetching anything, and `true` is confirmed against the opened bytes
+     * through the shared `detectMediaC2pa` export (bytes only, no MIME). Any failure
+     * to fetch or open is "no badge".
+     */
+    suspend fun verifiedC2pa(api: ApiClient, manager: FfiFeedManager?, hash: String): Boolean {
+        if (!runCatching { api.checkBlobC2pa(hash) }.getOrDefault(false)) return false
+        val bytes = fetchAndOpen(api, manager, hash) ?: return false
+        return detectMediaC2pa(bytes)
     }
 }

@@ -29,6 +29,7 @@ reach apple through shared Rust (`libs/fauna-ffi/src/nest_client.rs` reads
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import PurePosixPath
 
 import pytest
@@ -185,8 +186,8 @@ def prev_build_supports_real_send(client: str) -> bool:
 #: `launch_on_home` launch) — orthogonal to `PREV_BUILD_SUPPORTS_REAL_SEND`, which is
 #: about the send *command*, not the isolation *plumbing*.
 #:
-#: linux and macOS are BOTH members — foundational, not e2e-only additions — but by
-#: different mechanisms, and macOS's was mis-stated until it was measured 2026-07-15.
+#: All three are members — linux and macOS foundationally, not as e2e-only additions,
+#: and by different mechanisms (macOS's was mis-stated until it was measured 2026-07-15).
 #: linux locates its state under `XDG_CONFIG_HOME` (the driver's `xdg_base`). macOS
 #: locates the MLS store under `.applicationSupportDirectory`, which resolves from
 #: CoreFoundation's notion of home and IGNORES `HOME` — measured: with only `env["HOME"]`
@@ -199,22 +200,17 @@ def prev_build_supports_real_send(client: str) -> bool:
 #: (`FAUNA_E2E_CREDENTIAL_DIR`, which happened to clear on the same pin advance as its send
 #: capability), never about store relocation.
 #:
-#: **windows is excluded 2026-07-15, and will stay excluded until the pin advances past
-#: this commit.** `BackupPaths.DataDir`'s `FAUNA_E2E_DATA_DIR` override — the seam
-#: `state_home_config`'s windows branch relies on — is new THIS session; no pinned build
-#: can possibly honor an env var that didn't exist when it was built. Measured: the
-#: pinned build silently falls back to the REAL `%LocalAppData%\\Fauna`, so (a) the
-#: upgrade cell's phase 1 (pinned build writes) leaves the isolated HOME's `mls.db`
-#: entirely absent (`home.mls_db.exists()` false — vacuous-assertion guard catches it
-#: cleanly, not a crash), and (b) the downgrade cell's phase 2 (pinned build reads a
-#: HEAD-written HOME) opens with an empty `threads=[]` — the "unbound engine" signature
-#: `_assert_thread_visible`'s own error message calls out, NOT data loss (HEAD's write
-#: at the isolated path is untouched; only the OLD build is looking in the wrong place).
-#: **Unblock:** once a pin lands that postdates this change, add `"windows"` here (the
-#: standing instruction already governs pin-advance sessions generally — see
-#: `pinned-previous-build.toml`'s update rule) and re-run
-#: `test_client_at_rest_upgrade.py --client windows`.
-PREV_BUILD_SUPPORTS_HOME_ISOLATION = ("linux", "macos")
+#: **windows IS pin-gated, unlike macOS:** its seam is app-side —
+#: `BackupPaths.DataDir`'s `FAUNA_E2E_DATA_DIR` override (2026-07-15) — so
+#: a pinned build honors it only if it was cut after that commit. A pin that predates
+#: it silently falls back to the REAL `%LocalAppData%\\Fauna`: the upgrade cell's phase 1
+#: then leaves the isolated HOME's `mls.db` absent (the vacuous-assertion guard catches
+#: it), and the downgrade cell's phase 2 renders `threads=[]` — the "unbound engine"
+#: signature, not data loss. windows was excluded on exactly that measurement on
+#: 2026-07-15 and joined 2026-10-09, on the pin of 2026-10-05. The other half
+#: of its isolation, the `%LOCALAPPDATA%` ancestor the unified account store hangs off,
+#: is harness-side (`drivers/windows.py`), so every build honors it whatever its age.
+PREV_BUILD_SUPPORTS_HOME_ISOLATION = ("linux", "macos", "windows")
 
 
 def prev_build_supports_home_isolation(client: str) -> bool:
@@ -263,12 +259,8 @@ def prev_build_supports_home_isolation(client: str) -> bool:
 #: The N+61 "pinned-HOME never authenticates" symptom was count-1 (pin-age credentials),
 #: NOT the store seam — on the new pin the pinned build logs in fine on a seeded HOME.
 #:
-#: ⚠ **windows measured 2026-07-15 on the pin: excluded by `PREV_BUILD_SUPPORTS_
-#: HOME_ISOLATION`, NOT by send capability** (windows has been in `PREV_BUILD_SUPPORTS_
-#: REAL_SEND` since the pin's commit — this is a genuinely different gate; see that
-#: tuple's doc for the measured failure signatures). The windows real-binary SKEW-SMOKE
-#: suite (`test_version_skew_real_binary.py`, not this file) is fully green, including
-#: the real-MLS DM leg — only the at-rest HOME-isolation seam is pin-gated.
+#: windows was held out 2026-07-15 to 2026-10-09 by `PREV_BUILD_SUPPORTS_HOME_ISOLATION`,
+#: NOT by send capability — a genuinely different gate; see that tuple's doc.
 AT_REST_CLIENTS = tuple(
     c for c in SKEW_CLIENTS
     if prev_build_supports_real_send(c) and prev_build_supports_home_isolation(c)
@@ -308,9 +300,9 @@ def enable_real_conversations(app, client: str) -> None:
 #: Where each app keeps the MLS state store — the user-irrecoverable file the at-rest
 #: grid is really about (group secrets + signing key; the nest side is ciphertext, so if
 #: this is lost the conversation is gone). Relative to the persistent HOME.
-#: windows relocates its ENTIRE `%LocalAppData%\Fauna` data dir under `FAUNA_E2E_DATA_DIR`
-#: (`state_home_config` below), not just a keyring namespace — so `mls.db` lands directly
-#: under the pinned `home`, with no `Fauna`-subfolder segment the way the real profile has.
+#: windows' HOME stands in for `%LOCALAPPDATA%` and its data dir is laid out under it as
+#: `<home>\\Fauna` (`state_home_config` below), production's own layout — so the path
+#: carries the `Fauna` segment the real profile has.
 #:
 #: ⚠ These are the **PINNED (pre-scoping) build's** paths, which is exactly what the one
 #: consumer needs: the upgrade cell's vacuity guard, asserting that the PINNED build wrote
@@ -321,12 +313,13 @@ def enable_real_conversations(app, client: str) -> None:
 MLS_DB_RELPATH = {
     "linux": "config/fauna/mls_state.db",
     "macos": "Library/Application Support/Fauna/conv-mls.db",
-    "windows": "mls.db",
+    "windows": "Fauna/mls.db",
 }
 
 #: Clients whose HEAD build has completed its account-scoping leg: the MLS store moved
 #: from the flat path above to `<state base>/<actor-id-hex>/mls.db` (`account-scoping.md`
-#: § The scoping taxonomy). Grows one entry per client leg.
+#: § The scoping taxonomy). Grows one entry per client leg; windows' landed 2026-07-23
+#: (`AccountStateDir.cs`, `<base>\\<actor>\\mls.db`).
 #:
 #: The at-rest grid reads this in ONE place, the downgrade cell: an older build's reader
 #: is still at the flat path, so what it renders is whatever the flat store holds. Where
@@ -335,7 +328,7 @@ MLS_DB_RELPATH = {
 #: history rather than the newer build's. That is the accepted, uniform consequence of
 #: per-account placement — the contract it must not break is "destroy nothing", which
 #: phases 1+3 assert.
-HEAD_MLS_STORE_IS_ACCOUNT_SCOPED = ("macos", "linux")
+HEAD_MLS_STORE_IS_ACCOUNT_SCOPED = ("macos", "linux", "windows")
 
 
 def head_mls_store_is_account_scoped(client: str) -> bool:
@@ -373,8 +366,10 @@ def head_mls_store_is_account_scoped(client: str) -> bool:
 #: 2026-07-22) predates the pin, so that build writes only
 #: the per-account store — and the upgrade cell's vacuity guard, still looking at the
 #: flat path, failed in every whole-suite linux sweep as "the previous build wrote no
-#: MLS state".
-PREV_BUILD_MLS_STORE_IS_ACCOUNT_SCOPED = ("macos", "linux")
+#: MLS state". windows was listed when its at-rest leg was first enabled (2026-10-09):
+#: its scoping leg landed 2026-07-23, long before the pin of
+#: 2026-10-05.
+PREV_BUILD_MLS_STORE_IS_ACCOUNT_SCOPED = ("macos", "linux", "windows")
 
 
 def prev_build_mls_store_is_account_scoped(client: str) -> bool:
@@ -390,10 +385,14 @@ def prev_build_mls_store_is_account_scoped(client: str) -> bool:
 
 
 #: The per-account MLS store's FILE name, which is per client: apple's scoped store is
-#: `AccountStateDir.scopedMlsDbName`, linux keeps the historical `mls_state.db`.
+#: `AccountStateDir.scopedMlsDbName`, windows' `AccountStateDir.MlsDbName`, linux keeps
+#: the historical `mls_state.db`.
 SCOPED_MLS_DB_NAME = {
     "linux": "mls_state.db",
+    "tui": "mls_state.db",
+    "android": "mls.db",
     "macos": "mls.db",
+    "windows": "mls.db",
 }
 
 
@@ -401,8 +400,9 @@ def scoped_mls_db_relpath(client: str, actor_id_hex: str) -> str:
     """Where `client`'s per-account-scoped MLS store lives, relative to HOME.
 
     `<base>/<actor-id-hex>/<SCOPED_MLS_DB_NAME[client]>`, where the flat dir is
-    `MLS_DB_RELPATH[client]`'s parent — `AccountStateDir.swift` on apple, and
-    `account_scope.rs` over the shared `actor_state_dir` on linux. Only meaningful for
+    `MLS_DB_RELPATH[client]`'s parent — `AccountStateDir.swift` on apple,
+    `AccountStateDir.cs` on windows, and `account_scope.rs` over the shared
+    `actor_state_dir` on linux. Only meaningful for
     a client where `head_mls_store_is_account_scoped` (HEAD) or
     `prev_build_mls_store_is_account_scoped` (the pinned previous build) is true.
     """
@@ -454,18 +454,26 @@ def state_home_config(client: str, *, home, creds, keyring_app: str) -> dict:
     under XDG dirs plus a *named keyring namespace*, macOS keeps it under Application
     Support (relocated via `CFFIXED_USER_HOME` — which the driver sets from the pinned
     `home`; macOS's `.applicationSupportDirectory` ignores `HOME` itself) with the E2E
-    keychain living as a file in the credential dir, and windows relocates the whole
-    `%LocalAppData%\\Fauna` data dir (MLS store, logs,
-    trust-pin store — `BackupPaths.DataDir` in the app) via `data_dir` plus its existing
-    file-backed credential store (`FAUNA_E2E_CREDENTIAL_DIR`, the same seam a normal
-    windows e2e login already uses — see `drivers/windows.py`). Same concept, three
-    spellings; the mapping is confined to this function so no test file ever branches
-    on it.
+    keychain living as a file in the credential dir, and windows pins `%LOCALAPPDATA%`
+    itself (`local_appdata`) with the app's data dir under it as `<home>\\Fauna` —
+    production's layout. Both are needed because windows has two roots there: the app's
+    own data dir (MLS store, logs, trust-pin store — `BackupPaths.DataDir`, reached via
+    `FAUNA_E2E_DATA_DIR`), and the unified account store shared Rust roots at
+    `%LOCALAPPDATA%\\Fauna\\sync`, which only the ancestor reaches; a `data_dir` alone
+    left every build on a fresh account store. Credentials ride its existing file-backed
+    store (`FAUNA_E2E_CREDENTIAL_DIR`, the same seam a normal windows e2e login already
+    uses — see `drivers/windows.py`). Same concept, three spellings; the mapping is
+    confined to this function so no test file ever branches on it.
     """
     if client == "macos":
         return {"home": str(home), "credential_dir": str(creds)}
     if client == "windows":
-        return {"data_dir": str(home), "credential_dir": str(creds), "keyring_app": keyring_app}
+        return {
+            "local_appdata": str(home),
+            "data_dir": os.path.join(str(home), "Fauna"),
+            "credential_dir": str(creds),
+            "keyring_app": keyring_app,
+        }
     return {
         "xdg_base": str(home),
         "keyring_app": keyring_app,

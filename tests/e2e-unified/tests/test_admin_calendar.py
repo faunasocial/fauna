@@ -189,3 +189,61 @@ def test_caldav_enabled_toggle_round_trips(admin_app, nest_instance):
     assert not admin_app.error_text().strip(), (
         f"unexpected error after a valid toggle: {admin_app.error_text()!r}"
     )
+
+
+#: The three DAV pages: (navigate, present-check, toggle id, toggle click, the
+#: `get_mail_config` field the switch hydrates from).
+_DAV_SWITCHES = [
+    ("navigate_calendar", "calendar_policy_present",
+     "admin-calendar-enabled-toggle", "toggle_caldav_enabled", "caldav_enabled"),
+    ("navigate_contacts", "contacts_policy_present",
+     "admin-contacts-carddav-enabled-toggle", "toggle_carddav_enabled", "carddav_enabled"),
+    ("navigate_files", "files_policy_present",
+     "admin-files-webdav-enabled-toggle", "toggle_webdav_enabled", "webdav_enabled"),
+]
+
+
+@pytest.mark.feature("admin-calendar-contacts-files")
+def test_each_dav_switch_shows_the_nest_state(admin_app, nest_instance):
+    """Each of the Calendar, Contacts and Files pages shows its switch as the nest
+    holds it — when the page opens, and again after a change (admin.md § 8.
+    Calendar; the toggle's own `state` answer, read back, not just the nest
+    write). Each switch is put back the way it was found: the session nest is
+    shared by every later module."""
+    actions = admin_app.admin
+    with _admin_client(nest_instance) as client:
+        def held(field: str) -> bool:
+            return bool(client.call("fauna.bridges.get_mail_config", {})[field])
+
+        for navigate, present, toggle_id, click, field in _DAV_SWITCHES:
+            def shown() -> str:
+                return admin_app.driver.get_attr(toggle_id, "state") or ""
+
+            getattr(actions, navigate)()
+            assert _wait(getattr(actions, present)), (
+                f"{toggle_id} never rendered. error: {admin_app.error_text()!r}"
+            )
+            initial = held(field)
+            want = "on" if initial else "off"
+            assert _wait(lambda: shown() == want), (
+                f"on open {toggle_id} reads {shown()!r}; the nest holds {field}={initial}"
+            )
+
+            getattr(actions, click)()
+            assert _wait(lambda: held(field) == (not initial)), (
+                f"{toggle_id} did not reach the nest. error: {admin_app.error_text()!r}"
+            )
+            flipped = "off" if initial else "on"
+            assert _wait(lambda: shown() == flipped), (
+                f"after the change {toggle_id} reads {shown()!r}; the nest holds "
+                f"{field}={not initial}"
+            )
+
+            # Restore.
+            getattr(actions, click)()
+            assert _wait(lambda: held(field) == initial), (
+                f"could not restore {field}={initial}. error: {admin_app.error_text()!r}"
+            )
+            assert _wait(lambda: shown() == want), (
+                f"after restoring {toggle_id} reads {shown()!r}; the nest holds {field}={initial}"
+            )

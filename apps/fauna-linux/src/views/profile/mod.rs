@@ -130,9 +130,7 @@ pub fn build_profile_view(
         // `fauna.contacts.list` (`refresh_block_state`); each tap toggles and
         // re-renders from the new state. `block_user_authored` guards the
         // open-time read against a press that beat it home — see `apply_block_read`.
-        let block_btn = gtk::Button::with_label(p::BLOCK);
-        block_btn.add_css_class("destructive-action");
-        set_test_id(&block_btn, ids::PROFILE_BLOCK_BUTTON);
+        let block_btn = new_block_button();
         let is_blocked = Rc::new(Cell::new(false));
         let block_user_authored = Rc::new(Cell::new(false));
         refresh_block_state(
@@ -152,6 +150,40 @@ pub fn build_profile_view(
             });
         }
         actions.append(&block_btn);
+
+        // Report — tell the nest's admins about this account (`moderation.md`
+        // § User-initiated reporting → App surface), beside Block. The sheet's
+        // *also block this person* runs the same `knocks_block` the button
+        // above does, so a landed one re-renders THIS page's Block ⇄ Unblock
+        // the way a tap would.
+        let report_btn = gtk::Button::with_label(p::REPORT);
+        set_test_id(&report_btn, ids::PROFILE_REPORT_BUTTON);
+        {
+            let client = Rc::clone(client);
+            let actor_id = actor_id.clone();
+            let block_btn = block_btn.clone();
+            let is_blocked = Rc::clone(&is_blocked);
+            let block_user_authored = Rc::clone(&block_user_authored);
+            report_btn.connect_clicked(move |b| {
+                let block_btn = block_btn.clone();
+                let is_blocked = Rc::clone(&is_blocked);
+                let block_user_authored = Rc::clone(&block_user_authored);
+                let on_blocked: Rc<dyn Fn(&str)> = Rc::new(move |_| {
+                    is_blocked.set(true);
+                    block_user_authored.set(true);
+                    apply_block_state(&block_btn, true);
+                    // The sheet's block authors the edge: the toggle is known.
+                    block_btn.set_sensitive(true);
+                });
+                crate::report::open_sheet(
+                    b,
+                    crate::report::actor_target(&actor_id),
+                    &client,
+                    Some(on_blocked),
+                );
+            });
+        }
+        actions.append(&report_btn);
 
         // Request contact — the knock, routed to the viewed actor's home nest,
         // with the ward's ask pair (`family-safety.md` § Child-initiated contact
@@ -318,9 +350,35 @@ struct HeaderNames {
     public: gtk::Label,
     /// The published display name, once the open's `fauna.profile.get` lands.
     display_name: Rc<RefCell<Option<String>>>,
-    /// `Some(fallback)` on the SELF profile — the cached handle, else the
-    /// actor id; `None` on another's, whose names the shared resolver answers.
-    self_fallback: Option<String>,
+    /// The SELF profile, whose fallback is [`self_header_fallback`] read at
+    /// every paint; another's names come from the shared resolver.
+    is_self: bool,
+}
+
+thread_local! {
+    /// Repainters for every SELF header still on screen — each answers `false`
+    /// once its labels are gone, and is dropped then. Driven by
+    /// [`repaint_self_headers`] on every identity refresh.
+    static SELF_HEADERS: RefCell<Vec<Box<dyn Fn() -> bool>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Repaint every live SELF profile header — called on each
+/// `IdentityRefreshed`, so the header follows the account's current primary
+/// (`mail-primary-domain-rename.md` § Display-handle interaction) without a
+/// page rebuild. tui's twin is the `SelfAddressRefreshed` push.
+pub fn repaint_self_headers() {
+    SELF_HEADERS.with(|headers| headers.borrow_mut().retain(|repaint| repaint()));
+}
+
+/// The SELF header's fallback when no display name is published: the handle on
+/// the CURRENT primary, `<handle>@<domain>`, through the shared
+/// `fauna_client_accounts::display_handle` — never the bare handle — else the
+/// actor id. Read at paint time from the live account cache.
+fn self_header_fallback(actor_id: &str) -> String {
+    let (handle, domain, _tier) = load_account_cache();
+    let handle = handle.unwrap_or_default();
+    fauna_client_accounts::display_handle(&handle, Some(&handle), domain.as_deref())
+        .unwrap_or_else(|| actor_id.to_string())
 }
 
 impl HeaderNames {
@@ -330,12 +388,15 @@ impl HeaderNames {
     /// header holds no handle).
     fn label(&self, actor_id: &str) -> fauna_core::format::PeerLabel {
         let display_name = self.display_name.borrow();
-        match &self.self_fallback {
-            Some(fallback) => fauna_core::format::PeerLabel {
-                primary: display_name.clone().unwrap_or_else(|| fallback.clone()),
+        if self.is_self {
+            fauna_core::format::PeerLabel {
+                primary: display_name
+                    .clone()
+                    .unwrap_or_else(|| self_header_fallback(actor_id)),
                 public: None,
-            },
-            None => overlays::projection().peer_label(display_name.as_deref(), None, actor_id),
+            }
+        } else {
+            overlays::projection().peer_label(display_name.as_deref(), None, actor_id)
         }
     }
 
@@ -377,16 +438,11 @@ fn build_header(
         .hexpand(true)
         .valign(gtk::Align::Center)
         .build();
-    // Initial names: own handle (from the account cache) on the SELF profile,
-    // else the resolver's answer with no published name yet.
-    // `refresh_header_name` upgrades this to the published display_name once
-    // `fauna.profile.get` returns.
-    let self_fallback = is_self.then(|| {
-        let (handle, _domain, _tier) = load_account_cache();
-        handle
-            .filter(|h| !h.is_empty())
-            .unwrap_or_else(|| actor_id.to_string())
-    });
+    // Initial names: own `<handle>@<current primary>` on the SELF profile
+    // ([`self_header_fallback`], re-read on every identity refresh), else the
+    // resolver's answer with no published name yet. `refresh_header_name`
+    // upgrades this to the published display_name once `fauna.profile.get`
+    // returns.
     let handle_label = gtk::Label::new(None);
     handle_label.set_halign(gtk::Align::Start);
     handle_label.add_css_class("title-3");
@@ -403,9 +459,30 @@ fn build_header(
         primary: handle_label,
         public: public_label,
         display_name: Rc::new(RefCell::new(None)),
-        self_fallback,
+        is_self,
     };
     names.paint(actor_id);
+    if is_self {
+        let primary = names.primary.downgrade();
+        let public = names.public.downgrade();
+        let display_name = Rc::clone(&names.display_name);
+        let actor_id = actor_id.to_string();
+        SELF_HEADERS.with(|headers| {
+            headers.borrow_mut().push(Box::new(move || {
+                let (Some(primary), Some(public)) = (primary.upgrade(), public.upgrade()) else {
+                    return false;
+                };
+                HeaderNames {
+                    primary,
+                    public,
+                    display_name: Rc::clone(&display_name),
+                    is_self: true,
+                }
+                .paint(&actor_id);
+                true
+            }));
+        });
+    }
 
     let copy_btn = gtk::Button::with_label(p::COPY_ID);
     copy_btn.set_valign(gtk::Align::Center);
@@ -503,6 +580,19 @@ fn start_dm(actor_id: &str, on_open_conversations: &Rc<dyn Fn()>) {
     on_open_conversations();
 }
 
+/// The Block ⇄ Unblock toggle as built: "Block" label, but INERT until the
+/// open-time edge read lands (or the viewer's own press authors the edge) — a
+/// press on the not-blocked default would re-send `knocks_block` against an edge
+/// the viewer already holds. [`apply_block_read`] enables it; mirrors tui's
+/// `is_blocked: None`.
+fn new_block_button() -> gtk::Button {
+    let btn = gtk::Button::with_label(p::BLOCK);
+    btn.add_css_class("destructive-action");
+    btn.set_sensitive(false);
+    set_test_id(&btn, ids::PROFILE_BLOCK_BUTTON);
+    btn
+}
+
 /// Reflect the current block state on the toggle button: `blocked` → "Unblock"
 /// (constructive), not-blocked → "Block" (destructive-styled). One place so the
 /// initial read and every successful toggle render identically.
@@ -536,12 +626,18 @@ fn apply_block_state(btn: &gtk::Button, blocked: bool) {
 /// Linux rebuilds the whole profile view per open, so — unlike tui — there is no
 /// cross-open half to guard: a stale reply from a PRIOR open closed over the old
 /// `is_blocked`/`block_user_authored` pair and cannot reach a rebuilt view.
+///
+/// The toggle is built insensitive and this read is what enables it (a failed
+/// read lands as `false`, so the toggle never stays stuck off): the edge is
+/// not-yet-known until then, and a press on the not-blocked default would
+/// re-send `knocks_block` against an edge the viewer already holds.
 fn apply_block_read(
     btn: &gtk::Button,
     is_blocked: &Rc<Cell<bool>>,
     block_user_authored: &Rc<Cell<bool>>,
     blocked: bool,
 ) {
+    btn.set_sensitive(true);
     if block_user_authored.get() {
         return;
     }
@@ -831,6 +927,28 @@ mod tests {
                 "the next press must issue knocks_unblock against the blocked \
                  edge; a rewound value would re-issue knocks_block instead"
             );
+        });
+    }
+
+    /// Between open and the open-time edge read the toggle is inert: the edge is
+    /// not-yet-known, and a press on the not-blocked default would re-send
+    /// `knocks_block` against an edge the viewer already holds (mirrors tui's
+    /// `the_toggle_is_inert_until_the_open_time_read_lands`). The read enables it
+    /// — including a failed read, which lands as not-blocked.
+    #[test]
+    fn the_toggle_is_inert_until_the_open_time_read_lands() {
+        crate::testid::run_on_gtk_thread(|| {
+            let view = new_block_button();
+            assert!(
+                !view.is_sensitive(),
+                "the toggle is disabled until the edge is known"
+            );
+
+            let is_blocked = Rc::new(Cell::new(false));
+            let block_user_authored = Rc::new(Cell::new(false));
+            apply_block_read(&view, &is_blocked, &block_user_authored, true);
+            assert!(view.is_sensitive(), "the read enables the toggle");
+            assert!(is_blocked.get());
         });
     }
 

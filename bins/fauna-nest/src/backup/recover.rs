@@ -477,8 +477,13 @@ fn placements_from_folds(
 
 /// One resource's version in a DAV journal: its current placement, or its
 /// deletion. Both are numbered on the collection's one change counter.
+///
+/// Kind-neutral and whole — everything a journal record of either DAV kind
+/// says about the version but its ETag, which is the door's spelling of the
+/// change number — so materialize's re-filing reads the adopted journal
+/// through this fold too, rather than a second one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum DavVersion {
+pub(super) enum DavVersion {
     Placed {
         /// The content-record id the resource's row carries
         /// (`event_id`/`card_id`) — the floor of the record that is current.
@@ -486,10 +491,13 @@ enum DavVersion {
         modseq: u64,
         /// The row's effective sealed sidecar after this placement.
         sidecar: Option<Vec<u8>>,
+        ciphertext_size: u32,
     },
     Deleted {
         id: [u8; 32],
         modseq: u64,
+        /// Server delete time, epoch seconds.
+        deleted_at: i64,
     },
 }
 
@@ -501,25 +509,35 @@ impl DavVersion {
     fn rank(&self) -> (u64, u8, [u8; 32]) {
         match self {
             Self::Placed { id, modseq, .. } => (*modseq, 0, *id),
-            Self::Deleted { id, modseq } => (*modseq, 1, *id),
+            Self::Deleted { id, modseq, .. } => (*modseq, 1, *id),
+        }
+    }
+
+    /// The change number the version carries.
+    pub(super) fn modseq(&self) -> u64 {
+        match self {
+            Self::Placed { modseq, .. } | Self::Deleted { modseq, .. } => *modseq,
         }
     }
 }
 
 /// One collection as the fold knows it: the metadata of the generation that
-/// numbers it highest, and that number.
+/// numbers it highest, and that number — plus the highest prune floor any
+/// generation carries for it (`CalendarState::pruned_modseq`), whichever
+/// generation that is: below it the fold's tombstones are incomplete.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct DavCollection {
-    encrypted_metadata: Vec<u8>,
-    highestmodseq: u64,
+pub(super) struct DavCollection {
+    pub(super) encrypted_metadata: Vec<u8>,
+    pub(super) highestmodseq: u64,
+    pub(super) pruned_modseq: u64,
 }
 
 /// Where a placeable record goes: its resource and the sidecar its row takes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct DavPlacement {
-    collection: [u8; 32],
-    uid_hash: [u8; 32],
-    sidecar: Option<Vec<u8>>,
+pub(super) struct DavPlacement {
+    pub(super) collection: [u8; 32],
+    pub(super) uid_hash: [u8; 32],
+    pub(super) sidecar: Option<Vec<u8>>,
 }
 
 /// The reduction of every delivered DAV journal generation, live and retained,
@@ -531,9 +549,9 @@ struct DavPlacement {
 /// regressed source's own post-regression pushes and are silent about
 /// everything it lost.
 #[derive(Debug, Default)]
-struct DavFold {
-    resources: HashMap<([u8; 32], [u8; 32]), DavVersion>,
-    collections: HashMap<[u8; 32], DavCollection>,
+pub(super) struct DavFold {
+    pub(super) resources: HashMap<([u8; 32], [u8; 32]), DavVersion>,
+    pub(super) collections: HashMap<[u8; 32], DavCollection>,
 }
 
 impl DavFold {
@@ -546,17 +564,27 @@ impl DavFold {
         }
     }
 
-    fn absorb_collection(&mut self, id: [u8; 32], encrypted_metadata: &[u8], highestmodseq: u64) {
+    fn absorb_collection(
+        &mut self,
+        id: [u8; 32],
+        encrypted_metadata: &[u8],
+        highestmodseq: u64,
+        pruned_modseq: u64,
+    ) {
         let candidate = (highestmodseq, encrypted_metadata);
-        match self.collections.get(&id) {
+        match self.collections.get_mut(&id) {
             Some(held) if (held.highestmodseq, held.encrypted_metadata.as_slice()) >= candidate => {
+                held.pruned_modseq = held.pruned_modseq.max(pruned_modseq);
             }
-            _ => {
+            held => {
+                let pruned_modseq =
+                    held.map_or(pruned_modseq, |h| h.pruned_modseq.max(pruned_modseq));
                 self.collections.insert(
                     id,
                     DavCollection {
                         encrypted_metadata: encrypted_metadata.to_vec(),
                         highestmodseq,
+                        pruned_modseq,
                     },
                 );
             }
@@ -564,9 +592,17 @@ impl DavFold {
     }
 
     /// Fold one calendar journal generation in.
-    fn absorb_cal(&mut self, m: &fauna_calendar::segments::placement::CalPlacementManifest) {
+    pub(super) fn absorb_cal(
+        &mut self,
+        m: &fauna_calendar::segments::placement::CalPlacementManifest,
+    ) {
         for c in &m.calendars {
-            self.absorb_collection(c.calendar_id, &c.encrypted_metadata, c.highestmodseq);
+            self.absorb_collection(
+                c.calendar_id,
+                &c.encrypted_metadata,
+                c.highestmodseq,
+                c.pruned_modseq,
+            );
         }
         for e in &m.events {
             self.absorb_version(
@@ -575,6 +611,7 @@ impl DavFold {
                     id: e.event_id,
                     modseq: e.modseq,
                     sidecar: e.encrypted_fauna_ext.clone(),
+                    ciphertext_size: e.ciphertext_size,
                 },
             );
         }
@@ -584,15 +621,24 @@ impl DavFold {
                 DavVersion::Deleted {
                     id: t.event_id,
                     modseq: t.modseq,
+                    deleted_at: t.deleted_at,
                 },
             );
         }
     }
 
     /// Fold one contacts journal generation in — [`Self::absorb_cal`]'s twin.
-    fn absorb_card(&mut self, m: &fauna_contacts::segments::placement::CardPlacementManifest) {
+    pub(super) fn absorb_card(
+        &mut self,
+        m: &fauna_contacts::segments::placement::CardPlacementManifest,
+    ) {
         for b in &m.addressbooks {
-            self.absorb_collection(b.addressbook_id, &b.encrypted_metadata, b.highestmodseq);
+            self.absorb_collection(
+                b.addressbook_id,
+                &b.encrypted_metadata,
+                b.highestmodseq,
+                b.pruned_modseq,
+            );
         }
         for c in &m.cards {
             self.absorb_version(
@@ -601,6 +647,7 @@ impl DavFold {
                     id: c.card_id,
                     modseq: c.modseq,
                     sidecar: c.encrypted_fauna_ext.clone(),
+                    ciphertext_size: c.ciphertext_size,
                 },
             );
         }
@@ -610,6 +657,7 @@ impl DavFold {
                 DavVersion::Deleted {
                     id: t.card_id,
                     modseq: t.modseq,
+                    deleted_at: t.deleted_at,
                 },
             );
         }
@@ -618,7 +666,7 @@ impl DavFold {
     /// Every record id the fold names as its resource's current version, with
     /// where it goes. A placement in a collection the fold holds no metadata
     /// for could never be provisioned by id, so it places nothing.
-    fn current(&self) -> HashMap<[u8; 32], DavPlacement> {
+    pub(super) fn current(&self) -> HashMap<[u8; 32], DavPlacement> {
         self.resources
             .iter()
             .filter(|((collection, _), _)| self.collections.contains_key(collection))
@@ -1246,13 +1294,22 @@ async fn prepare_collections(
     Ok(())
 }
 
+/// **Collision (a)'s clock**: a write the target holds stands against a
+/// record of the same resource from the copy only when the server received it
+/// **later** — on a tie the copy's record files. `held_at` and `record_at`
+/// are server receive times, epoch seconds. Materialize's re-filing asks the
+/// same question of a post-gesture arrival against the corpus.
+pub(super) fn held_write_stands(held_at: i64, record_at: i64) -> bool {
+    held_at > record_at
+}
+
 /// A DAV placement journal record, of either kind.
-enum DavRecord {
+pub(super) enum DavRecord {
     Cal(CalPlacementRecord),
     Card(CardPlacementRecord),
 }
 
-async fn dav_journal(
+pub(super) async fn dav_journal(
     state: &Arc<AppState>,
     scope: &[u8; 32],
     record: DavRecord,
@@ -1317,7 +1374,7 @@ async fn recover_dav(
     if live
         .into_iter()
         .chain(expunged)
-        .any(|at| at > floor.created_at)
+        .any(|at| held_write_stands(at, floor.created_at))
     {
         return Ok(false);
     }
@@ -1895,6 +1952,7 @@ mod tests {
                 calendar_id: *id,
                 encrypted_metadata: meta.to_vec(),
                 highestmodseq: *hms,
+                pruned_modseq: 0,
             })
             .collect();
         m.events = events;
@@ -2033,6 +2091,25 @@ mod tests {
             let current: HashSet<[u8; 32]> = fold.current().into_keys().collect();
             assert_eq!(current, expect);
             assert_eq!(fold.collections[&CAL].highestmodseq, 9);
+        }
+    }
+
+    /// The prune floor folds to the highest any generation carries, whichever
+    /// generation's metadata wins: a generation that pruned a tombstone the
+    /// others still hold leaves the fold's tombstone list complete only above
+    /// its floor (`caldav-server.md` § Stale sync-token handling).
+    #[test]
+    fn the_fold_keeps_the_highest_prune_floor_in_any_order() {
+        let mut pruned = generation(&[(CAL, b"meta", 7)], vec![], vec![]);
+        pruned.calendars[0].pruned_modseq = 5;
+        let newest = generation(&[(CAL, b"newer-meta", 9)], vec![], vec![]);
+        for order in [[&pruned, &newest], [&newest, &pruned]] {
+            let Placements::Dav(fold) = fold_of(&order) else {
+                unreachable!()
+            };
+            let col = &fold.collections[&CAL];
+            assert_eq!((col.highestmodseq, col.pruned_modseq), (9, 5));
+            assert_eq!(col.encrypted_metadata, b"newer-meta");
         }
     }
 
@@ -2293,6 +2370,7 @@ mod tests {
             addressbook_id: book,
             encrypted_metadata: b"book-meta".to_vec(),
             highestmodseq: 20,
+            pruned_modseq: 0,
         });
         m.cards.push(CardPlacement {
             addressbook_id: book,

@@ -122,7 +122,7 @@ def test_default_credential_username_form_matrix(app, dedicated_mail_nest, reque
     app.mail_settings.navigate()
     assert app.mail_settings.is_page_visible(), "mail-settings page must be reachable"
     app.mail_settings.enable_mail_plain(_PASSWORD)
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "enabling mail must mint the first ('default') credential; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )

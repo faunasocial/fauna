@@ -5,7 +5,7 @@ import Foundation
     import FileProvider
 
     /// A domain removal was refused because un-recorded local edits still exist
-    /// under it (`on-demand-files.md` § Multi-account × File Provider, consequence 2:
+    /// under it (`on-demand-files-apple.md` § Multi-account × File Provider, consequence 2:
     /// iOS has no `.preserveDirtyUserData`, so a plain removal would let the OS
     /// discard them). The domain stays registered — the OS's pending-change
     /// retry drains the edits — and the caller retries the removal later.
@@ -17,7 +17,7 @@ import Foundation
 
     /// Async wrappers over the `NSFileProviderManager` domain lifecycle. A domain's
     /// identifier IS the set's actor-scoped identity, `<ref-component>@<actor-id-hex>`
-    /// (`local%3A1@…` — `FileProviderDomainIdentity`; `on-demand-files.md` § Apple
+    /// (`local%3A1@…` — `FileProviderDomainIdentity`; `on-demand-files-apple.md` § Apple
     /// File Provider binding, *the actor-scoped device identity*; the appex hands
     /// `domain.identifier` to `makeFileProviderHost(domainId:)`), so
     /// add/remove/list speak domain identifiers; the set name is only the
@@ -68,7 +68,7 @@ import Foundation
         /// reaches a file whose upload is un-acked only through here, and the
         /// default `.removeAll` would delete it — the one removal-shaped breach
         /// of "the OS never discards a local copy whose upload is un-acked"
-        /// (`on-demand-files.md` § Apple File Provider binding). The OS moves preserved
+        /// (`on-demand-files-apple.md` § Apple File Provider binding). The OS moves preserved
         /// dirty files aside and reports where. iOS: the SDK offers NO preserve
         /// mode (the headers mark both cases unavailable; the compiler is the
         /// authority), so removal is guarded by the **upload-drain gate**: while
@@ -240,7 +240,7 @@ import Foundation
     }
 
     /// Auto-appear reconcile + sign-out teardown for the per-set File Provider
-    /// domains (`on-demand-files.md` § Apple File Provider binding: domains for
+    /// domains (`on-demand-files-apple.md` § Apple File Provider binding: domains for
     /// the user's own folders this device accepts in, and § Shared sets on a
     /// capability host, decision 3: the folders shared with the account —
     /// behind `folder-on-demand-toggle`, default ON).
@@ -298,7 +298,7 @@ import Foundation
                     namedBy: folder, folderHash: folderHash, in: sets, actorHex: actorHex))
         }
 
-        /// The one-local-presence decision (`on-demand-files.md` § Apple File
+        /// The one-local-presence decision (`on-demand-files-apple.md` § Apple File
         /// Provider binding, arbitration precedence): the shared-Rust
         /// `fauna_folders_machine::on_demand_presence` plan — the sets this
         /// device is a delivery seat for (own folders its place accepts in, and
@@ -630,7 +630,7 @@ import Foundation
     /// extension never consults it), so the file lives in the **app's own**
     /// consent domain (`SyncStateDir.appDomain`): the user domain on macOS,
     /// the app-group container on iOS, where it is the app's only one
-    /// (`on-demand-files.md` § Apple File Provider binding, *state
+    /// (`on-demand-files-apple.md` § Apple File Provider binding, *state
     /// unification*). An iOS e2e launch keeps the unscoped in-sandbox dir,
     /// never the machine-global container (testing.md § conventions point 10).
     public enum FileProviderDomainPrefs {

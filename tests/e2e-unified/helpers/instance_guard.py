@@ -3,7 +3,10 @@ terminal refusal contract (`account-scoping.md` § Concurrent instances).
 
 Every native app's re-keying leg proves the same observable — a refused
 launch is process DEATH, never a survivor serving the wrong account — so the
-assertion lives here once (consumers: the macOS, linux and tui legs).
+assertion lives here once (consumers: the macOS, linux and tui legs). So do
+the survival waits of the succession journeys (:func:`wait_alive_until`,
+:func:`await_first_seat_follows_the_account`; consumers: linux, tui, windows,
+apple).
 """
 from __future__ import annotations
 
@@ -71,7 +74,17 @@ def is_app_alive(driver):
     return bool(liveness())
 
 
-def wait_alive_until(driver, predicate, budget_s, what, diagnose):
+#: The default death report of :func:`wait_alive_until` — the bound seat's own
+#: succession, the journey the helper was lifted for.
+_BOUND_SEAT_EXITED = (
+    "the bound instance EXITED during its own succession — {what}. A "
+    "binding left on the retired identity re-fires bound-or-refuse on the "
+    "successor's id (account-scoping.md § Concurrent instances → the "
+    "binding follows the account)."
+)
+
+
+def wait_alive_until(driver, predicate, budget_s, what, diagnose, *, exited=_BOUND_SEAT_EXITED):
     """Deadline-poll ``predicate`` while ``driver``'s client process is alive.
 
     Lifted 2026-09-02 from the tui instance-lock suite's own copy when the
@@ -86,6 +99,9 @@ def wait_alive_until(driver, predicate, budget_s, what, diagnose):
     Returns the predicate's truthy value, as :func:`wait_until` does, so a
     caller that polls for a reading keeps the reading rather than taking a
     second one that can land somewhere else.
+
+    ``exited`` is the death report, formatted with ``what``; a caller watching
+    some other seat (:func:`await_first_seat_follows_the_account`) names its own.
     """
     value = wait_until(
         lambda: predicate() or is_app_alive(driver) is False,
@@ -93,13 +109,62 @@ def wait_alive_until(driver, predicate, budget_s, what, diagnose):
         diagnose=diagnose,
     )
     assert is_app_alive(driver) is not False, (
-        f"the bound instance EXITED during its own succession — {what}. A "
-        "binding left on the retired identity re-fires bound-or-refuse on the "
-        "successor's id (account-scoping.md § Concurrent instances → the "
-        "binding follows the account). Captured stderr:\n"
+        f"{exited.format(what=what)} Captured stderr:\n"
         f"{driver.app_stderr_text()[-4000:]}"
     )
     return value
+
+
+def await_first_seat_follows_the_account(first, old_actor, new_actor, budget_s, diagnose):
+    """The plain FIRST seat of a two-instance world whose bound seat ran the
+    succession ceremony survives it and FOLLOWS THE ACCOUNT to the successor.
+
+    Lifted 2026-10-11 from the windows instance-lock suite when the linux and
+    tui twins took the same observable. The account is the successor now
+    (`account-scoping.md` § Concurrent instances → *The binding follows the
+    account*, rider (1) moving ``active``), and the first seat serves that
+    account on the same install. The nest ends the retired identity's sessions
+    at the succession, so the first seat's next connect comes at once and meets
+    the supersession — the own-device-fleet path (`succession-propagation.md`
+    § Propagation → *Own device fleet*) — and this install already holds the
+    verified successor, which the app adopts rather than asking the user to
+    import it (the shared relaunch adoption, ``fauna_client_accounts``: "this
+    device holds the verified successor; adopting it").
+
+    Forbidden, and what a red here means: the first seat exiting, or stranding
+    on the retired id this install already has a successor for. ``diagnose`` is
+    the caller's own account of the seat — linux and tui pass the first seat's
+    captured stderr, windows the app log both seats share — appended to the
+    session reading on timeout (convention 6).
+
+    Returns the session the seat settled on.
+    """
+
+    def _session():
+        return (first.get_state() or {}).get("session") or {}
+
+    def _followed():
+        session = _session()
+        return session if (
+            session.get("authenticated") and session.get("actor_id") == new_actor
+        ) else None
+
+    return wait_alive_until(
+        first,
+        _followed,
+        budget_s,
+        "before it followed the account to the successor",
+        diagnose=lambda: (
+            f"first seat's session: {_session()!r} "
+            f"(retired={old_actor!r}, successor={new_actor!r}). {diagnose()}"
+        ),
+        exited=(
+            "the first (plain) seat EXITED after its sibling's succession — {what}. "
+            "It serves the account the ceremony re-pointed, so it must adopt the "
+            "successor this install holds (succession-propagation.md § Propagation "
+            "→ Own device fleet), never die of the supersession."
+        ),
+    )
 
 
 def _assert_refused_for_the_right_reason(driver, message):

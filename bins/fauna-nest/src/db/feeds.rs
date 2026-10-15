@@ -15,7 +15,8 @@ pub enum FeedAudience {
     /// the built-in Trending feed (`gated_tier IS NULL`).
     PublicOnBox,
     /// A reader **off the box** — a third-party principal reading a public
-    /// timeline under `fauna:feed:read`. Held to
+    /// timeline under `fauna:feed:read`, or the account's own view of a
+    /// timeline or custom feed under `fauna:feed:read:account`. Held to
     /// [`super::public_servability::PUBLIC_POST_SERVABLE`], the one predicate
     /// for content leaving the nest to a party that is not the account: a
     /// gated post, a post with no index row, and an archive import are all
@@ -926,6 +927,22 @@ impl CacheDb {
         .await
     }
 
+    /// [`Self::query_feed`] for a named reader's [`FeedAudience`] — a custom
+    /// feed read by the account or, held off the box, by a principal under
+    /// `fauna:feed:read:account`.
+    pub async fn query_feed_for(
+        &self,
+        rules: &[fauna_core::scoring::FilterRule],
+        combination: fauna_core::scoring::FilterCombination,
+        mandatory: &[fauna_core::scoring::FilterRule],
+        cursor: Option<i64>,
+        limit: i64,
+        audience: FeedAudience,
+    ) -> Result<Vec<FeedPostRow>> {
+        self.query_feed_impl(rules, combination, mandatory, cursor, limit, audience)
+            .await
+    }
+
     async fn query_feed_impl(
         &self,
         rules: &[fauna_core::scoring::FilterRule],
@@ -1070,6 +1087,8 @@ impl CacheDb {
                 tags: Vec::new(),
                 quoted_post_id: None,
                 reposted_post_id: None,
+                reposted_gated_tier: None,
+                reposted_gated_room: None,
                 viewer_repost_id: None,
                 viewer_liked: false,
                 source,
@@ -1115,27 +1134,11 @@ impl CacheDb {
             }
         }
 
-        // Reposted-post projection — the quote twin (`feed.md` § Interaction
-        // bar → Repost, ratified 2026-08-10). Same index, same discipline:
-        // never touches `content.payload`. The viewer pair is deliberately NOT
+        // Reposted-post projection — the quote twin, plus the target's gate
+        // (`project_repost_targets`). The viewer pair is deliberately NOT
         // read here — this fn is viewer-independent; `augment_viewer_state`
         // fills it for the local query paths only.
-        let mut repost_stmt = conn
-            .prepare(
-                "SELECT target_id FROM content_links \
-                 WHERE source_id = ?1 AND link_type = 'repost' LIMIT 1",
-            )
-            .context("prepare repost lookup")?;
-        for result in &mut results {
-            let mut repost_rows = repost_stmt
-                .query_map(rusqlite::params![result.post_id], |row| {
-                    row.get::<_, Vec<u8>>(0)
-                })
-                .context("query repost")?;
-            if let Some(row) = repost_rows.next() {
-                result.reposted_post_id = Some(row.context("read repost target")?);
-            }
-        }
+        project_repost_targets(&conn, &mut results)?;
 
         // Per-row content-label projection (`moderation.md` § Per-row badge
         // data path): one entry per category, the highest-confidence row.
@@ -1177,6 +1180,17 @@ impl CacheDb {
     /// toggle — each repost post is individually unrepostable, so the pair
     /// converges), and the `engagement_events` like-toggle primary key
     /// (`compute_toggle_event_id`, the row `like`/`unlike` maintain).
+    ///
+    /// **The Bluesky exception** (`feed.md` § Interaction bar → *The
+    /// viewer-state carrier*): a `bluesky`-source row's like/repost never
+    /// touch either table — the bridged arms write the caller's record URI
+    /// to `bluesky_interactions`, keyed by the post's AT-URI. So such a row
+    /// reads that table through the `bluesky_posts` map instead:
+    /// `viewer_liked` from a stored like record, and `viewer_repost_id` set
+    /// to the row's OWN id from a stored repost record — the bridged
+    /// `unrepost` takes the target (it looks the record up by the target's
+    /// AT-URI), so the target is exactly `unrepost`'s argument, as the
+    /// carrier promises. A nest without the Bluesky tables skips the pass.
     pub async fn augment_viewer_state(
         &self,
         viewer: &[u8; 32],
@@ -1194,8 +1208,36 @@ impl CacheDb {
         let mut like_stmt = conn
             .prepare("SELECT 1 FROM engagement_events WHERE event_id = ?1")
             .context("prepare viewer like lookup")?;
+        // Absent on a nest built without the Bluesky schema — then no row can
+        // carry a stored Bluesky interaction, and the pass is skipped.
+        let mut bluesky_stmt = conn
+            .prepare(
+                "SELECT i.interaction_type FROM bluesky_posts p \
+                 JOIN bluesky_interactions i ON i.fauna_post_id = p.at_uri \
+                 WHERE p.fauna_post_id = ?1 AND i.actor_id = ?2",
+            )
+            .ok();
+        let viewer_hex = hex::encode(viewer);
         let viewer_actor = fauna_core::identity::ActorId(*viewer);
         for row in rows.iter_mut() {
+            if let Some(stmt) = bluesky_stmt.as_mut().filter(|_| {
+                fauna_core::source::normalize(&row.source).as_deref() == Some("bluesky")
+            }) {
+                let kinds = stmt
+                    .query_map(
+                        rusqlite::params![hex::encode(&row.post_id), viewer_hex],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .context("query viewer bluesky interactions")?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .context("read viewer bluesky interactions")?;
+                row.viewer_liked = kinds.iter().any(|k| k == "like");
+                row.viewer_repost_id = kinds
+                    .iter()
+                    .any(|k| k == "repost")
+                    .then(|| row.post_id.clone());
+                continue;
+            }
             row.viewer_repost_id = repost_stmt
                 .query_row(rusqlite::params![row.post_id, viewer.as_slice()], |r| {
                     r.get::<_, Vec<u8>>(0)
@@ -1287,6 +1329,31 @@ impl CacheDb {
             limit,
             composition,
             FeedAudience::OffBox,
+        )
+        .await
+    }
+
+    /// [`Self::query_feed_scored`] for a named reader's [`FeedAudience`] — the
+    /// scored twin of [`Self::query_feed_for`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn query_feed_scored_for(
+        &self,
+        rules: &[fauna_core::scoring::FilterRule],
+        combination: fauna_core::scoring::FilterCombination,
+        mandatory: &[fauna_core::scoring::FilterRule],
+        cursor: Option<ScoreCursor>,
+        limit: i64,
+        composition: &[fauna_core::scoring::CompositionEntry],
+        audience: FeedAudience,
+    ) -> Result<Vec<FeedPostRow>> {
+        self.query_feed_scored_impl(
+            rules,
+            combination,
+            mandatory,
+            cursor,
+            limit,
+            composition,
+            audience,
         )
         .await
     }
@@ -1484,6 +1551,8 @@ impl CacheDb {
                 tags: Vec::new(),
                 quoted_post_id: None,
                 reposted_post_id: None,
+                reposted_gated_tier: None,
+                reposted_gated_room: None,
                 viewer_repost_id: None,
                 viewer_liked: false,
                 source,
@@ -1529,27 +1598,11 @@ impl CacheDb {
             }
         }
 
-        // Reposted-post projection — the quote twin (`feed.md` § Interaction
-        // bar → Repost, ratified 2026-08-10). Same index, same discipline:
-        // never touches `content.payload`. The viewer pair is deliberately NOT
+        // Reposted-post projection — the quote twin, plus the target's gate
+        // (`project_repost_targets`). The viewer pair is deliberately NOT
         // read here — this fn is viewer-independent; `augment_viewer_state`
         // fills it for the local query paths only.
-        let mut repost_stmt = conn
-            .prepare(
-                "SELECT target_id FROM content_links \
-                 WHERE source_id = ?1 AND link_type = 'repost' LIMIT 1",
-            )
-            .context("prepare repost lookup")?;
-        for result in &mut results {
-            let mut repost_rows = repost_stmt
-                .query_map(rusqlite::params![result.post_id], |row| {
-                    row.get::<_, Vec<u8>>(0)
-                })
-                .context("query repost")?;
-            if let Some(row) = repost_rows.next() {
-                result.reposted_post_id = Some(row.context("read repost target")?);
-            }
-        }
+        project_repost_targets(&conn, &mut results)?;
 
         // Per-row content-label projection (`moderation.md` § Per-row badge
         // data path): one entry per category, the highest-confidence row.
@@ -1733,6 +1786,8 @@ impl CacheDb {
                 tags: Vec::new(),
                 quoted_post_id: None,
                 reposted_post_id: None,
+                reposted_gated_tier: None,
+                reposted_gated_room: None,
                 viewer_repost_id: None,
                 viewer_liked: false,
                 source,
@@ -1778,27 +1833,11 @@ impl CacheDb {
             }
         }
 
-        // Reposted-post projection — the quote twin (`feed.md` § Interaction
-        // bar → Repost, ratified 2026-08-10). Same index, same discipline:
-        // never touches `content.payload`. The viewer pair is deliberately NOT
+        // Reposted-post projection — the quote twin, plus the target's gate
+        // (`project_repost_targets`). The viewer pair is deliberately NOT
         // read here — this fn is viewer-independent; `augment_viewer_state`
         // fills it for the local query paths only.
-        let mut repost_stmt = conn
-            .prepare(
-                "SELECT target_id FROM content_links \
-                 WHERE source_id = ?1 AND link_type = 'repost' LIMIT 1",
-            )
-            .context("prepare repost lookup")?;
-        for result in &mut results {
-            let mut repost_rows = repost_stmt
-                .query_map(rusqlite::params![result.post_id], |row| {
-                    row.get::<_, Vec<u8>>(0)
-                })
-                .context("query repost")?;
-            if let Some(row) = repost_rows.next() {
-                result.reposted_post_id = Some(row.context("read repost target")?);
-            }
-        }
+        project_repost_targets(&conn, &mut results)?;
 
         // Per-row content-label projection (`moderation.md` § Per-row badge
         // data path): one entry per category, the highest-confidence row.
@@ -1865,6 +1904,48 @@ fn project_web_slug(
         Some(row) => Ok(row.context("read web-publish slug")?),
         None => Ok(None),
     }
+}
+
+/// Fill each repost row's target id and the target's gate — the
+/// `content_links link_type='repost'` row (the quote twin, `feed.md`
+/// § Interaction bar → Repost, ratified 2026-08-10), LEFT JOINed to the
+/// target's own `content_meta` row for its `gated_tier` / `gated_room`. Never
+/// touches `content.payload`.
+///
+/// The gate is what lets a repost render "as the target's own gated card,
+/// teaser and badge" (`restricted-posts.md` § Encryption at rest, ruling 3)
+/// for a target outside the reader's loaded window too — the client fold can
+/// only copy a gate it has loaded. It lands on the SEPARATE
+/// `reposted_gated_*` fields, never the row's own `gated_*` (the repost post
+/// itself is public; every reader of `gated_tier` treats it as "this row is
+/// sealed"). A target this nest has not indexed (federated, or not yet
+/// arrived) leaves both `None` — the card then paints no badge, as before.
+fn project_repost_targets(conn: &rusqlite::Connection, results: &mut [FeedPostRow]) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT cl.target_id, cm.gated_tier, cm.gated_room FROM content_links cl \
+             LEFT JOIN content_meta cm ON cm.content_id = cl.target_id \
+             WHERE cl.source_id = ?1 AND cl.link_type = 'repost' LIMIT 1",
+        )
+        .context("prepare repost lookup")?;
+    for result in results.iter_mut() {
+        let mut rows = stmt
+            .query_map(rusqlite::params![result.post_id], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(2)?,
+                ))
+            })
+            .context("query repost")?;
+        if let Some(row) = rows.next() {
+            let (target, tier, room) = row.context("read repost target")?;
+            result.reposted_post_id = Some(target);
+            result.reposted_gated_tier = tier;
+            result.reposted_gated_room = room;
+        }
+    }
+    Ok(())
 }
 
 /// Project a post's `content_labels` rows into one [`ContentLabelEntry`] per

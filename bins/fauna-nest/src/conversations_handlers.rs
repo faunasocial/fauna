@@ -37,7 +37,8 @@ use fauna_protocol::{
         ChannelFetchEntry, ChannelFetchReply, ChannelFetchRequest, ChannelListForActorReply,
         ChannelListForActorRequest, ChannelSendRemoteRequest, ChannelSendReply, ChannelSendRequest,
         ConversationBlobWriteTokenGetReply, ConversationBlobWriteTokenGetRequest,
-        KIND_CONVERSATIONS_BLOB_WRITE_TOKEN_GET, KeypackageCountReply, KeypackageCountRequest,
+        KIND_CONVERSATIONS_BLOB_WRITE_TOKEN_GET, KeypackageAddressableReply,
+        KeypackageAddressableRequest, KeypackageCountReply, KeypackageCountRequest,
         KeypackageFetchReply, KeypackageFetchRequest, KeypackageUploadReply,
         KeypackageUploadRequest, RoomAcceptInviteRemoteRequest, RoomAcceptInviteReply,
         RoomAcceptInviteRequest, RoomBackfillGenerationsReply, RoomBackfillGenerationsRequest,
@@ -1708,6 +1709,13 @@ fn keypackage_count_handler() -> RpcHandler {
             require_permission(&state, &actor_id, "fauna.conversations.keypackage.count").await?;
             let req: KeypackageCountRequest = decode(&payload).map_err(malformed)?;
             let target = parse_actor_id(&req.actor_id)?;
+            // The count is its owner's alone — no other caller, the admin
+            // included, reads a user's supply; another actor's reachability
+            // is `keypackage.addressable`'s boolean (`federation.md` § Key
+            // packages — privacy & exhaustion).
+            if target != actor_id {
+                return Err(permission_denied("a starter-key count is its owner's"));
+            }
 
             let count = state.db.count_key_packages(&target).await.map_err(|e| {
                 tracing::error!("count_key_packages error: {e}");
@@ -1716,6 +1724,40 @@ fn keypackage_count_handler() -> RpcHandler {
 
             encode_reply(&KeypackageCountReply {
                 count,
+                extra: std::collections::BTreeMap::new(),
+            })
+        })
+    })
+}
+
+// ── fauna.conversations.keypackage.addressable ─────────────────
+
+/// Whether a bare actor id can be reached: ≥1 usable key package, one-time or
+/// last-resort — the predicate `fauna.actor.by_handle`'s `addressable` bit
+/// reads. A pure read that consumes nothing and discloses no number.
+fn keypackage_addressable_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_permission(
+                &state,
+                &actor_id,
+                "fauna.conversations.keypackage.addressable",
+            )
+            .await?;
+            let req: KeypackageAddressableRequest = decode(&payload).map_err(malformed)?;
+            let target = parse_actor_id(&req.actor_id)?;
+
+            let addressable = state
+                .db
+                .has_usable_key_package(&target)
+                .await
+                .map_err(|e| {
+                    tracing::error!("has_usable_key_package error: {e}");
+                    internal("storage error")
+                })?;
+
+            encode_reply(&KeypackageAddressableReply {
+                addressable,
                 extra: std::collections::BTreeMap::new(),
             })
         })
@@ -1884,8 +1926,8 @@ pub(crate) async fn welcome_deliver_core(
         || matches!(req.kind, WelcomeKind::Folder { .. });
 
     // The claimed folder's own row, resolved once for the whole handler: the
-    // claim above names only the claimant, and the residency refusal below, the
-    // display `set_name` and its seal all read the row. Best-effort — a resolve
+    // claim above names only the claimant, and the display `set_name`, its
+    // seal and the residency stamp below all read the row. Best-effort — a resolve
     // failure must never fail an otherwise-good delivery.
     let claimed_fs = if is_folder_plane {
         crate::federation_handlers::claimed_folder_for_channel(state, &channel_id)
@@ -1894,32 +1936,6 @@ pub(crate) async fn welcome_deliver_core(
     } else {
         None
     };
-
-    // The interim cross-nest refusal, the member-moves-second direction
-    // (`file-sync.md` § Relay serving → *Until that leg is built, the pair is
-    // refused*; the folder update handler's residency arm holds the other): a
-    // metadata-only folder keeps no bytes on this nest and relay serving has no
-    // cross-nest leg yet, so a member on another nest could read nothing.
-    // Refused here — ahead of the reach gates' unrefundable share-admit spend
-    // and of the relay itself, so the peer nest is never handed a Welcome the
-    // recipient cannot use. A recipient already on the channel's foreign roster
-    // is an existing pair and is left as it is (a failed roster read refuses).
-    if req.nest_url.as_deref().is_some_and(|u| !u.is_empty())
-        && claimed_fs
-            .as_ref()
-            .is_some_and(|fs| crate::folder_handlers::residency_of(fs) == "metadata_only")
-        && !state
-            .db
-            .foreign_channel_member_exists(&channel_id, &recipient)
-            .await
-            .unwrap_or(false)
-    {
-        return Err(crate::rpc_errors::invalid_request_ns(
-            "conversations",
-            "this folder keeps its content off the nest, and a member on another nest \
-             cannot reach it yet; set the folder's residency back to full first",
-        ));
-    }
 
     if !recipient_established {
         // Outbound: a supervised sender may only initiate to an approved
@@ -6500,7 +6516,15 @@ fn room_list_roster_handler() -> RpcHandler {
                 return Err(permission_denied("not a member of this room"));
             }
 
-            encode_reply(&room_roster_reply(&state, &room_id, req.at_policy_version).await?)
+            encode_reply(
+                &room_roster_reply(
+                    &state,
+                    &room_id,
+                    req.at_policy_version,
+                    req.policy_version_span,
+                )
+                .await?,
+            )
         })
     })
 }
@@ -6521,6 +6545,7 @@ pub(crate) async fn room_roster_reply(
     state: &Arc<AppState>,
     room_id: &[u8; 32],
     at_policy_version: Option<u64>,
+    policy_version_span: Option<u32>,
 ) -> Result<RoomListRosterReply, RpcError> {
     // A retained policy version, served by number: what a member judges a
     // floor delete record against (`conversation-rooms.md` § Roles and
@@ -6535,6 +6560,27 @@ pub(crate) async fn room_roster_reply(
             .await
             .map_err(|e| internal(format!("room policy history: {e}")))?,
         None => None,
+    };
+    // The run a member anchoring a long chain asks for instead of one read per
+    // version: consecutive from `at_policy_version`, capped here whatever was
+    // asked, behind the same member gate as the single version.
+    let policy_versions = match (at_policy_version, policy_version_span) {
+        (Some(from), Some(span)) if span > 1 => Some(
+            state
+                .db
+                .get_room_policy_versions(
+                    room_id,
+                    from,
+                    span.min(fauna_mls::room_policy::MAX_POLICY_VERSION_SPAN),
+                )
+                .await
+                .map_err(|e| internal(format!("room policy history: {e}")))?
+                .into_iter()
+                .map(serde_bytes::ByteBuf::from)
+                .collect::<Vec<_>>(),
+        )
+        .filter(|run| !run.is_empty()),
+        _ => None,
     };
     let room = state
         .db
@@ -6654,6 +6700,7 @@ pub(crate) async fn room_roster_reply(
         policy: policy.map(serde_bytes::ByteBuf::from),
         labelers: labelers.map(serde_bytes::ByteBuf::from),
         policy_at_version: policy_at_version.map(serde_bytes::ByteBuf::from),
+        policy_versions,
         // The other half of the birth record, for the member anchoring the
         // version it just asked for — so only on that read, which keeps the
         // roster read every poll makes exactly the size it was.
@@ -6712,6 +6759,7 @@ fn room_list_roster_remote_handler() -> RpcHandler {
                 &hex::encode(actor_id),
                 &req.room_id,
                 req.at_policy_version,
+                req.policy_version_span,
             )
             .await
             {
@@ -7286,6 +7334,14 @@ pub fn register_conversations_handlers(b: &mut RpcRouterBuilder) {
             forbid_replay: false,
             default_deadline: Duration::from_secs(5),
             handler: keypackage_count_handler(),
+        },
+    );
+    b.add(
+        "fauna.conversations.keypackage.addressable",
+        RpcKindMeta {
+            forbid_replay: false,
+            default_deadline: Duration::from_secs(5),
+            handler: keypackage_addressable_handler(),
         },
     );
     b.add(

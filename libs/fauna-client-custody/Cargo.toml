@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# `spawn_owner_resend` (the `custody_owner_resend_now` poke's body) in a
+# release-profile e2e build (testing.md convention 15). A debug build already
+# has it via `cfg(debug_assertions)`; a consumer's own `e2e-agent` forwards
+# this one, and a plain `--release` build never turns it on.
+e2e-agent = ["fauna-client-capabilities/e2e-agent"]
+
 # ⚠️ NATIVE-ONLY BY CONSTRUCTION, and that is the whole reason this crate
 # exists. The T16 custody facet's PURE half (the three folds, the bundle, the
 # registry overlay, the budget seed texts) lives in `fauna-client-capabilities`,

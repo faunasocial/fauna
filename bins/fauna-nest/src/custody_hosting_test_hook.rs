@@ -19,6 +19,11 @@
 //! (a module-scoped fixture) a scheduled pass can land mid-journey and make a
 //! "nothing confirmed yet" precondition a race. `POST .../hold` suspends the
 //! periodic loop's passes on this nest until released; `run-now` still runs.
+//!
+//! `POST .../clock` shifts the pump's pass clock: the expiry skip and the
+//! expired-store GC (a month past a witness's expiry) read it, so a test
+//! reaches both without waiting — the register door refuses an already-expired
+//! witness, so no row can be planted past them.
 
 #![cfg(feature = "test-hooks")]
 
@@ -37,8 +42,11 @@ use crate::routes::AppState;
 /// custody-hosting sweep and return its pass report.
 ///
 /// Returns `{"ok": true, "rows": N, "pulled": N, "recorded": N,
-/// "adopted_segments": N, "stopped": N, "refused_url": N, "failed": N,
-/// "receipts_deposited": N, "receipts_failed": N}`.
+/// "adopted_segments": N, "stopped": N, "refused_url": N, "refused_fan_out": N,
+/// "expired": N, "stores_reclaimed": N, "failed": N, "owner_refused": N,
+/// "receipts_deposited": N,
+/// "receipts_failed": N, "recovery_pulled": N, "escrows_custodied": N,
+/// "braked": N, "metering_failed": N}`.
 /// `rows == 0` is a meaningful negative signal for a test, not an error.
 ///
 /// The sweep runs on the blocking pool driven by this runtime's handle,
@@ -57,12 +65,20 @@ async fn handle_run_now(State(state): State<Arc<AppState>>) -> impl IntoResponse
             "rows": report.rows,
             "stopped": report.stopped,
             "refused_url": report.refused_url,
+            "refused_fan_out": report.refused_fan_out,
+            "expired": report.expired,
+            "stores_reclaimed": report.stores_reclaimed,
             "pulled": report.pulled,
             "recorded": report.recorded,
             "adopted_segments": report.adopted_segments,
             "failed": report.failed,
+            "owner_refused": report.owner_refused,
             "receipts_deposited": report.receipts_deposited,
             "receipts_failed": report.receipts_failed,
+            "recovery_pulled": report.recovery_pulled,
+            "escrows_custodied": report.escrows_custodied,
+            "braked": report.braked,
+            "metering_failed": report.metering_failed,
         }))
         .into_response(),
         Ok(Err(e)) => ApiError::internal(format!("custody hosting run_now: {e:#}")).into_response(),
@@ -88,9 +104,29 @@ async fn handle_hold(
     Json(json!({ "ok": true, "held": body.held }))
 }
 
+#[derive(serde::Deserialize)]
+struct ClockBody {
+    offset_secs: i64,
+}
+
+/// `POST /api/v1/test/custody_hosting/clock` `{"offset_secs": i64}` — shift
+/// the pump's pass clock by `offset_secs` from the wall clock (`0` restores
+/// it). Only the pump's own `now` moves: the register door and the owner nest's
+/// handshake keep the real clock. Returns `{"ok": true, "offset_secs": i64}`.
+async fn handle_clock(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ClockBody>,
+) -> impl IntoResponse {
+    state
+        .custody_hosting_clock_offset_secs
+        .store(body.offset_secs, std::sync::atomic::Ordering::SeqCst);
+    Json(json!({ "ok": true, "offset_secs": body.offset_secs }))
+}
+
 /// Mount the `/api/v1/test/custody_hosting/*` routes.
 pub fn routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/api/v1/test/custody_hosting/run-now", post(handle_run_now))
         .route("/api/v1/test/custody_hosting/hold", post(handle_hold))
+        .route("/api/v1/test/custody_hosting/clock", post(handle_clock))
 }

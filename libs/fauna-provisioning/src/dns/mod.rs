@@ -111,7 +111,7 @@ pub trait DnsProvider: Send + Sync {
     /// while silently corrupting the two that can't. That asymmetry cost a
     /// production outage on 2026-07-24, when `fauna-client-dns` passed
     /// fully-qualified owners and Hetzner stored every record at a doubled name
-    /// (`_acme-challenge.example.com.example.com.`) — API-visible, never resolvable,
+    /// (`_acme-challenge.example.net.example.net.`) — API-visible, never resolvable,
     /// failing ACME twice
     /// (`docs/goal/architecture/nest/tls-certificates.md` § the 2026-07-24 dual
     /// defect; `docs/goal/architecture/provisioning/registry.md` § The

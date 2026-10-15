@@ -251,8 +251,8 @@ pub struct AccountStatePutReply {
 }
 
 /// WS-RPC kind: retire one live class-2 entry from a scope's feed — mark it
-/// superseded **without inserting anything** (`account-data-taxonomy.md`
-/// § The generation machinery → *Fleet-scope reclamation*, clause (1)). The
+/// superseded **without inserting anything** (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (1)). The
 /// one plane write that needs no live-entry headroom, which is what makes a
 /// scope at [`MAX_STATE_ENTRIES_PER_SCOPE`] recoverable from an app. The nest
 /// keeps the row's bytes and coordinate (its seq-reuse memory is intact) and

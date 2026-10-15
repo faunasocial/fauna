@@ -71,7 +71,7 @@ class CustodianPushKickTest {
         init {
             whenever(api.connectionState)
                 .thenReturn(MutableStateFlow(FfiConnectionState.CONNECTED))
-            whenever(storage.deviceId).thenReturn(DEVICE_ID)
+            whenever(storage.resolveDeviceId()).thenReturn(DEVICE_ID)
             whenever(stores.custodianStoreBaseDir()).thenReturn(BASE_DIR)
             runBlocking {
                 // Stubbed by VALUE, never with argument matchers: this is a

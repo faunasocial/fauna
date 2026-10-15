@@ -78,20 +78,82 @@ where
     }
 }
 
-/// Force an immediate save of `manager`'s current snapshot, bypassing the
-/// debounce entirely — the leave-door flush (`reserved-folders.md` § The
-/// leave-flush promise, row 481), awaited directly in `main.rs` right before
-/// the process exits (tui runs natively inside the tokio runtime for its
-/// whole life, so no thread-spinning is needed the way linux's GTK main
-/// thread requires).
-pub(crate) async fn flush_now<M: DraftsHost>(
-    manager: &M,
-    sync: &DraftsSync<Arc<NestClient>>,
+/// How long one rail's leave-flush may take before the door goes on without
+/// it: a slow or unreachable nest must not hang quitting or signing out.
+pub(crate) const LEAVE_FLUSH_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The leave-door flush of every drafts rail (`reserved-folders.md` § The
+/// leave-flush promise): each rail's current compose, saved now, bypassing the
+/// debounce. One body for both of tui's leave doors — the quit
+/// (`main.rs`, awaited right before the process exits) and the session
+/// teardown (`session::sign_out`, awaited on the stop task before the client
+/// disconnects, which covers sign-out, account switch and the e2e reset alike).
+///
+/// Split into a synchronous [`Self::capture`] and an async [`Self::run`]
+/// because the sign-out tears the rails down in the same synchronous call that
+/// starts it: the snapshots must be read while the managers still hold the
+/// user's last edit, and the saves ride the stop task afterwards. Each rail's
+/// [`DraftsSync`] holds its own `Arc` of the session client, so the saves keep
+/// a transport after the session has left `App`.
+pub(crate) struct LeaveFlush {
+    saves: Vec<RailSave>,
+}
+
+/// One rail's half of a [`LeaveFlush`]: the snapshot taken at capture, and
+/// the sync that saves it.
+struct RailSave {
     log_prefix: &'static str,
-) {
-    let snapshot = manager.drafts_snapshot_bytes();
-    if let Err(e) = sync.save_if_changed(&snapshot).await {
-        tracing::warn!("{log_prefix}: leave-flush failed: {e}");
+    sync: Arc<DraftsSync<Arc<NestClient>>>,
+    snapshot: Vec<u8>,
+}
+
+impl RailSave {
+    async fn run(self) {
+        let save = self.sync.save_if_changed(&self.snapshot);
+        match tokio::time::timeout(LEAVE_FLUSH_BUDGET, save).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!("{}: leave-flush failed: {e}", self.log_prefix),
+            Err(_) => tracing::warn!("{}: leave-flush timed out", self.log_prefix),
+        }
+    }
+}
+
+impl LeaveFlush {
+    /// Snapshot every rail this session wired, or `None` when it wired none
+    /// (pre-auth, or a session whose identity secret could not seal).
+    pub(crate) fn capture(app: &crate::app::App) -> Option<Self> {
+        let mut saves = Vec::new();
+        let mut push = |log_prefix, sync: &Arc<_>, snapshot| {
+            saves.push(RailSave {
+                log_prefix,
+                sync: Arc::clone(sync),
+                snapshot,
+            });
+        };
+        if let (Some(manager), Some(sync)) =
+            (&app.conversations.manager, &app.conversations.drafts_sync)
+        {
+            push("drafts", sync, manager.drafts_snapshot_bytes());
+        }
+        if let (Some(manager), Some(sync)) = (&app.feed.manager, &app.feed.drafts_sync) {
+            push("feed drafts", sync, manager.drafts_snapshot_bytes());
+        }
+        if let Some(sync) = &app.events.drafts_sync {
+            push(
+                "event drafts",
+                sync,
+                app.events.event_draft().snapshot_bytes(),
+            );
+        }
+        (!saves.is_empty()).then_some(Self { saves })
+    }
+
+    /// Save every captured snapshot, concurrently, each under its own
+    /// [`LEAVE_FLUSH_BUDGET`] — one rail's timeout never costs another its
+    /// flush. An unchanged snapshot is a byte-compare, no upload
+    /// (`save_if_changed`).
+    pub(crate) async fn run(self) {
+        futures_util::future::join_all(self.saves.into_iter().map(RailSave::run)).await;
     }
 }
 

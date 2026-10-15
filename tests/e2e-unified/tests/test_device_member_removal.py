@@ -2,8 +2,8 @@
 (``device-member-card``), and the member-addressed removal it offers.
 
 Owner: ``docs/goal/ui/devices.md`` § Members without a matching entry (the
-surface) and ``docs/goal/architecture/account-data-taxonomy.md`` § The
-generation machinery → *Fleet-scope reclamation*, clause (4), *A disagreement is
+surface) and ``docs/goal/architecture/fleet-scope-reclamation.md``
+§ *Fleet-scope reclamation*, clause (4), *A disagreement is
 the user's to settle* (the rule). The group lists every verified fleet member —
 a device holding this account's keys — that no roster row accounts for, by its
 key fingerprint, and removes it BY THAT KEY: no nest input (a hostile nest
@@ -136,16 +136,17 @@ def _error_text(driver) -> str:
 
 def _require_member_group(driver) -> None:
     """Convention 7: built on tui (lead app, 2026-09-25), macOS + iOS (shared
-    FaunaKit, trickle-down leg, 2026-09-25) and web (2026-09-30, its Devices
-    machine reaching the runtime through the account port);
-    linux/windows/android still owe their legs."""
-    if app_name(driver) not in ("tui", "macos", "ios", "web"):
+    FaunaKit, trickle-down leg, 2026-09-25), web (2026-09-30, its Devices
+    machine reaching the runtime through the account port) and linux
+    (2026-10-09), windows (2026-10-10) and android (2026-10-10, compile- and
+    Robolectric-verified; its e2e run venue is the emulator on the emulator host)."""
+    if app_name(driver) not in ("tui", "macos", "ios", "web", "linux", "windows", "android"):
         skip_unbuilt(
             driver,
             surface="device-member-card (signed-in devices without a matching entry)",
             detail=(
                 "the member group and device-own-fingerprint are built on tui, "
-                "macOS, iOS and web; this app's leg renders DevicesSnapshot.members / "
+                "macOS, iOS, web, linux, windows and android; this app's leg renders DevicesSnapshot.members / "
                 "own_fingerprint from the shared machine (no re-derivation owed)"
             ),
             tracked="docs/goal/ui/devices.md § Implementation status today",

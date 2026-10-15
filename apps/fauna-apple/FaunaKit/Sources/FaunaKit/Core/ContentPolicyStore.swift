@@ -56,6 +56,7 @@ public struct ContentPolicyInputs: Equatable {
         ).reported
     }
 
+#if !FAUNA_KIDS
     /// The post body the card PAINTS, for the e2e state read — `""` for a post
     /// the viewer's own report hides (the card paints "You reported this" and no
     /// body), the document's plaintext otherwise. Apple's lazy feed list does not
@@ -67,6 +68,7 @@ public struct ContentPolicyInputs: Equatable {
         isReported(itemId: post.postId, authorId: post.author)
             ? "" : renderDocumentToPlaintext(document: post.document)
     }
+#endif
 
     /// The client render verdict for one item's `labels` — one of
     /// `"show" | "badge" | "collapse" | "block"`, resolved by the shared

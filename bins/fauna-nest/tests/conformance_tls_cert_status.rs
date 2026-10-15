@@ -134,6 +134,122 @@ async fn admin_cert_status_handles_no_resolver() {
     assert!(reply.statuses[0].is_floor);
 }
 
+/// The last error of each failing nest-placed order rides the reply at
+/// deployment level (`tls-certificates.md` § Keeping the cert alive, *The admin
+/// sees why issuance is failing*): read from the ACME state file the lifecycle
+/// task writes, each entry tagged with its order and the CA's text verbatim. A
+/// tag this build does not know (a newer build's order) is left out — this
+/// build can neither name it on the wire nor ever clear it.
+#[tokio::test]
+async fn admin_cert_status_carries_each_failing_orders_last_error() {
+    use fauna_nest::acme_http01::{IssuanceOrder as StoredOrder, RetryState};
+    use fauna_protocol::tls::IssuanceOrder;
+
+    let acme = tempfile::tempdir().unwrap();
+    let mut retry = RetryState::default();
+    retry.record_order_error(
+        StoredOrder::Domain,
+        "order invalid: home.example.com: urn:ietf:params:acme:error:connection: Timeout",
+        1_700_000_000,
+    );
+    retry.record_order_error(
+        StoredOrder::IpBridge,
+        "the CA could not reach :80",
+        1_700_000_100,
+    );
+    retry
+        .last_errors
+        .push(fauna_nest::acme_http01::IssuanceError {
+            order: "newer_kind".into(),
+            detail: "from a newer build".into(),
+            failed_at_unix: 1_700_000_200,
+        });
+    retry.save(acme.path());
+
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let rpc_router = Arc::new({
+        let mut b = RpcRouter::builder();
+        register_tls_handlers(&mut b);
+        b.build()
+    });
+    let state = Arc::new(AppState {
+        rpc_router,
+        served_cert_spki: None,
+        acme_dir: acme.path().to_path_buf(),
+        ..AppState::for_test(db)
+    });
+    let actor: [u8; 32] = SigningKey::from_bytes(&[0x14u8; 32])
+        .verifying_key()
+        .to_bytes();
+    state.db.add_admin_actor(&actor[..]).await.unwrap();
+
+    let req = CertStatusRequest {
+        extra: Default::default(),
+        domains: vec!["home.example.com".into(), "alice.com".into()],
+    };
+    let reply: CertStatusReply = decode(
+        &dispatch(&state, actor, encode(&req))
+            .await
+            .expect("cert_status ok"),
+    )
+    .unwrap();
+
+    let got: Vec<(IssuanceOrder, &str, i64)> = reply
+        .issuance_errors
+        .iter()
+        .map(|e| (e.order, e.detail.as_str(), e.failed_at_unix))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (
+                IssuanceOrder::Domain,
+                "order invalid: home.example.com: urn:ietf:params:acme:error:connection: Timeout",
+                1_700_000_000,
+            ),
+            (
+                IssuanceOrder::IpBridge,
+                "the CA could not reach :80",
+                1_700_000_100
+            ),
+        ]
+    );
+}
+
+/// No state file (a fresh nest, or one that never ran HTTP-01) → no errors,
+/// and the key is absent from the encoded reply.
+#[tokio::test]
+async fn admin_cert_status_reports_no_issuance_error_without_a_state_file() {
+    let acme = tempfile::tempdir().unwrap();
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let rpc_router = Arc::new({
+        let mut b = RpcRouter::builder();
+        register_tls_handlers(&mut b);
+        b.build()
+    });
+    let state = Arc::new(AppState {
+        rpc_router,
+        served_cert_spki: None,
+        acme_dir: acme.path().to_path_buf(),
+        ..AppState::for_test(db)
+    });
+    let actor: [u8; 32] = SigningKey::from_bytes(&[0x15u8; 32])
+        .verifying_key()
+        .to_bytes();
+    state.db.add_admin_actor(&actor[..]).await.unwrap();
+    let req = CertStatusRequest {
+        extra: Default::default(),
+        domains: vec!["home.example.com".into()],
+    };
+    let reply: CertStatusReply = decode(
+        &dispatch(&state, actor, encode(&req))
+            .await
+            .expect("cert_status ok"),
+    )
+    .unwrap();
+    assert!(reply.issuance_errors.is_empty());
+}
+
 /// A non-admin caller is denied the read — the deployment's cert health is an
 /// admin concern, same gate as `publish_cert`.
 #[tokio::test]

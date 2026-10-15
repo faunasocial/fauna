@@ -45,7 +45,7 @@ Stamped 2026-09-22 at 963ffb408a.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | 0.1.2-dev+f3743cd5.dirty standalone |
-| linux | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
 | windows | ⚠ partial | 0.1.2-dev+6d8dc256.dirty standalone |
 | macos | ⚠ partial | 0.1.2-dev+e5506940 standalone |
 | ios | ⚠ partial | 0.1.2-dev+e5506940 standalone |
@@ -62,7 +62,7 @@ Stamped 2026-09-22 at 963ffb408a.
 | 5 | nest | `tests/e2e-unified/tests/api/test_public_folder_fetch.py::test_a_stranger_reads_a_public_folder_and_the_floor_strip_and_revoke_hold` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/api/test_public_folder_fetch.py::test_a_stranger_reads_a_public_folder_and_the_floor_strip_and_revoke_hold` | nest (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/api/test_public_folder_fetch.py::test_the_owners_nest_keeps_no_record_of_who_follows` | nest (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_folder_follow_outcomes.py::test_a_wrong_private_or_gone_address_fails_with_one_plain_message` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_folder_follow_outcomes.py::test_a_wrong_private_or_gone_address_fails_with_one_plain_message` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_folder_follow_outcomes.py::test_a_network_problem_never_reads_as_the_folder_having_been_taken_away` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_folder_follow_outcomes.py::test_a_followed_row_says_whose_folder_it_is` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_tui_media_external_open.py::test_a_followed_folders_file_on_another_nest_opens_with_no_account_there` | tui (linux): passed |

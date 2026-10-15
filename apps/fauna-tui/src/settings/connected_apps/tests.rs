@@ -1,8 +1,16 @@
 use super::*;
 use crate::app::App;
 use crate::app::tests::authed_app;
-use fauna_client_connected_apps::VERBATIM_KEY;
+use fauna_client_connected_apps::compose::{ComposedText, oracle_lines, set_lines};
+use fauna_client_connected_apps::{ConsentSetRow, VERBATIM_KEY, class};
 use fauna_core::localized::LocalizedText;
+
+fn resolved(lines: Vec<ComposedText>) -> Vec<String> {
+    lines
+        .iter()
+        .map(|l| l.resolve(fauna_i18n::strings::lookup))
+        .collect()
+}
 
 fn verbatim(s: &str) -> LocalizedText {
     LocalizedText::key_arg(VERBATIM_KEY, "text", s)
@@ -16,11 +24,15 @@ fn row(key: &str, class: &str, name: &str) -> ConnectedAppRow {
         client_id: Some("https://app.example/client.json".into()),
         publisher: Some("app.example".into()),
         scope_descriptions: vec![verbatim("Upload image files")],
+        sets: Vec::new(),
         created_at_millis: 1_700_000_000_000,
         last_used_at_millis: None,
         lasts_until_millis: None,
         connected: true,
+        paused: false,
         mail: None,
+        signer_burned: false,
+        oracle: None,
     }
 }
 
@@ -33,15 +45,19 @@ fn mail_row(id: &str, name: &str, revoked: bool) -> ConnectedAppRow {
         client_id: None,
         publisher: None,
         scope_descriptions: vec![LocalizedText::key("connected_apps.scope_mail")],
+        sets: Vec::new(),
         created_at_millis: 0,
         last_used_at_millis: None,
         lasts_until_millis: None,
         connected: !revoked,
+        paused: false,
         mail: Some(fauna_client_connected_apps::MailAppPassword {
             mua_username: format!("{{handle}}+{id}@example.test"),
             kind: LocalizedText::key("settings.mail.kind_password"),
             revoked,
         }),
+        signer_burned: false,
+        oracle: None,
     }
 }
 
@@ -72,6 +88,7 @@ fn request(id_hex: &str, code: &str, name: Option<&str>) -> ConsentCardRow {
         ],
         sets: vec![],
         ends: None,
+        install: None,
     }
 }
 
@@ -690,6 +707,36 @@ fn a_burned_mail_row_says_it_lost_access() {
     );
 }
 
+/// A signer client the succession burn killed is the same state for its class:
+/// listed, not connected, the revoked line directly under the name and the
+/// `revoked` attribute beside it; a live signer row carries neither.
+#[test]
+fn a_burned_signer_row_says_it_lost_access() {
+    let burned = ConnectedAppRow {
+        connected: false,
+        signer_burned: true,
+        ..row("signer:b1", class::SIGNER, "Amethyst")
+    };
+    let live = row("signer:b2", class::SIGNER, "Damus");
+    let app = app_with(|s| s.principals = vec![burned, live]);
+    let els = els(&app);
+    let items: Vec<_> = els
+        .iter()
+        .filter(|e| e.id == ids::CONNECTED_APPS_ITEM)
+        .collect();
+    assert_eq!(items.len(), 2);
+    let burned = items[0];
+    assert_eq!(attr(burned, "revoked"), Some("true"));
+    assert!(burned.text.contains(t::NOT_CONNECTED));
+    assert_eq!(
+        burned.text.lines().nth(1),
+        Some(t::SIGNER_REVOKED),
+        "the burned state sits directly under the name"
+    );
+    assert_eq!(attr(items[1], "revoked"), None);
+    assert!(!items[1].text.contains(t::SIGNER_REVOKED));
+}
+
 /// Copy login is local: the snapshot already holds the address.
 #[test]
 fn copying_the_login_issues_no_op() {
@@ -711,6 +758,38 @@ fn a_row_says_when_it_was_made() {
     let item = find(&els, ids::CONNECTED_APPS_ITEM);
     let stamp = fauna_core::format::format_unix_local_ms(1_700_000_000_000);
     assert!(item.text.contains(&t::created(&stamp)), "{:?}", item.text);
+}
+
+/// A row names the permission set its permissions came from, after the
+/// permission list and in the consent card's own lines.
+#[test]
+fn a_row_names_the_permission_set_after_its_permissions() {
+    let set = ConsentSetRow {
+        nsid: "com.example.authFull".into(),
+        title: Some("Full access".into()),
+        details: None,
+        member_descriptions: vec!["Post on your behalf".into()],
+    };
+    let app = app_with(|s| {
+        s.principals = vec![ConnectedAppRow {
+            sets: vec![set.clone()],
+            ..row("principal:01", class::DEVICE, "A")
+        }]
+    });
+    let els = els(&app);
+    let item = find(&els, ids::CONNECTED_APPS_ITEM);
+    let heading = card_t::consent_set_heading("Full access", "com.example.authFull");
+    let at = item.text.find(&heading).expect(&item.text);
+    assert!(
+        item.text.find("Upload image files").unwrap() < at,
+        "after the permission list: {}",
+        item.text
+    );
+    assert!(
+        item.text.contains(&resolved(set_lines(&set)).join("\n")),
+        "the card's own lines: {}",
+        item.text
+    );
 }
 
 // ── Blocked apps ─────────────────────────────────────────────────────────
@@ -813,4 +892,119 @@ async fn the_consent_route_lands_its_card_in_the_tray() {
     assert_eq!(snap.error, None);
     assert_eq!(snap.requests.len(), 1);
     assert_eq!(snap.requests[0].client_name.as_deref(), Some("Requester"));
+}
+
+/// The account's external-apps switch OFF pauses a principal: the row stays
+/// listed and says it is paused and how to undo it — never the bare "not
+/// connected" — and reports the state as a value.
+#[test]
+fn a_paused_row_reads_paused_in_words_and_as_a_value() {
+    let app = app_with(|s| {
+        s.principals = vec![ConnectedAppRow {
+            connected: false,
+            paused: true,
+            ..row("principal:01", class::DEVICE, "Example App")
+        }]
+    });
+    let els = els(&app);
+    let item = find(&els, ids::CONNECTED_APPS_ITEM);
+    assert!(item.text.contains(t::PAUSED), "{}", item.text);
+    assert!(!item.text.contains(t::NOT_CONNECTED), "{}", item.text);
+    assert_eq!(attr(item, "status"), Some("paused"));
+    assert!(
+        has(&els, ids::CONNECTED_APPS_ITEM_REVOKE),
+        "still revocable"
+    );
+}
+
+#[test]
+fn every_row_reports_whether_it_can_act() {
+    let app = app_with(|s| {
+        s.principals = vec![
+            row("principal:01", class::DEVICE, "Working App"),
+            ConnectedAppRow {
+                connected: false,
+                ..row("principal:02", class::DEVICE, "Idle App")
+            },
+        ]
+    });
+    let els = els(&app);
+    let items: Vec<_> = els
+        .iter()
+        .filter(|e| e.id == ids::CONNECTED_APPS_ITEM)
+        .collect();
+    assert_eq!(attr(items[0], "status"), Some("connected"));
+    assert_eq!(attr(items[1], "status"), Some("not_connected"));
+    assert!(items[1].text.contains(t::NOT_CONNECTED));
+}
+
+/// A principal the oracle served carries its summary in the row's own text —
+/// the window's count, every request answered, and the newest operation in the
+/// card's words with its detail — and the count as a value; a row it never
+/// served carries neither (`connected-apps.md` § Layout & flow, region 3).
+#[test]
+fn a_served_principal_row_shows_the_oracle_summary() {
+    use fauna_client_connected_apps::{OracleOpRow, OracleSummaryRow};
+    let words = "Ask your nest to sign Nostr posts";
+    let app = app_with(|s| {
+        s.principals = vec![
+            ConnectedAppRow {
+                oracle: Some(OracleSummaryRow {
+                    ops_in_window: 3,
+                    requests_served: 1,
+                    last_op: Some(OracleOpRow {
+                        at_millis: 1_700_000_300_000,
+                        class: "nostr.sign_event".into(),
+                        words: verbatim(words),
+                        detail: verbatim("1"),
+                    }),
+                }),
+                ..row("principal:01", class::DEVICE, "Served App")
+            },
+            row("principal:02", class::DEVICE, "Quiet App"),
+        ]
+    });
+    let els = els(&app);
+    let items: Vec<_> = els
+        .iter()
+        .filter(|e| e.id == ids::CONNECTED_APPS_ITEM)
+        .collect();
+    let text = &items[0].text;
+    assert!(text.contains(&t::oracle_ops("3")), "{text}");
+    assert!(text.contains(t::ORACLE_REQUESTS_ONE), "{text}");
+    assert!(
+        text.contains(&t::oracle_latest(&when(1_700_000_300_000), words, "1")),
+        "{text}"
+    );
+    assert_eq!(attr(items[0], "oracle_ops"), Some("3"));
+    assert_eq!(attr(items[1], "oracle_ops"), None);
+    assert!(
+        !items[1].text.contains(&t::oracle_ops("0")),
+        "{}",
+        items[1].text
+    );
+}
+
+/// An operation whose class carries no detail reads without a dangling dash,
+/// and a single operation in the window reads in the singular.
+#[test]
+fn an_oracle_summary_without_a_detail_reads_bare() {
+    use fauna_client_connected_apps::{OracleOpRow, OracleSummaryRow};
+    let lines = resolved(oracle_lines(&OracleSummaryRow {
+        ops_in_window: 1,
+        requests_served: 4,
+        last_op: Some(OracleOpRow {
+            at_millis: 0,
+            class: "post.author".into(),
+            words: verbatim("Post public posts as you"),
+            detail: verbatim(""),
+        }),
+    }));
+    assert_eq!(
+        lines,
+        [
+            format!("{} · {}", t::ORACLE_OPS_ONE, t::oracle_requests("4")),
+            t::oracle_latest_bare(&when(0), "Post public posts as you"),
+        ]
+    );
 }

@@ -40,6 +40,17 @@ pub(crate) struct StolenCeremonyHold {
     /// A supersession arrived while the ceremony owned the screen; its
     /// escalation is owed.
     deferred: bool,
+    /// The identity this process's ceremony retired and adopted a successor
+    /// for. A supersession naming it is SPENT, now and for the life of the
+    /// process: the retired session's other channels report their refused
+    /// re-auth a few milliseconds after the adopting fold, before the switch
+    /// has torn that session down (measured on the bound seat of the
+    /// two-instance world, 2026-10-11 — the late verdict re-ran the launch
+    /// over the adoption and the stale relaunch met the re-pointed binding as
+    /// `[launch-refused]`). A retired id never serves again, so the verdict can
+    /// say nothing new. Survives [`Self::teardown`] on purpose — the switch is
+    /// the teardown it would otherwise race.
+    adopted_past: Option<String>,
 }
 
 impl StolenCeremonyHold {
@@ -53,9 +64,15 @@ impl StolenCeremonyHold {
         self.in_flight || self.outcome_on_screen || message_parked
     }
 
-    /// A supersession arrived: record it as owed and answer `true` when the
-    /// ceremony owns it, else answer `false` (the caller escalates now).
-    pub(crate) fn defer(&mut self, message_parked: bool) -> bool {
+    /// A supersession of `superseded` (the identity the verdict is about, when
+    /// known) arrived: answer `true` when it is spent — it names the identity
+    /// this process already adopted a successor for — or when the ceremony owns
+    /// it, recording the latter as owed; else answer `false` (the caller
+    /// escalates now).
+    pub(crate) fn defer(&mut self, message_parked: bool, superseded: Option<&str>) -> bool {
+        if superseded.is_some() && superseded == self.adopted_past.as_deref() {
+            return true;
+        }
         let owned = self.owns(message_parked);
         if owned {
             self.deferred = true;
@@ -67,10 +84,22 @@ impl StolenCeremonyHold {
     /// switching to the successor, which is itself the full relaunch, so an
     /// owed escalation is SPENT, not performed. Answers whether the owed
     /// escalation is due now.
-    pub(crate) fn settle(&mut self, adopted: bool, on_account: bool, message_parked: bool) -> bool {
+    ///
+    /// `retired` is the identity the ceremony ran as; an adopting fold
+    /// remembers it so a later verdict on it is spent ([`Self::defer`]).
+    pub(crate) fn settle(
+        &mut self,
+        adopted: bool,
+        on_account: bool,
+        message_parked: bool,
+        retired: Option<String>,
+    ) -> bool {
         self.in_flight = false;
         if adopted {
             self.deferred = false;
+            if retired.is_some() {
+                self.adopted_past = retired;
+            }
             return false;
         }
         if on_account {
@@ -93,9 +122,13 @@ impl StolenCeremonyHold {
     /// The session is being torn down (an account switch, a sign-out, the
     /// escalation itself): whatever the ceremony was doing belongs to the
     /// departing session, so nothing may go on deferring on its behalf — and a
-    /// supersession owed for that session is moot.
+    /// supersession owed for that session is moot. What it adopted past stays
+    /// retired.
     pub(crate) fn teardown(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            adopted_past: self.adopted_past.take(),
+            ..Self::default()
+        };
     }
 }
 
@@ -147,11 +180,12 @@ pub(crate) fn begin_stolen_ceremony() {
 }
 
 /// A mid-session supersession arrived (`DataMessage::IdentitySuperseded`, from
-/// the silent sign-in or the supervisor's stop): `true` when this device's own
-/// ceremony owns it and the escalation is now owed.
-pub(crate) fn defer_own_supersession() -> bool {
+/// the silent sign-in or the supervisor's stop) for `superseded`: `true` when
+/// this device's own ceremony owns it and the escalation is now owed, or when
+/// it names an identity this process already adopted past.
+pub(crate) fn defer_own_supersession(superseded: Option<&str>) -> bool {
     let parked = super::has_pending_stolen_failed_message();
-    HOLD.with(|h| h.borrow_mut().defer(parked))
+    HOLD.with(|h| h.borrow_mut().defer(parked, superseded))
 }
 
 /// The ceremony's fold landed — called by `apply_recovery_succeeded` AFTER any
@@ -159,7 +193,10 @@ pub(crate) fn defer_own_supersession() -> bool {
 pub(super) fn settle_stolen_ceremony(adopted: bool) {
     let on_account = on_account();
     let parked = super::has_pending_stolen_failed_message();
-    if HOLD.with(|h| h.borrow_mut().settle(adopted, on_account, parked)) {
+    // The ceremony ran in the session still installed: its actor is the
+    // identity just retired.
+    let retired = super::get_client().and_then(|c| c.actor_id());
+    if HOLD.with(|h| h.borrow_mut().settle(adopted, on_account, parked, retired)) {
         super::escalate_to_launch("identity-superseded (held back by the ceremony)");
     }
 }
@@ -224,15 +261,15 @@ mod tests {
         let mut hold = StolenCeremonyHold::default();
         hold.begin();
         assert!(
-            hold.defer(false),
+            hold.defer(false, None),
             "mid-ceremony, the supersession is the ceremony's own"
         );
         assert!(
-            !hold.settle(false, true, true),
+            !hold.settle(false, true, true, None),
             "the fold parked the key on Account — escalating would tear it down"
         );
         assert!(
-            hold.defer(true),
+            hold.defer(true, None),
             "a second refusal while the key is parked is held too"
         );
         assert!(
@@ -245,7 +282,7 @@ mod tests {
     #[test]
     fn a_supersession_with_no_ceremony_escalates_at_once() {
         let mut hold = StolenCeremonyHold::default();
-        assert!(!hold.defer(false));
+        assert!(!hold.defer(false, None));
     }
 
     /// Past the fold: an undecidable outcome on Account still owns a refusal
@@ -254,14 +291,14 @@ mod tests {
     fn an_outcome_that_adopted_nothing_keeps_owning_its_supersession_on_account() {
         let mut hold = StolenCeremonyHold::default();
         hold.begin();
-        assert!(!hold.settle(false, true, false));
+        assert!(!hold.settle(false, true, false, None));
         assert!(
-            hold.defer(false),
+            hold.defer(false, None),
             "the late refusal waits for the leave edge"
         );
         assert!(hold.leave_account());
         assert!(
-            !hold.defer(false),
+            !hold.defer(false, None),
             "once the user has left, a supersession is ordinary"
         );
     }
@@ -270,9 +307,9 @@ mod tests {
     fn an_adopting_outcome_spends_the_owed_escalation() {
         let mut hold = StolenCeremonyHold::default();
         hold.begin();
-        assert!(hold.defer(false));
+        assert!(hold.defer(false, None));
         assert!(
-            !hold.settle(true, true, false),
+            !hold.settle(true, true, false, None),
             "the switch IS the relaunch"
         );
         assert!(!hold.leave_account(), "nothing is owed after an adoption");
@@ -282,16 +319,16 @@ mod tests {
     fn a_fold_off_account_with_nothing_parked_performs_it_at_once() {
         let mut hold = StolenCeremonyHold::default();
         hold.begin();
-        assert!(hold.defer(false));
-        assert!(hold.settle(false, false, false));
+        assert!(hold.defer(false, None));
+        assert!(hold.settle(false, false, false, None));
     }
 
     #[test]
     fn a_fold_off_account_with_a_parked_key_still_waits_for_the_edge() {
         let mut hold = StolenCeremonyHold::default();
         hold.begin();
-        assert!(hold.defer(false));
-        assert!(!hold.settle(false, false, true));
+        assert!(hold.defer(false, None));
+        assert!(!hold.settle(false, false, true, None));
         assert!(hold.leave_account());
     }
 
@@ -299,10 +336,39 @@ mod tests {
     fn a_teardown_ends_the_ceremonys_claim() {
         let mut hold = StolenCeremonyHold::default();
         hold.begin();
-        assert!(hold.defer(false));
+        assert!(hold.defer(false, None));
         hold.teardown();
-        assert!(!hold.defer(false));
+        assert!(!hold.defer(false, None));
         assert!(!hold.leave_account());
+    }
+
+    /// The race the bound seat of the two-instance world measured: the
+    /// adopting fold lands, and the retired session's other channels report
+    /// their refused re-auth after it — before and after the switch's teardown.
+    /// Each is spent; a supersession of the successor itself still escalates.
+    #[test]
+    fn a_verdict_on_the_identity_adopted_past_is_spent_even_after_teardown() {
+        let mut hold = StolenCeremonyHold::default();
+        hold.begin();
+        assert!(!hold.settle(true, true, false, Some("retired".into())));
+        assert!(
+            hold.defer(false, Some("retired")),
+            "a late verdict on the retired id must not re-run the launch over the adoption"
+        );
+        hold.teardown();
+        assert!(
+            hold.defer(false, Some("retired")),
+            "the switch's teardown must not reopen it — the switch is what it races"
+        );
+        assert!(
+            !hold.defer(false, Some("successor")),
+            "a supersession of the session served now is genuine and escalates"
+        );
+        assert!(
+            !hold.defer(false, None),
+            "a verdict that names no identity is never assumed spent"
+        );
+        assert!(!hold.leave_account(), "nothing spent was ever owed");
     }
 
     /// `settings-nav-back` moves only the outer stack: the sub-stack stays on

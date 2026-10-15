@@ -193,12 +193,14 @@ public struct RegionSubject {
     public var hashtags: [String]
     public var hasMedia: Bool
 
+#if !FAUNA_KIDS
     /// A feed post (card or detail) — linux's `region::post_input`.
     public static func post(_ post: PostSummary) -> RegionSubject {
         RegionSubject(
             contentIdHex: post.postId, authorHex: post.author, text: post.body,
             hashtags: post.tags, hasMedia: post.hasMedia)
     }
+#endif
 
     /// A conversation bubble, post-decrypt — the zero id stands in for the
     /// author, as on tui and linux.

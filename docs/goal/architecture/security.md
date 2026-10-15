@@ -48,6 +48,8 @@ plus signature without ever re-encoding the inner content.
 
 Reference: `libs/fauna-cbor/src/envelope.rs::SignedEnvelope`.
 
+**A media reference an author signs names a content address the client computed, never one a nest handed back.** The client hashes the bytes it uploads (`blake3` over the uploaded body, the function the nest ingests with) and refuses the upload when the nest's reply names a different hash, so a malicious or compromised home nest cannot put the author's signature on a blob they never attached; the nest's reply is an acknowledgement, not the source of the hash. Shared helper: `fauna_client::media_upload::upload_prepared_blob`.
+
 ## Third-party verification recipe
 
 Any language with BLAKE3 + Ed25519 + a dag-cbor decoder verifies a
@@ -457,7 +459,7 @@ comes from; differs by deployment).**
 | **Self-hosted public domain, pre-claim** (hand-deployed internet nest — `nest-internet-setup.md`; domainless until the claim names it, so no DNS `self=` exists yet and no seed was injected) | the **console-printed `fauna://claim` URI** — the boot banner prints the claim code beside a URI carrying `nest_actor_id` (`fauna_core::claim_code::claim_uri`; banner `bins/fauna-nest/src/claim.rs`), and pasting the URI makes the onboarding machine hold that identity as the first-contact root for the claim host *before the code is sent* (`wizard_submit_claim_code` → `hold_first_contact_identity`). The console is the out-of-band channel the code already travels on — the LAN-IP row's optional hardening made available here, where it guards a claim-time admin-takeover secret. | **Native apps:** paste the URI → verified from first connect, **no TOFU window**, and every later wizard call to that host self-verifies too — `WsNestApi::core`'s native arm runs `graduate_first_contact` against the held root before any wizard call rides the connection. Type the bare code → **no root** (the pre-fix state, kept working for old consoles/transcription): the claim rides the provisionally-accepted channel — a documented residual, closed for the account's later life by the post-claim DNS `self=` TXT. **Web consults the pin too, but proves less** (built 2026-08-16): the pasted identity is held the same way (`hold_first_contact_identity` is not cfg-gated), and the wasm arm of `WsNestApi::core` now verifies it before any wizard call rides the connection — `fauna_client_core::nest_trust::prove_first_contact_identity_possession` makes the box sign a fresh **client-chosen** nonce as the pasted identity, and a wrong identity, an absent binding, or a refusal of the handshake kind each hard-fail with nothing sent (as every row does since 2026-09-24 — the admin pasted *this* box's identity, so a refusal is hostile-or-broken). **It remains strictly weaker than native, and the difference is structural, not a gap to close later:** a browser exposes no received certificate to WASM, so there is no SPKI to compare the signature against and Axis 1's channel binding cannot be completed — the proof establishes *possession of the key*, not that *this channel* terminates at its holder. Concretely, web now refuses any box that cannot sign as the pasted identity (it previously accepted every box: the pin was stored and never consulted, a silent no-op), while a **compromised or coerced CA** stays exploitable by an attacker who both mints a browser-trusted certificate for the domain **and** relays the handshake to the real nest. Native's SPKI compare defeats that relay; matching it on web needs a received-certificate primitive browsers do not offer. |
 | **Federation-granted** (cross-nest byte plane) | the **home nest's `nest_actor_id`, delivered WITH the routing** — a cross-nest reader dials the folder's home nest's HTTPS byte plane directly (chunk/manifest transfers), holding no account there, so it cannot graduate a pin the ordinary way. Whatever carried `home_nest_url` also carries the identity, and the row has **two arms of different provenance — never generalize one onto the other** (the *Mechanism* paragraph below splits them): **(shared set)** the inviter's grant — the MLS Welcome relay + every `caller_access` federated read reply stamp `home_nest_actor_id` beside the URL (`../architecture/federation.md` § Cross-nest → *Recipient-side access discovery*; `../behavior/file-sync.md` § Multi-writer shared sets); **(followed public folder)** no grant and no inviter — the follower typed the owner's address, the client derived `home_nest_url` from that domain, and the home nest stamps its own `nest.info` identity on the `fauna.folders.public.fetch` reply, relayed through the follower's own nest (`../behavior/folders.md` § Publicly-synced follow; `../ui/media.md` § Followed public folders), anchored by the domain→key binding TLS gives the relaying nest's dial (`../architecture/federation.md` § Security → *Domain↔key binding rides TLS*) and held against no prior expectation. `IdentityRoot::PreResolved` on both arms. | **None — no TOFU window on either arm**: the identity arrives before the first byte-plane contact, which verifies against it (a self-signed home works; a WebPKI home is unchanged and the root is belt-and-braces). The follow arm's residual is the absence of any expectation *older than the reply*: an attacker who owns the typed domain's resolution *and* a WebPKI-valid certificate for it (the bar the relaying nest's dial enforces since 2026-09-25 — `../architecture/federation.md` § Peer-auth model → *Discovery trust rule*) owned the whole follow by construction, and beneath the pin that arm has no seal (its content is public by the owner's choice) — CID verification still runs, rooted in the same relayed listing. |
 
-**The login's pin — a login graduation leaves the pin store naming the identity it verified, whatever root proved it (ruled 2026-10-05; built the same day).** The pin is not only the TOFU row's record: it is *this machine's statement of which nest stands behind an authority*, and the escrow-holder set the account runtime trusts is defined as exactly that pin ([`account-data-taxonomy.md`](account-data-taxonomy.md) § The generation machinery → *A holder change re-receipts and never mints*, clause (1): "the one identity pinned for the bound nest … never the nest's own claim about itself"). So the rule is one sentence with three consequences, each closing a path on which a login verified the nest's identity and recorded nothing — which left every GenerationTip write (`fauna.state.mail`, `.backup`, `.folder-keys`, …) refused for good with *the escrow receipt is signed by a holder this account does not trust*, on exactly the deployments the project ships (a public-CA cert plus a published `self=`), for every user who signed in without having CLAIMED the box through onboarding (the claim ceremony's own seed, `seed_claimed_identity_pin`, hid the gap from every admin). **(1) A binding already in hand is never waived.** The WebPKI waiver (`trust::webpki_waives_binding`, the one decision point) answers "may a public-CA nest go *unbound*?" — the pre-identity first contact's question, asked before spending a round trip on `fauna.auth.nest_handshake`. A login never asks it: `read_login_binding` demanded a binding before anything was signed ([`../behavior/login.md`](../behavior/login.md) § Binding the nest), and every TLS nest's bearer-mint reply carries one. WebPKI says the client reached the name it dialed; the binding says *which nest* that is, and the stronger statement is kept — the full core runs (SPKI compare, the DNS `self=` root where the zone publishes one, else TOFU), the bound SPKI is pinned and re-pinned at every graduation, which is the mechanism a claimed § B-IP box already rides and what carries the app across an ACME rotation. **(2) The pre-resolved rows record the root they verified as the pin, authoritatively** (`trust::record_login_identity`, run by the two login wrappers after the core): a root outranks any TOFU pin, the same reasoning as the claim seed, and on the public-domain row "the client accepts whatever head the zone names" ([`nest/box-recovery.md`](nest/box-recovery.md) § Client acceptance) — so a pin that differs from a verified DNS root is replaced, not warned about; recording the identity the pin already names is a no-op, so an accepted rotation's seq survives every login. The core itself still never TOFU-pins a pre-resolved root. **(3) The scope is the LOGIN — the bearer-mint handshake and the silent-challenge launch wrappers — and nothing else.** `graduate_first_contact`'s callers record nothing new: the wizard's claim ceremony seeds its own pin; the byte-plane's grant-carried root stays on its own row (the federation-granted row's arms are fenced — *never generalize one onto the other* — and a durable pin for a home nest would be exactly that generalization); the consumer's never-minting heal and a read-only store stay never. **What this is, and is not.** It is native matching web: the SPA has always pinned the possession-proved identity on first contact over any origin (`check_web_nest_identity`, the NT-1 analysis below) and read its escrow trust from that pin. It is not a weakening: a pin adds the binding requirement, the SPKI pin and change detection *on top of* WebPKI, never in place of it; the first-connect UX on a public-CA nest stays silent. The one visible change is the public-domain row's "no pin": a box rebuilt with a new identity that neither the zone's `self=` nor a committed rotation chain carries now warns on native as it always has on web — which is the generation machinery's holder-change signal (clause (1): *trust follows the pin, every pass*), not a regression. Standalone e2e never saw the gap because its plaintext rig is seeded (`e2e-automation-surface-gating.md` § The e2e trust seed); live mode deliberately is not, which is how the first tui sweep against a real public-CA box exposed it. Witnesses: `trust::tests::{a_webpki_login_with_a_binding_in_hand_pins_the_identity_it_proved, a_login_records_the_pre_resolved_root_it_verified_as_the_pin, both_login_wrappers_pin_a_never_claimed_public_ca_nest}` (red first against the waiver), beside the unchanged waiver table and the § B-IP bridged-box test.
+**The login's pin — a login graduation leaves the pin store naming the identity it verified, whatever root proved it (ruled 2026-10-05; built the same day).** The pin is not only the TOFU row's record: it is *this machine's statement of which nest stands behind an authority*, and the escrow-holder set the account runtime trusts is defined as exactly that pin ([`account-data-taxonomy.md`](account-data-taxonomy.md) § The generation machinery → *A holder change re-receipts and never mints*, clause (1): "the one identity pinned for the bound nest … never the nest's own claim about itself"). So the rule is one sentence with three consequences, each closing a path on which a login verified the nest's identity and recorded nothing — which left every GenerationTip write (`fauna.state.mail`, `.backup`, `.folder-keys`, …) refused for good with *the escrow receipt is signed by a holder this account does not trust*, on exactly the deployments the project ships (a public-CA cert plus a published `self=`), for every user who signed in without having CLAIMED the box through onboarding (the claim ceremony's own seed, `seed_claimed_identity_pin`, hid the gap from every admin). **(1) A binding already in hand is never waived.** The WebPKI waiver (`trust::webpki_waives_binding`, the one decision point) answers "may a public-CA nest go *unbound*?" — the pre-identity first contact's question, asked before spending a round trip on `fauna.auth.nest_handshake`. A login never asks it: `read_login_binding` demanded a binding before anything was signed ([`../behavior/login.md`](../behavior/login.md) § Binding the nest), and every TLS nest's bearer-mint reply carries one. WebPKI says the client reached the name it dialed; the binding says *which nest* that is, and the stronger statement is kept — the full core runs (SPKI compare, the DNS `self=` root where the zone publishes one, else TOFU), the bound SPKI is pinned and re-pinned at every graduation, which is the mechanism a claimed § B-IP box already rides and what carries the app across an ACME rotation. **(2) The pre-resolved rows record the root they verified as the pin, authoritatively** (`trust::record_login_identity`, run by the two login wrappers after the core): a root outranks any TOFU pin, the same reasoning as the claim seed, and on the public-domain row "the client accepts whatever head the zone names" ([`nest/box-recovery.md`](nest/box-recovery.md) § Client acceptance) — so a pin that differs from a verified DNS root is replaced, not warned about; recording the identity the pin already names is a no-op, so an accepted rotation's seq survives every login. The core itself still never TOFU-pins a pre-resolved root. **(3) The scope is the LOGIN — the bearer-mint handshake and the silent-challenge launch wrappers — and nothing else.** `graduate_first_contact`'s callers record nothing new: the wizard's claim ceremony seeds its own pin; the byte-plane's grant-carried root stays on its own row (the federation-granted row's arms are fenced — *never generalize one onto the other* — and a durable pin for a home nest would be exactly that generalization); the consumer's never-minting heal and a read-only store stay never. **What this is, and is not.** It is native matching web: the SPA has always pinned the possession-proved identity on first contact over any origin (`check_web_nest_identity`, the NT-1 analysis below) and read its escrow trust from that pin. It is not a weakening: a pin adds the binding requirement, the SPKI pin and change detection *on top of* WebPKI, never in place of it; the first-connect UX on a public-CA nest stays silent. The one visible change is the public-domain row's "no pin": a box rebuilt with a new identity that neither the zone's `self=` nor a committed rotation chain carries now warns on native as it always has on web — which is the generation machinery's holder-change signal (clause (1): *trust follows the pin, every pass*), not a regression. Standalone e2e never saw the gap because its plaintext rig is seeded (`e2e-automation-surface-gating.md` § The e2e trust seed); live mode deliberately is not, which is how the first tui sweep against a real public-CA box exposed it. The standalone witness of rule (1) rides the nest-leg trust seed (`e2e-automation-surface-gating.md` § The nest-leg trust seed), since no rig can mint a publicly-chained certificate for a loopback or LAN address: `test_nest_identity_pin_webpki.py` (tui), red first against the waiver. Witnesses: `trust::tests::{a_webpki_login_with_a_binding_in_hand_pins_the_identity_it_proved, a_login_records_the_pre_resolved_root_it_verified_as_the_pin, both_login_wrappers_pin_a_never_claimed_public_ca_nest}` (red first against the waiver), beside the unchanged waiver table and the § B-IP bridged-box test.
 
 **Mechanism for the client-provisioned row — the pre-identity nest-identity
 handshake `fauna.auth.nest_handshake`.** The bearer handshakes can't serve this
@@ -667,6 +669,14 @@ held the clearing never runs: the graduation verifies the binding in full and
 [`nest/tls-certificates.md`](nest/tls-certificates.md) § B-IP bridge cert's
 ~4-day rotation — without ever downgrading a pinned host.
 
+**No session resumption on a pinned config (ruled 2026-10-08; built the same day).** Rule 2 above says every bearer-carrying connection presents the pinned SPKI, and the reqwest legs read the pin *per handshake* — but a TLS 1.3 session resumed from a cached ticket runs no certificate verifier at all, so with rustls' default client-side session cache "per handshake" silently meant "per *full* handshake": a process holding a ticket from a host's OLD identity could keep resuming to that box on every reqwest leg (the content API, chunk fetch, the ranged reader) for the ticket's lifetime after the user approved a re-pin to a NEW identity (a replaced box — or a compromise the admin answered by replacing it), and a `forget_identity_pin` re-trust would not refuse the un-graduated self-signed host it exists to refuse until the cache aged out. The accept-it reading — the resumed session was itself verified under the pin of its day, and the server proves PSK possession — was weighed and refused: the pin store is this machine's statement of which nest stands behind an authority *now* (*The login's pin*, above), the re-pin is the one user act that changes it, a connection reaching the previous holder after it is exactly the connection the pin exists to refuse, and a ticket lifetime (RFC 8446 allows seven days) is not a window the user approved. Flushing the session store on re-pin was refused too: a second mechanism every pin writer across three crates must remember to call, and it would leave the capturing configs — whose connect paths read the captured SPKI *after* the handshake, which a resumed session never writes — correct only by the accident that each dial builds a fresh config. So the ruling makes the state unrepresentable: **every config `tls_verify::config_with` builds — capturing, SPKI-pinned and dynamically pinned alike — disables client session resumption (`ClientConfig::resumption = Resumption::disabled()`)**, so every connection is a full handshake, the verifier is the only path to a connection, and *per-handshake* means *per connection*. The cost is one cert parse and one signature verification per new TCP connection, behind reqwest's connection pool (TLS 1.3 resumption saves no round trip without early data, which these configs never enable); on a `Connection: close` server the ranged reader pays it per read, beside the TCP and TLS round trips it already pays. Witness: `libs/fauna-client/tests/reqwest_pinned_tls.rs::a_re_pin_bites_on_the_next_request_even_when_the_server_offers_resumption` against the shared fixture with resumption ENABLED (`common::ServerSessions::Resumable`), red first under the default cache; the fixture's default rig stays full-handshake-only so the other trust assertions observe the verifier alone.
+
+**The native-player leg — a native app's media player never dials the nest (ruled 2026-10-08, a design pass; the shared reader BUILT 2026-10-08, windows' adapter 2026-10-09, linux' and android's 2026-10-10, apple's UNBUILT — `## Implementation status today`).** Every leg above is a client the app builds, which is why the policy reaches it: `tls_dial` for a WS, `store_pinned_reqwest_tls` for a reqwest leg, and the three platform HTTP legs through their `NestCertTrust` shims over the shared FFI classifiers. A platform media player handed a URL — windows' `MediaPlayer`, `AVPlayer` on macos + ios, android's framework `MediaPlayer` / `VideoView`, GTK's GStreamer-backed `gtk::Video` on linux — is none of these: it dials through the OS media stack's own HTTP client, which validates against the OS trust store alone. No WebPKI waiver the app decided, no loopback carve-out, no SPKI pin reaches it, so it refuses the always-live self-signed floor ([`nest/tls-certificates.md`](nest/tls-certificates.md) § The two-layer model) that every nest serves before ACME succeeds, that a LAN / `.local` / bare-IP nest serves for good — **and that the same-box install serves on `https://127.0.0.1:3000`** ([`installers/windows.md`](installers/windows.md)): the OS stack knows nothing of the loopback carve-out either, so the failure is not a remote-nest edge case but the windows default. The rule, for every native app: **a nest URL is handed to no OS component — not a media player, not an image loader, not a download manager. The component reads from a byte source the app owns, and that source is fed by the one pinned leg: the shared-Rust ranged reader (`fauna_client::RangedNestReader` over `pinned_http_client`, `Range` GETs only, UniFFI-faced for windows / apple / android and consumed directly on linux).** Where it stands in this section's model: it is a reqwest leg, so it is `store_pinned_reqwest_tls`'s — the pin is armed whenever a feed exists (*The login's pin*, above: the login graduated it), and `fauna_ffi` is statically linked into every native app, so the reader reads the same process-global store the WS handshake wrote. It carries no bearer and needs no session (the blob route is unauthenticated by design, the proxy's playback ticket rides the query — [`render-model.md`](render-model.md) § D6c → *Inline playback* answer (4)), which is also why nothing kept it platform-side the way the bearer-carrying content API legs are: the reader is a pure function of the nest URL and the pin store. What the player is, how the app wraps the reader into each platform's byte-source seam, and the `Sealed` arm (unchanged — whole blob through the app's existing pinned fetch) are [`render-model.md`](render-model.md) § D6c → *Inline playback* answer (1)'s. Three alternatives were rejected, each a fifth hand-rolled trust path of exactly the sync-plane kind the paragraph above records: **installing the floor cert into the OS trust store** — a per-install ceremony the user would perform against a 90-day-rotating key (configuration theatre under [`../principles.md`](../principles.md) § One configuration surface; on ios and android a visible profile install; and a system-wide trust grant for a per-app need); **the platforms' static pin manifests** (`NSPinnedDomains`, android's network-security-config `<pin-set>`, a `HttpBaseProtocolFilter` on windows — which only the HLS / DASH `AdaptiveMediaSource` accepts) — a pin here is graduated at runtime per nest and never known at build time; **a loopback relay the player dials** (`http://127.0.0.1:<port>` → the pinned client) — a listener any co-resident process can read (§ Co-resident process trust boundary), bearer-less by construction, and the sealed arm's plaintext on a socket. Outside this leg: web (the SPA is same-origin with the nest, so the browser's `<video>` already is the pinned peer) and tui (its handoff downloads whole files through the content API — [`apps/tui.md`](apps/tui.md) § External media handoff).
+
+**The proven identity is remembered per connection (ruled 2026-10-10; built the same day in shared Rust).** Every client decision keyed on "which nest is this" reads the identity the connection is **bound** to and refuses a nest whose own `fauna.nest.info` claim disagrees (`## Implementation status today`, the bound-identity bullet) — a proof of two round trips, the possession proof or pin read plus the cross-check. That proof is a fact about a **connection**, not about a read: it cannot change for the life of a bound connection, and a reconnect — to the same address, to a different box behind it, or by a client bound to another nest — is a new connection that proves afresh. So the one shared resolver (`LinkedNestsMachine::bound_nest_id`, behind every app's `resolve_this_nest_id` / FFI / wasm twin) runs the proof **once per connection** and serves it from the transport's own memo for that connection only (`fauna_protocol::ProvenIdentityMemo`, owned by the native `NestClient` and the wasm `WsRpcClient`, keyed on the live dispatcher's process-unique `connection_id`, which both transports mint per (re)connect). Three rules keep it a memo of a *proof*, never a cache of a *claim*: (1) nothing is remembered until the cross-check passed over this very connection, and a refusal remembers nothing; (2) the resolver takes the live connection's number BEFORE its first round trip and remembers only if that number is still live after the last — a proof that straddled a reconnect is attributed to no connection; (3) a seam with no connection of its own (a port-built web chunk, a test fake) proves on every read as before. **Why now:** every reader — the backups page's reads and writes, the custody leg at both its edges, the ledger aftermath, the DNS cert target — re-proved per call, and the `fauna.nest.info` leg rides the nest's per-actor discovery budget (`anonymous_rate_limit::DISCOVERY_MAX_EVENTS`, 60 events / 60 s on a release nest); a user signing in and enrolling this device as a custodian within the minute was refused `rate_limited` on the enroll itself, and the destination they asked for was never created (measured on tui against a release image, 2026-10-10). The budget stays at 60: raising it would weaken the harvesting bound it exists for, and the lever is the client's volume. Witnesses: `fauna_client_pair::tests::{the_proven_identity_is_remembered_per_connection_and_a_rebind_re_proves, a_proof_that_straddled_a_reconnect_is_not_remembered, a_seam_without_a_memo_proves_on_every_read}` and the memo's own `fauna_protocol::requester::proven_identity_tests`.
+
+**The nest's self-description is read once per connection (2026-10-11).** The node leg (`domain`, `version`), the feature-limits capability set (`capabilities`) and the sign-in update look (`newest_release`) all fold the one `fauna.nest.info` reply, so the transport remembers it per connection beside the proven identity: `fauna_protocol::NestInfoMemo`, owned by the native `NestClient` and the wasm `WsRpcClient`, keyed on the same `connection_id`, and read only through `fauna_protocol::read_nest_info` — which `StatusClient::nest_info`/`node`, `FeaturesClient::node_capabilities` (behind `rows` and `authored_surface`) and `update_look::look_at_sign_in` call, so every app that reaches those shared readers (directly, over UniFFI or over wasm) draws one read per connection with no app-side memo. The rules are the proof memo's, plus two: concurrent readers on one connection share the first one's round trip (the slot is an async lock held across the read), and an error is never remembered. **Which readers may share it:** a reader whose answer is fixed for a connection's life or is read once per connection anyway — a nest restart or upgrade drops the socket, the one runtime-gated capability (`relay`) gates no feature-limits row, and the sign-in look reads `newest_release` once per sign-in. A reader that needs `newest_release` or `relay` as they are now, mid-connection, reads `fauna.nest.info` itself; so does the identity cross-check, whose proof is its own memo's. Witnesses: `fauna_protocol::nest_info_memo::tests` and the beacon counts in `tests/e2e-unified/tests/test_nest_info_draw.py`.
+
 ### Post-auth surfacing — a mid-session identity change blocks, on the same surface (ratified 2026-07-23)
 
 Identity verification does not end at launch; three structural re-check
@@ -686,10 +696,13 @@ changes *mid-session* is detected without any new mechanism:
    requires the pinned SPKI (§ Cross-connection binding); a served-cert
    change forces a re-bind, which re-runs the full identity verdict.
 3. **Background silent challenges / token refresh.** A post-auth
-   `fauna.auth.challenge`/`verify` re-check (e.g. a client's background
-   account-data refresh) yields the same
+   `fauna.auth.challenge`/`verify` re-check yields the same
    `SilentChallengeOutcome::IdentityChanged`, and the launch machine's
-   token-refresh seam the same `TokenRefreshOutcome::IdentityChanged`.
+   token-refresh seam the same `TokenRefreshOutcome::IdentityChanged`. The
+   re-checks today are the session mint's own reply (every bearer re-mint,
+   whose identity the app reads off the client's identity watch and whose
+   verdict stops the supervisor — `transport-connection.md` § The dial
+   budget) and the e2e bridge command's forced challenge (`silent_sign_in`).
 
 The *security* invariant therefore already holds mid-session: a changed
 identity fails graduation, the connection is torn down, and no bearer is
@@ -938,7 +951,9 @@ ownership, and container split — no human config knob, per `principles.md` § 
 configuration surface), the same bucket as the existing `caldav_listen_https=127.0.0.1:8444`
 loopback split.
 
-**Hosted third-party code (ratified 2026-09-05, the third-party integration chain — TP3/TP11; unbuilt).** A plugin the nest hosts ([`third-party.md`](third-party.md) § Execution forms) is a co-resident process under exactly this posture and never a peer of trust: a curated-catalog **container** runs under its own UID with the kernel-enforced default-deny above (Landlock + seccomp), network-restricted to the hosts its document declares; a **WASM component** gets only the capability imports the host links (named outbound hosts, the nest API, a state scope, a clock) and the labeler runtime's fuel/memory caps. Neither ever holds a **certificate key**: the nest terminates TLS for any path or SNI name a plugin's document claims (`ingress`) and proxies plaintext to the plugin over the sidecar channel with a **nest-signed identity assertion** — the identity-aware-proxy shape, never a bare forwarded header (the same class of forgery the PROXY-header secret above closes). The PDS bridge's own cert fetch (`apps/bridges.md` § Bridge-kind catalogue, `fetch_tls_cert_blob`) is the first-party exception TP11 migrates last. The sandbox profiles are owned here; the runner contract is `third-party.md`'s.
+**Hosted third-party code (ratified 2026-09-05, the third-party integration chain — TP3/TP11; what is built: § Implementation status today).** A plugin the nest hosts ([`third-party.md`](third-party.md) § Execution forms) is a co-resident process under exactly this posture and never a peer of trust: a curated-catalog **container** runs under its own UID with the kernel-enforced default-deny above (Landlock + seccomp), network-restricted to the hosts its document declares; a **WASM component** gets only the capability imports the host links (named outbound hosts, the nest API, a state scope, a clock) and the labeler runtime's fuel/memory caps. Neither ever holds a **certificate key**: the nest terminates TLS for any path or SNI name a plugin's document claims (`ingress`) and proxies plaintext to the plugin over the sidecar channel with a **nest-signed identity assertion** — the identity-aware-proxy shape, never a bare forwarded header (the same class of forgery the PROXY-header secret above closes). **The path half as built (ruled 2026-10-10; refutable until the first plugin declaring ingress is installed):** a declared prefix is served only on the nest's OWN host — the apex domain, or any non-custom host of a domainless box — never on a user's custom domain or `<handle>` subdomain, so a plugin never shadows a user's published site (the admin's apex site yields to the plugins the same admin installed); it is matched in the public router's fallback, so a path the nest routes never reaches a plugin, and install refuses a prefix under one of the nest's own subtrees (`plugin_ingress::NEST_RESERVED_INGRESS_PREFIXES`, pinned against every route literal) or overlapping another installed plugin's. The plugin receives the method, the full path, the query, the headers minus `authorization` and the hop-by-hop set, a body under the router's 10 MB limit, and `actor` — filled from the request's bearer through the one bearer validator (`auth::check_bearer_session`), none when absent, the nest's 401 when it does not validate — a record field the nest fills, so no header names an identity. The reply drops the hop-by-hop set and `set-cookie` and always carries `Content-Security-Policy: sandbox` and `nosniff`: the plugin answers on the nest's own origin, where the web app holds the user's secret, so nothing it serves may script that origin (a hosted plugin is headless — `third-party.md` § The runner contract, TP2). A fault, or a plugin not running, answers 502. The PDS bridge's own cert fetch (`apps/bridges.md` § Bridge-kind catalogue, `fetch_tls_cert_blob`) is the first-party exception TP11 migrates last. The sandbox profiles are owned here; the runner contract is `third-party.md`'s.
+
+**The whole-name (`sni`) half as built (ruled 2026-10-10; refutable until the first plugin claiming a name is installed).** A plugin claims a whole name as **one lowercase DNS label under the installing nest's apex** — `{ "sni": "matrix" }` is `matrix.<apex>` on every nest that installs the document (the member's grammar is `third-party.md` § The manifest's): a publisher's document installs on many nests, so a name can only be relative to the nest, and an apex sub-name is exactly what the deployment already routes and resolves — `fauna-sni-router` is an L4 passthrough whose default backend is the nest, so **it needs no change**; the three labels it routes elsewhere (`mail`, `relay`, `pds`) are reserved labels no document may claim, and the admin's wildcard `*.<primary>` row (`../behavior/dns-management.md`) already points the name at the nest, with the name's own `A`/`AAAA` row surfaced beside `relay.`/`pds.` in the DNS matrix (`fauna_mail::dns::host`, `HostDnsInput::plugin_labels`) for an admin without the wildcard. **On a claimed name the nest answers nothing:** `plugin_ingress::whole_name_gate` is layered ahead of every route, merge and the credentialed CORS layer, so a request whose normalized `Host` is `<label>.<apex>` of an installed plugin is that plugin's on every path — no API, no `/app/`, no web content, no stacked CORS header — and a stopped plugin's name answers 502 like its paths. The name is therefore a whole origin holding no Fauna secret, the posture a user's `<handle>.<apex>` site already has (`../behavior/web-content-hosting.md` § Same-origin security model), so the reply **keeps `nosniff` and the dropped `set-cookie` but forces no `Content-Security-Policy: sandbox`** — the sandbox exists because the path half shares the web app's origin, and a separate name is a separate origin. **The certificate is the nest's, never the plugin's:** the name joins the per-domain web cert reconcile (`web_content::cert`, the sole authority over the per-SNI map — same HTTP-01 flow and account as a user's subdomain, issued within the loop's cadence, dropped after uninstall) and is served by `MultiDomainCertResolver` under the per-SNI floor rule (`nest/tls-certificates.md` § A); it stays out of the apex ACME order and out of the bridge fan-out by construction. **Exclusivity is first-come on the web name, in both directions:** install refuses a label whose `<label>.<apex>` is a live user site (an opted-in subdomain or a registered custom domain, `HostResolver::user_site_for`), one another installed plugin holds, and any label on a domainless box (no apex, no name to give — the install card lists each claimed name in full, `ConsentInstallInfo::ingress_names`); `fauna.web.set_subdomain_enabled` and `fauna.web.domain.set` refuse a name an installed plugin claims, and the boot seed of the host resolver skips such a subdomain. A handle equal to a plugin's label stays a valid handle — it is an address, not a web name — only its subdomain opt-in is refused, with the reason. Proven tier_3 in `bins/fauna-nest/tests/plugin_runner.rs` (the name reaches `ingress.handle` with the nest-asserted actor on a routed nest path too, host normalization, no sandbox on the name and the sandbox kept on the nest's host, the opt-in refusal, the install refusals) and unit-tested at the grammar, the gate's host match, the cert reconcile and the DNS row.
 
 ### Implementation status — UID isolation
 
@@ -948,16 +963,18 @@ and the MDA-RCE-blast-radius items.
 
 - **Slice 1 — distinct UIDs + filesystem isolation (single image): BUILT.** Each
   network-facing s6 service runs under its own non-root UID — nest `fauna`(1000),
-  MTA `fauna-mta`(1001), MDA `fauna-mda`(1002), SNI router `fauna-router`(1003);
+  MTA `fauna-mta`(1001), MDA `fauna-mda`(1002), SNI router `fauna-router`(1003),
+  P2P relay `fauna-relay`(1004), Bluesky PDS helper `fauna-atproto`(1005);
   `supervisor` stays root, `algorithm` is `fauna-sandbox`-confined.
   nest's sealed store (`/data/nest.db`, `/data/blobs`, `/data/acme`,
   `inbound-deliver-key`) is `0600`/`0700` nest-owned and **unreadable by a bridge
   UID**; each bridge's key lives in its own `0700` subdir
-  (`/data/keys/{mta,mda}/`, bridge-UID-owned), so neither bridge can read the
-  other's key. `/data` is `0711` (traverse-only for the now-non-owner bridges);
-  `operator-hatch.toml` (topology, no secret) is `0644`. A redeploy migrates a
-  pre-split flat keyfile into the per-role subdir, preserving the enrolled
-  identity. Authority: `installers/docker.md` § s6-overlay Services. Verified by
+  (`/data/keys/{mta,mda}/`, bridge-UID-owned; the relay's and the PDS helper's
+  likewise under `/data/keys/relay/` and `/data/keys/atproto/`), so no service
+  can read another's key. `/data` is `0711` (traverse-only for the now-non-owner bridges);
+  `operator-hatch.toml` (topology, no secret) is `0644`. The entrypoint creates and re-owns the per-role
+  subdirs on every boot; no pre-split flat keyfile is migrated (the 0.1.x
+  compat-free window and the 2026-09-24 baseline reset owe none). Authority: `installers/docker.md` § s6-overlay Services. Verified by
   tier_4 `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py`
   (cross-UID read denied; process UIDs distinct; all services still serve).
 - **Slice 4 — isolate the hostile-MIME parsers from the sealed store: BUILT, via
@@ -1088,13 +1105,13 @@ and the MDA-RCE-blast-radius items.
      `test_private_relay_hetzner.py::_assert_enrollment_strict` green on a real
      Hetzner VPS the installer stood up end-to-end, which is what proves the
      *artifact* wires the hardening rather than a hand-built image.
-  3. **The deployed box** — `example.com` self-reports
+  3. **The deployed box** — the live nest self-reported
      `enrollment_strict {mta: true, mda: true}` over admin WS-RPC, i.e. the blessed
      registry really is provisioned in production and the silent-lenient failure
      mode is not live.
   A supervised read-only on-box pass (2026-07-22, user-approved; SSH stays
   debug-only per `testing.md` § Gap 3 and is **not** a supported verification
-  path) additionally confirmed the slice-1/4 facts on `example.com` itself, which
+  path) additionally confirmed the slice-1/4 facts on that live nest itself, which
   matter there because it is hand-managed rather than installer-provisioned, so
   the `cloud_init` static asserts do not cover it: four distinct non-root UIDs
   (`fauna-nest` 1000, MTA 1001, MDA 1002, `fauna-sni-router` 1003; only s6
@@ -1221,10 +1238,14 @@ key, and the nest signs each outbound message as it hands it to the MTA
 custody decision; the MTA-side signing this section accepted for alpha was
 superseded 2026-10-03 and its sealed-blob path removed 2026-10-04). A stolen MTA
 key therefore signs nothing on its own, and signing costs no extra round-trip:
-the hand-out the MTA already needs is the sign site. The residual is that a
-compromised MTA can still have a message signed by enqueueing it, until the
-nest-side From-ownership check at `fauna.bridges.enqueue_outbound_mail` lands
-(same owner, *What the move does not yet buy*).
+the hand-out the MTA already needs is the sign site. The residual: a
+compromised MTA can still have a message signed by enqueueing it as a user
+whose submission token it has unwrapped — a user who opted into
+third-party-MUA submission and authenticated through it — until that
+credential is revoked or the token expires; never as an app-only user, who has
+no token. The nest proves the submitter with the token and holds the From: to
+it at every door (`../behavior/mail-multidomain.md` § From: header ownership →
+*Per door, nest-side* owns both, and the MDA's accepted residual).
 
 **TLS-cert blast radius: shared apex cert accepted,
 documented.** Every TLS-fetching sidecar — the MTA, the MDA, and now the iroh
@@ -1317,7 +1338,7 @@ high-entropy `WATCHTOWER_HTTP_TOKEN`. We do **not** put watchtower on its own
 compose network — segmentation is defense-in-depth only for the already-off API
 path while leaving the load-bearing socket privilege untouched, so it adds compose
 complexity without shrinking the trust. (Refutable by the deployer: if the
-update API is made a standing on-by-default path, revisit segmentation.)
+update API is made a standing on-by-default path, revisit segmentation.) The posture is the socket holder's, whichever component that is: the Fauna updater, which replaced Watchtower in every shipped bundle, inherits it unchanged and has no update API at all — it takes no requests — [`nest/update-channel.md`](nest/update-channel.md) § The updater. The paragraph above stays true of a box installed before that change, which runs Watchtower until its compose is re-copied.
 
 ## On-screen secret exposure (screen capture)
 
@@ -1389,7 +1410,9 @@ an apple leg should state which it took.
 
 ## Implementation status today
 
-- **Hosted third-party code's sandbox profiles + nest-terminated ingress (§ Co-resident process trust boundary, ratified 2026-09-05): the WASM sandbox BUILT 2026-10-02 and the nest-side runner 2026-10-03, the rest unbuilt.** `libs/fauna-plugin-host` links exactly the capability imports the paragraph names (named outbound hosts refused before any dial, the nest API through the principal chokepoint, a state scope, a clock) under the labeler's fuel and memory caps, and the ingress record carries the nest-asserted actor as a field the plugin cannot forge; no plugin ever sees a certificate key because the host crate has no import that could carry one. The nest-side runner (`bins/fauna-nest/src/plugin_runner.rs`) starts each installed plugin under those caps and dials its outbound fetches through the nest's guarded fetcher (both SSRF seats over one parse, pinned addresses, no redirect) after the host policy admits the URL. Not built: the TLS-terminating proxy that feeds `ingress.handle`, and the container form's UID/Landlock profile; sequencing in `third-party.md` § Implementation status today.
+- **Client-computed media hash (§ Signed-envelope shape, ratified 2026-10-12): native and web BUILT.** `fauna_client::media_upload::upload_prepared_blob` compares the nest's upload reply with `blake3` of the primary bytes and refuses a mismatch (linux, tui, archive import, period-sealed media). The web SPA's `uploadBlobMultipart` (`apps/fauna-web/src/lib/api.ts`) does the same through `assertEchoedBlobHash` (`blob-upload-hash.ts`) and the wasm `blobContentHashHex` export (shared `fauna_media::pipeline::bytes_content_hash_hex`), covering every caller including thumbnail uploads.
+
+- **Hosted third-party code's sandbox profiles + nest-terminated ingress (§ Co-resident process trust boundary, ratified 2026-09-05): the WASM sandbox BUILT 2026-10-02 and the nest-side runner 2026-10-03, the rest unbuilt.** `libs/fauna-plugin-host` links exactly the capability imports the paragraph names (named outbound hosts refused before any dial, the nest API through the principal chokepoint, a state scope, a clock) under the labeler's fuel and memory caps, and the ingress record carries the nest-asserted actor as a field the plugin cannot forge; no plugin ever sees a certificate key because the host crate has no import that could carry one. The nest-side runner (`bins/fauna-nest/src/plugin_runner.rs`) starts each installed plugin under those caps and dials its outbound fetches through the nest's guarded fetcher (both SSRF seats over one parse, pinned addresses, no redirect) after the host policy admits the URL. The ingress proxy's path half BUILT 2026-10-10 and its whole-name (`sni`) half the same day (`bins/fauna-nest/src/plugin_ingress.rs`; tier_3 `bins/fauna-nest/tests/plugin_runner.rs`; the per-name cert in `web_content/cert.rs`, the DNS row in `fauna_mail::dns::host`). Not built: the container form's UID/Landlock profile; sequencing in `third-party.md` § Implementation status today.
 
 The app-layer security path (§ Signed-envelope shape onward) is **shipping** —
 `libs/fauna-cbor/src/envelope.rs` implements `SignedEnvelope::sign` /
@@ -1505,18 +1528,32 @@ The macOS/iOS binding-regen verification (below) has since landed too.
     (`trust::Graduated::Verified` → `trust::record_login_identity`) as the
     host's pin, pre-resolved roots included; `graduate_first_contact` and the
     never-minting fallback are unchanged. Unit witnesses in `trust::tests`
-    (named at the ruling). **Live verification against a public-CA box is
-    PENDING**: a tui run of `test_backups.py::test_backup_destination_crud`
-    and `test_archive_import.py` against the staging box with no e2e trust
-    seed set is queued behind the running full tui live sweep — until it lands, the ruling is
-    unit-proven and live-unproven.
+    (named at the ruling). **Verified live against the public-CA staging box
+    (2026-10-05 and 2026-10-10, tui, no e2e trust seed, no `FAUNA_LIVE_*`):**
+    the rerun of the first live sweep's reds on a build containing the fix
+    turned the 103 escrow-trust reds green, and its logs carry zero
+    `does not trust` and zero `no candidate generation tip resolves` lines
+    (the pre-fix sweep carried 344 and 350); a fresh 2026-10-10 run of the
+    live-selectable `test_backups.py` and `test_mail_serving_toggle.py`
+    (17 passed) repeats the zero `does not trust` count. The two tests first named as the live proof are
+    not live witnesses by construction: `test_backup_destination_crud` takes a
+    second nest and the `archive_nest` journeys need a harness-started box, so
+    live mode deselects both at collection (`testing.md` § Default app and nest
+    mode → *What only a harness-started nest gives is deselected*). The
+    standalone witness of rule (1) is the nest-leg trust seed's harness-CA
+    login, `test_nest_identity_pin_webpki.py` (tui, built 2026-10-13): red
+    at its "the login leaves the pin" half with the waiver's
+    `binding.is_none()` clause removed, green on current code, with a
+    self-signed control arm green on both (`e2e-automation-surface-gating.md`
+    § Implementation status today records the runs).
   - **The TOFU-mint decision is atomic** (`NestIdentityPinStore::pin_if_absent`,
     fixed 2026-08-17): `check_identity_root`'s `Tofu` arm used to check-then-act
     (`get()` a pin, decide, then a separate `set()`) — a genuine race between two
     concurrent graduations of the *same* host (a client's synchronous
     login-time bearer mint racing its own fire-and-forget background silent
     challenge, both TOFU-checking the same host — tui's
-    `session::spawn_domain_refresh` is one such caller). Under load, one
+    `session::spawn_domain_refresh` was one such caller, until it was folded
+    onto the session mint's identity watch on 2026-10-08). Under load, one
     graduation's stale, still-in-flight mint could land **after** a second,
     newer pin decision and silently clobber it back with no warning —
     `test_nest_identity_pin_post_auth.py` caught it intermittently. Every
@@ -1543,7 +1580,33 @@ The macOS/iOS binding-regen verification (below) has since landed too.
     custody map past the fan-out's blast-radius guard, or have that sibling's
     custody entry marked superseded by a rotation it ran. Per-consumer
     mechanics: [`nest/box-recovery.md`](nest/box-recovery.md) § Implementation
-    status today (the BR-2 bullet).
+    status today (the BR-2 bullet). **Proven once per connection since
+    2026-10-10** (§ Transport trust → *The proven identity is remembered per
+    connection*): the resolver serves a passed proof from the transport's
+    `ProvenIdentityMemo` for the rest of that connection; a re-bind re-proves.
+    Measured 2026-10-10 on tui (`test_nest_info_draw.py`, counting the
+    nest's dispatch beacon for one actor from sign-in through the
+    hosted-custodian Backups journey): **10 `fauna.nest.info` reads under
+    the memo, 19 with it bypassed** — the nine it removes are the custody
+    leg's second edge, the ledger aftermath and the Backups page's own
+    re-proofs. Six of the ten that remained were capability reads that prove
+    nothing (the tui settings landing's node, feature-limits and own-limits
+    legs, one each, on each of the sign-in's two landing loads); since the
+    same day the landing reads the reply **once per connection** and hands it
+    to all three legs (`FeaturesClient::rows_with` / `authored_surface_with`,
+    `StatusClient::nest_info`), and the journey measured **5**. The tui's
+    sign-in update look (`newest_release`) then took the same reply instead
+    of a read of its own (2026-10-10), and the journey measures **4** —
+    pinned at 8 or fewer: the shared reply, the custody leg's one proof, and
+    two sync-engine peer-leg passes (one read per pump pass, the ruled relay
+    refresh). Since 2026-10-11 the memo lives in the transport
+    (§ Transport trust → *The nest's self-description is read once per
+    connection*): the shared readers read through it on all 7 apps and the
+    tui's app-held memo is retired. The settings landing's re-loads on one
+    connection draw no `fauna.nest.info` (measured 0 across three re-loads on tui, linux and web, 2026-10-12; pinned at 2 or fewer). macOS and
+    windows still run the interim release-host sign-in look, which reads no
+    nest, until they move to the FFI's `look_for_newer_release_at_sign_in`
+    (it reads the shared reply); web, iOS and android have no sign-in look.
   - **Cross-connection propagation:** `ws_adapter` requires the pinned SPKI on
     the authenticated WS that carries the bearer; absent a pin it falls to strict
     WebPKI. The **residual HTTP content API + `POST /register` reqwest leg** shares
@@ -1553,7 +1616,12 @@ The macOS/iOS binding-regen verification (below) has since landed too.
     `pinned_spki(authority)` **per-handshake** — so it pins the moment the WS
     handshake graduates one (and re-reads it across a cert rotation), refusing a
     non-WebPKI cert with no pin rather than accepting any. `FAUNA_INSECURE_TLS` no
-    longer touches **any** path (WS or reqwest); the env var is gone.
+    longer touches **any** path (WS or reqwest); the env var is gone. **Never
+    resumed (2026-10-08):** every `config_with`-built config — this one, the
+    capturing and the SPKI-pinned WS configs — disables client session resumption,
+    so the per-handshake read is per connection (§ Transport trust → *No session
+    resumption on a pinned config*; witness `reqwest_pinned_tls::
+    a_re_pin_bites_on_the_next_request_even_when_the_server_offers_resumption`).
   - **Windows `DirectNestClient` — the *second* residual-HTTP leg (C#), pinned
     via shared-Rust FFI**
     (`apps/fauna-windows/FaunaApp/FaunaApp.Core/Services/DirectNestClient.cs`).
@@ -1736,6 +1804,40 @@ The macOS/iOS binding-regen verification (below) has since landed too.
     `test_self_signed_nest_client_legs.py` carries `pytest.mark.android`, but no android
     e2e run exists until the run venue's harness lands (`testing.md` § Default app and
     nest mode → *Android's run venue*).
+  - **The native-player leg — reader BUILT 2026-10-08, windows' adapter BUILT 2026-10-09,
+    linux' and android's BUILT 2026-10-10, apple's UNBUILT (ruled 2026-10-08, § Transport trust → *The native-player
+    leg*).** The shared reader exists: `fauna_client::RangedNestReader`
+    (`libs/fauna-client/src/ranged_nest_reader.rs` — a `bytes=0-0` probe for `len` /
+    `content_type`, then one `Range` GET per `read_at`, over `pinned_http_client`) and its
+    sync UniFFI face `FfiRangedNestReader` (`libs/fauna-ffi/src/ranged_nest_reader.rs`,
+    gated `nest-trust`), with tier_1 `libs/fauna-client/tests/ranged_nest_reader.rs` over
+    a self-signed ranged fixture (slices, EOF, a non-ranging server, 416, an unknown
+    total, and pinned / unpinned / disagreeing-pin). **windows reads through it:**
+    `VideoPlaybackResolver.ResolveAsync` opens the reader on the client's configured nest
+    URL (`INestHttpClient.NestUrl` — the string the WS login minted on, so the pin key
+    matches) + the projection's nest-relative path, off the UI thread, for both `Url`
+    arms (the public blob and the ticketed proxy path); `VideoThumbnailView` plays
+    `MediaSource.CreateFromStream` over `RangedNestStream`, a WinRT `IRandomAccessStream`
+    shell over `FaunaApp.Core`'s `RangedNestCursor`, and releases the reader with the
+    player; nothing on windows hands the OS media stack a nest URL. **linux reads through
+    it directly from Rust:** `views/feed/video_thumbnail.rs` opens `RangedNestReader` on
+    `FaunaClient::node_url` (the WS login's string) + the projection's path, and
+    `gtk::MediaFile::for_input_stream` plays `feed/ranged_stream.rs`'s `RangedNestStream`
+    — a `gio::InputStream` + `gio::Seekable` subclass whose reads `block_on` the reader on
+    GStreamer's streaming thread. **android reads through the UniFFI face:**
+    `InlineVideoPlayback.resolve` opens `FfiRangedNestReader` on `ApiClient.nodeUrl` off
+    the main thread, and the framework `MediaPlayer` reads it through
+    `RangedNestDataSource` (`setDataSource(MediaDataSource)`). Still open: apple's `InlineVideoPlayer.start` hands `AVPlayerItem(url:)` the
+    nest URL, so there every public-`Video` stream (and every ticketed `ProxiedVideo`
+    stream, once apple wires its tap) is dialed by the OS media stack, unpinned, and fails
+    against a nest on its self-signed floor, the same-box install included. The `Sealed` arm is unaffected on every app (its bytes ride the pinned
+    fetch). **The e2e:** `test_feed_video_playback.py`'s ordinary legs run on the
+    plain-HTTP session nest (`FAUNA_INSECURE_DISABLE_TLS`) and cannot see this, so its
+    TLS twin `test_a_video_plays_against_a_self_signed_nest` runs the same journey on
+    `self_signed_logged_in_app` (the loopback floor) and `spki_pinned_logged_in_app` (the
+    pin branch) — windows' and linux' legs green; android's owed with its run venue
+    (`InlineVideoPlaybackTest` pins the data source over a fake reader meanwhile); macos +
+    ios declared unbuilt until apple's adapter lands, joining it red first.
   - A disk-backed identity pin store (`cert_binding::DiskPinStore`) survives
     restarts; the in-memory `MemoryPinStore` is the default until an app
     installs the disk store (`trust::install_pin_store`). **Linux installs it**
@@ -2193,11 +2295,17 @@ The macOS/iOS binding-regen verification (below) has since landed too.
        web module merged in on 2026-07-15 once web grew a `common.launch_harness`
        leg — web has no `app_path`, and its only state-preserving relaunch is a
        `hard_reload()`, so a `teardown()` discards the whole browser profile). The
-       arm each app reaches follows the nest's TLS posture: **tui** + **linux** +
-       **macOS** + **iOS**
-       ride `self_signed_nest`'s real binding → the stronger **Changed** arm (a pin
-       the binding *disagrees* with); **web** rides its plain-HTTP origin, which
-       serves no binding → the **Withdrawn** arm (a pin that can't be *confirmed*).
+       arm is the **Changed** arm on every app (a pin a proven identity
+       *disagrees* with); only how the identity is proven differs: **tui** +
+       **linux** + **macOS** + **iOS** ride `self_signed_nest`'s SPKI-compared
+       binding, and **web** rides its plain-HTTP origin, whose cert-optional
+       identity binding (`fauna.auth.nest_handshake`) every web channel reads
+       before signing (`../behavior/login.md` § Binding the nest) —
+       possession-only, so after "trust this nest" web re-pins the genuine
+       identity exactly as native does. (Web reached the **Withdrawn** arm — a pin
+       that can't be *confirmed* — until that binding landed on 2026-09-23; the
+       e2e assertion was corrected 2026-10-12. Withdrawn stays unit-pinned in
+       `fauna_client_core::nest_trust`.)
        **web, tui, macOS and iOS pass; linux skips headlessly** — the seeded pin must
        survive a
        relaunch (the native drivers otherwise hand a *fresh* store, so the harness
@@ -2325,23 +2433,25 @@ The macOS/iOS binding-regen verification (below) has since landed too.
 :** a
        new web-only `bearer_force_refresh` command drives the real
        `getAuthToken(secret, undefined, true)` re-mint over the SAME
-       Withdrawn-arm plain-HTTP harness `test_nest_identity_pin_post_auth.py`
-       already uses for web's channel 3 — plain HTTP serves no
-       `cert_binding` at all, so a poisoned pin is *unconfirmable* rather
-       than *contradicted*, but that is the same verdict class reaching the
-       same surface, not a weaker test. **Ruling on the Changed arm (real
-       TLS) for web e2e: not pursued, and not needed.** Reaching it would
+       plain-HTTP harness `test_nest_identity_pin_post_auth.py` already
+       uses for web's channel 3 — plain HTTP serves the cert-optional
+       identity binding the re-mint reads before signing, so a poisoned pin
+       is *contradicted* by a possession-proven identity (the Changed
+       verdict, possession-only), the same verdict class reaching the same
+       surface. **Ruling on the SPKI-compared Changed arm (real TLS) for
+       web e2e: not pursued, and not needed.** Reaching it would
        need a TLS-terminating upstream leg in the e2e harness's SPA proxy
        (`tests/e2e-unified/conftest.py`'s `_proxy_websocket`/
        `_proxy_to_nest`, today a bare `socket.create_connection` + an
        unverified `urllib` context) — real harness work, not a browser-cert
        question, since the browser only ever talks to the plain-HTTP proxy.
-       It buys no new coverage: `check_pin_and_maybe_repin` is the same code
-       for both arms (only the re-TOFU tail differs, and the Withdrawn arm's
-       own `repinned is None` assertion in
-       `test_nest_identity_pin_post_auth.py` already covers that tail), and
-       the Changed arm itself is already proven — over the real
-       `self_signed_nest` fixture — by the other four wired native apps.
+       It buys no new coverage: a browser compares no SPKI whatever the
+       transport, so `check_pin_and_maybe_repin` runs the same
+       possession-only Changed path over TLS as over plain HTTP (the
+       re-pin tail is asserted by `test_nest_identity_pin_post_auth.py`'s
+       `repinned is not None`), and the SPKI-compared Changed arm itself is
+       already proven — over the real `self_signed_nest` fixture — by the
+       other four wired native apps.
        **The classification rule is SHARED** — the identity verdict is the
        ONE outcome that escalates, every other failure class stays swallowed
        — as `fauna_launch_machine::classify_silent_challenge` →

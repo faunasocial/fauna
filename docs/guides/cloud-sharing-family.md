@@ -252,7 +252,10 @@ conversation is still fully readable by them, marked so they can see what is
 happening. Leave it at *Allow* and those messages arrive as before. This control
 is available on every app. (Ordinary *mail*
 from unknown senders is a separate control on the same page, and has been there
-since the start.)
+since the start. A held email shows up in the approval queue as who sent it and
+when it arrived — never its subject or its text; approving moves it to the
+child's inbox and lets that sender's later mail straight through, and denying
+discards it.)
 
 **Age bands.** When an admin admits a supervised account, they set the child's
 age band beside the guardian — under 13, 13–15, 16–17 or 18+ — and it picks the

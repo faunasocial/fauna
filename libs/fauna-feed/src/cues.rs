@@ -52,6 +52,8 @@ use fauna_core::scoring::cues::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::cue_tracker::ExposureEnd;
+
 /// The current cue-layout version stamped into a serialized [`CueRollup`].
 /// Additive-only within a major version (owner doc § At rest — "serialized
 /// additively"): a newer client widens [`ItemCues`] with defaulted fields and an
@@ -275,7 +277,8 @@ impl CueRollup {
 pub struct CueObservation {
     /// The content id (the feed's `post_id`).
     pub content_id: String,
-    /// Whether the item is a media (video/audio) post — selects the
+    /// Whether the item is playable media (`PostSummary::plays_media`; a still
+    /// image is a non-media post) — selects the
     /// `WatchComplete` gate (playback fraction vs. long dwell).
     pub is_media: bool,
     /// Peak playback fraction reached, **per-mille**, for a media item; `None`
@@ -290,6 +293,10 @@ pub struct CueObservation {
     /// The shell-supplied observation time (ms). The engine never reads a clock:
     /// it is fed the real event time (testability + honest pacing).
     pub observed_at_ms: u64,
+    /// How the exposure ended, stamped by the tracker — a `Skip` derives only
+    /// from [`ExposureEnd::ScrolledPast`] (owner doc § Cue vocabulary &
+    /// derivation, the 2026-10-10 ruling).
+    pub ended_by: ExposureEnd,
 }
 
 /// The shared-Rust derivation engine (owner doc § Cue vocabulary & derivation).
@@ -352,14 +359,18 @@ impl CueEngine {
             return Some(CueVerdict::WatchComplete);
         }
 
-        // Skip: the item was really-but-briefly seen, and not mid-flick. The
-        // item must have *reached* skip-visibility (dwell > 0 at that fraction)
-        // yet held it for less than CUE_SKIP_MS.
+        // Skip: the user scrolled past an item really-but-briefly seen, not
+        // mid-flick. Only a scroll is moving on: a window drop or a drain (a
+        // tap to read it, a feed switch, a dialog) is an act about something
+        // else, and leaves the item's standing verdict as it was. The item must
+        // have *reached* skip-visibility (dwell > 0 at that fraction) yet held
+        // it for less than CUE_SKIP_MS.
+        let scrolled_past = obs.ended_by == ExposureEnd::ScrolledPast;
         let briefly_seen =
             obs.dwell_ms_at_skip_visibility > 0 && obs.dwell_ms_at_skip_visibility < CUE_SKIP_MS;
         let normal_pace = prev_exposure_at_ms
             .is_none_or(|prev| obs.observed_at_ms.saturating_sub(prev) >= CUE_BURST_MIN_GAP_MS);
-        if briefly_seen && normal_pace {
+        if scrolled_past && briefly_seen && normal_pace {
             return Some(CueVerdict::Skip);
         }
         None
@@ -496,6 +507,7 @@ mod tests {
             dwell_ms_at_skip_visibility: dwell_long_ms,
             dwell_ms_at_long_visibility: dwell_long_ms,
             observed_at_ms: at,
+            ended_by: ExposureEnd::ScrolledPast,
         }
     }
 
@@ -508,6 +520,7 @@ mod tests {
             dwell_ms_at_skip_visibility: 3_000,
             dwell_ms_at_long_visibility: 3_000,
             observed_at_ms: at,
+            ended_by: ExposureEnd::ScrolledPast,
         }
     }
 
@@ -520,7 +533,75 @@ mod tests {
             dwell_ms_at_skip_visibility: skip_ms,
             dwell_ms_at_long_visibility: 0,
             observed_at_ms: at,
+            ended_by: ExposureEnd::ScrolledPast,
         }
+    }
+
+    /// `obs`, ended the given way.
+    fn ended(mut obs: CueObservation, end: ExposureEnd) -> CueObservation {
+        obs.ended_by = end;
+        obs
+    }
+
+    // ---- How the exposure ended: only a scroll derives Skip ----
+
+    #[test]
+    fn a_drained_glance_derives_nothing_and_leaves_a_prior_watch_complete() {
+        // The user tapped a post 500 ms after it appeared (or the app quit, or
+        // a dialog covered the list): not moving on, so no Skip — and the
+        // standing WatchComplete is not overwritten last-wins.
+        let mut engine = CueEngine::empty();
+        engine.observe(media("cat", 1000, 0));
+        let drained = ended(glance("cat", 500, 100_000), ExposureEnd::Drained);
+        assert_eq!(CueEngine::derive(&drained, None), None);
+        assert_eq!(engine.observe(drained), None);
+        assert_eq!(engine.verdict("cat"), Some(CueVerdict::WatchComplete));
+    }
+
+    #[test]
+    fn the_same_glance_scrolled_past_derives_skip() {
+        assert_eq!(
+            CueEngine::derive(&glance("cat", 500, 100_000), None),
+            Some(CueVerdict::Skip)
+        );
+    }
+
+    #[test]
+    fn a_long_dwell_derives_watch_complete_however_it_ended() {
+        // The navigate-away flush of a 9 s read stays a WatchComplete.
+        for end in [
+            ExposureEnd::Drained,
+            ExposureEnd::WindowDropped,
+            ExposureEnd::ScrolledPast,
+        ] {
+            assert_eq!(
+                CueEngine::derive(&ended(text_dwell("a", 9_000, 0), end), None),
+                Some(CueVerdict::WatchComplete)
+            );
+        }
+    }
+
+    #[test]
+    fn a_window_dropped_glance_derives_nothing() {
+        assert_eq!(
+            CueEngine::derive(
+                &ended(glance("a", 500, 100_000), ExposureEnd::WindowDropped),
+                None
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_verdict_less_drained_exposure_still_advances_the_pacing_clock() {
+        let mut engine = CueEngine::empty();
+        engine.observe(ended(glance("a", 500, 10_000), ExposureEnd::Drained));
+        // An immediately-following scrolled-past glance is inside the burst
+        // window the drained exposure opened.
+        assert_eq!(
+            engine.observe(glance("b", 500, 10_000 + CUE_BURST_MIN_GAP_MS - 1)),
+            None
+        );
     }
 
     // ---- WatchComplete: the two gates, at their exact boundaries ----
@@ -562,6 +643,7 @@ mod tests {
             dwell_ms_at_skip_visibility: 500,
             dwell_ms_at_long_visibility: 0,
             observed_at_ms: 0,
+            ended_by: ExposureEnd::ScrolledPast,
         };
         // Un-played media briefly glanced past is a Skip, not a WatchComplete.
         assert_eq!(CueEngine::derive(&obs, None), Some(CueVerdict::Skip));

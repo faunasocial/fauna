@@ -25,7 +25,7 @@ REAL infrastructure:
     ``ProvisionRelayMailbox``, re-sealing the fleet MSEK under that same
     default credential — no second enable-mail step, deployment doc
     § Pairing);
-  * **send** — real internet mail: SMTP submission through **example.com**
+  * **send** — real internet mail: SMTP submission through **the live nest**
     (port 465, AUTH PLAIN). The sender credential is MINTED BY THIS TEST, the
     way the live mail tests set up theirs: the client boots authenticated as
     the live box's admin (``FAUNA_LIVE_SECRET_HEX`` — its BackupKey
@@ -35,7 +35,7 @@ REAL infrastructure:
     ``<handle>+<credential_id>@<domain>`` (RFC 5233 — parsed by the MTA's AUTH,
     ``internal/mta/auth.go``; MAIL FROM stays the canonical handle, which the
     actor owns). No pre-existing mail password is needed, and the credential is
-    revoked again at teardown (best-effort; ids are nonce-unique). example.com
+    revoked again at teardown (best-effort; ids are nonce-unique). The live nest
     DKIM-signs and MX-delivers to the Hetzner box's port 25;
   * **read** — (1) a python raw-wire IMAP client against the PRIVATE nest's
     mapped 993 (the canonical store; the MDA opens the relayed seal at AUTH),
@@ -52,7 +52,7 @@ provisioning/pairing surface is the real client UI instead of seal-helper RPCs.
 Gating (all pre-existing conventions):
   * ``HETZNER_API_TOKEN`` + ``FAUNA_E2E_LIVE=1`` — the live-provision gate
     (``tests/live/conftest.py``; real € cost).
-  * ``FAUNA_LIVE_NEST_URL`` (e.g. https://example.com) + the live box's
+  * ``FAUNA_LIVE_NEST_URL`` (e.g. https://dev.fauna.build) + the live box's
     mail-enabled admin identity seed, resolved per box
     (``live_box_door.admin_seed``: ``FAUNA_LIVE_SECRET_HEX`` > the box's
     staging-box file > ``~/.fauna-id``) — ambient, safe because the sender leg
@@ -121,7 +121,7 @@ try:
 except Exception:
     HAS_DOCKER = False
 
-# The example.com sending identity. The sender CREDENTIAL is minted in-test via
+# The live nest's sending identity. The sender CREDENTIAL is minted in-test via
 # the mail-settings UI, so no password env — and since 2026-08-16 the sender's
 # HANDLE is derived from the secret too (`helpers/live_handle.py`), because this
 # test boots authenticated as the live box's already-registered admin, which is
@@ -135,7 +135,7 @@ LIVE_SECRET, LIVE_SECRET_SOURCE = live_box_door.admin_seed(LIVE_URL)
 pytestmark = [
     pytest.mark.tier_4,
     pytest.mark.live_provisioning,
-    pytest.mark.live_box,  # serializes the shared example.com sender via the flock
+    pytest.mark.live_box,  # serializes the shared live-nest sender via the flock
     # No client platform marker — the app axis is decided in-body by
     # `skip_unless_fresh_box_reach_app`, so an app that cannot drive this yet is
     # TALLIED as unbuilt debt (convention 7) rather than silently deselected.
@@ -256,26 +256,23 @@ def _ensure_admin_mail_enabled(app, timeout: float = 45.0) -> None:
     )
 
 
-def _settled_mail_enabled(admin_secret_hex: str, nest_url: str, *, settle_s: float = 10.0) -> bool:
-    """Poll `get_mail_config` for `settle_s` and return the SETTLED
-    `mail_enabled` — the post-claim launch glue's fire-and-forget
-    `enable_mail_with_generated_password` call (fired once LoggedIn is reached
-    on a real-registerable-domain handle, `onboarding.md` § 3b) needs a moment
-    to land. Still a settle window: the calendar-onboarding witnesses moved to
-    the post-claim step's completion anchor
-    (`helpers.waiting.await_serving_enablement_for`), and this live test
-    has not yet."""
+def _settled_mail_enabled(app, admin_secret_hex: str, nest_url: str) -> bool:
+    """The `mail_enabled` the post-claim launch glue left behind — its
+    fire-and-forget `enable_mail_with_generated_password` call (fired once
+    LoggedIn is reached on a real-registerable-domain handle, `onboarding.md`
+    § 3b) needs a moment to land. Anchored on the post-claim step's completion
+    (`helpers.waiting.await_serving_enablement_for`, convention 14): once this
+    admin's run is `completed` the glue has nothing left to write, so ONE read of
+    `get_mail_config` is final in both directions — no settle window."""
+    from helpers.waiting import await_serving_enablement_for
+
     sk = SigningKey(bytes.fromhex(admin_secret_hex))
     actor_id, signing_key = bytes(sk.verify_key), bytes(sk)
-    deadline = time.monotonic() + settle_s
-    last = False
-    while time.monotonic() < deadline:
-        admin_ws = WsRpcAdminClient(nest_url, actor_id=actor_id, signing_key=signing_key)
-        with admin_ws:
-            cfg = admin_ws.call("fauna.bridges.get_mail_config", {})
-        last = bool(cfg.get("mail_enabled"))
-        time.sleep(1.0)
-    return last
+    await_serving_enablement_for(app.driver, actor_id.hex(), what="the live claim")
+    admin_ws = WsRpcAdminClient(nest_url, actor_id=actor_id, signing_key=signing_key)
+    with admin_ws:
+        cfg = admin_ws.call("fauna.bridges.get_mail_config", {})
+    return bool(cfg.get("mail_enabled"))
 
 
 def _assert_enrollment_strict(admin_secret_hex: str, nest_url: str,
@@ -328,7 +325,7 @@ def _assert_bridge_confinement(admin_secret_hex: str, nest_url: str,
     box, each mail bridge must report a distinct non-root UID, an unreachable
     sealed store measured from inside its own Landlock domain, and an enforcing
     ruleset. Before this, those were the facts the 2026-07-22 chain could only
-    get by SSHing into example.com with a human present — a path `testing.md`
+    get by SSHing into the live nest with a human present — a path `testing.md`
     § Gap 3 rules out for a provisioned box, which carries no ssh key at all.
 
     ⚠ A self-report, so a *compromised* bridge could lie; this catches the
@@ -502,10 +499,10 @@ def _reassert_session(app, *, nest_url: str, secret_hex: str, view: str) -> None
 
 def _relax_inbound_perimeter(box, secret_hex: str) -> None:
     """Open the e2e box's spam gates that key on sender-host standing
-    (greylist/DNSBL/FCrDNS/conn-rate) so the single example.com delivery is
+    (greylist/DNSBL/FCrDNS/conn-rate) so the single live-nest delivery is
     accepted on the FIRST attempt instead of depending on the sender's retry
     queue beating the test timeout. Setup, not the assertion (the same posture
-    as ``test_mail_port25_inbound_live.py``); example.com is a real production
+    as ``test_mail_port25_inbound_live.py``); the live nest is a real production
     sender, so SPF/DKIM/DMARC still pass on their own merits."""
     from clients.ws_rpc_admin_client import WsRpcAdminClient
 
@@ -528,7 +525,7 @@ def _relax_inbound_perimeter(box, secret_hex: str) -> None:
 
 
 def _mint_sender_credential(app) -> tuple[str, str, str]:
-    """Mint THIS RUN's example.com sender credential through the mail-settings UI —
+    """Mint THIS RUN's live-nest sender credential through the mail-settings UI —
     in-test credential setup, the way the live mail tests do theirs, but
     NON-destructively (an additional credential on the already-enabled mailbox,
     not a factory-reset + re-enable). The client boots authenticated as the live
@@ -594,7 +591,7 @@ def _revoke_sender_credential(app, mua_username: str) -> None:
             return
 
 
-def _submit_via_fauna_fan(auth_username: str, password: str, mail_from: str,
+def _submit_via_live_box(auth_username: str, password: str, mail_from: str,
                           recipient: str, subject: str, body: str) -> None:
     """One outbound submission through the live box's port-465 submission
     listener (implicit TLS, verified cert): AUTH PLAIN as the sub-addressed
@@ -612,7 +609,7 @@ def _submit_via_fauna_fan(auth_username: str, password: str, mail_from: str,
     # submission and nest rejects it as a misleading transient 451 ("Outbound
     # enqueue temporarily unavailable") — root-caused live 2026-07-09; the
     # bridge-side RFC 6409 §8.3 auto-stamp fix rides this same commit but
-    # example.com runs an older build, so the test sets one explicitly.
+    # the live nest runs an older build, so the test sets one explicitly.
     msg["Message-ID"] = f"<{uuid.uuid4().hex}@{mail_from.split('@', 1)[-1]}>"
     msg.set_content(body)
     with smtplib.SMTP_SSL(
@@ -630,7 +627,7 @@ def test_private_relay_behind_hetzner_public_node(app, box, ghcr_latest_image, r
     secret_hex = box.identity_secret_hex
     handle = box.handle  # admin@e2e-<runid>.<zone> — ONE identity claims both boxes
 
-    # ── Phase 0: mint this run's example.com SENDER credential (in-test setup) ─
+    # ── Phase 0: mint this run's live-nest SENDER credential (in-test setup) ─
     # Preflight first: a live box that does not know the resolved seed (the
     # wrong box's seed, or a reset box) skips as environment before a paid VPS
     # is provisioned, naming where the seed came from.
@@ -701,7 +698,7 @@ def test_private_relay_behind_hetzner_public_node(app, box, ghcr_latest_image, r
     # silently toggling mail off — confirmed live 2026-07-19 (this exact
     # failure, at the old unconditional `enable_mail_plain` call). FIXED:
     # branch on the SETTLED derived state (`_settled_mail_enabled`, the
-    # settle-window twin of `helpers.caldav_onboarding._derived_enablement`). Do NOT reach
+    # anchor-based twin of `helpers.caldav_onboarding._derived_enablement`). Do NOT reach
     # for `add_credential_plain` here — Phase 6's
     # `MailSettingsMachine::provision_relay_mailbox` reuses
     # `cfg.mail.credentials.first()` for the home-box reseal (`machine.rs:1439`),
@@ -714,7 +711,7 @@ def test_private_relay_behind_hetzner_public_node(app, box, ghcr_latest_image, r
     finish_provisioned_wizard(app)
     _reassert_session(app, nest_url=public_ip_url, secret_hex=secret_hex,
                       view="conversations")
-    mail_already_derived_on = _settled_mail_enabled(secret_hex, public_ip_url)
+    mail_already_derived_on = _settled_mail_enabled(app, secret_hex, public_ip_url)
     # Enable mail through the mail-settings UI: flips the deployment subsystem
     # (/data/imap-enabled → MTA/MDA boot + self-enroll + auto-approve on a real
     # provisioned box) AND mints the `default` PLAIN credential + the fleet
@@ -758,7 +755,7 @@ def test_private_relay_behind_hetzner_public_node(app, box, ghcr_latest_image, r
     _assert_bridge_confinement(secret_hex, public_ip_url)
 
     # ── Phase 3: FQDN TLS gate — absorbs the ~30 min Hetzner DNS propagation ─
-    # (testing.md § Gap 3). After this both example.com and the private container
+    # (testing.md § Gap 3). After this both the live nest and the private container
     # can resolve the box, and ACME has replaced the floor cert.
     retry_get(f"{public_fqdn_url}/api/v1/health", verify=True, timeout=15,
               attempts=240, delay=10)
@@ -851,16 +848,16 @@ def test_private_relay_behind_hetzner_public_node(app, box, ghcr_latest_image, r
         )
         print("[relay-live] LinkBoth OK — both pairing rows seeded, home mailbox provisioned")
 
-        # ── Phase 7: send real internet mail via example.com ───────────────────
+        # ── Phase 7: send real internet mail via the live nest ───────────────
         nonce = uuid.uuid4().hex[:12]
         subject = f"relay-live {nonce}"
-        body = f"private-relay round-trip {nonce} sent via example.com submission.\n"
-        _submit_via_fauna_fan(sender_username, sender_password, sender_addr,
+        body = f"private-relay round-trip {nonce} sent via the live nest submission.\n"
+        _submit_via_live_box(sender_username, sender_password, sender_addr,
                               handle, subject, body)
-        print(f"[relay-live] submitted {subject!r} via example.com ({sender_addr} → {handle})")
+        print(f"[relay-live] submitted {subject!r} via the live nest ({sender_addr} → {handle})")
 
         # ── Phase 8: read it DECRYPTED over IMAP from the PRIVATE nest ───────
-        # Covers example.com's outbound queue + MX delivery + the relay worker's
+        # Covers the live nest's outbound queue + MX delivery + the relay worker's
         # ~10 s poll + pull/append/ack. Outer retry because AUTH itself can race
         # the async ProvisionRelayMailbox/receive path right after LinkBoth.
         deadline = time.monotonic() + 600.0
@@ -875,7 +872,7 @@ def test_private_relay_behind_hetzner_public_node(app, box, ghcr_latest_image, r
                 last_err = e
                 time.sleep(5.0)
         assert raw is not None, (
-            f"the example.com mail never became readable on the private nest's "
+            f"the live nest's mail never became readable on the private nest's "
             f"IMAP within 600s (last: {last_err})\n\n── home-box bridge diag ──\n"
             f"{bridge_diag(priv_name, ('mda',))}"
         )
@@ -885,7 +882,7 @@ def test_private_relay_behind_hetzner_public_node(app, box, ghcr_latest_image, r
         assert nonce in text, (
             f"private nest must serve the decrypted body nonce; first 400B: {text[:400]!r}")
         assert sender_addr in text, (
-            f"the decrypted mail must carry the example.com sender; first 400B: {text[:400]!r}")
+            f"the decrypted mail must carry the live nest's sender; first 400B: {text[:400]!r}")
         print("[relay-live] python IMAP read on the PRIVATE nest OK (decrypted)")
 
         # ── Phase 9: no-readable-copy — the PUBLIC box's INBOX drains to 0 ───
@@ -906,7 +903,7 @@ def test_private_relay_behind_hetzner_public_node(app, box, ghcr_latest_image, r
         print("[relay-live] no-readable-copy OK — public INBOX at 0 after relay+ack")
 
         # No-MTA boot, re-checked after real traffic: the private box never
-        # started its perimeter parser (deployment doc § Plaintext-mode behavior).
+        # started its perimeter parser (deployment doc § Private-axis behavior on the home box).
         mta_state = svstat(priv_name, "fauna-mail-bridge-mta")
         assert not is_commanded_up(mta_state), (
             f"private home box MTA must stay DOWN throughout; got: {mta_state!r}")

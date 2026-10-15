@@ -67,6 +67,7 @@ import secrets
 import pytest
 
 from common.launch_harness import make_launch_harness
+from helpers.app_launch import app_launch_config
 from conftest import _trust_seeder, get_available_apps
 from i18n.strings import S
 
@@ -143,14 +144,9 @@ def unreadable_index_app(request, unreadable_index_app_client, nest_instance, tm
     the routed path (the module docstring's *web* paragraph)."""
     client = unreadable_index_app_client
     if client == "ios":
-        # No bare `ios_app_path` fixture exists — iOS's direct-launch fixture
-        # (`ios_setup`) returns `{"udid", "app_path"}` together, because
-        # `drivers/ios.py`'s `launch()` requires both. Same branch as
-        # `test_nest_identity_pin.py`'s `pin_env` fixture.
-        ios_setup = request.getfixturevalue("ios_setup")
         harness = make_launch_harness(
-            "ios", tmp_path=tmp_path, app_path=ios_setup["app_path"],
-            udid=ios_setup["udid"], file_backed=True, seed_trust=_trust_seeder(request),
+            "ios", tmp_path=tmp_path, **app_launch_config("ios", request),
+            file_backed=True, seed_trust=_trust_seeder(request),
         )
         driver = harness.launch(
             secret_hex=secrets.token_hex(32),

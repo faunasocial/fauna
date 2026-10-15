@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 // The engagement-cue capture shell's thin, live-view half
@@ -211,16 +214,17 @@ public final class CueViewportObserver {
         }
     }
 
-    /// `postId` → `hasMedia` over the whole loaded window.
+    /// `postId` → `playsMedia` over the whole loaded window.
     ///
-    /// `hasMedia` is read straight off the shared snapshot's own field — the
-    /// same `PostSummary.has_media` linux's shell reads (`viewport.rs`) — rather
-    /// than re-deriving media-ness from the render document client-side, so all
-    /// seven apps answer "is this media" from one shared-Rust source.
+    /// `playsMedia` is read straight off the shared snapshot's own field — the
+    /// same `PostSummary.plays_media` linux's shell reads (`viewport.rs`), never
+    /// `hasMedia` (a still image is a non-media post) — rather than re-deriving
+    /// media-ness from the render document client-side, so all seven apps
+    /// answer "is this media" from one shared-Rust source.
     nonisolated static func postsWindow(_ posts: [PostSummary]) -> [String: Bool] {
         var window: [String: Bool] = [:]
         window.reserveCapacity(posts.count)
-        for post in posts { window[post.postId] = post.hasMedia }
+        for post in posts { window[post.postId] = post.playsMedia }
         return window
     }
 
@@ -279,9 +283,10 @@ public final class CueViewportObserver {
     /// Hand the finished exposures to the shared engine
     /// (`FfiFeedManager.recordObservation`) — already past the tracker's own
     /// single-sample noise floor, so no shell-side filtering is needed or
-    /// correct here. `observedAtMs` rides straight through from the tracker,
-    /// which stamped every exposure in the batch with the one `wallNowMs` this
-    /// sample was taken at.
+    /// correct here. Each record rides straight through as the tracker emitted
+    /// it — `observedAtMs` (the one `wallNowMs` this sample was taken at) and
+    /// `endedBy` (how the exposure ended, which a `skip` requires to be a
+    /// scroll) included.
     ///
     /// No playback surface on apple yet — the feed renders media as
     /// `AsyncImage` stills, with no AVPlayer anywhere, so `mediaPlayedPm` is
@@ -348,15 +353,9 @@ struct CueCaptureCalls {
             hydrateCues: { try await manager.hydrateCues() },
             // The Bool (the opt-in itself) is the manager's cache fill's by-product; the shell has no use for it.
             hydrateSignalOptin: { _ = try await manager.hydrateSignalOptin() },
-            recordObservation: { observation in
-                try await manager.recordObservation(
-                    contentId: observation.contentId,
-                    isMedia: observation.isMedia,
-                    mediaPlayedPm: observation.mediaPlayedPm,
-                    dwellMsAtSkipVisibility: observation.dwellMsAtSkipVisibility,
-                    dwellMsAtLongVisibility: observation.dwellMsAtLongVisibility,
-                    observedAtMs: observation.observedAtMs)
-            },
+            // Relayed whole: the tracker stamped how each exposure ended
+            // (`endedBy`), and the shell has no honest way of its own to know it.
+            recordObservation: { observation in try await manager.recordObservation(obs: observation) },
             flushCues: { try await manager.flushCues() },
             sample: { rows, windowPostIds, viewportStart, viewportEnd, monoNowMs, wallNowMs in
                 tracker.sample(
@@ -442,3 +441,4 @@ struct CueCaptureModifier: ViewModifier {
             }
     }
 }
+#endif // !FAUNA_KIDS

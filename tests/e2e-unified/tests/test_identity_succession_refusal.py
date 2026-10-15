@@ -43,8 +43,8 @@ composes end to end.
 
 **Both preconditions are arranged through shared Rust, not the app UI.** The
 identity needs a registered RecoveryKey before it can be succeeded at all, and
-the Settings → Recovery kit ceremony that mints one has landed on tui only.
-Driving it through that screen would make this journey skip on six apps for a
+the Settings → Recovery kit ceremony that mints one is a different journey.
+Driving it through that screen would make this journey fail or skip for a
 reason that has nothing to do with what it asserts — so kit registration and the
 succession are both fixture setup (convention 8's carve-out), signed by
 ``libs/fauna-client-recovery/examples/recovery_fixture.rs``. The UI ceremony

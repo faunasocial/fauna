@@ -100,6 +100,14 @@ pub struct SuccessionReseal {
     /// Retired identities' `BackupKey`s, newest chain-hop first; empty when this
     /// identity never succeeded (the pass is then skipped without a round trip).
     pub predecessors: Vec<crate::BackupKey>,
+    /// The retired identities this device can author, nearest hop first — the
+    /// actor half of the same registry walk
+    /// (`AccountRegistry::predecessor_backup_keys_by_actor`), so the restore
+    /// door can park the predecessor's leaf it finds at this identity's
+    /// `provider` path ([`MlsStateSync::with_predecessor_actors`]). Empty when
+    /// this identity never succeeded, or when the app has no registry to
+    /// resolve the walk from (nothing is parked then).
+    pub predecessor_actors: Vec<fauna_core::identity::ActorId>,
     /// Where the pass reports its [`crate::ReplicaResealProgress`]; `None` on a
     /// build with no progress surface.
     pub sink: Option<crate::sync::ResealSink>,
@@ -115,7 +123,9 @@ pub fn tokio_launcher(
 ) -> Option<Arc<dyn MlsSyncLauncher>> {
     let seed: [u8; 32] = self_secret.try_into().ok()?;
     let keypair = ActorKeypair::from_secret(seed);
-    let mut sync = MlsStateSync::new(transport, &keypair).with_predecessors(aftermath.predecessors);
+    let mut sync = MlsStateSync::new(transport, &keypair)
+        .with_predecessors(aftermath.predecessors)
+        .with_predecessor_actors(aftermath.predecessor_actors);
     if let Some(sink) = aftermath.sink {
         sync = sync.with_reseal_sink(sink);
     }

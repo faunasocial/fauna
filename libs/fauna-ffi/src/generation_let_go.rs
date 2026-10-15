@@ -1,6 +1,6 @@
 //! UniFFI façade for **the let-go** — a dead generation's rows are retired by
-//! the user, and by nothing else (`account-data-taxonomy.md` § The generation
-//! machinery → *Fleet-scope reclamation*, clause (3)(j); the surface is
+//! the user, and by nothing else (`fleet-scope-reclamation.md`
+//! § *Fleet-scope reclamation*, clause (3)(j); the surface is
 //! `docs/goal/ui/settings.md` § Recovery kit, the fifth act).
 //!
 //! The read and the act are shared Rust

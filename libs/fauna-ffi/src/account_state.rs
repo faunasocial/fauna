@@ -53,7 +53,7 @@ pub fn account_state_erase_scope(
 ) -> Result<(), FfiError> {
     erase_scope_under(
         &PathBuf::from(base_dir),
-        store_root_for(store_container_dir.map(PathBuf::from)).as_path(),
+        store_root_for(store_container_dir.map(PathBuf::from)).as_deref(),
         &actor_id_hex,
     )
 }
@@ -62,15 +62,23 @@ pub fn account_state_erase_scope(
 /// env-mutation-free testing shape tui's `account_scope::erase_under` takes,
 /// and for the same reason: the production root is the developer's own
 /// `~/.config/fauna/sync`, so a test that resolved it would erase real data.
-fn erase_scope_under(
+///
+/// `store_root` is `Err` when the store root could not be resolved (the shared
+/// no-home refusal): the app base is erased regardless — erasing what CAN be
+/// erased is strictly better — and the refusal is then the answer, since the
+/// account store's scope was never reached.
+pub(crate) fn erase_scope_under(
     app_base: &Path,
-    store_root: &Path,
+    store_root: Result<&Path, &FfiError>,
     actor_id_hex: &str,
 ) -> Result<(), FfiError> {
     fauna_sync_engine::db::erase_account_scope(app_base, actor_id_hex).map_err(|e| {
         FfiError::General {
             msg: format!("account state scope erase failed: {e:#}"),
         }
+    })?;
+    let store_root = store_root.map_err(|e| FfiError::General {
+        msg: format!("account store scope not erased: {e}"),
     })?;
     fauna_sync_engine::db::erase_account_scope(store_root, actor_id_hex).map_err(|e| {
         FfiError::General {
@@ -101,13 +109,28 @@ fn erase_scope_under(
 /// directory the store was never in, leave the real store behind, and destroy
 /// the writer key alongside. `store_root_for` is the one place that mapping
 /// lives, and the tests below pin both arms.
-pub(crate) fn store_root_for(store_container_dir: Option<PathBuf>) -> PathBuf {
+///
+/// `Err` (the shared no-home refusal, `FfiError::General`) when there is no
+/// container and the platform root cannot resolve — never a panic. An export
+/// with an error channel returns it; one without logs it through
+/// [`store_root_or_logged`] and proceeds over the roots it can reach.
+pub(crate) fn store_root_for(store_container_dir: Option<PathBuf>) -> Result<PathBuf, FfiError> {
     match store_container_dir {
-        Some(dir) => fauna_sync_engine::root::StoreRoot::at(dir),
+        Some(dir) => Ok(fauna_sync_engine::root::StoreRoot::at(dir)),
         None => fauna_sync_engine::root::StoreRoot::platform(),
     }
-    .base()
-    .to_path_buf()
+    .map(|root| root.base().to_path_buf())
+    .map_err(|e| FfiError::General {
+        msg: format!("{e:#}"),
+    })
+}
+
+/// [`store_root_for`] for an export with no error channel: the refusal is
+/// logged here and the caller proceeds without the store root (`None`).
+pub(crate) fn store_root_or_logged(store_container_dir: Option<PathBuf>) -> Option<PathBuf> {
+    store_root_for(store_container_dir)
+        .inspect_err(|e| tracing::error!("[account-state] no account-store root: {e}"))
+        .ok()
 }
 
 /// The per-user, per-OS **platform state base** — `StoreRoot::platform()`'s
@@ -120,7 +143,7 @@ pub(crate) fn store_root_for(store_container_dir: Option<PathBuf>) -> PathBuf {
 /// ONE derivation the macOS app's own sync-state home takes (`SyncStateDir`):
 /// the app reads the agent-hosted sets' `file_states` out of this root, and a
 /// second Swift spelling of it is exactly how the two could drift apart
-/// (`on-demand-files.md` § Apple File Provider binding, *state unification* —
+/// (`on-demand-files-apple.md` § Apple File Provider binding, *state unification* —
 /// the user domain is one of macOS's two consent domains; the other is the
 /// sandboxed File Provider extension's app-group container, which no Rust
 /// process resolves state under any more).
@@ -129,11 +152,16 @@ pub(crate) fn store_root_for(store_container_dir: Option<PathBuf>) -> PathBuf {
 /// container: there this would resolve inside the sandbox, away from the
 /// extension that must share the root. Pure resolution — creates nothing;
 /// always absolute (the Rust owner's launchd-cwd guarantee).
+///
+/// Throws (`FfiError::General`, the shared no-home refusal) when the process
+/// has no absolute home — the caller logs it and fails closed, never a panic.
 #[uniffi::export]
-pub fn platform_state_base() -> String {
+pub fn platform_state_base() -> Result<String, FfiError> {
     fauna_sync_engine::root::platform_state_base()
-        .to_string_lossy()
-        .into_owned()
+        .map(|base| base.to_string_lossy().into_owned())
+        .map_err(|e| FfiError::General {
+            msg: format!("{e:#}"),
+        })
 }
 
 /// What a sign-out's erase removed, what it could **not**, and the one view a
@@ -337,14 +365,22 @@ pub fn account_state_erase_all_scopes(
 ) -> FfiEraseSweep {
     erase_all_scopes_under(
         &PathBuf::from(base_dir),
-        store_root_for(store_container_dir.map(PathBuf::from)).as_path(),
+        store_root_for(store_container_dir.map(PathBuf::from)).as_deref(),
     )
     .into()
 }
 
 /// The pure half of [`account_state_erase_all_scopes`], both roots passed in —
 /// same reasoning as [`erase_scope_under`].
-fn erase_all_scopes_under(app_base: &Path, store_root: &Path) -> fauna_sync_engine::db::EraseSweep {
+///
+/// A store root that could not be resolved (`Err`, the shared no-home refusal)
+/// is reported as a SURVIVOR, never skipped quietly: its stores — if any — were
+/// not reached, and an empty `survivors` is the only outcome that may tell the
+/// user the device is clean.
+fn erase_all_scopes_under(
+    app_base: &Path,
+    store_root: Result<&Path, &FfiError>,
+) -> fauna_sync_engine::db::EraseSweep {
     // BOTH roots are attempted, and neither one's survivors end the sweep. These
     // are two independent directory trees; a `?` here made one undeletable file
     // under the app base cost the store root its erase entirely — so a Windows
@@ -356,7 +392,16 @@ fn erase_all_scopes_under(app_base: &Path, store_root: &Path) -> fauna_sync_engi
     // either, and it returns the paths that survived instead of one opaque
     // error — so the two roots simply fold into one report.
     let mut sweep = fauna_sync_engine::db::erase_all_account_scopes(app_base);
-    sweep.absorb(fauna_sync_engine::db::erase_all_account_scopes(store_root));
+    match store_root {
+        Ok(store_root) => sweep.absorb(fauna_sync_engine::db::erase_all_account_scopes(store_root)),
+        Err(refusal) => {
+            tracing::error!("[account-state] the account-store root was not erased: {refusal}");
+            sweep.absorb(fauna_sync_engine::db::EraseSweep {
+                erased: 0,
+                survivors: vec![PathBuf::from(format!("<account-store root: {refusal}>"))],
+            });
+        }
+    }
     sweep
 }
 
@@ -394,7 +439,7 @@ mod tests {
         let store_a = seed(&store_root, ACTOR_A, "account-store.sqlite");
         let store_b = seed(&store_root, ACTOR_B, "account-store.sqlite");
 
-        let sweep = erase_all_scopes_under(&app_base, &store_root);
+        let sweep = erase_all_scopes_under(&app_base, Ok(&store_root));
         assert!(
             sweep.is_clean(),
             "nothing should survive: {:?}",
@@ -446,7 +491,7 @@ mod tests {
             .open(&pinned)
             .unwrap();
 
-        let sweep = erase_all_scopes_under(&app_base, &store_root);
+        let sweep = erase_all_scopes_under(&app_base, Ok(&store_root));
         assert!(
             !sweep.is_clean(),
             "an undeletable scope must still be reported"
@@ -486,7 +531,7 @@ mod tests {
         let store_b = seed(&store_root, ACTOR_B, "account-store.sqlite");
         seed(&app_base, ACTOR_A, "mls.db");
 
-        erase_scope_under(&app_base, &store_root, ACTOR_A).unwrap();
+        erase_scope_under(&app_base, Ok(&store_root), ACTOR_A).unwrap();
 
         assert!(!store_a.exists(), "the removed account's store goes");
         assert!(
@@ -515,7 +560,7 @@ mod tests {
     fn a_sandboxed_host_erases_under_the_container_it_hosts_from() {
         let container = PathBuf::from("/data/user/0/social.fauna.fauna/files/sync");
         assert_eq!(
-            store_root_for(Some(container.clone())),
+            store_root_for(Some(container.clone())).unwrap(),
             container,
             "the container the shell supplies IS the per-user root there"
         );
@@ -526,8 +571,9 @@ mod tests {
     #[test]
     fn no_container_still_resolves_the_platform_root() {
         assert_eq!(
-            store_root_for(None),
+            store_root_for(None).unwrap(),
             fauna_sync_engine::root::StoreRoot::platform()
+                .unwrap()
                 .base()
                 .to_path_buf(),
         );
@@ -538,7 +584,8 @@ mod tests {
     #[test]
     fn absent_roots_are_a_no_op() {
         let tmp = tempfile::tempdir().unwrap();
-        let sweep = erase_all_scopes_under(&tmp.path().join("nope"), &tmp.path().join("also-nope"));
+        let sweep =
+            erase_all_scopes_under(&tmp.path().join("nope"), Ok(&tmp.path().join("also-nope")));
         assert_eq!(sweep.erased, 0);
         assert!(
             sweep.is_clean(),
@@ -547,7 +594,7 @@ mod tests {
         );
         erase_scope_under(
             &tmp.path().join("nope"),
-            &tmp.path().join("also-nope"),
+            Ok(&tmp.path().join("also-nope")),
             ACTOR_A,
         )
         .unwrap();
@@ -576,7 +623,7 @@ mod tests {
         seed(&app_base, ACTOR_A, "mls.db");
         seed(&store_root, ACTOR_B, "account-store.sqlite");
 
-        let ffi = FfiEraseSweep::from(erase_all_scopes_under(&app_base, &store_root));
+        let ffi = FfiEraseSweep::from(erase_all_scopes_under(&app_base, Ok(&store_root)));
         assert_eq!(ffi.erased, 2, "both scopes went");
         assert!(ffi.survivors.is_empty(), "{:?}", ffi.survivors);
         assert!(!ffi.residue.owes_work);
@@ -622,7 +669,7 @@ mod tests {
             return;
         }
 
-        let ffi = FfiEraseSweep::from(erase_all_scopes_under(&app_base, &store_root));
+        let ffi = FfiEraseSweep::from(erase_all_scopes_under(&app_base, Ok(&store_root)));
         std::fs::set_permissions(&scope, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(

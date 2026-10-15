@@ -108,6 +108,7 @@ pub fn build_admin_calendar_page() -> adw::PreferencesPage {
         S::ENABLED_SUBTITLE,
         "admin-calendar-enabled-toggle",
     );
+    super::mirror_on_off_state(&enabled_toggle);
     // tui's `admin::Action::ToggleCaldavEnabled` (`account-data-plane.md` §
     // The offline-mutation contract — admin/provisioning is OnlineOnly).
     crate::offline_gate::declare_wire_kind(&enabled_toggle, "fauna.bridges.set_caldav_enabled");

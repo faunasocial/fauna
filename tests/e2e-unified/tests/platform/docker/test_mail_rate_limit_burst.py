@@ -3,7 +3,7 @@ MDA's CalDAV auth-material cache under a real request BURST (not single requests
 
 Gap 2 of ``docs/goal/architecture/testing.md`` (the real mail-flow perimeter),
 track **2e** (tracked internally). Two bugs in this
-class reproduced only against example.com and cost live debugging:
+class reproduced only against the live nest and cost live debugging:
 
   - The CalDAV auth-material cache ("MDA caches CalDAV auth material to stay under nest's
     bridge_rate_limit"): CalDAV is stateless HTTP Basic auth, so without a cache
@@ -151,6 +151,19 @@ def _basic_auth(username: str, password: str) -> dict[str, str]:
     return {"Authorization": f"Basic {creds}"}
 
 
+#: The line nest logs for every ``fetch_wrapped_mls_blob`` it refuses on
+#: ``bridge_rate_limit`` (``bins/fauna-nest/src/bridge_blob_handlers.rs``).
+WRAPPED_MLS_RATE_LIMITED = "rate-limited (wrapped_mls)"
+
+
+def _rate_limited_fetches(name: str) -> int:
+    """How many wrapped-MLS blob fetches nest has refused on the rate limit so
+    far, read off the container log — nest's own record of each refusal."""
+    logs = subprocess.run(
+        ["docker", "logs", name], capture_output=True, text=True, timeout=30)
+    return (logs.stdout + logs.stderr).count(WRAPPED_MLS_RATE_LIMITED)
+
+
 # ── Tests ─────────────────────────────────────────────────────────────
 
 
@@ -233,8 +246,10 @@ def test_imap_reconnect_storm_trips_rate_limit(serving_nest, run_seal_helper):
     # auth-material cache, so each login fetches; IMAP_STORM (> 30) logins exceed
     # the 30/60 s budget and nest returns fauna.bridges.rate_limited on the
     # overflow, which the MDA surfaces as an AUTH failure.
+    limited_before = _rate_limited_fetches(nest["name"])
     with ThreadPoolExecutor(max_workers=IMAP_STORM) as pool:
         results = list(pool.map(_one_login, range(IMAP_STORM)))
+    limited = _rate_limited_fetches(nest["name"]) - limited_before
 
     ok = [r for r in results if r == "OK"]
     failed = [r for r in results if r != "OK"]
@@ -249,4 +264,14 @@ def test_imap_reconnect_storm_trips_rate_limit(serving_nest, run_seal_helper):
         f"some logins MUST fail with fauna.bridges.rate_limited → AUTH fail. None did, "
         f"so either the limit is not enforced on the mail path or the storm did not "
         f"pile within the 60s window. results={results}\n\n"
+        f"── bridge diagnostics ──\n{bridge_diag(nest['name'])}")
+    # Every failed login must be the RATE LIMIT, not some other failure (a
+    # refused credential, a connection dropped for another reason): nest
+    # records each refusal it makes, and a failed login without one is a
+    # failure this test does not witness.
+    assert limited >= len(failed), (
+        f"{len(failed)} of {IMAP_STORM} logins failed but nest refused only "
+        f"{limited} wrapped-MLS fetch(es) on bridge_rate_limit "
+        f"({WRAPPED_MLS_RATE_LIMITED!r} lines), so at least "
+        f"{len(failed) - limited} failed for another reason. results={results}\n\n"
         f"── bridge diagnostics ──\n{bridge_diag(nest['name'])}")

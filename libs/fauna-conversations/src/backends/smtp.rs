@@ -424,26 +424,38 @@ pub async fn sync_mail_read_state(inbox: &dyn InboundMailSource, manager: &Conve
     drain_mail_flag_changes(inbox, manager).await;
 }
 
-/// Send every owed `\Seen` write as ONE batched `mark_seen`. A transient
-/// failure keeps the batch owed for the next sweep; a source that does not
-/// serve the kind (`Unsupported` — anything but `INBOX`) ends syncing for the
-/// run, silently. Every nest refusal is a transient failure here: the
+/// The most UIDs one `mark_seen` request carries — the nest refuses a longer
+/// list (`mail-app-surface.md` § Read state). MUST equal
+/// `fauna_protocol::email::INBOX_FLAG_WRITE_MAX_UIDS`; this crate does not
+/// depend on `fauna-protocol`, so `fauna-client-conversations` pins the two
+/// equal in a test.
+pub const MARK_SEEN_BATCH_MAX: usize = 1000;
+
+/// Send every owed `\Seen` write as batched `mark_seen` requests of at most
+/// [`MARK_SEEN_BATCH_MAX`] UIDs, in ascending order. A transient failure keeps
+/// the failed batch and every unsent one owed for the next sweep; a source that
+/// does not serve the kind (`Unsupported` — anything but `INBOX`) ends syncing
+/// for the run, silently. Every nest refusal is a transient failure here: the
 /// older-nest `unknown_kind` reading left with the 2026-09-24 compat-remnant
 /// sweep (`mail-app-surface.md` § Read state → *Compatibility*).
 pub async fn flush_owed_mail_seen(inbox: &dyn InboundMailSource, manager: &ConversationsManager) {
     let uids = manager.take_owed_mail_seen();
-    if uids.is_empty() {
-        return;
-    }
-    match inbox.mark_seen(uids.clone()).await {
-        Ok(()) => {}
-        Err(MailFlagCallError::Unsupported) => manager.note_mail_read_sync_unsupported(),
-        Err(MailFlagCallError::Failed(reason)) => {
-            tracing::warn!(
-                count = uids.len(),
-                "mail mark_seen failed; kept for the next sweep: {reason}"
-            );
-            manager.requeue_mail_seen(uids);
+    for (i, batch) in uids.chunks(MARK_SEEN_BATCH_MAX).enumerate() {
+        match inbox.mark_seen(batch.to_vec()).await {
+            Ok(()) => {}
+            Err(MailFlagCallError::Unsupported) => {
+                manager.note_mail_read_sync_unsupported();
+                return;
+            }
+            Err(MailFlagCallError::Failed(reason)) => {
+                let unsent = uids[i * MARK_SEEN_BATCH_MAX..].to_vec();
+                tracing::warn!(
+                    count = unsent.len(),
+                    "mail mark_seen failed; kept for the next sweep: {reason}"
+                );
+                manager.requeue_mail_seen(unsent);
+                return;
+            }
         }
     }
 }

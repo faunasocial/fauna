@@ -45,7 +45,7 @@ use fauna_nest::db::CacheDb;
 use fauna_nest::nest_identity::NestIdentity;
 use fauna_nest::routes::AppState;
 use fauna_nest::rpc_router::RpcRouter;
-use fauna_nest::segment_backup::{NestBackupCoordinator, NestBackupWorker};
+use fauna_nest::segment_backup::{Backpressure, NestBackupCoordinator, NestBackupWorker};
 use fauna_nest::segments::backup_source::NestLocalSegmentSource;
 use fauna_nest::{backup_handlers, federation_handlers};
 use fauna_protocol::backup::{
@@ -118,6 +118,40 @@ async fn start_nest_on(
     db: Arc<CacheDb>,
     secret: [u8; 32],
 ) -> (String, Arc<AppState>, Arc<dyn BlobStoreBackend>) {
+    // A test drives many coordinator passes within a second, which a
+    // deployment spaces minutes apart; the channel default (30 a minute per
+    // kind) would refuse the mints. The custody-record kinds keep their own
+    // writer budget whatever this says (`federation_router::max_events`); the
+    // throttle's own tests below start a nest on the production limiter.
+    let generous = fauna_nest::bridge_rate_limit::Limiter::with_config(
+        fauna_nest::bridge_rate_limit::LimiterConfig {
+            window: std::time::Duration::from_secs(60),
+            max_events: 10_000,
+        },
+    );
+    start_nest_throttled_on(data_path, db, secret, Arc::new(generous)).await
+}
+
+/// [`start_nest`] with the federation channel throttle `limiter` — the
+/// production one, or one a test pre-fills to stand for a busy destination.
+async fn start_nest_throttled(
+    limiter: Arc<fauna_nest::bridge_rate_limit::Limiter>,
+) -> (String, Arc<AppState>, Arc<dyn BlobStoreBackend>) {
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let data_dir = tempfile::tempdir().unwrap();
+    let data_path = data_dir.path().to_path_buf();
+    std::mem::forget(data_dir); // outlives the test; the OS reaps it
+    let mut secret = [0u8; 32];
+    getrandom::fill(&mut secret).unwrap();
+    start_nest_throttled_on(data_path, db, secret, limiter).await
+}
+
+async fn start_nest_throttled_on(
+    data_path: std::path::PathBuf,
+    db: Arc<CacheDb>,
+    secret: [u8; 32],
+    federation_rate_limit: Arc<fauna_nest::bridge_rate_limit::Limiter>,
+) -> (String, Arc<AppState>, Arc<dyn BlobStoreBackend>) {
     let backup_svc = Arc::new(
         BackupService::new(db.clone(), None, false, data_path.join("blobs"), None).unwrap(),
     );
@@ -145,16 +179,7 @@ async fn start_nest_on(
             data_path.clone(),
             KIND,
         )),
-        // A test drives many coordinator passes within a second, which a
-        // deployment spaces minutes apart; the per-peer federation throttle's
-        // production budget (30 records a minute per kind) would refuse them.
-        // Nothing in this file exercises that throttle.
-        federation_rate_limit: Arc::new(fauna_nest::bridge_rate_limit::Limiter::with_config(
-            fauna_nest::bridge_rate_limit::LimiterConfig {
-                window: std::time::Duration::from_secs(60),
-                max_events: 10_000,
-            },
-        )),
+        federation_rate_limit,
         // The placement journal under the same data dir, so a copy of the
         // data directory carries the journal with the content.
         mail_placement: Arc::new(fauna_nest::segments::MailPlacementSegmentManager::new(
@@ -2312,6 +2337,70 @@ async fn delivered_filed() -> (Arc<AppState>, Arc<AppState>, String) {
     (source, dest, d_url)
 }
 
+/// **Un-commit** a finished `__mail` flip: revert exactly the effects of its
+/// one transaction, leaving the real half-state an interruption after the
+/// journal adopt leaves — both families on disk and adopted, the mailbox tree
+/// written (the containers land before the halves), the in-flight marker
+/// standing, and no mirror or placement row.
+///
+/// `journaled` says whether the copy rode a journal, whose placement rows the
+/// transaction would have re-stated.
+async fn uncommit(dest: &Arc<AppState>, ids: &[u32], journaled: bool) {
+    let placed: &[&str] = if journaled {
+        &[
+            "bridge_imap_messages",
+            "bridge_imap_expunged",
+            "bridge_imap_subscriptions",
+        ]
+    } else {
+        &[]
+    };
+    uncommit_kind(dest, KIND, ids, placed).await;
+}
+
+/// [`uncommit`] for any kind: drop the `kind` mirror rows in `ids` and every
+/// row of the `placed` tables — the item and tombstone rows the transaction
+/// re-states; the containers stay, as the containers-before-the-halves rule
+/// leaves them — and stand the in-flight marker for the kind's set.
+async fn uncommit_kind(dest: &Arc<AppState>, kind: &str, ids: &[u32], placed: &[&str]) {
+    use fauna_nest::db::materialize_in_flight::{InFlightJournal, MaterializeInFlight};
+    {
+        let conn = dest.db.conn().await;
+        for id in ids {
+            conn.execute(
+                "DELETE FROM segment_records WHERE scope_id = ?1 AND kind = ?2 \
+                 AND segment_id = ?3",
+                rusqlite::params![OWNER.as_slice(), kind, i64::from(*id)],
+            )
+            .expect("drop the mirror rows the interrupted run never committed");
+        }
+        for table in placed {
+            conn.execute(
+                &format!("DELETE FROM {table} WHERE actor_id = ?1"),
+                rusqlite::params![OWNER.as_slice()],
+            )
+            .expect("drop the placement rows the interrupted run never committed");
+        }
+    }
+    dest.db
+        .materialize_in_flight_put(
+            &OWNER,
+            kind,
+            &MaterializeInFlight {
+                set_name: format!("__{kind}"),
+                segment_ids: ids.to_vec(),
+                journal: if placed.is_empty() {
+                    InFlightJournal::None
+                } else {
+                    InFlightJournal::Adopt
+                },
+                started_at: 1_716_000_000,
+            },
+        )
+        .await
+        .expect("the marker the interrupted run left standing");
+}
+
 /// Every `seg-*` file in a nest's placement journal area for `OWNER`, with its
 /// bytes — the on-disk truth behind the journal's manifest.
 fn journal_area_contents(nest: &Arc<AppState>) -> Vec<(String, Vec<u8>)> {
@@ -2603,32 +2692,21 @@ async fn materialize_supersedes_a_never_used_targets_mailbox_scaffolding() {
 
 /// **A crash between the journal adopt and the commit resumes on retry.**
 ///
-/// Staged as the real half-state: both families are on disk and adopted, and
-/// the one transaction that makes them live never committed — so the mirror
-/// rows and the placement rows are both absent. The retry must recognise the
+/// Staged as the real half-state ([`uncommit`]): both families are on disk and
+/// adopted, the mailbox tree written, the in-flight marker standing, and the
+/// one transaction that makes them live never committed — so the mirror rows
+/// and the placement rows are both absent. The retry must recognise the
 /// journal it finds as this ceremony's own and finish, not read an adopted
 /// corpus as a lived-in account and refuse for ever.
 #[tokio::test]
 async fn a_crash_between_the_journal_adopt_and_the_commit_resumes_on_retry() {
     let (source, dest, _d_url) = delivered_filed().await;
-    materialize(&dest, "__mail").await.expect("the first flip");
+    let first = materialize(&dest, "__mail").await.expect("the first flip");
     let journal_on_disk = journal_area_contents(&dest);
     let content_on_disk = segment_area_contents(&dest);
 
     // The crash: the transaction never committed.
-    {
-        let conn = dest.db.conn().await;
-        for sql in [
-            "DELETE FROM segment_records WHERE scope_id = ?1 AND kind = 'mail'",
-            "DELETE FROM bridge_imap_messages WHERE actor_id = ?1",
-            "DELETE FROM bridge_imap_mailbox_state WHERE actor_id = ?1",
-            "DELETE FROM bridge_imap_expunged WHERE actor_id = ?1",
-            "DELETE FROM bridge_imap_subscriptions WHERE actor_id = ?1",
-        ] {
-            conn.execute(sql, rusqlite::params![OWNER.as_slice()])
-                .expect("drop the rows the interrupted run never committed");
-        }
-    }
+    uncommit(&dest, &first.segments, true).await;
     assert!(
         serve_mailbox(&dest, &OWNER, "INBOX").await.is_empty(),
         "the staged state is the real one: adopted, and serving nothing"
@@ -2658,6 +2736,191 @@ async fn a_crash_between_the_journal_adopt_and_the_commit_resumes_on_retry() {
         .await
         .unwrap_err_or_panic("a live account refuses");
     assert_eq!(err.code, "fauna.backup.target_not_empty");
+}
+
+/// **An interrupted flip completes over an arrival that landed since** —
+/// `backup-destinations.md` § Third destination kind → *Re-seed* → *the
+/// in-flight marker*.
+///
+/// The flip is torn after the journal adopt ([`uncommit`]), and before the
+/// owner retries, one mail arrives through the production door. It is served at
+/// once — the half-state is a live account for arrivals — under the UID the
+/// corpus's own tree hands out next. The retry asks no freshness question (the
+/// marker answered it), keeps the arrival exactly where it was served, makes
+/// the corpus live beside it, and retires the marker, after which the ordinary
+/// rule applies again.
+#[tokio::test]
+async fn an_interrupted_flip_completes_over_an_arrival_that_landed_since() {
+    let (source, dest, _d_url) = delivered_filed().await;
+    let first = materialize(&dest, "__mail").await.expect("the first flip");
+    uncommit(&dest, &first.segments, true).await;
+
+    let source_inbox = serve_mailbox(&source, &OWNER, "INBOX").await;
+    file_mail(&dest, &OWNER, &[(1_716_000_000_000, "INBOX", "")]).await;
+    let half = serve_mailbox(&dest, &OWNER, "INBOX").await;
+    assert_eq!(
+        half.iter().map(|(uid, ..)| *uid).collect::<Vec<_>>(),
+        vec![source_inbox.len() as u32 + 1],
+        "the half-state serves the arrival, under the UID the corpus's tree hands out next"
+    );
+    let arrival = half[0].clone();
+    // Sealed by the retry's own first guard; sealed here so the comparison
+    // below is about what the retry wrote, not about the arrival's footer.
+    dest.mail_segments.finalize_open(&OWNER).await.unwrap();
+    let before_retry = segment_area_contents(&dest);
+
+    let reply = materialize(&dest, "__mail")
+        .await
+        .expect("an interrupted flip completes over what arrived since");
+
+    assert_eq!(reply.placements, Some(FILED.len() as u64 + 1));
+    let mut expected_inbox = source_inbox.clone();
+    expected_inbox.push(arrival);
+    assert_eq!(
+        serve_mailbox(&dest, &OWNER, "INBOX").await,
+        expected_inbox,
+        "INBOX is the source's, plus the arrival at the SAME UID it was served under"
+    );
+    assert_eq!(
+        serve_mailbox(&dest, &OWNER, "Archive").await,
+        serve_mailbox(&source, &OWNER, "Archive").await,
+    );
+    let fold = dest.mail_placement.current_manifest(&OWNER).await.unwrap();
+    let mut placed: Vec<&[u8]> = fold
+        .placements
+        .iter()
+        .map(|p| p.content_record_id.as_slice())
+        .collect();
+    placed.sort();
+    placed.dedup();
+    assert_eq!(
+        placed.len(),
+        FILED.len() + 1,
+        "the journal places every record exactly once"
+    );
+    let mut expected_tree = mailbox_tree(&source, &OWNER).await;
+    for (name, _, uid_next, highestmodseq) in &mut expected_tree {
+        if name == "INBOX" {
+            *uid_next += 1;
+            *highestmodseq += 1;
+        }
+    }
+    assert_eq!(
+        mailbox_tree(&dest, &OWNER).await,
+        expected_tree,
+        "the source's tree, INBOX advanced by the one arrival"
+    );
+    assert_eq!(
+        segment_area_contents(&dest),
+        before_retry,
+        "the corpus is untouched by the retry and the arrival's own segment is still there"
+    );
+    assert!(
+        dest.db
+            .materialize_in_flight_get(&OWNER, KIND)
+            .await
+            .unwrap()
+            .is_none(),
+        "the commit retired the marker"
+    );
+
+    let err = materialize(&dest, "__mail")
+        .await
+        .unwrap_err_or_panic("a completed flip is a live account");
+    assert_eq!(err.code, "fauna.backup.target_not_empty");
+}
+
+/// **An arrival into a flip torn before its halves mints above the corpus, and
+/// is re-filed there.**
+///
+/// The interruption is staged one step earlier than [`uncommit`]'s: a file the
+/// ceremony cannot prove is its own squats on the corpus's first segment path,
+/// so the first run refuses after recording the marker, flooring the counter
+/// and writing the mailbox tree, and before writing any half or adopting the
+/// journal. Mail arriving now is what the three rules exist for:
+///
+/// * the **floor** opens its segment above every corpus id, so the store's
+///   own reclaim never touches the squatted path and the arrival never takes a
+///   corpus id;
+/// * the **containers** are already the corpus's, so it is served at once under
+///   the UID the corpus's INBOX hands out next;
+/// * the target's journal was never superseded, so the arrival sits in a
+///   journal the corpus's will **supersede** — and the retry **re-files** it
+///   into the adopted one under the UID it was served at.
+#[tokio::test]
+async fn an_arrival_into_a_flip_torn_before_its_halves_is_filed_above_the_corpus() {
+    let (source, dest, _d_url) = delivered_filed().await;
+    let first_id = *live_segment_ids(&source, OWNER)
+        .await
+        .first()
+        .expect("the corpus holds at least one segment");
+    let root = fauna_mail::segments::mail_segments_root(dest.mail_segments.data_dir(), &OWNER);
+    std::fs::create_dir_all(&root).unwrap();
+    let squatter = root.join(format!("seg-{first_id:08}.dat"));
+    let squatted: &[u8] = b"not a segment this ceremony wrote";
+    std::fs::write(&squatter, squatted).unwrap();
+
+    let err = materialize(&dest, "__mail")
+        .await
+        .unwrap_err_or_panic("bytes the ceremony cannot prove are its own stop the write");
+    assert_eq!(err.code, "fauna.backup.segment_path_occupied");
+    assert!(
+        dest.db
+            .materialize_in_flight_get(&OWNER, KIND)
+            .await
+            .unwrap()
+            .is_some(),
+        "the refusal came after the gesture was recorded"
+    );
+
+    let source_inbox = serve_mailbox(&source, &OWNER, "INBOX").await;
+    file_mail(&dest, &OWNER, &[(1_716_000_000_000, "INBOX", "\\Flagged")]).await;
+    let half = serve_mailbox(&dest, &OWNER, "INBOX").await;
+    assert_eq!(
+        half.iter().map(|(uid, ..)| *uid).collect::<Vec<_>>(),
+        vec![source_inbox.len() as u32 + 1],
+        "the containers landed before the halves: the arrival mints above the corpus's UIDs"
+    );
+    assert_eq!(
+        std::fs::read(&squatter).unwrap(),
+        squatted,
+        "the floor kept the arrival's segment off the corpus's ids"
+    );
+    let arrival = half[0].clone();
+
+    // The owner clears what was in the way, then retries.
+    std::fs::remove_file(&squatter).unwrap();
+    let reply = materialize(&dest, "__mail")
+        .await
+        .expect("the interrupted flip completes over the arrival");
+
+    assert_eq!(reply.placements, Some(FILED.len() as u64 + 1));
+    let mut expected_inbox = source_inbox.clone();
+    expected_inbox.push(arrival);
+    assert_eq!(
+        serve_mailbox(&dest, &OWNER, "INBOX").await,
+        expected_inbox,
+        "the arrival is re-filed under the UID and flags it was served with"
+    );
+    assert_eq!(
+        serve_mailbox(&dest, &OWNER, "Archive").await,
+        serve_mailbox(&source, &OWNER, "Archive").await,
+    );
+    let mut expected_tree = mailbox_tree(&source, &OWNER).await;
+    for (name, _, uid_next, highestmodseq) in &mut expected_tree {
+        if name == "INBOX" {
+            *uid_next += 1;
+            *highestmodseq += 1;
+        }
+    }
+    assert_eq!(mailbox_tree(&dest, &OWNER).await, expected_tree);
+    assert!(
+        dest.db
+            .materialize_in_flight_get(&OWNER, KIND)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// A destination holding [`FILED`] mail's **content only** — no custody at the
@@ -3257,7 +3520,7 @@ async fn materialize_refuses_a_genuinely_open_segment_for_the_same_id() {
 /// calls that a bug, not a deferred feature.
 ///
 /// The residue here is a **0-byte** `.meta` with no `.dat`, which is both the
-/// canonical crash shape and the exact example.com 2026-06-13 precedent (a 0-byte
+/// canonical crash shape and the exact live-nest 2026-06-13 precedent (a 0-byte
 /// `seg-00000040.dat` permanently 451'd all mail for an actor). An empty file
 /// is a prefix of any half this run intends to write, which is precisely what
 /// makes it provably OUR interrupted write rather than someone's data.
@@ -3297,28 +3560,22 @@ async fn an_interrupted_half_is_reclaimed_rather_than_stranding_the_scope() {
 /// committed, and this ceremony deletes nothing — so the only correct move is
 /// to resume: keep the bytes, skip the rewrite, and finish the mirror.
 ///
-/// Staged by dropping the mirror rows a successful run wrote, which leaves
-/// exactly the on-disk and manifest state that crash produces.
+/// Staged by reverting exactly what a successful run's transaction did
+/// ([`uncommit`]), which leaves the on-disk, manifest and marker state that
+/// crash produces.
 #[tokio::test]
 async fn a_crash_between_adopting_and_the_mirror_rebuild_resumes_on_retry() {
     let (source, dest, _d_url) = delivered().await;
     let corpus = serve_mail(&source).await;
 
-    materialize(&dest, "__mail")
+    let first = materialize(&dest, "__mail")
         .await
         .expect("the first flip lands the halves and adopts their ids");
     let on_disk = segment_area_contents(&dest);
     assert!(!on_disk.is_empty(), "the flip left segment files behind");
 
     // The crash: the rebuild transaction never committed.
-    {
-        let conn = dest.db.conn().await;
-        conn.execute(
-            "DELETE FROM segment_records WHERE scope_id = ?1 AND kind = 'mail'",
-            rusqlite::params![OWNER.as_slice()],
-        )
-        .expect("drop the mirror rows the interrupted rebuild never committed");
-    }
+    uncommit(&dest, &first.segments, true).await;
     assert!(
         serve_mail(&dest).await.is_empty(),
         "the staged state is the real one: bytes on disk, adopted, serving nothing"
@@ -4171,6 +4428,455 @@ async fn materialize_refuses_a_calendar_that_has_held_events() {
         before,
         "the target's own journal is untouched"
     );
+}
+
+/// What the interrupted-flip pins ask of a DAV kind (the [`Dav`] enum is the
+/// recovery proofs', below): one journey over the calendar's doors and tables
+/// and the contacts' twins.
+impl Dav {
+    fn set(self) -> &'static str {
+        match self {
+            Self::Calendar => "__calendar",
+            Self::Card => "__card",
+        }
+    }
+
+    /// The item and tombstone tables the commit transaction re-states.
+    fn placed_tables(self) -> &'static [&'static str] {
+        match self {
+            Self::Calendar => &["bridge_caldav_events", "bridge_caldav_expunged"],
+            Self::Card => &["bridge_carddav_cards", "bridge_carddav_expunged"],
+        }
+    }
+
+    fn segments(self, nest: &Arc<AppState>) -> &Arc<fauna_segment_store::SegmentManager> {
+        match self {
+            Self::Calendar => &nest.cal_segments,
+            Self::Card => &nest.card_segments,
+        }
+    }
+
+    /// Provision the collection and put one item per uid.
+    async fn seed(self, nest: &Arc<AppState>, uids: &[u8]) {
+        match self {
+            Self::Calendar => put_events(nest, uids).await,
+            Self::Card => put_cards(nest, uids).await,
+        }
+    }
+
+    /// One item `uid` arriving into the home collection, filed through the
+    /// storage core every placement of the kind runs once its door has
+    /// admitted it — the PUT's, and for an event the emailed invitation's —
+    /// as the mail pins file through `place_relayed_record`. Not through the
+    /// PUT door itself: a destination's reserved set is a custody copy, which
+    /// that door refuses the owner as a pure-backup destination.
+    async fn arrive(self, nest: &Arc<AppState>, uid: u8) {
+        use fauna_mls::wrapped_blob::SealedRecordBytes;
+        use fauna_protocol::bridge_routing::{
+            PutCardCiphertextReply, PutCardCiphertextRequest, PutEventCiphertextReply,
+            PutEventCiphertextRequest,
+        };
+        let body = sealed(format!("arrival uid-{uid}").as_bytes());
+        let hint = sealed(b"hint-arrival");
+        let proven = |b: &[u8]| SealedRecordBytes::verify(b.to_vec()).expect("a sealed fixture");
+        let timestamp = 1_753_000_000 + i64::from(uid);
+        match self {
+            Self::Calendar => {
+                let req = PutEventCiphertextRequest {
+                    actor_id: OWNER.to_vec(),
+                    calendar_id: CALENDAR.to_vec(),
+                    uid_hash: vec![uid; 32],
+                    ciphertext_size: body.len() as u32,
+                    encrypted_body: body.clone(),
+                    encrypted_index_hint: hint.clone(),
+                    timestamp,
+                    ..Default::default()
+                };
+                let reply = fauna_nest::bridge_caldav_handlers::store_sealed_event(
+                    nest,
+                    OWNER,
+                    CALENDAR,
+                    &req,
+                    proven(&body),
+                    proven(&hint),
+                )
+                .await
+                .expect("file an arriving event");
+                assert!(
+                    matches!(reply, PutEventCiphertextReply::Created { .. }),
+                    "the arrival is placed: {reply:?}"
+                );
+            }
+            Self::Card => {
+                let req = PutCardCiphertextRequest {
+                    actor_id: OWNER.to_vec(),
+                    addressbook_id: ADDRESSBOOK.to_vec(),
+                    uid_hash: vec![uid; 32],
+                    ciphertext_size: body.len() as u32,
+                    encrypted_body: body.clone(),
+                    encrypted_index_hint: hint.clone(),
+                    timestamp,
+                    ..Default::default()
+                };
+                let reply = fauna_nest::bridge_carddav_handlers::store_sealed_card(
+                    nest,
+                    OWNER,
+                    ADDRESSBOOK,
+                    &req,
+                    proven(&body),
+                    proven(&hint),
+                )
+                .await
+                .expect("file an arriving card");
+                assert!(
+                    matches!(reply, PutCardCiphertextReply::Created { .. }),
+                    "the arrival is placed: {reply:?}"
+                );
+            }
+        }
+    }
+
+    /// Every item served in the home collection, and that collection's
+    /// counter ([`served_events`] / [`served_cards`]).
+    async fn served_items(self, nest: &Arc<AppState>) -> (Vec<DavItem>, Option<i64>) {
+        match self {
+            Self::Calendar => served_events(nest).await,
+            Self::Card => served_cards(nest).await,
+        }
+    }
+
+    /// The journal's placed items, as `(item id, etag, change number)`.
+    async fn journaled(self, nest: &Arc<AppState>) -> Vec<(Vec<u8>, String, i64)> {
+        let mut out: Vec<(Vec<u8>, String, i64)> = match self {
+            Self::Calendar => nest
+                .cal_placement
+                .current_manifest(&OWNER)
+                .await
+                .unwrap()
+                .events
+                .into_iter()
+                .map(|e| (e.event_id.to_vec(), e.etag, e.modseq as i64))
+                .collect(),
+            Self::Card => nest
+                .card_placement
+                .current_manifest(&OWNER)
+                .await
+                .unwrap()
+                .cards
+                .into_iter()
+                .map(|c| (c.card_id.to_vec(), c.etag, c.modseq as i64))
+                .collect(),
+        };
+        out.sort();
+        out
+    }
+
+    /// The source's live content segment ids for this kind.
+    async fn live_segment_ids(self, nest: &Arc<AppState>) -> Vec<u32> {
+        NestLocalSegmentSource::new(Arc::clone(nest), "test-source")
+            .list_segments(self.kind(), &hex::encode(OWNER))
+            .await
+            .expect("list segments")
+            .segments
+            .into_iter()
+            .map(|r| r.segment_id)
+            .collect()
+    }
+}
+
+/// A source holding three items of `dav`'s kind, one of them deleted, backed
+/// up to a fresh destination holding the owner's key grant.
+async fn delivered_dav(dav: Dav) -> (Arc<AppState>, Arc<AppState>) {
+    delivered_with(dav.kind(), move |s| async move {
+        dav.seed(&s, &[1, 2, 3]).await;
+        if let Dav::Calendar = dav {
+            delete_event(&s, 2).await;
+        }
+    })
+    .await
+}
+
+/// What a completed flip over one arrival serves: the source's items plus
+/// the arrival exactly as it was served in the half-state, under the
+/// collection's counter advanced by that one change; and the journal places
+/// both — the source's placements and the arrival under the change number and
+/// ETag it was served with.
+async fn assert_flip_kept_the_arrival(
+    dav: Dav,
+    source: &Arc<AppState>,
+    dest: &Arc<AppState>,
+    arrival: &DavItem,
+) {
+    let (was, was_counter) = dav.served_items(source).await;
+    let mut expected = was.clone();
+    expected.push(arrival.clone());
+    expected.sort();
+    assert_eq!(
+        dav.served_items(dest).await,
+        (expected, was_counter.map(|c| c + 1)),
+        "the source's {} items, plus the arrival under the ETag and change number it was \
+         served with; the counter one change past the source's",
+        dav.kind()
+    );
+    let mut journaled = dav.journaled(source).await;
+    journaled.push((arrival.0.clone(), arrival.2.clone(), arrival.3));
+    journaled.sort();
+    assert_eq!(
+        dav.journaled(dest).await,
+        journaled,
+        "the adopted journal places the corpus and the arrival, each exactly once"
+    );
+    assert!(
+        dest.db
+            .materialize_in_flight_get(&OWNER, dav.kind())
+            .await
+            .unwrap()
+            .is_none(),
+        "the commit retired the marker"
+    );
+    let err = materialize(dest, dav.set())
+        .await
+        .unwrap_err_or_panic("a completed flip is a live account");
+    assert_eq!(err.code, "fauna.backup.target_not_empty");
+}
+
+/// **An interrupted calendar or contacts flip completes over an item that
+/// arrived since** — the DAV twin of
+/// `an_interrupted_flip_completes_over_an_arrival_that_landed_since`
+/// (`backup-destinations.md` § Third destination kind → *Re-seed* → *the
+/// in-flight marker*).
+///
+/// Torn after the journal adopt ([`uncommit_kind`]): the corpus's collection
+/// row stands (the containers land before the halves), so an arrival is
+/// served at once under the change number above every change the corpus
+/// holds. The retry asks no freshness question, keeps the arrival exactly as
+/// it was served, makes the corpus live beside it, and retires the marker.
+async fn an_interrupted_dav_flip_completes_over_an_arrival(dav: Dav) {
+    let (source, dest) = delivered_dav(dav).await;
+    let first = materialize(&dest, dav.set()).await.expect("the first flip");
+    uncommit_kind(&dest, dav.kind(), &first.segments, dav.placed_tables()).await;
+
+    let (was, was_counter) = dav.served_items(&source).await;
+    assert_eq!(
+        dav.served_items(&dest).await,
+        (Vec::new(), was_counter),
+        "the half-state: the corpus's container, and nothing served in it yet"
+    );
+    dav.arrive(&dest, 9).await;
+    let (half, _) = dav.served_items(&dest).await;
+    assert_eq!(
+        half.iter().map(|item| item.3).collect::<Vec<_>>(),
+        vec![was_counter.expect("the source's collection") + 1],
+        "the arrival is served at once, numbered above every change the corpus holds"
+    );
+    let arrival = half[0].clone();
+
+    let reply = materialize(&dest, dav.set())
+        .await
+        .expect("an interrupted flip completes over what arrived since");
+    assert_eq!(reply.placements, Some(was.len() as u64 + 1));
+    assert_flip_kept_the_arrival(dav, &source, &dest, &arrival).await;
+}
+
+#[tokio::test]
+async fn an_interrupted_calendar_flip_completes_over_an_event_that_arrived_since() {
+    an_interrupted_dav_flip_completes_over_an_arrival(Dav::Calendar).await;
+}
+
+#[tokio::test]
+async fn an_interrupted_contacts_flip_completes_over_a_card_that_arrived_since() {
+    an_interrupted_dav_flip_completes_over_an_arrival(Dav::Card).await;
+}
+
+/// **An item arriving into a calendar or contacts flip torn before its halves
+/// is numbered above the corpus, and re-filed there** — the DAV twin of
+/// `an_arrival_into_a_flip_torn_before_its_halves_is_filed_above_the_corpus`.
+///
+/// A file the ceremony cannot prove is its own squats on the corpus's first
+/// segment path, so the first run refuses after the marker, the counter floor
+/// and the containers, before any half or the journal. Then:
+///
+/// * the **floor** opens the arrival's segment above every corpus id, so the
+///   squatted path is never reclaimed and no corpus id is taken;
+/// * the **containers** are the corpus's, so an arrival finds its
+///   collection and is numbered above the corpus's changes;
+/// * the arrival sits in the target's own journal, which the corpus's
+///   **supersedes** — and the retry **re-files** it into the adopted one under
+///   the change number and ETag it was served with.
+async fn an_arrival_into_a_dav_flip_torn_before_its_halves(dav: Dav) {
+    let (source, dest) = delivered_dav(dav).await;
+    let squatter = tear_before_halves(dav, &source, &dest).await;
+    let squatted = std::fs::read(&squatter).unwrap();
+
+    dav.arrive(&dest, 9).await;
+    let (was, was_counter) = dav.served_items(&source).await;
+    let (half, _) = dav.served_items(&dest).await;
+    assert_eq!(
+        half.iter().map(|item| item.3).collect::<Vec<_>>(),
+        vec![was_counter.expect("the source's collection") + 1],
+        "the containers landed before the halves: the arrival is numbered above the corpus"
+    );
+    assert_eq!(
+        std::fs::read(&squatter).unwrap(),
+        squatted,
+        "the floor kept the arrival's segment off the corpus's ids"
+    );
+    let arrival = half[0].clone();
+
+    // The owner clears what was in the way, then retries.
+    std::fs::remove_file(&squatter).unwrap();
+    let reply = materialize(&dest, dav.set())
+        .await
+        .expect("the interrupted flip completes over the arrival");
+    assert_eq!(reply.placements, Some(was.len() as u64 + 1));
+    assert_flip_kept_the_arrival(dav, &source, &dest, &arrival).await;
+}
+
+/// Tear `dest`'s flip of `dav`'s set before its halves: a file the ceremony
+/// cannot prove is its own squats on the corpus's first segment path, so the
+/// first run refuses after the marker, the counter floor and the containers.
+/// Returns the squatter's path, for the owner to clear before the retry.
+async fn tear_before_halves(
+    dav: Dav,
+    source: &Arc<AppState>,
+    dest: &Arc<AppState>,
+) -> std::path::PathBuf {
+    let first_id = *dav
+        .live_segment_ids(source)
+        .await
+        .first()
+        .expect("the corpus holds at least one segment");
+    let root = dav.segments(dest).scope_dir(&OWNER);
+    std::fs::create_dir_all(&root).unwrap();
+    let squatter = root.join(format!("seg-{first_id:08}.dat"));
+    std::fs::write(&squatter, b"not a segment this ceremony wrote").unwrap();
+
+    let err = materialize(dest, dav.set())
+        .await
+        .unwrap_err_or_panic("bytes the ceremony cannot prove are its own stop the write");
+    assert_eq!(err.code, "fauna.backup.segment_path_occupied");
+    assert!(
+        dest.db
+            .materialize_in_flight_get(&OWNER, dav.kind())
+            .await
+            .unwrap()
+            .is_some(),
+        "the refusal came after the gesture was recorded"
+    );
+    squatter
+}
+
+#[tokio::test]
+async fn an_event_arriving_into_a_calendar_flip_torn_before_its_halves_is_filed_above_the_corpus() {
+    an_arrival_into_a_dav_flip_torn_before_its_halves(Dav::Calendar).await;
+}
+
+#[tokio::test]
+async fn a_card_arriving_into_a_contacts_flip_torn_before_its_halves_is_filed_above_the_corpus() {
+    an_arrival_into_a_dav_flip_torn_before_its_halves(Dav::Card).await;
+}
+
+/// **An arrival on a resource the corpus also holds goes to the later write,
+/// by server receive time** — recovery's collision (a), as the re-filing
+/// applies it (`backup-destinations.md` § *the in-flight marker*).
+///
+/// Staged as [`tear_before_halves`] leaves it, so the arrival sits in the
+/// journal the corpus's supersedes and the re-filing decides it. It replaces
+/// item 1, which the corpus holds too; its row's receive time is then set
+/// either side of the corpus record's, the one clock the rule reads:
+///
+/// * **arrival later** → it stands, under the change number and ETag it was
+///   served with, and the corpus's version of item 1 is not served;
+/// * **arrival earlier** → the corpus's version stands, journaled again under
+///   the collection's next change number — above the one the arrival was
+///   served under, so a client holding that sync token hears the change — and
+///   the arrival's row is gone.
+async fn a_dav_arrival_on_a_held_resource_goes_to_the_later_write(dav: Dav, arrival_later: bool) {
+    let (source, dest) = delivered_dav(dav).await;
+    let squatter = tear_before_halves(dav, &source, &dest).await;
+    dav.arrive(&dest, 1).await;
+    let (half, _) = dav.served_items(&dest).await;
+    let arrival = half[0].clone();
+    {
+        let items = dav.placed_tables()[0];
+        let conn = dest.db.conn().await;
+        conn.execute(
+            &format!("UPDATE {items} SET created_at = ?2 WHERE actor_id = ?1 AND uid_hash = ?3"),
+            rusqlite::params![
+                OWNER.as_slice(),
+                if arrival_later { i64::MAX / 2 } else { 0 },
+                vec![1u8; 32],
+            ],
+        )
+        .expect("stamp the arrival's receive time");
+    }
+
+    std::fs::remove_file(&squatter).unwrap();
+    materialize(&dest, dav.set())
+        .await
+        .expect("the interrupted flip completes over the arrival");
+
+    let (was, was_counter) = dav.served_items(&source).await;
+    let was_counter = was_counter.expect("the source's collection");
+    let uid1 = vec![1u8; 32];
+    let (served, counter) = dav.served_items(&dest).await;
+    let (expected, expected_counter) = if arrival_later {
+        let mut expected: Vec<DavItem> = was.iter().filter(|i| i.1 != uid1).cloned().collect();
+        expected.push(arrival.clone());
+        expected.sort();
+        (expected, was_counter + 1)
+    } else {
+        let renumbered = was_counter + 2;
+        let expected: Vec<DavItem> = was
+            .iter()
+            .cloned()
+            .map(|mut i| {
+                if i.1 == uid1 {
+                    i.2 = format!("{renumbered:016x}");
+                    i.3 = renumbered;
+                }
+                i
+            })
+            .collect();
+        (expected, renumbered)
+    };
+    assert_eq!(
+        (served, counter),
+        (expected, Some(expected_counter)),
+        "item 1 is the later write's (arrival later: {arrival_later}), numbered above the \
+         arrival's change"
+    );
+    let journaled = dav.journaled(&dest).await;
+    assert_eq!(
+        journaled.len(),
+        was.len(),
+        "one current version per resource in the journal"
+    );
+    assert_eq!(
+        journaled.iter().any(|(id, ..)| *id == arrival.0),
+        arrival_later,
+        "the journal places the arrival exactly when it stands"
+    );
+}
+
+#[tokio::test]
+async fn an_event_arriving_later_than_the_corpus_version_of_its_resource_stands() {
+    a_dav_arrival_on_a_held_resource_goes_to_the_later_write(Dav::Calendar, true).await;
+}
+
+#[tokio::test]
+async fn an_event_arriving_earlier_than_the_corpus_version_of_its_resource_yields_to_it() {
+    a_dav_arrival_on_a_held_resource_goes_to_the_later_write(Dav::Calendar, false).await;
+}
+
+#[tokio::test]
+async fn a_card_arriving_later_than_the_corpus_version_of_its_resource_stands() {
+    a_dav_arrival_on_a_held_resource_goes_to_the_later_write(Dav::Card, true).await;
+}
+
+#[tokio::test]
+async fn a_card_arriving_earlier_than_the_corpus_version_of_its_resource_yields_to_it() {
+    a_dav_arrival_on_a_held_resource_goes_to_the_later_write(Dav::Card, false).await;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -5198,10 +5904,56 @@ enum Tear {
     VerbAfterTwo,
 }
 
-impl fauna_protocol::RpcRequester for OwnerLink {
-    type Error = String;
+/// What an [`OwnerLink`] call failed with: the handler's own refusal, kept
+/// typed so the leg classifies it as a real connection's error would, or a
+/// staged tear / local fault, which reads as a transport failure.
+#[derive(Debug)]
+enum OwnerLinkError {
+    Rejected(fauna_protocol::RpcError),
+    Torn(String),
+}
 
-    async fn request<Req, Reply>(&self, kind: &'static str, payload: Req) -> Result<Reply, String>
+impl std::fmt::Display for OwnerLinkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(e) => write!(f, "{}: {}", e.code, e.detail_or_code()),
+            Self::Torn(s) => f.write_str(s),
+        }
+    }
+}
+
+impl fauna_protocol::RpcErrorClass for OwnerLinkError {
+    fn is_rejection(&self) -> bool {
+        matches!(self, Self::Rejected(_))
+    }
+    fn as_rpc_error(&self) -> Option<&fauna_protocol::RpcError> {
+        match self {
+            Self::Rejected(e) => Some(e),
+            Self::Torn(_) => None,
+        }
+    }
+}
+
+impl From<String> for OwnerLinkError {
+    fn from(s: String) -> Self {
+        Self::Torn(s)
+    }
+}
+
+impl From<&str> for OwnerLinkError {
+    fn from(s: &str) -> Self {
+        Self::Torn(s.to_string())
+    }
+}
+
+impl fauna_protocol::RpcRequester for OwnerLink {
+    type Error = OwnerLinkError;
+
+    async fn request<Req, Reply>(
+        &self,
+        kind: &'static str,
+        payload: Req,
+    ) -> Result<Reply, OwnerLinkError>
     where
         Req: Serialize,
         Reply: DeserializeOwned,
@@ -5232,8 +5984,8 @@ impl fauna_protocol::RpcRequester for OwnerLink {
             .ok_or_else(|| format!("kind not registered: {kind}"))?;
         let out = (meta.handler)(self.nest.clone(), OWNER, bytes)
             .await
-            .map_err(|e| format!("{}: {:?}", e.code, e.message))?;
-        decode(&out).map_err(|e| e.to_string())
+            .map_err(OwnerLinkError::Rejected)?;
+        decode(&out).map_err(|e| OwnerLinkError::Torn(e.to_string()))
     }
 }
 
@@ -5331,16 +6083,21 @@ async fn run_recovery_leg(
         tear,
     };
     let sink = SourceBytePlane(source.clone());
+    // Each end's reserved-set arm, through the self-healing record entry the
+    // app's leg records with.
+    let dest_records = fauna_client_sync::SyncClient::new(&dest_link);
+    let source_records = fauna_client_sync::SyncClient::new(&source_link);
     let leg = RecoveryDelivery::new(
         RecoveryDestination {
             seam: &seam,
             bytes: &dest_bytes,
-            records: &dest_link,
+            records: &dest_records,
             device_id: hex::encode(DEST_DEVICE),
         },
         RecoverySource {
             bytes: &sink,
             nest: &source_link,
+            records: &source_records,
             device_id: hex::encode(SOURCE_DEVICE),
         },
         OWNER,
@@ -5485,7 +6242,11 @@ async fn a_regressed_source_recovers_its_lost_records_by_record() {
     // what the "next append lands above the pin" check below proves.
 
     register_device(&a, SOURCE_DEVICE).await;
-    register_device(&dest, DEST_DEVICE).await;
+    // The driving device holds no row at the destination — the app's case:
+    // nothing else of its own lives there. Its first post-recovery tombstone
+    // registers it through the record entry's own `device_unregistered` heal,
+    // which the retirement checks below depend on.
+    common::seed_dispatch_actor(&dest.db, &OWNER).await;
     grant_key_to(&a).await;
 
     // ── Tear 1: the leg, after a `.dat`, before its `.meta` ───────────────
@@ -6304,8 +7065,9 @@ async fn a_second_source_box_of_one_owner_is_refused_at_one_destination() {
 ///   under the successor, passes — the renamed mirror set included, against
 ///   the device's replica of the folder — with no inclusion alarm.
 ///
-/// The source's status row still reads a stale upload time and a backlog while
-/// refused: the row's `writer_state` is the source half's build
+/// While refused, the source's status row reads `writer_state: refused` beside
+/// its stale upload time and backlog — a refused writer is a state, never a lag
+/// — and the first accepted pass after the carry turns it back to `ok`
 /// (`backup-destinations.md` § Per-destination status read).
 #[tokio::test]
 async fn a_rotated_source_box_is_refused_until_its_owner_carries_the_seat() {
@@ -6371,6 +7133,10 @@ async fn a_rotated_source_box_is_refused_until_its_owner_carries_the_seat() {
     let uploaded_at = before.destinations[0].last_upload_time;
     assert!(uploaded_at.is_some());
     assert_eq!(before.destinations[0].backlog_count, 0);
+    assert_eq!(
+        before.destinations[0].writer_state.as_deref(),
+        Some(fauna_protocol::backup::WRITER_STATE_OK)
+    );
     let cat_path = hex::encode(cat_hash);
     let mirrored_before = live_custody_in(&dest, &old_set).await;
     assert_eq!(mirrored_before.keys().collect::<Vec<_>>(), vec![&cat_path]);
@@ -6437,7 +7203,7 @@ async fn a_rotated_source_box_is_refused_until_its_owner_carries_the_seat() {
     );
 
     // The source's status row while refused: the stale upload time and a
-    // backlog (its `writer_state` field is the source half's build).
+    // backlog, and the state that tells them from a lag.
     let refused = status(&source, OWNER).await;
     assert_eq!(
         refused.destinations,
@@ -6445,6 +7211,7 @@ async fn a_rotated_source_box_is_refused_until_its_owner_carries_the_seat() {
             destination_id: DEST_ID.to_string(),
             last_upload_time: uploaded_at,
             backlog_count: 1,
+            writer_state: Some(fauna_protocol::backup::WRITER_STATE_REFUSED.to_string()),
             ..Default::default()
         }],
     );
@@ -6521,9 +7288,12 @@ async fn a_rotated_source_box_is_refused_until_its_owner_carries_the_seat() {
     // ── Both axes resume, sending only what is new ───────────────────────
     let report = mail_pass(&source).await.expect("the carried mail pass");
     assert_eq!(report.uploaded_segments.len(), 1, "{report:?}");
+    let accepted = status(&source, OWNER).await;
+    assert_eq!(accepted.destinations[0].backlog_count, 0);
     assert_eq!(
-        status(&source, OWNER).await.destinations[0].backlog_count,
-        0
+        accepted.destinations[0].writer_state.as_deref(),
+        Some(fauna_protocol::backup::WRITER_STATE_OK),
+        "the first accepted pass clears the refusal"
     );
     let report = folder_pass(&source, folder_id)
         .await
@@ -7142,4 +7912,224 @@ impl fauna_client_backup::audit::AuditStateStore for MemAuditStore {
         *self.0.lock().unwrap() = snapshot.clone();
         Ok(())
     }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The writer-plane throttle and the coordinator's backpressure
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// `federation.md` § Nest-writer backup plane → *Throttling* (the custody-record
+// kind's own budget) and `segment-backup-protocol.md` § Cross-location backup
+// protocol → *Backpressure* (a `rate_limited` answer is waited out, and a
+// destination still refusing pauses the tuple — never a failed pass).
+
+/// The custody-record kind's federation throttle bucket for `source` at the
+/// destination — the per-nest check's key.
+const RECORD_KIND: &str = "fauna.federation.backup.changes.record";
+
+/// Mail spread over `n` months: the source's append rotates on the month
+/// bucket, so this is `n` segments.
+fn monthly_stamps(n: usize) -> Vec<i64> {
+    const MONTH_MS: i64 = 31 * 24 * 3600 * 1000;
+    (0..n as i64)
+        .map(|i| 1_600_000_000_000 + i * MONTH_MS)
+        .collect()
+}
+
+/// Spend `n` of the custody-record kind's budget for `source` at a
+/// destination throttled by `limiter` — a destination already busy with this
+/// writer's records.
+fn spend_record_budget(
+    limiter: &fauna_nest::bridge_rate_limit::Limiter,
+    source: &Arc<AppState>,
+    n: u32,
+) {
+    let src: [u8; 32] = source.nest_identity.public_key_bytes();
+    for _ in 0..n {
+        assert!(limiter.check_with_max(
+            &src,
+            &[0u8; 32],
+            RECORD_KIND,
+            fauna_nest::federation_router::WRITER_RECORD_MAX_EVENTS,
+        ));
+    }
+}
+
+/// **A first pass over 40+ segments drains in ONE sweep at the production
+/// throttle.** Each segment is two custody records, so this pass sends over
+/// 80 — past the channel default's 30 a minute, where the first refused record
+/// used to abort the tuple and count it failed toward the lease's stall
+/// threshold; under the writer budget (600) it drains whole.
+#[tokio::test]
+async fn a_first_pass_over_forty_segments_drains_in_one_sweep() {
+    let (_s_url, source, _s_blobs) = start_nest().await;
+    let (d_url, dest, _d_blobs) = start_nest_throttled(Arc::new(
+        fauna_nest::bridge_rate_limit::Limiter::new(), // the production channel throttle
+    ))
+    .await;
+
+    register_user(&source, OWNER, "alice").await;
+    register_user(&dest, OWNER, "alice").await;
+    append_mail(&source, &OWNER, &monthly_stamps(42)).await;
+    enroll(&source, &dest, &d_url).await;
+
+    let seg_ids = live_segment_ids(&source, OWNER).await;
+    assert!(
+        seg_ids.len() >= 40,
+        "the owner holds at least 40 segments: {}",
+        seg_ids.len()
+    );
+
+    let outcome = NestBackupCoordinator::open_for_owner(Arc::clone(&source), OWNER)
+        .await
+        .unwrap()
+        .expect("owner is enrolled")
+        .run_all_tuples()
+        .await
+        .expect("the sweep runs");
+    assert_eq!(
+        (outcome.failed, outcome.paused),
+        (0, 0),
+        "no tuple failed or paused: {outcome:?}"
+    );
+
+    // Every segment's pair is in the destination's custody.
+    let held = custody_paths(&dest).await;
+    let scope_hex = hex::encode(OWNER);
+    for seg_id in &seg_ids {
+        for path in [
+            segment_rel_path(&scope_hex, *seg_id),
+            segment_meta_rel_path(&scope_hex, *seg_id),
+        ] {
+            assert!(held.contains(&path), "custody is missing {path}");
+        }
+    }
+
+    let after = status(&source, OWNER).await;
+    assert_eq!(
+        after.destinations[0].backlog_count, 0,
+        "nothing left queued"
+    );
+    assert_eq!(
+        after.destinations[0].writer_state.as_deref(),
+        Some(fauna_protocol::backup::WRITER_STATE_OK)
+    );
+}
+
+/// **A destination answering `rate_limited` is waited out, and the pass still
+/// drains.** The destination's throttle window is short here and the writer's
+/// budget already spent, so the first custody record is refused; the
+/// coordinator waits and re-sends rather than failing the tuple.
+#[tokio::test]
+async fn a_throttled_destination_is_waited_out_and_the_pass_still_drains() {
+    let limiter = Arc::new(fauna_nest::bridge_rate_limit::Limiter::with_config(
+        fauna_nest::bridge_rate_limit::LimiterConfig {
+            window: std::time::Duration::from_secs(1),
+            ..Default::default()
+        },
+    ));
+    let (_s_url, source, _s_blobs) = start_nest().await;
+    let (d_url, dest, _d_blobs) = start_nest_throttled(Arc::clone(&limiter)).await;
+
+    register_user(&source, OWNER, "alice").await;
+    register_user(&dest, OWNER, "alice").await;
+    append_mail(&source, &OWNER, &monthly_stamps(3)).await;
+    enroll(&source, &dest, &d_url).await;
+
+    let coordinator = NestBackupCoordinator::open_for_owner(Arc::clone(&source), OWNER)
+        .await
+        .unwrap()
+        .expect("owner is enrolled")
+        .with_backpressure(Backpressure {
+            wait: std::time::Duration::from_millis(100),
+            max_retries: 30, // three seconds — three windows
+        });
+    spend_record_budget(
+        &limiter,
+        &source,
+        fauna_nest::federation_router::WRITER_RECORD_MAX_EVENTS,
+    );
+    // The first record WILL be refused: the bucket is full (a refused check
+    // records nothing, so this costs the pass no budget).
+    assert!(!limiter.check_with_max(
+        &source.nest_identity.public_key_bytes(),
+        &[0u8; 32],
+        RECORD_KIND,
+        fauna_nest::federation_router::WRITER_RECORD_MAX_EVENTS,
+    ));
+    let outcome = coordinator.run_all_tuples().await.expect("the sweep runs");
+    assert_eq!(
+        (outcome.failed, outcome.paused),
+        (0, 0),
+        "a refusal that clears within the retry budget is neither: {outcome:?}"
+    );
+    assert_eq!(
+        status(&source, OWNER).await.destinations[0].backlog_count,
+        0
+    );
+    let held = custody_paths(&dest).await;
+    let scope_hex = hex::encode(OWNER);
+    for seg_id in live_segment_ids(&source, OWNER).await {
+        for path in [
+            segment_rel_path(&scope_hex, seg_id),
+            segment_meta_rel_path(&scope_hex, seg_id),
+        ] {
+            assert!(held.contains(&path), "custody is missing {path}");
+        }
+    }
+}
+
+/// **A destination still refusing after the retry budget PAUSES the tuple —
+/// never a failure — and keeps the progress made.** Room for exactly four
+/// records: two segments land, the third is refused until the coordinator
+/// pauses. The pass reads paused, not failed, so it cannot stall the lease;
+/// the status backlog is the ordinary lag that is left, with the writer ok.
+#[tokio::test]
+async fn a_destination_still_refusing_pauses_the_tuple_and_keeps_progress() {
+    let limiter = Arc::new(fauna_nest::bridge_rate_limit::Limiter::new());
+    let (_s_url, source, _s_blobs) = start_nest().await;
+    let (d_url, dest, _d_blobs) = start_nest_throttled(Arc::clone(&limiter)).await;
+
+    register_user(&source, OWNER, "alice").await;
+    register_user(&dest, OWNER, "alice").await;
+    append_mail(&source, &OWNER, &monthly_stamps(5)).await;
+    enroll(&source, &dest, &d_url).await;
+    let total = status(&source, OWNER).await.destinations[0].backlog_count;
+    assert!(total >= 5, "a real backlog: {total}");
+
+    spend_record_budget(
+        &limiter,
+        &source,
+        fauna_nest::federation_router::WRITER_RECORD_MAX_EVENTS - 4,
+    );
+    let outcome = NestBackupCoordinator::open_for_owner(Arc::clone(&source), OWNER)
+        .await
+        .unwrap()
+        .expect("owner is enrolled")
+        .with_backpressure(Backpressure {
+            wait: std::time::Duration::from_millis(10),
+            max_retries: 3,
+        })
+        .run_all_tuples()
+        .await
+        .expect("the sweep runs");
+    assert!(outcome.paused >= 1, "the mail tuple paused: {outcome:?}");
+    assert_eq!(outcome.failed, 0, "a pause is never a failure: {outcome:?}");
+    assert!(
+        !outcome.wholly_failed(),
+        "a paused pass cannot stall the lease"
+    );
+
+    let after = status(&source, OWNER).await;
+    let left = after.destinations[0].backlog_count;
+    assert!(
+        0 < left && left < total,
+        "progress kept: {left} of {total} left after the pause"
+    );
+    assert_eq!(
+        after.destinations[0].writer_state.as_deref(),
+        Some(fauna_protocol::backup::WRITER_STATE_OK),
+        "a throttled writer is an ordinary lag, never a refused one"
+    );
+    assert!(!custody_paths(&dest).await.is_empty());
 }

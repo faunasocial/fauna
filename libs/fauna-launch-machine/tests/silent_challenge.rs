@@ -366,6 +366,7 @@ async fn nest_outdated_lands_terminal_offline_and_retry_is_noop() {
     let connector =
         MockAuthConnector::new().push_silent_challenge(SilentChallengeOutcome::NeedsUpdate {
             message: banner.clone(),
+            outdated: fauna_launch_machine::OutdatedSide::Nest,
         });
     let m = LaunchMachine::new_with_connector(
         Arc::new(NullObserver),

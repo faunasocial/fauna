@@ -46,7 +46,8 @@ windows' own W5.6 leg lands):
    runs the identity-theft succession ceremony to completion: it stays up,
    renders the successor's kit, comes back authenticated as the successor and
    keeps its ``no_engine`` sweep view (the first instance holds the
-   conversations-engine role lock).
+   conversations-engine role lock). The first (plain) seat follows the
+   account to the successor too.
 5. **A bound launch follows the chain** — after case 4's ceremony a THIRD
    instance launched bound to the RETIRED id comes up as the successor.
 
@@ -84,7 +85,10 @@ from actions import ActionLayer
 from common import build_registry_seed, create_actor_and_register
 from conftest import _seeded_environment
 from drivers import create_driver
-from helpers.instance_guard import is_app_alive, wait_alive_until
+from helpers.instance_guard import (
+    await_first_seat_follows_the_account,
+    wait_alive_until,
+)
 from helpers.succession_ceremony import (
     SECRET_HEX_LEN,
     SUCCESSION_AND_RELAUNCH_S,
@@ -368,8 +372,11 @@ def test_linux_bound_launch_onto_the_served_account_coexists(
                     break
             assert CONVERGED_TERM in seen, (
                 "the first instance's write never became visible in the second "
-                f"within {CONVERGENCE_BUDGET_S:.0f}s — the shared-store "
-                f"notification floor is not converging; second saw {seen!r}"
+                f"within {CONVERGENCE_BUDGET_S:.0f}s — a fresh visit to the "
+                "second's page does not read what the shared store holds; "
+                f"second saw {seen!r}, its error-message "
+                f"{second_app.error_text()!r}. The second's captured stderr, "
+                f"tail:\n{second.app_stderr_text()[-6000:]}"
             )
 
             # And the first's own conversations page carries no refusal — the
@@ -455,6 +462,19 @@ def test_linux_bound_launch_for_another_account_coexists_as_that_account(
         first.teardown()
 
 
+def _await_first_seat_follows(first, old_actor, new_actor):
+    """The plain first seat follows the account to the successor
+    (:func:`helpers.instance_guard.await_first_seat_follows_the_account`),
+    diagnosed with its own captured stderr."""
+    return await_first_seat_follows_the_account(
+        first,
+        old_actor,
+        new_actor,
+        SUCCESSION_AND_RELAUNCH_S,
+        diagnose=lambda: f"First seat's captured stderr, tail:\n{first.app_stderr_text()[-8000:]}",
+    )
+
+
 def _bound_launch(nest_instance, linux_app_path, request, bound_actor, world):
     """The launch config of a seat bound to ``bound_actor`` in ``world`` — no
     re-seed: the shared store already holds the registry, and a re-seed would
@@ -492,7 +512,12 @@ def test_linux_a_bound_instance_survives_its_own_succession(
     3. **The sweep view survived**, and it is the ``no_engine`` arm: the first
        instance holds the conversations-engine role lock, so this seat's
        ceremony swept with no engine.
-    4. **The first instance is untouched** — still alive, still serving.
+    4. **The first instance follows the account** — it survives the second's
+       ceremony and comes to serve the successor (`succession-propagation.md`
+       § Propagation → *Own device fleet*; see
+       :func:`helpers.instance_guard.await_first_seat_follows_the_account`).
+       ⚠ Until 2026-10-11 this asserted only "still authenticated", which held
+       whether the seat followed or stranded on the retired id.
 
     ⚠ Do NOT "simplify" this into a lone bound launch: the first instance is
     what makes the sweep ``no_engine``.
@@ -569,14 +594,8 @@ def test_linux_a_bound_instance_survives_its_own_succession(
             assert sweep_owes_work(sweep), f"a no_engine sweep owes work; {sweep!r}"
             assert_the_retry_affordance_matches_the_sweep(app, sweep)
 
-            # ── 4. the first instance is untouched ───────────────────────────
-            assert is_app_alive(first) is not False, (
-                "the first instance must survive the second's ceremony"
-            )
-            fstate = first.get_state()
-            assert bool(fstate.get("session", {}).get("authenticated")), (
-                f"the first instance must still be serving; got {fstate.get('session')!r}"
-            )
+            # ── 4. the first instance follows the account ────────────────────
+            _await_first_seat_follows(first, old_actor, new_actor)
         finally:
             second.teardown()
     finally:
@@ -598,7 +617,8 @@ def test_linux_a_launch_bound_to_a_retired_id_comes_up_as_the_successor(
     shared ``AccountRegistry::resolve_launch_binding``, which walks the
     ``succeeded_by`` chain to the terminal successor before the session
     account resolves. A launch that exits instead fails with its captured
-    stderr in the message.
+    stderr in the message. The first (plain) seat follows the account to the
+    successor too, as in case 4.
     """
     seed, user_actor = _seed_one_account(nest_instance)
     world = _shared_instance_world()
@@ -658,8 +678,8 @@ def test_linux_a_launch_bound_to_a_retired_id_comes_up_as_the_successor(
             finally:
                 third.teardown()
 
-            # The first seat is untouched by either launch.
-            assert is_app_alive(first) is not False
+            # The first seat followed the account, as in case 4.
+            _await_first_seat_follows(first, old_actor, new_actor)
         finally:
             second.teardown()
     finally:

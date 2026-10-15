@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// Thin SwiftUI-friendly proxy over the shared, stateful `FfiFeedManager`
@@ -409,6 +412,9 @@ public final class FeedVM {
     /// consumption — `version-compatibility.md`: never offer an unsupported
     /// protocol). Drives the selector instead of a hard-coded protocol list.
     public var availableBridges: [AvailableBridge] { snapshot?.availableBridges ?? [] }
+    /// The roster a post's source token resolves its bridge against
+    /// (`ui/feed.md` § Implementation status today, `SourceKind::Bridged`).
+    public var bridgeRoster: [BridgeIdentitySnapshot] { snapshot?.bridgeRoster ?? [] }
     public var selectedFeedId: String? { snapshot?.selectedFeed }
     /// Whether the built-in **Trending** virtual feed is the current selection
     /// (`feed-trending-item`, `trending.md` § The Trending feed) — mutually
@@ -1352,6 +1358,19 @@ public final class FeedVM {
     /// ruling 6) — reads in the user's language, recognized by the one shared
     /// `feedRefusalI18nKey`; every other failure keeps its own text. The
     /// account-switch guard is `landClientErrorMessage`'s.
+    /// A rejected verb's `error-message` copy: the shared `feed.reference_restricted`
+    /// sentence for a stated refusal, the failure's own text otherwise. Static so
+    /// `FeedVerbErrorCopyTests` pins it without a manager.
+    static func verbErrorCopy(_ error: Error) -> String {
+        let text: String
+        if let ffi = error as? FfiError, case let .General(msg) = ffi {
+            text = msg
+        } else {
+            text = String(describing: error)
+        }
+        return feedRefusalI18nKey(err: text).map(L.lookup) ?? text
+    }
+
     private func runVerb(_ verb: (FfiFeedManager) async throws -> Void) async {
         guard let manager else { return }
         let generation = managerGeneration
@@ -1364,13 +1383,7 @@ public final class FeedVM {
             }
             verbErrorMessage = nil
         } catch {
-            let text: String
-            if let ffi = error as? FfiError, case let .General(msg) = ffi {
-                text = msg
-            } else {
-                text = String(describing: error)
-            }
-            let shown = feedRefusalI18nKey(err: text).map(L.lookup) ?? text
+            let shown = Self.verbErrorCopy(error)
             if landClientErrorMessage(generation: generation, message: shown) {
                 verbErrorMessage = shown
             }
@@ -1488,3 +1501,4 @@ final class FeedRoomPostObserverBox: SnapshotObserver, @unchecked Sendable {
 extension PostSummary: @retroactive Identifiable { public var id: String { postId } }
 extension FeedSummaryView: @retroactive Identifiable { public var id: String { feedId } }
 extension BridgeFeedView: @retroactive Identifiable {}
+#endif // !FAUNA_KIDS

@@ -187,10 +187,11 @@ def test_changes_in_one_mail_app_are_pushed_to_another(mail_bridge_mda, nest_ins
         assert _recv_line(idler.sock, idler.buf, deadline).startswith("+"), "IDLE continuation"
 
         step = lambda: time.monotonic() + 20.0  # noqa: E731
-        # Barrier: the idling session's push subscription is live once it has
-        # been told about a message the other session added. Without it, a
-        # change made before the subscription registered would be missed for a
-        # reason that has nothing to do with the push path under test.
+        # The push subscription is live by the time `+` is seen (the MDA
+        # registers it before writing the continuation — imap-server.md § Push
+        # wiring), so this first change, made the moment `+` arrived, must be
+        # pushed. A red here with "saw []" is that ordering broken; the later
+        # steps then run against a subscription this push proved live.
         status, _ = writer.append("INBOX", "wake the idler")
         assert status == "OK"
         _await_untagged(idler.sock, idler.buf, r"^\* \d+ EXISTS", step(),

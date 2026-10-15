@@ -150,9 +150,12 @@ pub struct ProfileState {
     period_keys: Option<fauna_client_subscriptions::SharedPeriodKeyStore>,
     /// The viewer's own actor id hex (`is_self` fallback + SELF header fallback).
     self_actor_id: String,
-    /// The viewer's own cached handle (SELF header fallback below the published
-    /// display name).
-    self_handle: String,
+    /// The viewer's own `<handle>@<current primary>` (SELF header fallback below
+    /// the published display name) — `session::session_display_handle`, seeded
+    /// at attach and re-pushed on every `SelfAddressRefreshed`, never baked
+    /// (`mail-primary-domain-rename.md` § Display-handle interaction). `None`
+    /// until it resolves; the header then shows the actor id, never a bare handle.
+    self_address: Option<String>,
     /// The published display name fetched via `fauna.profile.get`, upgrading the
     /// header over the handle/actor_id fallback. `None` until fetched / on
     /// `not_found`.
@@ -304,7 +307,7 @@ pub fn init(
     secret: SecretArray32,
     period_keys: fauna_client_subscriptions::SharedPeriodKeyStore,
     self_actor_id: String,
-    self_handle: String,
+    self_address: Option<String>,
     nest_url: String,
 ) -> ProfileState {
     ProfileState {
@@ -313,9 +316,17 @@ pub fn init(
         secret: Some(secret),
         period_keys: Some(period_keys),
         self_actor_id,
-        self_handle,
+        self_address,
         nest_url,
         ..ProfileState::default()
+    }
+}
+
+/// Land a newly resolved display handle (the `SelfAddressRefreshed` push). A
+/// `None` keeps what the header already shows — never push a partial.
+pub fn set_self_address(st: &mut ProfileState, address: Option<String>) {
+    if address.is_some() {
+        st.self_address = address;
     }
 }
 
@@ -1065,12 +1076,12 @@ fn non_empty(s: &str) -> Option<String> {
 /// crosses a `tokio::spawn` (agent path) or is awaited inline (keyboard path).
 pub enum Op {
     /// The private section's Save — the changed registers through the shared
-    /// `contact_overlays::save` door ([`private`]).
+    /// `contact_overlays::save_staged` answer ([`private`]).
     SavePrivate {
         manager: Arc<fauna_conversations::ConversationsManager>,
         store: fauna_sync_engine::account_runtime::AccountStoreHandle,
         actor: String,
-        write: fauna_sync_engine::contact_overlay_rows::OverlayWrite,
+        changes: fauna_core::contact_overlay::OverlayChanges,
     },
     /// `fauna.profile.get` → the SELF edit-form RMW base + editable-field seed,
     /// through the shared `load_profile_edit_base`: a succession link the base
@@ -1304,8 +1315,8 @@ impl Op {
                 manager,
                 store,
                 actor,
-                write,
-            } => private::save(manager, store, actor, write).await,
+                changes,
+            } => private::save(manager, store, actor, changes).await,
             Op::LoadEditBase {
                 nest,
                 secret,
@@ -1952,8 +1963,8 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
 
 // ── Elements ─────────────────────────────────────────────────────────────────
 
-/// The header identity: SELF = published display name → cached handle → actor
-/// id; OTHER = the one shared resolver (`format::peer_display_label`,
+/// The header identity: SELF = published display name → live display handle
+/// (`<handle>@<current primary>`) → actor id; OTHER = the one shared resolver (`format::peer_display_label`,
 /// value-formatting.md § Peer display label) over the viewer's own nickname,
 /// the published display name, then the canonical short id (the OTHER header
 /// has no cached handle). `public` is the name a nickname replaced — the
@@ -1962,8 +1973,8 @@ fn header_label(st: &ProfileState) -> format::PeerLabel {
     if st.is_self() {
         let primary = if let Some(name) = st.header_name.as_ref().filter(|n| !n.trim().is_empty()) {
             name.clone()
-        } else if !st.self_handle.trim().is_empty() {
-            st.self_handle.clone()
+        } else if let Some(address) = st.self_address.as_ref().filter(|a| !a.trim().is_empty()) {
+            address.clone()
         } else {
             st.actor_id().to_string()
         };
@@ -2292,7 +2303,7 @@ mod tests {
         let mut app = authed_app();
         app.page = Page::Profile;
         app.profile.self_actor_id = "ab".repeat(32);
-        app.profile.self_handle = "me@self.test".to_string();
+        app.profile.self_address = Some("me@self.test".to_string());
         app
     }
 
@@ -2476,6 +2487,25 @@ mod tests {
         }
         // The header falls back to the cached handle before a published name.
         assert_eq!(text_of(&app, "profile-handle"), "me@self.test");
+    }
+
+    /// The SELF header follows a rename: the follower's push moves it to the
+    /// new primary, and an unresolved push keeps what it had.
+    #[test]
+    fn the_self_header_follows_a_pushed_primary_rename() {
+        let mut app = self_app();
+        set_self_address(&mut app.profile, Some("me@renamed.test".to_string()));
+        assert_eq!(text_of(&app, "profile-handle"), "me@renamed.test");
+        set_self_address(&mut app.profile, None);
+        assert_eq!(text_of(&app, "profile-handle"), "me@renamed.test");
+    }
+
+    /// With nothing resolved the header shows the actor id, never a bare handle.
+    #[test]
+    fn an_unresolved_self_header_shows_the_actor_id() {
+        let mut app = self_app();
+        app.profile.self_address = None;
+        assert_eq!(text_of(&app, "profile-handle"), "ab".repeat(32));
     }
 
     /// A published display name upgrades the header over the fallback.
@@ -2837,9 +2867,16 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("avatar.png");
-        std::fs::write(&path, b"not really a png, just test bytes").unwrap();
+        let bytes = b"not really a png, just test bytes";
+        std::fs::write(&path, bytes).unwrap();
 
-        let hash_hex = "ab".repeat(32);
+        // The shared upload refuses an echo that differs from the local
+        // blake3 (`security.md` § sign-over-cid), so the fake nest echoes it.
+        let hash_hex: String = fauna_core::encoding::content_hash(bytes)
+            .digest()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         let fake = fauna_nest_http::FakeNestContentApi::new();
         fake.set_ok(
             fauna_nest_http::Verb::PostMultipartBlob,

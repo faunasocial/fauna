@@ -192,6 +192,8 @@ async fn replica(
                 })
             }),
             file_chunks: None,
+            folder_changes: None,
+            folder_manifests: None,
             quotas,
             now: now_fn,
         },
@@ -1719,6 +1721,8 @@ async fn the_fleet_brake_refuses_to_start_the_leg() {
             custody_revoked: None,
             device_removed: None,
             file_chunks: None,
+            folder_changes: None,
+            folder_manifests: None,
             quotas: QuotaConfig::default(),
             now: now_fn,
         },

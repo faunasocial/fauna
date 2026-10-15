@@ -1175,7 +1175,7 @@ class MacosInProcessDriver(InProcessAgentDriver):
         except OSError:
             return ""
 
-    def teardown(self) -> None:
+    def _stop_app(self) -> None:
         """Kill the app **and its whole process group**, then close the log files.
 
         `terminate_tree`, never a hand-rolled `killpg`. The app spawns
@@ -1183,7 +1183,7 @@ class MacosInProcessDriver(InProcessAgentDriver):
         agent is BUILT to outlive the app that started it (`sync-agent.md`
         § Packaging + lifecycle) — right in production, an orphan in a test, and
         one that mass-deletes the user's live files when tmp GC empties the
-        folder it still has bound (34 deletes propagated to example.com,
+        folder it still has bound (34 deletes propagated to the live nest,
         2026-07-24).
 
         The hand-rolled teardown this replaces leaked the agent two independent

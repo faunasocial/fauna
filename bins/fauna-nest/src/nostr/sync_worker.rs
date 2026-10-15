@@ -131,6 +131,14 @@ pub struct NostrSyncWorker {
     /// attach state, so nothing in tree relies on the stateless shape: it is a
     /// degraded mode, not a second behavior to keep working.
     state: Option<Arc<crate::AppState>>,
+    /// Wake nudge for the inbound-subscription refresh (fed by
+    /// `state.nostr.inbound_wake_tx`): one pass of the 60 s tick's follow
+    /// sweep, now. Its one sender today is the `test-hooks` poll-now route
+    /// ([`crate::nostr::inbound_test_hook`]), so a journey asserting that a
+    /// followed author's note reached the feed pokes it instead of waiting out
+    /// the cadence. `None` (a worker built without
+    /// [`Self::with_inbound_wake`]) never wakes early.
+    inbound_wake_rx: Option<mpsc::Receiver<()>>,
     /// The SSRF seat for every relay this worker dials — publish lists, follow
     /// hints, paired serving boxes — passed to `RelayClient::connect` at the
     /// pool and the bunker drain. Production boot passes
@@ -138,6 +146,14 @@ pub struct NostrSyncWorker {
     /// than read at the dial so an in-process test whose peer nest sits on
     /// loopback can say so without a feature or an env var.
     dial_policy: RelayDialPolicy,
+}
+
+/// Receive on an optional wake channel; an absent one never fires.
+async fn recv_wake(rx: &mut Option<mpsc::Receiver<()>>) -> Option<()> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 impl NostrSyncWorker {
@@ -156,8 +172,16 @@ impl NostrSyncWorker {
             bunker_wake_rx,
             nest_signing_key_bytes,
             state: None,
+            inbound_wake_rx: None,
             dial_policy,
         }
+    }
+
+    /// Attach the inbound-refresh wake channel (see the field). The production
+    /// spawn always does this.
+    pub fn with_inbound_wake(mut self, rx: mpsc::Receiver<()>) -> Self {
+        self.inbound_wake_rx = Some(rx);
+        self
     }
 
     /// Attach the app state so believed zaps can complete a purchase and the
@@ -202,6 +226,18 @@ impl NostrSyncWorker {
                         continue;
                     }
                     self.reconcile_bunker_drains(&mut bunker_drains).await;
+                }
+
+                // An on-demand inbound refresh — the tick's follow sweep
+                // alone; the drain below collects what the relays answer.
+                Some(()) = recv_wake(&mut self.inbound_wake_rx) => {
+                    if !self.bridging_enabled().await {
+                        continue;
+                    }
+                    self.refresh_inbound_subscriptions(
+                        &mut relay_connections,
+                        &mut active_subscriptions,
+                    ).await;
                 }
 
                 // Periodic inbound sync: refresh subscriptions for followed Nostr pubkeys
@@ -844,8 +880,17 @@ impl NostrSyncWorker {
                         None => None,
                     };
                     let conn = self.db.conn().await;
-                    crate::nostr::zap_ingest::record_zap_as(&conn, &zap, purchased.as_deref());
+                    let newly =
+                        crate::nostr::zap_ingest::record_zap_as(&conn, &zap, purchased.as_deref());
                     drop(conn);
+                    crate::nostr::zap_ingest::notify_tip(
+                        state,
+                        &zap,
+                        subject.as_ref(),
+                        purchased.as_deref(),
+                        newly,
+                    )
+                    .await;
                     return;
                 }
                 fauna_bridge_nostr::nip57::ZapVerdict::Untrusted(reason) => {

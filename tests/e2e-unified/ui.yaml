@@ -137,7 +137,17 @@ gated_features:
       - subscription-claim-      # §5 claim minting + redemption
       - post-tip-                # the tip surface on a post
       - subscription-tier-form-asking-price   # the tier editor's machine-price input
+      - subscription-tier-form-price-hint     # the price-and-route class (dynamic-features.md 2026-10-07 ruling): tier editor price hint
+      - subscription-tier-form-payment-url    # tier editor payment-route URL
       - compose-sell-asking-price             # the sell-post composer's machine-price input
+      - compose-sell-price                    # the price-and-route class: the composer's price field
+      - compose-sell-subscribers-free         # the price-and-route class: the composer's subscribers-free toggle
+      - subscription-tier-price               # the price-and-route class: a tier's price line
+      - subscription-offer-price              # the price-and-route class: an offer's price line
+      - subscription-offer-payment-link       # the price-and-route class: an offer's payment link
+      - gated-post-price                      # the price-and-route class: a gated post's price
+      - gated-post-payment-link               # the price-and-route class: a gated post's payment link
+      - gated-post-buy-button                 # the price-and-route class: a gated post's buy button
   # The NIP-57 Lightning zap plane — a subset member of `payments` (excising `payments`
   # excises this too; excising this alone keeps provider-rail payments).
   zaps:
@@ -395,7 +405,11 @@ pages:
     sub_pages:
       post_detail:
         trigger: "click post-card"
-        elements: [feed-post-detail-dialog, feed-post-detail-author, feed-post-detail-body, tag-chip, post-image, doc-remote-image, quoted-post, post-tip-total, post-tip-count, post-tip-list-button]
+        elements: [feed-post-detail-dialog, feed-post-detail-author, feed-post-detail-body, tag-chip, post-image, doc-remote-image, quoted-post, post-tip-total, post-tip-count, post-tip-list-button, feed-post-view-thread-button]
+      thread:
+        # The Bluesky-native thread view (bridges.md § Bluesky-native thread view): IDs user-approved 2026-10-03, all seven apps; tui first. Back returns to post_detail. A failed fetch paints the page's error-message.
+        trigger: "click feed-post-view-thread-button"
+        elements: [feed-thread-page, feed-thread-post, error-message]
       create_feed:
         trigger: "click feed-create-feed-button"
         elements: [feed-create-feed-name, feed-rule-type-select, feed-rule-value-input, feed-rule-threshold-input, feed-rule-required-toggle, feed-add-rule-button, feed-combination-select, feed-factor-select, feed-factor-weight-input, feed-factor-global-toggle, feed-add-factor-button, create-feed, feed-create-cancel]
@@ -495,7 +509,7 @@ pages:
       - thread-rename-confirm          # button — commit the new label in the rename overlay
       - thread-rename-field            # text_input — new-label input in the rename overlay
       - thread-room-class              # text — the room's class stated on the thread header (state via `class` attribute: end-to-end | community | transport-only; user-approved 2026-09-09)
-      - thread-room-settings-button    # button — opens the room_settings editor; greyed unless capabilities.can_set_policy (user-approved 2026-09-09)
+      - thread-room-settings-button    # button — opens the room_settings editor; painted and live for any member of a room, the greying moving inside per control (user-approved 2026-09-09, widened 2026-09-20)
       - topic-toggle-button            # button — reveal/hide subject input in compose
       - verified-badge                 # text — verified sender indicator
     optional_elements:
@@ -867,6 +881,11 @@ pages:
       - backup-destination-reseed-cancel-button   # button — close without side effect
       - backup-destination-reseed-result          # view — the ceremony's per-set outcome (present only after a run)
       - backup-audit-alert               # text, indexed — loud audit-failure banner at top of page; one per destination in a freshness-failure / inclusion-failure / overdue state (renders only then; IDs user-approved 2026-07-24, backup-restore.md § Background Tasks audit loop)
+      - backup-audit-recover-button       # button, indexed — on a fifth-reason banner whose destination is a nest: recover what the nest lost (user-approved 2026-09-30)
+      - backup-audit-recover-confirm-modal  # view — plain confirm, no re-type
+      - backup-audit-recover-confirm-button # button — run the recovery
+      - backup-audit-recover-cancel-button  # button — close without side effect
+      - backup-audit-recover-result       # view — the recovery's per-set outcome (present only after a run)
       - backup-sole-client-destination-warning # text — standing warning when every configured destination is a client device (backups.md § Third destination kind; user-approved 2026-08-02)
       - backup-destination-status-row     # view, indexed — one row per configured destination (only renders when ≥1 destination configured)
       - backup-destination-kind-badge     # text, indexed — per-row destination-kind label (nest / this-device; backups.md § Third destination kind; user-approved 2026-08-02)
@@ -945,8 +964,8 @@ pages:
       # confirm chosen by the user over a single click). A second, separately
       # labelled group below the roster: one `device-member-card` per verified
       # fleet member that NO roster row accounts for, removable directly by its
-      # key through the member-addressed door (account-data-taxonomy.md § The
-      # generation machinery → Fleet-scope reclamation, clause (4), *A
+      # key through the member-addressed door (fleet-scope-reclamation.md
+      # § Fleet-scope reclamation, clause (4), *A
       # disagreement is the user's to settle*). It is the only way to remove a
       # device removed from the web app (web hosts no account runtime, so it
       # deletes the nest row alone and the member stays signed in) or a stolen
@@ -1130,6 +1149,13 @@ pages:
       # only shape). Promoted from optional_elements 2026-08-27: windows was
       # the last of 7 apps without a call site; all 7 now carry it.
       - settings-export-data-button  # button — export the full account archive
+      # Encryption — the account's supply of one-use starter keys (direct-messages.md
+      # § Key Package Management; settings.md § Encryption page). Realized from this
+      # page under the rail's settings-nav-row[encryption] (no page key of its own,
+      # navigation.sub_page_nav_rows). Ids user-approved 2026-09-25 under rule A; the
+      # conditional low flag sits in optional_elements below.
+      - encryption-keypackage-count          # text — the account's published key-package count (read-only)
+      - encryption-keypackage-refresh-button # button — the manual top-up through the shared session (ensure_keypackages)
       # About — the one product version every app and the nest share
       # (product-version.md § The model; id user-approved 2026-09-25 under rule A,
       # tui first 2026-09-26). The two update ids beside it are desktop + tui
@@ -1137,6 +1163,10 @@ pages:
       - settings-app-version       # text — the running app's version, the shared product version
       - error-message              # text — error display
     optional_elements:
+      # The Encryption page's read-only low flag (direct-messages.md § Key Package
+      # Management) — present only while the count is under the shared low threshold;
+      # never an auto-mint trigger. Id user-approved 2026-09-25 under rule A.
+      - encryption-keypackage-low-warning  # text — the supply is low; present only when low
       # The shared feature-policy editor, opened in place from a feature-limits-row's
       # own edit button (self tier) — present only while open. The same ID family
       # admin-nest hosts for the admin tier (dynamic-features.md § Authoring surfaces).
@@ -1237,8 +1267,8 @@ pages:
       # the degraded copy pointing at a button that is not there.
       # ✅ ID user-approved 2026-08-16 (proposed 2026-08-15).
       - recovery-kit-sweep-retry-button  # button — re-run the succession group sweep
-      # The let-go of a dead generation (account-data-taxonomy.md § The
-      # generation machinery → Fleet-scope reclamation, clause (3)(j); placement
+      # The let-go of a dead generation (fleet-scope-reclamation.md
+      # § Fleet-scope reclamation, clause (3)(j); placement
       # settings.md § Recovery kit). A dead generation is keyed by no device of
       # this account and wrapped by no holder; only the user may retire the rows
       # sealed under it, because a dormant device may still read them. All three
@@ -1654,6 +1684,7 @@ pages:
       - admin-users-admit-actor-input    # text_input — actor id to admit (64 hex chars)
       - admin-users-admit-handle-input   # text_input — handle to admit them under; blank = handle-less (deliberate state — cannot send deployment-domain mail, public-mode.md § A handle-less account)
       - admin-users-admit-tier-select    # select — tier for the admitted account (admission is always choosing a tier)
+      - admin-users-admit-guardian-select # select — guardian for a supervised admission, default "none" (family-safety.md § The guardianship link, Set at admission; user-approved 2026-09-25)
       - admin-users-admit-button         # button — one fauna.admin.users.create call
       # ── Section: Invite (mint a code; folded from admin-settings) ──
       - admin-users-invite-section       # view — mint-an-invite-code section
@@ -2009,12 +2040,12 @@ pages:
     errors: [error-message]
     notes:
       tui: "lead app — src/admin/custody_hosting.rs over AdminHostingClient + the shared admin_hosting_rows projection."
-      linux: "lift — pending (batched trickle-down)."
-      web: "lift — pending (batched trickle-down)."
-      windows: "lift — pending (batched trickle-down)."
-      macos: "lift — pending (batched trickle-down)."
-      ios: "lift — pending (batched trickle-down)."
-      android: "lift — pending (batched trickle-down)."
+      linux: "built 2026-08-18 (second app after tui)."
+      web: "built 2026-08-19."
+      windows: "built 2026-09-09 (the seventh and last app)."
+      macos: "built 2026-08-26 (shared FaunaKit view with ios)."
+      ios: "built 2026-08-26 (shared FaunaKit view with macos)."
+      android: "built 2026-08-19."
 
   admin-logs:
     heading: S.admin.logs_page.title
@@ -2565,10 +2596,12 @@ pages:
     platform_elements:
       # Local-folder binding — DESKTOP ONLY (no user-bindable local folder tree on
       # web/ios/android). Bound per-set, nested under each folder; no free-text set
-      # name. Behavior + data shape: docs/goal/behavior/file-sync.md § On-Demand Files.
-      # macos/ios additionally carry folder-on-demand-toggle — the SET-level
-      # "Show in Finder/Files" File Provider presence (user-approved 2026-07-18;
-      # file-sync.md § On-Demand Files → Apple File Provider binding).
+      # name. Behavior + data shape: docs/goal/behavior/on-demand-files.md § On-Demand Files.
+      # macos/ios/android additionally carry folder-on-demand-toggle — the SET-level
+      # "Show in Finder/Files" presence: apple's File Provider domain (user-approved
+      # 2026-07-18), android's SAF DocumentsProvider set (user-approved 2026-09-30);
+      # on-demand-files-apple.md § Apple File Provider binding / § Android SAF
+      # DocumentsProvider binding.
       # folder-location-deletes-held + folder-location-apply-deletes-button are the
       # mass-delete floor's confirm affordance (user-approved 2026-08-15;
       # delete-propagation.md § A wholesale-vanished folder is infrastructure
@@ -2584,7 +2617,7 @@ pages:
       # linux and windows carry folder-location-mode-toggle — the per-binding
       # on-demand switch, on the platforms whose agent hosts a placeholder
       # surface for a bound directory (windows cfapi; linux the agent's FUSE
-      # root — user-approved for linux 2026-09-26; on-demand-files.md § Linux
+      # root — user-approved for linux 2026-09-26; on-demand-files-linux.md § Linux
       # FUSE binding). On linux it renders insensitive, with the reason, where
       # the agent cannot mount (no fuse3 package, a sandbox without /dev/fuse).
       linux:   [folder-location-list, folder-location-row, folder-location-path, folder-location-add-button, folder-location-path-input, folder-location-browse-button, folder-location-remove-button, folder-location-deletes-held, folder-location-apply-deletes-button, folder-location-unreadable, folder-location-mode-toggle]
@@ -2601,6 +2634,7 @@ pages:
       # on-demand-files.md § On-Demand Files).
       tui:     [folder-location-list, folder-location-row, folder-location-path, folder-location-add-button, folder-location-path-input, folder-location-remove-button, folder-location-deletes-held, folder-location-apply-deletes-button, folder-location-unreadable, folder-location-mode-toggle, sync-agent-linger-toggle]
       ios:     [folder-on-demand-toggle]
+      android: [folder-on-demand-toggle]
     components:
       - photo-backup-controls   # Apple + android — the "Photo Library" folder's config (see component notes); other clients have no device photo library
       - recipient-picker        # REUSED from conversations add-participant — the person-picker for the per-set "Shared with" share affordance (folders.md § Sharing)
@@ -2624,7 +2658,7 @@ pages:
       windows: "Local-folder binding over the fauna-sync named-pipe IPC; on-demand mode live (cfapi). The standalone 'Sync conflicts' (conflicts-tab) entry is retired — conflicts render here."
       tui: "settings/folders.rs sync_folder_elements — the binding section nested under each expanded folder-row, driven directly through crate::sync_agent (the external per-user fauna-sync-agent, A6). Set is contextual (the row names it); typed-path add (no folder-location-browse-button — an OS-picker affordance tui declares absent, tui.md § Declared platform absences 4). folder-location-mode-toggle renders on each bound row only where the agent has a placeholder surface — a windows host (cfapi), where a fresh binding starts on-demand whichever app binds, and a linux host (the agent's FUSE root), where it starts always-resident — carrying the row's mode in a `state` attr (always|on-demand) read off the shared binding model's agent-mirrored mode; disabled with the reason as untagged chrome under it where the agent reports on-demand unavailable (linux without the fuse3 package), and a row whose mount was refused says so the same way; absent on macOS (bound locations always-resident by design). Landed 2026-07-23 (A6 Slice 3). sync-agent-linger-toggle sits ABOVE the set list (landed 2026-07-23, A6 remainder): it renders only where loginctl can answer, and its help line is untagged chrome."
       web: "No local-folder binding (folder-location-* absent); folder create/config + conflicts apply. Reached at /app/settings/folders."
-      android: "No local-folder binding (mobile sync model). Folder create/config + conflicts apply."
+      android: "No local-folder binding; on-demand presence in the system file browser via folder-on-demand-toggle. Folder create/config + conflicts apply."
       ios: "No local-folder binding (sandboxed; no user-bindable local folder tree). Folder create/config + conflicts apply. folder-on-demand-toggle ('Show in Files'; File Provider domain, ratified 2026-07-18, BUILT 2026-07-19 in M5 — the same shared FaunaKit FolderOnDemandToggle macOS renders; e2e in test_folder_on_demand_toggle.py) is the only per-device presence control, and with no binding surface here the arbitration rule reduces to FP-domain-or-RemoteOnly."
 
   moderation:
@@ -2634,7 +2668,7 @@ pages:
       # The reporter's own ledger — "Your reports" (moderation.md § User-initiated
       # reporting → What the reporter is told; the one-sentence widening of that
       # doc's § Goal, still never an admin console). IDs user-approved 2026-09-25;
-      # unbuilt on every app — tui leads.
+      # built on all 7 apps (tui led).
       - moderation-reports-section # view — container for the reports the user made about others' content
     optional_elements:
       # Present only with rows: one per report the user made (subject, reason,
@@ -3073,7 +3107,7 @@ pages:
       - mail-export-done-summary                  # step 5: X exported, time, blob size
       - mail-export-download-button               # step 5: actor-authed sealed-blob download
       - mail-export-download-url                  # step 5: copyable actor-bound link (other-device download)
-      - mail-export-discard-button                # step 5: immediate blob unlink (before 30-day GC)
+      - mail-export-discard-button                # step 5: immediate blob unlink (before 30-day GC); also step 4's Dismiss of a FAILED export (mail-export.md § A failed export is a record …, ratified 2026-10-11 — same id, own label)
       - error-message
     components:
       - mail-export-mailbox-progress-list         # step 4: per-mailbox progress rows
@@ -3149,7 +3183,7 @@ pages:
     elements:
       - page-heading
       - archive-import-source-picker            # step 1: Facebook / Instagram (label round-trip over fauna_archive::Platform::label)
-      - archive-import-source-help              # step 1: how to request the JSON export on that platform
+      - archive-import-source-help              # step 1: how to request the JSON export on that platform, ending with the platform's export-page address (snapshot source_export_url)
       - archive-import-archive-path             # step 2: path entry (tui/desktop); the real file input on web
       - archive-import-archive-open-button      # step 2: opens the path / launches the picker → ArchiveImportAction::OpenArchive (user-approved 2026-09-08; the machine's OpenArchive is a separate action from Next)
       - archive-import-archive-summary          # step 2: platform · account · date range · sizes, once indexed
@@ -3163,7 +3197,7 @@ pages:
       - wizard-back-button                      # steps 2→1, 3→2, 4→3; on a concluded Progress/Done screen: a fresh wizard (reused)
       - archive-import-confirm-summary          # step 4: records + bytes to upload
       - archive-import-start-button             # step 4: the durable commit (folder + raw upload; the app spawns run_import)
-      - archive-import-progress-summary         # step 5: imported of total · skipped, plus the run state
+      - archive-import-progress-summary         # step 5: imported of total · skipped, plus the run state, elapsed time and the estimate left (snapshot elapsed_secs / eta_secs)
       - archive-import-progress-bar             # step 5
       - archive-import-pause-button             # step 5
       - archive-import-resume-button            # step 5 (also the restart-resume door: a folder found at hydrate lands here Paused)
@@ -3832,9 +3866,17 @@ onboarding:
   # NO retry element, deliberately: a retry cannot change the verdict and must
   # never silently re-pin. The only two ways out are the trust button and the
   # fallthrough.
+  #
+  # FORK VARIANT (box-recovery.md § Client acceptance; user-approved 2026-10-09,
+  # rule A): when the shared `LaunchSnapshot.identity_fork` is set, the page
+  # paints nest-identity-fork-warning (naming both heads) INSTEAD of
+  # nest-identity-changed-warning, plus launch-fallthrough-button ONLY — no
+  # trust button (the machine refuses it on fork evidence anyway). The two
+  # warnings are mutually exclusive; each render carries exactly one.
   launch_identity_changed:
     elements:
       - nest-identity-changed-warning
+      - nest-identity-fork-warning
       - nest-identity-changed-trust-button
       - launch-fallthrough-button
     transitions:
@@ -3984,6 +4026,10 @@ onboarding:
       # entries sit adjacent and their labels must differentiate sharply).
       # ID user-approved 2026-08-01.
       - restore-from-recovery-kit-button
+      # ui/sessions.md § The signed-out door: the 24-hour lock door. Restores
+      # nothing — it locks an account from a device the owner will not sign in
+      # on, and persists nothing. IDs user-approved 2026-09-25.
+      - emergency-lockout-entry-button
       # account-scoping.md § Erasure follows scope → the residue surface: what a
       # sign-out's erase could not remove, painted where every sign-out and
       # every signed-out launch lands. Present ONLY while the install-scoped
@@ -4010,6 +4056,7 @@ onboarding:
       - { on: "click import-identity-button", to: "identity_import" }
       - { on: "click recover-lost-box-button", to: "identity_import" }   # recovery intent → handle_entry after import (Q2-A)
       - { on: "click restore-from-recovery-kit-button", to: "recovery_entry" }   # identity restore (phrase only)
+      - { on: "click emergency-lockout-entry-button", to: "emergency_lockout_entry" }   # the signed-out lock door
       - { on: "click onboarding-cancel-button", to: "(authenticated app)" }   # windows only, append-mode only
 
   identity_created:
@@ -4067,6 +4114,25 @@ onboarding:
       - { on: "click recovery-entry-submit-button", success: true, to: "handle_entry" }
       - { on: "qr-scan-success", to: "handle_entry" }
       - { on: "click recovery-entry-back-button", to: "identity_choice" }
+
+  # ui/sessions.md § Layout & flow → *The signed-out door* (leg 3): the lock
+  # door, reached from identity_choice. Pre-identity and persists nothing — the
+  # pasted secret rides one anonymous fauna.account.lockout call. The three
+  # lock elements are the page-leg ones, reused (one copy of the REQUIRED
+  # warning). IDs user-approved 2026-09-25.
+  emergency_lockout_entry:
+    elements:
+      - paste-secret-field
+      - recovery-entry-account-field
+      - sessions-lockout-warning
+      - sessions-lockout-confirm-field
+      - sessions-lockout-button
+      - emergency-lockout-back-button
+    errors: [error-message]
+    transitions:
+      - { on: "click sessions-lockout-button", success: true, to: "identity_choice" }
+      - { on: "click sessions-lockout-button", success: false, to: "emergency_lockout_entry" }
+      - { on: "click emergency-lockout-back-button", to: "identity_choice" }
 
   identity_import:
     elements: [paste-secret-field, import-submit-button, identity-import-back-button]
@@ -5019,15 +5085,28 @@ components:
         resolves the shared FeedManager playbackSource and swaps the glyph for a
         native <video controls> in the same element, publishing data-state
         idle/loading/playing/error; never autoplays (test_feed_video_playback.py)."
-      linux: "build_post_video (post_list.rs + post_detail.rs), off
-        post.document.first_video_hash() — a play glyph icon + the hash as a
-        gtk::Label, mirroring tui's text-only render (no poster frame exists
-        to paint). Built 2026-08-16."
-      android: "FeedPostVideo (FeedScreen.kt, also wired into
-        PostDetailScreen.kt), off documentMediaVideoHash →
-        renderDocumentFirstVideoHash — a play glyph icon + the hash as Text,
-        same text-only render as linux/tui. Built 2026-08-16, compile-verified
-        only (no host emulator on this dev VM)."
+      linux: "build_post_video (views/feed/video_thumbnail.rs; call sites
+        post_list.rs + post_detail.rs), off the document's Video block (or a
+        bridged post's ProxiedVideo) — a play glyph icon + the hash (or path) as
+        a gtk::Label until a tap (no poster frame exists to paint). Built
+        2026-08-16. Since 2026-10-10 the element is the inline player host
+        (render-model.md § D6c → Inline playback): a tap resolves the shared
+        playback_source and swaps the glyph for gtk::Video in the same element,
+        reading a Url source through the pinned RangedNestReader (never a URL)
+        and a sealed one from its opened bytes; publishes state
+        idle/loading/playing/error plus position and source; never autoplays
+        (test_feed_video_playback.py, all four legs)."
+      android: "FeedPostVideo (FeedPostVideo.kt; call sites FeedScreen.kt +
+        PostDetailScreen.kt), off documentMediaVideoHash (or a bridged post's
+        documentProxiedPostVideoPath) — a play glyph icon + the hash (or path)
+        as Text until a tap. Built 2026-08-16. Since 2026-10-10 the element is
+        the inline player host (render-model.md § D6c → Inline playback): a tap
+        resolves the shared playbackSource and swaps the glyph for the
+        framework MediaPlayer on a SurfaceView in the same element, reading a
+        Url source through RangedNestDataSource over FfiRangedNestReader (never
+        a URL) and a sealed one from a cache-dir temp file; publishes state as
+        stateDescription; never autoplays. Compile- and Robolectric-verified
+        only (InlineVideoPlaybackTest; no android run venue yet)."
       tui: "Painted from the document's first Video block (feed/mod.rs
         video_thumbnail_element), on the list card and post_detail alike. Text is
         the play glyph + hash: inline AV playback is a declared tui absence
@@ -5040,9 +5119,26 @@ components:
       windows: "DocumentRenderer.MediaVideoHash (render_document_first_video_hash),
         twinning the existing MediaImageHash/post-image wrapper — a play glyph
         (Segoe MDL2 Assets) + the hash as text, mirroring tui/linux/android's
-        text-only render (no poster frame exists to paint). Two call sites:
-        FeedPage.xaml's post-card DataTemplate (list card) + the imperative
-        post-detail dialog (FeedPage.xaml.cs). Built 2026-08-26."
+        text-only render (no poster frame exists to paint). Two call sites, one
+        control (Controls/VideoThumbnailView): FeedPage.xaml's post-card
+        DataTemplate (list card) + the imperative post-detail dialog
+        (FeedPage.xaml.cs). Built 2026-08-26. Since 2026-10-08 the element is the
+        inline player host (render-model.md § D6c → Inline playback): a tap
+        resolves the shared FeedManager PlaybackSource (VideoPlaybackResolver — a
+        blob URL on the nest origin, or a sealed video opened in memory) and swaps
+        the glyph for WinUI's MediaPlayerElement in the same element, publishing
+        state idle/loading/playing/error plus position and source, packed into its
+        UIA HelpText and read per key by the FlaUI bridge; never autoplays
+        (InlineVideoPlaybackTests; test_feed_video_playback.py). A bridged post's
+        ProxiedVideo (render-model.md § D6c → Proxied video, 2026-10-07) paints in
+        the same element as the play glyph + its nest-relative path
+        (MediaProxiedVideoPath) when the post has no blob Video — never byte-loaded
+        before the tap. Since 2026-10-09 it plays like a Video: the control binds the
+        folded block itself (DocumentRenderer.MediaVideoBlock → FeedPostItem.VideoBlock;
+        the detail dialog reads the same helper), and the tap asks PlaybackSource about
+        that ProxiedVideo, whose answer is the proxied path carrying the playback
+        ticket (exp + sig) the shared decision minted — published whole as source
+        (test_feed_video_playback.py's bridged-post test)."
       all: >
         REACHABLE FROM THE SHARED DOCUMENT since 2026-08-15 (render-model.md § D6b).
         The fold that used to discard MediaItem.media_type now emits a typed
@@ -5318,6 +5414,7 @@ components:
       - create-event            # button — submit (all platforms)
       - event-form-description  # text_input — description (all platforms)
       - event-form-location     # text_input — location (all platforms)
+      - event-form-discard      # button — discard the draft and close (all platforms; user-approved 2026-09-25)
     children:
       - event-form-start-datetime
       - event-form-end-datetime
@@ -5716,6 +5813,7 @@ components:
     elements:
       - spam-preferences
       - spam-threshold
+      - spam-threshold-band
       - phishing-threshold
       - save-spam-prefs
     used_in: [settings]
@@ -6325,7 +6423,7 @@ components:
     used_in: [devices]
 
   device-member-card:
-    description: "One signed-in device without a matching entry (indexed): a verified fleet member — a device holding this account's keys — that NO roster row accounts for, offered direct removal BY ITS KEY through the member-addressed door (account-data-taxonomy.md § The generation machinery → Fleet-scope reclamation, clause (4), *A disagreement is the user's to settle*; devices.md § Members without a matching entry). Who lists here: a device removed from the web app (its nest row deleted alone), a device whose own record names a row that is not its roster row (fabricated, a sibling's, this device's own — and then BOTH devices stating one row), a non-stating device whose claim the nest stripped or re-aimed, and a device signed in but not yet registered with the server (until it does). An honest fleet lists nobody. Such a member has NO name — the label is the nest row's, exactly what cannot be trusted here — so the card carries its key fingerprint (first 8 + … + last 8 hex, the shared `fleet_fingerprint`) and the sign-in time the device itself claims (its own self-signed word, a hint never proof). The user settles by elimination against `device-own-fingerprint` on each device still in hand; the honest re-minted machine yields two cards, one matching its own fingerprint. Removal is PERMANENT (the fleet's Removed record is absorbing; the device must sign in again from scratch) — hence the two-step confirm the user chose. A separately-labelled group below the roster, never intermixed with device-card rows. IDs user-approved 2026-09-25; tui first."
+    description: "One signed-in device without a matching entry (indexed): a verified fleet member — a device holding this account's keys — that NO roster row accounts for, offered direct removal BY ITS KEY through the member-addressed door (fleet-scope-reclamation.md § Fleet-scope reclamation, clause (4), *A disagreement is the user's to settle*; devices.md § Members without a matching entry). Who lists here: a device removed from the web app (its nest row deleted alone), a device whose own record names a row that is not its roster row (fabricated, a sibling's, this device's own — and then BOTH devices stating one row), a non-stating device whose claim the nest stripped or re-aimed, and a device signed in but not yet registered with the server (until it does). An honest fleet lists nobody. Such a member has NO name — the label is the nest row's, exactly what cannot be trusted here — so the card carries its key fingerprint (first 8 + … + last 8 hex, the shared `fleet_fingerprint`) and the sign-in time the device itself claims (its own self-signed word, a hint never proof). The user settles by elimination against `device-own-fingerprint` on each device still in hand; the honest re-minted machine yields two cards, one matching its own fingerprint. Removal is PERMANENT (the fleet's Removed record is absorbing; the device must sign in again from scratch) — hence the two-step confirm the user chose. A separately-labelled group below the roster, never intermixed with device-card rows. IDs user-approved 2026-09-25; tui first."
     elements:
       - device-member-card
       - device-member-fingerprint          # the key fingerprint — the SAME shared-Rust formatter as device-own-fingerprint (one comparison, two halves)
@@ -6383,7 +6481,7 @@ components:
     used_in: [admin-bridges-pending]
 
   admin-dns-domain:
-    description: "Per-domain DNS section on admin-dns. Indexed; one per active local domain. Holds the domain name, a managed/manual mode control, a primary badge / remove affordance, a per-domain catch-all actor picker (with a read-only explainer when a succession, not an admin, last cleared it), four per-domain role-address override pickers (postmaster/abuse/noc/security), the per-domain TLS-cert lifecycle (status badge + issue/renew + manual-paste complete/cancel + CNAME renewal-delegation; tls-certificates.md § C.4 + § B tier 3), and an indexed list of admin-dns-record rows."
+    description: "Per-domain DNS section on admin-dns. Indexed; one per active local domain. Holds the domain name, a managed/manual mode control, a primary badge / remove affordance, a per-domain catch-all actor picker (with a read-only explainer when a succession, not an admin, last cleared it), a per-domain DMARC policy picker, four per-domain role-address override pickers (postmaster/abuse/noc/security), the per-domain TLS-cert lifecycle (status badge + issue/renew + manual-paste complete/cancel + CNAME renewal-delegation; tls-certificates.md § C.4 + § B tier 3), and an indexed list of admin-dns-record rows."
     elements:
       - admin-dns-domain
       - admin-dns-domain-name
@@ -6391,6 +6489,7 @@ components:
       - admin-dns-domain-auto-renew              # default-on auto-renew toggle; shown only for managed/delegated rows; SetAutoRenew (config-only, all apps)
       - admin-dns-domain-catch-all-select        # designate/clear this domain's catch-all actor ("none" clears)
       - admin-dns-domain-catch-all-cleared-state # read-only: present only when a succession (not an admin) cleared the catch-all
+      - admin-dns-domain-dmarc-policy-select     # this domain's published DMARC policy: reject (default; clears the override) / quarantine / none
       - admin-dns-domain-role-address-postmaster-select  # designate/clear postmaster@ override actor ("Admin (default)" clears)
       - admin-dns-domain-role-address-abuse-select       # designate/clear abuse@ override actor ("Admin (default)" clears)
       - admin-dns-domain-role-address-noc-select         # designate/clear noc@ override actor ("Admin (default)" clears)
@@ -7412,6 +7511,14 @@ elements:
   nest-identity-changed-warning:
     description: "Loud warning on the launch screen when the nest's pinned deployment identity changed, or it can no longer prove the identity this client previously trusted (the SSH known_hosts model)"
     type: text
+  # The fork variant of page launch_identity_changed (box-recovery.md § Client
+  # acceptance — re-pin on a verified chain), user-approved 2026-10-09 under rule
+  # A. Shown INSTEAD of nest-identity-changed-warning when the shared
+  # `LaunchSnapshot.identity_fork` is set; nest-identity-changed-trust-button is
+  # absent on that surface.
+  nest-identity-fork-warning:
+    description: "Hard warning on the launch screen when the nest's identity history shows two competing successors (rotation-chain fork evidence) — names both heads (`LaunchPhase::IdentityChanged`'s pinned_hex and seen_hex) and offers no way to trust either"
+    type: text
   # The previously-signed-in row's launch surface (page launch_sign_in_refused),
   # user-approved 2026-09-25 under rule A.
   launch-sign-in-refused-notice:
@@ -7560,6 +7667,12 @@ elements:
   recovery-entry-back-button:
     description: "Back button on recovery_entry that returns to identity_choice."
     type: button
+  emergency-lockout-entry-button:
+    description: "Optional third entry on identity_choice (ui/sessions.md § The signed-out door): opens emergency_lockout_entry, the 24-hour lock door that takes the secret key and the handle and persists nothing. Its label says what it does — a lock, not a restore — so it differentiates from the two recovery entries beside it."
+    type: button
+  emergency-lockout-back-button:
+    description: "Back button on emergency_lockout_entry that returns to identity_choice, dropping whatever was typed."
+    type: button
   recovery-kit-section:
     description: "Container for the recovery-kit section in account settings (ui/settings.md § Recovery kit). Scope for scoped queries over the section's elements. Placed immediately after identity-export-section — its sibling root-secret affordance."
     type: view
@@ -7585,7 +7698,7 @@ elements:
     description: "Finish a post-succession group sweep that did not complete — the successor's own re-run of the pass that removes the retired identity from every MLS group and seats the new one (identity-succession.md § Propagation → MLS groups), over the shared fauna_client_recovery::retry_group_sweep. Optional — renders ONLY while App-side sweep state shows unfinished work: the sweep never ran (conversations were down at the ceremony), it failed, or it swept some groups and not others (the common network-flake arm). ⚠ Its render gate is UNFINISHED WORK, never 'this device can retry': the retry needs the retired identity's own MLS store, which survives on the device the ceremony ran on and nowhere else, and a device without it answers with the member-side remedy when pressed rather than being silently button-less — gating the render on the store would leave the degraded sweep copy pointing at a control that is not on screen. ⚠ It is IDEMPOTENT and safe to press twice: the shared driver recognises finished groups from membership facts, so a completed group is re-posted nothing, and a partial sweep resumes rather than restarting. ⚠ Never construct the outcome app-side — the three non-sweeping answers (no succession landed, the account moved to a different successor, this device has no old state) each carry their own copy and each names what is left to do; a gesture that reports nothing reads downstream as a dropped command. ID user-approved 2026-08-16."
     type: button
   recovery-kit-unreadable-status:
-    description: "The dead generations of this account's fleet scope — each a generation keyed by no device of the account and wrapped by no holder (account-data-taxonomy.md § Fleet-scope reclamation, clause (3)(j)) — listed as the data sealed under it: its mint date where this device can read the mint record, and its live-row count. Its copy says the one thing the client cannot know: a device not signed in since that date may still read these rows, so sign in there first. Optional — renders ONLY while the shared dead-generation read answers non-empty. ID user-approved 2026-10-02."
+    description: "The dead generations of this account's fleet scope — each a generation keyed by no device of the account and wrapped by no holder (fleet-scope-reclamation.md § Fleet-scope reclamation, clause (3)(j)) — listed as the data sealed under it: its mint date where this device can read the mint record, and its live-row count. Its copy says the one thing the client cannot know: a device not signed in since that date may still read these rows, so sign in there first. Optional — renders ONLY while the shared dead-generation read answers non-empty. ID user-approved 2026-10-02."
     type: text
   recovery-kit-let-go-confirm-field:
     description: "Type-to-confirm gate for recovery-kit-let-go-button, the identity-stolen-confirm-field idiom: the let-go retires rows a dormant device might still read, so it is irreversible. The button stays disabled until this field holds the confirm word, and the gate is re-checked when the act fires. Optional — renders ONLY while a dead generation exists. ID user-approved 2026-10-02."
@@ -8213,7 +8326,7 @@ elements:
     type: view
     indexed: true
   recipient-resolve-status:
-    description: "Recipient resolve state (resolving / resolved / error / mls_available / mls_unavailable). State exposed via attribute, not separate elements."
+    description: "Recipient resolve state (idle / resolving / resolved / not-found / error). State exposed via attribute, not separate elements."
     type: text
   recipient-picker-class:
     description: "The class of the room about to be created, stated in the new-thread composer once a recipient chip is committed (conversation-rooms.md § The three classes) — end-to-end when every chip is a Fauna address, transport-only when any chip rides a bridge; derived in shared Rust (prospective_room_class). State exposed via the `class` attribute (end-to-end | community | transport-only), the recipient-resolve-status shape."
@@ -8771,6 +8884,9 @@ elements:
   event-form-location:
     description: "Location field in event creation form"
     type: text_input
+  event-form-discard:
+    description: "Discard the half-written event: empties the five form fields and the events draft rail, then closes the form (distinct from closing, which keeps the draft)"
+    type: button
 
   # --- Bridges ---
   bridge-card:
@@ -8867,6 +8983,16 @@ elements:
   feed-post-detail-author:
     description: "Author info in post detail dialog"
     type: text
+  feed-post-view-thread-button:
+    description: "'View Thread' on the post detail, beside feed-post-detail-body — present ONLY for a post whose source is bluesky (fauna_feed::PostSummary::offers_thread_view); opens feed-thread-page. User-approved 2026-10-03 (bridges.md § Bluesky-native thread view)."
+    type: button
+  feed-thread-page:
+    description: "The Bluesky thread page (feed sub_page `thread`): the conversation around the opened post as one flat list — ancestors oldest-first, the opened post, then its direct replies — read off FeedSnapshot.thread (FeedManager::open_thread). Back returns to the post detail. User-approved 2026-10-03."
+    type: view
+  feed-thread-post:
+    description: "One post of feed-thread-page, in thread order; text is '‹author› ‹post text›' (the display name, else @handle). Carries a `selected` attribute (\"true\"/\"false\", always present): true on exactly the opened post, the one the nest names by BlueskyThreadReply.focal_index. User-approved 2026-10-03."
+    type: text
+    indexed: true
 
   # --- Contacts ---
   contacts-search-field:
@@ -9196,6 +9322,9 @@ elements:
   spam-threshold:
     description: "Slider for spam detection threshold"
     type: button
+  spam-threshold-band:
+    description: "The localized band label (Aggressive / Moderate / Permissive) for the current spam-threshold value, shown beside spam-threshold — painted from the shared fauna_protocol::spam band mapping (settings.md § Spam threshold slider labels)"
+    type: text
   phishing-threshold:
     description: "Slider for phishing detection threshold"
     type: button
@@ -9571,6 +9700,22 @@ elements:
     description: "Loud audit-failure banner at the top of the backups page. Indexed; one per destination in a failing state — freshness failure (destination high-water lags the client's own by > FRESHNESS_SLACK), inclusion-sampling failure (a sampled record missing or unopenable), or audit overdue (> AUDIT_OVERDUE since the last successful audit). Self-describing text naming the destination + reason; renders only while ≥1 destination is failing. Precedent: restore-divergence-banner. IDs user-approved 2026-07-24."
     type: text
     indexed: true
+  backup-audit-recover-button:
+    description: "'Recover what your nest lost' — on a backup-audit-alert banner carrying the fifth reason (an accepted source regression) whose destination is a nest: recover by record what the copy there holds and the owner's nest lost (segment-backup-protocol.md § Recovery into the lived-in nest that regressed); opens the recover confirm modal. Indexed, scoped inside its backup-audit-alert[i]; a client-device destination's banner carries none (backups.md § Audit-alert surface). User-approved 2026-09-30."
+    type: button
+    indexed: true
+  backup-audit-recover-confirm-modal:
+    description: "Plain confirm dialog for the recovery — no re-type; nothing is deleted on either side, and a re-run recovers nothing twice (user-approved 2026-09-30)"
+    type: view
+  backup-audit-recover-confirm-button:
+    description: "Confirm the recovery — deliver the copy, recover by record, then the post-recovery duties (user-approved 2026-09-30)"
+    type: button
+  backup-audit-recover-cancel-button:
+    description: "Close the recover confirm dialog without side effect (user-approved 2026-09-30)"
+    type: button
+  backup-audit-recover-result:
+    description: "The recovery's outcome, one line per set: recovered N / nothing to recover / refused with its remedy / recovered with gaps; present only after a run (user-approved 2026-09-30)"
+    type: view
   # --- Manage backup destinations (backups.md § Manage backup destinations) ---
   backup-destination-add-button:
     description: "Open the add-destination dialog. Always present on the backups page (entry point for the first destination)."
@@ -10088,12 +10233,12 @@ elements:
     indexed: true
   folder-on-demand-toggle:
     type: checkbox
-    description: "Per-set, per-device 'Show in Finder' (macOS) / 'Show in Files' (iOS) — adds/removes the set's File Provider domain (on-demand placeholders under the system-managed Fauna location). Every owner row, and every row of a folder shared with the account (user-approved 2026-09-30; hide-only there — it writes no place); default ON; mutually exclusive with a local-folder binding for the same set (one local presence per set per device). macos+ios platform_elements. User-approved 2026-07-18. Behavior authority docs/goal/behavior/on-demand-files.md § Apple File Provider binding and § Shared sets on a capability host"
+    description: "Per-set, per-device 'Show in Finder' (macOS) / 'Show in Files' (iOS, android) — adds/removes the set's File Provider domain (apple; on-demand placeholders under the system-managed Fauna location) or its set under the Fauna root of the system file browser (android's SAF DocumentsProvider). Every owner row, and every row of a folder shared with the account (user-approved 2026-09-30; hide-only there — it writes no place); default ON; mutually exclusive with a local-folder binding for the same set (one local presence per set per device). macos+ios+android platform_elements. User-approved 2026-07-18 (android 2026-09-30). Behavior authority docs/goal/behavior/on-demand-files-apple.md § Apple File Provider binding, § Android SAF DocumentsProvider binding and § Shared sets on a capability host"
     indexed: true
   # --- Local-folder binding (per folder; DESKTOP only — on the folders page) ---
   # 2026-06-28 unification: a bound folder lives nested UNDER its folder, so the set
   # is contextual — no free-text set name (folder-location-fileset / folder-location-fileset-input
-  # removed). Behavior + data shape: docs/goal/behavior/file-sync.md § On-Demand Files.
+  # removed). Behavior + data shape: docs/goal/behavior/on-demand-files.md § On-Demand Files.
   folder-location-list:
     type: view
     description: "Container for the bound-folder rows under a folder (desktop)"
@@ -11386,6 +11531,18 @@ elements:
     type: text
     description: "Status: secure MLS channels open (read-only)"
     indexed: false
+  encryption-keypackage-count:
+    type: text
+    description: "Encryption page: how many one-use starter keys the account has on its nest (read-only; direct-messages.md § Key Package Management). Always present once the page renders."
+    indexed: false
+  encryption-keypackage-low-warning:
+    type: text
+    description: "Encryption page: the read-only low flag — present only while the count is under the shared low threshold; never an auto-mint trigger."
+    indexed: false
+  encryption-keypackage-refresh-button:
+    type: button
+    description: "Encryption page: the manual refresh — tops the pool up through the shared session's ensure_keypackages, then re-reads the count."
+    indexed: false
   status-build-sha:
     type: text
     description: "Status: the commit of the build this app is running"
@@ -11424,7 +11581,8 @@ elements:
   # resolve-status-resolving / resolve-status-resolved / resolve-status-error:
   #   REMOVED — collapsed into single recipient-resolve-status with state attribute.
   # mls-available-status / mls-unavailable-status: REMOVED — surfaced via the
-  #   single recipient-resolve-status element (mls_available / mls_unavailable states).
+  #   single recipient-resolve-status element (those two states were later dropped;
+  #   its description lists the shipped vocabulary).
 
   # member-role-badge: REMOVED — orphaned by the conversations merge that
   #   deleted the groups page. role-badge was also removed (2026-05-10).
@@ -11535,6 +11693,9 @@ elements:
   admin-users-admit-tier-select:
     type: select
     description: "Tier for the admitted account — admission is always choosing a tier (the tier is the quota)."
+  admin-users-admit-guardian-select:
+    type: select
+    description: "Guardian for a supervised admission when directly admitting an account (Admit section), default none — the direct-admission arm of the guardianship link (family-safety.md § The guardianship link, Set at admission). Same handle-keyed option shape as admin-users-invite-guardian-select; the nest refuses a guardian on a handle-less admit or equal to the admitted actor."
   admin-users-admit-button:
     type: button
     description: "Admit the actor (one fauna.admin.users.create call). Errors surface on admin-users-action-error."
@@ -13182,7 +13343,7 @@ elements:
     description: "Copyable actor-bound download link (lets the user download from a different device; AUTH'd as the same actor — not a public link)."
   mail-export-discard-button:
     type: button
-    description: "Immediate blob unlink + row delete before the 30-day GC (fauna.bridges.discard_export_blob)."
+    description: "Immediate blob unlink + row delete before the 30-day GC (fauna.bridges.discard_export_blob). On a FAILED export it is the Progress step's one control, Dismiss — same call, the row goes, the wizard returns to Format (mail-export.md § A failed export is a record the wizard shows until the user moves on)."
 
   # --- mail-export-mailbox-progress-list component ---
   mail-export-mailbox-progress-list:
@@ -13210,10 +13371,10 @@ elements:
     description: "App-password field for the Gmail / iCloud source paths (both require 2FA + an app-specific password); shown conditionally with a deep-link to the provider's app-password page."
   mail-import-source-oauth-button:
     type: button
-    description: "Starts the Microsoft Graph OAuth flow for the Outlook source path (client-side redirect/callback, same pattern as the Bluesky bridge link)."
+    description: "Starts the Microsoft sign-in for the Outlook source path: the OAuth 2.0 device-code grant run by shared Rust — the app shows a code, the user enters it on Microsoft's sign-in page in any browser; no redirect, nothing nest-side (mailbox-migration.md § Microsoft sign-in — the device-code grant)."
   mail-import-source-host:
     type: text_input
-    description: "Generic-IMAP source hostname; also the Outlook IMAP-fallback host when OAuth is unavailable."
+    description: "Generic-IMAP source hostname (the Outlook source has no host field: its triple is fixed and its password fallback is withdrawn)."
   mail-import-source-port:
     type: text_input
     description: "Generic-IMAP source port, default 993."
@@ -13222,10 +13383,10 @@ elements:
     description: "Generic-IMAP source TLS mode: implicit (default, 993) or STARTTLS (143). No plaintext option."
   mail-import-source-username:
     type: text_input
-    description: "Generic-IMAP source username; also the Outlook IMAP-fallback username."
+    description: "Generic-IMAP source username; for the Outlook source, the Microsoft account's email address (the XOAUTH2 user)."
   mail-import-source-password:
     type: text_input
-    description: "Generic-IMAP source password; also the Outlook IMAP-fallback password."
+    description: "Generic-IMAP source password (the Outlook source has no password field)."
   mail-import-connect-button:
     type: button
     description: "Opens the source IMAP session (LOGIN + LIST) to enumerate source mailboxes; on failure surfaces the source server's error plus a provider-specific hint, retryable without re-entering credentials."
@@ -13744,6 +13905,10 @@ elements:
   admin-dns-domain-catch-all-select:
     type: select
     description: "Per-domain catch-all actor picker. Designate one actor as this domain's catch-all (unmatched inbound mail routes to it) or 'none' to clear — a 1-per-domain admin-tier setting (mail-aliases.md § Kind 4, mail-multidomain.md § Per-domain catch-all). Dispatches LocalDomainMachine SetCatchAllActor → fauna.bridges.set_catch_all_actor. RCPT-time resolver consumption is a separate track."
+    indexed: true
+  admin-dns-domain-dmarc-policy-select:
+    type: select
+    description: "Per-domain DMARC policy picker (dmarc-reporting.md § Multi-domain deployments; id approved by the user 2026-10-03). A RAW-VALUE select: the RFC 7489 tag — `reject` (the default), `quarantine`, `none` — is both what get_text returns and what select takes; the localized option text rides display_value / the options attr, from the shared catalog fauna_client_mail_settings::local_domains::dmarc_policy_options. Renders LocalDomainView.dmarc_policy; choosing dispatches LocalDomainMachine UpdateConfig{domain, dmarc_policy: Some(_)} with every other knob None → fauna.bridges.update_local_domain_config{dmarc_policy_mode}. Sets the domain's p= and sp= together; `reject` clears the override rather than storing it. Admin-class."
     indexed: true
   admin-dns-domain-catch-all-cleared-state:
     type: text

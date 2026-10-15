@@ -176,7 +176,8 @@ private func cueCalls(
 
 private let anObservation = CueObservation(
     contentId: "p", isMedia: false, mediaPlayedPm: nil,
-    dwellMsAtSkipVisibility: 1, dwellMsAtLongVisibility: 0, observedAtMs: 0)
+    dwellMsAtSkipVisibility: 1, dwellMsAtLongVisibility: 0, observedAtMs: 0,
+    endedBy: .scrolledPast)
 
 // MARK: - FeedPostActionsButton (feed ⋯ menu web-publishing verbs)
 

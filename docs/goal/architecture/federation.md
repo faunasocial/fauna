@@ -262,9 +262,9 @@ sole carriers. **Both legs of the migration:**
   (`recipient_nest_url` None) or originates `fauna.federation.inbox.deliver` (Some).
   Mirrors the `fauna.events.remote_rsvp` → home-nest-originates precedent (row above).
 
-**Client-side peer discovery for a cross-nest knock** (built 2026-09-20; the piece `fauna.inbox.send` waited on since 2026-06-06). The kind always accepted a `recipient_nest_url`, and the nest always branched on it — what no app could do was *produce* one. A client now does, without any new discovery mechanism and without a new kind: the knock rides `fauna.federation.inbox.deliver` as its transport exactly as the group-invite fan-out does. Two shared-Rust helpers own the decision and the derivation, so no app re-derives either (priorities #1/#2): `fauna_core::resolve::is_foreign_handle_domain(typed_domain, home_domain)` rules a typed `@domain` foreign by comparing it ASCII-case-insensitively against the domain the caller's *own* nest echoed on a same-nest `fauna.actor.by_handle` (an absent home domain reads as foreign, so a failed local probe never silently resolves `bob@other.test` to a local `bob`); `fauna_provisioning::probe::peer_nest_url` then derives the peer's base URL by the same `resolve_handle_domain` rule the conversations recipient picker's relay `nest_url` uses. The client opens an **anonymous connection straight to that authority** and runs `fauna.actor.by_handle` there — the pre-identity discovery hop, not a home-nest relay. It is deliberately **not** the nest-proxied `fauna.nest.resolve` kind: that one refuses loopback, IP-literal and `.local` authorities by design (`discovery_core.rs`), so it can reach neither a peer on a LAN address nor any two-nest test topology. The resolved URL is then carried on the find result and handed to `fauna.inbox.send`, whose `Some` arm originates the deliver; the receiving nest runs the identical `deliver_inbox_payload_core` with `ArrivalOrigin::Federation`, so a stranger's cross-nest knock takes the recipient's own `InboxMode` route (`allow_knock` → `store_knock`) exactly as a same-nest one would — there is no federation-specific knock policy, which is why this needed no new kind.
+**Client-side peer discovery for a cross-nest knock** (built 2026-09-20; the piece `fauna.inbox.send` waited on since 2026-06-06). The kind always accepted a `recipient_nest_url`, and the nest always branched on it — what no app could do was *produce* one. A client now does, without any new discovery mechanism and without a new kind: the knock rides `fauna.federation.inbox.deliver` as its transport exactly as the group-invite fan-out does. Two shared-Rust helpers own the decision and the derivation, composed in `find_user_across_nests` so no app re-derives either (priorities #1/#2): `fauna_core::resolve::is_foreign_handle_domain(typed_domain, home_domain)` rules a typed `@domain` foreign by comparing it ASCII-case-insensitively against the domain the caller's *own* nest echoed on a same-nest `fauna.actor.by_handle` (an absent home domain reads as foreign, so a failed local probe never silently resolves `bob@other.test` to a local `bob`); `fauna_provisioning::probe::peer_nest_url` then derives the peer's base URL by the same `resolve_handle_domain` rule the conversations recipient picker's relay `nest_url` uses. The client opens an **anonymous connection straight to that authority** and runs `fauna.actor.by_handle` there — the pre-identity discovery hop, not a home-nest relay. It is deliberately **not** the nest-proxied `fauna.nest.resolve` kind: that one refuses loopback, IP-literal and `.local` authorities by design (`discovery_core.rs`), so it can reach neither a peer on a LAN address nor any two-nest test topology. The resolved URL is then carried on the find result and handed to `fauna.inbox.send`, whose `Some` arm originates the deliver; the receiving nest runs the identical `deliver_inbox_payload_core` with `ArrivalOrigin::Federation`, so a stranger's cross-nest knock takes the recipient's own `InboxMode` route (`allow_knock` → `store_knock`) exactly as a same-nest one would — there is no federation-specific knock policy, which is why this needed no new kind.
 
-tui ships it as the lead app; the other six already carry `recipient_nest_url` on their transports and owe only the page wiring. Witnesses: `bins/fauna-nest/tests/conformance_federation_channel.rs` `inbox_send_cross_nest_stores_a_knock_for_a_stranger` (the `allow_knock` + `ArrivalOrigin::Federation` arm, headless) and `tests/e2e-unified/tests/test_contacts_cross_nest_knock.py` (the app journey, two real nests; exclusion class (8) — one nest dialing another is refused in docker as non-global, so the catalog cell comes from standalone and live runs).
+tui shipped it as the lead app; every app now calls the one shared lookup `fauna_client_core::find_user::find_user_across_nests` (UniFFI `find_user`, wasm `findUser`, linux directly), which runs the home probe, the `is_foreign_handle_domain` ruling and the direct peer dial together and returns the nest it resolved on; the apps that have not adopted it yet owe only the page wiring. Witnesses: `bins/fauna-nest/tests/conformance_federation_channel.rs` `inbox_send_cross_nest_stores_a_knock_for_a_stranger` (the `allow_knock` + `ArrivalOrigin::Federation` arm, headless) and `tests/e2e-unified/tests/test_contacts_cross_nest_knock.py` (the app journey, two real nests; exclusion class (8) — one nest dialing another is refused in docker as non-global, so the catalog cell comes from standalone and live runs).
 
 The unauthenticated twin could reach **same-nest** recipients only — cross-nest social
 sends were never routed through the home nest (wrong under Spec Y2 — clients reach remote
@@ -957,7 +957,7 @@ owned by `mls-group-key-material.md` § M2 / Rotate-on-removal, not restated her
   the set's owner-stamped `content_key_floor`, the value `fauna.folders.list`
   projects on the row a cross-nest member does not have — refreshed into
   `ForeignFolder.content_key_floor` so the member's engine arms its pre-seal hold
-  from it (owner: `../behavior/on-demand-files.md` § Shared sets on a capability
+  from it (owner: `../behavior/on-demand-files-shared-sets.md` § Shared sets on a capability
   host → *One mechanism*, question 2). Same absent-asserts-nothing semantics; an
   input to the member's own HOLD only — the enforcement stays this nest's
   `stale_content_key` refusal, so a wrong value costs a held or refused write,
@@ -966,7 +966,7 @@ owned by `mls-group-key-material.md` § M2 / Rotate-on-removal, not restated her
   two member surfaces — the pending-share knock ("Shared by ‹…›",
   `../behavior/value-formatting.md` § Account display label) and the shared
   set's display name in the member's file browser (`docs (alice)`,
-  `../behavior/on-demand-files.md` § Shared sets on a capability host,
+  `../behavior/on-demand-files-shared-sets.md` § Shared sets on a capability host,
   decision 3) — and a cross-nest member's own nest holds no `users` row for
   that owner, so without a label both fall back (an unknown sharer; the
   home nest's host). The id→handle bullet above forecloses the obvious fix: no nest asks
@@ -1108,8 +1108,11 @@ owned by `mls-group-key-material.md` § M2 / Rotate-on-removal, not restated her
   here: the p2p share leg's cross-nest carve-out
   (`SyncEngine::refresh_share_writer_roster`) reads the same roster and may lift
   on this relay when p2p cross-nest is scoped.
-- **Throttling:** all kinds inherit the channel's per-IP + per-nest throttles;
-  nothing new to configure (no-operator invariant — cadences are Rust constants).
+- **Throttling:** all kinds inherit the channel's per-IP + per-nest throttles —
+  the write plane's record kind at the writer-plane budget, every other kind at
+  the channel default (§ Nest-writer backup plane → *Throttling* owns the budget
+  and its reasoning); nothing new to configure (no-operator invariant — cadences
+  and budgets are Rust constants).
 
 ### The public folder read plane (design ratified 2026-08-18; BUILT 2026-08-18 — folders re-model phase 4, slice 4f-i; see the § Status bullet below)
 
@@ -1216,6 +1219,54 @@ backup protocol → *The writer seat* owns that rule and how the row moves. Kind
   residual window is one TTL — the accepted contract restated from the folder
   write plane.
 
+**Throttling (ruled 2026-10-13; BUILT
+2026-10-13 — `FederationRouterBuilder::add_with_budget`).** Both kinds ride the channel's per-source-IP
+and per-nest throttles like every other kind, but at the **writer-plane budget,
+not the channel default**: a federation kind's budget is declared beside its
+handler at registration (§ Security → *Rate limiting is the primary DoS
+defense*), and `backup.changes.record` and `folder.changes.record` declare
+`WRITER_RECORD_MAX_EVENTS = 600` per 60 s window (one window for the whole
+channel; only the count varies per kind). **Why the default is wrong here:** the
+30-per-minute default is sized for human-paced kinds, and a backup pass is a
+machine writing two custody records per segment plus a mirror and a journal —
+so under the default the first refused record aborted the `(destination, kind)`
+pass, a first pass over more than about 14 segments could never drain in one
+sweep, moved about 30 records per 15-minute tick, and read as failed toward the
+lease's stall threshold the whole time (seen 2026-10-13 on the linux e2e sweep).
+**What the throttle bounds on this plane is the pre-gate cost, nothing more:** an
+unauthorized caller's request costs a decode, three hex parses and one point
+read before `require_backup_writer` refuses it, and an authorized writer's
+post-gate cost is owner-charged — `segment-backup-protocol.md` § Cross-location
+backup protocol → *Reclaim rate-cap* already rules that **quota-charging is the
+rate cap** on this plane and that a defense-in-depth cap stays unbuilt until a
+measured abuse signal. So the budget is sized as an abuse bound on a point-read
+path: ten a second sustained, the `RECORDS_DOOR_LIMITER_CONFIG` precedent
+(`bridge_rate_limit.rs`), a plane of the same shape (grant-gated, quota-charged
+record door) — far above any human-paced rate, still a hard bound per source IP
+(/64) and per nest. Both checks — IP first, then nest — honour the kind's
+budget, so several source nests behind one /64 share one 600-per-minute bucket
+per kind. **A legitimate writer may still reach it** (tiny segments on a
+LAN-fast destination, a shared /64, version skew), which is why a trip is never
+a failure to the writer: the coordinator treats `rate_limited` as backpressure —
+wait, retry, and after a full window pause the tuple with its progress kept
+(`segment-backup-protocol.md` § Cross-location backup protocol → *Backpressure*
+owns that contract). **The same answer for both record kinds, one difference:**
+`folder.changes.record` is the same shape (member-gated, owner-charged,
+exactly-once by content — § Cross-nest shared folders + channel append) and its
+rate is a relaying nest's whole user population's edit rate on foreign-homed
+sets, so it takes the same budget; its backpressure stays the relaying client's
+own retry, because that write has a user behind it and the relay passes the
+peer's `rate_limited` through unchanged, while the backup coordinator is the one
+autonomous writer and owns its own. The two `write_token.mint` kinds keep the
+default (one mint per pass per tuple, bounded by the token TTL). **Refused: a
+batched record kind.** Batching changes nothing structural — one request per
+segment pair still outruns 30 per minute on a fast link, a larger batch widens
+the crash-replay window between upload and custody (the per-path
+record-before-advance ordering is the data-loss guarantee), the folder plane
+cannot batch a client's single record, and it would still need the budget and
+the backpressure. Nothing new to configure: every number is a Rust constant,
+refutable once real backup telemetry exists.
+
 The owner's client registers/revokes/lists the grant and lists/restores custody
 generations over its **own** authed client↔destination connection (USER-class
 kinds, the `fauna.backup.writer_grant.*` and `fauna.backup.generation.*` families)
@@ -1242,11 +1293,34 @@ mechanism: its § *Custody grace window (T)*).
 
 ## Key packages — privacy & exhaustion
 
-- **Reachability probe = a boolean on `by_handle`, never a cross-nest count.** The
+- **Reachability probe = a boolean, never a count — on every arm.** The
   anonymous `fauna.actor.by_handle` reply carries `addressable: bool` ("target has
   ≥1 usable key package, one-time **or** last-resort"). This leaks yes/no, not a
-  number, and adds no new anonymous surface. The authed same-nest
-  `fauna.conversations.keypackage.count` kind is unchanged (local top-up UX).
+  number, and adds no new anonymous surface. A client resolving a **handle** —
+  same-nest or foreign — reads that bit from the reply it already holds and
+  makes no second call; a client resolving a bare **64-hex actor id** (no handle
+  to look up) asks the authed same-nest
+  `fauna.conversations.keypackage.addressable` kind (`{actor_id}` →
+  `{addressable: bool}`; User-class, a pure read, the same DB predicate as
+  `by_handle`'s bit), which tells a signed-in account nothing
+  `fauna.conversations.keypackage.fetch` would not already tell it, destructively.
+  **A count is the wrong probe twice over:** it discloses the number, and it
+  counts one-time packages only — the top-up gauge must leave the last-resort
+  package out — so an actor down to the last-resort package reads `0` to a count
+  probe while `take_key_package` still serves them (next bullet); `addressable`
+  is the predicate that matches the fallback.
+- **The starter-key count is its owner's alone (ruled 2026-10-09).** The authed
+  same-nest `fauna.conversations.keypackage.count` kind exists for the bearer's
+  own top-up gauge — every Settings → Encryption page, the status page and the
+  shared session's `ensure_keypackages` read it for the caller's own id — and
+  answers **only** that: a request naming any other actor, from any User-class
+  caller the admin included, is refused with
+  `fauna.conversations.permission_denied`. A same-nest neighbour is "someone
+  looking you up" too, and `../../features/encryption-settings.md` outcome 12
+  promises them the bit, never the number; the request keeps its `actor_id`
+  field (every app already passes its own), the handler compares it with the
+  caller. Nothing in the product needs another account's exact supply — a
+  readiness question is the boolean above.
 - **Last-resort key package (mandatory).** Every actor publishes one reusable
   last-resort key package at onboarding (standard MLS). `take_key_package` returns a
   one-time KP if the pool is non-empty, else the last-resort KP **without deleting
@@ -1293,7 +1367,12 @@ Full analysis in the Spec Y2 doc § 8. Load-bearing rules:
   (reject delivery to a non-registered local actor before any write). All
   federation/anonymous limiter `DashMap`s are periodically swept (`main.rs`,
   `lib.rs`) so a rotating-source flood can't grow them unboundedly. Reuse
-  `bins/fauna-nest/src/bridge_rate_limit.rs`. The auth-bootstrap kinds ride none
+  `bins/fauna-nest/src/bridge_rate_limit.rs`. **The budget is a property of the
+  KIND, declared beside its handler at registration (ruled 2026-10-13):** every
+  kind takes the channel default unless its registration names its own, and
+  the two grant-gated writer-plane record kinds do (§ Nest-writer backup plane
+  → *Throttling* owns the budget and its sizing rule); one window for the
+  whole channel, only the count varies. The auth-bootstrap kinds ride none
   of these plane throttles; the one bound on `fauna.auth.device_handshake` is the
   refusal-counting failed-credential throttle, owned with the upgrade half it
   shares by `transport-connection.md` § Abuse posture → *The failed-credential
@@ -1312,7 +1391,29 @@ Full analysis in the Spec Y2 doc § 8. Load-bearing rules:
   public, so handle/actor-id resolution stays open but is **per-source
   rate-limited** (`anonymous_rate_limit`, keyed on the real client IP) to bound
   bulk harvesting. Anonymous `nest.info`/`setup.status` version is **coarsened to
-  `major.minor`** (anti-fingerprinting). The anonymous **secret-guess** surfaces —
+  `major.minor`** (anti-fingerprinting), and so is every other anonymous discovery
+  answer that carries a version — the fediverse node-info document and the Nostr
+  relay's NIP-11 document (`version-compatibility.md` § Dimension 3 holds the
+  negotiation-side constraint). **The ONE ruled exception is `GET /api/v1/health`,
+  which serves the exact `version`, `commit` and `build_id` to anyone, by design
+  (ruled 2026-10-09, confirming the 2026-06-01 exposed-ports review's L2
+  acceptance), and — on the same terms — the sha256
+  of every binary the image ships (`binaries`, what the deploy binary gate
+  compares: `image-pipeline.md` § Verifying a deploy carried the binaries).** The health identity exists so the
+  release pipeline can tell one artifact from another from OUTSIDE the box with no
+  credential — a fresh pre-claim box has none to present, a degraded box
+  (`version-compatibility.md` § 2.2) opens no database and so can verify no one,
+  and a door into the box was refused on its own grounds (`image-pipeline.md`
+  § Image tags & channels) — and what it discloses is public for public software:
+  the commit and the version name a public release, the build id is a run number,
+  and the binary hashes are hashes of files in a public image.
+  So the coarsening of the discovery surfaces is least-disclosure for their
+  purpose (compatibility negotiation needs `major.minor` and nothing more), not a
+  secret the health identity betrays; the marginal fingerprint it adds is
+  accepted. Should a deployment ever find that leak unacceptable, the ruled order
+  is the docstring's: replace the deploy-verify and promotion signal first, gate
+  the fields after (`routes::health`, `build_identity.rs`). The anonymous
+  **secret-guess** surfaces —
   the one-time `claim_admin` and the in-band `invite_code.verify` — are
   rate-limited too: `claim_admin` per-source **and** with a global
   (source-independent) cap bounding a distributed brute-force, `invite_code.verify`
@@ -1447,7 +1548,7 @@ tracked internally, Spec Y2 slice 4). Load-bearing shape (further mechanics trac
   channel, falling back to the HTTP interim when a peer offered no
   `/api/v1/federation/ws`). **Slice 5 (2026-06-03) retired the HTTP interim**
   once the channel was the production version floor: Fauna deploys as a single
-  nest (example.com) today, so the floor was met trivially on deploy. Capability
+  nest (the project's live nest) then, so the floor was met trivially on deploy. Capability
   detection survives (`dial` → `ChannelUnsupported`), but with no HTTP to fall
   back to it now surfaces as a hard `PoolError::Unsupported` — a channel-only
   build cannot federate with a pre-slice-4 peer. This is a deliberate
@@ -1472,9 +1573,22 @@ re-verified 2026-08-14; individual bullets below carry their own landing
 dates).** The nest↔nest WS-RPC channel is the sole Fauna↔Fauna carrier, live
 end-to-end:
 
+- **Owner-only `keypackage.count` and the by-id `keypackage.addressable`
+  probe (ruled 2026-10-09, § Key packages — privacy & exhaustion) — BUILT
+  2026-10-11.** `conversations_handlers::keypackage_count_handler` refuses a
+  target other than the caller with `fauna.conversations.permission_denied`;
+  `keypackage_addressable_handler` answers `has_usable_key_package` (one-time
+  or last-resort) to any User-class caller. In `FaunaMlsBackend::resolve_address`
+  the handle form promotes on the `by_handle` reply's `addressable` bit with no
+  second call and the actor-id form asks `ConversationsRpc::keypackage_addressable`,
+  so a last-resort-only peer now resolves. The e2e readiness barriers read the
+  owner's own count or `conv_api.actor_addressable`. Witnesses:
+  `conformance_conversations_keypackage.rs` (`count_refuses_another_actors_supply`,
+  `addressable_*`), `fauna_mls_backend_tests.rs::resolve_address_last_resort_only_peer_resolves`,
+  and the tier_3 `test_starter_key_supply.py::test_a_signed_in_neighbour_learns_only_whether_you_can_be_reached`.
 - **Relay serving across nests (ruled 2026-10-01) — the read direction BUILT
   2026-10-03, the stamp and the serving kinds BUILT 2026-10-04, the seat
-  UNBUILT** (§ Cross-nest shared folders + channel
+  BUILT 2026-10-09** (§ Cross-nest shared folders + channel
   append → *Relay serving across nests*). **Built:**
   `fauna.federation.folder.read_token.mint`
   (`federation_handlers::folder_read_token_mint_handler` — the structural
@@ -1496,7 +1610,7 @@ end-to-end:
   (`write_token_bearer::folder_read_token_bearer`) and every other one the
   write-token bearer, so a cross-nest READER's on-demand host hydrates —
   driven across two nests by `cross_nest_agent_capstone.rs`;
-  `../behavior/on-demand-files.md` § Shared sets on a capability host,
+  `../behavior/on-demand-files-shared-sets.md` § Shared sets on a capability host,
   *Implementation status* → *Decision 3*. **Built (2026-10-04): the `residency` stamp** —
   `federation_handlers::residency_stamp`, always stated, on the three
   federated folder read replies and on the Welcome relay, threaded through
@@ -1515,10 +1629,13 @@ end-to-end:
   `fauna.sync.serve.announce`'s additive `foreign` list and by the home
   nest's relay walk to the leasing `nest_id` alone; pinned in
   `bins/fauna-nest/tests/conformance_relay_serving_cross_nest.rs`.
-  **Unbuilt:** the seat — no engine announces a folder homed on another
-  nest yet. What that leaves broken, and the refusal that stands in until
-  it is built: `../behavior/file-sync.md` § Relay serving, its status
-  paragraph.
+  **Built (2026-10-09): the seat** — the per-user agent's engine of a
+  folder homed on another nest is announced in that `foreign` list by its
+  home nest and answers on its own byte plane, and the interim refusal of
+  the metadata-only ⊕ cross-nest-member pair is gone; the witness across two
+  real nests and the real agent is `cross_nest_agent_capstone.rs`.
+  Mechanism and pins: `../behavior/file-sync.md` § Relay serving, its
+  status paragraph.
 - **BUILT 2026-10-05 — the cross-nest owner label**
   (§ Cross-nest shared folders + channel append → *The cross-nest owner
   label*): the home nest stamps `owner_handle`/`owner_domain`
@@ -1635,6 +1752,13 @@ end-to-end:
   `fauna_mls_backend_tests.rs::{the_hold_behind_a_parked_folder_statement_survives_a_relaunch,
   a_forged_statements_hold_does_not_recur_on_the_launch_after_the_settle}`
   and `engine.rs::the_folder_park_rests_per_channel_and_goes_with_the_group`.
+  **The slot is a bounded set that displaces nothing (ruled 2026-10-12):**
+  the rule, its one exception and its residual are `identity-succession.md`'s
+  (§ The succession statement (wire) → *The slot's replacement policy*); this
+  rail's share is that the at-rest mirror rests the **whole set** of the
+  channel's slot, and a rested value that fails to decode as one is forgotten
+  (a hold lost once, inside the 0.1.x compat-free window). Pinned by
+  `fauna_mls_backend_tests.rs::the_rested_folder_park_holds_the_whole_set_across_a_relaunch`.
 - **Channel + auth:** `GET /api/v1/federation/ws` (subprotocol
   `fauna.federation.v1`), the mutual `fauna.federation.hello` nest-key handshake
   (reuses `federation_sig`; binds both `nest_id`s + a fresh `channel_nonce` + the
@@ -1967,7 +2091,9 @@ end-to-end:
   Owner-side: `members.list_actors` unions foreign rows (`remote: true`);
   `members.evict` purges the foreign row (S8). S6: the two byte GET routes
   carry route-scoped `Any`-origin no-credentials CORS outside the blanket
-  credentialed layer. **Client read-side BUILT (2026-07-19, Phase 2 second
+  credentialed layer, admitting the `Authorization` request header a
+  folder-hinted read's bearer rides (`file-sync.md` § Relay serving, step
+  (4) — a script-held bearer is no ambient authority). **Client read-side BUILT (2026-07-19, Phase 2 second
   slice):** the Welcome relay wire carries an additive `set_name`
   (home-nest-resolved from the claimed row, never sender-asserted —
   `WelcomeInbox`/`WelcomePayload`/`FedWelcomeDeliverRequest`); the recipient's

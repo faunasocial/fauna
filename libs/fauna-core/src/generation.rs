@@ -35,7 +35,11 @@
 //!   DAG core (parents, member ids, minter, commitment — gen-0-readable
 //!   metadata regardless, a stated R14 exposure) and **drops the wrap
 //!   ciphertexts**, so an honest replica that merges the shred no longer
-//!   carries unwrappable key material for the dead generation.
+//!   carries unwrappable key material for the dead generation. The marker
+//!   is availability and attribution only: the authored act — what any
+//!   destructive consumer counts — is the shredder's [`ShredAttestation`] in
+//!   its own `fauna.state.generation-shred` cell (ruled 2026-10-13), whose key-aware join ([`join_generation_shred`]) is the third
+//!   join this module owns.
 
 use serde::{Deserialize, Serialize};
 
@@ -248,46 +252,34 @@ pub enum GenerationMintRecord {
     /// The absorbing shred marker: devices drop the key, holders delete the
     /// escrow wrap, and this row's surviving bytes carry no wrap ciphertext.
     ///
-    /// **Two acts, two gates** (ruled 2026-10-08 —
-    /// `account-data-taxonomy.md` § The generation machinery → *Fleet-scope
-    /// reclamation*, the shredder's veto → *the authored shred*; the group
-    /// plane's shape, [`crate::group_generation::GroupGenerationMintRecord`]).
-    /// The join absorbs and the resolver drops the generation's candidacy on
-    /// ANY decodable `Shredded`, authored or not: the `Minted` row's wraps
-    /// are gone from the plane either way, so the generation could not be
-    /// keyed from the plane again and the fleet re-mints — availability only,
-    /// the class a `BackupKey` holder already reaches by same-key `Minted`
-    /// suppression. **Dropping a key, sweeping an escrow wrap or retiring a
-    /// row because a generation reads `Shredded` is a different act and never
-    /// rides an unauthored row**: `BackupKey` seals this row and every reading
-    /// replica, removed devices included, holds `BackupKey`, so a consumer
-    /// acts only when [`Self::shred_is_authored`] answers `Ok`.
+    /// **The availability marker and attribution only** (ruled 2026-10-13 — `fleet-scope-reclamation.md` § *Fleet-scope
+    /// reclamation*, the shredder's veto → *the shred cell*). The join absorbs
+    /// and the resolver drops the generation's candidacy on ANY decodable
+    /// `Shredded`: the `Minted` row's wraps are gone from the plane either
+    /// way, so the generation could not be keyed from the plane again and the
+    /// fleet re-mints — availability only, the class a `BackupKey` holder
+    /// already reaches by same-key `Minted` suppression. **Dropping a key,
+    /// sweeping an escrow wrap or retiring a row because a generation reads
+    /// `Shredded` never consults this row**: `BackupKey` seals it, every
+    /// reading replica (removed devices included) holds `BackupKey`, and
+    /// between two markers the join keeps the byte-order max — so the
+    /// authored act lives in the shredder's own cell, a [`ShredAttestation`]
+    /// in `fauna.state.generation-shred`, and a consumer acts only on
+    /// [`authored_shred_generations`].
     Shredded {
         core: MintCore,
-        /// Shred stamp, unix ms. Advisory; signed, so it cannot be moved
-        /// under the signature.
+        /// Shred stamp, unix ms. Advisory.
         shredded_at_ms: i64,
-        /// The shredding writer's 32-byte device id — and the Ed25519
-        /// verification key for `shredder_sig` (a device id IS the device
-        /// principal's public key, the `minter_sig` pattern). **Attribution
-        /// only unless the row is authored** — no reader consults it alone.
+        /// The shredding writer's 32-byte device id. Attribution only — no
+        /// reader consults it.
         #[serde(with = "serde_bytes")]
         shredded_by: [u8; 32],
-        /// Ed25519 by `shredded_by` over [`shred_signing_bytes`]. Additive:
-        /// empty on a row forged without the device secret or written by a
-        /// binary older than the ruling (either is then unauthored), skipped
-        /// when empty so such a row encodes exactly as it always did. No
-        /// authorization rides beside it: the device set is this plane's
-        /// authority and every reader holds it as its [`FleetView`] — where
-        /// the group plane's cert chain is not, which is why that plane's
-        /// shred carries the cert and this one does not.
-        #[serde(default, skip_serializing_if = "Vec::is_empty", with = "serde_bytes")]
-        shredder_sig: Vec<u8>,
     },
 }
 
 /// Domain-separation tag for an authored shred's signature (frozen — the
-/// [`MINT_MINTER_SIG_CONTEXT`] replay discipline).
+/// [`MINT_MINTER_SIG_CONTEXT`] replay discipline). The preimage did not move
+/// when the signature left the mint row for the shred cell (2026-10-13).
 pub const SHRED_SIG_CONTEXT: &[u8] = b"fauna.generation.shred.v1\0";
 
 /// The exact bytes a shredder signs: the domain tag, the content-derived
@@ -307,80 +299,179 @@ pub fn shred_signing_bytes(
     out
 }
 
-/// Build one **authored** shred as the shredding device — the ONE production
-/// shape of a `Shredded` row since the ruling. The signature's verification
-/// key is the shredder's own device id, so no key distribution rides this.
+/// One shredder's attestation in `fauna.state.generation-shred`, at the
+/// two-segment logical key [`shred_cell_key`]
+/// (`"<generation-id-hex>/<shredder-device-id-hex>"`) — one cell per
+/// (generation, shredder), authored ONLY by that shredder (ruled 2026-10-13 — `fleet-scope-reclamation.md` § *Fleet-scope
+/// reclamation*, the shredder's veto → *the shred cell*).
 ///
-/// # Errors
-/// Only on a core that fails canonical encoding.
+/// **Why a cell of its own.** The mint row is one cell per generation, and a
+/// merge may rank on nothing but the cell key and the two values (it never
+/// consults the device set — `fauna_protocol::merge_policy`'s standing
+/// contract), so no rank at that one cell keeps a `BackupKey` holder's
+/// byte-greater forged marker from displacing an honest shred. Here the
+/// cell key names the shredder, the record verifies only under it
+/// ([`Self::verifies_at`]), and the kind's join ranks a verifying row over
+/// any that does not ([`join_generation_shred`]) — so a standing attestation
+/// is never displaced by bytes from outside its own shredder's cell. A
+/// forger files its own cell under a key it holds, which no reader honors.
+///
+/// **Authored** at a reader ([`Self::is_authored_at`]) when it verifies at
+/// its cell and its shredder is a verified, non-removed member of the
+/// reader's CURRENT [`FleetView`] — never at the stamp: the device set is
+/// monotone and has no clock, so a shred by a device removed later goes
+/// inert wherever it has not yet been acted on, the fail-safe direction. No
+/// authorization rides the attestation: the device set is this plane's
+/// authority and every reader holds it, where the group plane's cert chain
+/// is not ([`crate::group_generation::GroupShredAttestation`] carries the
+/// cert).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShredAttestation {
+    /// The shredded generation — echoes cell segment 1.
+    #[serde(with = "serde_bytes")]
+    pub generation_id: [u8; 32],
+    /// The shredder's device id — echoes cell segment 2, and IS the Ed25519
+    /// verification key for `shredder_sig` (a device id is its device
+    /// principal's public key — the `minter_sig` pattern).
+    #[serde(with = "serde_bytes")]
+    pub shredded_by: [u8; 32],
+    /// Shred stamp, unix ms. Signed; advisory.
+    pub shredded_at_ms: i64,
+    /// Ed25519 by `shredded_by` over [`shred_signing_bytes`].
+    #[serde(with = "serde_bytes")]
+    pub shredder_sig: Vec<u8>,
+}
+
+impl ShredAttestation {
+    /// Does this record verify **at its cell** — both ids echoing the cell
+    /// key's segments, and `shredder_sig` verifying under the cell's shredder
+    /// over exactly these fields? Pure over the record and the cell
+    /// coordinates (the [`GenerationWrapRecordV2::verifies_at`] contract: a
+    /// merge may never consult external state).
+    #[must_use]
+    pub fn verifies_at(&self, cell_generation: &[u8; 32], cell_shredder: &[u8; 32]) -> bool {
+        if self.generation_id != *cell_generation || self.shredded_by != *cell_shredder {
+            return false;
+        }
+        verified_signature(
+            &self.shredded_by,
+            &shred_signing_bytes(&self.generation_id, &self.shredded_by, self.shredded_at_ms),
+            &self.shredder_sig,
+        )
+    }
+
+    /// Is this the **authored** shred of `cell_generation` at the reader
+    /// holding `view` — the only shape a consumer may drop a generation key,
+    /// sweep an escrow wrap or retire a row on? It verifies at its cell
+    /// ([`Self::verifies_at`]) and its shredder is a verified, non-removed
+    /// member of `view` ([`FleetView::is_verified_member`]).
+    #[must_use]
+    pub fn is_authored_at(
+        &self,
+        cell_generation: &[u8; 32],
+        cell_shredder: &[u8; 32],
+        view: &FleetView,
+    ) -> bool {
+        view.is_verified_member(cell_shredder) && self.verifies_at(cell_generation, cell_shredder)
+    }
+}
+
+/// Build one shredder's attestation for `generation_id` — what the
+/// shredder's pass writes into its own cell beside the mint row's marker.
+/// The verification key is the shredder's own device id, so no key
+/// distribution rides this.
+#[must_use]
 pub fn sign_shred(
     shredder: &ed25519_dalek::SigningKey,
-    core: MintCore,
+    generation_id: &[u8; 32],
     shredded_at_ms: i64,
-) -> Result<GenerationMintRecord, Error> {
+) -> ShredAttestation {
     use ed25519_dalek::Signer;
-    let id = generation_id(&core)?;
     let shredded_by = shredder.verifying_key().to_bytes();
     let shredder_sig = shredder
-        .sign(&shred_signing_bytes(&id, &shredded_by, shredded_at_ms))
+        .sign(&shred_signing_bytes(
+            generation_id,
+            &shredded_by,
+            shredded_at_ms,
+        ))
         .to_bytes()
         .to_vec();
-    Ok(GenerationMintRecord::Shredded {
-        core,
-        shredded_at_ms,
+    ShredAttestation {
+        generation_id: *generation_id,
         shredded_by,
+        shredded_at_ms,
         shredder_sig,
+    }
+}
+
+/// The `fauna.state.generation-shred` cell key. One derivation, shared by the
+/// writer, every consumer and the tests — never re-formatted ad hoc.
+#[must_use]
+pub fn shred_cell_key(generation_id: &[u8; 32], shredder: &[u8; 32]) -> String {
+    format!(
+        "{}/{}",
+        crate::hex32::encode(generation_id),
+        crate::hex32::encode(shredder)
+    )
+}
+
+/// Parse a shred-kind logical key — canonical-or-nothing, the
+/// [`parse_wrap_cell_key`] injectivity rule.
+#[must_use]
+pub fn parse_shred_cell_key(key: &str) -> Option<([u8; 32], [u8; 32])> {
+    parse_unkeyable_cell_key(key)
+}
+
+/// The `fauna.state.generation-shred` join — byte-level, decode-or-fail:
+/// rank = (verifies-at-this-cell, bytes), lexicographic max, winner returned
+/// verbatim (the [`join_generation_unkeyable`] shape less the stamp: a
+/// shredder attests a generation once, so there is no re-assertion to rank).
+/// A verifying record beats any that does not, so nothing displaces the
+/// shredder's own row; between two verifying records (one honest author
+/// re-attesting at another stamp) or two that do not, bytes break the tie.
+/// A side that does not decode is an `Err`, never ranked; first-contact
+/// strictness lives in the adoption arm.
+pub fn join_generation_shred<'a>(
+    generation_id: &[u8; 32],
+    shredder: &[u8; 32],
+    current: &'a [u8],
+    incoming: &'a [u8],
+) -> Result<&'a [u8], Error> {
+    let rank = |bytes: &[u8]| -> Result<bool, Error> {
+        Ok(canonical_decode::<ShredAttestation>(bytes)?.verifies_at(generation_id, shredder))
+    };
+    let (cur, inc) = (rank(current)?, rank(incoming)?);
+    Ok(if (cur, current) >= (inc, incoming) {
+        current
+    } else {
+        incoming
     })
 }
 
-impl GenerationMintRecord {
-    /// Is this a `Shredded` row **authored by a verified, non-removed member
-    /// of `view`** — the only shape a consumer may drop a generation key,
-    /// sweep an escrow wrap or retire a row on? `shredded_by` must answer
-    /// [`FleetView::is_verified_member`] at the reader's CURRENT view (the
-    /// device set is monotone and has no clock, so membership is read now,
-    /// never at the stamp: a shred by a device removed later goes inert
-    /// wherever it has not yet been acted on — the fail-safe direction), and
-    /// `shredder_sig` must verify under it over the **recomputed** generation
-    /// id (never the row key an attacker chose). Returns that id.
-    ///
-    /// Runs the strict primitive ([`crate::identity::verify_detached`])
-    /// because `shredded_by` is the row's own claimed key — attacker-chosen
-    /// on an inbound row.
-    ///
-    /// # Errors
-    /// A `Minted` row, an unauthored (sig-less or forged) shred, a shredder
-    /// that is no verified member, or a signature that does not verify.
-    pub fn shred_is_authored(&self, view: &FleetView) -> Result<[u8; 32], String> {
-        let GenerationMintRecord::Shredded {
-            core,
-            shredded_at_ms,
-            shredded_by,
-            shredder_sig,
-        } = self
-        else {
-            return Err("a Minted row shreds nothing".to_string());
-        };
-        if shredder_sig.is_empty() {
-            return Err("shred is unauthored — it carries no signature".to_string());
-        }
-        let id = generation_id(core).map_err(|e| format!("shred core does not encode: {e}"))?;
-        if !view.is_verified_member(shredded_by) {
-            return Err("shredder is not a verified, non-removed fleet member".to_string());
-        }
-        if shredder_sig.len() != 64
-            || !crate::identity::verify_detached(
-                shredded_by,
-                &shred_signing_bytes(&id, shredded_by, *shredded_at_ms),
-                shredder_sig,
-            )
-        {
-            return Err(
-                "shred signature does not verify under the shredder's device id".to_string(),
-            );
-        }
-        Ok(id)
-    }
+/// The generations `shred_rows` — merged `fauna.state.generation-shred` rows
+/// as `(logical key, value)` — attest **authored** at the reader holding
+/// `view` ([`ShredAttestation::is_authored_at`]; one authored cell suffices).
+/// The ONE set every destructive consumer reads (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation* → *the authored shred*): a mint row's
+/// `Shredded` marker never enters it. A row whose key or value does not
+/// parse attests nothing.
+pub fn authored_shred_generations<'a, I>(
+    view: &FleetView,
+    shred_rows: I,
+) -> std::collections::BTreeSet<[u8; 32]>
+where
+    I: IntoIterator<Item = (&'a str, &'a [u8])>,
+{
+    shred_rows
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let (generation, shredder) = parse_shred_cell_key(key)?;
+            canonical_decode::<ShredAttestation>(value)
+                .ok()?
+                .is_authored_at(&generation, &shredder, view)
+                .then_some(generation)
+        })
+        .collect()
 }
 
 /// One healer-attributed top-up wrap in `fauna.state.generation-wrap`, at the
@@ -1591,6 +1682,22 @@ pub fn escrow_receipt_cell_key(
     )
 }
 
+/// The `fauna.state.escrow-wrap` logical key: `<generation-id-hex>/<actor-id-hex>`
+/// — one Immutable row per (generation, identity), the fleet plane's
+/// replicated copy of the wrap the identity's holders were handed. No holder
+/// segment: the wrap is sealed to the identity's own escrow target, whoever
+/// holds it, so one copy serves every replica. The identity segment is the
+/// receipt key's, for the receipt key's reason — a successor's wrap lands
+/// beside the predecessor's.
+#[must_use]
+pub fn escrow_wrap_cell_key(generation_id: &[u8; 32], actor_id: &ActorId) -> String {
+    format!(
+        "{}/{}",
+        crate::hex32::encode(generation_id),
+        crate::hex32::encode(&actor_id.0)
+    )
+}
+
 /// Domain-separation tag for the enrollment self-signature (frozen — the
 /// [`REACH_SIG_CONTEXT`] replay discipline).
 pub const DEVICE_SET_SIG_CONTEXT: &[u8] = b"fauna.generation.device-set-enrollment.v1\0";
@@ -2372,8 +2479,9 @@ pub(crate) fn two_phase_winner<'a>(
     match (a_absorbing, b_absorbing) {
         (true, false) => a,
         (false, true) => b,
-        // Same phase: byte-order max — deterministic everywhere, unreachable
-        // with differing bytes in honest operation.
+        // Same phase: byte-order max — deterministic everywhere, and harmless
+        // between two `Shredded` markers: no reader consults a marker's
+        // attribution (the authored act is the shred cell's).
         _ => {
             if a >= b {
                 a
@@ -2440,7 +2548,6 @@ pub(crate) mod tests {
             core: core(),
             shredded_at_ms: 9_000,
             shredded_by: [2u8; 32],
-            shredder_sig: vec![],
         })
         .expect("encode")
     }
@@ -3692,17 +3799,18 @@ pub(crate) mod tests {
             core,
             shredded_at_ms: 2_000,
             shredded_by: members[0],
-            shredder_sig: vec![],
         })
         .unwrap();
         (crate::hex32::encode(&id), value, id)
     }
 
-    // ── The authored shred ─────────────────────────────────────
+    // ── The shred cell ─────────────────────────────────────────────
     //
-    // Red-verified during development by inverting each check in
-    // `shred_is_authored` (the membership test, the signature test, the empty
-    // guard): the matching assertion below fails on each inversion.
+    // The authored act left the mint row for the shredder's own cell. Each
+    // test below was red-verified during development by inverting the check
+    // it names (`verifies_at`'s echo and signature tests, `is_authored_at`'s
+    // membership test, the join's verifying-first rank): the matching
+    // assertion fails on each inversion.
 
     fn shred_core(members: &[[u8; 32]], salt: u8) -> MintCore {
         MintCore {
@@ -3715,52 +3823,42 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_shred_signed_by_a_verified_member_is_authored_and_names_its_id() {
+    fn an_attestation_signed_by_a_verified_member_is_authored_at_its_cell() {
         let members = [device_id(1), device_id(2)];
-        let core = shred_core(&members, 0x51);
-        let id = generation_id(&core).unwrap();
+        let id = generation_id(&shred_core(&members, 0x51)).unwrap();
         // The hander, not the minter: any verified member may author.
-        let row = sign_shred(&signing_key_of(&members[1]), core, 2_000).unwrap();
-        assert_eq!(row.shred_is_authored(&fleet_of(&members)), Ok(id));
-    }
-
-    #[test]
-    fn a_sig_less_shred_is_unauthored_and_encodes_as_it_always_did() {
-        let members = [device_id(1), device_id(2)];
-        let row = GenerationMintRecord::Shredded {
-            core: shred_core(&members, 0x52),
-            shredded_at_ms: 2_000,
-            shredded_by: members[0],
-            shredder_sig: vec![],
-        };
-        let err = row.shred_is_authored(&fleet_of(&members)).unwrap_err();
-        assert!(err.contains("unauthored"), "{err}");
-        // Additive: the empty field is skipped, so the pre-ruling bytes are
-        // unchanged and a pre-ruling reader decodes a post-ruling sig-less row.
-        let bytes = canonical_encode(&row).unwrap();
-        assert!(
-            !bytes
-                .windows(b"shredder_sig".len())
-                .any(|w| w == b"shredder_sig"),
-            "an empty signature must not be encoded"
+        let cell = sign_shred(&signing_key_of(&members[1]), &id, 2_000);
+        assert!(cell.verifies_at(&id, &members[1]));
+        assert!(cell.is_authored_at(&id, &members[1], &fleet_of(&members)));
+        let rows = [(
+            shred_cell_key(&id, &members[1]),
+            canonical_encode(&cell).unwrap(),
+        )];
+        assert_eq!(
+            authored_shred_generations(
+                &fleet_of(&members),
+                rows.iter().map(|(k, v)| (k.as_str(), v.as_slice()))
+            ),
+            std::collections::BTreeSet::from([id])
         );
-        let back: GenerationMintRecord = canonical_decode(&bytes).unwrap();
-        assert_eq!(back, row);
     }
 
     #[test]
-    fn a_shred_signed_by_a_non_member_or_a_removed_member_is_unauthored() {
+    fn an_attestation_by_a_non_member_or_a_removed_member_is_unauthored() {
         let members = [device_id(1), device_id(2)];
-        let core = shred_core(&members, 0x53);
+        let id = generation_id(&shred_core(&members, 0x53)).unwrap();
         // A device secret the fleet never enrolled (a `BackupKey` holder that
-        // is no member) signs a self-consistent row — refused at the view.
-        let outsider = sign_shred(&device_signing_key(9), core.clone(), 2_000).unwrap();
-        let err = outsider.shred_is_authored(&fleet_of(&members)).unwrap_err();
-        assert!(err.contains("not a verified"), "{err}");
-        // A member removed since: its row is a verified member's shape, but
-        // the reader's current view excludes it — the fail-safe direction.
-        let by_member = sign_shred(&signing_key_of(&members[1]), core, 2_000).unwrap();
-        assert!(by_member.shred_is_authored(&fleet_of(&members)).is_ok());
+        // is no member) files a self-consistent cell under its own key: it
+        // verifies there, and no reader honors it.
+        let outsider_key = device_signing_key(9);
+        let outsider_id = outsider_key.verifying_key().to_bytes();
+        let outsider = sign_shred(&outsider_key, &id, 2_000);
+        assert!(outsider.verifies_at(&id, &outsider_id));
+        assert!(!outsider.is_authored_at(&id, &outsider_id, &fleet_of(&members)));
+        // A member removed since: verifying, but the reader's current view
+        // excludes it — the fail-safe direction.
+        let by_member = sign_shred(&signing_key_of(&members[1]), &id, 2_000);
+        assert!(by_member.is_authored_at(&id, &members[1], &fleet_of(&members)));
         let mut rows: Vec<(String, Vec<u8>)> = members
             .iter()
             .map(|id| {
@@ -3771,100 +3869,192 @@ pub(crate) mod tests {
             })
             .collect();
         rows[1].1 = removed_row(members[0]);
-        let err = by_member.shred_is_authored(&view_of(&rows)).unwrap_err();
-        assert!(err.contains("not a verified"), "{err}");
+        assert!(!by_member.is_authored_at(&id, &members[1], &view_of(&rows)));
     }
 
     #[test]
-    fn a_shred_signature_binds_the_generation_the_shredder_and_the_stamp() {
+    fn an_attestation_binds_the_generation_the_shredder_and_the_stamp() {
         let members = [device_id(1), device_id(2)];
         let view = fleet_of(&members);
-        let signed = sign_shred(
-            &signing_key_of(&members[1]),
-            shred_core(&members, 0x54),
-            2_000,
-        )
-        .unwrap();
-        let GenerationMintRecord::Shredded {
-            shredded_at_ms,
-            shredded_by,
-            shredder_sig,
-            ..
-        } = signed.clone()
-        else {
-            unreachable!()
+        let id = generation_id(&shred_core(&members, 0x54)).unwrap();
+        let other = generation_id(&shred_core(&members, 0x55)).unwrap();
+        let signed = sign_shred(&signing_key_of(&members[1]), &id, 2_000);
+        // Filed at another generation's cell, or another member's.
+        assert!(!signed.verifies_at(&other, &members[1]));
+        assert!(!signed.verifies_at(&id, &members[0]));
+        // Moved onto another generation under the carried signature.
+        let moved = ShredAttestation {
+            generation_id: other,
+            ..signed.clone()
         };
-        // Transplanted onto another generation's core: the recomputed id differs.
-        let moved = GenerationMintRecord::Shredded {
-            core: shred_core(&members, 0x55),
-            shredded_at_ms,
-            shredded_by,
-            shredder_sig: shredder_sig.clone(),
-        };
-        assert!(
-            moved
-                .shred_is_authored(&view)
-                .unwrap_err()
-                .contains("signature")
-        );
+        assert!(!moved.is_authored_at(&other, &members[1], &view));
         // The stamp moved under the signature.
-        let restamped = GenerationMintRecord::Shredded {
-            core: shred_core(&members, 0x54),
-            shredded_at_ms: shredded_at_ms + 1,
-            shredded_by,
-            shredder_sig: shredder_sig.clone(),
+        let restamped = ShredAttestation {
+            shredded_at_ms: 2_001,
+            ..signed.clone()
         };
-        assert!(
-            restamped
-                .shred_is_authored(&view)
-                .unwrap_err()
-                .contains("signature")
-        );
-        // Another member's id claimed over this member's signature.
-        let reattributed = GenerationMintRecord::Shredded {
-            core: shred_core(&members, 0x54),
-            shredded_at_ms,
+        assert!(!restamped.is_authored_at(&id, &members[1], &view));
+        // Another member's id claimed over this member's signature, at that
+        // member's cell.
+        let reattributed = ShredAttestation {
             shredded_by: members[0],
-            shredder_sig,
+            ..signed.clone()
         };
-        assert!(
-            reattributed
-                .shred_is_authored(&view)
-                .unwrap_err()
-                .contains("signature")
+        assert!(!reattributed.is_authored_at(&id, &members[0], &view));
+        // A truncated or empty signature.
+        let unsigned = ShredAttestation {
+            shredder_sig: vec![],
+            ..signed
+        };
+        assert!(!unsigned.is_authored_at(&id, &members[1], &view));
+    }
+
+    /// **The forged-marker pin at the join itself.** A forger writes, at the honest
+    /// shredder's own cell, an attestation whose bytes sort above the honest
+    /// one (an all-`0xff` signature over the same ids) — the byte-order max
+    /// the mint cell used to keep. The verifying row wins in both orders.
+    #[test]
+    fn a_verifying_attestation_is_never_displaced_by_byte_greater_bytes() {
+        let members = [device_id(1), device_id(2)];
+        let id = generation_id(&shred_core(&members, 0x56)).unwrap();
+        let honest = sign_shred(&signing_key_of(&members[0]), &id, 2_000);
+        let forged = ShredAttestation {
+            shredder_sig: vec![0xff; 64],
+            ..honest.clone()
+        };
+        let (honest, forged) = (
+            canonical_encode(&honest).unwrap(),
+            canonical_encode(&forged).unwrap(),
         );
-        // A Minted row shreds nothing, whoever asks.
-        let (_, minted, _) = mint_row(vec![], &members, 0x56);
-        let minted: GenerationMintRecord = canonical_decode(&minted).unwrap();
-        assert!(
-            minted
-                .shred_is_authored(&view)
-                .unwrap_err()
-                .contains("Minted")
+        assert!(forged > honest, "the forgery sorts above the honest bytes");
+        assert_eq!(
+            join_generation_shred(&id, &members[0], &honest, &forged).unwrap(),
+            honest.as_slice()
         );
+        assert_eq!(
+            join_generation_shred(&id, &members[0], &forged, &honest).unwrap(),
+            honest.as_slice()
+        );
+        // Decode-or-fail: an undecodable side is an error, never ranked.
+        for (a, b) in [
+            (honest.as_slice(), b"junk".as_slice()),
+            (b"junk".as_slice(), honest.as_slice()),
+        ] {
+            assert!(join_generation_shred(&id, &members[0], a, b).is_err());
+        }
     }
 
     #[test]
-    fn an_authored_shred_absorbs_in_the_join_exactly_as_an_unauthored_one() {
-        // The join is the one consumer that stays blind to authorship (the
-        // availability-only act): a signed and an unsigned shred both absorb
-        // a Minted row, in both orders.
+    fn the_shred_join_is_commutative_associative_idempotent() {
         let members = [device_id(1), device_id(2)];
-        let (_, minted, _) = mint_row(vec![], &members, 0x57);
-        let (_, unsigned, _) = shredded_row(vec![], &members, 0x57);
-        let signed = canonical_encode(
-            &sign_shred(
-                &signing_key_of(&members[0]),
-                shred_core(&members, 0x57),
-                2_000,
-            )
-            .unwrap(),
-        )
+        let id = generation_id(&shred_core(&members, 0x57)).unwrap();
+        let key = signing_key_of(&members[0]);
+        let a = canonical_encode(&sign_shred(&key, &id, 2_000)).unwrap();
+        let b = canonical_encode(&sign_shred(&key, &id, 3_000)).unwrap();
+        let f1 = canonical_encode(&ShredAttestation {
+            shredder_sig: vec![0x01; 64],
+            ..sign_shred(&key, &id, 2_000)
+        })
         .unwrap();
-        for shred in [&unsigned, &signed] {
+        let f2 = canonical_encode(&ShredAttestation {
+            shredder_sig: vec![0xfe; 64],
+            ..sign_shred(&key, &id, 2_000)
+        })
+        .unwrap();
+        let join = |x: &[u8], y: &[u8]| {
+            join_generation_shred(&id, &members[0], x, y)
+                .unwrap()
+                .to_vec()
+        };
+        let all = [&a, &b, &f1, &f2];
+        for x in all {
+            assert_eq!(join(x, x), **x, "idempotent");
+            for y in all {
+                assert_eq!(join(x, y), join(y, x), "commutative");
+                for z in all {
+                    assert_eq!(join(&join(x, y), z), join(x, &join(y, z)), "associative");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_shred_cell_key_is_canonical_or_nothing() {
+        let (g, s) = ([0x0Au8; 32], [0xB0u8; 32]);
+        let key = shred_cell_key(&g, &s);
+        assert_eq!(parse_shred_cell_key(&key), Some((g, s)));
+        assert_eq!(parse_shred_cell_key(&key.to_uppercase()), None);
+        assert_eq!(parse_shred_cell_key(&format!("{key}/00")), None);
+        assert_eq!(parse_shred_cell_key(&crate::hex32::encode(&g)), None);
+    }
+
+    /// The marker is attribution only: a `Shredded` mint row — whatever its
+    /// shredder field says — puts no generation in the authored set, and only
+    /// an authored cell does. One authored cell suffices beside any number
+    /// that are not.
+    #[test]
+    fn only_an_authored_cell_puts_a_generation_in_the_authored_set() {
+        let members = [device_id(1), device_id(2)];
+        let view = fleet_of(&members);
+        let (g, marker, _) = shredded_row(vec![], &members, 0x58);
+        let id = generation_id(&shred_core(&members, 0x58)).unwrap();
+        assert_eq!(g, crate::hex32::encode(&id));
+        let outsider_key = device_signing_key(9);
+        let outsider = sign_shred(&outsider_key, &id, 2_000);
+        let honest = sign_shred(&signing_key_of(&members[1]), &id, 2_000);
+        let mut rows = vec![
+            // A mint row's key and value at the shred kind parse as nothing.
+            (g, marker),
+            (
+                shred_cell_key(&id, &outsider_key.verifying_key().to_bytes()),
+                canonical_encode(&outsider).unwrap(),
+            ),
+            // The honest attestation filed at the wrong shredder's cell.
+            (
+                shred_cell_key(&id, &members[0]),
+                canonical_encode(&honest).unwrap(),
+            ),
+        ];
+        let set = |rows: &[(String, Vec<u8>)]| {
+            authored_shred_generations(&view, rows.iter().map(|(k, v)| (k.as_str(), v.as_slice())))
+        };
+        assert!(set(&rows).is_empty());
+        rows.push((
+            shred_cell_key(&id, &members[1]),
+            canonical_encode(&honest).unwrap(),
+        ));
+        assert_eq!(set(&rows), std::collections::BTreeSet::from([id]));
+    }
+
+    #[test]
+    fn the_marker_absorbs_in_the_mint_join_and_carries_no_signature() {
+        // The mint join is blind to attribution (the availability-only act):
+        // a marker absorbs a Minted row in both orders, and two markers
+        // converge on the byte-order max — harmless, since no reader consults
+        // a marker's attribution.
+        let members = [device_id(1), device_id(2)];
+        let (_, minted, _) = mint_row(vec![], &members, 0x59);
+        let (_, by_first, _) = shredded_row(vec![], &members, 0x59);
+        let by_forger = canonical_encode(&GenerationMintRecord::Shredded {
+            core: shred_core(&members, 0x59),
+            shredded_at_ms: 2_000,
+            shredded_by: [0xff; 32],
+        })
+        .unwrap();
+        for shred in [&by_first, &by_forger] {
             assert_eq!(&join_generation_mint(&minted, shred).unwrap(), shred);
             assert_eq!(&join_generation_mint(shred, &minted).unwrap(), shred);
         }
+        assert_eq!(
+            join_generation_mint(&by_first, &by_forger).unwrap(),
+            join_generation_mint(&by_forger, &by_first).unwrap()
+        );
+        assert!(
+            !by_first
+                .windows(b"shredder_sig".len())
+                .any(|w| w == b"shredder_sig"),
+            "the marker carries no signature field"
+        );
     }
 
     /// The observer's own escrow-target key — the one the resolver filters

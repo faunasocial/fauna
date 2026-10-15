@@ -103,7 +103,9 @@ pub struct ListBunkerAppsRequest {
 }
 
 /// One bunker connection row (`nostr-bunker-app-item`): pending (invite
-/// outstanding) or active. Revoked tombstones are not served.
+/// outstanding), active, or burned (the identity-succession burn: listed so
+/// the successor sees which apps held authority, never able to act). User-
+/// revoked tombstones are not served.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BunkerAppEntry {
     /// Roster row id (the revoke/set_label handle).
@@ -114,7 +116,7 @@ pub struct BunkerAppEntry {
     /// User-editable label (the bunker flow transports no app name; empty
     /// until the user names it).
     pub label: String,
-    /// `"pending"` or `"active"`.
+    /// `"pending"`, `"active"` or `"burned"`.
     pub status: String,
     /// Epoch-seconds the row was created.
     pub created_at: u64,

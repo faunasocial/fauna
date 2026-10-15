@@ -161,35 +161,40 @@ pub fn install(
     // is the one that finds an empty slot.
     let claim = HOST.begin(rt.clone());
     rt.spawn(async move {
-        let params = build_params(
-            AppRuntimeInputs {
-                actor_id_hex,
-                principal,
-                attested_predecessors,
-                memberships: Some(memberships),
-                // The peer leg (W5.7) is a separate tranche: it needs the
-                // `fauna-iroh` dependency, which only tui carries today.
-                peer_transport: None,
-                // Desktop: the per-OS constant. Only a sandboxed mobile shell
-                // supplies its own container — and with it, its cloud-backup
-                // exclusion; the desktop posture is shared Rust's own.
-                store_container: None,
-            },
-            rpc,
-            &nest_url,
-        );
-        let params = with_session_wakes(params, reconnects, pushes);
+        // `build_params` refuses a process with no absolute home (the shared
+        // no-home refusal); it lands in the same failed-assembly arm below.
+        let started = async {
+            let params = build_params(
+                AppRuntimeInputs {
+                    actor_id_hex,
+                    principal,
+                    attested_predecessors,
+                    memberships: Some(memberships),
+                    // The peer leg (W5.7) is a separate tranche: it needs the
+                    // `fauna-iroh` dependency, which only tui carries today.
+                    peer_transport: None,
+                    // Desktop: the per-OS constant. Only a sandboxed mobile shell
+                    // supplies its own container — and with it, its cloud-backup
+                    // exclusion; the desktop posture is shared Rust's own.
+                    store_container: None,
+                },
+                rpc,
+                &nest_url,
+            )?;
+            let params = with_session_wakes(params, reconnects, pushes);
 
-        let started = resolve_and_start(
-            params,
-            ResolveContext {
-                nest_url,
-                // Which `sync_devices` row this machine is — resolved inside
-                // phase 2 (it is a state-dir read) so it never reaches the
-                // login path.
-                own_device_id_hex: Box::new(|| crate::sync::device_id().ok().map(hex_encode)),
-            },
-        )
+            resolve_and_start(
+                params,
+                ResolveContext {
+                    nest_url,
+                    // Which `sync_devices` row this machine is — resolved inside
+                    // phase 2 (it is a state-dir read) so it never reaches the
+                    // login path.
+                    own_device_id_hex: Box::new(|| crate::sync::device_id().ok().map(hex_encode)),
+                },
+            )
+            .await
+        }
         .await;
 
         match started {
@@ -426,6 +431,53 @@ pub fn teardown(reason: StopReason, then: impl FnOnce() + 'static) {
     };
     stop_agent_then_store(unprovision, store);
     after_stops(Box::new(then));
+}
+
+/// The nest half and the erase a remove-account owes once its registry step
+/// landed (`crate::account_scope::remove_account`; `account-scoping.md`
+/// § Erasure follows scope → *Removing an account retires this machine from
+/// it, as a sign-out does*). Twin of tui's `session::finish_removal`.
+///
+/// The nest half is async and best-effort under
+/// [`fauna_client_account_runtime::REMOVED_ACCOUNT_RETIRE_BUDGET`], so it runs
+/// as a stop on the client's runtime ([`stop_then`]) and the erase is queued
+/// behind it ([`after_stops`]): the sign-out's continuation shape, and for the
+/// same reason — the nest half's runtime has the account's store open, and the
+/// erase must never meet an open store. GTK main thread.
+pub(crate) fn finish_removal(owed: crate::account_scope::RemovalOwed) {
+    if !owed.removed.holds_device_authorization() {
+        // This machine never enrolled on the account: no grant to retire, so
+        // nothing to sign in to and nothing to wait for.
+        owed.erase();
+        return;
+    }
+    let Some(rt) = crate::settings::get_client().map(|client| client.runtime_handle()) else {
+        // No signed-in client, so no runtime to drive the nest half on — the
+        // removal proceeds, as an offline one does (decision 3).
+        tracing::warn!(
+            "[settings/account] remove-account: no client runtime — the enrollment retirement is \
+             deferred"
+        );
+        owed.erase();
+        return;
+    };
+    let removed = Arc::clone(&owed.removed);
+    let actor = removed.actor_id().to_string();
+    stop_then(&rt, async move {
+        // The outcome's log line is the shared routine's own.
+        let _ = fauna_client_account_runtime::retire_removed_account(
+            removed,
+            fauna_client_account_runtime::RemovedAccountInputs {
+                // The removed account's own id — its scope is still on disk,
+                // the erase being queued behind this stop.
+                own_device_id_hex: Box::new(move || crate::sync::device_id_hex_for(&actor)),
+                // Desktop: the per-OS constant, as the live assembly passes.
+                store_container: None,
+            },
+        )
+        .await;
+    });
+    after_stops(Box::new(move || owed.erase()));
 }
 
 /// Queue the one stop a teardown owes: the agent's un-provision reply first,

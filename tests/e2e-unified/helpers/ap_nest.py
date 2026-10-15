@@ -104,7 +104,10 @@ def start_ap_nest(binary, tmp_dir, port, domain, *, bind_host="127.0.0.1",
     """
     tmp_dir = str(tmp_dir)
     os.makedirs(tmp_dir, exist_ok=True)
-    db_path = os.path.join(tmp_dir, "nest.db")
+    # Forward slashes, as `common.nest.start_nest` writes it: the path lands in a TOML
+    # basic string below, where a Windows `\U…` is a unicode escape and the nest exits
+    # on a config parse error before it binds.
+    db_path = os.path.join(tmp_dir, "nest.db").replace("\\", "/")
     scheme = "https" if serve_tls else "http"
 
     config = f"""[nest]
@@ -136,7 +139,13 @@ registration_mode = "open"
     # `build_ap_nest_binary`). Only loopback is exempted — a private-range or
     # cloud-metadata target stays rejected even here.
     ap_env = {**os.environ, "FAUNA_TEST_AP_ALLOW_LOOPBACK": "1", **(extra_env or {})}
-    argv = [binary, "--bind", f"{bind_host}:{port}", "--db", db_path, "--config", config_path]
+    # A blob store, as every standard test nest has (`common.nest`): without
+    # `--blob-dir` the nest runs no blob service and answers every blob upload
+    # and read 503, so no photo, avatar or sealed gated body can be stored.
+    blob_dir = os.path.join(tmp_dir, "blobs")
+    os.makedirs(blob_dir, exist_ok=True)
+    argv = [binary, "--bind", f"{bind_host}:{port}", "--db", db_path, "--config", config_path,
+            "--blob-dir", blob_dir]
     if serve_tls:
         # Mark the port BEFORE any host-side dial so wait_for_node/claim_admin/
         # ws_api all resolve https:// (+ CERT_NONE) for the floor cert.
@@ -171,7 +180,9 @@ registration_mode = "open"
     )
     reap_descendants_of(proc.pid)
     log_file.close()  # the child holds its own dup of the fd
-    wait_for_node(port, scheme=scheme)
+    # `proc` + `log_path`: a nest that exits at boot fails here at once, with its own
+    # log tail, instead of reading as a 180 s "booted but never served /health".
+    wait_for_node(port, scheme=scheme, proc=proc, log_path=log_path)
 
     # Claim admin via claim code
     admin = claim_admin(port, CLAIM_CODE)
@@ -356,3 +367,95 @@ def delivery_jobs_for(nest, inbox_url: str) -> list[str]:
     finally:
         conn.close()
     return [r[0] for r in rows]
+
+
+def deliver_note(nest, peer, username: str, actor_url: str, text: str,
+                 *, attachment: list[dict] | None = None) -> str:
+    """`peer` (a `helpers.fake_follower.FakeFollower`) follows the user
+    (auto-accepted) and sends it a signed `Create{Note}` on the user's own
+    inbox — the relationship gate's *addressed* arm ingests it into the user's
+    feed. `attachment` is the note's AS2 `attachment` list (a bridged media
+    post). Returns the note's id once its `ap_post_map` row exists.
+    """
+    import time
+    import uuid
+
+    code = peer.post_signed(
+        f"{nest['url']}/ap/users/{username}/inbox",
+        {
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "type": "Follow",
+            "id": f"{peer.actor_uri}/activities/follow-1",
+            "actor": peer.actor_uri,
+            "object": actor_url,
+        },
+    )
+    assert code == 202, f"inbox did not accept the Follow: HTTP {code}"
+    peer.wait_for("Accept")
+
+    note_id = f"{peer.actor_uri}/statuses/note-{uuid.uuid4().hex[:10]}"
+    note = {
+        "type": "Note",
+        "id": note_id,
+        "attributedTo": peer.actor_uri,
+        "content": f"<p>{text}</p>",
+        # Now, never a fixed date: the inbox drops a note published past its
+        # future bound, and a fixed date ages the feed order.
+        "published": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "to": ["https://www.w3.org/ns/activitystreams#Public"],
+    }
+    if attachment is not None:
+        note["attachment"] = attachment
+    code = peer.post_signed(
+        f"{nest['url']}/ap/users/{username}/inbox",
+        {
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "type": "Create",
+            "id": f"{note_id}/activity",
+            "actor": peer.actor_uri,
+            "to": ["https://www.w3.org/ns/activitystreams#Public"],
+            "object": note,
+        },
+    )
+    assert code == 202, f"inbox did not accept the Create: HTTP {code}"
+    assert ap_post_map_row(nest, note_id) is not None, (
+        f"the peer's note {note_id!r} was accepted (202) but never ingested — "
+        "a rejected activity answers the peer, not us; read the nest log"
+    )
+    return note_id
+
+
+def deliver_direct_note(nest, peer, username: str, actor_url: str, text: str) -> str:
+    """`peer` (a `helpers.fake_follower.FakeFollower`) sends the user a signed
+    **direct** `Create{Note}` on the user's own inbox: addressed to the user's
+    actor alone — no Public, no followers collection, and no Follow first. The
+    inbound audience gate hands it to the ActivityPub DM leg
+    (`activitypub/dm_leg.rs`), which stores it in the user's bridged room with
+    `peer` rather than the feed. Returns the note's id once the inbox accepted
+    it (the leg's deposit runs inside that request).
+    """
+    import time
+    import uuid
+
+    note_id = f"{peer.actor_uri}/statuses/dm-{uuid.uuid4().hex[:10]}"
+    note = {
+        "type": "Note",
+        "id": note_id,
+        "attributedTo": peer.actor_uri,
+        "content": f"<p>{text}</p>",
+        "published": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "to": [actor_url],
+    }
+    code = peer.post_signed(
+        f"{nest['url']}/ap/users/{username}/inbox",
+        {
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "type": "Create",
+            "id": f"{note_id}/activity",
+            "actor": peer.actor_uri,
+            "to": [actor_url],
+            "object": note,
+        },
+    )
+    assert code == 202, f"inbox did not accept the direct Create: HTTP {code}"
+    return note_id

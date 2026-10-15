@@ -43,7 +43,7 @@ public class AdminWebViewModelTests
     public async Task Apex_designate_then_clear_round_trips()
     {
         var web = new FakeWebClient { ApexActor = null };
-        var vm = new AdminWebViewModel(web, Actors(new ApexActorOption(Alice, "alice")), "example.test");
+        var vm = new AdminWebViewModel(web, Actors(new ApexActorOption(Alice, "alice")));
 
         await vm.LoadAsync();
         Assert.Equal(2, vm.ApexOptions.Count); // [None, alice]
@@ -61,12 +61,22 @@ public class AdminWebViewModelTests
     }
 
     [Fact]
+    public async Task Apex_info_is_the_nests_serving_domain()
+    {
+        var web = new FakeWebClient { NestServingDomain = "web.test" };
+        var vm = new AdminWebViewModel(web, Actors());
+
+        await vm.LoadAsync();
+        Assert.Contains("https://web.test/", vm.ApexInfoText);
+    }
+
+    [Fact]
     public async Task Apex_keeps_a_paginated_out_designation_visible()
     {
         var bob = Enumerable.Range(100, 32).Select(i => (byte)i).ToArray();
         // bob is the persisted apex but is NOT in the loaded actor page.
         var web = new FakeWebClient { ApexActor = bob };
-        var vm = new AdminWebViewModel(web, Actors(new ApexActorOption(Alice, "alice")), "example.test");
+        var vm = new AdminWebViewModel(web, Actors(new ApexActorOption(Alice, "alice")));
 
         await vm.LoadAsync();
         Assert.Equal(3, vm.ApexOptions.Count); // [None, alice, <bob trailing>]

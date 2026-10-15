@@ -9,6 +9,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
     Loaded="Panel_Loaded"
+    Unloaded="Panel_Unloaded"
     xmlns:ids="using:FaunaApp.UiIds">
 
     <!-- Renders the shared fauna_client_pair::LinkedNestsMachine (over UniFFI):
@@ -45,6 +46,32 @@
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsAddCancelButton}"
                         Content="{loc:Localize Key=nests/add_cancel}"
                         Click="Cancel_Click" />
+            </StackPanel>
+        </StackPanel>
+
+        <!-- Forward queue (nests.md § Forward queue; private-mode.md § Post
+             Forwarding): the user's own post-forward queue on the connected nest.
+             Page-level, after the add form and before the nest rows; Collapsed
+             (absent to UIA) unless queued > 0, so an ordinary Nests page carries
+             none of the four ids. Projection lives in ForwardQueueFormat (Core).
+             The reason is partly relay-chosen text: a plain TextBlock.Text only —
+             never a RichTextBlock, markup or hyperlink-detecting control. -->
+        <StackPanel x:Name="ForwardBlock" Spacing="6" Visibility="Collapsed">
+            <TextBlock x:Name="ForwardSummary"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsForwardQueue}"
+                       TextWrapping="Wrap" />
+            <TextBlock x:Name="ForwardReason"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsForwardQueueReason}"
+                       TextWrapping="Wrap" Opacity="0.7" Visibility="Collapsed" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button x:Name="ForwardRetryButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsForwardRetryButton}"
+                        Content="{loc:Localize Key=nests/forward_retry}"
+                        Click="ForwardRetry_Click" />
+                <Button x:Name="ForwardDiscardButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsForwardDiscardButton}"
+                        Content="{loc:Localize Key=nests/forward_discard}"
+                        Click="ForwardDiscard_Click" />
             </StackPanel>
         </StackPanel>
 
@@ -90,6 +117,16 @@
                                 <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsItemNestId}"
                                            Text="{x:Bind NestId}"
                                            Opacity="0.7" FontFamily="Consolas" FontSize="12" />
+                                <!-- participant-escrow-holder-badge (participants.md § The
+                                     participant model → Roles): this nest holds the account's
+                                     generation-key escrow. Collapsed (absent to UIA) on every
+                                     other row; derived from recorded escrow receipts, never
+                                     asserted by the nest itself. -->
+                                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.ParticipantEscrowHolderBadge}"
+                                           Text="{x:Bind EscrowBadgeText}"
+                                           Visibility="{x:Bind EscrowBadgeVisibility}"
+                                           Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                           FontSize="12" />
                                 <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsItemCapabilities}"
                                            Text="{x:Bind Capabilities}"
                                            Visibility="{x:Bind IdentityDetailVisibility}"
@@ -367,11 +404,77 @@
                                  DataContext. Genuinely dynamic per-row state (scope-
                                  driven holder visibility + confirm-enable) that OneTime
                                  x:Bind can't express. -->
+                            <!-- nest-trust-blessed-toggle (nests.md § Expiry / renewal →
+                                 Duration and blessing): the per-nest blessing, home row +
+                                 Now lens only. FlaUI drives a CheckBox via the Toggle
+                                 pattern (Checked/Unchecked, not Click); the e2e reads the
+                                 `state` attr → HelpText ("on"/"off"). -->
+                            <CheckBox AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustBlessedToggle}"
+                                      AutomationProperties.HelpText="{x:Bind BlessedState}"
+                                      Visibility="{x:Bind BlessedVisibility}"
+                                      IsChecked="{x:Bind Blessed}"
+                                      Content="{x:Bind BlessedLabel}"
+                                      Checked="Blessed_Toggled"
+                                      Unchecked="Blessed_Toggled" />
+
                             <StackPanel x:Name="MintHost"
                                         Visibility="{x:Bind MintFlowVisibility}"
                                         Loaded="MintHost_Loaded" />
                         </StackPanel>
                     </StackPanel>
+                    </Border>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+        <!-- Custodian-NEST rows (nests.md § Trust facet — custody rows): one nests-item
+             per NEST-anchored custody, AFTER the linked rows. Device-anchored custody
+             stays on the Devices page. Same non-virtualizing panel + Name rationale as
+             NestsList. The nest-trust-custody-item container carries the family (a
+             Border root needs AutomationProperties.Name to be FlaUI-visible). -->
+        <ItemsControl x:Name="CustodyNestsList">
+            <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <StackPanel Orientation="Vertical" Spacing="12" />
+                </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="local:NestCustodyItem">
+                    <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsItem}"
+                            AutomationProperties.Name="{x:Bind Label}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1" CornerRadius="6" Padding="8">
+                        <StackPanel Spacing="6">
+                            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestsItemLabel}"
+                                       Text="{x:Bind Label}"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustCustodyItem}"
+                                    AutomationProperties.Name="{x:Bind Label}">
+                                <StackPanel Spacing="2">
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustCustodyScope}"
+                                               Text="{x:Bind Scope}" />
+                                    <!-- Three receipt states, three strings — never collapsed,
+                                         never empty. -->
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustCustodyReceiptStatus}"
+                                               Text="{x:Bind ReceiptStatus}"
+                                               Foreground="{x:Bind ReceiptStatusBrush}"
+                                               FontSize="12" />
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustCustodyHeldBytes}"
+                                               Text="{x:Bind HeldBytes}"
+                                               Opacity="0.7" FontSize="12" />
+                                    <!-- REQUIRED honest-bound copy (nests.md § Honest bound),
+                                         stated beside the control. -->
+                                    <TextBlock Text="{x:Bind BoundNote}"
+                                               TextWrapping="Wrap" Opacity="0.6" FontSize="12" />
+                                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.NestTrustCustodyRevokeButton}"
+                                            Content="{x:Bind RevokeLabel}"
+                                            Tag="{x:Bind}"
+                                            IsEnabled="{x:Bind RevokeEnabled}"
+                                            Margin="0,2,0,0"
+                                            Click="RevokeCustody_Click" />
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
                     </Border>
                 </DataTemplate>
             </ItemsControl.ItemTemplate>

@@ -150,6 +150,23 @@ fn guardian_refusal_text(detail: &str) -> String {
     format!("{GUARDIAN_APPROVAL_REQUIRED_PREFIX}{detail}")
 }
 
+/// `GetForwardPerHourReply` as the `{ value, ceiling }` the `mail-settings`
+/// Forwarding section reads (the FFI `ForwardPerHour` record's twin).
+#[derive(Serialize)]
+struct ForwardPerHourJs {
+    value: u32,
+    ceiling: u32,
+}
+
+impl From<fauna_protocol::bridge_routing::GetForwardPerHourReply> for ForwardPerHourJs {
+    fn from(r: fauna_protocol::bridge_routing::GetForwardPerHourReply) -> Self {
+        Self {
+            value: r.forward_per_hour,
+            ceiling: r.forward_per_hour_ceiling,
+        }
+    }
+}
+
 /// `AdminInviteRequest` + the shared [`AdminInviteRequest::is_pending`] predicate
 /// projected onto the JS reply — the wasm twin of native's projected
 /// `FfiAdminInviteRequest.is_pending` field. The web admin-users hub reads
@@ -527,6 +544,10 @@ struct WasmBackupDestinationStatus {
     /// leaves this stamp at the previous pass, so the stamp alone renders a
     /// freshly-rotted custodian as just-verified.
     last_audit_passed_at: Option<u64>,
+    /// Nest rows only: `"ok"` / `"refused"`, passed straight to the shared
+    /// `backupBacklogLabel` — a destination that turns this box away reads as
+    /// refused, never as an ordinary lag. `null` on a client-device row.
+    writer_state: Option<String>,
 }
 
 /// One destination's audit picture, reshaped for JS — the two
@@ -558,15 +579,31 @@ struct WasmDestinationAuditRow {
     /// then at most one `SourceRegressed`. The SPA paints every entry, each
     /// opaque, through `backupAuditAlertLabel`.
     alert_reasons: Vec<fauna_core::format::BackupAuditAlertReason>,
+    /// Whether this row's fifth-reason banner carries
+    /// `backup-audit-recover-button` — the shared
+    /// `fauna_client_backup::recover::recover_offered` answer at the pass's
+    /// `now`, so the page never re-derives which banners carry the gesture
+    /// (the ffi row's field of the same name). A browser is never a
+    /// custodian, so only a regressed **nest** destination is offered.
+    recover_offered: bool,
 }
 
 /// Project one persisted record to its render row — the wasm twin of the ffi
 /// `audit_row`, split out so the projection is unit-testable without a nest.
+/// `destinations` is the pinned list the pass audited, read for the row's
+/// kind.
 fn audit_row(
     r: &fauna_client_backup::audit::DestinationAuditRecord,
+    destinations: &[fauna_core::data::BackupDestination],
     now: i64,
 ) -> WasmDestinationAuditRow {
     WasmDestinationAuditRow {
+        recover_offered: destinations
+            .iter()
+            .find(|d| d.destination_id == r.state.destination_id)
+            // No custodian store in a browser: no device id matches a
+            // client-device row.
+            .is_some_and(|d| fauna_client_backup::recover::recover_offered(r, d, "", now)),
         destination_id: r.state.destination_id.clone(),
         last_passed_at: r.state.last_passed_at.and_then(|s| u64::try_from(s).ok()),
         alert_reason: r.alert_reason(),
@@ -610,7 +647,12 @@ mod audit_row_tests {
             verdict: Some(AuditVerdict::Passed),
         };
 
-        let open = audit_row(&record, NOW);
+        let destinations = vec![fauna_core::data::BackupDestination {
+            destination_id: "id-a".into(),
+            destination_nest_url: "https://backup.example".into(),
+            ..Default::default()
+        }];
+        let open = audit_row(&record, &destinations, NOW);
         assert!(open.alert_reason.is_none());
         assert_eq!(
             open.alert_reasons,
@@ -618,7 +660,49 @@ mod audit_row_tests {
                 left_secs: Some(1_000)
             }]
         );
-        assert!(audit_row(&record, NOW + 1_000).alert_reasons.is_empty());
+        assert!(open.recover_offered, "a regressed nest offers the recovery");
+        let closed = audit_row(&record, &destinations, NOW + 1_000);
+        assert!(closed.alert_reasons.is_empty());
+        assert!(
+            !closed.recover_offered,
+            "nothing to recover once the window closes"
+        );
+        assert!(
+            !audit_row(&record, &[], NOW).recover_offered,
+            "a row the pinned list no longer carries is never offered"
+        );
+    }
+
+    /// A browser hosts no custodian store, so a client-device destination's
+    /// regression is never offered here — its copy is not on this device.
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn a_client_device_row_is_never_offered_in_a_browser() {
+        const NOW: i64 = 1_800_000_000;
+        let mut state = DestinationAuditState {
+            destination_id: "device".to_string(),
+            ..Default::default()
+        };
+        state.accepted_regressions.insert(
+            "ledger".to_string(),
+            AcceptedRegression {
+                pinned: 40,
+                served: 30,
+                observed_at: NOW,
+                floored_at: None,
+                recoverable_until: Some(NOW + 1_000),
+            },
+        );
+        let record = DestinationAuditRecord {
+            state,
+            verdict: None,
+        };
+        let destinations = vec![fauna_core::data::BackupDestination {
+            destination_id: "device".into(),
+            kind: fauna_core::data::DESTINATION_KIND_CLIENT_DEVICE.into(),
+            custodian_device_id: Some("aa11".into()),
+            ..Default::default()
+        }];
+        assert!(!audit_row(&record, &destinations, NOW).recover_offered);
     }
 }
 
@@ -668,7 +752,8 @@ async fn resolve_recovery_seeds(
     cold: Option<&InnerClient>,
 ) -> Result<Vec<fauna_core::data::DeploymentSeedEntry>, JsValue> {
     use fauna_account_plane::deployment_seed_recovery::{StoreRoot, resolve_deployment_seeds_over};
-    resolve_deployment_seeds_over(&StoreRoot::platform(), secret, cold)
+    let root = StoreRoot::platform().map_err(|e| JsValue::from_str(&format!("{e:#}")))?;
+    resolve_deployment_seeds_over(&root, secret, cold)
         .await
         .into_result()
         .map_err(|e| JsValue::from_str(&format!("{e:#}")))
@@ -1518,7 +1603,7 @@ pub struct WsRpcClient {
 /// `$lib/device-id`'s `getDeviceId` reaches (`WasmAccountRegistry::
 /// deviceIdForActor`), so the id the session's connection announces and the id
 /// its push row is keyed under are one value by construction.
-fn this_browsers_device_id(
+pub(crate) fn this_browsers_device_id(
     actor_id_hex: &str,
 ) -> Result<String, fauna_client_accounts::DeviceIdError> {
     AccountRegistry::new(Arc::new(LocalStorageSecretStore))
@@ -1620,16 +1705,26 @@ impl WsRpcClient {
     /// The session-ending verdict the stop is, typed — `"sign_in_refused"`
     /// when the reconnect loop stopped because the nest refused this
     /// identity's re-mint (`fauna.auth.not_registered`: suspended or removed
-    /// while signed in), else `undefined`. The wasm twin of native
-    /// `NestClient::supervisor_stop` read through
+    /// while signed in), `"nest_outdated"` when the re-mint met a nest that
+    /// restarted degraded (`fauna.nest.outdated`), `"app_outdated"` when the
+    /// nest closed this app's dial or re-mint 4426 (it no longer serves the
+    /// app's subprotocol: the app is too old), else `undefined`. The wasm twin
+    /// of native `NestClient::supervisor_stop` read through
     /// `NestClientError::session_ending_verdict`: `rpc.ts` routes it to the
-    /// launch surface (`security.md` § Post-auth surfacing), never by matching
+    /// launch surface (`security.md` § Post-auth surfacing;
+    /// `version-compatibility.md` § Dimension 4), never by matching
     /// [`Self::supervisor_stop`]'s localized text.
     #[wasm_bindgen(js_name = sessionEndingVerdict)]
     pub fn session_ending_verdict(&self) -> Option<String> {
-        self.inner
-            .stopped_by_sign_in_refusal()
-            .then(|| "sign_in_refused".to_string())
+        if self.inner.stopped_by_sign_in_refusal() {
+            Some("sign_in_refused".to_string())
+        } else if self.inner.stopped_by_nest_outdated() {
+            Some("nest_outdated".to_string())
+        } else if self.inner.stopped_by_app_outdated() {
+            Some("app_outdated".to_string())
+        } else {
+            None
+        }
     }
 
     /// Register a JS `() => void` fired on every reconnect (a `Connected` after
@@ -2386,17 +2481,32 @@ impl WsRpcClient {
     /// deliberate handle-less state (§ A handle-less account); `label` is
     /// always empty, matching tui/linux — there is no free-text label on
     /// direct admission, only a tier. `actor_id` is the raw 32-byte id.
+    /// `guardian_actor` (raw 32 bytes, `undefined` = none) is the
+    /// `admin-users-admit-guardian-select` pick — the supervised designation
+    /// (`family-safety.md` § The guardianship link); `age_band` is the band
+    /// option value (a wire token from `ageBandOptions`, or `undefined`/`""`),
+    /// refused here if the vocabulary cannot name it.
     #[wasm_bindgen(js_name = adminUsersCreate)]
     pub fn admin_users_create(
         &self,
         actor_id: Vec<u8>,
         tier: String,
         handle: Option<String>,
+        guardian_actor: Option<Vec<u8>>,
+        age_band: Option<String>,
     ) -> js_sys::Promise {
         let client = self.inner.clone();
         future_to_promise(async move {
+            let age_band = parse_age_band(age_band)?;
             AdminClient::new(client)
-                .users_create(actor_id, tier, String::new(), handle)
+                .users_create(
+                    actor_id,
+                    tier,
+                    String::new(),
+                    handle,
+                    guardian_actor,
+                    age_band,
+                )
                 .await
                 .map_err(err_to_js)?;
             Ok(JsValue::UNDEFINED)
@@ -2428,6 +2538,52 @@ impl WsRpcClient {
         future_to_promise(async move {
             AdminClient::new(client)
                 .admins_remove(actor_id)
+                .await
+                .map_err(err_to_js)?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// `fauna.admin.pending_actions.list` → every account's pending actions
+    /// (ALL statuses) as `{ actions: [...] }`; the Users hub's
+    /// `admin-users-pending-section` narrows to `status === 'pending'`
+    /// (`admin.md` § Pending admin actions). Distinct from the account-side
+    /// `pendingActionsList`, which is keyed on the connection actor.
+    #[wasm_bindgen(js_name = adminPendingActionsList)]
+    pub fn admin_pending_actions_list(&self) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let reply = AdminClient::new(client)
+                .pending_actions_list()
+                .await
+                .map_err(err_to_js)?;
+            to_js(&reply)
+        })
+    }
+
+    /// `fauna.pending_actions.approve` — add this admin's approval
+    /// (`admin-pending-action-approve-button`). `id` rides as `f64` (no native
+    /// `i64` in wasm-bindgen; row ids stay far under 2^53).
+    #[wasm_bindgen(js_name = adminPendingActionApprove)]
+    pub fn admin_pending_action_approve(&self, id: f64) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            AdminClient::new(client)
+                .pending_action_approve(id as i64)
+                .await
+                .map_err(err_to_js)?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// `fauna.pending_actions.cancel` from the admin console
+    /// (`admin-pending-action-cancel-button`) — one click, no confirm.
+    #[wasm_bindgen(js_name = adminPendingActionCancel)]
+    pub fn admin_pending_action_cancel(&self, id: f64) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            AdminClient::new(client)
+                .pending_action_cancel(id as i64)
                 .await
                 .map_err(err_to_js)?;
             Ok(JsValue::UNDEFINED)
@@ -2506,16 +2662,13 @@ impl WsRpcClient {
             let store = fauna_client_config::ResolvingLedgerStore::new(move || {
                 crate::account_runtime::handle_for(&actor)
             });
-            let verdict = match fauna_client_config::rotate_deployment_seed_on_plane(
-                &client,
-                id,
-                Some(&store),
-            )
-            .await
-            {
-                Ok(outcome) => fauna_client_config::seed_rotation_verdict(&outcome),
-                Err(e) => failed(e.to_string()),
-            };
+            let verdict =
+                match fauna_client_config::rotate_deployment_seed_on_plane(&client, id, &store)
+                    .await
+                {
+                    Ok(outcome) => fauna_client_config::seed_rotation_verdict(&outcome),
+                    Err(e) => failed(e.to_string()),
+                };
             to_js(&verdict)
         })
     }
@@ -2934,6 +3087,20 @@ impl WsRpcClient {
         })
     }
 
+    /// `admin_dashboard_snapshot()` → `{ stats: { label, value }[], error }` —
+    /// the dashboard's one card set (`admin.md` § 1. Dashboard → *The card
+    /// set*): the five reads and the shared fold, each `label`/`value` a
+    /// `LocalizedText` for `resolveLocalized`. Never rejects: a failed read
+    /// drops its own cards and rides `error` for `error-message`.
+    #[wasm_bindgen(js_name = adminDashboardSnapshot)]
+    pub fn admin_dashboard_snapshot(&self) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let snapshot = AdminClient::new(client).dashboard_snapshot().await;
+            to_js(&snapshot)
+        })
+    }
+
     /// `fauna.admin.invite_codes.list` → `AdminInviteCode[]`.
     #[wasm_bindgen(js_name = adminInviteCodesList)]
     pub fn admin_invite_codes_list(&self) -> js_sys::Promise {
@@ -3310,6 +3477,26 @@ impl WsRpcClient {
                 .await
                 .map_err(err_to_js)?;
             to_js(&reply)
+        })
+    }
+
+    // ── fauna.nest.info → the Status page's node leg ────────────────
+    //
+    // `ui/status.md` § State & data shape: the node leg is the nest's own
+    // `fauna.nest.info` reply narrowed to `{domain, version}`, read by the
+    // shared `StatusClient::node()` — the wasm twin of the UniFFI
+    // `FfiStatusClient::node`. Pair with the free `statusText` below.
+
+    /// `fauna.nest.info` → `{domain, version}` (the snapshot's `NodeLeg`).
+    #[wasm_bindgen(js_name = statusNode)]
+    pub fn status_node(&self) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let node = fauna_client_status::StatusClient::new(client)
+                .node()
+                .await
+                .map_err(err_to_js)?;
+            to_js(&node)
         })
     }
 
@@ -3834,6 +4021,61 @@ impl WsRpcClient {
         })
     }
 
+    /// `fauna.bridges.get_forward_all_to` → the caller's "forward all incoming
+    /// mail to" address, or `null` when forwarding is off.
+    #[wasm_bindgen(js_name = forwardAllToGet)]
+    pub fn forward_all_to_get(&self) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let value = MailAccountClient::new(client)
+                .get_forward_all_to()
+                .await
+                .map_err(err_to_js)?;
+            to_js(&value)
+        })
+    }
+
+    /// `fauna.bridges.set_forward_all_to` (`null` clears) then a confirming
+    /// re-read — the persisted address, never the local edit.
+    #[wasm_bindgen(js_name = forwardAllToSet)]
+    pub fn forward_all_to_set(&self, address: Option<String>) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let confirmed = MailAccountClient::new(client)
+                .set_forward_all_to_and_reload(address)
+                .await
+                .map_err(err_to_js)?;
+            to_js(&confirmed)
+        })
+    }
+
+    /// `fauna.bridges.get_forward_per_hour` → `{ value, ceiling }`.
+    #[wasm_bindgen(js_name = forwardPerHourGet)]
+    pub fn forward_per_hour_get(&self) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let reply = MailAccountClient::new(client)
+                .get_forward_per_hour()
+                .await
+                .map_err(err_to_js)?;
+            to_js(&ForwardPerHourJs::from(reply))
+        })
+    }
+
+    /// `fauna.bridges.set_forward_per_hour` then a confirming re-read →
+    /// `{ value, ceiling }`.
+    #[wasm_bindgen(js_name = forwardPerHourSet)]
+    pub fn forward_per_hour_set(&self, value: u32) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let reply = MailAccountClient::new(client)
+                .set_forward_per_hour_and_reload(value)
+                .await
+                .map_err(err_to_js)?;
+            to_js(&ForwardPerHourJs::from(reply))
+        })
+    }
+
     /// `fauna.email.apply_spam_disposition` → `{ watermarked, movedToJunk }`.
     /// Applies the on-device scorer's outcome to the caller's own INBOX:
     /// watermark every `scored_uids` message `$FaunaSpamScored`, then move the
@@ -4092,9 +4334,9 @@ impl WsRpcClient {
     }
 
     /// `fauna.bridges.query_events` over a calendar → `{ events: [{ ...row }] }`
-    /// (see `flat_event_to_web_json`). Each sealed body is unsealed + flat-parsed
-    /// via the WASM-safe `decode_event_entry_flat`. Empty list when mail is off or
-    /// the calendar has no row yet.
+    /// (see `flat_event_to_web_json`) via the shared
+    /// `CalDavClient::events_flat_in_calendar`. Empty list when mail is off or the
+    /// calendar has no row yet; a row that will not unseal or parse rejects.
     #[wasm_bindgen(js_name = caldavQueryEvents)]
     pub fn caldav_query_events(
         &self,
@@ -4113,30 +4355,21 @@ impl WsRpcClient {
                 return to_js(&serde_json::json!({ "events": [] }));
             };
             let calendar_id = hex_array_32(&calendar_id_hex)?;
-            let reply = caldav::CalDavClient::new(client)
-                .query_events(caldav::bridge_routing::QueryEventsRequest {
-                    actor_id: actor_id.to_vec(),
-                    calendar_id: calendar_id.to_vec(),
-                    since_modseq: None,
-                    after_event_id: None,
-                    limit: 0,
-                })
-                .await
-                .map_err(err_to_js)?;
-            let entries = match reply {
-                caldav::bridge_routing::QueryEventsReply::Ok { events, .. } => events,
-                caldav::bridge_routing::QueryEventsReply::CalendarNotFound => Vec::new(),
-                caldav::bridge_routing::QueryEventsReply::Unknown => {
-                    return Err(JsValue::from_str(caldav::UNKNOWN_QUERY_OUTCOME));
-                }
-            };
             // Derived once for the whole page — every row reuses it instead of
             // paying its own X-Wing keygen .
             let keys = caldav::DavRecipientKeys::from_mseks(&msek, &prior_mseks);
-            let events: Vec<serde_json::Value> = entries
+            // The shared read: a row that will not unseal or parse rejects the
+            // promise with its cause instead of vanishing from the list.
+            let events: Vec<serde_json::Value> = caldav::CalDavClient::new(client)
+                .events_flat_in_calendar(&actor_id, &calendar_id, &keys)
+                .await
+                .map_err(|e| match e {
+                    caldav::ReadEventsError::Transport(e) => err_to_js(e),
+                    other => JsValue::from_str(&other.to_string()),
+                })?
+                .unwrap_or_default()
                 .iter()
-                .filter_map(|e| caldav::decode_event_entry_flat(e, &keys).ok())
-                .map(|f| flat_event_to_web_json(&f, &self_email))
+                .map(|f| flat_event_to_web_json(f, &self_email))
                 .collect();
             to_js(&serde_json::json!({ "events": events }))
         })
@@ -4748,17 +4981,33 @@ impl WsRpcClient {
         }))
     }
 
-    #[wasm_bindgen(js_name = conversationsManager)]
+    /// Build the conversations manager for this client's actor — the one path
+    /// every web MLS engine passes through, so the conversations-engine role is
+    /// taken HERE, before the engine exists (`conversations::take_engine_role`,
+    /// the twin of the role lock natively taken inside `SqliteStorage::open`).
+    /// A promise because a Web Lock request is one; a refused role rejects with
+    /// the typed `Error` `isConversationsEngineRoleRefusal` recognises. A build
+    /// that fails after the role was taken keeps it: the tab's next build
+    /// serves under it, and the tab's teardown releases it.
+    #[wasm_bindgen(
+        js_name = conversationsManager,
+        unchecked_return_type = "Promise<WasmConversationsManager>"
+    )]
     pub fn conversations_manager(
         &self,
         self_address: String,
         self_secret: Vec<u8>,
-    ) -> Result<crate::conversations::WasmConversationsManager, JsValue> {
-        crate::conversations::WasmConversationsManager::with_conversations(
-            self.inner.clone(),
-            self_address,
-            self_secret,
-        )
+    ) -> js_sys::Promise {
+        let client = self.inner.clone();
+        wasm_bindgen_futures::future_to_promise(async move {
+            crate::conversations::take_engine_role(client.actor_id_hex()).await?;
+            crate::conversations::WasmConversationsManager::with_conversations(
+                client,
+                self_address,
+                self_secret,
+            )
+            .map(JsValue::from)
+        })
     }
 
     /// Build the shared `WasmFeedManager` for the logged-in actor over this
@@ -5423,7 +5672,9 @@ impl WsRpcClient {
     // transport-generic over `RpcRequester` precisely so native and wasm
     // share one implementation). The tui/linux twins are
     // `apps/fauna-tui/src/settings/mod.rs` and
-    // `apps/fauna-linux/src/{client,settings/recovery_kit}.rs`.
+    // `apps/fauna-linux/src/{client,settings/recovery_kit}.rs`. The fifth
+    // act, the let-go, takes no identity and no client — it rides this tab's
+    // account runtime — so its three exports live in `crate::generation_let_go`.
 
     /// A fresh read of `recovery-kit-status` off the registration chain
     /// (never a local flag, so a kit created on another device is reflected
@@ -5697,22 +5948,64 @@ impl WsRpcClient {
         }
     }
 
-    /// `recovery-kit-sweep-retry-button`'s press — the answer, as a
-    /// `LocalizedText` the SPA resolves and paints on `error-message`.
-    ///
-    /// Never `null`: the button "must answer in words on every press"
+    /// `recovery-kit-sweep-retry-button`'s press — resolves to the answer as a
+    /// `LocalizedText` the SPA resolves and paints on `error-message`, or `null`
+    /// when the press SWEPT: the button "must answer in words on every press"
     /// (`settings.md` § Recovery kit → *Finishing an unfinished group sweep*),
-    /// so a silent arm would be a dropped command (testing.md point 11). On web
-    /// the arm is always the same one and the reasoning is
-    /// [`crate::succession::succession_sweep_retry`]'s; the sentence itself is
-    /// the shared projection's, identical to the one a native device without
-    /// the retired identity's conversation history gives.
+    /// and a sweep's words are its own lines, re-read through
+    /// `successionSweepCopy` from the report the press parked. The driver is
+    /// [`crate::succession::succession_sweep_retry`]; rejects only on an
+    /// unreadable secret.
+    ///
+    /// `conversations` is BORROWED, for `succeedIdentityWithHeldKit`'s reason:
+    /// the successor's half of the sweep joins the live engine in place, and a
+    /// by-value parameter would zero the SPA's handle. No manager → the
+    /// `NoEngine` export.
     #[wasm_bindgen(js_name = successionSweepRetry)]
-    pub fn succession_sweep_retry(&self) -> Result<JsValue, JsValue> {
-        // `to_js` for `successionSweepCopy`'s reason: `LocalizedText::args` is a
-        // map, and the default serializer hands `resolveLocalized` a JS `Map`
-        // with no own properties.
-        to_js(&crate::succession::succession_sweep_retry())
+    pub fn succession_sweep_retry(
+        &self,
+        secret_hex: String,
+        conversations: &crate::conversations::WasmConversationsManager,
+    ) -> js_sys::Promise {
+        sweep_retry_promise(
+            self.inner.clone(),
+            secret_hex,
+            conversations.succession_engine(),
+        )
+    }
+
+    /// [`Self::succession_sweep_retry`] for a tab with no conversations
+    /// manager — it answers in words rather than sweeping (the driver never
+    /// builds a second engine on web).
+    #[wasm_bindgen(js_name = successionSweepRetryNoEngine)]
+    pub fn succession_sweep_retry_no_engine(&self, secret_hex: String) -> js_sys::Promise {
+        sweep_retry_promise(self.inner.clone(), secret_hex, None)
+    }
+
+    /// Discharge a relaunch adoption's owed group sweep — the unbidden press of
+    /// the retry button, claimed once (`succession::discharge_owed_sweep`).
+    /// Resolves to `null` when nothing was owed, else `{ message }`: the
+    /// press's `LocalizedText` for `error-message`, or `null` on a sweep that
+    /// ran, whose lines `successionSweepCopy` then reads. `conversations` is
+    /// borrowed, as for [`Self::succession_sweep_retry`].
+    #[wasm_bindgen(js_name = dischargeOwedSuccessionSweep)]
+    pub fn discharge_owed_succession_sweep(
+        &self,
+        secret_hex: String,
+        conversations: &crate::conversations::WasmConversationsManager,
+    ) -> js_sys::Promise {
+        discharge_owed_sweep_promise(
+            self.inner.clone(),
+            secret_hex,
+            conversations.succession_engine(),
+        )
+    }
+
+    /// [`Self::discharge_owed_succession_sweep`] for a tab with no
+    /// conversations manager.
+    #[wasm_bindgen(js_name = dischargeOwedSuccessionSweepNoEngine)]
+    pub fn discharge_owed_succession_sweep_no_engine(&self, secret_hex: String) -> js_sys::Promise {
+        discharge_owed_sweep_promise(self.inner.clone(), secret_hex, None)
     }
 
     /// `nestUrl` is the nest the successor's account row is BOUND to;
@@ -5723,6 +6016,13 @@ impl WsRpcClient {
     /// Resolves to the ceremony's typed outcome (`StolenOutcomeJs` — `kind`,
     /// `message`, `landed`, `carriesTheOnlySeed`) on every arm of a ceremony
     /// that ran; rejects only when it could not start (an unreadable secret).
+    ///
+    /// `conversations` is BORROWED, never moved: a by-value wasm-bindgen
+    /// parameter zeroes the caller's JS handle, and the SPA's conversations
+    /// module keeps that handle until the actor-scope reset — so its leave-door
+    /// drafts flush threw `null pointer passed to rust` on every succession.
+    /// wasm-bindgen takes no `Option<&T>`, so the no-manager arm is its own
+    /// export, [`Self::succeed_identity_with_held_kit_no_engine`].
     #[wasm_bindgen(js_name = succeedIdentityWithHeldKit)]
     pub fn succeed_identity_with_held_kit(
         &self,
@@ -5730,24 +6030,36 @@ impl WsRpcClient {
         phrase: String,
         nest_url: String,
         dial_url: String,
-        conversations: Option<crate::conversations::WasmConversationsManager>,
+        conversations: &crate::conversations::WasmConversationsManager,
     ) -> js_sys::Promise {
-        let client = self.inner.clone();
-        future_to_promise(async move {
-            let old = conversations.as_ref().and_then(|c| c.succession_engine());
-            let outcome = crate::succession::succeed_with_held_kit_web(
-                client,
-                &secret_hex,
-                &phrase,
-                &nest_url,
-                &dial_url,
-                old.as_ref(),
-            )
-            .await
-            .map_err(|e| JsValue::from_str(&e))?;
-            // `to_js` for `successionSweepCopy`'s reason: `message.args` is a map.
-            to_js(&outcome)
-        })
+        succeed_with_held_kit_promise(
+            self.inner.clone(),
+            secret_hex,
+            phrase,
+            nest_url,
+            dial_url,
+            conversations.succession_engine(),
+        )
+    }
+
+    /// [`Self::succeed_identity_with_held_kit`] for a tab whose conversations
+    /// manager was never built — native's `SweepStatus::NoEngine` arm.
+    #[wasm_bindgen(js_name = succeedIdentityWithHeldKitNoEngine)]
+    pub fn succeed_identity_with_held_kit_no_engine(
+        &self,
+        secret_hex: String,
+        phrase: String,
+        nest_url: String,
+        dial_url: String,
+    ) -> js_sys::Promise {
+        succeed_with_held_kit_promise(
+            self.inner.clone(),
+            secret_hex,
+            phrase,
+            nest_url,
+            dial_url,
+            None,
+        )
     }
 
     // ── admin mail / DNS machines ───────────────────────────────────
@@ -6043,7 +6355,7 @@ impl WsRpcClient {
         let client = self.inner.clone();
         future_to_promise(async move {
             let reply = SyncClient::new(client)
-                .status(folder)
+                .status(folder, None)
                 .await
                 .map_err(err_to_js)?;
             to_js(&reply)
@@ -6058,7 +6370,7 @@ impl WsRpcClient {
         let client = self.inner.clone();
         future_to_promise(async move {
             let reply = SyncClient::new(client)
-                .files(folder)
+                .files(folder, None)
                 .await
                 .map_err(err_to_js)?;
             to_js(&reply.files)
@@ -6275,6 +6587,42 @@ impl WsRpcClient {
                 .await
                 .map_err(err_to_js)?;
             to_js(&reply.rows)
+        })
+    }
+
+    /// One snapshot file's **decrypted** bytes — the web leg of
+    /// `snapshot-file-download-button`, through the ONE snapshot entry reader
+    /// every app drives (`crate::snapshot_download`): the entry, sealed or
+    /// plaintext, licensed by the judged change row of `folder` that named
+    /// its manifest under its path — read over this connection, before any
+    /// byte — and only then opened under the owner `BackupKey`
+    /// (`backup-restore.md` § Security Properties → Integrity). The SPA saves
+    /// the bytes as a browser blob download; `folderHashHex` is the detail's
+    /// `folder_hash`, `undefined` when the reply carried none.
+    #[wasm_bindgen(js_name = downloadSnapshotFileBytes)]
+    pub fn download_snapshot_file_bytes(
+        &self,
+        manifest_hash: Vec<u8>,
+        relative_path: String,
+        secret_hex: String,
+        nest_url: String,
+        folder: String,
+        folder_hash_hex: Option<String>,
+    ) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let bytes = crate::snapshot_download::download_snapshot_file_bytes(
+                &client,
+                &manifest_hash,
+                &relative_path,
+                &secret_hex,
+                &nest_url,
+                &folder,
+                folder_hash_hex.as_deref(),
+            )
+            .await
+            .map_err(err_to_js)?;
+            Ok(js_sys::Uint8Array::from(bytes.as_slice()).into())
         })
     }
 
@@ -7041,9 +7389,9 @@ impl WsRpcClient {
     /// `fauna.admin.deployment_seed.get`, refuses one that does not derive to
     /// the bound id, and merges the entry — the seed never crosses into JS.
     ///
-    /// `onWarning` is a JS `(warning: 'mismatch' | 'failed') => void`, called
-    /// when a run (on either edge) ends with custody unconfirmed for an admin
-    /// of the bound nest. Resolves a token for the console ring:
+    /// `onWarning` is a JS `(warning: LocalizedText) => void`, called with the
+    /// shared `fauna_client_config::custody_leg_warning` when a run (on either
+    /// edge) ends with custody unconfirmed for an admin of the bound nest. Resolves a token for the console ring:
     /// `"already_custodied"`, `"captured"`, `"not_admin"`,
     /// `"handoff_unavailable"`, `"nest_holds_no_seed"`, `"refused_mismatch"`,
     /// `"store_refused"`, `"bound_unresolved"`, or `"store_not_ready"` (the
@@ -7066,7 +7414,7 @@ impl WsRpcClient {
             };
             let run = crate::deployment_seed_custody::run_leg(&client, &handle).await;
             if let Some(warning) = run.warning {
-                crate::deployment_seed_custody::emit_warning(&on_warning, warning);
+                crate::deployment_seed_custody::emit_warning(&on_warning, &warning);
             }
             Ok(JsValue::from_str(run.token))
         })
@@ -7255,6 +7603,7 @@ impl WsRpcClient {
                     cap_state: d.cap_state,
                     audit_state: d.audit_state,
                     last_audit_passed_at: d.last_audit_passed_at,
+                    writer_state: d.writer_state,
                 })
                 .collect();
             to_js(&statuses)
@@ -7330,8 +7679,11 @@ impl WsRpcClient {
                 tracing::warn!("backup audit: {degradation}");
             }
 
-            let rows: Vec<WasmDestinationAuditRow> =
-                pass.records.iter().map(|r| audit_row(r, now)).collect();
+            let rows: Vec<WasmDestinationAuditRow> = pass
+                .records
+                .iter()
+                .map(|r| audit_row(r, &state.backup.destinations, now))
+                .collect();
             to_js(&rows)
         })
     }
@@ -7521,6 +7873,24 @@ impl WsRpcClient {
         future_to_promise(async move {
             let reply = ModerationClient::new(client)
                 .legal_takedown(content_id, content_type, legal_reference, restore)
+                .await
+                .map_err(err_to_js)?;
+            to_js(&reply)
+        })
+    }
+
+    /// `fauna.moderation.appeal` — appeal the enforcement decision recorded
+    /// against `content_id` (the queue row's own id, captured when the form
+    /// opened; `moderation.md` § Legal takedown — the transparency triple's
+    /// second leg). Gate the dispatch through `appealFormView`. Resolves to the
+    /// reply (`{ status: "appeal_recorded" | "appeal_already_recorded",
+    /// content_id }`); errors reject for `appealVerdict` to word.
+    #[wasm_bindgen(js_name = moderationAppeal)]
+    pub fn moderation_appeal(&self, content_id: String, reason: String) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let reply = ModerationClient::new(client)
+                .appeal(content_id, reason)
                 .await
                 .map_err(err_to_js)?;
             to_js(&reply)
@@ -7810,6 +8180,100 @@ impl WsRpcClient {
     }
 }
 
+/// The press behind both `successionSweepRetry*` exports — a free function, so
+/// it never becomes a JS face of its own.
+fn sweep_retry_promise(
+    client: InnerClient,
+    secret_hex: String,
+    live: Option<crate::succession::LiveEngineHandle>,
+) -> js_sys::Promise {
+    future_to_promise(async move {
+        let successor = keypair_from_secret_hex(&secret_hex)?;
+        match crate::succession::succession_sweep_retry(client, &successor, live.as_ref()).await {
+            // `to_js` for `successionSweepCopy`'s reason: `LocalizedText::args`
+            // is a map, and the default serializer hands `resolveLocalized` a
+            // JS `Map` with no own properties.
+            Some(sentence) => to_js(&sentence),
+            None => Ok(JsValue::NULL),
+        }
+    })
+}
+
+/// The discharge behind both `dischargeOwedSuccessionSweep*` exports.
+fn discharge_owed_sweep_promise(
+    client: InnerClient,
+    secret_hex: String,
+    live: Option<crate::succession::LiveEngineHandle>,
+) -> js_sys::Promise {
+    future_to_promise(async move {
+        let successor = keypair_from_secret_hex(&secret_hex)?;
+        match crate::succession::discharge_owed_sweep(client, &successor, live.as_ref()).await {
+            Some(discharged) => to_js(&discharged),
+            None => Ok(JsValue::NULL),
+        }
+    })
+}
+
+/// The ceremony behind both `succeedIdentityWithHeldKit*` exports — a free
+/// function, so it never becomes a JS face of its own.
+fn succeed_with_held_kit_promise(
+    client: InnerClient,
+    secret_hex: String,
+    phrase: String,
+    nest_url: String,
+    dial_url: String,
+    old: Option<crate::succession::LiveEngineHandle>,
+) -> js_sys::Promise {
+    future_to_promise(async move {
+        let outcome = crate::succession::succeed_with_held_kit_web(
+            client,
+            &secret_hex,
+            &phrase,
+            &nest_url,
+            &dial_url,
+            old.as_ref(),
+        )
+        .await
+        .map_err(|e| JsValue::from_str(&e))?;
+        // `to_js` for `successionSweepCopy`'s reason: `message.args` is a map.
+        to_js(&outcome)
+    })
+}
+
+/// `identity-stolen-button` on the locked launch surface's
+/// `identity_stolen_entry` step (`ui/sessions.md` § Layout & flow → *The
+/// locked surface*) — the same ceremony as `succeedIdentityWithHeldKit*`, run
+/// with NO session: a locked account mints no bearer, so the ceremony rides an
+/// anonymous connection of its own (`devices.md` § The two panic buttons,
+/// point 5 — the web twin of the native session-less entry
+/// `succession_succeed_stolen_locked`). No conversations engine exists on the
+/// launch route, so the sweep is the no-engine arm. `nestUrl` / `dialUrl` as
+/// for `succeedIdentityWithHeldKit`. Resolves to the same `StolenOutcomeJs`;
+/// rejects only when it could not start (an unreadable secret, no socket).
+#[wasm_bindgen(js_name = succeedStolenIdentityLocked)]
+pub fn succeed_stolen_identity_locked(
+    secret_hex: String,
+    phrase: String,
+    nest_url: String,
+    dial_url: String,
+) -> js_sys::Promise {
+    future_to_promise(async move {
+        let anon = AnonymousWsRpcClient::connect(&dial_url)
+            .map_err(|e| JsValue::from_str(&format!("reaching the nest: {e}")))?;
+        let outcome = crate::succession::succeed_with_held_kit_web(
+            anon,
+            &secret_hex,
+            &phrase,
+            &nest_url,
+            &dial_url,
+            None,
+        )
+        .await
+        .map_err(|e| JsValue::from_str(&e))?;
+        to_js(&outcome)
+    })
+}
+
 // The `zaps` registry feature's web half (`dynamic-features.md` § Charter
 // members — a subset member of `payments`, so this block exists only in builds
 // that also carry the money plane). Its own `impl` block rather than
@@ -8053,21 +8517,16 @@ fn subscriber_entry_to_web_json(e: &SubscriberEntry) -> serde_json::Value {
 /// One of the caller's own subscriptions → the consumer-page row JSON
 /// (`subscription-settings` page, Slice B). `author_id` hex-encoded for the
 /// per-row unsubscribe (`subscriptionsUnsubscribe`); `handle` is the nest's
-/// best-effort local resolution. `author_display` is the `subscription-mine-author`
-/// label, pre-computed here through the shared chooser (the wasm twin of
-/// `FfiMineSubscription.author_display`) so the page renders it verbatim instead
-/// of re-deriving the handle-else-hex fallback — `value-formatting.md`
-/// § Subscription author label.
+/// best-effort local resolution. The `subscription-mine-author` label is the
+/// private overlay face's (`WasmContactOverlays::subscriptionAuthorLabel` over
+/// `handle` + `author_id`), so the viewer's nickname for the creator wins —
+/// `value-formatting.md` § Subscription author label.
 fn mine_subscription_to_web_json(m: &MineSubscription) -> serde_json::Value {
     serde_json::json!({
         "author_id": hex::encode(m.author_id.0),
         "tier": m.tier,
         "status": m.status,
         "handle": m.handle,
-        "author_display": fauna_core::format::author_display_label(
-            m.handle.as_deref(),
-            &m.author_id.0,
-        ),
     })
 }
 
@@ -8548,6 +9007,24 @@ impl WsRpcClient {
         })
     }
 
+    /// `fauna.subscriptions.encaps_key.publish` — publish the account's
+    /// subscriber encapsulation-key registry entry (`post-quantum.md` § surface
+    /// B). Call at every session start; idempotent and best-effort. `secret_hex`
+    /// is the caller's own 32-byte identity seed. The web twin of `fauna-ffi`'s
+    /// `subscriptions_publish_encaps_key`.
+    #[wasm_bindgen(js_name = subscriptionsPublishEncapsKey)]
+    pub fn subscriptions_publish_encaps_key(&self, secret_hex: String) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let subscriber = keypair_from_secret_hex(&secret_hex)?;
+            SubscriptionsClient::new(client)
+                .publish_encaps_key(&subscriber)
+                .await
+                .map_err(err_to_js)?;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     /// `fauna.subscriptions.status.get` — the caller's current subscription
     /// status for `author_id_hex` (the active `tier`, or `null` when none).
     /// Drives the per-offer-row status badge (Subscribed / Pending / Not
@@ -8626,6 +9103,16 @@ pub fn payments_known_kinds() -> Vec<String> {
 #[wasm_bindgen(js_name = paymentsWebhookUrl)]
 pub fn payments_webhook_url(base_url: String, author_id_hex: String, kind: String) -> String {
     fauna_client_payments::webhook_url(&base_url, &author_id_hex, &kind)
+}
+
+/// The post-checkout redirect URL a creator pastes into `kind`'s checkout
+/// settings so a paying visitor lands on their site's return door and sees
+/// their claim code. `site_url` is the creator's web site origin (the door
+/// resolves the owner from the `Host`), not the nest URL.
+#[cfg(feature = "payments")]
+#[wasm_bindgen(js_name = paymentsReturnUrl)]
+pub fn payments_return_url(site_url: String, kind: String) -> String {
+    fauna_client_payments::return_url(&site_url, &kind)
 }
 
 // Gated on its OWN `impl` block: the whole money plane is the `payments`
@@ -8743,6 +9230,24 @@ impl WsRpcClient {
             to_js(&rows)
         })
     }
+
+    /// `fauna.payments.claims.void` — the author withdraws one of their own
+    /// claim codes: unredeemed → it stops redeeming (app and web); redeemed →
+    /// the redeemer's entitlement to its tier ends too, as a refund ends it.
+    /// Idempotent. Returns `{ voided_at }` (micros, the value
+    /// `paymentsClaimsList` then carries). Typed error:
+    /// `fauna.payments.claim_not_found`.
+    #[wasm_bindgen(js_name = paymentsClaimsVoid)]
+    pub fn payments_claims_void(&self, code: String) -> js_sys::Promise {
+        let client = self.inner.clone();
+        future_to_promise(async move {
+            let voided_at = PaymentsClient::new(client)
+                .claims_void(code)
+                .await
+                .map_err(err_to_js)?;
+            to_js(&serde_json::json!({ "voided_at": voided_at.0 }))
+        })
+    }
 }
 
 /// The two admission age-band selects' option value → the typed band the
@@ -8760,4 +9265,40 @@ fn parse_age_band(value: Option<String>) -> Result<Option<fauna_protocol::age::A
                 ))
             }),
     }
+}
+
+/// The Status page's element texts from the legs web has
+/// (`fauna_client_status::render_static`) — the bare value each `status-*`
+/// element shows, `null` for a leg that is not loaded (the element is then not
+/// rendered; `ui/status.md` § State & data shape). `node` is `statusNode`'s
+/// reply or `null`; `keyPackages` is `keypackageCount`'s, `channels` is
+/// `WasmConversationsManager.secureChannelCount()`; `buildStamp` is the
+/// compile-time commit (`VITE_GIT_SHA`) — `dev`, empty or absent read as an
+/// unknown build. Web has no local sync agent, so its snapshot carries
+/// `sync: None` and `status-sync-*` are always `null` here.
+#[wasm_bindgen(js_name = statusText)]
+pub fn status_text(
+    node: JsValue,
+    key_packages: Option<f64>,
+    channels: f64,
+    build_stamp: Option<String>,
+) -> Result<JsValue, JsValue> {
+    let node: Option<fauna_client_status::NodeLeg> = if node.is_null() || node.is_undefined() {
+        None
+    } else {
+        Some(from_js(node)?)
+    };
+    let snapshot = fauna_client_status::StatusSnapshot {
+        node,
+        sync: None,
+        mls: key_packages.map(|key_packages| fauna_client_status::MlsLeg {
+            key_packages: key_packages as u64,
+            channels: channels as u64,
+        }),
+        build: fauna_client_status::BuildLeg::from_stamp(build_stamp.as_deref()),
+    };
+    // No sync leg ⇒ no i18n key is ever resolved.
+    to_js(&fauna_client_status::render_static(&snapshot, |_: &str| {
+        None::<&str>
+    }))
 }

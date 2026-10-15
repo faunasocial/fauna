@@ -398,6 +398,15 @@ pub fn history_for_holders(
     ledger: &SuccessionLedger,
     holders: &BTreeSet<Vec<u8>>,
 ) -> Vec<HistoryEntry> {
+    let mut entries = history_entries(ledger);
+    entries.retain(|e| holders.contains(&e.holder));
+    entries
+}
+
+/// Every grant event of the log as a self-describing [`HistoryEntry`],
+/// most-recent-first — the unfiltered base [`history_for_holders`] and
+/// [`unclaimed_history`] narrow.
+fn history_entries(ledger: &SuccessionLedger) -> Vec<HistoryEntry> {
     let events = history(ledger);
     // A signed `Revoke` carries no scope (the `GrantEvent` shape is frozen for
     // this major), yet every History row is self-describing (`nests.md`
@@ -417,7 +426,6 @@ pub fn history_for_holders(
     };
     events
         .iter()
-        .filter(|e| holders.contains(&e.holder))
         .map(|e| HistoryEntry {
             grant_id: e.grant_id.clone(),
             holder: e.holder.clone(),
@@ -428,6 +436,57 @@ pub fn history_for_holders(
             at: e.at,
         })
         .collect()
+}
+
+/// Whether a grant's scope is one only a third-party principal's consent mints
+/// (an `ext.*` kind or the keyless `deposit` tuple) — such a grant renders on
+/// its principal's participant row, never in the nest catch-all. The
+/// `content.read{folder}` twin is deliberately *not* here: the web-serve
+/// paywall grant shares that tuple and belongs to the catch-all when no roster
+/// claims its holder.
+fn is_principal_only_scope(scope: &[GrantEventScope]) -> bool {
+    scope.iter().any(|t| {
+        t.class == ScopeTuple::CLASS_DEPOSIT
+            || t.base_kind().is_some_and(fauna_core::ext_kind::is_ext_kind)
+    })
+}
+
+/// The Now-lens **catch-all**: the owner's live grants whose holder no roster
+/// in `claimed` names, soonest-expiring first, in the same shape as
+/// [`trust_facet_for_holders`]. The audit view is the signed log, never a nest
+/// read (`nests.md` § Trust facet — grants), so a nest that omits a holder from
+/// its roster — hostile, or failing the call — must not make that holder's live
+/// grant, and its Revoke, vanish: the roster only *groups* the log, it never
+/// gates what the owner may see. Third-party principals' own grants are left to
+/// their participant rows.
+pub fn unclaimed_trust_facet(
+    ledger: &SuccessionLedger,
+    claimed: &BTreeSet<Vec<u8>>,
+    now: u64,
+) -> TrustFacet {
+    let mut facet = trust_facet_for_holders(
+        ledger,
+        &current_grants(ledger)
+            .into_iter()
+            .map(|g| g.holder)
+            .filter(|h| !claimed.contains(h))
+            .collect(),
+        now,
+        &BTreeSet::new(),
+    );
+    facet.grants.retain(|g| !is_principal_only_scope(&g.scope));
+    facet
+}
+
+/// [`unclaimed_trust_facet`]'s History-lens twin: every event of a grant whose
+/// holder no roster in `claimed` names, most-recent-first, `Revoke`s included.
+pub fn unclaimed_history(
+    ledger: &SuccessionLedger,
+    claimed: &BTreeSet<Vec<u8>>,
+) -> Vec<HistoryEntry> {
+    let mut entries = history_entries(ledger);
+    entries.retain(|e| !claimed.contains(&e.holder) && !is_principal_only_scope(&e.scope));
+    entries
 }
 
 // ── The third-party principal as a participant ───────────────────────────────
@@ -1645,6 +1704,52 @@ mod tests {
         assert_eq!(facet_a.grants[0].grant_id, vec![1u8; 16]);
         assert_eq!(facet_b.grants.len(), 1);
         assert_eq!(facet_b.grants[0].grant_id, vec![2u8; 16]);
+    }
+
+    #[test]
+    fn unclaimed_facet_lists_what_no_roster_claims_and_skips_principal_grants() {
+        // the catch-all: the roster groups the log, it never gates it.
+        let mut cfg = empty_ledger();
+        let kp = ActorKeypair::generate();
+        let claimed = [0x11u8; 32];
+        let omitted = [0x22u8; 32];
+        let principal = [0x33u8; 32];
+        let ext = GrantEventScope {
+            class: ScopeTuple::CLASS_DEPOSIT.into(),
+            kind: None,
+            tier: None,
+        };
+        for (id, holder, scope) in [
+            (1u8, claimed, mail_scope()),
+            (2, omitted, mail_scope()),
+            (3, principal, ext),
+        ] {
+            record_mint(
+                &mut cfg,
+                kp.signing_key(),
+                [id; 16],
+                holder,
+                vec![scope],
+                0,
+                90 * 86400,
+                0,
+            )
+            .unwrap();
+        }
+        let roster = holder_set(&[claimed]);
+        let facet = unclaimed_trust_facet(&cfg, &roster, 1000);
+        assert_eq!(
+            facet
+                .grants
+                .iter()
+                .map(|g| g.grant_id.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![2u8; 16]],
+            "the omitted holder's grant is listed; the claimed one and the principal's are not"
+        );
+        let hist = unclaimed_history(&cfg, &roster);
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].grant_id, vec![2u8; 16]);
     }
 
     // ── history_for_holders (the History lens) ───────────────────────────────

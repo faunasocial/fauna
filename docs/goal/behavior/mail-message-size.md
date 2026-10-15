@@ -226,7 +226,7 @@ owns mail's constants, enforcement points, and reply codes.
   - **LANDED 2026-07-18: the write flip.** `MAIL_ENVELOPE_WRITE_FORMAT` now selects v2,
     flipped in one commit together with `MAIL_CONTINUATION_WRITE_DEFAULT` and
     `MAIL_CLIENT_FEED_REFERENCE_DEFAULT` — the three shared one deployed-reader gate.
-    Gate evidence: example.com ran that build (both reader capabilities content-verified),
+    Gate evidence: the live nest ran that build (both reader capabilities content-verified),
     and the user confirmed every installed client build and every other box in the
     rollback window is past 2026-07-17. New writes are v2; a v2 record at a v1-only
     reader would be an honest per-record decode error, which is what the gate protected.
@@ -426,8 +426,8 @@ owns mail's constants, enforcement points, and reply codes.
     `import_one` path unchanged: validate, seal-at-ingest via the D2 resolver, quota on
     the sealed size, dedup. Admission ceiling is `effective_max_raw_message_bytes` —
     the same one shared rule the SMTP `Data` paths read. Wire application owned by
-    `mailbox-migration.md` § RPC surface. No deployed-producer constraint exists: no
-    shipped app calls the import RPCs yet.
+    `mailbox-migration.md` § RPC surface. No deployed-producer constraint exists: the wizards on
+    all seven apps call the import RPCs, but always inline-bodied — no producer mints a `staged_body` yet.
   - **Leg: the outbound queue pair — both directions, same envelope.**
     `EnqueueOutboundMailRequest` gains `staged_body: Option<StagedBodyRef>`
     (exactly-one-of with a non-empty `raw_message`; the bridge mints its `MailBody`
@@ -539,10 +539,7 @@ owns mail's constants, enforcement points, and reply codes.
     stages ciphertext over the real `POST /api/v1/chunks` route with its **session
     bearer** — no mint — then imports by reference and the record opens with the
     owner's secret byte-for-byte). **Not built (a separate track, not S9.4): the
-    client SEND path** that would drive this — no shipping app calls the import
-    RPCs at all yet (even inline), so nothing produces a `staged_body` in production;
-    the producer-side staging + send belongs with the import wizard (Track D,
-    `mailbox-migration.md` § RPC surface). **Remaining, still designed-not-built:**
+    producer-side staging** that would drive this — the import wizard (Track D, `mailbox-migration.md` § RPC surface) now ships on all seven apps and calls the import RPCs, but only inline-bodied, so nothing produces a `staged_body` in production. **Remaining, still designed-not-built:**
     the **forward leg** — the `forward_message` inline-budget backstop + the
     `dispatchForward` size-suppression verdict (`server.go`, pinned by
     `TestForwardSuppressedTooLarge`, now measuring the stamped bytes it ships) STAY
@@ -600,10 +597,9 @@ owns mail's constants, enforcement points, and reply codes.
     compared against `fauna_mail::transport_limits::MAX_INLINE_RAW_MESSAGE_BYTES`)
     and refuses locally — before the RPC — with the identical localized string,
     reusing the page's existing `error-message` surface (no new ui.yaml ID). The
-    `import_message`-outcome render leg has no consumer yet (the client import
-    wizard — Track D above, `mailbox-migration.md` § RPC surface — is unbuilt,
-    and no shipping app calls the import RPCs) — deferred to whichever
-    session builds that wizard.
+    `import_message`-outcome render leg for an over-ceiling message has no producer yet (the client import
+    wizard — Track D above, `mailbox-migration.md` § RPC surface — ships on all seven apps but never mints a `staged_body`) — deferred to whichever
+    session builds the staging leg.
 
 ## Implementation status today
 

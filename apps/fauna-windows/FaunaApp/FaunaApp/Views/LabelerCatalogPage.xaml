@@ -38,76 +38,10 @@
 
             <!-- labeler-inspect-panel: the inspect-before-subscribe detail,
                  collapsed until a row's inspect button is tapped
-                 (LabelerCatalogSnapshot.inspecting). -->
-            <Border x:Name="InspectPanelBorder"
-                    AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectPanel}"
-                    AutomationProperties.Name="{loc:Localize Key=labeler_catalog/title}"
-                    Visibility="Collapsed"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1" CornerRadius="6" Padding="12">
-                <StackPanel Spacing="8">
-                    <TextBlock x:Name="InspectMetadataText"
-                               AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectMetadata}"
-                               TextWrapping="Wrap" IsTextSelectionEnabled="True" />
-
-                    <!-- list-kind inspect only (content-moderation-and-ranking.md
-                         § Tier-3 artifact kinds; topic-factors.md § Publishing):
-                         the decoded publisher-chosen name + the EXACT id→score
-                         map, every entry (never a capped preview). Collapsed for
-                         a wasm labeler — RenderInspectPanel toggles visibility on
-                         inspecting.artifactKind. -->
-                    <StackPanel x:Name="InspectListSection" Spacing="8" Visibility="Collapsed">
-                        <TextBlock x:Name="InspectListNameText"
-                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectListName}"
-                                   TextWrapping="Wrap" IsTextSelectionEnabled="True" />
-                        <TextBlock x:Name="InspectListEntryCountText"
-                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectListEntryCount}"
-                                   Opacity="0.7" FontSize="12" />
-                        <!-- A Border (not a bare container) carries the list test
-                             id with a non-empty Name — the bare-id-root prune
-                             trap; rows live in a non-virtualizing StackPanel so
-                             FlaUI realizes every row (mirrors CatalogListBorder
-                             below). -->
-                        <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectListEntries}"
-                                AutomationProperties.Name="{loc:Localize Key=labeler_catalog/title}"
-                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                                BorderThickness="1" CornerRadius="6" Padding="8">
-                            <StackPanel x:Name="InspectListEntriesContainer" Spacing="2" />
-                        </Border>
-                    </StackPanel>
-
-                    <!-- text-model-kind inspect only (content-moderation-and-
-                         ranking.md § Tier-3 artifact kinds; topic-factors.md §
-                         Publishing a trained factor, v2; IDs user-approved
-                         2026-08-13): the decoded publisher-chosen name + the
-                         artifact's WHOLE vocabulary — every n-gram, never a
-                         capped preview, since unlike a List's entries (ids the
-                         publisher already made public) this vocabulary IS
-                         what the subscriber is being asked to trust. Collapsed
-                         for every other kind — RenderInspectPanel toggles
-                         visibility on inspecting.artifactKind. -->
-                    <StackPanel x:Name="InspectModelSection" Spacing="8" Visibility="Collapsed">
-                        <TextBlock x:Name="InspectModelNameText"
-                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectModelName}"
-                                   TextWrapping="Wrap" IsTextSelectionEnabled="True" />
-                        <TextBlock x:Name="InspectModelNgramCountText"
-                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectModelNgramCount}"
-                                   Opacity="0.7" FontSize="12" />
-                        <Border AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectModelEntries}"
-                                AutomationProperties.Name="{loc:Localize Key=labeler_catalog/title}"
-                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                                BorderThickness="1" CornerRadius="6" Padding="8">
-                            <StackPanel x:Name="InspectModelEntriesContainer" Spacing="2" />
-                        </Border>
-                    </StackPanel>
-
-                    <Button x:Name="InspectCloseButton"
-                            AutomationProperties.AutomationId="{x:Bind ids:Ids.LabelerInspectCloseButton}"
-                            Content="{loc:Localize Key=labeler_catalog/close_inspect}"
-                            HorizontalAlignment="Left"
-                            Click="InspectCloseButton_Click" />
-                </StackPanel>
-            </Border>
+                 (LabelerCatalogSnapshot.inspecting). The same control the room
+                 editor's labeler set paints in place. -->
+            <controls:LabelerInspectPanel x:Name="InspectPanel"
+                                          CloseRequested="InspectPanel_CloseRequested" />
 
             <!-- A Border (not a bare container) carries the list test id with a
                  non-empty Name — a container without one prunes from the UIA

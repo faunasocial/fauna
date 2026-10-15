@@ -8,7 +8,7 @@ the nest directly with no test proxy). The browser is driven through the
 handle-first onboarding and asserts that typing a ``test@localhost:<port>``
 handle:
 
-  1. does NOT yield ``handle_check.outcome.tld_invalid`` (the reported bug), and
+  1. does NOT yield ``onboarding.handle_check.outcome.tld_invalid`` (the reported bug), and
   2. resolves → skips DNS → probes the local nest (HTTP health/challenge +
      WS-RPC setup-status) → ``UnregisteredUnclaimedNest`` → Continue routes to
      the admin-claim (``claim_code``) screen, ready for the one-time code.
@@ -60,7 +60,7 @@ pytestmark = [pytest.mark.tier1, pytest.mark.web, pytest.mark.tier_3]
 
 
 @pytest.fixture
-def unclaimed_nest(nest_binary, static_dir, tmp_path_factory):
+def localhost_unclaimed_nest(nest_binary, static_dir, tmp_path_factory):
     """A fresh, never-claimed nest that also serves the SPA at /app/.
 
     `--static-dir <build>` makes the nest serve the web app from its own origin,
@@ -105,10 +105,10 @@ def unclaimed_nest(nest_binary, static_dir, tmp_path_factory):
 
 
 @pytest.fixture
-def local_web(unclaimed_nest):
+def local_web(localhost_unclaimed_nest):
     """A web driver loaded from the nest's own origin via `localhost`, so a
     `test@localhost:<port>` handle resolves to that same origin."""
-    port = unclaimed_nest["port"]
+    port = localhost_unclaimed_nest["port"]
     driver = create_driver("web")
     driver.launch({"url": f"http://localhost:{port}/app/"})
     yield driver, port

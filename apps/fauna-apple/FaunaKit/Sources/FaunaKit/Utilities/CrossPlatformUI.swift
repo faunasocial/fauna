@@ -139,8 +139,17 @@ public enum Pasteboard {
 /// reach into the app is closed at launch, by default). The handoff stays
 /// observable rather than silent — a test can assert the app reached this
 /// seam with the right address via the shared `fauna_log` ring.
+///
+/// The Fauna Kids build opens nothing: outbound link opening is a plane the
+/// kids flavor excises (family-safety.md § The account age band, the kids-app
+/// bullet, item (4)), and this is the one door every in-app open goes through
+/// (android's `UrlOpener` carries the same condition). SwiftUI's own link taps
+/// are refused at the kids app root through `\.openURL`.
 public enum OpenURL {
     public static func open(_ url: URL) {
+        #if FAUNA_KIDS
+        return
+        #else
         #if DEBUG
         if FaunaE2E.isActive {
             logMessage(level: .info, target: "fauna.ui",
@@ -152,6 +161,7 @@ public enum OpenURL {
         NSWorkspace.shared.open(url)
         #else
         UIApplication.shared.open(url)
+        #endif
         #endif
     }
 }

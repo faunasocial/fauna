@@ -198,6 +198,10 @@ public static class ActorScope
         // time) — without this a new account inherits the previous ward's
         // lock, naming a guardian the user does not have.
         ScreenTimeCache.Reset();
+        // The ward's own pending asks and this session's typed feed-source refusals
+        // (family-safety.md § Child-initiated contact requests, rule (c)) — one
+        // account's state; the incoming account's first status read re-fills it.
+        WardAsksCache.Reset();
         // The muted-word list and its reveal set — the conversation-bubble twin of
         // the line above.
         MutedKeywordsCache.Reset();

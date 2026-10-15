@@ -46,7 +46,7 @@ fauna-client-folders = { path = "../fauna-client-folders", features = ["mls"] }
 # crate because it also serves the Devices page's `FollowedFoldersSource`;
 # `rpc-glue` is the feature that exposes it, and `fauna-wasm-folders` already
 # proves that combination cross-compiles to wasm32.
-fauna-devices-machine = { path = "../fauna-devices-machine", default-features = false, features = ["rpc-glue"] }
+fauna-devices-machine = { path = "../fauna-devices-machine", default-features = false, features = ["rpc-glue", "web"] }
 # The account's follows (`fauna.state.follows`) the followed-folders source
 # reads live in the core chunk's account runtime, so this chunk reaches them
 # across the account port: the followed-folders seam's forwarder

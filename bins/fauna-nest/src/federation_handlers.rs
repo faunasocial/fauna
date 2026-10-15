@@ -44,7 +44,9 @@ use fauna_protocol::{RpcError, decode_strict, encode_canonical};
 use crate::api_error::ApiError;
 use crate::config::SubmissionPolicy;
 use crate::db::now_epoch_secs;
-use crate::federation_router::{FederationRouterBuilder, RpcHandler, RpcKindMeta};
+use crate::federation_router::{
+    FederationRouterBuilder, RpcHandler, RpcKindMeta, WRITER_RECORD_MAX_EVENTS,
+};
 use crate::feed_routes::{RemoteQueryRequest, RemoteQueryResponse, remote_query_feed_core};
 use crate::routes::parse_32_bytes;
 use crate::routes::{
@@ -418,6 +420,11 @@ pub struct FedRoomRosterRequest {
     /// fails closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at_policy_version: Option<u64>,
+    /// `RoomListRosterRequest::policy_version_span`, carried likewise. Additive
+    /// — a room home older than the field ignores it and serves the single
+    /// version, which the member's walk continues from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_version_span: Option<u32>,
 }
 
 /// `fauna.federation.conversation.roster.fetch` reply — the room's live floor
@@ -1447,6 +1454,7 @@ fn room_roster_fetch_handler() -> RpcHandler {
                 &state,
                 &room_id,
                 req.at_policy_version,
+                req.policy_version_span,
             )
             .await?;
             encode_reply(&FedRoomRosterReply { roster })
@@ -2805,7 +2813,7 @@ pub struct FedFolderContentKeyFetchReply {
     /// envelope row — the same value `fauna.folders.list` projects as the row's
     /// `content_key_floor` — so the member's engine can hold its writes behind
     /// it locally instead of learning of a rotation only from this nest's
-    /// `stale_content_key` refusal (`on-demand-files.md` § Shared sets on a
+    /// `stale_content_key` refusal (`on-demand-files-shared-sets.md` § Shared sets on a
     /// capability host → *One mechanism*, question 2). Wire-additive: a
     /// home nest with no floor sends none and a member that does not read it ignores it.
     /// `None` ⇒ no floor established (or a read blip) ⇒ the member keeps what
@@ -3605,9 +3613,13 @@ pub fn register_folder_federation_handlers(b: &mut FederationRouterBuilder) {
         "fauna.federation.folder.actors.fetch",
         meta(folder_actors_fetch_handler()),
     );
-    b.add(
+    // A writer-plane record kind: its throttle budget is the writer budget,
+    // not the channel default (`federation.md` § Nest-writer backup plane →
+    // *Throttling*).
+    b.add_with_budget(
         "fauna.federation.folder.changes.record",
         meta(folder_changes_record_handler()),
+        WRITER_RECORD_MAX_EVENTS,
     );
     b.add(
         "fauna.federation.folder.write_token.mint",
@@ -4267,12 +4279,15 @@ pub fn register_succession_federation_handlers(b: &mut FederationRouterBuilder) 
 }
 
 /// Nest-writer backup-plane handlers (`federation.md` § Nest-writer backup
-/// plane). Ride the channel's inherited per-IP + per-(nest, kind) throttles, like
-/// every other federation kind — nothing per-kind to configure.
+/// plane). Ride the channel's per-IP + per-(nest, kind) throttles like every
+/// other federation kind; the custody-record kind at the writer-plane budget,
+/// the mint at the channel default (§ *Throttling*) — Rust constants, nothing
+/// to configure.
 pub fn register_backup_federation_handlers(b: &mut FederationRouterBuilder) {
-    b.add(
+    b.add_with_budget(
         "fauna.federation.backup.changes.record",
         meta(backup_changes_record_handler()),
+        WRITER_RECORD_MAX_EVENTS,
     );
     b.add(
         "fauna.federation.backup.write_token.mint",

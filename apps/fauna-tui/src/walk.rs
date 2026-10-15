@@ -830,6 +830,7 @@ fn dump_media_detail(app: &mut App) {
         folder: "photos".into(),
         path: "cat.jpg".into(),
         name: "cat.jpg".into(),
+        set_value: "photos".into(),
         versions,
         show_pruned: false,
         arming: None,
@@ -848,6 +849,7 @@ fn dump_media_detail(app: &mut App) {
         author_display: "field-laptop".into(),
         pruned: false,
         purge_after: None,
+        folder_id: None,
     };
     app.media.detail = Some(detail(Some(vec![version()])));
     dump_surface(app, "media item detail (one version)");
@@ -963,7 +965,7 @@ fn the_wizard_still_exposes_the_inputs_the_invariant_sweep_checks() {
 /// Every step the wizard's own exhaustive match renders (`Done` has no page —
 /// the "Almost ready" outcome surface or the authed shell owns it). Shared by
 /// the corpus dump and the wizard invariant above so the two cannot drift.
-const ALL_WIZARD_STEPS: [fauna_onboarding_machine::OnboardingStep; 15] = {
+const ALL_WIZARD_STEPS: [fauna_onboarding_machine::OnboardingStep; 16] = {
     use fauna_onboarding_machine::OnboardingStep as S;
     [
         S::IdentityChoice,
@@ -971,6 +973,7 @@ const ALL_WIZARD_STEPS: [fauna_onboarding_machine::OnboardingStep; 15] = {
         S::IdentityImport,
         S::RecoveryKit,
         S::RecoveryEntry,
+        S::EmergencyLockoutEntry,
         S::HandleEntry,
         S::InviteRequest,
         S::ClaimCode,
@@ -998,6 +1001,7 @@ fn dump_onboarding_and_launch_surfaces() {
         OnboardingStep::IdentityImport,
         OnboardingStep::RecoveryKit,
         OnboardingStep::RecoveryEntry,
+        OnboardingStep::EmergencyLockoutEntry,
         OnboardingStep::HandleEntry,
         OnboardingStep::InviteRequest,
         OnboardingStep::ClaimCode,
@@ -1067,6 +1071,12 @@ fn dump_onboarding_and_launch_surfaces() {
             "launch IdentityChanged",
             LaunchSurface::IdentityChanged {
                 error: "the nest's identity changed".into(),
+            },
+        ),
+        (
+            "launch IdentityForked",
+            LaunchSurface::IdentityForked {
+                warning: "the nest's identity history has split".into(),
             },
         ),
         // The unreadable account index — all three states, because they paint

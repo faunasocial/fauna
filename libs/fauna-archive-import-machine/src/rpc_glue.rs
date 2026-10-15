@@ -455,7 +455,7 @@ impl RpcArchiveNest {
         path: &str,
     ) -> Result<Option<SyncFile>, ArchiveNestError> {
         let reply = SyncRpc::new(Arc::clone(&self.nest))
-            .files(folder)
+            .files(folder, None)
             .await
             .map_err(nest_err)?;
         Ok(find_head(reply.files, path))
@@ -487,10 +487,11 @@ impl RpcArchiveNest {
         Ok(Some(bytes))
     }
 
-    /// The actor's own email (`<handle>@<domain>`) — the VEVENT `ORGANIZER` for
-    /// writes. `handle` from `fauna.account.get`, `domain` from
-    /// `fauna.setup.status`; a resolution failure yields `""` (organizer
-    /// omitted), which is the same safe degrade
+    /// The actor's own email (`<handle>@<domain>`) — the CAL-ADDRESS an imported
+    /// event's roster carries the owner's answer against, and its `ORGANIZER`
+    /// when the owner hosted it. `handle` from `fauna.account.get`, `domain` from
+    /// `fauna.setup.status`; a resolution failure yields `""` (roster and
+    /// organizer omitted), which is the same safe degrade
     /// `FfiCalDavClient::self_email` takes.
     async fn self_email(&self) -> &str {
         self.self_email
@@ -565,14 +566,25 @@ impl ArchiveNest for RpcArchiveNest {
     }
 
     async fn list_archive_folders(&self) -> Result<Vec<ArchiveFolderRef>, ArchiveNestError> {
+        // The unrendered rows, each sealed row named from custody by hash
+        // (`path-sealing.md` § the set-name plane): this client carries no
+        // label custody, and a sealed set rests no plaintext name — the
+        // rendered `list` would drop every archive folder. Archive folders are
+        // owner-created, so custody names every one of them.
         let listing = FoldersClient::new(Arc::clone(&self.nest))
-            .list()
+            .list_wire()
             .await
             .map_err(nest_err)?;
+        let custody = self
+            .folder_keys
+            .load()
+            .await
+            .map_err(|e| ArchiveNestError::Transport(format!("folder-key custody: {e:#}")))?;
         let mut out = Vec::new();
         // Recognized by the marker alone (`archive-import.md` § Storage): a
         // folder has no type, so no field of the row narrows the walk.
-        for summary in listing.folders {
+        for summary in fauna_client_folders::custody::named_from_custody(listing.folders, &custody)
+        {
             let Some(bytes) = self.read_path(&summary.name, MARKER_PATH).await? else {
                 continue;
             };
@@ -596,8 +608,11 @@ impl ArchiveNest for RpcArchiveNest {
 
     async fn create_folder(&self, name: &str) -> Result<(), ArchiveNestError> {
         // Through the shared create helper: the set's nonce lands in the
-        // owner's custody before the nest sees the set.
-        fauna_client_folders::create_set(
+        // owner's custody before the nest sees the set, and the set is sealed
+        // from birth under the owner's root, passed explicitly since this
+        // client carries no label custody.
+        let owner = BackupKey::derive(self.keypair()?.secret_bytes());
+        fauna_client_folders::create_set_with_owner_root(
             &FoldersClient::new(Arc::clone(&self.nest)),
             &*self.folder_keys,
             FolderCreateRequest {
@@ -606,6 +621,7 @@ impl ArchiveNest for RpcArchiveNest {
                 audience: Some("private".to_string()),
                 ..Default::default()
             },
+            Some(owner),
         )
         .await
         .map(|_| ())
@@ -675,6 +691,7 @@ impl ArchiveNest for RpcArchiveNest {
                 None,
                 None,
                 path_sealed,
+                None,
                 None,
                 None,
             )
@@ -795,7 +812,9 @@ impl ArchiveNest for RpcArchiveNest {
                 "a calendar to import events into".to_string(),
             ));
         };
-        let organizer = self.self_email().await.to_string();
+        // The owner's own answer: their roster line with its PARTSTAT, the
+        // organizer only when they hosted (`ImportedEvent::owner_reply`).
+        let reply = event.owner_reply(self.self_email().await);
         let end = event
             .end
             .unwrap_or(Timestamp(event.start.0.saturating_add(3_600 * 1_000_000)));
@@ -814,11 +833,12 @@ impl ArchiveNest for RpcArchiveNest {
             ..Default::default()
         };
         let ext = FaunaEventExt {
-            // The asymmetric `interested` refinement: the owner's own RSVP is
-            // the only roster entry an import knows (attendee lists stay in the
-            // sealed model — § What each category becomes, the events row).
-            interested_attendees: if event.rsvp == "interested" && !organizer.is_empty() {
-                vec![organizer.clone()]
+            // The asymmetric `interested` refinement over the owner's wire
+            // `TENTATIVE`: the owner is the only roster entry an import knows
+            // (attendee lists stay in the sealed model — § What each category
+            // becomes, the events row).
+            interested_attendees: if reply.interested {
+                reply.attendees.iter().map(|a| a.email.clone()).collect()
             } else {
                 vec![]
             },
@@ -839,8 +859,8 @@ impl ArchiveNest for RpcArchiveNest {
                 &uid_hash(&event.uid),
                 &msek,
                 &fields,
-                &[],
-                &organizer,
+                &reply.attendees,
+                &reply.organizer,
                 Some(&ext),
                 Timestamp::now_secs(),
                 None,

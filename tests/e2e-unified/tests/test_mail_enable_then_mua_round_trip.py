@@ -90,6 +90,7 @@ from helpers.mail_wire import (
     _smtp_auth_plain,
     _wait_for_tagged,
     dkim_signature_tag,
+    verify_each_dkim_signature,
 )
 
 # Drives the client's own "Enable mail" settings UI. linux, web, windows and both
@@ -193,7 +194,7 @@ def test_client_enabled_mail_round_trips_through_a_normal_mua(
     app.mail_settings.navigate()
     assert app.mail_settings.is_page_visible(), "mail-settings page must be reachable"
     mua_secret = _client_enable_mail(app, cred_kind)
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         f"enabling mail ({cred_kind}) must mint the first credential; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
@@ -333,9 +334,9 @@ def test_client_enabled_mail_submits_outbound_through_submission(
     """
     handle = dedicated_mail_nest
     handle.assert_mta_running()
-    assert handle.dkim_public_dns_value, (
-        "fixture must read the nest's DKIM record for the outbound-submission leg "
-        "(handle.dkim_public_dns_value unset)"
+    assert handle.dkim_records, (
+        "fixture must read the nest's DKIM records for the outbound-submission leg "
+        "(handle.dkim_records unset)"
     )
     nest = handle.nest
     domain = handle.domain
@@ -348,7 +349,7 @@ def test_client_enabled_mail_submits_outbound_through_submission(
     app.mail_settings.navigate()
     assert app.mail_settings.is_page_visible(), "mail-settings page must be reachable"
     mua_secret = _client_enable_mail(app, cred_kind)
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         f"enabling mail ({cred_kind}) must mint the first credential; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
@@ -401,24 +402,19 @@ def test_client_enabled_mail_submits_outbound_through_submission(
         f"(see {handle.bridge_log_hint()})"
     )
 
-    # ── Verify: an independent verifier (dkimpy) confirms the
-    # DKIM-Signature cryptographically verifies against the nest-published public
-    # TXT (the in-CI proxy for Gmail's `dkim=pass`), fed via a dnsfunc so no real
-    # DNS query fires. A misaligned d=/s= would query a name we don't answer.
-    import dkim  # dkimpy — independent verifier; fleet venv dep
-
-    expected_query = f"{handle.dkim_selector}._domainkey.{domain}.".encode()
-    seen_queries: list[bytes] = []
-
-    def dnsfunc(name, timeout=5):
-        seen_queries.append(name)
-        return handle.dkim_public_dns_value if name == expected_query else None
-
-    assert dkim.verify(received, dnsfunc=dnsfunc), (
-        "dkimpy rejected the DKIM-Signature on the client-enabled "
-        "submission — the relayed message would fail `dkim=pass` at a real "
-        f"receiver. dnsfunc queries: {seen_queries!r}. First 600 bytes:\n"
-        f"{received[:600]!r}"
+    # ── Verify: an independent verifier (dkimpy) confirms each of the two
+    # DKIM-Signatures cryptographically verifies against its nest-published
+    # public TXT (the RSA one is the in-CI proxy for Gmail's `dkim=pass`), fed
+    # via a dnsfunc so no real DNS query fires. A misaligned d=/s= would query
+    # a name we don't answer.
+    verified, seen_queries = verify_each_dkim_signature(
+        received, domain, handle.dkim_records
+    )
+    assert verified == list(handle.dkim_records), (
+        f"dkimpy verified {verified!r} of {list(handle.dkim_records)!r} on the "
+        "client-enabled submission — the relayed message would fail `dkim=pass` "
+        f"at a real receiver. dnsfunc queries: {seen_queries!r}. First 900 "
+        f"bytes:\n{received[:900]!r}"
     )
 
     # DMARC alignment: the d= signing domain must equal the From: header domain.

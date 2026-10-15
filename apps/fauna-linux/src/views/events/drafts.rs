@@ -71,6 +71,10 @@ type EventDraftsSync = DraftsSync<Arc<NestClient>>;
 /// turn "your draft came back" into "your draft is gone" — the exact latency
 /// dependence e2e convention 14 forbids a test from papering over with a sleep.
 pub struct OpenForm {
+    /// The dialog itself — what [`start`] closes when the session it was opened
+    /// under ends (see [`retire_open_form`]), and what [`detach_form`] matches
+    /// so a late destroy never unregisters a newer dialog.
+    pub window: gtk::Window,
     pub summary: gtk::Entry,
     pub dtstart: gtk::Entry,
     pub dtend: gtk::Entry,
@@ -80,10 +84,10 @@ pub struct OpenForm {
 
 impl OpenForm {
     /// Whether the user has authored anything into this form yet. Deliberately
-    /// the three free-text fields and not the datetimes: the opener *prefills*
-    /// dtstart/dtend with today's working hours, so a form nobody has touched is
-    /// never datetime-empty and testing those would make every restore look
-    /// unsafe.
+    /// the three free-text fields and not the datetimes: the day-cell and
+    /// empty-slot openers *prefill* dtstart/dtend with the day they name, so a
+    /// form nobody has touched need not be datetime-empty, and testing those
+    /// would make every restore into such a form look unsafe.
     fn is_untouched(&self) -> bool {
         let buf = self.description.buffer();
         self.summary.text().is_empty()
@@ -137,7 +141,9 @@ thread_local! {
 /// (account switch / re-auth) replaces the rail wholesale, so the previous
 /// actor's draft is never saved under the new actor's key: the old `Rc` is
 /// dropped here and any timer still holding one saves into a `DraftsSync` that
-/// no opener can reach and no further edit can feed.
+/// no opener can reach and no further edit can feed. A compose dialog the
+/// departing session left open is closed first ([`retire_open_form`]) — the
+/// rail swap alone would leave it on screen, feeding the new rail.
 ///
 /// `succession_predecessors` is the retired identities' `BackupKey`s
 /// (`FaunaClient::predecessor_backup_keys()`, resolved ONCE by the caller and
@@ -150,6 +156,7 @@ pub fn start(
     runtime: &tokio::runtime::Handle,
     succession_predecessors: &[fauna_client_drafts::BackupKey],
 ) {
+    retire_open_form();
     let keypair = match ActorKeypair::from_secret_hex(secret_hex) {
         Ok(k) => k,
         Err(e) => {
@@ -276,6 +283,33 @@ fn install_restored(draft: EventDrafts, launched_for: &Arc<EventDraftsSync>) {
     });
 }
 
+/// Close the compose dialog the departing session left on screen, if any —
+/// BEFORE the rail it was registered with is replaced.
+///
+/// The rail swap alone does not end that dialog: it is a window of its own,
+/// and its inputs tick [`note_edit`], which resolves `RAIL_STATE` at edit time.
+/// Left standing across an account switch it still shows the departing actor's
+/// half-written event, and the incoming actor's first keystroke into it
+/// autosaves that text under the incoming actor's `BackupKey` — the in-memory
+/// corollary of `account-scoping.md` § The scoping taxonomy, here for a
+/// widget rather than a loop. Closing is not discarding: the departing actor's
+/// draft already rests on the nest under their own key, and the close keeps
+/// it (the dialog's own close never clears the rail).
+///
+/// The registration is taken out and the borrow released before `close`, whose
+/// destroy handler re-enters [`detach_form`].
+fn retire_open_form() {
+    let form = RAIL_STATE.with(|s| {
+        s.borrow()
+            .as_ref()
+            .and_then(|rail| rail.form.borrow_mut().take())
+    });
+    if let Some(form) = form {
+        tracing::debug!("event drafts: closing the departing session's compose dialog");
+        form.window.close();
+    }
+}
+
 /// Register the compose dialog now on screen, so a late launch restore can still
 /// reach it (see [`OpenForm`]). Replacing an existing registration is correct:
 /// the previous dialog is gone by the time a new one is built.
@@ -288,11 +322,16 @@ pub fn attach_form(form: OpenForm) {
 }
 
 /// Forget the compose dialog — it has closed. Keeps the rail from holding
-/// widgets of a destroyed window alive for the rest of the session.
-pub fn detach_form() {
+/// widgets of a destroyed window alive for the rest of the session. Only the
+/// registration of `window` itself is dropped: a destroy that lands after a
+/// newer dialog registered must not unregister that one.
+pub fn detach_form(window: &gtk::Window) {
     RAIL_STATE.with(|s| {
         if let Some(rail) = s.borrow().as_ref() {
-            *rail.form.borrow_mut() = None;
+            let mut form = rail.form.borrow_mut();
+            if form.as_ref().is_some_and(|f| &f.window == window) {
+                *form = None;
+            }
         }
     });
 }
@@ -499,6 +538,96 @@ mod tests {
         });
         clear();
         assert_eq!(resume_draft(), None, "still nothing to resume");
+    }
+
+    /// A bare window carrying the five inputs, registered with the installed
+    /// rail and unregistered on destroy — the shape `event_form` builds.
+    fn attach_test_form() -> (gtk::Window, gtk::Entry) {
+        let window = gtk::Window::new();
+        let summary = gtk::Entry::new();
+        attach_form(OpenForm {
+            window: window.clone(),
+            summary: summary.clone(),
+            dtstart: gtk::Entry::new(),
+            dtend: gtk::Entry::new(),
+            location: gtk::Entry::new(),
+            description: gtk::TextView::new(),
+        });
+        window.connect_destroy(detach_form);
+        window.present();
+        (window, summary)
+    }
+
+    /// **An account switch closes the compose dialog the departing session left
+    /// open** (`account-scoping.md` § The scoping taxonomy → the in-memory
+    /// corollary). Replacing the rail does not end that window: its inputs tick
+    /// [`note_edit`], which resolves `RAIL_STATE` at edit time, so left standing
+    /// it shows the departing actor's draft and the incoming actor's first
+    /// keystroke saves that text under the incoming actor's key — measured on
+    /// the drafts-survive e2e witness, whose second account typed into the
+    /// first account's still-open form.
+    ///
+    /// Red-verify by deleting the `retire_open_form()` call from [`start`]: the
+    /// departing window stays visible.
+    #[test]
+    fn an_account_switch_closes_the_departing_sessions_compose_dialog() {
+        crate::testid::run_on_gtk_thread(|| {
+            let rt = tokio::runtime::Runtime::new().expect("test runtime");
+            let departing = install_test_rail(&rt);
+            let (window, summary) = attach_test_form();
+            summary.set_text("the departing actor's offsite");
+            assert!(
+                window.is_visible(),
+                "precondition: the compose dialog is on screen"
+            );
+
+            // The switch, through the AuthSuccess entry point itself.
+            let nest = fauna_client::NestClient::new(
+                "http://127.0.0.1:1".to_string(),
+                ActorKeypair::generate(),
+            );
+            start(nest, &"11".repeat(32), rt.handle(), &[]);
+
+            let closed = !window.is_visible();
+            let registered = departing.form.borrow().is_some();
+            let resumable = resume_draft();
+            RAIL_STATE.with(|s| *s.borrow_mut() = None);
+            assert!(
+                closed,
+                "the departing session's compose dialog is still on screen after the \
+                 account switch, feeding the incoming actor's rail",
+            );
+            assert!(
+                !registered,
+                "the departing rail still holds the closed dialog"
+            );
+            assert_eq!(resumable, None, "the incoming actor's rail starts empty");
+        });
+    }
+
+    /// A late destroy of an earlier dialog never unregisters the one now open:
+    /// [`detach_form`] drops only its own window's registration.
+    #[test]
+    fn a_destroyed_dialog_unregisters_only_itself() {
+        crate::testid::run_on_gtk_thread(|| {
+            let rt = tokio::runtime::Runtime::new().expect("test runtime");
+            let rail = install_test_rail(&rt);
+            let (older, _) = attach_test_form();
+            let (newer, _) = attach_test_form();
+            detach_form(&older);
+            let kept = rail.form.borrow().as_ref().map(|f| f.window == newer);
+            detach_form(&newer);
+            let dropped = rail.form.borrow().is_none();
+            older.destroy();
+            newer.destroy();
+            RAIL_STATE.with(|s| *s.borrow_mut() = None);
+            assert_eq!(
+                kept,
+                Some(true),
+                "the older dialog's destroy unregistered the newer one"
+            );
+            assert!(dropped, "the newer dialog's own destroy must unregister it");
+        });
     }
 
     /// An all-empty record is not a draft — the opener must not "resume" one,

@@ -63,6 +63,26 @@ public sealed class InheritedFilterMarksTests
         Assert.Contains("FilterMarksList", rpc.Calls);
     }
 
+    /// <summary>The mail burn is the pass's last leg: the Mail page on screen
+    /// re-reads when the hook fires (the panel subscribes to this event).</summary>
+    [Fact]
+    public void ConfigStageSettledRaisesTheMailPanelsReReadEvent()
+    {
+        var raised = 0;
+        void OnSettled() => raised++;
+        AftermathSettled.Settled += OnSettled;
+        try
+        {
+            new LoggingAftermathSink().ConfigStageSettled();
+        }
+        finally
+        {
+            AftermathSettled.Settled -= OnSettled;
+        }
+
+        Assert.Equal(1, raised);
+    }
+
     /// <summary>A new pass (every sign-in, an account switch included) must not
     /// paint the previous identity's backlog.</summary>
     [Fact]

@@ -64,7 +64,24 @@ impl WsCustodyHandshakeBearer {
             &self.witness,
         )
         .await
-        .map_err(|e| map_anon_err(e, &self.nest_url))
+        .map_err(|e| map_custody_mint_err(e, &self.nest_url))
+    }
+}
+
+/// [`map_anon_err`], except that the owner nest's **authenticated refusal**
+/// (`fauna.auth.not_registered`) stays typed as [`ApiError::SignInRefused`] —
+/// which reaches the session as `NestClientError::Rpc(not_registered)` — rather
+/// than flattening into a status string. The custodian-NEST pump marks its
+/// hosting row on exactly that refusal and on nothing else
+/// (`account-replica-posture.md` § Replica posture → *The custody grant +
+/// ceremony*, the custodian-NEST serve door bullet, ruling 5), so the refusal
+/// must survive every seam distinct from an unreachable nest.
+fn map_custody_mint_err(e: fauna_anon_client::AnonClientError, nest_url: &str) -> ApiError {
+    match e {
+        fauna_anon_client::AnonClientError::Rpc(ref err) if err.is_not_registered() => {
+            ApiError::SignInRefused
+        }
+        e => map_anon_err(e, nest_url),
     }
 }
 
@@ -122,4 +139,49 @@ pub fn custody_nest_client(
         pinned_http_client(nest_url),
     ));
     NestClient::with_auth(auth)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fauna_anon_client::AnonClientError;
+    use fauna_protocol::RpcError;
+
+    /// The refusal the pump marks on survives the bearer seam typed, and
+    /// lands on the session as the wire refusal itself.
+    #[test]
+    fn a_not_registered_custody_refusal_stays_typed_through_the_bearer() {
+        let mapped = map_custody_mint_err(
+            AnonClientError::Rpc(RpcError::not_registered()),
+            "https://owner.example",
+        );
+        assert!(matches!(mapped, ApiError::SignInRefused), "{mapped:?}");
+        let on_session = crate::auth_client::map_api_err(mapped);
+        assert!(
+            matches!(&on_session, crate::NestClientError::Rpc(e) if e.is_not_registered()),
+            "{on_session:?}"
+        );
+    }
+
+    /// Every other refusal and every transport fault keeps the shared
+    /// mapping — nothing else reads as the owner's refusal.
+    #[test]
+    fn other_custody_mint_failures_keep_the_shared_mapping() {
+        let drift = map_custody_mint_err(
+            AnonClientError::Rpc(RpcError::new(
+                "fauna.auth.timestamp_drift",
+                "error.auth.timestamp_drift",
+            )),
+            "https://owner.example",
+        );
+        assert!(
+            matches!(drift, ApiError::Status { code: 401, .. }),
+            "{drift:?}"
+        );
+        let down = map_custody_mint_err(
+            AnonClientError::WebSocket("connection refused".into()),
+            "https://owner.example",
+        );
+        assert!(matches!(down, ApiError::Transport(_)), "{down:?}");
+    }
 }

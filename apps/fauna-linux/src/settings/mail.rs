@@ -52,6 +52,8 @@ use fauna_client_mail_settings::{
     SettingsStatus,
 };
 
+use fauna_client_bridges::MailAccountClient;
+
 use crate::async_helper::spawn_with_snapshot;
 use crate::i18n::strings::common;
 use crate::i18n::strings::mail_settings as MS;
@@ -152,6 +154,17 @@ struct MailPageWidgets {
     // Local IMAP/CalDAV-serving toggle group (visible when enabled).
     serve_here_group: adw::PreferencesGroup,
     serve_here_toggle: adw::SwitchRow,
+
+    // Forwarding group (visible while mail is enabled; mail-forwarding.md
+    // § Per-account "forward all", § Per-account forward rate-limit).
+    forwarding_group: adw::PreferencesGroup,
+    forward_all_to_input: gtk::Entry,
+    forward_per_hour_input: gtk::Entry,
+    forward_per_hour_row: adw::ActionRow,
+    /// The admin ceiling the nest returned beside the limit — the field's
+    /// bound, never hard-coded. `None` until the first read resolves; the
+    /// limit commit is inert until then.
+    forward_ceiling: Rc<Cell<Option<u32>>>,
 }
 
 /// Everything the page's event handlers + render need: the shared machine, the
@@ -159,6 +172,7 @@ struct MailPageWidgets {
 /// form mode, and the widget handles. `Rc`-shared into every closure.
 struct MailPageCtx {
     machine: Arc<MailSettingsMachine>,
+    nest: Arc<fauna_client::NestClient>,
     rt: tokio::runtime::Handle,
     guard: Rc<Cell<bool>>,
     form_mode: Cell<FormMode>,
@@ -202,8 +216,7 @@ pub fn build_mail_page() -> adw::PreferencesPage {
     // `mail-add-credential-submit-button` already declares the kind that binds
     // that leg (`MailAddCredentialSubmit`). OFF's ceremony instead dead-ends at
     // an `adw::AlertDialog` confirm button (via `crate::confirm_dialog`) with no
-    // persistent widget reference — the same shape as `admin.rs::build_factory_reset_section`'s
-    // `ADMIN_FACTORY_RESET_BUTTON` — so the ENTRY is what declares the OFF
+    // persistent widget reference — so the ENTRY is what declares the OFF
     // leg's kind (`MailDisableConfirm`'s `DisableMail`, an OfflineSafe
     // `fauna.state.mail` write, not a bridge call).
     crate::offline_gate::declare_wire_kind(&enabled_toggle, "fauna.account.state.put");
@@ -236,7 +249,10 @@ pub fn build_mail_page() -> adw::PreferencesPage {
         .subtitle(SM::BANNER_SUBTITLE)
         .build();
     banner_row.add_prefix(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
-    banner_row.add_suffix(&super::marker("mail-settings-pending-rotation-banner"));
+    banner_row.add_suffix(&super::value_marker(
+        "mail-settings-pending-rotation-banner",
+        SM::BANNER_TITLE,
+    ));
     let resume_btn = gtk::Button::builder()
         .label(SM::RESUME)
         .valign(gtk::Align::Center)
@@ -390,6 +406,7 @@ pub fn build_mail_page() -> adw::PreferencesPage {
         .label("")
         .halign(gtk::Align::Start)
         .css_classes(["dim-label"])
+        .visible(false)
         .build();
     set_test_id(
         &password_strength,
@@ -622,6 +639,50 @@ pub fn build_mail_page() -> adw::PreferencesPage {
     serve_here_group.add(&serve_here_toggle);
     page.add(&serve_here_group);
 
+    // --- Forwarding (visible while mail is enabled) ---
+    // mail-settings-forward-all-to-input / -forward-per-hour-input: two
+    // save-on-Enter entries (the Spam page's threshold shape — no save button).
+    // The shared `forwarding` parsers check the draft first; a committed value
+    // repaints from the nest's re-read, never the keystrokes.
+    let forwarding_group = adw::PreferencesGroup::builder()
+        .title(MS::FORWARDING_TITLE)
+        .build();
+    forwarding_group.set_visible(false);
+    let forward_all_to_input = gtk::Entry::builder().valign(gtk::Align::Center).build();
+    set_test_id(
+        &forward_all_to_input,
+        ids::MAIL_SETTINGS_FORWARD_ALL_TO_INPUT,
+    );
+    crate::offline_gate::declare_wire_kind(
+        &forward_all_to_input,
+        "fauna.bridges.set_forward_all_to",
+    );
+    let forward_all_to_row = adw::ActionRow::builder()
+        .title(MS::FORWARD_ALL_TO_LABEL)
+        .subtitle(MS::FORWARD_ALL_TO_SUBTITLE)
+        .activatable(false)
+        .build();
+    forward_all_to_row.set_use_markup(false);
+    forward_all_to_row.add_suffix(&forward_all_to_input);
+    forwarding_group.add(&forward_all_to_row);
+    let forward_per_hour_input = gtk::Entry::builder().valign(gtk::Align::Center).build();
+    set_test_id(
+        &forward_per_hour_input,
+        ids::MAIL_SETTINGS_FORWARD_PER_HOUR_INPUT,
+    );
+    crate::offline_gate::declare_wire_kind(
+        &forward_per_hour_input,
+        "fauna.bridges.set_forward_per_hour",
+    );
+    let forward_per_hour_row = adw::ActionRow::builder()
+        .title(MS::FORWARD_PER_HOUR_LABEL)
+        .activatable(false)
+        .build();
+    forward_per_hour_row.set_use_markup(false);
+    forward_per_hour_row.add_suffix(&forward_per_hour_input);
+    forwarding_group.add(&forward_per_hour_row);
+    page.add(&forwarding_group);
+
     // --- Wire the shared state machine ---
     let widgets = MailPageWidgets {
         enabled_toggle,
@@ -675,6 +736,11 @@ pub fn build_mail_page() -> adw::PreferencesPage {
         mua_auth,
         serve_here_group,
         serve_here_toggle,
+        forwarding_group,
+        forward_all_to_input,
+        forward_per_hour_input,
+        forward_per_hour_row,
+        forward_ceiling: Rc::new(Cell::new(None)),
     };
     wire_machine(&page, widgets);
 
@@ -720,6 +786,7 @@ fn wire_machine(page: &adw::PreferencesPage, widgets: MailPageWidgets) {
 
     let ctx = Rc::new(MailPageCtx {
         machine,
+        nest: client.nest_rpc().clone(),
         rt: client.runtime_handle(),
         guard: Rc::new(Cell::new(false)),
         form_mode: Cell::new(FormMode::Enable),
@@ -728,6 +795,39 @@ fn wire_machine(page: &adw::PreferencesPage, widgets: MailPageWidgets) {
 
     // Hydrate on mount: load the `fauna.state.mail` entries and render the snapshot.
     hydrate_and_render(&ctx);
+    hydrate_forwarding(&ctx);
+
+    // The Forwarding entries commit on Enter.
+    {
+        let c = Rc::clone(&ctx);
+        ctx.w
+            .forward_all_to_input
+            .clone()
+            .connect_activate(move |_| commit_forward_all_to(&c));
+        let c = Rc::clone(&ctx);
+        ctx.w
+            .forward_per_hour_input
+            .clone()
+            .connect_activate(move |_| commit_forward_per_hour(&c));
+    }
+
+    // The status line reads the machine's LIVE status, not the copy the last
+    // dispatch returned: the machine moves to `Syncing` / `RotationInProgress`
+    // the moment a dispatch starts, and the snapshot only lands when it
+    // returns — so painting at return alone would never say "syncing" while a
+    // change still runs (`mail-settings.md` § Status indicator). Tick the paint
+    // for as long as the page lives.
+    {
+        let ctx = Rc::clone(&ctx);
+        let alive = ctx.w.status_row.downgrade();
+        glib::timeout_add_local(Duration::from_millis(250), move || {
+            if alive.upgrade().is_none() {
+                return glib::ControlFlow::Break;
+            }
+            paint_live_status(&ctx);
+            glib::ControlFlow::Continue
+        });
+    }
 
     // Re-hydrate whenever the page is shown (navigated to). The settings sub-stack
     // is built once at app launch (`build_settings_view`) and only swaps the
@@ -740,7 +840,10 @@ fn wire_machine(page: &adw::PreferencesPage, widgets: MailPageWidgets) {
     // it. Mirrors the `connect_map` refresh-on-show in `logs.rs`.
     {
         let ctx = Rc::clone(&ctx);
-        page.connect_map(move |_| hydrate_and_render(&ctx));
+        page.connect_map(move |_| {
+            hydrate_and_render(&ctx);
+            hydrate_forwarding(&ctx);
+        });
     }
 
     // Re-hydrate when the post-succession aftermath's mail burn settles: it
@@ -845,11 +948,19 @@ fn wire_machine(page: &adw::PreferencesPage, widgets: MailPageWidgets) {
     // Password strength readout (advisory; never gates submission).
     {
         let strength = ctx.w.password_strength.clone();
+        let autogenerate = ctx.w.autogenerate_toggle.clone();
         ctx.w.password_input.clone().connect_changed(move |entry| {
-            let text =
+            // The meter reads a TYPED password only (ui.yaml: hidden while
+            // auto-generate is on): a generated one is always strong and
+            // never typed, so it shows no reading.
+            let text = if autogenerate.is_active() {
+                String::new()
+            } else {
                 fauna_client_mail_settings::password_gen::password_strength_label(&entry.text())
                     .map(|lt| lt.resolve(crate::i18n::strings::lookup))
-                    .unwrap_or_default();
+                    .unwrap_or_default()
+            };
+            strength.set_visible(!text.is_empty());
             strength.set_text(&text);
         });
     }
@@ -922,6 +1033,7 @@ fn wire_machine(page: &adw::PreferencesPage, widgets: MailPageWidgets) {
                 fauna_client_mail_settings::state::rotation_rewrap_count(&snap, &excluded),
             ));
             paint_rotate_form(&ctx.w, &snap.status);
+            ctx.w.rotate_keys_btn.set_sensitive(false);
             let machine = Arc::clone(&ctx.machine);
             let ctx_render = Rc::clone(&ctx);
             spawn_with_snapshot(
@@ -980,6 +1092,9 @@ fn open_rotate_form(ctx: &Rc<MailPageCtx>) {
         }
         for cred in ctx.machine.snapshot().credentials {
             let cb = gtk::CheckButton::with_label(&cred.display_name);
+            // One id per password (flat-indexed in the credentials' order): the
+            // element a test ticks to mark that password compromised.
+            set_test_id(&cb, ids::MAIL_ROTATE_KEYS_EXCLUDE_ITEM);
             w.rotate_exclude_box.append(&cb);
             checks.push((cred.credential_id.clone(), cb));
         }
@@ -1165,6 +1280,137 @@ fn hydrate_and_render(ctx: &Rc<MailPageCtx>) {
     );
 }
 
+/// One nest-confirmed read of the Forwarding section. Each half is `None` when
+/// the op did not touch it, so committing one field never repaints the other's
+/// uncommitted draft; the first failure either half carries lands on
+/// `error-message`.
+struct ForwardingRead {
+    forward_all_to: Option<Result<Option<String>, String>>,
+    forward_per_hour:
+        Option<Result<fauna_protocol::bridge_routing::GetForwardPerHourReply, String>>,
+}
+
+/// Read both Forwarding values (replay-safe pure reads) and paint them.
+fn hydrate_forwarding(ctx: &Rc<MailPageCtx>) {
+    let nest = Arc::clone(&ctx.nest);
+    let ctx_render = Rc::clone(ctx);
+    spawn_with_snapshot(
+        &ctx.rt,
+        move || async move {
+            let client = MailAccountClient::new(nest);
+            ForwardingRead {
+                forward_all_to: Some(client.get_forward_all_to().await.map_err(|e| e.to_string())),
+                forward_per_hour: Some(
+                    client
+                        .get_forward_per_hour()
+                        .await
+                        .map_err(|e| e.to_string()),
+                ),
+            }
+        },
+        move |read| render_forwarding(&ctx_render, read),
+    );
+}
+
+/// Commit the forward-all address. The shared parser decides first: a refused
+/// draft names its reason on `error-message` and sends nothing (the nest would
+/// refuse it for the same reason — one rule, priority #2). Blank clears; the
+/// field repaints from the nest's re-read.
+fn commit_forward_all_to(ctx: &Rc<MailPageCtx>) {
+    let value = match fauna_client_mail_settings::parse_forward_all_to_draft(
+        &ctx.w.forward_all_to_input.text(),
+    ) {
+        Ok(value) => value,
+        Err(reason) => {
+            let text = reason.resolve(crate::i18n::strings::lookup);
+            super::render_error_label(&ctx.w.error_label, Some(&text));
+            return;
+        }
+    };
+    let nest = Arc::clone(&ctx.nest);
+    let ctx_render = Rc::clone(ctx);
+    spawn_with_snapshot(
+        &ctx.rt,
+        move || async move {
+            ForwardingRead {
+                forward_all_to: Some(
+                    MailAccountClient::new(nest)
+                        .set_forward_all_to_and_reload(value)
+                        .await
+                        .map_err(|e| e.to_string()),
+                ),
+                forward_per_hour: None,
+            }
+        },
+        move |read| render_forwarding(&ctx_render, read),
+    );
+}
+
+/// Commit the hourly limit, bounded by the ceiling the nest returned. No
+/// ceiling yet = the first read has not resolved: the commit is inert.
+fn commit_forward_per_hour(ctx: &Rc<MailPageCtx>) {
+    let Some(ceiling) = ctx.w.forward_ceiling.get() else {
+        return;
+    };
+    let value = match fauna_client_mail_settings::parse_forward_per_hour_draft(
+        &ctx.w.forward_per_hour_input.text(),
+        ceiling,
+    ) {
+        Ok(value) => value,
+        Err(reason) => {
+            let text = reason.resolve(crate::i18n::strings::lookup);
+            super::render_error_label(&ctx.w.error_label, Some(&text));
+            return;
+        }
+    };
+    let nest = Arc::clone(&ctx.nest);
+    let ctx_render = Rc::clone(ctx);
+    spawn_with_snapshot(
+        &ctx.rt,
+        move || async move {
+            ForwardingRead {
+                forward_all_to: None,
+                forward_per_hour: Some(
+                    MailAccountClient::new(nest)
+                        .set_forward_per_hour_and_reload(value)
+                        .await
+                        .map_err(|e| e.to_string()),
+                ),
+            }
+        },
+        move |read| render_forwarding(&ctx_render, read),
+    );
+}
+
+/// Paint a Forwarding read: each confirmed half repaints its own entry (and the
+/// limit's explainer, which names the ceiling); a failure lands on
+/// `error-message`, a success clears it.
+fn render_forwarding(ctx: &Rc<MailPageCtx>, read: ForwardingRead) {
+    let w = &ctx.w;
+    let mut error = None;
+    match read.forward_all_to {
+        Some(Ok(address)) => w
+            .forward_all_to_input
+            .set_text(&address.unwrap_or_default()),
+        Some(Err(msg)) => error = Some(msg),
+        None => {}
+    }
+    match read.forward_per_hour {
+        Some(Ok(reply)) => {
+            w.forward_ceiling.set(Some(reply.forward_per_hour_ceiling));
+            w.forward_per_hour_input
+                .set_text(&reply.forward_per_hour.to_string());
+            w.forward_per_hour_row.set_subtitle(
+                &fauna_client_mail_settings::forward_per_hour_hint(reply.forward_per_hour_ceiling)
+                    .resolve(crate::i18n::strings::lookup),
+            );
+        }
+        Some(Err(msg)) => error = error.or(Some(msg)),
+        None => {}
+    }
+    super::render_error_label(&w.error_label, error.as_deref());
+}
+
 /// Render a `MailSettingsSnapshot` into the page widgets. Runs on the GTK main
 /// thread. The `guard` suppresses the `toggled` re-fire from setting the toggle
 /// programmatically.
@@ -1231,11 +1477,24 @@ fn render(ctx: &Rc<MailPageCtx>, snap: &MailSettingsSnapshot) {
     // Manage buttons: add visible when a mailbox exists; rotate when ≥1 credential.
     w.manage_group.set_visible(mailbox);
     w.rotate_keys_btn.set_visible(!snap.credentials.is_empty());
+    // Disabled while a rotation is pending or running (`mail-settings.md`
+    // § Architectural rules 5: no second rotation racing the first) — the
+    // banner's Resume is the way on; the shared machine refuses a second
+    // StartRotation too, so this is the visible half.
+    w.rotate_keys_btn.set_sensitive(
+        snap.pending_rotation.is_none()
+            && w.rotation_in_flight.get().is_none()
+            && !matches!(snap.status, SettingsStatus::RotationInProgress { .. }),
+    );
 
     // Serve-here toggle: the per-actor "serve my mailbox over IMAP/CalDAV here"
     // flip applies to a CalDAV-only mailbox just as much as an email one, so it
     // follows `mailbox`, not `enabled`.
     w.serve_here_group.set_visible(mailbox);
+
+    // Forwarding is a mail feature, so it shows while mail is enabled (not for
+    // a CalDAV-only mailbox).
+    w.forwarding_group.set_visible(snap.enabled);
 
     // MUA connection details render whenever a mailbox is provisioned (email OR
     // CalDAV OR CardDAV OR WebDAV). Within the one `mail-settings-mua-instructions`
@@ -1266,6 +1525,26 @@ fn render(ctx: &Rc<MailPageCtx>, snap: &MailSettingsSnapshot) {
     w.mua_webdav_url.set_text(&snap.mua.webdav_url);
     w.mua_username.set_text(&snap.mua.username_format);
     w.mua_auth.set_text(&snap.mua.auth_mechanism);
+}
+
+/// Paint the status line and the rotate button from the machine's live
+/// snapshot (the 250 ms tick in [`wire_machine`]). Writes only on change, so an
+/// idle page does not churn the accessibility tree.
+fn paint_live_status(ctx: &Rc<MailPageCtx>) {
+    let w = &ctx.w;
+    let snap = ctx.machine.snapshot();
+    let text = fauna_client_mail_settings::settings_status_label(snap.status.clone(), snap.enabled)
+        .resolve(crate::i18n::strings::lookup);
+    if w.status_marker.text() != text {
+        w.status_marker.set_text(&text);
+        w.status_row.set_subtitle(&text);
+    }
+    let rotatable = snap.pending_rotation.is_none()
+        && w.rotation_in_flight.get().is_none()
+        && !matches!(snap.status, SettingsStatus::RotationInProgress { .. });
+    if w.rotate_keys_btn.is_sensitive() != rotatable {
+        w.rotate_keys_btn.set_sensitive(rotatable);
+    }
 }
 
 /// Present the destructive "Disable mail?" confirmation. Confirm dispatches
@@ -1334,11 +1613,16 @@ fn apply_autogen_state(w: &MailPageWidgets) {
         w.password_input.set_visibility(false);
         w.password_show_toggle.set_active(false);
         w.password_strength.set_text("");
+        w.password_strength.set_visible(false);
         w.weak_password_warning.set_visible(false);
     } else {
         w.password_input.set_text("");
         w.password_input.set_editable(true);
-        w.weak_password_warning.set_visible(true);
+        // Today the page has no nest-encrypted signal; user content rests sealed
+        // on every nest, so the manual-entry warning always applies.
+        w.weak_password_warning.set_visible(
+            fauna_client_mail_settings::password_gen::warn_manual_password(false, true),
+        );
     }
 }
 

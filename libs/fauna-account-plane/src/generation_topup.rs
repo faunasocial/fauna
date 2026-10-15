@@ -780,7 +780,6 @@ mod tests {
                 core,
                 shredded_at_ms: 9_000,
                 shredded_by: device_id_of(US),
-                shredder_sig: vec![],
             },
         ))
         .await;

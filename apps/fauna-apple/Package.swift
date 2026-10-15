@@ -82,7 +82,7 @@ var targets: [Target] = [
     // macOS desktop app — ALL app code lives in this library so the SPM
     // executable below and the `.xcodeproj` `Fauna` app shell (which packages the
     // File Provider appex) compile the SAME code (M2 slice 3b, option (b):
-    // "shells linking SwiftPM library products" — file-sync.md § On-Demand Files
+    // "shells linking SwiftPM library products" — on-demand-files-apple.md § On-Demand Files
     // → Apple File Provider binding).
     .target(
         name: "FaunaMacOSLib",

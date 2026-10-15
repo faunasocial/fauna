@@ -5,7 +5,7 @@
   // excision → *The price-and-route class*). Isolated here, imported only from
   // behind `__FAUNA_PAYMENTS__`, so an excised build shows a priced tier as an
   // ordinary approval-gated tier and its bundle carries neither id.
-  import { IDS } from '$lib/generated/uiIds';
+  import { PAYMENTS_IDS } from '$lib/components/payments/generatedIds';
 
   interface Props {
     variant: 'tier' | 'offer';
@@ -14,7 +14,7 @@
   let { variant, priceHint }: Props = $props();
 
   const testid = $derived(
-    variant === 'tier' ? IDS.SUBSCRIPTION_TIER_PRICE : IDS.SUBSCRIPTION_OFFER_PRICE
+    variant === 'tier' ? PAYMENTS_IDS.SUBSCRIPTION_TIER_PRICE : PAYMENTS_IDS.SUBSCRIPTION_OFFER_PRICE
   );
 </script>
 

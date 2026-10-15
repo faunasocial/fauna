@@ -22,7 +22,7 @@ use adw::prelude::*;
 use gtk::{Button, Entry, Label, Orientation};
 
 use crate::testid::set_test_id;
-use fauna_onboarding_machine::{OnboardingMachine, snapshots::invite_request::OobCodeState};
+use fauna_onboarding_machine::OnboardingMachine;
 
 use crate::async_helper;
 use crate::i18n::resolve_key as resolve;
@@ -136,9 +136,10 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
     // `invite-code-supervised-notice` — "this account will be supervised by X",
     // rendered BEFORE redemption when the checked out-of-band code carries a
     // guardian designation (`family-safety.md` § Wire & data shape: the additive
-    // `supervised_by` on the `fauna.account.invite_code.verify` reply, surfaced by
-    // the shared machine as `OobCodeState::Valid { supervised_by }`). Transparency
-    // at creation — the supervised user knows before they redeem.
+    // `supervised_by` on the `fauna.account.invite_code.verify` reply), and the
+    // age band the code was minted with in the same sentence (§ App surface →
+    // *Age-band surfaces*). Transparency at creation — the supervised user knows
+    // before they redeem. The text is the shared machine's `supervised_notice`.
     let supervised_notice = Label::new(None);
     supervised_notice.add_css_class("heading");
     supervised_notice.set_halign(gtk::Align::Start);
@@ -219,19 +220,17 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
             // Bottom row: OOB code status.
             code_status.set_text(&snap.oob_message.resolve(crate::i18n::strings::lookup));
 
-            // Supervised-admission notice: only a *valid* code that carries a
-            // guardian shows it (an invalid/idle/verifying code never does).
-            match &snap.out_of_band_code_state {
-                OobCodeState::Valid {
-                    supervised_by: Some(guardian),
-                    ..
-                } => {
-                    supervised_notice.set_text(
-                        &crate::i18n::strings::family::supervised_notice_onboarding(guardian),
-                    );
+            // Supervised-admission notice: the shared machine's
+            // `supervised_notice`, set only for a *valid* code that carries a
+            // guardian (an invalid/idle/verifying code never has one). Its
+            // `{band}` argument is a nested key, hence `resolve_nested`.
+            match &snap.supervised_notice {
+                Some(notice) => {
+                    supervised_notice
+                        .set_text(&notice.resolve_nested(crate::i18n::strings::lookup));
                     supervised_notice.set_visible(true);
                 }
-                _ => {
+                None => {
                     supervised_notice.set_text("");
                     supervised_notice.set_visible(false);
                 }

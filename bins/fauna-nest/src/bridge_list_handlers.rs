@@ -47,8 +47,8 @@ use crate::db::mail_lists::{
     AddMemberOutcome, ListQuotaOutcome, ListSendCaps, ListWriteError, MailListMemberRecord,
     MailListRecord,
 };
+use crate::db::now_epoch_millis;
 use crate::db::outbound::{InboundVerdictsSnapshot, NewOutbound};
-use crate::db::{now_epoch_millis, now_epoch_secs};
 use crate::routes::AppState;
 use crate::rpc_router::{RpcHandler, RpcKindMeta, RpcRouterBuilder};
 
@@ -522,6 +522,9 @@ fn send_list_message_handler() -> RpcHandler {
             let req: SendListMessageRequest = decode(&payload).map_err(malformed)?;
             let list_id = list_id_from_wire(&req.list_id)?;
             let list = owned_list(&state, &list_id, &actor_id).await?;
+            // The owner's own send switch (`mail-policy-config.md` § Tier 3),
+            // ahead of every cap so a refused send reserves nothing.
+            crate::bridge_routing_handlers::refuse_if_send_disabled(&state, &actor_id).await?;
 
             // RFC 5322 §3.6: exactly one From field, before any cap is reserved
             // (`smtp-server.md` § Architectural rules → *Exactly one From
@@ -536,6 +539,39 @@ fn send_list_message_handler() -> RpcHandler {
                         "message must carry exactly one From header field, found {from_fields}"
                     ),
                 ));
+            }
+            // From: header ownership — this door's call of the one predicate
+            // (`mail-multidomain.md` § From: header ownership → *Per door,
+            // nest-side*, the list door). The submitter is the caller, whom
+            // `owned_list` proved owns the list; a From on a signed-for domain
+            // must be an address they own, or exactly THIS list's own posting
+            // address — the one address the resolver attributes to nobody that
+            // its owner may author as (a list speaks only as itself: another
+            // list's address, the owner's own other list included, is refused).
+            // Before any cap is reserved. The mailbox read is the signer's own.
+            if let Some(from) = crate::mail_dkim_key::signable_from_mailbox(&req.message)
+                && let crate::mail_from_ownership::FromOwnership::NotOwned { .. } =
+                    crate::mail_from_ownership::from_ownership(
+                        &state,
+                        &actor_id,
+                        &from.mailbox,
+                        &from.host,
+                    )
+                    .await?
+            {
+                let is_this_list = from.mailbox.eq_ignore_ascii_case(&list.pattern)
+                    && fauna_core::web::normalize_dns_name(&from.host)
+                        == fauna_core::web::normalize_dns_name(&list.local_domain);
+                if !is_this_list {
+                    return Err(fauna_protocol::RpcError::new(
+                        fauna_protocol::bridge_routing::SENDER_NOT_OWNED_CODE,
+                        "error.bridges.sender_not_owned",
+                    )
+                    .with_details_text(
+                        "From: names an address on a domain this deployment signs for that \
+                         is neither the list owner's nor this list's own posting address",
+                    ));
+                }
             }
 
             let members = state
@@ -603,7 +639,10 @@ fn send_list_message_handler() -> RpcHandler {
             let list_id_label = Uuid::from_bytes(list_id).to_string();
             let original_sender = format!("{}@{}", list.pattern, list.local_domain);
             let msgid = format!("<{}@{}>", Uuid::new_v4(), list.local_domain);
-            let now_secs = now_epoch_secs();
+            // The outbound clock every queue row and the warm-up day are read on
+            // (`AppState::outbound_now`), so a held fan-out row's release and the
+            // reads that compare against it stay on one clock.
+            let now_secs = state.outbound_now();
 
             let mut queued: u64 = 0;
             for m in &members {

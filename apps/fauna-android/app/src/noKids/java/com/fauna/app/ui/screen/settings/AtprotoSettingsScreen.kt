@@ -3,6 +3,7 @@ package com.fauna.app.ui.screen.settings
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -13,6 +14,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -162,6 +164,7 @@ fun AtprotoSettingsScreen(
         onOpenDeleteConfirm = vm::openDeleteConfirm,
         onCancelDelete = vm::cancelDelete,
         onConfirmDelete = vm::confirmDelete,
+        onSetDeleteRetireIdentity = vm::setDeleteRetireIdentity,
         onSelectLevel = vm::selectLevel,
         onConfirmTransition = vm::confirmTransition,
         onCancelTransition = vm::cancelTransition,
@@ -228,6 +231,7 @@ fun AtprotoSettingsContent(
     onOpenDeleteConfirm: () -> Unit,
     onCancelDelete: () -> Unit,
     onConfirmDelete: () -> Unit,
+    onSetDeleteRetireIdentity: (Boolean) -> Unit,
     onSelectLevel: (String) -> Unit,
     onConfirmTransition: () -> Unit,
     onCancelTransition: () -> Unit,
@@ -381,7 +385,12 @@ fun AtprotoSettingsContent(
             // Its own confirm card — never the depth selector's. The copy is
             // the machine's, rendered verbatim.
             snapshot.deleteConfirm?.let { confirm ->
-                DeleteConfirmCard(confirm = confirm, onConfirm = onConfirmDelete, onCancel = onCancelDelete)
+                DeleteConfirmCard(
+                    confirm = confirm,
+                    onSetRetireIdentity = onSetDeleteRetireIdentity,
+                    onConfirm = onConfirmDelete,
+                    onCancel = onCancelDelete,
+                )
             }
 
             if (snapshot.level == "hosted_full") {
@@ -556,7 +565,7 @@ private fun TransitionCard(
             if (card.showHistoryBackfill) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.testTag(Ids.ATPROTO_HISTORY_BACKFILL)) {
                     Checkbox(checked = historyBackfill, onCheckedChange = onSetHistoryBackfill)
-                    Text(stringResource(R.string.atproto_settings_history_backfill_label))
+                    Text(localized(card.historyBackfillLabel) ?: "")
                 }
             }
             // The commit gates, not the buffer: the card's own history-backfill
@@ -608,6 +617,7 @@ private fun HostedPanel(snapshot: AtprotoSettingsSnapshot, onSetDidMethod: (Stri
 @Composable
 private fun DeleteConfirmCard(
     confirm: uniffi.fauna_atproto_settings_machine.DeleteConfirmCardModel,
+    onSetRetireIdentity: (Boolean) -> Unit,
     onConfirm: () -> Unit,
     onCancel: () -> Unit,
 ) {
@@ -615,6 +625,34 @@ private fun DeleteConfirmCard(
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             for (line in confirm.lines) {
                 Text(localized(line) ?: "", style = MaterialTheme.typography.bodyMedium)
+            }
+            // The terminal opt-in (`atproto-delete-tombstone`) is card state on
+            // the machine, not a gesture: it stays live without a nest and sends
+            // nothing until the confirm. `state` is on / off / unavailable.
+            val retire = confirm.retireIdentity
+            val retireLive = retire.available && !confirm.inProgress
+            val retireState = if (!retire.available) "unavailable" else if (retire.selected) "on" else "off"
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .testTag(Ids.ATPROTO_DELETE_TOMBSTONE)
+                    .toggleable(
+                        value = retire.selected,
+                        enabled = retireLive,
+                        role = Role.Checkbox,
+                        onValueChange = onSetRetireIdentity,
+                    )
+                    .semantics { stateDescription = retireState },
+            ) {
+                Checkbox(checked = retire.selected, enabled = retireLive, onCheckedChange = null)
+                Text(stringResource(R.string.atproto_settings_delete_retire_identity_label))
+            }
+            retire.unavailableReason?.let { reason ->
+                Text(
+                    localized(reason) ?: "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             // The confirm is the round trip — `AtprotoSettingsMachine::confirm_delete`
             // calls `nest_api.delete_presence()`. The OPENER above and the cancel
@@ -691,6 +729,11 @@ private fun FullPdsPanel(
             )
         }
         DisabledControlReasonText(killSwitchGate.reason)
+        Text(
+            stringResource(R.string.atproto_settings_external_apps_hint),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
         Column(modifier = Modifier.testTag(Ids.ATPROTO_APP_CREDENTIALS_LIST), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(stringResource(R.string.atproto_settings_app_credentials_heading), style = MaterialTheme.typography.titleSmall)

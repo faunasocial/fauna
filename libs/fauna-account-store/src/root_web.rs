@@ -29,9 +29,11 @@ pub const PLATFORM_ROOT: &str = "fauna-account-store";
 pub struct StoreRoot(String);
 
 impl StoreRoot {
-    /// The production root — [`PLATFORM_ROOT`].
-    pub fn platform() -> Self {
-        Self(PLATFORM_ROOT.to_owned())
+    /// The production root — [`PLATFORM_ROOT`]. Always `Ok`: a browser origin
+    /// has no home to be missing. The `Result` is the native leg's signature
+    /// (which refuses a missing home), so shared callers never fork on target.
+    pub fn platform() -> Result<Self> {
+        Ok(Self(PLATFORM_ROOT.to_owned()))
     }
 
     /// An explicit root (tests).

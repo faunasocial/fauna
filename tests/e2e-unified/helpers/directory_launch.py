@@ -14,6 +14,7 @@ imports it drives an app, so it is registered in ``DRIVER_FACTORY_IMPORTS``.
 from __future__ import annotations
 
 from drivers import create_driver
+from helpers.app_launch import app_launch_config
 
 
 def launch_app_with_directory(app_name: str, request, nest: dict, directory):
@@ -41,17 +42,11 @@ def launch_app_with_directory(app_name: str, request, nest: dict, directory):
         if app_name == "linux":
             environment["GTK_A11Y"] = "none"
         driver = create_driver(app_name)
-        launch_config = {"url": nest["url"], "environment": environment}
-        if app_name == "ios":
-            # No bare `ios_app_path` fixture exists — iOS's direct-launch fixture
-            # (`ios_setup`) returns `{"udid", "app_path"}` together, because
-            # `drivers/ios.py`'s `launch()` requires both.
-            ios_setup = request.getfixturevalue("ios_setup")
-            launch_config["app_path"] = ios_setup["app_path"]
-            launch_config["udid"] = ios_setup["udid"]
-        else:
-            launch_config["app_path"] = request.getfixturevalue(f"{app_name}_app_path")
-        driver.launch(launch_config)
+        driver.launch({
+            "url": nest["url"],
+            "environment": environment,
+            **app_launch_config(app_name, request),
+        })
     try:
         driver.wait_for_state(lambda s: s is not None, timeout=30)
     except (TimeoutError, Exception):

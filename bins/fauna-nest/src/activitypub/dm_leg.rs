@@ -66,14 +66,120 @@ async fn enabled_account(
 /// The one spelling of an actor URI the leg's rooms and the gate's verdict
 /// rows key on: an `https` URL as the URL parser normalises it (lowercase
 /// host, default port elided), its fragment dropped. `None` for anything else.
+///
+/// The one widening is the AP loopback test hook's
+/// (`outbound::test_loopback_hook_open` — a `test-hooks` build with
+/// `FAUNA_TEST_AP_ALLOW_LOOPBACK` set, never a shipped one): an `http` actor
+/// on a loopback host, the in-test fediverse server's spelling, so a journey
+/// can deliver a direct Note the dial-side hook already lets it serve.
 #[must_use]
 pub fn canonical_actor(uri: &str) -> Option<String> {
+    canonical_actor_with(uri, super::outbound::test_loopback_hook_open())
+}
+
+fn canonical_actor_with(uri: &str, loopback_http: bool) -> Option<String> {
     let mut url = url::Url::parse(uri.trim()).ok()?;
-    if url.scheme() != "https" || url.host_str().is_none() {
+    let scheme_ok = url.scheme() == "https"
+        || (loopback_http
+            && url.scheme() == "http"
+            && super::outbound::is_loopback_url(uri.trim()));
+    if !scheme_ok || url.host_str().is_none() {
         return None;
     }
     url.set_fragment(None);
     Some(url.to_string())
+}
+
+/// The largest WebFinger answer [`resolve_account`] reads — real ones are a
+/// few hundred bytes; the dial is to a host the user typed.
+const WEBFINGER_MAX_BYTES: usize = 65_536;
+
+/// The far room id of the leg's room with `address`: its canonical actor URI,
+/// whether `address` is that URI or the `@user@host` it is known by (resolved
+/// through `far`). `None` for an address that names no actor.
+pub async fn far_room_id(far: &impl bridge_legs::FarResolve, address: &str) -> Option<String> {
+    match fediverse_handle_with(address, super::outbound::test_loopback_hook_open()) {
+        Some((user, host)) => canonical_actor(&far.fediverse_account(&user, &host).await?),
+        None => canonical_actor(address),
+    }
+}
+
+/// The `(user, host)` an `@user@host` names — the shared parse, which admits a
+/// dotted DNS host only. The one widening is the AP loopback test hook's, as
+/// for [`canonical_actor`]: a loopback `host:port`, the in-test fediverse
+/// server's authority, so a journey can open a room by the account it serves.
+fn fediverse_handle_with(address: &str, loopback: bool) -> Option<(String, String)> {
+    use fauna_bridge_activitypub::webfinger::parse_fediverse_handle;
+    parse_fediverse_handle(address).or_else(|| {
+        let (user, host) = address.trim().strip_prefix('@')?.split_once('@')?;
+        let ok = loopback
+            && !user.is_empty()
+            && !user
+                .chars()
+                .any(|c| c.is_whitespace() || matches!(c, '@' | '/' | ':' | '?' | '#' | '%'))
+            && !host.contains(['/', '@', '?', '#'])
+            && super::outbound::is_loopback_url(&format!("http://{host}/"));
+        ok.then(|| (user.to_string(), host.to_ascii_lowercase()))
+    })
+}
+
+/// The WebFinger query asking `host` which actor `acct:user@host` is: the
+/// shared `https` query, or — under the loopback test hook only, for a
+/// loopback `host` — the same query over `http`, the in-test server's scheme.
+fn webfinger_query_url(user: &str, host: &str, loopback: bool) -> String {
+    let url = fauna_bridge_activitypub::webfinger::acct_query_url(user, host);
+    if loopback
+        && super::outbound::is_loopback_url(&format!("http://{host}/"))
+        && let Some(rest) = url.strip_prefix("https://")
+    {
+        return format!("http://{rest}");
+    }
+    url
+}
+
+/// The canonical actor URI the Fediverse account `user@host` names — asked of
+/// `host` by WebFinger through the SSRF-guarded dialer, then the actor
+/// document it names fetched and cached (`ap_remote_actors`), so an answer
+/// that names no actor is no answer. `None` when either step fails.
+pub async fn resolve_account(state: &AppState, user: &str, host: &str) -> Option<String> {
+    match webfinger_actor(state, user, host).await {
+        Ok(uri) => Some(uri),
+        Err(e) => {
+            tracing::debug!(%host, "activitypub leg: account did not resolve: {e:#}");
+            None
+        }
+    }
+}
+
+async fn webfinger_actor(state: &AppState, user: &str, host: &str) -> anyhow::Result<String> {
+    use fauna_bridge_activitypub::webfinger::self_actor_href;
+
+    let query = webfinger_query_url(user, host, super::outbound::test_loopback_hook_open());
+    let (client, url) = super::outbound::ap_outbound_client(&query).await?;
+    let resp = client
+        .get(url)
+        .header("Accept", "application/jrd+json, application/json")
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("WebFinger returned HTTP {}", resp.status());
+    }
+    let body = crate::ssrf::read_capped(resp, WEBFINGER_MAX_BYTES).await?;
+    let jrd: fauna_bridge_activitypub::types::WebFingerResponse = serde_json::from_slice(&body)?;
+    let uri = self_actor_href(&jrd)
+        .and_then(canonical_actor)
+        .ok_or_else(|| anyhow::anyhow!("the WebFinger answer names no https actor"))?;
+
+    let cached = {
+        let conn = state.db.conn().await;
+        db_helpers::get_remote_actor(&conn, &uri)?
+    };
+    if cached.is_none() {
+        let actor = crate::activitypub::inbox_routes::fetch_remote_actor(state, &uri).await?;
+        let conn = state.db.conn().await;
+        db_helpers::upsert_remote_actor(&conn, &actor)?;
+    }
+    Ok(uri)
 }
 
 /// A far `published` as unix ms — the sender's claim, carried for display and
@@ -288,6 +394,7 @@ mod tests {
     use serde_json::json;
 
     use crate::activitypub::inbox_routes::handle_create;
+    use crate::bridge_legs::test_support::FakeResolve;
     use crate::bridged_conversation_handlers::test_support as family;
 
     const ALICE: [u8; 32] = [0xA1; 32];
@@ -489,6 +596,52 @@ mod tests {
         assert!(family::rooms(&st, ALICE).await.is_empty());
     }
 
+    /// `conversations.md` § *The `Bridged` adapter*, ruling 2 (d): a typed
+    /// `@user@host` opens the room keyed on the canonical actor URI WebFinger
+    /// names; the actor URI itself opens the same room.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fediverse_handle_opens_the_room_keyed_on_its_actor_uri() {
+        let state = state(None).await;
+        let far = FakeResolve::knowing(&[("mallory@remote.example", MALLORY)]);
+
+        let room = family::open_resolving(&state, ALICE, "@mallory@Remote.Example", &far)
+            .await
+            .unwrap();
+        assert_eq!(room.bridge_id, "activitypub");
+        assert_eq!(room.far_room_id, MALLORY);
+        assert_eq!(room.participants, vec![MALLORY.to_string()]);
+
+        let by_uri = family::open(&state, ALICE, "activitypub", MALLORY)
+            .await
+            .unwrap();
+        assert_eq!(by_uri.room_id, room.room_id);
+        assert_eq!(family::rooms(&state, ALICE).await.len(), 1);
+    }
+
+    /// The family's typed refusal, no room opened: a bare `user@host` (an
+    /// email address to every app's probe — the grammar admits only the
+    /// two-`@` form), an account WebFinger does not know, and an answer that is
+    /// no `https` actor URI.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_address_that_names_no_actor_is_address_refused() {
+        let state = state(None).await;
+        let far = FakeResolve::knowing(&[
+            ("mallory@remote.example", MALLORY),
+            ("odd@remote.example", "http://remote.example/users/odd"),
+        ]);
+        for address in [
+            "mallory@remote.example",
+            "@nobody@remote.example",
+            "@odd@remote.example",
+        ] {
+            let err = family::open_resolving(&state, ALICE, address, &far)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "fauna.bridges.address_refused", "{address}");
+        }
+        assert!(family::rooms(&state, ALICE).await.is_empty());
+    }
+
     /// The outbound drain: the far call is a `Create{Note}` from the account's
     /// actor, addressed to the peer alone, queued for the peer's inbox.
     #[tokio::test(flavor = "multi_thread")]
@@ -527,5 +680,74 @@ mod tests {
         assert_eq!(note["content"], "<p>hi &lt;mallory&gt;<br>bye</p>");
         assert_eq!(note["tag"][0]["type"], "Mention");
         assert_eq!(note["tag"][0]["href"], MALLORY);
+    }
+
+    /// The canonical spelling is `https` only — save the loopback test hook's
+    /// one widening, an `http` actor on a loopback host, and only while the
+    /// hook is open; a non-loopback `http` actor stays refused either way.
+    #[test]
+    fn canonical_actor_is_https_save_the_open_loopback_hook() {
+        for open in [false, true] {
+            assert_eq!(
+                canonical_actor_with("https://Remote.Example:443/users/bob#main-key", open)
+                    .as_deref(),
+                Some("https://remote.example/users/bob"),
+            );
+            assert_eq!(
+                canonical_actor_with("http://remote.example/users/bob", open),
+                None
+            );
+            assert_eq!(
+                canonical_actor_with("mailto:bob@remote.example", open),
+                None
+            );
+        }
+        let fake = "http://127.0.0.1:4567/users/bob";
+        assert_eq!(canonical_actor_with(fake, false), None);
+        assert_eq!(canonical_actor_with(fake, true).as_deref(), Some(fake));
+        assert_eq!(
+            canonical_actor_with("http://localhost:4567/users/bob", true).as_deref(),
+            Some("http://localhost:4567/users/bob"),
+        );
+        assert_eq!(
+            canonical_actor_with("http://10.0.0.1/users/bob", true),
+            None
+        );
+    }
+
+    /// An `@user@host` names a dotted DNS host, asked over `https` — save the
+    /// loopback test hook's widening, a loopback `host:port` asked over
+    /// `http`, and only while the hook is open; a private-range or ported DNS
+    /// host stays refused either way.
+    #[test]
+    fn fediverse_handle_is_dns_and_https_save_the_open_loopback_hook() {
+        for open in [false, true] {
+            assert_eq!(
+                fediverse_handle_with("@Bob@Remote.Example", open),
+                Some(("Bob".into(), "remote.example".into())),
+            );
+            for not_one in ["@bob@10.0.0.1:80", "@bob@remote.example:8443", "@bob"] {
+                assert_eq!(fediverse_handle_with(not_one, open), None, "{not_one}");
+            }
+            assert_eq!(
+                webfinger_query_url("bob", "remote.example", open),
+                "https://remote.example/.well-known/webfinger?resource=acct%3Abob%40remote.example",
+            );
+        }
+        let fake = "@frank@127.0.0.1:4567";
+        assert_eq!(fediverse_handle_with(fake, false), None);
+        assert_eq!(
+            fediverse_handle_with(fake, true),
+            Some(("frank".into(), "127.0.0.1:4567".into())),
+        );
+        assert_eq!(
+            fediverse_handle_with("@frank@localhost:4567", true),
+            Some(("frank".into(), "localhost:4567".into())),
+        );
+        assert!(webfinger_query_url("frank", "127.0.0.1:4567", false).starts_with("https://"));
+        assert_eq!(
+            webfinger_query_url("frank", "127.0.0.1:4567", true),
+            "http://127.0.0.1:4567/.well-known/webfinger?resource=acct%3Afrank%40127.0.0.1%3A4567",
+        );
     }
 }

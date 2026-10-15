@@ -15,10 +15,13 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 import uniffi.fauna_atproto_settings_machine.ConsentCardRow
+import uniffi.fauna_atproto_settings_machine.ConsentSetRow
 import uniffi.fauna_client_connected_apps.BlockedAppRow
 import uniffi.fauna_client_connected_apps.ConnectedAppRow
 import uniffi.fauna_client_connected_apps.ConnectedAppsSnapshot
 import uniffi.fauna_client_connected_apps.MailAppPassword
+import uniffi.fauna_client_connected_apps.OracleOpRow
+import uniffi.fauna_client_connected_apps.OracleSummaryRow
 import uniffi.fauna_core.LocalizedText
 
 /**
@@ -48,8 +51,12 @@ class ConnectedAppsContentTest {
         clientId: String? = null,
         publisher: String? = null,
         scopes: List<String> = emptyList(),
+        sets: List<ConsentSetRow> = emptyList(),
         connected: Boolean = true,
+        paused: Boolean = false,
         mail: MailAppPassword? = null,
+        signerBurned: Boolean = false,
+        oracle: OracleSummaryRow? = null,
     ) = ConnectedAppRow(
         key = key,
         `class` = cls,
@@ -57,11 +64,15 @@ class ConnectedAppsContentTest {
         clientId = clientId,
         publisher = publisher,
         scopeDescriptions = scopes.map { verbatim(it) },
+        sets = sets,
         createdAtMillis = 1_700_000_000_000L,
         lastUsedAtMillis = null,
         lastsUntilMillis = null,
         connected = connected,
+        paused = paused,
         mail = mail,
+        signerBurned = signerBurned,
+        oracle = oracle,
     )
 
     private fun mailRow(key: String = "mail:c1", revoked: Boolean = false) = row(
@@ -75,13 +86,17 @@ class ConnectedAppsContentTest {
         ),
     )
 
-    private fun request(id: String = "c1", code: String = "AAA-BBB") = ConsentCardRow(
+    private fun request(
+        id: String = "c1",
+        code: String = "AAA-BBB",
+        sets: List<ConsentSetRow> = emptyList(),
+    ) = ConsentCardRow(
         consentIdHex = id,
         code = code,
         clientId = "https://example.com/oauth",
         clientName = "Example App",
         scopeDescriptions = listOf("Read your posts"),
-        sets = emptyList(),
+        sets = sets,
     )
 
     private fun snapshot(
@@ -224,6 +239,96 @@ class ConnectedAppsContentTest {
         composeTestRule.onNodeWithText("Read your posts", substring = true).assertExists()
     }
 
+    // ── The card's permission-set section ─────────────────────────────────
+    // atproto-oauth-provider.md § F4 detail → *Permission sets*: painted AFTER the
+    // flat scope list, no ids on the lines. Mirrors linux's `consent_set_lines`
+    // and windows' `ConsentSetLines` pins.
+
+    /** Identity (NSID verbatim beside the publisher's title), the publisher's
+     *  prose, and EVERY member — the title must never stand in for the expansion. */
+    @Test
+    fun aPermissionSetRendersItsIdentityProseAndEveryMember() {
+        val set = ConsentSetRow(
+            nsid = "com.example.calendar.appPerms",
+            title = "Calendar sync",
+            details = "Keeps your calendar in step.",
+            memberDescriptions = listOf("Read and write calendar events", "See your free/busy time"),
+        )
+        render(snapshot = snapshot(requests = listOf(request(sets = listOf(set)))))
+        composeTestRule.onNodeWithText(
+            "Some of that comes from \u201cCalendar sync\u201d (com.example.calendar.appPerms):",
+            substring = true,
+        ).assertExists()
+        composeTestRule.onNodeWithText("Keeps your calendar in step.", substring = true).assertExists()
+        composeTestRule.onNodeWithText("Read and write calendar events", substring = true).assertExists()
+        composeTestRule.onNodeWithText("See your free/busy time", substring = true).assertExists()
+    }
+
+    /** The roster row carries the same provenance: the set's NSID beside its
+     *  title and every member, after the row's scope words. */
+    @Test
+    fun aRosterRowNamesThePermissionSetItCameFrom() {
+        val set = ConsentSetRow(
+            nsid = "com.example.calendar.appPerms",
+            title = "Calendar sync",
+            details = null,
+            memberDescriptions = listOf("Read and write calendar events"),
+        )
+        render(
+            snapshot = snapshot(
+                principals = listOf(row("oauth:c1", cls = "oauth", scopes = listOf("Read your posts"), sets = listOf(set))),
+            ),
+        )
+        val text = composeTestRule.onNodeWithTag("connected-apps-item")
+            .fetchSemanticsNode().config[SemanticsProperties.Text].joinToString("") { it.text }
+        assert("Some of that comes from \u201cCalendar sync\u201d (com.example.calendar.appPerms):" in text) { text }
+        assert(text.indexOf("Read your posts") < text.indexOf("com.example.calendar.appPerms")) { text }
+        assert("Read and write calendar events" in text) { text }
+    }
+
+    /** A set whose publisher declared no title shows its NSID alone — never an
+     *  empty pair of quotes. */
+    @Test
+    fun anUntitledSetShowsItsNsidAloneWithNoEmptyQuotes() {
+        val set = ConsentSetRow(
+            nsid = "com.example.calendar.appPerms",
+            title = null,
+            details = null,
+            memberDescriptions = listOf("Read and write calendar events"),
+        )
+        render(snapshot = snapshot(requests = listOf(request(sets = listOf(set)))))
+        composeTestRule.onNodeWithText(
+            "Some of that comes from com.example.calendar.appPerms:",
+            substring = true,
+        ).assertExists()
+        assert(composeTestRule.onAllNodesWithText("\u201c", substring = true).fetchSemanticsNodes().isEmpty())
+        assert(composeTestRule.onAllNodesWithText("\"\"", substring = true).fetchSemanticsNodes().isEmpty())
+    }
+
+    /** A key replacement's card says what the approve ends; an ordinary card
+     *  paints nothing of the kind. */
+    @Test
+    fun aKeyReplacingCardSaysWhatTheApproveEnds() {
+        val replacing = request().copy(ends = LocalizedText("connected_apps.consent_ends_holder", emptyMap()))
+        render(snapshot = snapshot(requests = listOf(replacing)))
+        composeTestRule.onNodeWithText("Approving ends the access", substring = true).assertExists()
+    }
+
+    @Test
+    fun anOrdinaryCardSaysNothingOfAKeyReplacement() {
+        render(snapshot = snapshot(requests = listOf(request())))
+        composeTestRule.onNodeWithText("Read your posts", substring = true).assertExists()
+        assert(composeTestRule.onAllNodesWithText("Approving ends", substring = true).fetchSemanticsNodes().isEmpty())
+    }
+
+    /** A request naming no set paints no set lines — not even a blank heading. */
+    @Test
+    fun aRequestWithNoSetPaintsNoSetLines() {
+        render(snapshot = snapshot(requests = listOf(request(sets = emptyList()))))
+        composeTestRule.onNodeWithText("Read your posts", substring = true).assertExists()
+        assert(composeTestRule.onAllNodesWithText("Some of that comes from", substring = true).fetchSemanticsNodes().isEmpty())
+    }
+
     @Test
     fun approveDeclineAndBlockForwardTheConsentId() {
         val seen = mutableListOf<String>()
@@ -350,16 +455,82 @@ class ConnectedAppsContentTest {
     fun aBurnedRowSaysSoUnderTheNameAndCarriesTheRevokedAttr() {
         render(snapshot = snapshot(principals = listOf(mailRow(revoked = true))))
         composeTestRule.onNodeWithTag("connected-apps-item")
-            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "true"))
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "revoked=true;oracle_ops=;status=connected"))
         // Words sit directly under the name: on the item's own text and as a Text of their own.
         assert(composeTestRule.onAllNodesWithText("Access revoked", substring = true).fetchSemanticsNodes().isNotEmpty())
     }
 
     @Test
+    fun aBurnedSignerRowSaysSoInItsOwnWordsAndCarriesTheRevokedAttr() {
+        render(
+            snapshot = snapshot(
+                principals = listOf(row(key = "signer:s1", cls = "signer", connected = false, signerBurned = true)),
+            ),
+        )
+        composeTestRule.onNodeWithTag("connected-apps-item")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "revoked=true;oracle_ops=;status=not_connected"))
+        assert(composeTestRule.onAllNodesWithText("connect this signer app again", substring = true).fetchSemanticsNodes().isNotEmpty())
+    }
+
+    @Test
     fun aLiveRowCarriesNoRevokedAttr() {
         render(snapshot = snapshot(principals = listOf(mailRow(revoked = false))))
+        // An empty `revoked` or `oracle_ops` reads as not set; only `status` is published.
         composeTestRule.onNodeWithTag("connected-apps-item")
-            .assert(SemanticsMatcher.keyNotDefined(SemanticsProperties.StateDescription))
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "revoked=;oracle_ops=;status=connected"))
+    }
+
+    @Test
+    fun anOracleServedRowPaintsTheSummaryAndCarriesTheOpsAttr() {
+        val oracle = OracleSummaryRow(
+            opsInWindow = 3u,
+            requestsServed = 7uL,
+            lastOp = OracleOpRow(
+                atMillis = 1_700_000_100_000L,
+                `class` = "atproto_service_auth",
+                words = verbatim("Ask your nest for a token"),
+                detail = verbatim("did:web:example.com app.bsky.feed.getFeedSkeleton"),
+            ),
+        )
+        render(snapshot = snapshot(principals = listOf(row("p:1", oracle = oracle))))
+        composeTestRule.onNodeWithTag("connected-apps-item")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "revoked=;oracle_ops=3;status=connected"))
+        assert(composeTestRule.onAllNodesWithText("7 requests answered in all", substring = true).fetchSemanticsNodes().isNotEmpty())
+        assert(
+            composeTestRule.onAllNodesWithText("did:web:example.com app.bsky.feed.getFeedSkeleton", substring = true)
+                .fetchSemanticsNodes().isNotEmpty(),
+        )
+    }
+
+    @Test
+    fun anAppPasswordRowThatWroteToAtprotoPaintsTheSummaryAndCarriesTheOpsAttr() {
+        val oracle = OracleSummaryRow(
+            opsInWindow = 2u,
+            requestsServed = 5uL,
+            lastOp = OracleOpRow(
+                atMillis = 1_700_000_100_000L,
+                `class` = "atproto_commit",
+                words = verbatim("Write to your repository"),
+                detail = verbatim("create app.bsky.graph.list/3kabc"),
+            ),
+        )
+        render(snapshot = snapshot(principals = listOf(mailRow().copy(oracle = oracle))))
+        composeTestRule.onNodeWithTag("connected-apps-item")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "revoked=;oracle_ops=2;status=connected"))
+        assert(composeTestRule.onAllNodesWithText("5 requests answered in all", substring = true).fetchSemanticsNodes().isNotEmpty())
+        assert(
+            composeTestRule.onAllNodesWithText("create app.bsky.graph.list/3kabc", substring = true)
+                .fetchSemanticsNodes().isNotEmpty(),
+        )
+    }
+
+    @Test
+    fun aPausedRowSaysPausedAndCarriesTheStatusAttr() {
+        render(snapshot = snapshot(principals = listOf(row("p:1", connected = false, paused = true))))
+        composeTestRule.onNodeWithTag("connected-apps-item")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "revoked=;oracle_ops=;status=paused"))
+        assert(composeTestRule.onAllNodesWithText("Paused — turn Allow external apps back on", substring = true).fetchSemanticsNodes().isNotEmpty())
+        assert(composeTestRule.onAllNodesWithText("not connected", substring = true, ignoreCase = true).fetchSemanticsNodes().isEmpty())
     }
 
     /** security.md § On-screen secret exposure, rule 2: a minted, revocable

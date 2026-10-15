@@ -1,7 +1,8 @@
 //go:build !fauna_e2e_fixtures
 
 // The production twin of fixtures_seam.go: the proxy-fixtures redirect seam
-// does not exist in this build. Convention 15 — the tag is the boundary, so a
+// does not exist in this build (nor does the fake-relay seam beside it).
+// Convention 15 — the tag is the boundary, so a
 // release bridge carries neither the `FAUNA_ATPROTO_PROXY_FIXTURES` read nor
 // the direct-dial fixture types that skip safefetch's SSRF verdict, and the
 // production recipes grep the built artifact for the variable's name to prove
@@ -13,6 +14,7 @@
 package main
 
 import (
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/atprotocrawl"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/atprotolex"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/atprotopds"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/safefetch"
@@ -32,4 +34,10 @@ func proofFetcherFromEnv(real *safefetch.Fetcher) atprotolex.ProofFetcher {
 
 func permissionSetFixtureWrap(real atprotolex.DocumentResolver) atprotolex.DocumentResolver {
 	return real
+}
+
+// crawlRelays always returns the production relays: the environment is never
+// consulted here.
+func crawlRelays() []string {
+	return atprotocrawl.DefaultRelays
 }

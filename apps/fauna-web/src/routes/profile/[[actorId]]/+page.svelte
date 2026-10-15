@@ -20,9 +20,23 @@
   // the published display_name, falling back to handle (SELF) / actor_id (OTHER).
   // UX/IDs: tests/e2e-unified/ui.yaml `profile` page.
   import { identity } from '$lib/store';
+  import { accountDisplayHandle } from '$lib/accounts';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
-  import { getConversationsManager, refreshConversations } from '$lib/conversations';
+  import {
+    contactOverlays,
+    contactOverlaysSettled,
+    contactsRevision,
+    engineRoleDenied,
+    getConversationsManager,
+    refreshConversations,
+  } from '$lib/conversations';
+  import {
+    savePrivateSection,
+    type OverlayEditorFace,
+    type OverlayFace,
+    type OverlayForm,
+  } from '$lib/contact-overlay';
   import {
     knocksBlock,
     knocksUnblock,
@@ -82,6 +96,13 @@
   import { IDS } from '$lib/generated/uiIds';
   import { hexToBytes } from '$lib/hex';
   import { refusalText } from '$lib/guardian-refusal';
+  import {
+    blockEdgeBlocked,
+    blockToggleEnabled,
+    foldBlockPress,
+    foldBlockRead,
+    unknownBlockEdge,
+  } from '$lib/block-edge';
   import {
     classifyKnockFailure,
     contactAskRender,
@@ -185,8 +206,12 @@
   // toggle (lead = linux): the label reads "Unblock" when the viewed actor's edge
   // is `blocked`, else "Block"; a tap toggles over `fauna.knocks.{block,unblock}`
   // and re-derives. Mirrors linux `refresh_block_state`/`toggle_block`.
-  let isBlocked = $state(false);
+  // The edge is not-yet-known until the open-time read (or the viewer's own press)
+  // sets it, and the toggle is disabled until then — see `$lib/block-edge`.
+  let blockEdge = $state(unknownBlockEdge());
   let blockBusy = $state(false);
+  const isBlocked = $derived(blockEdgeBlocked(blockEdge));
+  const blockEnabled = $derived(blockToggleEnabled(blockEdge, blockBusy));
   // The toggle label decision (`blocked` → "Unblock", else "Block") lives in shared
   // Rust (`fauna_core::format::contact_toggle_block_label` over wasm), so web shares
   // the wording instead of its own ternary. The button *style* stays web-local.
@@ -216,13 +241,110 @@
   const heading = $derived(activeTab === 'tiers' ? t.profile.tiers : t.profile.posts);
 
   // The header identity label prefers the published `display_name` (rich
-  // identity, profile.md § State & data shape), falling back to handle (SELF) →
-  // actor_id when no profile is published yet.
+  // identity, profile.md § State & data shape), falling back to — SELF — the
+  // handle on the CURRENT primary (`<handle>@<domain>`, re-derived whenever
+  // `$identity` moves, so a primary rename lands without a reload;
+  // mail-primary-domain-rename.md § Display-handle interaction) → actor_id
+  // when no profile is published yet.
   let publishedDisplayName = $state<string | null>(null);
-  const handleLabel = $derived(
-    publishedDisplayName ||
-      (isSelf ? $identity?.handle || $identity?.actorId || '' : viewedActorId || ''),
-  );
+  // On another's profile both names come from the private overlay's one
+  // resolver: the viewer's nickname heads the page and the public name it
+  // replaced is the secondary line (`profile-public-name`, absent with no
+  // nickname) — profile.md § The private section → *The header shows both
+  // names*. Re-read when the overlay moves (`$contactsRevision`).
+  const otherNames = $derived.by(() => {
+    void $contactsRevision;
+    if (isSelf || !wasmReady || !viewedActorId) return null;
+    return contactOverlays().peerLabel(publishedDisplayName, null, viewedActorId);
+  });
+  const handleLabel = $derived.by(() => {
+    if (!isSelf) return otherNames?.primary ?? viewedActorId ?? '';
+    const selfHandle = wasmReady
+      ? accountDisplayHandle($identity?.handle, $identity?.domain)
+      : undefined;
+    return publishedDisplayName || selfHandle || $identity?.actorId || '';
+  });
+
+  // ── the private section (OTHER only — profile.md § The private section) ──
+  // The staging is the face's (`WasmOverlayEditor` over shared Rust's
+  // `OverlayEditor`); this page holds only the text widgets' values. The
+  // editor is rebuilt for each viewed person and whenever the tab's face
+  // changes (the manager arrived, or the account switched), and its form is
+  // re-read on every overlay move, so an untouched section follows a sibling
+  // device's edit.
+  let privateEditor = $state<OverlayEditorFace | null>(null);
+  // Plain (untracked) twin of `privateEditor`, so the effect below never
+  // reads the state it writes.
+  let privateEditorKey: { face: OverlayFace; actor: string; editor: OverlayEditorFace } | null =
+    null;
+  let privateForm = $state<OverlayForm>({ nickname: '', notes: '', labels: [] });
+  let labelDraft = $state('');
+  let privateSaving = $state(false);
+
+  $effect(() => {
+    void $contactsRevision;
+    void $engineRoleDenied;
+    const id = viewedActorId;
+    // Built only once the tab's face is settled (`contactOverlaysSettled`): an
+    // editor over the runtime-less face while the manager is still building
+    // would refuse a Save this tab is about to be able to make.
+    if (isSelf || !wasmReady || !id || !contactOverlaysSettled()) {
+      privateEditor = null;
+      privateEditorKey = null;
+      return;
+    }
+    const face = contactOverlays();
+    if (privateEditorKey?.face !== face || privateEditorKey.actor !== id) {
+      privateEditorKey = { face, actor: id, editor: face.editor(id) };
+      privateEditor = privateEditorKey.editor;
+      labelDraft = '';
+    }
+    privateForm = privateEditorKey.editor.form();
+  });
+
+  function setPrivateNickname(value: string): void {
+    privateEditor?.setNickname(value);
+    if (privateEditor) privateForm = privateEditor.form();
+  }
+
+  function setPrivateNotes(value: string): void {
+    privateEditor?.setNotes(value);
+    if (privateEditor) privateForm = privateEditor.form();
+  }
+
+  function addPrivateLabel(): void {
+    if (!privateEditor) return;
+    const refusal = privateEditor.addLabel(labelDraft);
+    if (refusal) {
+      error = resolveLocalized(refusal);
+      return;
+    }
+    labelDraft = '';
+    privateForm = privateEditor.form();
+  }
+
+  function removePrivateLabel(index: number): void {
+    if (!privateEditor) return;
+    privateEditor.removeLabel(index);
+    privateForm = privateEditor.form();
+  }
+
+  async function savePrivate(): Promise<void> {
+    const editor = privateEditor;
+    if (!editor || privateSaving) return;
+    privateSaving = true;
+    try {
+      const refusal = await savePrivateSection(editor);
+      // A refused Save keeps the staged edits on screen; a landed one has
+      // already reloaded the projection, so the re-read below (and every name
+      // on the page) follows it.
+      error = refusal ?? '';
+      if (refusal === null) refreshConversations();
+      if (privateEditor === editor) privateForm = editor.form();
+    } finally {
+      privateSaving = false;
+    }
+  }
 
   // ── profile edit form (SELF only; text-only v1: display_name / bio / links) ──
   // A read-modify-write: open fetches the current profile (the base, so a
@@ -484,7 +606,7 @@
     copiedActorId = '';
     pendingTiers = new Set();
     followedOverride = null;
-    isBlocked = false;
+    blockEdge = unknownBlockEdge();
     blockBusy = false;
     knockRoute = null;
     knockAsk = knockStateFor(self ? null : id);
@@ -707,21 +829,28 @@
   // Read the viewed actor's edge from `fauna.contacts.list` and set the toggle
   // label: a `blocked` row for this peer → "Unblock", else "Block" (mirrors linux
   // `refresh_block_state`). A failed read is non-fatal — defaults to not-blocked
-  // ("Block"), like linux's `Err(_) => false`.
+  // ("Block"), like linux's `Err(_) => false` — and still enables the toggle.
+  // The read folds through `foldBlockRead`: it is dropped once the viewer's own
+  // press authored the edge, and when the viewed actor changed while it was in
+  // flight (the component is reused across `/app/profile/<a>` → `<b>`).
   async function refreshBlockState(): Promise<void> {
     const s = secret();
-    if (!s || !viewedActorId) return;
+    const actor = viewedActorId;
+    if (!s || !actor) return;
+    let blocked: boolean;
     try {
       const contacts = await contactsList(s);
       // Shared block predicate (`fauna_core::format::contact_row_blocks_actor` over
       // wasm): a `blocked` row whose `peer_id` matches the viewed actor (case-
       // insensitive hex) → blocked. Same rule the native apps fold over the roster.
-      isBlocked = contacts.some((c) =>
-        contactRowBlocksActor(c.peer_id, c.status, viewedActorId),
+      blocked = contacts.some((c) =>
+        contactRowBlocksActor(c.peer_id, c.status, actor),
       );
     } catch {
-      isBlocked = false;
+      blocked = false;
     }
+    if (actor !== viewedActorId) return;
+    blockEdge = foldBlockRead(blockEdge, blocked);
   }
 
   // Block ⇄ unblock toggle (profile.md § User actions; contacts.md § Where logic
@@ -734,7 +863,9 @@
   async function toggleBlock(): Promise<void> {
     const s = secret();
     if (!s || !viewedActorId) return;
+    if (!blockEnabled) return;
     const wasBlocked = isBlocked;
+    const actor = viewedActorId;
     blockBusy = true;
     try {
       if (wasBlocked) {
@@ -743,7 +874,7 @@
         await knocksBlock(s, viewedActorId);
       }
       error = '';
-      isBlocked = !wasBlocked;
+      if (actor === viewedActorId) blockEdge = foldBlockPress(!wasBlocked);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -840,6 +971,9 @@
   <header class="user-header">
     <div class="avatar" aria-hidden="true">🙂</div>
     <span class="handle" data-testid={IDS.PROFILE_HANDLE}>{handleLabel}</span>
+    {#if otherNames?.public}
+      <span class="muted" data-testid={IDS.PROFILE_PUBLIC_NAME}>{otherNames.public}</span>
+    {/if}
     <button
       class="btn"
       data-testid={IDS.PROFILE_ACTOR_ID_COPY_BTN}
@@ -874,7 +1008,7 @@
       </button>
       <button
         class="btn danger" data-testid={IDS.PROFILE_BLOCK_BUTTON}
-        onclick={toggleBlock} disabled={blockBusy}
+        onclick={toggleBlock} disabled={!blockEnabled}
       >{blockLabel}</button>
       <button
         class="btn danger" data-testid={IDS.PROFILE_REPORT_BUTTON}
@@ -893,6 +1027,63 @@
         >{t.contacts.ask_guardian}</button>
       {/if}
     </div>
+  {/if}
+
+  <!-- ── the private section (OTHER only): your own nickname, notes and labels
+       on this person, staged and committed by one Save; nobody else ever sees
+       them (profile.md § The private section). Refusals land on the page's
+       `error-message`, the staged edits kept. ── -->
+  {#if !isSelf && privateEditor}
+    <section class="form private-section" data-testid={IDS.PROFILE_PRIVATE_SECTION}>
+      <p class="muted small">{t.profile.private_title}</p>
+      <label class="field">
+        <span>{t.profile.private_nickname}</span>
+        <input
+          class="input" type="text"
+          data-testid={IDS.PROFILE_NICKNAME_FIELD}
+          value={privateForm.nickname}
+          oninput={(e) => setPrivateNickname((e.currentTarget as HTMLInputElement).value)}
+        />
+      </label>
+      <label class="field">
+        <span>{t.profile.private_notes}</span>
+        <textarea
+          class="input" rows="3"
+          data-testid={IDS.PROFILE_NOTES_FIELD}
+          value={privateForm.notes}
+          oninput={(e) => setPrivateNotes((e.currentTarget as HTMLTextAreaElement).value)}
+        ></textarea>
+      </label>
+      <span>{t.profile.private_labels}</span>
+      <div class="list" data-testid={IDS.PROFILE_LABEL_LIST}>
+        {#each privateForm.labels as label, i (label)}
+          <div class="row">
+            <span class="badge" data-testid={IDS.PROFILE_LABEL_CHIP} data-index={i}>{label}</span>
+            <button
+              class="btn small" data-testid={IDS.PROFILE_LABEL_REMOVE_BUTTON} data-index={i}
+              onclick={() => removePrivateLabel(i)}
+            >{t.profile.private_label_remove}</button>
+          </div>
+        {/each}
+      </div>
+      <div class="row">
+        <input
+          class="input grow" type="text"
+          data-testid={IDS.PROFILE_LABEL_FIELD}
+          bind:value={labelDraft}
+          onkeydown={(e) => { if (e.key === 'Enter') addPrivateLabel(); }}
+        />
+        <button class="btn" data-testid={IDS.PROFILE_LABEL_ADD_BUTTON} onclick={addPrivateLabel}>
+          {t.profile.private_label_add}
+        </button>
+      </div>
+      <div class="form-buttons">
+        <button
+          class="btn primary" data-testid={IDS.PROFILE_PRIVATE_SAVE_BUTTON}
+          onclick={savePrivate} disabled={privateSaving}
+        >{t.profile.private_save}</button>
+      </div>
+    </section>
   {/if}
 
   <!-- ── profile edit form (SELF, text-only v1) — shown async after the current
@@ -1017,7 +1208,7 @@
   <ReportHost
     bind:target={reportTarget}
     onerror={(m) => (error = m)}
-    onblocked={(actor) => { if (actor === viewedActorId) isBlocked = true; }}
+    onblocked={(actor) => { if (actor === viewedActorId) blockEdge = foldBlockPress(true); }}
   />
 
   <!-- ── Posts tab (content TBD — landmark only) ── -->

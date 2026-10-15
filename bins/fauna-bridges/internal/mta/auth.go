@@ -181,7 +181,7 @@ func (s *submissionSession) runAuth(username string, secret []byte, kind mailfau
 	ctx, cancel := context.WithTimeout(context.Background(), auth.RPCTimeout)
 	defer cancel()
 
-	actorID, err := s.resolveActor(ctx, base, domain)
+	actorID, handle, err := s.resolveActor(ctx, base, domain)
 	if err != nil {
 		// resolveActor returns ErrRecipientRejected when nest rejects;
 		// other errors are transport/decode. Map both to AUTH-fail on
@@ -217,7 +217,7 @@ func (s *submissionSession) runAuth(username string, secret []byte, kind mailfau
 	s.mu.Lock()
 	s.actorID = actorID
 	s.credentialID = credentialID
-	s.authedLocalPart = base
+	s.authedHandle = handle
 	s.submissionToken = token
 	s.authenticated = true
 	s.mu.Unlock()
@@ -269,15 +269,17 @@ func (s *submissionSession) reportAuthFail(actorID []byte, credentialID string, 
 }
 
 // resolveActor calls fauna.bridges.validate_recipient and returns the
-// 32-byte actor_id on success. Mirrors the IMAP path's same-named
-// helper; the wsrpc wrapper already lifts hex into bytes for us.
-func (s *submissionSession) resolveActor(ctx context.Context, localPart, domain string) ([]byte, error) {
-	raw, _, err := wsrpc.ValidateRecipient(ctx, s.backend.client, localPart, domain)
+// 32-byte actor_id on success, with the actor's canonical handle ("" when it
+// has none). The login may be an exact alias rather than the handle, so the
+// handle — not the login's local part — is what the sender fast path
+// compares (assertSenderOwned). Mirrors the IMAP path's same-named helper.
+func (s *submissionSession) resolveActor(ctx context.Context, localPart, domain string) ([]byte, string, error) {
+	raw, handle, err := wsrpc.ResolveLogin(ctx, s.backend.client, localPart, domain)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if len(raw) != 32 {
-		return nil, fmt.Errorf("validate_recipient actor_id must be 32 bytes, got %d", len(raw))
+		return nil, "", fmt.Errorf("validate_recipient actor_id must be 32 bytes, got %d", len(raw))
 	}
-	return raw, nil
+	return raw, handle, nil
 }

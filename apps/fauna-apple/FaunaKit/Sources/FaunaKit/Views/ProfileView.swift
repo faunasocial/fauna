@@ -157,11 +157,18 @@ public struct ProfileView: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal)
                 Spacer()
-            } else if isSelf {
-                SubscriptionTiersTab(vm: vm)
-            } else {
-                SubscriptionOffersTab(vm: offersVM)
             }
+            // The Tiers tab is monetization, which the Fauna Kids build excises
+            // (family-safety.md § The account age band, the kids-app bullet).
+            #if !FAUNA_KIDS
+            if activeTab != "posts" {
+                if isSelf {
+                    SubscriptionTiersTab(vm: vm)
+                } else {
+                    SubscriptionOffersTab(vm: offersVM)
+                }
+            }
+            #endif
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         // Page landmark — registered so the driver's is_visible/count see it.
@@ -278,6 +285,9 @@ public struct ProfileView: View {
                     .accessibilityIdentifier(Ids.profileEditButton)
                     .automationActivate(Ids.profileEditButton) { openEditForm() }
             } else {
+                // Not composed in the Fauna Kids build: following is subscribing,
+                // and a kid's contacts are the guardian's to approve.
+                #if !FAUNA_KIDS
                 // Label flips "Follow" ⇄ "Following" off the shared
                 // `followToggleLabel` (profile.md § Where logic lives → Follow /
                 // unfollow), resolved the same way the block toggle resolves
@@ -293,6 +303,7 @@ public struct ProfileView: View {
                 ) {
                     Task { await offersVM.follow() }
                 }
+                #endif
             }
         }
         .padding([.top, .horizontal])
@@ -520,14 +531,17 @@ public struct ProfileView: View {
             Button(L.profile.posts) { activeTab = "posts" }
                 .accessibilityIdentifier(Ids.profilePostsTab)
                 .automationActivate(Ids.profilePostsTab) { activeTab = "posts" }
+            #if !FAUNA_KIDS
             Button(L.profile.tiers) { activeTab = "tiers"; tiersReloadToken += 1 }
                 .accessibilityIdentifier(Ids.profileTiersTab)
                 .automationActivate(Ids.profileTiersTab) { activeTab = "tiers"; tiersReloadToken += 1 }
+            #endif
         }
         .padding(.horizontal)
     }
 }
 
+#if !FAUNA_KIDS
 // MARK: - Tiers tab (SELF author management — §1 / §2 / §3)
 
 /// The three SELF author-management sections. A dumb renderer of
@@ -1135,6 +1149,7 @@ private struct SubscriptionOfferRow: View {
         openPaymentURL(url) { vm.errorMessage = $0 }
     }
 }
+#endif
 
 // MARK: - Edit form (SELF publish/edit)
 

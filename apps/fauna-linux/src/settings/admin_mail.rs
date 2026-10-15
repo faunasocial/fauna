@@ -46,6 +46,8 @@ use fauna_client_mail_settings::{
     SubmissionPolicyView,
 };
 
+use fauna_client_mail_settings::admin_policy::MailHealthView;
+
 use crate::async_helper::spawn_with_snapshot;
 use crate::i18n::strings::admin::mail_page as S;
 use crate::testid::set_test_id;
@@ -66,6 +68,16 @@ struct MailWidgets {
     error_label: gtk::Label,
     enabled_toggle: gtk::Switch,
     auto_enable_new_users: gtk::Switch,
+
+    // ── Mail health readout (fauna.bridges.mail_health; read-only) ──
+    // The group is hidden while `snapshot.health` is `None`; the check rows are
+    // rebuilt on every render (their count is the nest's, not the page's).
+    health_group: adw::PreferencesGroup,
+    health_status: gtk::Label,
+    health_rows: gtk::Box,
+    health_delist: gtk::Button,
+    health_recheck: gtk::Button,
+    health_warmup_reset: gtk::Button,
 
     // ── Spam / inbound perimeter (put_spam_policy) ──
     threshold_junk: gtk::Entry,
@@ -90,6 +102,10 @@ struct MailWidgets {
     // button lives in `MailSaveButtons`; this is only the render target for the
     // published/withheld outcome.
     publish_baseline_result: gtk::Label,
+    // Standing publish (its own `SetBaselineStandingPublish` gesture, not a
+    // Spam-group draft) and the served baseline's state text.
+    baseline_standing: gtk::Switch,
+    baseline_state: gtk::Label,
 
     // ── Inbound authentication enforcement (put_auth_policy) ──
     enforce_dmarc: gtk::Switch,
@@ -140,6 +156,12 @@ struct MailCtx {
     /// the change back as an action. The Spam/Auth controls are read on Save
     /// (no per-change dispatch), so they need no guard.
     syncing: Cell<bool>,
+    /// The warm-up reset's same-button two-click confirm: the first press arms
+    /// (the label relabels to the confirm sentence), the second dispatches.
+    /// Every render (any mail re-read) disarms.
+    warmup_armed: Cell<bool>,
+    /// The delist URL the readout currently carries, for the link's click.
+    delist_url: std::cell::RefCell<Option<String>>,
     w: MailWidgets,
 }
 
@@ -275,6 +297,63 @@ pub fn build_admin_mail_page() -> adw::PreferencesPage {
         "fauna.bridges.set_auto_enable_mail_for_new_users",
     );
     page.add(&top_group);
+
+    // --- Mail health readout group (fauna.bridges.mail_health; read-only) ---
+    // Directly under the enable toggles. Hidden until the first health read
+    // lands (`snapshot.health` is `None` before hydrate).
+    let health_group = adw::PreferencesGroup::builder()
+        .title(S::HEALTH_TITLE)
+        .visible(false)
+        .build();
+    set_test_id(&health_group, ids::ADMIN_MAIL_HEALTH_SECTION);
+    let health_status = gtk::Label::builder()
+        .halign(gtk::Align::Start)
+        .wrap(true)
+        .xalign(0.0)
+        .build();
+    set_test_id(&health_status, ids::ADMIN_MAIL_HEALTH_STATUS);
+    let health_status_row = adw::ActionRow::builder().activatable(false).build();
+    health_status_row.set_child(Some(&health_status));
+    health_group.add(&health_status_row);
+    let health_rows = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    health_group.add(&health_rows);
+    let health_delist = gtk::Button::builder()
+        .label(S::HEALTH_DELIST)
+        .valign(gtk::Align::Center)
+        .visible(false)
+        .build();
+    set_test_id(&health_delist, ids::ADMIN_MAIL_HEALTH_DELIST_LINK);
+    let health_recheck = gtk::Button::builder()
+        .label(S::HEALTH_RECHECK)
+        .valign(gtk::Align::Center)
+        .build();
+    set_test_id(&health_recheck, ids::ADMIN_MAIL_HEALTH_RECHECK_BUTTON);
+    // tui's `admin::Action::RecheckMailHealth` (blocklist self-check +
+    // diagnostics, then a health re-read).
+    crate::offline_gate::declare_wire_kind(
+        &health_recheck,
+        "fauna.bridges.blocklist_self_check_run",
+    );
+    let health_warmup_reset = gtk::Button::builder()
+        .label(S::HEALTH_WARMUP_RESET)
+        .valign(gtk::Align::Center)
+        .build();
+    set_test_id(
+        &health_warmup_reset,
+        ids::ADMIN_MAIL_HEALTH_WARMUP_RESET_BUTTON,
+    );
+    crate::offline_gate::declare_wire_kind(
+        &health_warmup_reset,
+        "fauna.bridges.outbound_warmup_reset",
+    );
+    let health_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    health_buttons.append(&health_delist);
+    health_buttons.append(&health_recheck);
+    health_buttons.append(&health_warmup_reset);
+    let health_buttons_row = adw::ActionRow::builder().activatable(false).build();
+    health_buttons_row.set_child(Some(&health_buttons));
+    health_group.add(&health_buttons_row);
+    page.add(&health_group);
 
     // --- Spam / inbound perimeter group (put_spam_policy) ---
     let spam_group = adw::PreferencesGroup::builder()
@@ -449,6 +528,27 @@ pub fn build_admin_mail_page() -> adw::PreferencesPage {
     let publish_baseline_result_row = adw::ActionRow::builder().activatable(false).build();
     publish_baseline_result_row.add_suffix(&publish_baseline_result);
     spam_group.add(&publish_baseline_result_row);
+    // admin-mail-spam-baseline-standing-toggle — keep a shared baseline published;
+    // dispatches immediately (`SetBaselineStandingPublish`), off the persisted
+    // snapshot. tui's `admin::Action::ToggleMailBaselineStanding`.
+    let baseline_standing = super::switch_row(
+        &spam_group,
+        S::SPAM_BASELINE_STANDING_LABEL,
+        S::SPAM_BASELINE_STANDING_SUBTITLE,
+        "admin-mail-spam-baseline-standing-toggle",
+    );
+    crate::offline_gate::declare_wire_kind(&baseline_standing, "fauna.bridges.put_spam_policy");
+    // admin-mail-spam-baseline-state — the served baseline's state, EMPTY until
+    // the state read answers (always present, like the result label above).
+    let baseline_state = gtk::Label::builder()
+        .halign(gtk::Align::Start)
+        .wrap(true)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    set_test_id(&baseline_state, ids::ADMIN_MAIL_SPAM_BASELINE_STATE);
+    let baseline_state_row = adw::ActionRow::builder().activatable(false).build();
+    baseline_state_row.add_suffix(&baseline_state);
+    spam_group.add(&baseline_state_row);
     page.add(&spam_group);
 
     // --- Inbound authentication enforcement group (put_auth_policy) ---
@@ -731,6 +831,12 @@ pub fn build_admin_mail_page() -> adw::PreferencesPage {
         error_label,
         enabled_toggle,
         auto_enable_new_users,
+        health_group,
+        health_status,
+        health_rows,
+        health_delist,
+        health_recheck,
+        health_warmup_reset,
         threshold_junk,
         threshold_reject,
         dnsbl_servers,
@@ -748,6 +854,8 @@ pub fn build_admin_mail_page() -> adw::PreferencesPage {
         training_history_retention,
         unlisted_recipient_penalty,
         publish_baseline_result,
+        baseline_standing,
+        baseline_state,
         enforce_dmarc,
         enforce_dmarc_quarantine,
         enforce_spf_hardfail,
@@ -819,10 +927,56 @@ fn wire_machine(saves: MailSaveButtons, widgets: MailWidgets) {
         machine,
         rt: client.runtime_handle(),
         syncing: Cell::new(false),
+        warmup_armed: Cell::new(false),
+        delist_url: std::cell::RefCell::new(None),
         w: widgets,
     });
 
     hydrate_and_render(&ctx);
+
+    // Re-read whenever the page is shown again: the sub-page outlives its first
+    // visit, and the readout is a live fact (the mail service connecting or the
+    // enable flag flipping elsewhere) that a one-shot build-time hydrate would
+    // leave stale on every later visit.
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w.enabled_toggle.clone().connect_map(move |_| {
+            hydrate_and_render(&ctx);
+        });
+    }
+
+    // Mail health readout buttons. Recheck → RecheckHealth; the delist link opens
+    // the readout's URL; the warm-up reset is a same-button two-click confirm
+    // (first press arms and relabels, second dispatches ResetWarmup; any render
+    // disarms).
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w.health_recheck.clone().connect_clicked(move |_| {
+            dispatch_action(&ctx, MailPolicyAction::RecheckHealth);
+        });
+    }
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w.health_delist.clone().connect_clicked(move |_| {
+            if let Some(url) = ctx.delist_url.borrow().as_deref() {
+                crate::url_opener::open(url);
+            }
+        });
+    }
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w
+            .health_warmup_reset
+            .clone()
+            .connect_clicked(move |btn| {
+                if !ctx.warmup_armed.get() {
+                    ctx.warmup_armed.set(true);
+                    btn.set_label(S::HEALTH_WARMUP_RESET_CONFIRM);
+                    return;
+                }
+                dispatch_action(&ctx, MailPolicyAction::ResetWarmup);
+            });
+    }
 
     // Mail-enable toggle → SetMailEnabled (skip the echo from render()).
     {
@@ -857,6 +1011,26 @@ fn wire_machine(saves: MailSaveButtons, widgets: MailWidgets) {
                 dispatch_action(
                     &ctx,
                     MailPolicyAction::SetAutoEnableMailForNewUsers {
+                        enabled: sw.is_active(),
+                    },
+                );
+            });
+    }
+
+    // Standing-publish toggle → SetBaselineStandingPublish (skip the echo from
+    // render()).
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w
+            .baseline_standing
+            .clone()
+            .connect_active_notify(move |sw| {
+                if ctx.syncing.get() {
+                    return;
+                }
+                dispatch_action(
+                    &ctx,
+                    MailPolicyAction::SetBaselineStandingPublish {
                         enabled: sw.is_active(),
                     },
                 );
@@ -957,6 +1131,28 @@ fn dispatch_action(ctx: &Rc<MailCtx>, action: MailPolicyAction) {
     );
 }
 
+/// The `admin-mail-spam-baseline-state` text (`mail-spam.md` § Cold start Path 2
+/// → *Standing publish*): "Published over N contributors on <date>." or "No
+/// baseline published.", then "Waiting for more contributor activity." when the
+/// last run was deferred. Blank when the state read has not answered.
+fn baseline_state_text(snap: &MailPolicySnapshot) -> String {
+    let Some(state) = snap.baseline_state.as_ref() else {
+        return String::new();
+    };
+    let mut line = match (state.published, state.published_at_ms) {
+        (true, Some(at_ms)) => S::spam_baseline_state_published(
+            &state.contributors.to_string(),
+            &fauna_core::format::format_unix_local_date_ms(at_ms),
+        ),
+        _ => S::SPAM_BASELINE_STATE_NONE.to_string(),
+    };
+    if state.deferred {
+        line.push(' ');
+        line.push_str(S::SPAM_BASELINE_WAITING);
+    }
+    line
+}
+
 /// Render a `MailPolicySnapshot` into the page widgets (GTK main thread).
 fn render(ctx: &Rc<MailCtx>, snap: &MailPolicySnapshot) {
     let w = &ctx.w;
@@ -977,6 +1173,8 @@ fn render(ctx: &Rc<MailCtx>, snap: &MailPolicySnapshot) {
             .set_active(snap.auto_enable_mail_for_new_users);
         ctx.syncing.set(false);
     }
+
+    render_health(ctx, snap.health.as_ref());
 
     // Spam / inbound perimeter sub-struct. These controls have no per-change
     // dispatch (read on Save), so no echo guard is needed.
@@ -1013,7 +1211,11 @@ fn render(ctx: &Rc<MailCtx>, snap: &MailPolicySnapshot) {
     // so the client just picks the message + interpolates.
     match &snap.baseline_publish_result {
         Some(r) => {
-            let mut msg = if r.published {
+            // `deferred` first: a delta-floor deferral also carries
+            // `published = false` and must never read as "too few contributors".
+            let mut msg = if r.deferred {
+                S::SPAM_BASELINE_WAITING.to_string()
+            } else if r.published {
                 S::spam_baseline_published(&r.contributors.to_string(), &r.sample_count.to_string())
             } else {
                 S::spam_baseline_withheld(&r.contributors.to_string())
@@ -1035,6 +1237,16 @@ fn render(ctx: &Rc<MailCtx>, snap: &MailPolicySnapshot) {
             w.publish_baseline_result.set_text("");
         }
     }
+
+    // Standing publish — persisted state, echo-guarded like the other
+    // dispatching toggles.
+    if w.baseline_standing.is_active() != s.baseline_standing_publish {
+        ctx.syncing.set(true);
+        w.baseline_standing.set_active(s.baseline_standing_publish);
+        ctx.syncing.set(false);
+    }
+    // The served baseline's state text — blank until the read answers.
+    w.baseline_state.set_text(&baseline_state_text(snap));
 
     // Auth-enforcement sub-struct.
     let a = &snap.auth;
@@ -1098,6 +1310,91 @@ fn render(ctx: &Rc<MailCtx>, snap: &MailPolicySnapshot) {
     w.alias_subaddressing.set_active(al.subaddressing_enabled);
     w.alias_wildcard_prefix
         .set_active(al.wildcard_prefix_enabled);
+}
+
+/// A small fixed label for one cell of a health check row, carrying `test_id`.
+fn health_cell(text: &str, test_id: &str, css: &[&str]) -> gtk::Label {
+    let label = gtk::Label::builder()
+        .label(text)
+        .halign(gtk::Align::Start)
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(css)
+        .build();
+    set_test_id(&label, test_id);
+    label
+}
+
+/// Paint the mail health readout (`mail-deliverability.md` § The mail health
+/// readout) — a dumb render of the shared fold: every sentence is shared Rust
+/// (`mail_health_status_text` / `_check_state_label` / `_heartbeat_text`) or
+/// the nest's own row detail. Rows 5 and 6 are the heartbeats: the fold leaves
+/// their `detail` empty on purpose and the stamp is painted there. The group is
+/// hidden while there is no readout.
+fn render_health(ctx: &Rc<MailCtx>, health: Option<&MailHealthView>) {
+    let w = &ctx.w;
+    ctx.warmup_armed.set(false);
+    w.health_warmup_reset.set_label(S::HEALTH_WARMUP_RESET);
+    let Some(health) = health else {
+        w.health_group.set_visible(false);
+        return;
+    };
+    w.health_group.set_visible(true);
+
+    let lookup = fauna_i18n::strings::lookup;
+    let now_ms = fauna_core::data::Timestamp::now_millis_or_zero() as i64;
+    w.health_status
+        .set_text(&fauna_core::format::mail_health_status_text(
+            &health.state,
+            health.last_outbound_delivered_at,
+            health.last_inbound_accepted_at,
+            now_ms,
+            lookup,
+        ));
+
+    while let Some(child) = w.health_rows.first_child() {
+        w.health_rows.remove(&child);
+    }
+    let heartbeats = [
+        health.last_outbound_delivered_at,
+        health.last_inbound_accepted_at,
+    ];
+    for (i, check) in health.checks.iter().enumerate() {
+        let detail = match i.checked_sub(5).and_then(|h| heartbeats.get(h)) {
+            Some(stamp) => fauna_core::format::mail_health_heartbeat_text(*stamp, now_ms, lookup),
+            None => check.detail.clone(),
+        };
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        row.set_margin_start(12);
+        row.set_margin_end(12);
+        set_test_id(&row, ids::ADMIN_MAIL_HEALTH_CHECK);
+        row.append(&health_cell(
+            lookup(&check.label_key).unwrap_or(check.label_key.as_str()),
+            ids::ADMIN_MAIL_HEALTH_CHECK_LABEL,
+            &["heading"],
+        ));
+        row.append(&health_cell(
+            &fauna_core::format::mail_health_check_state_label(&check.state).resolve(lookup),
+            ids::ADMIN_MAIL_HEALTH_CHECK_STATE,
+            &[],
+        ));
+        row.append(&health_cell(
+            &detail,
+            ids::ADMIN_MAIL_HEALTH_CHECK_DETAIL,
+            &["dim-label"],
+        ));
+        w.health_rows.append(&row);
+    }
+
+    *ctx.delist_url.borrow_mut() = health.delist_url.clone();
+    // The link's target, readable as its `href` attribute: the button's text
+    // is only its label.
+    crate::testid::set_test_attr_text(
+        &w.health_delist,
+        "href",
+        health.delist_url.as_deref().unwrap_or(""),
+    );
+    w.health_delist.set_visible(health.delist_url.is_some());
 }
 
 /// Gather the whole Spam/inbound-perimeter sub-struct from the widgets, starting
@@ -1307,6 +1604,8 @@ mod tests {
                 "admin-mail-spam-save-button",
                 "admin-mail-publish-spam-baseline-button",
                 "admin-mail-publish-spam-baseline-result",
+                "admin-mail-spam-baseline-standing-toggle",
+                "admin-mail-spam-baseline-state",
                 "admin-mail-auth-enforce-dmarc-toggle",
                 "admin-mail-auth-enforce-dmarc-quarantine-toggle",
                 "admin-mail-auth-enforce-spf-hardfail-toggle",

@@ -77,12 +77,13 @@ internal sealed class FeedDraftsService : IDisposable
     {
         _sync = sync;
         _store = store;
-        // Same ~600ms windows already uses for the conversations leg
-        // (ConversationDraftsService) — reused rather than minting a second debounce
-        // constant for the same platform (reserved-folders.md § Drafts Sync notes
-        // AUTOSAVE_DEBOUNCE as the shared-Rust legs' 1500ms; windows' own local
-        // constant predates it and stays the windows-side value).
-        _debounce = debounce ?? TimeSpan.FromMilliseconds(600);
+        // Shared `fauna_client_drafts::autosave_debounce` via
+        // `FaunaFfiMethods.AutosaveDebounceMs()` — the one window every app and every
+        // rail reads (reserved-folders.md § Drafts Sync), as the conversations and
+        // events legs here already do. This rail kept a windows-only 600 ms literal
+        // after the others converged, which also left it out of reach of the e2e
+        // window seam.
+        _debounce = debounce ?? TimeSpan.FromMilliseconds(FaunaFfiMethods.AutosaveDebounceMs());
     }
 
     /// <summary>

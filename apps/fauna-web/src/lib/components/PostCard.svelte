@@ -13,9 +13,10 @@
   import SoldPostTeaser from './payments/SoldPostTeaser.svelte';
   import RegionPlaceholder from './RegionPlaceholder.svelte';
   import { markdownToHtml } from '$lib/markdown';
-  import { shortActor, liveStatusClass } from '$lib/feed-utils';
-  import { structuredView, markdownToDocument, type RegionPlaceholder as RegionPlaceholderValue } from '$lib/wasm';
-  import { documentToHtml, documentHasBlockedRemoteImages, quotedPostBlock, documentMediaBlocks, resolvedLinkPreviews } from '$lib/document';
+  import { liveStatusClass } from '$lib/feed-utils';
+  import { contactOverlays, contactsRevision } from '$lib/conversations';
+  import { structuredView, markdownToDocument, postCardGate, type BridgeIdentity, type RegionPlaceholder as RegionPlaceholderValue } from '$lib/wasm';
+  import { documentToHtml, documentHasBlockedRemoteImages, quotedPostBlock, documentMediaBlocks, mediaBlockKey, resolvedLinkPreviews } from '$lib/document';
   import { t } from '$lib/i18n/strings';
   import { relativeTime } from '$lib/value-format';
   import { IDS } from '$lib/generated/uiIds';
@@ -29,6 +30,9 @@
   interface Props {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     post: any;
+    /** The feed snapshot's `bridge_roster` — what a bridged post's source
+     *  badge resolves its bridge against (`ProtocolBadge`). */
+    bridgeRoster: BridgeIdentity[];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     decoded: any;
     blobUrl: (hash: string) => string;
@@ -142,6 +146,7 @@
 
   let {
     post,
+    bridgeRoster,
     decoded,
     blobUrl,
     mediaUrl,
@@ -257,6 +262,21 @@
   // attribution + the embedded original, no interaction bar of its own — the
   // repost post is empty by construction, so its own bar would be all zeros.
   let isRepostRow = $derived(!!post.reposted_post_id);
+  // The badge's gate: the row's own, else a repost row's TARGET gate — the shared
+  // `PostSummary::card_gate`. Badge only: `post.gated_tier` alone says the row is sealed.
+  let cardGate = $derived(postCardGate(post));
+  // The author's name through the private overlay's one resolver: the
+  // viewer's nickname, else a bridged author's display name / handle
+  // (`author_display`), else the short id (contacts.md § The private overlay
+  // → *Where the nickname paints*; value-formatting.md § Peer display label).
+  let authorName = $derived.by(() => {
+    void $contactsRevision;
+    return contactOverlays().peerLabel(
+      post.author_display?.display_name ?? null,
+      post.author_display?.handle ?? null,
+      post.author,
+    ).primary;
+  });
 
   // The quoted-post + media-image embeds, painted from the post `document`
   // (render-model.md § D6): the feed manager folds a `QuotedPost` / `Image` block
@@ -326,7 +346,7 @@
   data-testid={IDS.POST_CARD}
   data-post-id={post.post_id}
   data-cue-post={cueSubject ? post.post_id : undefined}
-  data-cue-media={cueSubject ? String(!!post.has_media) : undefined}
+  data-cue-media={cueSubject ? String(!!post.plays_media) : undefined}
   onclick={handleCardActivate}
   onkeydown={(e) => { if (e.key === 'Enter') handleCardActivate(e); }}
 >
@@ -374,13 +394,13 @@
   </div>
 {:else}
   <div class="post-header">
-    <ProtocolBadge source={post.source} />
+    <ProtocolBadge source={post.source} {bridgeRoster} />
     <UnverifiedSourceBadge verification={post.verification} />
     <!-- The D10 audit marker (`delegated-origin-badge`): an external app wrote
          this post as the account. Beside the unverified badge, the order every
          app paints these two in. -->
     <DelegatedOriginBadge authoringOrigin={post.authoring_origin} />
-    <span class="post-author" data-testid={IDS.POST_AUTHOR}>{shortActor(post.author)}</span>
+    <span class="post-author" data-testid={IDS.POST_AUTHOR}>{authorName}</span>
     <!-- The attribution marker beside the author (id user-approved 2026-08-11):
          what lets an e2e tell a repost card from an empty-commentary quote card
          BY ELEMENT, instead of inferring it from the harness state dump. -->
@@ -401,19 +421,19 @@
          the composer's own "Room: ‹label›" string), and the card's detail-open is
          its "open"; a reader not in the room sees the reserved tier (feed.md
          § Encryption at rest → the app half, the card). -->
-    {#if post.gated_tier}
-      {#if post.room_label}
+    {#if cardGate}
+      {#if cardGate.room_label}
         <span
           class="gated-badge"
           data-testid={IDS.GATED_POST_BADGE}
-          title={t.feed.post.gated_badge_room_tooltip({ room: post.room_label })}
-        >{t.feed.post.gate_room({ room: post.room_label })}</span>
+          title={t.feed.post.gated_badge_room_tooltip({ room: cardGate.room_label })}
+        >{t.feed.post.gate_room({ room: cardGate.room_label })}</span>
       {:else}
         <span
           class="gated-badge"
           data-testid={IDS.GATED_POST_BADGE}
-          title={t.feed.post.gated_badge_tooltip({ tier: post.gated_tier })}
-        >{post.gated_tier}</span>
+          title={t.feed.post.gated_badge_tooltip({ tier: cardGate.tier })}
+        >{cardGate.tier}</span>
       {/if}
     {/if}
     <!-- Buyer's price read (gap (2c), monetization.md § Per-post pay-to-unlock
@@ -653,7 +673,7 @@
          instead of only here. -->
     {#if mediaBlocks.length > 0}
       <div class="post-media">
-        {#each mediaBlocks as block}
+        {#each mediaBlocks as block, i (mediaBlockKey(block, i))}
           {#if 'Image' in block}
             <!-- `mediaUrl`, not `blobUrl`: a tier-restricted post's attachment is
                  sealed under the post's own per-post key and no URL can render it,
@@ -670,6 +690,7 @@
               src={blobUrl(block.Video.hash)}
               alt={block.Video.alt || 'post video'}
               resolveSource={playbackUrl ? () => playbackUrl(block) : undefined}
+              postId={post.post_id}
             />
           {:else if 'ProxiedImage' in block}
             <!-- A bridged post's own picture (render-model.md § D6c): an authenticated fetch of
@@ -682,11 +703,13 @@
             />
           {:else if 'ProxiedVideo' in block}
             <!-- A bridged post's own video (render-model.md § D6c → *Proxied video*): the play
-                 glyph over a poster-less frame carrying the path — never byte-loaded, and inert
-                 until the shared playback projection answers for it. -->
+                 glyph over a poster-less frame carrying the path — never byte-loaded before the
+                 tap, which plays the ticketed proxied path the shared projection mints. -->
             <VideoThumbnail
               caption={block.ProxiedVideo.path}
               alt={block.ProxiedVideo.alt || 'post video'}
+              resolveSource={playbackUrl ? () => playbackUrl(block) : undefined}
+              postId={post.post_id}
             />
           {/if}
         {/each}

@@ -1787,6 +1787,7 @@ mod tests {
             mint_default_duration: default,
             trust_backups: Vec::new(),
             trust_generations: Vec::new(),
+            trust_holders_unreachable: false,
         }
     }
 

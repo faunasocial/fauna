@@ -14,7 +14,7 @@ use crate::backup::service::BackupService;
 /// Minimum seconds between full-DB hot-copy backups. The scheduler ticks every
 /// ~60s for folder snapshots, but the DB hot-copy is gated to this much longer
 /// cadence: running it EVERY tick (and never pruning) wrote a fresh ~8 MB DB copy
-/// every 60s to the blob store and filled example.com's disk to 68 GB.
+/// every 60s to the blob store and filled the live nest's disk to 68 GB.
 /// Hourly + keep-last-N retention (`KEEP_SQLITE_BACKUPS`) keeps the self-backup
 /// store bounded. See `docs/goal/behavior/backup-restore.md` § Self-backup retention.
 const DB_BACKUP_INTERVAL_SECS: i64 = 3600;
@@ -690,5 +690,145 @@ mod tests {
             "alice's changed folder got no automatic snapshot"
         );
         handle.abort();
+    }
+
+    /// One owner's live heads summing past `i64::MAX` must not panic the
+    /// nest-wide scheduler. Under an `i64::MAX`-class ceiling the
+    /// saturating meter forgets the excess of an undelete, so a second prune
+    /// credits the full size and admits a third huge head; the snapshot's size
+    /// total over p1 + p2 + p3 then overflows, and release builds check
+    /// overflow. Alice's changed folder beside it must still be snapshotted.
+    #[tokio::test]
+    async fn live_heads_summing_past_i64_max_leave_the_scheduler_alive() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let owner = [0x11u8; 32];
+        let alice = [1u8; 32];
+        let big = i64::MAX - 1000;
+        let fs_id = db.create_folder("owner-set", &owner).await.unwrap();
+        let rec = |path: &'static str, size: i64| {
+            let db = db.clone();
+            async move {
+                let ph: [u8; 32] = *blake3::hash(path.as_bytes()).as_bytes();
+                let mh: [u8; 32] = *blake3::hash(format!("{path}{size}").as_bytes()).as_bytes();
+                db.record_sync_change_metered(
+                    &owner,
+                    &owner,
+                    None,
+                    &ph,
+                    Some(&mh),
+                    size,
+                    "create",
+                    fs_id,
+                    &[0x22u8; 32],
+                    Some(path),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    i64::MAX,
+                )
+                .await
+                .ok()
+            }
+        };
+        let a = rec("p1", big).await.expect("p1 big admitted");
+        assert!(rec("p1", 1000).await.is_some());
+        assert!(db.soft_prune_version(a).await.unwrap());
+        assert!(rec("p2", big).await.is_some());
+        assert!(db.undelete_version(a).await.unwrap());
+        assert!(db.soft_prune_version(a).await.unwrap());
+        assert!(
+            rec("p3", big).await.is_some(),
+            "precondition: the third head is admitted"
+        );
+
+        let alice_id = db.create_folder("alice-set", &alice).await.unwrap();
+        let ph: [u8; 32] = *blake3::hash(b"photo.jpg").as_bytes();
+        db.record_sync_change(
+            &alice,
+            &ph,
+            Some(&[0xAAu8; 32]),
+            100,
+            "create",
+            Some(alice_id),
+            None,
+            Some("photo.jpg"),
+        )
+        .await
+        .unwrap();
+
+        let svc = make_svc(db.clone(), tmp.path());
+        let scheduler = Arc::new(SnapshotScheduler::new(svc, Duration::from_millis(20), 0));
+        let handle = scheduler.spawn();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        assert!(
+            !handle.is_finished(),
+            "the nest-wide scheduler task died on one owner's live-head sizes"
+        );
+        assert_eq!(
+            db.list_snapshots(alice_id).await.unwrap().len(),
+            1,
+            "alice's changed folder got no automatic snapshot"
+        );
+        handle.abort();
+    }
+
+    /// The containment itself: a folder whose check fails costs only that
+    /// folder's snapshot, never the pass (`backup-restore.md` § 8b). The
+    /// unreadable `created_at` fails `folder_needs_snapshot`'s change-stats
+    /// decode while `list_folders` still reads the row, so this reaches the
+    /// `Err` arm — the over-ceiling quiet-period pin above never does.
+    #[tokio::test]
+    async fn one_folders_failed_check_costs_only_that_folders_snapshot() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let mallory = [7u8; 32];
+        let alice = [1u8; 32];
+        let mut ids = Vec::new();
+        for (name, actor) in [("mallory-set", mallory), ("alice-set", alice)] {
+            let id = db.create_folder(name, &actor).await.unwrap();
+            let ph: [u8; 32] = *blake3::hash(b"paper.txt").as_bytes();
+            db.record_sync_change(
+                &actor,
+                &ph,
+                Some(&[0xAAu8; 32]),
+                100,
+                "create",
+                Some(id),
+                None,
+                Some("paper.txt"),
+            )
+            .await
+            .unwrap();
+            ids.push(id);
+        }
+        let (mallory_id, alice_id) = (ids[0], ids[1]);
+        db.conn()
+            .await
+            .execute(
+                "UPDATE sync_changes SET created_at = 'x' WHERE folder_id = ?1",
+                rusqlite::params![mallory_id],
+            )
+            .unwrap();
+        assert!(
+            db.folder_needs_snapshot(mallory_id, 0).await.is_err(),
+            "precondition: mallory's folder check fails"
+        );
+
+        let svc = make_svc(db.clone(), tmp.path());
+        let created = SnapshotScheduler::new(svc, Duration::from_secs(60), 0)
+            .check_all_folders()
+            .await
+            .expect("one folder's failed check must not fail the pass");
+
+        assert_eq!(created, 1);
+        assert_eq!(
+            db.list_snapshots(alice_id).await.unwrap().len(),
+            1,
+            "alice's folder must still be snapshotted in the same pass"
+        );
     }
 }

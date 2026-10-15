@@ -367,16 +367,17 @@ def test_perimeter_accepts_dkim_aligned_pass_rejects_broken(
         accepting_nest, dkim_keypair, run_seal_helper):
     """DKIM half of Gap-2b (positive + negative control in one fixture): an inbound
     whose ONLY passing aligned identifier is a valid DKIM signature clears the
-    enforced ``p=reject`` gate (accepted + IMAP read), while the SAME message with a
-    body tampered after signing — DKIM body-hash mismatch, SPF still ``-all`` — is
-    rejected ``550 5.7.1 DMARC reject``.
+    enforced ``p=reject`` gate (accepted + IMAP read), while the same signing path
+    with its signed ``Subject`` header altered after signing — the header hash no
+    longer matches what ``b=`` signed, SPF still ``-all`` — is rejected
+    ``550 5.7.1 DMARC reject``.
 
     Isolation argument (mirrors the SPF half, alignment vector flipped to DKIM):
     ``DKIM_DOMAIN`` publishes ``v=spf1 -all`` so SPF can never align; under an
     enforced ``p=reject`` the only way to clear ``applyDMARCRejectGate`` is a
     DKIM-aligned pass. So a green accept proves the full external-DKIM →
     verify_inbound → DMARC(dkim-aligned) → accept path against the real image; the
-    body-tamper negative proves the verifier checks the signature *cryptographically*
+    header-tamper negative proves the verifier checks the signature *cryptographically*
     (not mere presence), so the positive reflects a genuinely valid signature."""
     nest = accepting_nest
     name = nest["name"]

@@ -146,6 +146,58 @@ impl CacheDb {
         text: &NotificationText,
         created_at: i64,
     ) -> Result<Option<i64>> {
+        self.insert_notification_row(
+            actor_id,
+            notif_type,
+            source,
+            sender_id,
+            content_id,
+            subject_uri,
+            text,
+            created_at,
+            true,
+        )
+        .await
+    }
+
+    /// [`Self::insert_notification`] without its (actor, type, sender,
+    /// content) dedup — for a producer whose every event is distinct and
+    /// already deduplicated at its own ingest. A tip is one: the same tipper
+    /// may tip the same post twice, and every tipper the box cannot name
+    /// shares a `NULL` sender, so the generic dedup would swallow real money;
+    /// the receipt's own event id is the dedup, applied before this is called
+    /// (`nostr::zap_ingest::notify_tip`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_notification_undeduped(
+        &self,
+        actor_id: &[u8],
+        notif_type: &NotifType,
+        source: &str,
+        sender_id: Option<&[u8]>,
+        content_id: Option<&[u8]>,
+        text: &NotificationText,
+        created_at: i64,
+    ) -> Result<i64> {
+        self.insert_notification_row(
+            actor_id, notif_type, source, sender_id, content_id, None, text, created_at, false,
+        )
+        .await?
+        .context("an undeduped insert always writes a row")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_notification_row(
+        &self,
+        actor_id: &[u8],
+        notif_type: &NotifType,
+        source: &str,
+        sender_id: Option<&[u8]>,
+        content_id: Option<&[u8]>,
+        subject_uri: Option<&str>,
+        text: &NotificationText,
+        created_at: i64,
+        dedup: bool,
+    ) -> Result<Option<i64>> {
         let actor_id = actor_id.to_vec();
         let notif_type = notif_type.as_wire().to_string();
         let source = source.to_string();
@@ -161,16 +213,17 @@ impl CacheDb {
         let conn = self.conn.lock().await;
 
         // Check for duplicate
-        let exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM notifications
+        let exists: bool = dedup
+            && conn
+                .query_row(
+                    "SELECT COUNT(*) FROM notifications
                  WHERE actor_id = ?1 AND notif_type = ?2
                    AND sender_id IS ?3 AND content_id IS ?4",
-                rusqlite::params![actor_id, notif_type, sender_id, content_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|c| c > 0)
-            .unwrap_or(false);
+                    rusqlite::params![actor_id, notif_type, sender_id, content_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
 
         if exists {
             return Ok(None);

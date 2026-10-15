@@ -319,13 +319,19 @@ impl FolderCommitGate for Arc<fauna_conversations::backends::fauna_mls::FaunaMls
                 .map_err(|e| format!("clear provably-unsent pending: {e}"))?;
         }
 
-        let Some(leaf) = engine.find_leaf_by_identity(&channel, member) else {
+        if engine.find_leaf_by_identity(&channel, member).is_none() {
             return Ok(GatedRemoval::AlreadyAbsent);
-        };
-        gate.gated_remove_member(channel, leaf)
+        }
+        // The gate re-resolves the leaf from the actor on every rebase attempt;
+        // this pre-check only picks the cheap `AlreadyAbsent` exit.
+        let sent = gate
+            .gated_remove_member(channel, *member)
             .await
             .map_err(|e| format!("gated remove: {e}"))?;
-        Ok(GatedRemoval::Removed)
+        Ok(match sent {
+            Some(_) => GatedRemoval::Removed,
+            None => GatedRemoval::AlreadyAbsent,
+        })
     }
 
     async fn gated_add(

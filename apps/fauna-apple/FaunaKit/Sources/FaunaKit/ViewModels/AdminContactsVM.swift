@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// Shared view-model for the flat admin **`admin-contacts`** page (macOS + iOS, one
@@ -82,3 +85,4 @@ public final class AdminContactsVM: MachineBackedVM {
     /// error on the snapshot), then we re-read.
     public func dispatch(_ action: CarddavPolicyAction) async { await dispatchToMachine(action) }
 }
+#endif // !FAUNA_KIDS

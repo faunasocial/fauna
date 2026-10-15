@@ -28,7 +28,9 @@ sits in the ``!FAUNA_E2E_BRIDGE`` block the e2e never reaches otherwise).
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
+from helpers import budgets
 from helpers.budgets import APP_EXIT_S
+from helpers.waiting import wait_until
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.windows, pytest.mark.real_conversations]
 
@@ -71,7 +73,8 @@ def test_window_close_forces_conversation_draft_flush_before_exit(
     app.driver.type_text("dm-text-field", draft_body)
 
     # 3. The real quit: WM_CLOSE -> AppWindow.Closing -> TrayIconService.
-    # QuitApplication() -> ConvDrafts.SaveNowAsync().Wait(1500) -> exit.
+    # QuitApplication() -> App.FlushDraftRailsAsync().Wait(1500) (the
+    # conversations rail's ConvDrafts.SaveNowAsync() among the three) -> exit.
     app.driver.window_close()
     assert app.driver.wait_app_exit(APP_EXIT_S), (
         f"app did not exit on window close; still alive={app.driver.is_app_alive()}; "
@@ -86,4 +89,43 @@ def test_window_close_forces_conversation_draft_flush_before_exit(
         "conversation draft was not on the nest after window_close() — "
         "QuitApplication()'s ConvDrafts.SaveNowAsync() quit-time flush did "
         "not land before the process exited"
+    )
+
+    # 5. Discard the draft this test just proved is DURABLE — the cleanup is part
+    #    of the test (test_conversations_draft_persistence.py's step 7 has the
+    #    reasoning): `__drafts` is per-actor nest state on the session-scoped
+    #    `test_user`, so a draft left here comes back in the next test's
+    #    new-thread composer. Measured 2026-10-09: run after this file, that
+    #    file's precondition read "draft flushed by real window_close, not the
+    #    debouncedraft that must survive an app restart 4827". Relaunch as the
+    #    same actor, wait for the launch restore to bring the draft back, then
+    #    cancel it — the user-facing discard — and wait for the emptied set to
+    #    reach the nest. Asserted, never best-effort, for the same reason.
+    app.driver.hard_reload()
+    app.conversations.navigate()
+    app.driver.click("new-conversation-button")
+    app.driver.wait_for("dm-text-field", timeout=10.0)
+    wait_until(
+        lambda: app.conversations.compose_body_text() == draft_body,
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: (
+            f"cleanup: the relaunch never restored the draft to cancel; composer="
+            f"{app.conversations.compose_body_text()!r} error={app.error_text()!r}"
+        ),
+    )
+    app.driver.click("new-conversation-cancel")
+
+    def _emptied_set_landed():
+        with WsRpcAdminClient(node_url, actor_id=actor_id, signing_key=signing_key) as dev:
+            return dev.call("fauna.drafts.get", {"path": "conversations"}).get("blob") != blob
+
+    wait_until(
+        _emptied_set_landed,
+        budgets.RPC_ROUNDTRIP_S,
+        interval=0.5,
+        diagnose=lambda: (
+            "cleanup: cancelling the restored draft never reached the nest, so it "
+            "leaks into the next test's composer. The flush assertion above already "
+            "PASSED — look at new-conversation-cancel and the debounced save here."
+        ),
     )

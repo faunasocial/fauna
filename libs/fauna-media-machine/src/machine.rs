@@ -16,7 +16,7 @@
 use std::sync::{Arc, Mutex};
 
 use fauna_client_media::media::MediaItem;
-use fauna_client_media::{MediaSnapshot, MediaSortKey};
+use fauna_client_media::{FolderFilter, MediaSnapshot, MediaSortKey};
 use fauna_core::crypto::{BackupKey, decrypt_backup_chunk};
 use fauna_core::file_download::{FileDownloadKeys, PredecessorSealKey, RecordSigner};
 use fauna_core::followed_media::{FollowedFetchError, FollowedMediaScope, FollowedMediaSource};
@@ -32,6 +32,7 @@ use crate::snapshots::{
     FileVersionSummary, FollowedScopeOption, MediaFolderOption, MediaItemSummary,
     MediaPageSnapshot, ShareCreateSnapshot, ShareLinkSummary, ShareLinksSnapshot,
 };
+pub use fauna_client_media::member_rows::MlsQuery;
 
 /// i18n key for a cross-set read (`refresh()`) failure ("Failed to load media: {message}").
 const REFRESH_ERROR_KEY: &str = "media.error_refresh";
@@ -73,6 +74,11 @@ const FOLLOWED_READ_ONLY_ERROR_KEY: &str = "media.error_followed_read_only";
 /// anything is sealed or sent (`file-sync.md` § Relay serving). No `{message}`
 /// arg.
 const METADATA_ONLY_FOLDER_ERROR_KEY: &str = "media.error_metadata_only_folder";
+/// i18n key for an upload into a shared set the caller may only **read** — the
+/// owner granted reading, not writing, so it refuses before anything is sealed
+/// or sent; the set stays an option (`media.md` § Encryption at rest → *The
+/// filter and the upload target address the row*, (d)). No `{message}` arg.
+const READ_ONLY_SHARED_FOLDER_ERROR_KEY: &str = "media.error_read_only_shared_folder";
 /// i18n key for a followed-scope fetch the home nest refused — the plane's
 /// folded `not_found`, ONE message for every cause (flipped back / deleted /
 /// never there), deliberately: a per-case message would rebuild the existence
@@ -94,8 +100,12 @@ struct State {
     sort: MediaSortKey,
     /// Sort direction (desktop column-header toggle).
     descending: bool,
-    /// `media-folder-filter`: a set name, or `None` for the all-media default.
-    filter: Option<String>,
+    /// `media-folder-filter`: the parsed option value — an own set's name, a
+    /// shared set's ref, an item-only set's name — or `None` for the
+    /// all-media default (`media.md` § Encryption at rest → *The filter and the
+    /// upload target address the row*). The name variant keeps the plaintext,
+    /// which the snapshot echoes and the item-only degrade matches on.
+    filter: Option<FolderFilter>,
     /// `media-view-toggle`: `true` = thumbnail grid, `false` = list.
     view_grid: bool,
     /// Last page-level error (the `error-message` element); `None` when clear.
@@ -135,6 +145,81 @@ struct ShareCreate {
     key_in_fragment: bool,
 }
 
+/// Which set a custody read on this page addresses (`media.md` § Encryption at
+/// rest → *A set is addressed by its row, named by its label*): the set's
+/// **row** wherever the item or gesture can name one, its name only as the
+/// declared degrade. Two sets a reader sees may share a name — a member who
+/// owns `photos` also reads a collaborator's shared `photos` — so content
+/// keys, the signer ledger, the declassification verdict and the relay hint
+/// all key by this, never by a name.
+///
+/// Built from a record ([`Self::of`]: an item's or version's `folder_id`),
+/// from a gesture's name through the page's own rows
+/// ([`MediaMachine::item_set_key`]), or for a write by name through the
+/// owner-first target rule ([`MediaMachine::target_set_key`]) — and anything
+/// that already holds a set's identity hands its `Ref` straight in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SetKey {
+    /// The set's row: `FolderRef::Local(folders.id)`, the `folder_id` every
+    /// `fauna.media.list` item and `fauna.folders.list` row carries.
+    Ref(fauna_core::folder_keys::FolderRef),
+    /// The degrade for a producer that stamps no `folder_id`: the set's name
+    /// hash (`path_crypto::set_name_hash`, the row's `folder_hash`), resolved
+    /// through the by-name forms exactly as before the row was addressable.
+    Name([u8; 32]),
+}
+
+impl SetKey {
+    /// The key of a record that carries `folder_id` (else its set's `name`).
+    fn of(folder_id: Option<i64>, name: &str) -> Self {
+        Self::of_hash(folder_id, path_crypto::set_name_hash(name))
+    }
+
+    /// [`Self::of`] with the name already hashed — a listed row whose
+    /// plaintext name may be scrubbed carries its `folder_hash`.
+    fn of_hash(folder_id: Option<i64>, name_hash: [u8; 32]) -> Self {
+        match folder_id {
+            Some(id) => Self::Ref(fauna_core::folder_keys::FolderRef::Local(id)),
+            None => Self::Name(name_hash),
+        }
+    }
+
+    /// The row form, for the relay hint — `None` on the name degrade.
+    fn folder_ref(&self) -> Option<fauna_core::folder_keys::FolderRef> {
+        match self {
+            Self::Ref(r) => Some(*r),
+            Self::Name(_) => None,
+        }
+    }
+
+    /// The same-nest row a request names in its `folder_id` — `None` on the
+    /// name degrade and for a foreign set, which keeps its channel form.
+    fn local_row(&self) -> Option<i64> {
+        match self.folder_ref() {
+            Some(fauna_core::folder_keys::FolderRef::Local(id)) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The control-plane row this key names in `rows`: the row with that id,
+    /// or on the degrade the first row of that name. A foreign set has no row
+    /// here. `None` is every caller's fail-closed answer.
+    fn row_in<'a>(
+        &self,
+        rows: &'a [fauna_client_media::MediaFolder],
+    ) -> Option<&'a fauna_client_media::MediaFolder> {
+        match self {
+            Self::Ref(fauna_core::folder_keys::FolderRef::Local(id)) => {
+                rows.iter().find(|f| f.id == *id)
+            }
+            Self::Ref(fauna_core::folder_keys::FolderRef::Foreign(_)) => None,
+            Self::Name(hash) => rows
+                .iter()
+                .find(|f| path_crypto::set_name_hash(&f.name) == *hash),
+        }
+    }
+}
+
 /// Who the shared judge found each listed row **signed as**
 /// (`mls-group-key-material.md` § M2 → *Writer-signed change records*, ruling
 /// (8)(c)). The machine's gestures take a hash, not a row, so this is where a
@@ -152,8 +237,9 @@ struct ShareCreate {
 /// offer.
 #[derive(Default)]
 struct SignedAsLedger {
-    /// `(set name, manifest hash)` → who signed the row naming it.
-    manifests: std::collections::HashMap<(String, String), RecordSigner>,
+    /// `(set, manifest hash)` → who signed the row naming it. The set is the
+    /// row's [`SetKey`], so a same-named pair's rows never share an entry.
+    manifests: std::collections::HashMap<(SetKey, String), RecordSigner>,
     /// Thumbnail hashes, the same way. Keyed by hash alone: the thumbnail
     /// gesture names nothing else, and a thumbnail is only ever painted for
     /// the account that holds its key.
@@ -163,12 +249,12 @@ struct SignedAsLedger {
 impl SignedAsLedger {
     fn note(
         &mut self,
-        folder: &str,
+        set: SetKey,
         manifest_hex: &str,
         signer: RecordSigner,
         chain: &[PredecessorSealKey],
     ) {
-        let key = (folder.to_string(), manifest_hex.to_ascii_lowercase());
+        let key = (set, manifest_hex.to_ascii_lowercase());
         let kept = self
             .manifests
             .get(&key)
@@ -190,9 +276,9 @@ impl SignedAsLedger {
         self.thumbnails.insert(key, kept);
     }
 
-    /// Who signed the row naming `manifest_hex` in `folder`.
-    fn signer(&self, folder: &str, manifest_hex: &str) -> RecordSigner {
-        let key = (folder.to_string(), manifest_hex.to_ascii_lowercase());
+    /// Who signed the row naming `manifest_hex` in `set`.
+    fn signer(&self, set: SetKey, manifest_hex: &str) -> RecordSigner {
+        let key = (set, manifest_hex.to_ascii_lowercase());
         self.manifests.get(&key).copied().unwrap_or_default()
     }
 
@@ -205,7 +291,7 @@ impl SignedAsLedger {
 }
 
 /// The facts [`fauna_client_share::share_link_eligible`] decides over for the
-/// set named `folder`: its VERIFIED public audience
+/// item's `set` (its row — [`SetKey`]): its VERIFIED public audience
 /// (`MediaFolder::rests_unsealed`, the owner-attested verdict), whether it is
 /// owner-only (`MediaFolder::owner_only`), and whether this seat holds the
 /// owner root its chunks seal under — `author_held`, the share author wired by
@@ -213,10 +299,10 @@ impl SignedAsLedger {
 /// predecessors. Fail-closed for a set the control plane did not report.
 fn share_facts(
     raw: &MediaSnapshot,
-    folder: &str,
+    set: SetKey,
     author_held: bool,
 ) -> fauna_client_share::ShareFolderFacts {
-    let known = raw.known_folders.iter().find(|f| f.name == folder);
+    let known = set.row_in(&raw.known_folders);
     let owner_only = known.is_some_and(|f| f.owner_only);
     fauna_client_share::ShareFolderFacts {
         public_audience: known.is_some_and(|f| f.rests_unsealed),
@@ -230,9 +316,12 @@ fn share_facts(
 /// deep link locates ([`MediaMachine::locate_file`] / [`MediaMachine::locate_path`])
 /// open the same detail surface (`share-links.md` § Which files can be linked).
 fn own_summary(raw: &MediaSnapshot, item: MediaItem, author_held: bool) -> MediaItemSummary {
+    let set = SetKey::of(item.folder_id, &item.folder);
+    let filter_value = raw.filter_value(&item);
     let mut summary = MediaItemSummary::from(item);
+    summary.filter_value = filter_value;
     summary.share_link_eligible =
-        fauna_client_share::share_link_eligible(&share_facts(raw, &summary.folder, author_held));
+        fauna_client_share::share_link_eligible(&share_facts(raw, set, author_held));
     summary
 }
 
@@ -329,6 +418,13 @@ pub struct MediaMachine {
     /// Devices machine holds, so a Media browse fetch feeds the very cache the
     /// Folders page's probe reads.
     followed_source: std::sync::OnceLock<Arc<dyn FollowedMediaSource>>,
+    /// The client's MLS join-filter over the member-visible folder rows
+    /// (`fauna_protocol::member_rows`, the one filter the Folders page runs —
+    /// `media.md` § Layout & flow → *Where the offerable sets come from*).
+    /// Wired post-construction ([`Self::set_mls_query`]); `None` until then ⇒
+    /// **fail-safe**: every member row is dropped, so a stranger's rostered
+    /// knock never surfaces as an option or a target.
+    mls_query: Mutex<Option<Arc<dyn MlsQuery>>>,
     /// The owner `BackupKey` for the **write-side label seals** the delete /
     /// restore gestures mint (S8 D2 — those tombstone/re-point records are
     /// append-only nest-side and can never be re-sealed later). Injected once
@@ -411,6 +507,7 @@ impl MediaMachine {
             folder_keys,
             foreign_fetchers: std::sync::OnceLock::new(),
             followed_source: std::sync::OnceLock::new(),
+            mls_query: Mutex::new(None),
             owner_backup_key: Mutex::new(None),
             predecessor_backup_keys: Mutex::new(Vec::new()),
             predecessor_ids: Mutex::new(Vec::new()),
@@ -433,6 +530,34 @@ impl MediaMachine {
     /// the platform builder after `new()`; later calls are no-ops.
     pub fn set_followed_media_source(&self, source: Arc<dyn FollowedMediaSource>) {
         let _ = self.followed_source.set(source);
+    }
+
+    /// Wire the client's MLS join-filter (see the field doc) — the
+    /// `DevicesMachine::set_mls_query` twin, called by the platform glue after
+    /// construction and never over UniFFI (a trait object has no FFI ABI).
+    /// Until wired, every shared row is dropped (fail-safe): shared sets still
+    /// reach the page through their items, as item-only options by name.
+    pub fn set_mls_query(&self, mls_query: Arc<dyn MlsQuery>) {
+        *self.mls_query.lock().unwrap() = Some(mls_query);
+    }
+
+    /// `list_folders` behind the join-filter: an own row always passes, a
+    /// member row only once this client has joined its group.
+    async fn list_joined_folders(
+        &self,
+    ) -> Result<Vec<fauna_client_media::MediaFolder>, MediaApiError> {
+        let rows = self.nest_api.list_folders().await?;
+        let query = self.mls_query.lock().unwrap().clone();
+        Ok(rows
+            .into_iter()
+            .filter(|f| {
+                fauna_client_media::member_rows::admits(
+                    query.as_deref(),
+                    f.member,
+                    f.mls_group_id.as_deref(),
+                )
+            })
+            .collect())
     }
 
     /// Whether a builder handed this machine the folder custody resolver — the
@@ -501,8 +626,10 @@ impl MediaMachine {
                 continue;
             }
             let wire_hash = set.name_hash.as_deref();
-            let salt = fauna_core::label_custody::set_name_label_salt(wire_hash, &set.name);
-            let keys = self.folder_keys_for_hash(&salt, owner.clone()).await.0;
+            // The row's own custody, by its identity — never by the name hash
+            // a same-named set shares.
+            let row = SetKey::Ref(fauna_core::folder_keys::FolderRef::Local(set.id));
+            let keys = self.folder_keys_for_key(&row, owner.clone()).await.0;
             match fauna_core::label_custody::render_set_name(
                 &keys,
                 set.name_sealed.as_deref(),
@@ -541,23 +668,27 @@ impl MediaMachine {
 
         // Resolve custody once per distinct set, not once per item — `resolve`
         // is a roster + config read. The set's *name* renders once per set for
-        // the same reason, and is cached beside its keys. Keyed by the set's
-        // `name_hash` (the row's `folder_hash`, else the hash of its plaintext),
-        // never by `folder`: once the nest scrubs sealed names every set's
-        // plaintext is the same empty sentinel, and custody must resolve by the
-        // hash anyway (`LabelCustody::keys_for_row`).
-        let mut per_set: std::collections::HashMap<[u8; 32], (FileDownloadKeys, SetNameRender)> =
+        // the same reason, and is cached beside its keys. Keyed by the item's
+        // row ([`SetKey`]) — two same-named sets share a `name_hash` and must
+        // each render under their own custody — and, for a row that stamps no
+        // id, by the set's `name_hash` (the row's `folder_hash`, else the hash
+        // of its plaintext), never by `folder`: once the nest scrubs sealed
+        // names every set's plaintext is the same empty sentinel.
+        let mut per_set: std::collections::HashMap<SetKey, (FileDownloadKeys, SetNameRender)> =
             std::collections::HashMap::new();
         let total = snap.items.len();
         let mut rendered = Vec::with_capacity(total);
         let chain = self.predecessor_keys();
         for mut item in std::mem::take(&mut snap.items) {
-            let set_key = fauna_core::label_custody::set_name_label_salt(
-                item.folder_hash.as_ref().map(|b| &b[..]),
-                &item.folder,
+            let set_key = SetKey::of_hash(
+                item.folder_id,
+                fauna_core::label_custody::set_name_label_salt(
+                    item.folder_hash.as_ref().map(|b| &b[..]),
+                    &item.folder,
+                ),
             );
             if let std::collections::hash_map::Entry::Vacant(slot) = per_set.entry(set_key) {
-                let keys = self.folder_keys_for_hash(&set_key, owner.clone()).await.0;
+                let keys = self.folder_keys_for_key(&set_key, owner.clone()).await.0;
                 // The set-name twin of the path render below, through the same
                 // shared seam so the two cannot disagree on root or salt. The
                 // nest ships `folder_sealed`/`folder_hash` only to this
@@ -600,8 +731,11 @@ impl MediaMachine {
             };
             let set_name = set_name.clone();
             if let Some(manifest) = item.manifest_hash.as_ref() {
+                // Under the rendered name — the one a gesture hands back — on
+                // the degrade, exactly as `note_signed_as` and every reader
+                // derive it.
                 self.signed_as.lock().unwrap().note(
-                    &set_name,
+                    SetKey::of(item.folder_id, &set_name),
                     &hex::encode(&manifest[..]),
                     signer,
                     &chain,
@@ -676,7 +810,12 @@ impl MediaMachine {
         for item in items {
             let signer = self.signer_of(item.signed_as_current, item.signed_as);
             if let Some(manifest) = item.manifest_hash.as_ref() {
-                ledger.note(&item.folder, &hex::encode(&manifest[..]), signer, &chain);
+                ledger.note(
+                    SetKey::of(item.folder_id, &item.folder),
+                    &hex::encode(&manifest[..]),
+                    signer,
+                    &chain,
+                );
             }
             if let Some(thumbnail) = item.thumbnail_hash.as_deref() {
                 // Ruling (10)(c), the stamp binds the root: a thumbnail is a
@@ -721,10 +860,100 @@ impl MediaMachine {
         }
     }
 
-    /// Who signed the row naming `manifest_hex` in `folder`
+    /// Who signed the row naming `manifest_hex` in `set`
     /// ([`SignedAsLedger::signer`]).
-    fn signer_for(&self, folder: &str, manifest_hex: &str) -> RecordSigner {
-        self.signed_as.lock().unwrap().signer(folder, manifest_hex)
+    fn signer_for(&self, set: SetKey, manifest_hex: &str) -> RecordSigner {
+        self.signed_as.lock().unwrap().signer(set, manifest_hex)
+    }
+
+    /// The [`SetKey`] of the item a gesture names by `(folder, path)` — and by
+    /// its manifest when the gesture carries one — read off that item in the
+    /// page's own rows, never by name through `known_folders`, where a
+    /// reader's own same-named set would answer for a shared one (`media.md`
+    /// § Encryption at rest → *A set is addressed by its row*; `file-sync.md`
+    /// § Relay serving, step (4)). The path matches the rendered path or its
+    /// `path_hash`. A manifest no listed row names (a historical version)
+    /// falls back to the item at that path; no matching row, or a row the
+    /// nest stamped no id on, is the name degrade.
+    ///
+    /// Every reader of a record's custody and every writer of its ledger entry
+    /// derives the key here or from the record's own `folder_id`, so the two
+    /// cannot disagree.
+    fn item_set_key(&self, folder: &str, path: &str, manifest_hex: Option<&str>) -> SetKey {
+        let path_hash = fauna_core::sync::path_hash(path);
+        let s = self.state.lock().unwrap();
+        let at_path = |it: &&MediaItem| {
+            it.folder == folder
+                && (it.path == path
+                    || it
+                        .path_hash
+                        .as_deref()
+                        .is_some_and(|h| h[..] == path_hash[..]))
+        };
+        let names_manifest = |it: &&MediaItem| {
+            manifest_hex.is_some_and(|m| {
+                it.manifest_hash
+                    .as_deref()
+                    .is_some_and(|h| hex::encode(h).eq_ignore_ascii_case(m))
+            })
+        };
+        let items = &s.raw.items;
+        let found = items
+            .iter()
+            .filter(at_path)
+            .find(names_manifest)
+            .or_else(|| items.iter().find(at_path));
+        SetKey::of(found.and_then(|it| it.folder_id), folder)
+    }
+
+    /// The [`SetKey`] of a listed version: its own row, which the nest stamps
+    /// on every version (`FileVersionSummary::folder_id`) — a by-name listing
+    /// interleaves a same-named pair's versions of one path, so the item at
+    /// that path cannot answer for them (`media.md` § Encryption at rest → *A
+    /// set is addressed by its row*). A version carrying no row (a nest that
+    /// stamps none) resolves through [`Self::item_set_key`].
+    ///
+    /// The one derivation for both the ledger's note ([`Self::file_versions`])
+    /// and the restore's read ([`Self::restore_version`]), so they agree.
+    fn version_set_key(&self, folder: &str, path: &str, version: &FileVersionSummary) -> SetKey {
+        match version.folder_id {
+            Some(_) => SetKey::of(version.folder_id, folder),
+            None => self.item_set_key(folder, path, Some(&version.manifest_hash)),
+        }
+    }
+
+    /// The set a gesture made BY NAME **writes** into — the upload target and
+    /// the delete / restore re-point's set: the caller's own set of that name
+    /// (`MediaSnapshot::own_row` — never a shared row of that name) when they own
+    /// one, else the name degrade. The nest resolves the same by-name write
+    /// owner-first (`folder_authz::resolve_writable_folder`), so the seal root
+    /// and the row the nest writes agree.
+    ///
+    /// The by-name write is the stopgap until the filter and the upload target
+    /// address the row (`media.md` § Encryption at rest → *The filter and the
+    /// upload target address the row*, (e)): a caller that already holds the
+    /// target's identity hands its [`SetKey::Ref`] to the write directly
+    /// ([`Self::upload_into`]) and never comes here.
+    fn target_set_key(&self, folder: &str) -> SetKey {
+        let s = self.state.lock().unwrap();
+        SetKey::of(s.raw.own_row(folder).map(|f| f.id), folder)
+    }
+
+    /// The set an upload's target **value** writes into, with the name its
+    /// record carries (`media.md` § Encryption at rest → *The filter and the
+    /// upload target address the row*, (e)): a ref resolves to its listed row
+    /// (`None` when the list carries no such row — nothing to name, nothing to
+    /// write); a name to the caller's own set of that name, else the name
+    /// degrade ([`Self::target_set_key`]).
+    fn resolve_target(&self, filter: &FolderFilter) -> Option<(String, SetKey)> {
+        match filter {
+            FolderFilter::Ref(r) => {
+                let s = self.state.lock().unwrap();
+                let row = s.raw.row_for(filter)?;
+                Some((row.name.clone(), SetKey::Ref(*r)))
+            }
+            FolderFilter::Name(name) => Some((name.clone(), self.target_set_key(name))),
+        }
     }
 
     /// The owner key injected by [`Self::set_owner_backup_key`], cloned out from
@@ -744,25 +973,74 @@ impl MediaMachine {
     /// Its own function for exactly [`Self::owner_key`]'s reason, and this one
     /// learned it the hard way: written inline as
     /// `self.predecessor_backup_keys.lock().unwrap().clone()` inside
-    /// [`Self::folder_keys_for`], the temporary `MutexGuard` lives to the end
+    /// [`Self::folder_keys_for_key`], the temporary `MutexGuard` lives to the end
     /// of the enclosing statement — which spans the `.await` — and the whole
     /// `#[uniffi::export]` block stops compiling with "future is not `Send`".
     fn predecessor_keys(&self) -> Vec<PredecessorSealKey> {
         self.predecessor_backup_keys.lock().unwrap().clone()
     }
 
+    /// The id of `set`'s row when its bytes rest **unsealed**, else `None` —
+    /// the verdict read off the row with that id, never the first row of the
+    /// name.
+    ///
+    /// The page-snapshot reading — for the READ and refuse-only paths, where a
+    /// stale answer costs a failed open or a refusal, never a plaintext write.
+    /// The producer arm uses [`Self::declassified_folder_id_now`].
+    fn declassified_folder_id(&self, set: SetKey) -> Option<i64> {
+        let s = self.state.lock().unwrap();
+        set.row_in(&s.raw.known_folders)
+            .filter(|f| f.rests_unsealed)
+            .map(|f| f.id)
+    }
+
+    /// The id of `set`'s row when its bytes rest **unsealed** *right now*, else `None`.
+    ///
+    /// Reads the verdict the control plane gives **now** (a fresh
+    /// `list_folders`, not the page snapshot; `MediaFolder::rests_unsealed`, set from
+    /// `FolderSummary::judge_declassification` at the ws-rpc seam) — this page never
+    /// re-derives the declassification rule, and an unknown folder answers
+    /// `None`, which seals. That direction is deliberate on BOTH sides of the
+    /// gesture: a producer that guesses "public" leaks bytes irrecoverably,
+    /// while one that guesses "sealed" costs only a re-record, and a reader
+    /// that guesses wrong merely fails to open (`encryption-at-rest.md`
+    /// § Readable classes -> *Owner-flipped public-audience folders*).
+    async fn declassified_folder_id_now(&self, set: SetKey) -> Option<i64> {
+        // Read at upload time, never from the page's last-refresh snapshot: the
+        // owner may have flipped the folder back to private on another device
+        // since, and a stale "public" would POST plaintext the nest then refuses
+        // (`path_seal_required`) and orphans until the blob GC. A failed read, or
+        // a folder the reply does not name as public, seals. The read goes
+        // through the same `list_folders` seam (the one `judge_declassification`
+        // mapping); nothing is re-derived here.
+        match self.list_joined_folders().await {
+            Ok(folders) => set
+                .row_in(&folders)
+                .filter(|f| f.rests_unsealed)
+                .map(|f| f.id),
+            Err(e) => {
+                tracing::warn!(
+                    target: "fauna_media",
+                    error = %e.detail(),
+                    "folder audience read failed at upload time; sealing",
+                );
+                None
+            }
+        }
+    }
+
     /// Open a raw-AEAD **Library**-audience blob under every owner root this
     /// account may hold for it — the gesture's `current` key first, then each
     /// retired predecessor in registry order.
     ///
-    /// The one funnel for the crate's two *bare*-`BackupKey` open sites
-    /// ([`Self::fetch_thumbnail`] and [`Self::download_file`]'s blob-primary
-    /// arm). They are the plane `FileDownloadKeys::predecessor_backup_keys` does
-    /// **not** reach: that field feeds `owner_open_roots`, which offers
-    /// *convergent chunk roots*, while these blobs seal under the bare key. So a
-    /// successor whose chunk corpus already reads (leg 5's read half) still had
-    /// its whole inherited thumbnail grid and every Media-page-uploaded file
-    /// read as dark — the same break, one plane over
+    /// The crate's one *bare*-`BackupKey` open site's funnel
+    /// ([`Self::fetch_thumbnail`]: a folder file rests as a chunk manifest, its
+    /// thumbnail as its own blob). It is the plane
+    /// `FileDownloadKeys::predecessor_backup_keys` does **not** reach: that
+    /// field feeds `owner_open_roots`, which offers *convergent chunk roots*,
+    /// while these blobs seal under the bare key. So a successor whose chunk
+    /// corpus already reads (leg 5's read half) still had its whole inherited
+    /// thumbnail grid read as dark — the same break, one plane over
     /// (`succession-aftermath.md` § Re-key scope, the `BackupKey` corpus row).
     ///
     /// ⚠ **Callers MUST have verified the content address first**, and that
@@ -782,26 +1060,6 @@ impl MediaMachine {
     ///
     /// Cost in the steady state is nil: an account that never succeeded holds no
     /// predecessors, and the current key is always tried first.
-    /// The id of `folder` when its bytes rest **unsealed**, else `None`.
-    ///
-    /// Reads the verdict the control plane already gave
-    /// (`MediaFolder::rests_unsealed`, set from
-    /// `FolderSummary::judge_declassification` at the ws-rpc seam) — this page never
-    /// re-derives the declassification rule, and an unknown folder answers
-    /// `None`, which seals. That direction is deliberate on BOTH sides of the
-    /// gesture: a producer that guesses "public" leaks bytes irrecoverably,
-    /// while one that guesses "sealed" costs only a re-record, and a reader
-    /// that guesses wrong merely fails to open (`encryption-at-rest.md`
-    /// § Readable classes -> *Owner-flipped public-audience folders*).
-    fn declassified_folder_id(&self, folder: &str) -> Option<i64> {
-        let s = self.state.lock().unwrap();
-        s.raw
-            .known_folders
-            .iter()
-            .find(|f| f.name == folder && f.rests_unsealed)
-            .map(|f| f.id)
-    }
-
     ///
     /// `signer` is who signed the row naming the blob (ruling (8)(c), the
     /// bare-key twin of `FileDownloadKeys::record_signer`, through the same
@@ -876,7 +1134,7 @@ impl MediaMachine {
                 // transient failure) must still render the browse rather than
                 // erroring the whole page. Losing the list degrades exactly to
                 // the pre-fix item-derived options.
-                match self.nest_api.list_folders().await {
+                match self.list_joined_folders().await {
                     Ok(sets) => {
                         snap.known_folders = self.render_sealed_folder_names(sets, owner).await
                     }
@@ -957,38 +1215,26 @@ impl MediaMachine {
     /// — shared with snapshot browse/diff and the conflict list, which resolve
     /// the identical custody and must not be free to resolve it differently.
     ///
-    /// `folder` is a name the caller already holds in the clear — a gesture's
-    /// target, i.e. a name this page rendered. A nest row's set goes through
-    /// [`Self::folder_keys_for_hash`] with its `folder_hash` instead.
-    async fn folder_keys_for(
+    /// `set` is the set's [`SetKey`]: its row resolves through the resolver's
+    /// identity entry point (`LabelCustody::keys_for_ref`), so a reader's own
+    /// same-named set never answers for it; the name degrade through the
+    /// by-name form (`LabelCustody::keys_for_hash`, the row's `folder_hash`).
+    async fn folder_keys_for_key(
         &self,
-        folder: &str,
+        set: &SetKey,
         owner: Option<BackupKey>,
     ) -> (
         FileDownloadKeys,
         Option<fauna_core::folder_keys::ForeignHome>,
     ) {
-        self.folder_keys_for_hash(&path_crypto::set_name_hash(folder), owner)
-            .await
-    }
-
-    /// [`Self::folder_keys_for`] by the set's `name_hash` — the address a
-    /// `fauna.media.list` row still carries once its plaintext `folder`
-    /// scrubs.
-    async fn folder_keys_for_hash(
-        &self,
-        name_hash: &[u8; 32],
-        owner: Option<BackupKey>,
-    ) -> (
-        FileDownloadKeys,
-        Option<fauna_core::folder_keys::ForeignHome>,
-    ) {
-        fauna_core::label_custody::LabelCustody::new(self.folder_keys.clone(), owner)
+        let custody = fauna_core::label_custody::LabelCustody::new(self.folder_keys.clone(), owner)
             // Read candidates for a successor's predecessor-sealed media; the
             // seal-side twin below deliberately does NOT get them.
-            .with_predecessor_keys(self.predecessor_keys())
-            .keys_for_hash(name_hash)
-            .await
+            .with_predecessor_keys(self.predecessor_keys());
+        match set {
+            SetKey::Ref(folder_ref) => custody.keys_for_ref(folder_ref).await,
+            SetKey::Name(name_hash) => custody.keys_for_hash(name_hash).await,
+        }
     }
 
     /// Open a version another signature recorded and re-seal it under the
@@ -1017,65 +1263,29 @@ impl MediaMachine {
     /// into a public folder would hide what it publishes).
     async fn reseal_inherited_version(
         &self,
-        folder: &str,
+        set: SetKey,
         path: &str,
         version: &FileVersionSummary,
     ) -> Result<(String, i64, Option<u64>), String> {
-        use fauna_core::nest_reseal::ChunkStoreSink;
         let refused = || RESTORE_INHERITED_UNOPENABLE.to_string();
         // The roots the version's signer may reach — its own and its
         // predecessors' (ruling (8)(c)), never the current one.
-        let signer = self.signer_for(folder, &version.manifest_hash);
+        let signer = self.signer_for(set, &version.manifest_hash);
         let owner = self.owner_key().ok_or_else(refused)?;
         let uploader = self.blob_uploader.as_ref().ok_or_else(refused)?;
         let digest: [u8; 32] = hex::decode(&version.manifest_hash)
             .ok()
             .and_then(|b| b.try_into().ok())
             .ok_or_else(|| "the version has a malformed manifest hash".to_string())?;
-        let (keys, _) = self.folder_keys_for(folder, Some(owner.clone())).await;
-        if keys.is_content_keyed() || self.declassified_folder_id(folder).is_some() {
+        let (keys, _) = self.folder_keys_for_key(&set, Some(owner.clone())).await;
+        if keys.is_content_keyed() || self.declassified_folder_id(set).is_some() {
             return Err(refused());
         }
         let seal_root = (owner.convergent_chunk_root(), None);
         let sink = crate::blob_uploader::UploaderSink(uploader.as_ref());
 
-        // Arm 1 — a Media-page upload rests as one blob primary under the bare
-        // owner key ([`Self::download_file`]'s arm 1).
-        if let Some(blob_fetcher) = self.blob_fetcher.as_ref() {
-            match blob_fetcher.fetch_blob(version.manifest_hash.clone()).await {
-                Ok(sealed) => {
-                    if !blake3::hash(&sealed)
-                        .to_hex()
-                        .as_str()
-                        .eq_ignore_ascii_case(&version.manifest_hash)
-                    {
-                        return Err(
-                            "file content-hash mismatch: the nest served a different blob".into(),
-                        );
-                    }
-                    let plaintext = self
-                        .open_library_blob(&owner, &sealed, "file", signer)
-                        .map_err(|_| refused())?;
-                    let resealed = fauna_core::blob_seal::seal_blob(&plaintext, Some(seal_root))
-                        .map_err(|e| format!("re-sealing the restored version: {e:#}"))?;
-                    sink.put_chunks(resealed.chunks, path)
-                        .await
-                        .map_err(|e| format!("{e:#}"))?;
-                    sink.put_manifest(resealed.manifest_hash, resealed.manifest_bytes)
-                        .await
-                        .map_err(|e| format!("{e:#}"))?;
-                    return Ok((
-                        hex::encode(resealed.manifest_hash.digest()),
-                        resealed.manifest.total_size as i64,
-                        None,
-                    ));
-                }
-                Err(MediaApiError::NotFound { .. }) => {}
-                Err(e) => return Err(e.detail().to_string()),
-            }
-        }
-
-        // Arm 2 — a sync-engine upload rests as chunks behind a manifest.
+        // A folder file rests as chunks behind a manifest (`media.md`
+        // § Encryption at rest → *One at-rest shape*).
         let fetcher = self.download_fetcher.as_ref().ok_or_else(refused)?;
         let record_keys = FileDownloadKeys {
             record_signer: signer,
@@ -1109,7 +1319,7 @@ impl MediaMachine {
     /// Seal a delete-tombstone / restore-re-point path (S8 D2) — the write-side
     /// twin of the render custody above, assembled from the **injected** owner
     /// key ([`MediaMachine::set_owner_backup_key`]) instead of a per-gesture
-    /// one, through the same [`Self::folder_keys_for`] so the seal root can
+    /// one, through the same [`Self::folder_keys_for_key`] so the seal root can
     /// never diverge from the root the page renders under.
     ///
     /// Best-effort like every label seal on a user gesture: `None` records
@@ -1123,8 +1333,19 @@ impl MediaMachine {
     /// "unbound" and this site stamped under the owner root despite this very
     /// comment; a resolve *failure* likewise yields no keys, never the owner
     /// fallback.
+    ///
+    /// The seal is the TARGET set's ([`Self::target_set_key`]): the record goes
+    /// to the nest by name, which writes it into the caller's own set of that
+    /// name first, so this seals under that row's custody.
     async fn seal_gesture_path(&self, folder: &str, path: &str) -> Option<Vec<u8>> {
-        let (keys, _) = self.folder_keys_for(folder, self.owner_key()).await;
+        self.seal_record_path(self.target_set_key(folder), path)
+            .await
+    }
+
+    /// [`Self::seal_gesture_path`] for a record whose set is already known —
+    /// a restore re-pointing a version into that version's own row.
+    async fn seal_record_path(&self, target: SetKey, path: &str) -> Option<Vec<u8>> {
+        let (keys, _) = self.folder_keys_for_key(&target, self.owner_key()).await;
         match fauna_core::label_custody::seal_path_from_keys(&keys, path) {
             Ok(bytes) => Some(bytes),
             Err(fauna_core::label_custody::SealPathFromKeysError::NoRoot) => None,
@@ -1164,17 +1385,12 @@ impl MediaMachine {
         // rendered through the same view sort as the aggregate, with `filter`
         // carrying the scope's minted value so the select paints its selection
         // with zero new app logic (`media.md` § Followed public folders).
-        let (items, filter, followed_scope) = match &s.followed_active {
+        let (items, filter, filter_label, followed_scope) = match &s.followed_active {
             Some(active) => {
                 let view = MediaSnapshot {
                     items: active.items(),
                     ..MediaSnapshot::default()
                 };
-                let items: Vec<MediaItemSummary> = view
-                    .view(None, s.sort, s.descending)
-                    .into_iter()
-                    .map(MediaItemSummary::from)
-                    .collect();
                 // The option list's verdict is fresher than the one frozen at
                 // scope entry — prefer it for the active-scope rendering.
                 let available = s
@@ -1188,17 +1404,34 @@ impl MediaMachine {
                     .unwrap_or(active.scope.available);
                 let mut option = followed_option_of(&active.scope);
                 option.available = available;
-                (items, Some(option.value.clone()), Some(option))
-            }
-            None => (
-                s.raw
-                    .view(s.filter.as_deref(), s.sort, s.descending)
+                let items: Vec<MediaItemSummary> = view
+                    .view(None, s.sort, s.descending)
                     .into_iter()
-                    .map(|item| own_summary(&s.raw, item, author_held))
-                    .collect(),
-                s.filter.clone(),
-                None,
-            ),
+                    .map(|item| MediaItemSummary {
+                        filter_value: option.value.clone(),
+                        ..MediaItemSummary::from(item)
+                    })
+                    .collect();
+                (
+                    items,
+                    Some(option.value.clone()),
+                    Some(option.label.clone()),
+                    Some(option),
+                )
+            }
+            None => {
+                let value = s.filter.as_ref().map(FolderFilter::value);
+                (
+                    s.raw
+                        .view(value.as_deref(), s.sort, s.descending)
+                        .into_iter()
+                        .map(|item| own_summary(&s.raw, item, author_held))
+                        .collect(),
+                    value.clone(),
+                    value.map(|v| s.raw.filter_label(&v)),
+                    None,
+                )
+            }
         };
         MediaPageSnapshot {
             items,
@@ -1210,8 +1443,11 @@ impl MediaMachine {
                 .map(|option| MediaFolderOption {
                     name: option.name,
                     folder_id: option.folder_ref.map(|r| r.to_wire()),
+                    value: option.value,
+                    label: option.label,
                 })
                 .collect(),
+            filter_label,
             followed: s.followed_options.iter().map(followed_option_of).collect(),
             followed_scope,
             sort: s.sort.as_select_value().to_string(),
@@ -1319,6 +1555,11 @@ impl MediaMachine {
     /// anything is sealed or sent: this door keeps no copy, so the bytes would
     /// rest on the nest against the folder's promise
     /// ([`METADATA_ONLY_FOLDER_ERROR_KEY`]).
+    ///
+    /// `folder` is a filter value: an own set's name, or a shared set's ref
+    /// (`media.md` § Encryption at rest → *The filter and the upload target
+    /// address the row*, (e)); a shared set the caller may only read is
+    /// refused before anything is sealed ([`READ_ONLY_SHARED_FOLDER_ERROR_KEY`]).
     pub async fn upload(
         &self,
         folder: String,
@@ -1327,44 +1568,27 @@ impl MediaMachine {
         raw_bytes: Vec<u8>,
         backup_key: Vec<u8>,
     ) {
-        let metadata_only = self
-            .state
-            .lock()
-            .unwrap()
-            .raw
-            .known_folders
-            .iter()
-            .any(|f| f.name == folder && f.metadata_only);
-        if metadata_only {
-            let err = LocalizedText::key(METADATA_ONLY_FOLDER_ERROR_KEY);
-            tracing::warn!(target: "fauna_media", "{}", err.log_line());
-            self.state.lock().unwrap().error = Some(err);
-            self.observer.on_changed();
-            return;
-        }
-        match self
-            .do_upload(&folder, &device_id, &path, &raw_bytes, backup_key.clone())
-            .await
-        {
-            // Success: refresh re-reads the aggregate (clearing the error) and
-            // notifies once — the new item then appears via `fauna.media.list`.
-            // The gesture's own key renders the sealed labels: an upload is the
-            // one Media gesture that already holds one, which is why it is also
-            // the one that seals on the way in.
-            Ok(()) => self.refresh(Some(backup_key)).await,
-            Err(e) => self.set_error(UPLOAD_ERROR_KEY, e.detail()),
+        match self.resolve_target(&FolderFilter::parse(&folder)) {
+            Some((name, target)) => {
+                self.upload_into(name, target, device_id, path, raw_bytes, backup_key)
+                    .await
+            }
+            None => self.set_error_no_upload_target(),
         }
     }
 
     /// Upload `raw_bytes` (the picked file's contents) as `path` into the
     /// **currently selected** set, then refresh — the cross-app "upload into
     /// the selected folder" gesture (`media.md` § Layout & flow / § User
-    /// actions). The target is the `media-folder-filter` set, or, in the
-    /// all-media view (no single set selected), the first **upload target**
-    /// ([`MediaSnapshot::upload_targets`] — any folder the caller owns, empty
-    /// or not) — the goal doc's "the client … defaults the target set;
-    /// the upload always lands in exactly one set." When the caller has no
-    /// folder at all the page error is set and nothing is uploaded.
+    /// actions). The target is the `media-folder-filter` set — by its value, so
+    /// a selected shared set is that row, never the caller's same-named own
+    /// set — or, in the all-media view (no single set selected), the **first
+    /// own set** ([`MediaSnapshot::default_upload_target`] — empty or not,
+    /// never a shared one: `media.md` § Encryption at rest → *The filter and
+    /// the upload target address the row*, (d)) — the goal doc's "the client
+    /// … defaults the target set; the upload always lands in exactly one set."
+    /// When the caller has no own folder at all the page error is set and
+    /// nothing is uploaded.
     ///
     /// The default used to be "the first set that *has media*", which made a
     /// brand-new empty set impossible to upload into: it could not be defaulted
@@ -1386,8 +1610,9 @@ impl MediaMachine {
             (
                 s.followed_active.is_some(),
                 s.filter
-                    .clone()
-                    .or_else(|| s.raw.upload_targets().first().cloned()),
+                    .as_ref()
+                    .map(FolderFilter::value)
+                    .or_else(|| s.raw.default_upload_target()),
             )
         };
         // A followed browse scope is structurally read-only, and while one is
@@ -1553,10 +1778,6 @@ impl MediaMachine {
         let author_held = self.share_author_held();
         {
             let mut s = self.state.lock().unwrap();
-            let facts = share_facts(&s.raw, &folder, author_held);
-            if !fauna_client_share::share_link_eligible(&facts) {
-                return;
-            }
             let Some(item) = s
                 .raw
                 .items
@@ -1565,6 +1786,14 @@ impl MediaMachine {
             else {
                 return;
             };
+            let facts = share_facts(
+                &s.raw,
+                SetKey::of(item.folder_id, &item.folder),
+                author_held,
+            );
+            if !fauna_client_share::share_link_eligible(&facts) {
+                return;
+            }
             let name = fauna_client_media::display_name(item).to_string();
             s.share_create = Some(ShareCreate {
                 folder,
@@ -1726,11 +1955,24 @@ impl MediaMachine {
     /// write-capable `device_id`, then `refresh()`. On failure the page error is
     /// set and prior data is kept; notifies once. The tombstone's seal contract
     /// is [`Self::set_owner_backup_key`]'s doc.
+    ///
+    /// `folder` is the item's set as a filter value — the item's
+    /// `filter_value` (a shared set's ref) or a set's name — resolved like the
+    /// upload target ([`Self::resolve_target`]): the tombstone names that row
+    /// and seals under its custody (`set-addressing.md` § The row form →
+    /// *Whoever holds the row sends it*); a name is the caller's own set of
+    /// that name, else the name degrade. A ref the page no longer lists names
+    /// nothing, so nothing is written.
     pub async fn delete(&self, folder: String, device_id: String, path: String) {
-        let path_sealed = self.seal_gesture_path(&folder, &path).await;
+        let Some((name, target)) = self.resolve_target(&FolderFilter::parse(&folder)) else {
+            self.set_error(DELETE_ERROR_KEY, &format!("no listed set is {folder}"));
+            return;
+        };
+        let path_sealed = self.seal_record_path(target, &path).await;
+        let folder_id = target.local_row();
         match self
             .nest_api
-            .delete_member(&folder, &device_id, &path, path_sealed)
+            .delete_member(&name, folder_id, &device_id, &path, path_sealed)
             .await
         {
             // Re-render under the custody this gesture just SEALED with, not
@@ -1755,29 +1997,47 @@ impl MediaMachine {
     /// `pruned` + `purge_after`), the `file-version-show-pruned-toggle`
     /// recovery browse (`file-versions.md` § Retention (3)); `false` = the
     /// live-only listing.
+    ///
+    /// `folder` is the item's set as a filter value, resolved like
+    /// [`Self::delete`]'s: a ref lists that row's history, a name the
+    /// caller's own set of that name, else the name degrade
+    /// (`set-addressing.md` § The row form → *Whoever holds the row sends
+    /// it*). A ref the page no longer lists answers `NotFound`.
     pub async fn file_versions(
         &self,
         folder: String,
         path: String,
         include_pruned: bool,
     ) -> Result<Vec<FileVersionSummary>, MediaApiError> {
+        let Some((folder, target)) = self.resolve_target(&FolderFilter::parse(&folder)) else {
+            return Err(MediaApiError::NotFound {
+                detail: format!("no listed set is {folder}"),
+            });
+        };
         let listed = self
             .nest_api
-            .file_versions(&folder, &path, include_pruned)
+            .file_versions(&folder, target.local_row(), &path, include_pruned)
             .await?;
         // Who signed each version waits here for the download or restore that
         // names its manifest (ruling (8)(c)/(d)).
+        // Each under its own row — the key the restore of that version derives
+        // too (`Self::version_set_key`).
         let chain = self.predecessor_keys();
-        let signers: Vec<RecordSigner> = listed
+        let noted: Vec<(SetKey, RecordSigner)> = listed
             .iter()
-            .map(|v| self.signer_of(v.signed_as_current, v.signed_as))
+            .map(|v| {
+                (
+                    self.version_set_key(&folder, &path, &v.summary),
+                    self.signer_of(v.signed_as_current, v.signed_as),
+                )
+            })
             .collect();
         let mut ledger = self.signed_as.lock().unwrap();
         Ok(listed
             .into_iter()
-            .zip(signers)
-            .map(|(version, signer)| {
-                ledger.note(&folder, &version.summary.manifest_hash, signer, &chain);
+            .zip(noted)
+            .map(|(version, (set, signer))| {
+                ledger.note(set, &version.summary.manifest_hash, signer, &chain);
                 version.summary
             })
             .collect())
@@ -1812,9 +2072,20 @@ impl MediaMachine {
         path: String,
         version: FileVersionSummary,
     ) {
+        // The version is read under its own row's custody and verdicts, and
+        // re-pointed into that row (`Self::version_set_key`): a writer
+        // member's restore of a shared set's version lands there, never in a
+        // same-named own set the name resolves to first.
+        let set = self.version_set_key(&folder, &path, &version);
+        let folder_id = version.folder_id;
         // Same seal contract as `delete` — the re-point row is append-only
-        // nest-side, so the gesture is this row's only chance to seal.
-        let path_sealed = self.seal_gesture_path(&folder, &path).await;
+        // nest-side, so the gesture is this row's only chance to seal. A
+        // version naming its row seals under that row's custody; one without
+        // goes by name, so it seals for the set the name writes into.
+        let path_sealed = match folder_id {
+            Some(_) => self.seal_record_path(set, &path).await,
+            None => self.seal_gesture_path(&folder, &path).await,
+        };
         // Ruling (8)(d): a restore re-signs the historical manifest under the
         // CURRENT identity, and a head so signed is offered the current owner
         // root ever after. So a version some other signature recorded — a
@@ -1832,15 +2103,12 @@ impl MediaMachine {
         // that performs the re-seal the other doors can only refuse.
         use fauna_core::restore_branch::{RestoreDecision, listed_restore_decision};
         let current_vouches = self
-            .signer_for(&folder, &version.manifest_hash)
+            .signer_for(set, &version.manifest_hash)
             .offers_current();
         let (manifest_hash, size_bytes, content_key_version) =
             match listed_restore_decision(version.content_key_version, current_vouches) {
                 RestoreDecision::NeedsReseal => {
-                    match self
-                        .reseal_inherited_version(&folder, &path, &version)
-                        .await
-                    {
+                    match self.reseal_inherited_version(set, &path, &version).await {
                         Ok(resealed) => resealed,
                         Err(detail) => {
                             self.set_error(RESTORE_ERROR_KEY, &detail);
@@ -1860,6 +2128,7 @@ impl MediaMachine {
             .nest_api
             .restore_member(
                 &folder,
+                folder_id,
                 &device_id,
                 &path,
                 manifest_hash,
@@ -1966,7 +2235,9 @@ impl MediaMachine {
         // The item is found by the hash this call already verified above, so the
         // lookup cannot widen what is rendered: it only says how to read bytes
         // whose address is settled.
-        let folder = {
+        // The verdict is the item's own row's, so a same-named public set
+        // never passes a shared set's sealed thumbnail off as public bytes.
+        let set = {
             let st = self.state.lock().unwrap();
             st.raw
                 .items
@@ -1976,12 +2247,9 @@ impl MediaMachine {
                         .as_deref()
                         .is_some_and(|h| h.eq_ignore_ascii_case(&thumbnail_hash))
                 })
-                .map(|it| it.folder.clone())
+                .map(|it| SetKey::of(it.folder_id, &it.folder))
         };
-        if folder
-            .as_deref()
-            .is_some_and(|f| self.declassified_folder_id(f).is_some())
-        {
+        if set.is_some_and(|set| self.declassified_folder_id(set).is_some()) {
             return Ok(sealed);
         }
 
@@ -2000,28 +2268,13 @@ impl MediaMachine {
     /// recorded `manifest_hash` — the per-item *download* `media.md` § User
     /// actions puts on the detail surface.
     ///
-    /// **The recorded hash has two provenances**, because the nest keeps two
-    /// content stores, and the sync-change record's `manifest_hash` field names
-    /// whichever one the producer used:
-    ///
-    /// 1. **A Media-page upload** ([`upload`](Self::upload)) rests as **one
-    ///    sealed blob-store primary** — the recorded hash is the blob's content
-    ///    hash (`POST /api/v1/blob`'s reply, `do_upload`). Resolved via the
-    ///    injected [`MediaBlobFetcher`]: fetch by hash, verify the content
-    ///    address, `decrypt_backup_chunk` under the owner key — byte-for-byte
-    ///    the posture [`fetch_thumbnail`](Self::fetch_thumbnail) proves.
-    /// 2. **A sync-engine upload** rests as sealed **chunks behind a
-    ///    chunk-store manifest** — the recorded hash is the manifest's. Resolved
-    ///    via the one shared single-file walk
-    ///    (`fauna_core::file_download::download_file_bytes_by_manifest` over the
-    ///    injected `download_fetcher` field; `ui/backups.md`
-    ///    § Where logic lives → *Single-file byte download*).
-    ///
-    /// The blob primary is tried first — its miss is a **typed** `NotFound`
-    /// (the two stores are disjoint, so a miss there means "this is a manifest
-    /// hash"), while the walk's errors are an untyped anyhow chain that can't
-    /// distinguish a 404 from a network fault. A verify/decrypt failure on
-    /// either arm is a real error and never falls through to the other.
+    /// The recorded hash names a **chunk-store manifest** — every producer
+    /// records a folder file as sealed chunks behind one (`media.md`
+    /// § Encryption at rest → *One at-rest shape*) — resolved via the one
+    /// shared single-file walk
+    /// (`fauna_core::file_download::download_file_bytes_by_manifest` over the
+    /// injected `download_fetcher` field; `ui/backups.md`
+    /// § Where logic lives → *Single-file byte download*).
     ///
     /// `manifest_hash` is **hex**, exactly as [`FileVersionSummary`] carries it
     /// (the latest version is the current file). `content_key_version` is that
@@ -2038,8 +2291,8 @@ impl MediaMachine {
     ///
     /// Like `fetch_thumbnail`, this is a **per-item query**: it returns the
     /// bytes (or the error) to the caller and never touches the page
-    /// `error-message` banner. The whole file lands **in memory** on both arms
-    /// (the walk's documented contract) — fine for typical media; a streaming
+    /// `error-message` banner. The whole file lands **in memory** (the walk's
+    /// documented contract) — fine for typical media; a streaming
     /// composition is the follow-on for very large files.
     pub async fn download_file(
         &self,
@@ -2069,9 +2322,9 @@ impl MediaMachine {
         // Shared-set path (Phase 0 — the read leg). A bound shared folder's
         // chunks are content-keyed, never owner-keyed, so *any* reader (the owner
         // reading their own shared set, or a member) opens under the content keys
-        // in their `fauna.state.folder-keys` custody — resolved here by set name — and the
-        // set's readable content lives in the sync-engine chunk store (the walk),
-        // never the Media-page blob primary. `content_open_roots` fails closed on
+        // in their `fauna.state.folder-keys` custody — resolved here by the item's row — and the
+        // set's readable content lives in the chunk store (the walk).
+        // `content_open_roots` fails closed on
         // a generation this holder lacks (a removed member, or an unsynced
         // rotation): no plaintext, no owner-key fall-through (FS-BIND-5). An
         // owner-only (unbound) set takes the owner-key path below — guaranteed
@@ -2081,22 +2334,39 @@ impl MediaMachine {
         // no longer route this set's fetches to a stranger's nest), and a
         // resolve *failure* yields no keys at all rather than masquerading as
         // unbound.
-        let (keys, foreign_home) = self.folder_keys_for(&folder, Some(key.clone())).await;
+        //
+        // Custody, signer and hint all key by the downloaded item's own row
+        // (`media.md` § Encryption at rest → *A set is addressed by its row*),
+        // so a reader's own same-named set never answers for a shared one.
+        let set = self.item_set_key(&folder, &relative_path, Some(&manifest_hash));
+        let (keys, foreign_home) = self.folder_keys_for_key(&set, Some(key.clone())).await;
         // Ruling (8)(c): the row naming this manifest in this set decides
         // whether the current owner root may open it. A row signed under a
         // retired identity gets the retired roots alone, on every arm below.
-        let signer = self.signer_for(&folder, &manifest_hash);
+        let signer = self.signer_for(set, &manifest_hash);
         let keys = FileDownloadKeys {
             record_signer: signer,
             ..keys
         };
+        // A same-nest read is a read of `folder`: the walk carries its relay
+        // hint, so a file whose bytes rest only on a holder's seat (a
+        // metadata-only folder) is relayed instead of missing (`file-sync.md`
+        // § Relay serving, step (4)). The hint travels with this download, not
+        // with the machine's one fetcher, which serves every folder. The ref
+        // form comes from the item itself, so a reader's own same-named set
+        // never shadows the shared set the item belongs to.
+        let hint =
+            fauna_core::file_download::FolderHint::new(folder.as_str()).with_ref(set.folder_ref());
         if keys.mls_group_id.is_some() {
             // A FOREIGN (cross-nest) set's bytes live on its home nest — fetch
             // through the factory-built fetcher bound to that base URL (Phase 2
             // client read-side; the byte routes are public + CORS-open and
             // integrity is by content address), verified against the
             // grant-delivered home identity. A same-nest set uses the
-            // machine's own injected fetcher, unchanged.
+            // machine's own injected fetcher, hinted. The foreign read carries
+            // no hint: this session holds no bearer the home nest can name
+            // (its reader's door is § Relay serving → *A member on another
+            // nest*'s byte-plane token).
             let fetcher: Arc<dyn fauna_core::file_download::BlobFetcher> = match foreign_home
                 .as_ref()
             {
@@ -2117,12 +2387,18 @@ impl MediaMachine {
                             .to_string(),
                     })?,
             };
+            let hinted = fauna_core::file_download::FolderHinted::new(fetcher.as_ref(), hint);
+            let walk: &dyn fauna_core::file_download::BlobFetcher = if foreign_home.is_some() {
+                fetcher.as_ref()
+            } else {
+                &hinted
+            };
             // The owner key rides in `keys` for a bound set too, but
             // `effective_backup_key` suppresses it on every chunk site
             // (FS-5DC) — a bound set's chunks stay content-keyed, exactly as
             // before this factor.
             return fauna_core::file_download::download_file_bytes_by_manifest(
-                fetcher.as_ref(),
+                walk,
                 &keys,
                 fauna_core::data::ContentHash::from_digest_raw(digest),
                 content_key_version,
@@ -2134,54 +2410,7 @@ impl MediaMachine {
             });
         }
 
-        // Owner-only path — the pre-Phase-0 two-arm owner-key download.
-        //
-        // Arm 1 — the blob-store primary (a Media-page upload). Never for a
-        // STAMPED version (ruling (10)(c), the stamp binds the root): a
-        // primary rests under the bare owner key and is recorded unstamped,
-        // so a stamp naming one is not a record this arm may open — it walks
-        // to the chunk store, where the stamp selects its generation alone.
-        if let Some(blob_fetcher) = self
-            .blob_fetcher
-            .as_ref()
-            .filter(|_| content_key_version.is_none())
-        {
-            match blob_fetcher.fetch_blob(manifest_hash.clone()).await {
-                Ok(sealed) => {
-                    // The same content-address check as `fetch_thumbnail`, for
-                    // the same reason: the backup-chunk AEAD frame carries no
-                    // AAD, so only the address proves *this* blob.
-                    if !blake3::hash(&sealed)
-                        .to_hex()
-                        .as_str()
-                        .eq_ignore_ascii_case(&manifest_hash)
-                    {
-                        return Err(MediaApiError::BadRequest {
-                            detail: "file content-hash mismatch: the nest served a different blob"
-                                .to_string(),
-                        });
-                    }
-                    // Never falls through to the walk on failure (the blob IS
-                    // this hash's content). A successor's inherited primary
-                    // opens under a retired root — the same candidate loop the
-                    // thumbnail arm takes ([`Self::open_library_blob`]).
-                    // Same rule as the thumbnail arm: a declassified folder's
-                    // primary rests plaintext, so the verified bytes ARE the
-                    // file. `folder` is named by the caller here, so no lookup
-                    // by hash is needed.
-                    if self.declassified_folder_id(&folder).is_some() {
-                        return Ok(sealed);
-                    }
-                    return self.open_library_blob(&key, &sealed, "file", signer);
-                }
-                // The typed miss: this hash is not a blob primary — it names a
-                // chunk-store manifest (a sync-engine-recorded file). Walk it.
-                Err(MediaApiError::NotFound { .. }) => {}
-                Err(e) => return Err(e),
-            }
-        }
-
-        // Arm 2 — the chunk-store walk (a sync-engine upload).
+        // Owner-only path — the chunk-store walk under the owner key.
         let fetcher = self
             .download_fetcher
             .as_ref()
@@ -2189,12 +2418,11 @@ impl MediaMachine {
                 detail: "media file download is not yet supported on this platform".to_string(),
             })?;
         // `keys` is `FileDownloadKeys::owner(key)` here when the resolver
-        // positively answered unbound — the same discriminator arm 1 above
-        // took. On a resolve *failure* it is keyless instead (no keys, per the
+        // positively answered unbound. On a resolve *failure* it is keyless instead (no keys, per the
         // three-valued contract) and the walk refuses to open — transient and
         // retryable, preferred over guessing an audience.
         fauna_core::file_download::download_file_bytes_by_manifest(
-            fetcher.as_ref(),
+            &fauna_core::file_download::FolderHinted::new(fetcher.as_ref(), hint),
             &keys,
             fauna_core::data::ContentHash::from_digest_raw(digest),
             content_key_version,
@@ -2227,16 +2455,20 @@ impl MediaMachine {
         self.observer.on_changed();
     }
 
-    /// Set the `media-folder-filter` scope: `Some(name)` for one set, `None` for
-    /// the all-media default. Notifies.
+    /// Set the `media-folder-filter` scope: `Some(value)` for one set — an
+    /// option's value as the snapshot offered it, which parses as a ref
+    /// (`local:<id>`, a shared set) or else names a set (the caller's own set
+    /// of that name, then an item-only set; `media.md` § Encryption at rest →
+    /// *The filter and the upload target address the row*, (a)) — and `None`
+    /// for the all-media default. Notifies.
     ///
-    /// Always leaves any active followed browse scope — a set name (or the
+    /// Always leaves any active followed browse scope — a set value (or the
     /// all-media `None`) addresses the own-set browse; entering a followed
     /// scope is [`Self::select_followed_scope`]'s job.
     pub fn set_filter(&self, folder: Option<String>) {
         {
             let mut s = self.state.lock().unwrap();
-            s.filter = folder;
+            s.filter = folder.as_deref().map(FolderFilter::parse);
             s.followed_active = None;
         }
         self.observer.on_changed();
@@ -2414,6 +2646,73 @@ impl MediaMachine {
 // Private helpers (not UniFFI-exported — kept out of the `#[uniffi::export]`
 // impl above).
 impl MediaMachine {
+    /// [`MediaMachine::upload`] into the set `target` names — the row the
+    /// upload's custody, declassification verdict and seal key by. `folder` is
+    /// the set's name, which the record request still carries. A caller that
+    /// holds the target's identity (the filter value, `media.md` § Encryption
+    /// at rest → *The filter and the upload target address the row*, (e))
+    /// hands its [`SetKey::Ref`] here; `upload` derives it by name.
+    ///
+    /// A **metadata-only** folder, or a shared set the caller may only read, is
+    /// refused first, before anything is sealed or sent.
+    async fn upload_into(
+        &self,
+        folder: String,
+        target: SetKey,
+        device_id: String,
+        path: String,
+        raw_bytes: Vec<u8>,
+        backup_key: Vec<u8>,
+    ) {
+        let refusal = {
+            let s = self.state.lock().unwrap();
+            target.row_in(&s.raw.known_folders).and_then(|f| {
+                if f.metadata_only {
+                    Some(METADATA_ONLY_FOLDER_ERROR_KEY)
+                } else if f.member && !f.writer {
+                    Some(READ_ONLY_SHARED_FOLDER_ERROR_KEY)
+                } else {
+                    None
+                }
+            })
+        };
+        if let Some(key) = refusal {
+            let err = LocalizedText::key(key);
+            tracing::warn!(target: "fauna_media", "{}", err.log_line());
+            self.state.lock().unwrap().error = Some(err);
+            self.observer.on_changed();
+            return;
+        }
+        match self
+            .do_upload(
+                &folder,
+                target,
+                &device_id,
+                &path,
+                &raw_bytes,
+                backup_key.clone(),
+            )
+            .await
+        {
+            // Success: refresh re-reads the aggregate (clearing the error) and
+            // notifies once — the new item then appears via `fauna.media.list`.
+            // The gesture's own key renders the sealed labels: an upload is the
+            // one Media gesture that already holds one, which is why it is also
+            // the one that seals on the way in.
+            Ok(()) => self.refresh(Some(backup_key)).await,
+            Err(e) => {
+                // A `path_seal_required` refusal means the nest's view of the
+                // folder's audience differs from what this upload assumed:
+                // re-read the snapshot so the page no longer shows the stale
+                // verdict. The refresh clears the error, so set it after.
+                if e.detail().contains("path_seal_required") {
+                    self.refresh(Some(backup_key)).await;
+                }
+                self.set_error(UPLOAD_ERROR_KEY, e.detail())
+            }
+        }
+    }
+
     /// The seal → POST → record core of `upload()`, factored out so the public
     /// gesture stays a thin success/error dispatcher (mirrors `refresh`'s split).
     ///
@@ -2433,12 +2732,13 @@ impl MediaMachine {
     /// So every manifest reader opens what this page wrote with no second arm:
     /// the WebDAV MDA and a member (content-keyed), a synced desktop's hydrate
     /// and a private link's envelope (owner-only), the web serve's one door
-    /// and a public link (public). The blob-store primary
+    /// and a public link (public). The single sealed blob
     /// (`fauna_media::process_and_seal`) stays the attachment plane's and is
     /// never a folder file's shape.
     async fn do_upload(
         &self,
         folder: &str,
+        target: SetKey,
         device_id: &str,
         path: &str,
         raw_bytes: &[u8],
@@ -2465,9 +2765,10 @@ impl MediaMachine {
         let owner = BackupKey::from_bytes(key_bytes);
 
         // 3. The folder's custody — the same one the page renders and
-        //    downloads under (`folder_keys_for` → the one shared resolver), so
-        //    the seal root can never diverge from the root the readers hold.
-        let (keys, foreign_home) = self.folder_keys_for(folder, Some(owner.clone())).await;
+        //    downloads under (`folder_keys_for_key` → the one shared resolver),
+        //    so the seal root can never diverge from the root the readers
+        //    hold — by the TARGET row, the one the record lands in.
+        let (keys, foreign_home) = self.folder_keys_for_key(&target, Some(owner.clone())).await;
         let custody = if keys.is_content_keyed() {
             // A content-keyed set fails CLOSED, never owner-keyed: with the
             // set's content keys not in this device's custody yet (the
@@ -2494,7 +2795,7 @@ impl MediaMachine {
                 root: *content_keys.current_key(),
                 version: content_keys.current_version(),
             }
-        } else if let Some(folder_id) = self.declassified_folder_id(folder) {
+        } else if let Some(folder_id) = self.declassified_folder_id_now(target).await {
             // Media is a producer for a declassified folder exactly as the
             // sync engine is (`SyncEngine::with_public_audience`): its content,
             // names and paths rest in the clear, because they are URLs the
@@ -2603,10 +2904,19 @@ impl MediaMachine {
 
         // 9. Record the manifest member (the WS-RPC control plane): the
         //    manifest's hash, the plaintext size the engine records, the
-        //    generation stamp of a content-keyed seal, the thumbnail's hash.
+        //    generation stamp of a content-keyed seal, the thumbnail's hash —
+        //    and the target's ROW wherever the key names one, which the nest
+        //    resolves by id and never by the name forms (`media.md`
+        //    § Encryption at rest → *The filter and the upload target address
+        //    the row*, (e)); an item-only name records by name alone.
+        let folder_id = match target {
+            SetKey::Ref(fauna_core::folder_keys::FolderRef::Local(id)) => Some(id),
+            _ => None,
+        };
         self.nest_api
             .record_member(
                 folder,
+                folder_id,
                 device_id,
                 path,
                 hex::encode(sealed.manifest_hash.digest()),
@@ -2642,9 +2952,12 @@ impl MediaMachine {
             .ok_or_else(|| format!("unknown expiry {expiry}"))?;
         // A link names the CURRENT version's bytes (`share-links.md` § What a
         // link is): the newest live version row (the list is oldest→newest).
+        // The link's set is the caller's own set of that name, as every
+        // by-name write resolves it ([`Self::target_set_key`]).
+        let row = self.target_set_key(folder).local_row();
         let versions = self
             .nest_api
-            .file_versions(folder, path, false)
+            .file_versions(folder, row, path, false)
             .await
             .map_err(|e| e.detail().to_string())?;
         let current = versions
@@ -2688,9 +3001,7 @@ impl MediaMachine {
 
     /// The sealed manifest a private link names, fetched over the byte routes
     /// and checked against its address before anything reads it (the root of
-    /// the integrity chain the viewer walks). A Media-page upload into an
-    /// owner-only folder rests as one blob primary, not a chunk manifest, so
-    /// it has none — the create then fails with this detail.
+    /// the integrity chain the viewer walks).
     async fn fetch_link_manifest(
         &self,
         manifest_hash: [u8; 32],

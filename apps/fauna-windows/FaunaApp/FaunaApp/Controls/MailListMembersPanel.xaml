@@ -82,6 +82,12 @@
             </StackPanel>
         </StackPanel>
 
+        <!-- mail-list-members-import-result — the last batch import's tally; shown only
+             after an import, cleared when the import sheet reopens. -->
+        <TextBlock x:Name="ImportResultText"
+                   AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersImportResult}"
+                   Visibility="Collapsed" TextWrapping="Wrap" />
+
         <!-- ── Members (mail-list-members-list) — Border-wrapped + non-virtualizing. ── -->
         <Border x:Name="ListBorder"
                 AutomationProperties.AutomationId="{x:Bind ids:Ids.MailListMembersList}"

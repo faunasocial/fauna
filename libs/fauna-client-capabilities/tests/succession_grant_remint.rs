@@ -918,3 +918,112 @@ fn a_custody_grant_reminted_keyless_without_any_roster_membership() {
     );
     assert_ne!(live[0].grant_id.as_slice(), &[0xCDu8; 16]);
 }
+
+/// A connected app's consent-time grant (`third-party-kinds.md` § Principal
+/// write authority) re-mints across a succession like every other grant: the
+/// `ext.*` kinds' `content.read` tuples re-wrap the **successor's** delegable
+/// pair for each kind, the keyless `content.write` tuples keep the attested
+/// writer, and the personalization twin's tuples riding the same blob come
+/// along verbatim. The holder is the principal's own key — never on the
+/// bridge roster — so the roster stays empty.
+#[test]
+fn an_ext_consent_grant_reminted_under_the_successors_delegable_pairs() {
+    use fauna_client_capabilities::{
+        PERSONALIZATION_GRANT_KINDS, ext_kinds_scope_wraps, open_ext_kind_keys,
+        open_personalization_keys, personalization_scope_wraps,
+    };
+    use fauna_core::crypto::{AccountStateKindKeys, BackupKey, DelegableSchedule};
+    use fauna_core::grant_event::parse_writer_factor;
+    use fauna_mls::wrapped_blob::generate_x25519_keypair;
+    use fauna_protocol::ext_kind::ExtKind;
+
+    const WRITER: [u8; 32] = [0xE7u8; 32];
+    let kinds: Vec<ExtKind> = ["ext.app.example.notes", "ext.app.example.todo"]
+        .iter()
+        .map(|k| k.parse().expect("an ext kind"))
+        .collect();
+    let (holder_sk, holder_pk) = generate_x25519_keypair();
+    let nest = Arc::new(FakeNest::default());
+    let window_end = far_future();
+
+    // The predecessor's consent grant, logged the way the consent path logs
+    // it (`event_scope_of` over the blob's tuples, the writer folded in).
+    let predecessor = DelegableSchedule::derive(&BackupKey::derive(&PREDECESSOR_SEED));
+    let mut scopes = ext_kinds_scope_wraps(&predecessor, &kinds, Some(&WRITER));
+    scopes.extend(personalization_scope_wraps(&predecessor));
+    let tuples: Vec<ScopeTuple> = scopes.into_iter().map(|(t, _)| t).collect();
+    let ledger = successor_ledger_with(&[(
+        [0xEEu8; 16],
+        holder_pk,
+        grant_log::event_scope_of(&tuples),
+        window_end,
+    )]);
+
+    let outcome = block_on(remint_capability_grants(
+        nest.clone(),
+        SUCCESSOR_SEED,
+        &ledger,
+        None,
+        &mail(),
+    ))
+    .expect("run");
+    assert_eq!(
+        outcome,
+        GrantRemintOutcome::Reminted {
+            reminted: 1,
+            owed: 0
+        },
+        "an ext.* grant is never owed for want of a generic payload"
+    );
+
+    let minted = nest.minted.lock().unwrap().clone();
+    assert_eq!(minted.len(), 1);
+    let blob = GrantBlob::from_canonical_bytes(&minted[0]).expect("decode");
+    assert_eq!(blob.holder, holder_pk);
+    assert_eq!(blob.index.0.as_slice(), &successor_kp().actor_id().0[..]);
+
+    // Every pair opens under the holder secret to the SUCCESSOR's schedule.
+    let successor = DelegableSchedule::derive(&BackupKey::derive(&SUCCESSOR_SEED));
+    let expect = |kind: &str| {
+        let (entry_key, item_blind) = successor.for_kind(kind).to_grant();
+        AccountStateKindKeys::from_grant(kind, entry_key, item_blind).item_key(b"probe")
+    };
+    let ext = open_ext_kind_keys(&blob, &holder_sk).expect("the ext pairs open");
+    assert_eq!(ext.len(), kinds.len());
+    for keys in &ext {
+        assert_eq!(
+            keys.item_key(b"probe"),
+            expect(keys.kind()),
+            "{}",
+            keys.kind()
+        );
+    }
+    let personalization =
+        open_personalization_keys(&blob, &holder_sk).expect("the twin's pairs open");
+    assert_eq!(personalization.len(), PERSONALIZATION_GRANT_KINDS.len());
+    for keys in &personalization {
+        assert_eq!(
+            keys.item_key(b"probe"),
+            expect(keys.kind()),
+            "{}",
+            keys.kind()
+        );
+    }
+
+    // The keyless write tuples name the same writer, one per kind.
+    let writers: Vec<_> = blob
+        .scope
+        .iter()
+        .filter(|t| t.class == ScopeTuple::CLASS_CONTENT_WRITE)
+        .map(|t| t.factor.as_deref().and_then(parse_writer_factor))
+        .collect();
+    assert_eq!(writers, vec![Some(WRITER); kinds.len()]);
+
+    // The ledger: the replacement is live and carries the scope verbatim.
+    let live = current_grants(&ledger.current());
+    assert_eq!(live.len(), 1);
+    assert_ne!(live[0].grant_id.as_slice(), &[0xEEu8; 16]);
+    assert_eq!(live[0].scope, grant_log::event_scope_of(&tuples));
+    assert_eq!(live[0].window_end, window_end);
+    assert_every_held_grant_is_named(&nest, &ledger);
+}

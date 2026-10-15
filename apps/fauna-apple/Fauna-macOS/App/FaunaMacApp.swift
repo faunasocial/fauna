@@ -992,7 +992,7 @@ public struct FaunaMacApp: App {
             appState.syncAgentProvisioner = provisioner
             // No content keys are pushed from here: the agent resolves every
             // set's keys from this account's custody itself and re-reads it at
-            // its own edges (`on-demand-files.md` § Shared sets on a capability
+            // its own edges (`on-demand-files-shared-sets.md` § Shared sets on a capability
             // host → *One mechanism*).
             locationsModel.attach(provisioner: provisioner)
             // Health polling doesn't depend on the convergence loop actually
@@ -1092,15 +1092,17 @@ public struct FaunaMacApp: App {
         guard let material,
               let nodeUrl = material.nestUrl,
               let url = URL(string: nodeUrl),
-              let deviceId = material.deviceId else {
+              let deviceId = FaunaAccounts.sessionDeviceId(
+                  forActorId: material.actorId, keychain: keychain) else {
             // Defensive. `Online` means the machine authenticated against a saved identity
             // + nest_url, but we still cannot build a client without a device_id and a
             // well-formed URL. For a bound instance there is no wizard to fall into
             // (onboarding belongs to the primary) — refuse instead. For the primary,
-            // enter the wizard rather than a half-wired session. (`deviceId` is written
-            // at the onboarding handoff and is only ever deleted together with
-            // `nodeUrl`, so this should be unreachable — windows keeps the same guard
-            // for the same reason.)
+            // enter the wizard rather than a half-wired session. The device id is the
+            // shared get-or-create (`FaunaAccounts.sessionDeviceId`), which mints
+            // when the slot is empty or not a sync id, so for a registered actor
+            // only a nest_url-less/unparseable-URL material or a failed install-secret
+            // read lands here — windows keeps the same guard for the same reason.
             if let bound = appState.boundActorId {
                 refuseLaunch(
                     actorId: bound,
@@ -1399,10 +1401,10 @@ public struct FaunaMacApp: App {
             }
         }
 
-        // File Provider auto-appear (file-sync.md § On-Demand Files → Apple File
+        // File Provider auto-appear (on-demand-files-apple.md § On-Demand Files → Apple File
         // Provider binding): converge the per-set FP domains onto the user's own
         // sets this device's place accepts in and the sets shared with the account
-        // (on-demand-files.md § Shared sets on a capability host, decision 3;
+        // (on-demand-files-shared-sets.md § Shared sets on a capability host, decision 3;
         // per-device toggle store, default ON) **minus the
         // bound-folder sets** — the one-local-presence rule; a binding's resident
         // engine outranks the ambient toggle — and provision the app-dead
@@ -1862,6 +1864,20 @@ public struct FaunaMacApp: App {
                 // believes it. Convention 11: a refusal is LOUD.
                 machineMethodResultBox.value = nil
                 switch await DeviceSetStateTestCommand.apply(command, api: appState.liveClient?.api) {
+                case .report(let json):
+                    machineMethodResultBox.value = json
+                case .refused(let reason):
+                    testAgentFailure(reason)
+                }
+            case "read_marker_state":
+                // The read-state relaunch witness's durability barrier — this
+                // app's own account-store read marker for `channel_id_hex`
+                // (`conversation-read-state.md` § The read-marker record).
+                // Shared FaunaKit handler (macOS + iOS, one implementation);
+                // slot cleared FIRST and written only on success, exactly as
+                // `device_set_state` above (a refusal leaves it empty).
+                machineMethodResultBox.value = nil
+                switch await ReadMarkerStateTestCommand.apply(command, api: appState.liveClient?.api) {
                 case .report(let json):
                     machineMethodResultBox.value = json
                 case .refused(let reason):
@@ -3006,7 +3022,7 @@ public struct FaunaMacApp: App {
         await tearDownSessionForSwitch()
         Task { @MainActor in
             // FP teardown must COMPLETE before the incoming session starts
-            // (file-sync.md § Apple File Provider binding, multi-account: the
+            // (on-demand-files-apple.md § Apple File Provider binding, multi-account: the
             // capability store is single-slot, so a stale async revoke landing
             // after the new account's provision would wipe the fresh slot; and
             // the outgoing account's domains must not keep serving mid-switch).

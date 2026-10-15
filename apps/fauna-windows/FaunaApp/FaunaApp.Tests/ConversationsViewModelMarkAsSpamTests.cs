@@ -52,6 +52,9 @@ public class ConversationsViewModelMarkAsSpamTests
         public Task<SpamWriteResult> TrainSpamModelClientAsync(string text, bool isSpam) =>
             throw new System.NotImplementedException();
 
+        public Task TrainModerationCorrectionAsync(string contentId, bool isSpam) =>
+            throw new System.NotImplementedException();
+
         public Task<SpamWriteResult> TrainSpamModelClientMailAsync(
             string text, bool isSpam, byte[] messageId, string mailbox, string subject)
         {

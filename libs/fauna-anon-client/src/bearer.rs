@@ -67,13 +67,36 @@ pub struct MintedBearer {
     /// above compares it against its own clock, so it must never carry the
     /// nest's.
     pub expires_at: u64,
+    /// The account identity the mint's reply confirmed — `Some` from
+    /// [`mint_bearer_over_silent_challenge`] (the `VerifyReply` carries
+    /// `handle`/`domain`/`tier`), `None` from the handshake, device-handshake
+    /// and custody mints, whose replies carry none. **Kept, not dropped**, for
+    /// the same reason as `token_id`: it is how the session client learns who
+    /// it is signed in as without a second challenge
+    /// ([`MintedIdentity`]; `transport-connection.md` § The dial budget).
+    pub identity: Option<MintedIdentity>,
 }
+
+pub use fauna_protocol::auth::MintedIdentity;
 
 impl MintedBearer {
     /// Build from a mint reply, anchoring the expiry at receipt — the one
     /// conversion every mint in this module makes.
-    fn at_receipt(token: String, token_id: String, expires_in: u64, expires_at: u64) -> Self {
-        Self::at_receipt_on(now_client_secs(), token, token_id, expires_in, expires_at)
+    fn at_receipt(
+        token: String,
+        token_id: String,
+        expires_in: u64,
+        expires_at: u64,
+        identity: Option<MintedIdentity>,
+    ) -> Self {
+        Self::at_receipt_on(
+            now_client_secs(),
+            token,
+            token_id,
+            expires_in,
+            expires_at,
+            identity,
+        )
     }
 
     /// [`Self::at_receipt`] with the client's `now` passed in, so a test can
@@ -84,6 +107,7 @@ impl MintedBearer {
         token_id: String,
         expires_in: u64,
         expires_at: u64,
+        identity: Option<MintedIdentity>,
     ) -> Self {
         Self {
             token,
@@ -93,6 +117,7 @@ impl MintedBearer {
                 expires_in,
                 expires_at,
             ),
+            identity,
         }
     }
 }
@@ -186,6 +211,7 @@ pub async fn mint_bearer_over_handshake(
         reply.token_id,
         reply.expires_in,
         reply.expires_at,
+        None,
     ))
 }
 
@@ -247,11 +273,13 @@ pub async fn mint_bearer_over_silent_challenge(
         .map_err(AnonClientError::Trust)?;
     }
 
+    let identity = reply.identity();
     Ok(MintedBearer::at_receipt(
         reply.token,
         reply.token_id,
         reply.expires_in,
         reply.expires_at,
+        Some(identity),
     ))
 }
 
@@ -309,6 +337,7 @@ pub async fn mint_bearer_over_device_handshake(
         reply.token_id,
         reply.expires_in,
         reply.expires_at,
+        None,
     ))
 }
 
@@ -363,6 +392,64 @@ pub async fn mint_bearer_over_custody_handshake(
         reply.token_id,
         reply.expires_in,
         reply.expires_at,
+        None,
+    ))
+}
+
+/// The custodied-fleet sibling (`account-replica-posture.md` § Replica
+/// posture → *The custody grant + ceremony*, the custodian-NEST serve door
+/// bullet, ruling 2): mint an OWNER-FLEET device's restore-read bearer at a
+/// CUSTODIAN nest over one `fauna.auth.custodied_fleet_handshake` round trip,
+/// signing the domain-tagged
+/// [`custodied_fleet_handshake_signed_message`](fauna_protocol::auth::custodied_fleet_handshake_signed_message)
+/// with the device's principal key and carrying its root-signed
+/// `DeviceAuthorization` inline. The device holds no account on the custodian
+/// nest — this is its whole auth path there. Same anonymous connect, fresh
+/// nonce, TLS channel-binding graduation.
+pub async fn mint_bearer_over_custodied_fleet_handshake(
+    nest_url: &str,
+    owner_actor_id: [u8; 32],
+    device_signing_key: &SigningKey,
+    authorization: &fauna_core::encoding::EmbedAsBytes,
+) -> Result<MintedBearer, AnonClientError> {
+    use fauna_protocol::auth::{CUSTODIED_FLEET_HANDSHAKE_KIND, CustodiedFleetHandshakeRequest};
+
+    let client = AnonymousNestClient::connect(nest_url).await?;
+    let nest_id = crate::read_login_binding(&client).await?;
+
+    let device_key = device_signing_key.verifying_key().to_bytes();
+    let timestamp = fauna_core::data::Timestamp::now_millis();
+    let nonce = crate::fresh_nonce();
+    let msg = fauna_protocol::auth::custodied_fleet_handshake_signed_message(
+        &owner_actor_id,
+        &device_key,
+        timestamp,
+        &nest_id,
+        &nonce,
+    );
+    let signature = device_signing_key.sign(&msg);
+
+    let req = CustodiedFleetHandshakeRequest {
+        owner_actor_id: fauna_core::hex32::encode(&owner_actor_id),
+        device_key: fauna_core::hex32::encode(&device_key),
+        timestamp,
+        signature: hex::encode(signature.to_bytes()),
+        client_nonce: fauna_protocol::ByteBuf::from(nonce.to_vec()),
+        authorization: authorization.clone(),
+        nest_id: fauna_core::hex32::encode(&nest_id),
+        extra: Default::default(),
+    };
+
+    let reply: HandshakeReply = client.request(CUSTODIED_FLEET_HANDSHAKE_KIND, req).await?;
+
+    graduate_bearer_channel_binding(&client, nest_url, &nonce, reply.cert_binding.as_ref()).await?;
+
+    Ok(MintedBearer::at_receipt(
+        reply.token,
+        reply.token_id,
+        reply.expires_in,
+        reply.expires_at,
+        None,
     ))
 }
 
@@ -385,6 +472,7 @@ mod tests {
             "id".into(),
             3600,
             nest_now + 3600,
+            None,
         );
         assert_eq!(minted.expires_at, client_now + 3600);
     }
@@ -400,6 +488,7 @@ mod tests {
             "id".into(),
             3600,
             nest_now + 3600,
+            None,
         );
         assert_eq!(minted.expires_at, client_now + 3600);
     }
@@ -409,8 +498,40 @@ mod tests {
     #[test]
     fn an_unreadable_clock_keeps_the_nest_deadline() {
         let minted =
-            MintedBearer::at_receipt_on(None, "t".into(), "id".into(), 3600, 1_800_003_600);
+            MintedBearer::at_receipt_on(None, "t".into(), "id".into(), 3600, 1_800_003_600, None);
         assert_eq!(minted.expires_at, 1_800_003_600);
+    }
+
+    /// The silent-challenge reply's identity rides the mint out — the field
+    /// every native mint dropped until 2026-10-08, which cost tui, linux and
+    /// apple a second challenge at sign-in to learn it.
+    #[test]
+    fn a_verify_replys_identity_rides_the_mint() {
+        let reply = fauna_protocol::auth::VerifyReply {
+            token: "t".into(),
+            token_id: "id".into(),
+            handle: "alice".into(),
+            domain: "nest.example".into(),
+            tier: "free".into(),
+            ..Default::default()
+        };
+        let identity = reply.identity();
+        let minted = MintedBearer::at_receipt_on(
+            None,
+            reply.token,
+            reply.token_id,
+            3600,
+            1_800_003_600,
+            Some(identity),
+        );
+        assert_eq!(
+            minted.identity,
+            Some(MintedIdentity {
+                handle: "alice".into(),
+                domain: "nest.example".into(),
+                tier: "free".into(),
+            })
+        );
     }
 
     /// The anchor reads the ONE client clock (`fauna_protocol::client_clock`),

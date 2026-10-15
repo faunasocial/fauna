@@ -34,7 +34,7 @@ pub fn build_atproto_settings_machine(
 ) -> Result<Arc<AtprotoSettingsMachine>, FfiError> {
     let keypair = crate::keypair_from_bytes(&secret)?;
     #[cfg(feature = "account-runtime")]
-    let consent_grants = consent_grant_seams(&keypair);
+    let consent_grants = consent_grant_seams(&keypair, nest.nest_arc());
     let machine = fauna_atproto_settings_machine::build_atproto_settings_machine(
         nest.nest_arc(),
         keypair,
@@ -72,6 +72,7 @@ pub fn build_atproto_settings_machine(
 #[cfg(feature = "account-runtime")]
 pub(crate) fn consent_grant_seams(
     keypair: &fauna_core::identity::ActorKeypair,
+    nest: Arc<fauna_client::NestClient>,
 ) -> Arc<fauna_atproto_settings_machine::ConsentGrantSeams> {
     let door = Arc::new(fauna_client_config::ResolvingLedgerStore::new(
         crate::account_runtime::handle,
@@ -81,7 +82,8 @@ pub(crate) fn consent_grant_seams(
             keypair,
             door.clone(),
             door,
-        ),
+        )
+        .with_nest_custody(crate::account_runtime::folder_key_store(), nest),
     )
 }
 

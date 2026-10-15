@@ -4,14 +4,12 @@
 //! `settings/encryption.rs`; the i18n copy set (`encryption_page`) already
 //! existed for it, unrendered on tui until now.
 //!
-//! **No ui.yaml element ids exist for this content on ANY of the 4 apps that
-//! render it** (linux/web/windows/macos all built ahead of any e2e id
-//! allocation for this page). tui follows the same shape rather than
-//! inventing a new id family unilaterally (§ UI Consistency rule A): every
-//! element here besides the shared `page-heading`/`settings-nav-back` is
-//! `Element::chrome`/`chrome_button` — real, human-usable content and (for
-//! the Refresh action) a real focus-ring/keyboard target, just not
-//! ui.yaml-registered or e2e-drivable, exactly linux's own gap.
+//! **The three content ids** — `encryption-keypackage-count`,
+//! `encryption-keypackage-low-warning` (present only while low) and
+//! `encryption-keypackage-refresh-button` — were user-approved 2026-09-25
+//! under rule A; tui is the first app to carry them. The low test is the
+//! shared [`fauna_conversations::keypackages_low`] (fewer than five), never a
+//! per-app literal (`direct-messages.md` § Key Package Management).
 //!
 //! **The count read and the refresh mint are deliberately two different
 //! client seams.** The count (`Op::HydrateEncryption`) is a pure
@@ -34,10 +32,6 @@ use fauna_ui_ids as ids;
 use super::{Action, SettingsState};
 use crate::element::{Element, Gesture};
 
-/// Below this available count, the low-key warning paints — linux's
-/// `LOW_KEY_THRESHOLD`.
-const LOW_KEY_THRESHOLD: u64 = 10;
-
 pub(super) fn encryption_elements(state: &SettingsState) -> Vec<Element> {
     let mut els = vec![
         Element::label(ids::PAGE_HEADING, enc::TITLE),
@@ -56,12 +50,15 @@ pub(super) fn encryption_elements(state: &SettingsState) -> Vec<Element> {
     // either "fine" or "low" (the `quota`/`features` un-hydrated-paint
     // discipline).
     if let Some(count) = state.encryption_key_packages
-        && count < LOW_KEY_THRESHOLD
+        && fauna_conversations::keypackages_low(count)
     {
-        els.push(Element::chrome(enc::LOW_KEY_WARNING_TITLE));
-        els.push(Element::chrome(enc::low_key_warning_body(
-            &count.to_string(),
-        )));
+        els.push(
+            Element::label(
+                ids::ENCRYPTION_KEYPACKAGE_LOW_WARNING,
+                enc::low_key_warning_body(&count.to_string()),
+            )
+            .labelled(enc::LOW_KEY_WARNING_TITLE),
+        );
     }
 
     els.push(Element::chrome(enc::MLS_KEY_PACKAGES));
@@ -71,14 +68,16 @@ pub(super) fn encryption_elements(state: &SettingsState) -> Vec<Element> {
         Some(count) => count.to_string(),
         None => common::LOADING.to_string(),
     };
-    els.push(Element::chrome(format!(
-        "{}: {count_text}",
-        enc::AVAILABLE_KEY_PACKAGES
-    )));
+    els.push(
+        Element::label(ids::ENCRYPTION_KEYPACKAGE_COUNT, count_text)
+            .labelled(enc::AVAILABLE_KEY_PACKAGES),
+    );
 
     els.push(Element::chrome(enc::REFRESH_KEYS_DESCRIPTION));
-    els.push(Element::chrome_button(
+    els.push(Element::gesture_button(
+        ids::ENCRYPTION_KEYPACKAGE_REFRESH_BUTTON,
         enc::REFRESH_KEYS,
+        true,
         Gesture::Settings(Action::RefreshKeyPackages),
     ));
 
@@ -149,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn a_count_below_ten_paints_the_low_key_warning_naming_the_exact_count() {
+    fn a_count_below_five_paints_the_low_key_warning_naming_the_exact_count() {
         let app = state_with(Some(3));
         let painted = crate::ui::painted_line_texts(&encryption_elements(&app.settings));
         assert!(
@@ -164,10 +163,9 @@ mod tests {
     }
 
     #[test]
-    fn exactly_at_threshold_paints_no_warning() {
-        // LOW_KEY_THRESHOLD is 10 — the boundary is "< 10", not "<= 10", so 10
-        // itself is healthy. A mutation flipping `<` to `<=` must fail this.
-        let app = state_with(Some(LOW_KEY_THRESHOLD));
+    fn a_count_between_five_and_ten_paints_no_warning() {
+        // The pre-unification tui threshold was ten; seven is healthy now.
+        let app = state_with(Some(7));
         let painted = crate::ui::painted_line_texts(&encryption_elements(&app.settings));
         assert!(
             !painted
@@ -177,18 +175,40 @@ mod tests {
     }
 
     #[test]
-    fn refresh_is_a_real_focusable_control_with_no_ui_yaml_id() {
-        let app = state_with(Some(20));
-        let els = encryption_elements(&app.settings);
-        let refresh = els
-            .iter()
-            .find(|e| e.text == enc::REFRESH_KEYS)
-            .expect("Refresh Keys control painted");
-        assert_eq!(
-            refresh.id, "",
-            "no ui.yaml id exists for this content on ANY app — chrome_button, not a minted id"
+    fn exactly_at_threshold_paints_no_warning() {
+        // The shared threshold is five (`direct-messages.md` § Key Package
+        // Management: "fewer than five") — five itself is healthy, so a
+        // mutation flipping `<` to `<=` must fail this.
+        let app = state_with(Some(fauna_conversations::KEYPACKAGE_LOW_THRESHOLD));
+        let painted = crate::ui::painted_line_texts(&encryption_elements(&app.settings));
+        assert!(
+            !painted
+                .iter()
+                .any(|l| l.contains(enc::LOW_KEY_WARNING_TITLE))
         );
+    }
+
+    #[test]
+    fn the_approved_ids_carry_the_count_the_warning_and_refresh() {
+        let app = state_with(Some(3));
+        let els = encryption_elements(&app.settings);
+        let by_id = |id: &str| els.iter().find(|e| e.id == id);
+        assert_eq!(
+            by_id(ids::ENCRYPTION_KEYPACKAGE_COUNT).map(|e| e.text.as_str()),
+            Some("3"),
+            "the count id's text is the bare count every driver reads"
+        );
+        assert!(by_id(ids::ENCRYPTION_KEYPACKAGE_LOW_WARNING).is_some());
+        let refresh = by_id(ids::ENCRYPTION_KEYPACKAGE_REFRESH_BUTTON).expect("refresh");
+        assert_eq!(refresh.text, enc::REFRESH_KEYS);
         assert!(refresh.enabled);
+        let healthy = state_with(Some(5));
+        assert!(
+            !encryption_elements(&healthy.settings)
+                .iter()
+                .any(|e| e.id == ids::ENCRYPTION_KEYPACKAGE_LOW_WARNING),
+            "the warning id is absent while the count is not low"
+        );
     }
 
     #[test]

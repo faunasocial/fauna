@@ -129,17 +129,26 @@ public enum SyncStateDir {
         /// resolved by shared Rust (`platform_state_base()`) so this app can
         /// never spell the root differently from the agent whose `fsid-<ref>.db`s
         /// it reads there. Under an e2e launch the same call resolves inside the
-        /// launch's relocated `HOME`.
-        public static var userDomainSyncDir: URL {
-            URL(fileURLWithPath: platformStateBase(), isDirectory: true)
+        /// launch's relocated `HOME`. `nil` — logged — when the process has no
+        /// absolute home: shared Rust refuses a shared fallback such as `/tmp`
+        /// rather than resolve one (`account-data-plane.md` § The account store →
+        /// Placement).
+        public static var userDomainSyncDir: URL? {
+            do {
+                return URL(fileURLWithPath: try platformStateBase(), isDirectory: true)
+            } catch {
+                logMessage(level: .error, target: "fauna.syncstate",
+                           message: "no user-domain sync root: \(error)")
+                return nil
+            }
         }
 
         /// `~/Library/Application Support/Fauna` — the user-domain home the
         /// app's other install-scoped files hang off (the deployment-seed
         /// `config-replica`, the pin store's `trust/`), one level above
-        /// ``userDomainSyncDir``.
-        public static var userDomainHome: URL {
-            userDomainSyncDir.deletingLastPathComponent()
+        /// ``userDomainSyncDir``; `nil` with it.
+        public static var userDomainHome: URL? {
+            userDomainSyncDir?.deletingLastPathComponent()
         }
     #endif
 

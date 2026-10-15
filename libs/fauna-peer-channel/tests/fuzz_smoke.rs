@@ -230,6 +230,27 @@ fn kind_payload_corpus_replays_ok_and_sweep_never_panics() {
             "peer_sync_chunks_pull_reply" => {
                 decode_strict::<fauna_protocol::peer_sync::PeerSyncChunksPullReply>(&entry).is_ok()
             }
+            "peer_sync_changes_list_request" => {
+                decode_strict::<fauna_protocol::peer_sync::PeerSyncChangesListRequest>(&entry)
+                    .is_ok()
+            }
+            "peer_sync_changes_list_reply" => {
+                decode_strict::<fauna_protocol::peer_sync::PeerSyncChangesListReply>(&entry).is_ok()
+            }
+            "peer_change_row" => {
+                decode_strict::<fauna_protocol::peer_row::PeerChangeRow>(&entry).is_ok()
+            }
+            "peer_sync_manifests_get_request" => {
+                decode_strict::<fauna_protocol::peer_sync::PeerSyncManifestsGetRequest>(&entry)
+                    .is_ok()
+            }
+            "peer_sync_manifests_get_reply" => {
+                decode_strict::<fauna_protocol::peer_sync::PeerSyncManifestsGetReply>(&entry)
+                    .is_ok()
+            }
+            "peer_sync_manifest" => {
+                decode_strict::<fauna_protocol::peer_sync::PeerSyncManifest>(&entry).is_ok()
+            }
             "sync_changes_list_request" => decode_strict::<SyncChangesListRequest>(&entry).is_ok(),
             "sync_changes_list_reply" => decode_strict::<SyncChangesListReply>(&entry).is_ok(),
             other => panic!("kind_payloads corpus entry {name} has unknown type prefix {other}"),
@@ -706,6 +727,112 @@ async fn regenerate_corpus() {
     );
 }
 
+/// Writes the same-account folder row pull's `kind_payloads` entries
+/// (`fauna.peer.sync.changes.list` / `fauna.peer.sync.manifests.get`) — only
+/// these, so the rest of the committed corpus (the captured exchange, and the
+/// stale-key evidence entries [`regenerate_corpus`] warns about) is untouched.
+/// The row entries carry the share corpus's two row shapes — one struct, one
+/// stem in both dirs.
+///
+/// ```text
+/// cargo test -p fauna-peer-channel --test fuzz_smoke -- --ignored regenerate_peer_sync_folder_corpus
+/// ```
+#[test]
+#[ignore = "writes into fuzz/corpus/ — run manually, commit the output"]
+fn regenerate_peer_sync_folder_corpus() {
+    use fauna_protocol::encode_canonical;
+    use fauna_protocol::peer_row::PeerChangeRow;
+    use fauna_protocol::peer_sync::{
+        PeerSyncChangesListReply, PeerSyncChangesListRequest, PeerSyncManifest,
+        PeerSyncManifestsGetReply, PeerSyncManifestsGetRequest,
+    };
+    use serde_bytes::ByteBuf;
+
+    let dir = corpus_dir("kind_payloads");
+    std::fs::create_dir_all(&dir).expect("create corpus dir");
+    let write = |name: &str, bytes: bytes::Bytes| {
+        std::fs::write(dir.join(name), bytes).expect("write");
+    };
+    let folder = || "own:3f2c".to_string();
+
+    write(
+        "peer_sync_changes_list_request-1.bin",
+        encode_canonical(&PeerSyncChangesListRequest {
+            folder: folder(),
+            since: 42,
+            extra: BTreeMap::new(),
+        })
+        .unwrap(),
+    );
+    let row = fauna_protocol::sync::SyncChange {
+        seq: 7,
+        path_hash: "aa".repeat(32),
+        manifest_hash: Some("bb".repeat(32)),
+        size_bytes: 1_048_576,
+        change_type: "modify".to_string(),
+        created_at: 1_760_000_000,
+        path: Some("holiday/clip.mp4".to_string()),
+        author_actor_id: Some("c1".repeat(32)),
+        device_id: Some("12".repeat(16)),
+        ..Default::default()
+    };
+    let sequenced = PeerChangeRow {
+        change: row.clone(),
+        sequenced: true,
+        signer_cert: None,
+        extra: BTreeMap::new(),
+    };
+    let pending = PeerChangeRow {
+        change: fauna_protocol::sync::SyncChange { seq: 0, ..row },
+        sequenced: false,
+        signer_cert: None,
+        extra: BTreeMap::new(),
+    };
+    write(
+        "peer_change_row-1.bin",
+        encode_canonical(&sequenced).unwrap(),
+    );
+    write("peer_change_row-2.bin", encode_canonical(&pending).unwrap());
+    write(
+        "peer_sync_changes_list_reply-1.bin",
+        encode_canonical(&PeerSyncChangesListReply {
+            changes: vec![sequenced, pending],
+            more: true,
+            extra: BTreeMap::new(),
+        })
+        .unwrap(),
+    );
+
+    let manifest = PeerSyncManifest {
+        hash: ByteBuf::from(vec![0xA1; 32]),
+        bytes: ByteBuf::from(vec![0xCB; 96]),
+        extra: BTreeMap::new(),
+    };
+    write(
+        "peer_sync_manifest-1.bin",
+        encode_canonical(&manifest).unwrap(),
+    );
+    write(
+        "peer_sync_manifests_get_request-1.bin",
+        encode_canonical(&PeerSyncManifestsGetRequest {
+            folder: folder(),
+            manifest_hashes: vec![ByteBuf::from(vec![0xA1; 32]), ByteBuf::from(vec![0xB2; 32])],
+            extra: BTreeMap::new(),
+        })
+        .unwrap(),
+    );
+    write(
+        "peer_sync_manifests_get_reply-1.bin",
+        encode_canonical(&PeerSyncManifestsGetReply {
+            manifests: vec![manifest],
+            missing: vec![ByteBuf::from(vec![0xB2; 32])],
+            deferred: vec![ByteBuf::from(vec![0xC3; 32])],
+            extra: BTreeMap::new(),
+        })
+        .unwrap(),
+    );
+}
+
 // ── The p2p-share plane's own targets (feature-gated — see
 // `hardening::KIND_PAYLOAD_COVERAGE_P2P_SHARE`'s docs: separate table,
 // separate corpus dir, and the gate runs `--features p2p-share`) ────────────
@@ -745,7 +872,7 @@ mod p2p_share {
                 "peer_share_changes_list_reply" => {
                     decode_strict::<PeerShareChangesListReply>(&entry).is_ok()
                 }
-                "peer_share_change" => decode_strict::<PeerShareChange>(&entry).is_ok(),
+                "peer_change_row" => decode_strict::<PeerShareChange>(&entry).is_ok(),
                 "peer_share_manifests_get_request" => {
                     decode_strict::<PeerShareManifestsGetRequest>(&entry).is_ok()
                 }
@@ -978,13 +1105,10 @@ mod p2p_share {
             extra: BTreeMap::new(),
         };
         write(
-            "peer_share_change-1.bin",
+            "peer_change_row-1.bin",
             encode_canonical(&sequenced).unwrap(),
         );
-        write(
-            "peer_share_change-2.bin",
-            encode_canonical(&pending).unwrap(),
-        );
+        write("peer_change_row-2.bin", encode_canonical(&pending).unwrap());
         write(
             "peer_share_changes_list_reply-1.bin",
             encode_canonical(&PeerShareChangesListReply {

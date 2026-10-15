@@ -828,7 +828,9 @@ fn the_offline_gate_holds_the_admin_nest_page() {
             "admin-nest-serving-port-save-button",
             "admin-nest-nat-mode-save-button",
             "nest-os-restart-now-button",
-            "admin-factory-reset-button",
+            // `admin-factory-reset-button` is absent on purpose: arming the
+            // confirm is local, so the wire kind rides on the dialog's confirm
+            // button (`views/admin.rs` `build_factory_reset_section`).
             // The outside-app sign-in keys' two dispatching controls: the
             // ordinary rotation, and the one confirm both forced arms share
             // (declared with the key arm's kind until an arm re-declares it).

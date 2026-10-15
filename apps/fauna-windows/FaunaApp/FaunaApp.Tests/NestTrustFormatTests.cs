@@ -24,6 +24,8 @@ public class NestTrustFormatTests
             ["nests/scope_posts"] = "Posts",
             ["nests/scope_posts_tier"] = "Posts — {tier}",
             ["nests/scope_spam_labels"] = "Write spam labels",
+            ["nests/scope_folder"] = "Your folder \"{folder}\"",
+            ["nests/scope_folder_deleted"] = "A folder you have since deleted",
             ["nests/status_active"] = "Active",
             ["nests/status_expiring"] = "Expiring soon",
             ["nests/status_expired"] = "Paused — renew to resume",
@@ -81,6 +83,31 @@ public class NestTrustFormatTests
     {
         var scopes = new[] { Scope("content.read", "mail"), Scope("content.read", "calendar") };
         Assert.Equal("Mail, Calendar", NestTrustFormat.ScopeLine(scopes));
+    }
+
+    [Fact]
+    public void ScopeLine_NamesThePaywallGrantsFolder()
+    {
+        var scopes = new[] { Scope("content.read", "folder") };
+        Assert.Equal("Your folder \"premium\"", NestTrustFormat.ScopeLine(scopes, new TrustFolder.Named("premium")));
+        Assert.Equal("A folder you have since deleted", NestTrustFormat.ScopeLine(scopes, new TrustFolder.Deleted()));
+    }
+
+    [Fact]
+    public void HistoryLine_ScopelessRevokeNamesTheGrantsFolder()
+    {
+        var unix = new DateTimeOffset(2026, 1, 2, 3, 4, 0, TimeSpan.Zero).ToUnixTimeSeconds();
+        var when = DateTimeOffset.FromUnixTimeSeconds(unix).ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+        var row = new TrustHistoryRow(
+            grantId: new byte[] { 1 },
+            holder: new byte[] { 2 },
+            kind: TrustEventKind.Revoke,
+            scope: Array.Empty<TrustScope>(),
+            windowStart: 0,
+            windowEnd: 0,
+            at: unix,
+            folder: new TrustFolder.Named("premium"));
+        Assert.Equal($"Trust revoked: Your folder \"premium\" · {when}", NestTrustFormat.HistoryLine(row));
     }
 
     // TrustLiveness is a UniFFI-internal enum — it can't back a public [Theory]

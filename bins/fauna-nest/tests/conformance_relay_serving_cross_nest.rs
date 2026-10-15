@@ -17,12 +17,11 @@
 //! the bytes to H's answer route under its write token → the reader is served,
 //! and H's store holds nothing.
 //!
-//! **The share is seeded beneath the handlers**: the nest refuses a
-//! metadata-only folder with a member on another nest at both doors until the
-//! cross-nest witness lands (`file-sync.md` § Relay serving, *Until that leg is
-//! built, the pair is refused*), so the folder, its claimed channel, the
+//! **The share is seeded beneath the handlers**: this file is about the two
+//! nests' serving kinds, not the share, so the folder, its claimed channel, the
 //! foreign roster row and the writer grant are written straight into H's
-//! database — the state the share would have left.
+//! database — the state the share would have left. The share itself, through
+//! the real agent, is `fauna-sync-agent`'s `cross_nest_agent_capstone`.
 //!
 //! Every "the seat was asked" claim is anchored on the seat's own socket — the
 //! push it receives. A lease's lapse is time, and is pinned beside the table
@@ -247,7 +246,7 @@ impl Harness {
 
 /// H holds the owner's metadata-only, group-bound folder with its channel
 /// claimed, and a roster row binding the member to M at M's URL — the state
-/// the cross-nest share leaves, written beneath the refusing doors. The member
+/// the cross-nest share leaves, written beneath the handlers. The member
 /// has an account and a sync device on M, none on H. The writer grant is the
 /// test's to give.
 async fn start() -> Harness {

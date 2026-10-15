@@ -417,9 +417,101 @@ impl FfiModerationClient {
     }
 }
 
+// ── Appeal (moderation.md § Legal takedown — the transparency triple's
+//    second leg) ──────────────────────────────────────────────────────────
+//
+// Gated `moderation-badge` for the same reason as the takedown console above
+// (bare `LocalizedText` / `QueueRow` cross-namespace types; the Go mail-bridge
+// has no moderation queue UI), so the tracked Go binding needs no regen.
+
+/// UniFFI face of [`fauna_client_moderation::row_is_appealable`] — whether a
+/// merged queue row ([`moderation_queue`]) carries a nest-issued decision to
+/// appeal. True for a server row only; a local detection's lever is the
+/// train-correction button.
+#[cfg(feature = "moderation-badge")]
+#[uniffi::export]
+pub fn row_is_appealable(row: QueueRow) -> bool {
+    fauna_client_moderation::row_is_appealable(&row)
+}
+
+/// UniFFI mirror of [`fauna_client_moderation::AppealFormView`] — what the
+/// queue's appeal form renders, derived once in shared Rust so no app grows
+/// its own guard or wording.
+#[cfg(feature = "moderation-badge")]
+#[derive(uniffi::Record)]
+pub struct FfiAppealFormView {
+    /// Whether the submit control may be offered.
+    pub can_submit: bool,
+    /// Why not, when it may not.
+    pub blocked_reason: Option<fauna_core::localized::LocalizedText>,
+    /// The submit control's label.
+    pub submit_label: fauna_core::localized::LocalizedText,
+    /// Names the content the appeal is filed against.
+    pub summary: fauna_core::localized::LocalizedText,
+}
+
+/// The appeal form's per-keystroke fold — pass the content id captured when
+/// the form was opened and the reason as typed.
+#[cfg(feature = "moderation-badge")]
+#[uniffi::export]
+pub fn appeal_form_view(content_id: String, reason: String) -> FfiAppealFormView {
+    let view = fauna_client_moderation::appeal_form_view(&fauna_client_moderation::AppealForm {
+        content_id,
+        reason,
+    });
+    FfiAppealFormView {
+        can_submit: view.can_submit,
+        blocked_reason: view.blocked_reason,
+        submit_label: view.submit_label,
+        summary: view.summary,
+    }
+}
+
+/// The appeal's outcome line (`appeal-status`) — the transport/handler error
+/// string on failure, `None` on success.
+#[cfg(feature = "moderation-badge")]
+#[uniffi::export]
+pub fn appeal_verdict(error: Option<String>) -> fauna_core::localized::LocalizedText {
+    fauna_client_moderation::appeal_verdict(error)
+}
+
+/// The dispatch leg of the appeal form, on the same client handle the queue
+/// read uses.
+#[cfg(feature = "moderation-badge")]
+#[fauna_uniffi_async::export]
+impl FfiModerationClient {
+    /// `fauna.moderation.appeal` — appeal the enforcement decision recorded
+    /// against `content_id` (the queue row's own id, captured when the form
+    /// opened). Gate the dispatch through [`appeal_form_view`]. Returns the
+    /// reply's `status` (`"appeal_recorded"` / `"appeal_already_recorded"`);
+    /// errors surface on the error channel for [`appeal_verdict`] to word.
+    pub async fn appeal(&self, content_id: String, reason: String) -> Result<String, FfiError> {
+        let reply = self
+            .client()
+            .appeal(content_id, reason)
+            .await
+            .map_err(stringify)?;
+        Ok(reply.status)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "moderation-badge")]
+    #[test]
+    fn appeal_faces_delegate_to_the_shared_fold() {
+        let blocked = appeal_form_view("ab".repeat(32), "  ".into());
+        assert!(!blocked.can_submit);
+        assert_eq!(
+            blocked.blocked_reason.expect("blocked").key,
+            "moderation.appeal_blocked_no_reason"
+        );
+        let ready = appeal_form_view("ab".repeat(32), "I hold the licence".into());
+        assert!(ready.can_submit);
+        assert_eq!(appeal_verdict(None).key, "moderation.appeal_recorded");
+    }
 
     #[test]
     fn report_share_entry_maps_from_proto() {

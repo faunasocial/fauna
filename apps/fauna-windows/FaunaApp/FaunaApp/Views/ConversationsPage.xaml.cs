@@ -15,8 +15,10 @@ using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
 using FaunaApp.Helpers;
 using FaunaApp.Services;
+using FaunaApp.Sync;
 using uniffi.fauna_conversations;
 using uniffi.fauna_ffi;
+using uniffi.fauna_labeler_catalog_machine;
 using FaunaApp.UiIds;
 
 namespace FaunaApp.Views;
@@ -235,6 +237,14 @@ public sealed partial class ConversationsPage : Page
         // paints unmarked until this resolves; the next observer tick (or
         // this load's own re-render below) catches up.
         _ = LoadMemberReviewRosterAsync();
+        // …and again on the shared store-change notice (account-runtime.md § A
+        // runtime's own pump is a source of the notice too): a person put up for
+        // review marks the OPEN thread's member chips with no re-visit.
+        if (_rpc is not null)
+        {
+            _rpc.StoreChanged -= OnStoreChanged;
+            _rpc.StoreChanged += OnStoreChanged;
+        }
 
         // search.md § User actions (SearchNav.Mail / SearchNav.Draft): a
         // present message id (Mail only) selects that message inside its
@@ -263,15 +273,81 @@ public sealed partial class ConversationsPage : Page
         // Navigating away destroys the compose controls — flush the live body to
         // the manager so returning to the page restores it (the manager is
         // session-owned and outlives the page). conversations.md § Persistence.
-        FlushActiveComposeDraft();
+        // Guarded: a sign-out's or switch's unload runs AFTER the actor change —
+        // see UnlessManagerRetired.
+        UnlessManagerRetired(FlushActiveComposeDraft, "unload draft flush");
         // Persist the just-flushed draft set to the nest now (draft-persistence v2),
         // in case the debounce window hadn't elapsed — fire-and-forget, best-effort.
         _ = App.ConvDrafts?.SaveNowAsync();
         if (_vm is not null) _vm.PropertyChanged -= Vm_PropertyChanged;
+        if (_rpc is not null) _rpc.StoreChanged -= OnStoreChanged;
         if (ReferenceEquals(Current, this)) Current = null;
     }
 
-    private void Vm_PropertyChanged(object? sender, PropertyChangedEventArgs e) => Refresh();
+    /// <summary>The store-change re-read of the review roster (the member chips'
+    /// source): a failed read keeps the roster held, an unchanged one repaints
+    /// nothing, and the compose draft is never touched (the pass is the same
+    /// <see cref="Refresh"/> every observer tick runs).</summary>
+    private async void OnStoreChanged()
+    {
+        if (_rpc is null) return;
+        IReadOnlyList<FfiMemberReview> roster;
+        try
+        {
+            roster = await _rpc.MemberReviewsListAsync();
+        }
+        catch (Exception ex)
+        {
+            FaunaApp.Core.Logs.ShellLog.Warn("ConversationsPage",
+                $"[store-change] member-review roster read failed: {ex.GetType().Name}");
+            return;
+        }
+        if (MemberReviewViewModel.SameRoster(roster, _memberReviewRoster)) return;
+        _memberReviewRoster = roster;
+        UnlessManagerRetired(Refresh, "store-change roster refresh");
+    }
+
+    private void Vm_PropertyChanged(object? sender, PropertyChangedEventArgs e) =>
+        UnlessManagerRetired(Refresh, "observer refresh");
+
+    /// <summary>
+    /// Run one of this page's passes over the manager <see cref="_vm"/> renders,
+    /// unless an actor change has already destroyed that manager under it.
+    ///
+    /// <para>The manager is retired off the UI thread, BEFORE this page is navigated
+    /// away: <c>ConversationsManagerHost.ResetForActorChange</c> (every sign-out, the
+    /// e2e reset, an account switch) disposes the host's own wrapper on the
+    /// command's thread, and the frame navigates on a later UI turn. So this page's
+    /// <see cref="Page_Unloaded"/> — and any observer tick queued in between (the
+    /// engine's retirement itself notifies) — always runs after the actor change.
+    /// When the page rendered off the host's wrapper (no <c>ConvSession</c> was
+    /// handed over: production's swallowed session-build failure, or the e2e
+    /// login's bounded await expiring), its next call is an
+    /// <see cref="ObjectDisposedException"/> on the UI thread, which killed the app
+    /// with <c>[fauna] FATAL (UI thread)</c>. A session
+    /// wrapper (<c>ConvSession.Manager()</c>) is the page's own and is never
+    /// disposed, so this guard only ever fires on the host-wrapper path.</para>
+    ///
+    /// <para>The exception IS the check, deliberately: a "retired?" flag read on
+    /// this thread races the dispose on that one, while the wrapper's own call
+    /// counter refuses atomically. Nothing is lost by skipping: the pass's target
+    /// no longer exists, so its write could not have landed, and the page is on its
+    /// way out (the flush that CAN land — into a session wrapper — never reaches the
+    /// catch). Same posture as <c>UnreadBadgeObserver</c>'s read of the same manager
+    /// mid-teardown.</para>
+    /// </summary>
+    private static void UnlessManagerRetired(Action pass, string what)
+    {
+        try
+        {
+            pass();
+        }
+        catch (ObjectDisposedException ex)
+        {
+            FaunaApp.Core.Logs.ShellLog.Info("ConversationsPage",
+                $"[actor-change] {what} skipped: the page's manager was retired ({ex.ObjectName})");
+        }
+    }
 
     /// <summary>
     /// Refresh every UI surface from the latest snapshot. Cheap; called
@@ -314,6 +390,9 @@ public sealed partial class ConversationsPage : Page
         var syncSw = System.Diagnostics.Stopwatch.StartNew();
         SyncThreads(_vm.Threads);
         _traceSyncThreadsMs = syncSw.ElapsedMilliseconds;
+
+        // The community-room invitations standing atop the list.
+        PaintRoomInvitations(_vm.RoomInvitations);
 
         // Backup-audit observation feed (backups.md § Audit-alert surface): the
         // newest message-kind activity this client has actually rendered, fed on
@@ -363,7 +442,8 @@ public sealed partial class ConversationsPage : Page
         var ap = _vm.AddParticipant;
         if (ap is not null)
         {
-            AddParticipantPicker.SetChips(ap.picker.chips.Select(a => new ChipItem(FaunaConversationsMethods.TypedAddressDisplay(a))).ToList());
+            AddParticipantPicker.SetChips(ap.picker.chips.Select(a => new ChipItem(ChipDisplay(a))).ToList());
+            AddParticipantPicker.SetBridgeLabels(BridgeLabels());
             AddParticipantPicker.UpdateResolveState(ap.picker.resolveState);
             AddParticipantOverlay.Visibility = Visibility.Visible;
         }
@@ -426,6 +506,18 @@ public sealed partial class ConversationsPage : Page
         }
     }
 
+    /// <summary>A picker chip's text: the shared per-rail display, bridge-aware so a
+    /// bridged address reads with the label its bridge declared
+    /// (<c>TypedAddressDisplayWithBridges</c> — the nest-side match, no app mapping).</summary>
+    private string ChipDisplay(TypedAddress a)
+        => FaunaConversationsMethods.TypedAddressDisplayWithBridges(
+            a, _vm?.Snapshot.bridges ?? Array.Empty<uniffi.fauna_core.BridgeIdentitySnapshot>());
+
+    /// <summary>The serving bridges' declared labels, for the picker's bridges line.</summary>
+    private IReadOnlyList<string> BridgeLabels()
+        => (_vm?.Snapshot.bridges ?? Array.Empty<uniffi.fauna_core.BridgeIdentitySnapshot>())
+            .Select(b => b.label).ToList();
+
     private void SyncThreads(IReadOnlyList<ThreadSummary> snapshot)
     {
         // The snapshot's `threads` is ALREADY filtered by the active search query in shared
@@ -468,7 +560,11 @@ public sealed partial class ConversationsPage : Page
         // conversations.md § Where logic lives → Thread label display.
         DetailThreadHeader.SetLabel(
             Strings.Resolve(uniffi.fauna_ffi.FaunaFfiMethods.ThreadLabelDisplay(detail.label)));
-        DetailThreadHeader.SetProtocolIcon(ThreadRow.ProtocolGlyphFor(detail.glyph));
+        DetailThreadHeader.SetProtocolIcon(
+            ThreadRow.ProtocolTextFor(detail.glyph, detail.bridge), detail.bridge?.id);
+        DetailThreadHeader.SetGuardianState(
+            detail.guardianState is { } gs ? FaunaConversationsMethods.GuardianStateLabel(gs) : null,
+            detail.guardianState is { } gt ? FaunaConversationsMethods.GuardianStateAttrToken(gt) : null);
         DetailThreadHeader.SetCapabilities(
             supportsRename: detail.capabilities.supportsRename,
             supportsMembershipChange: detail.capabilities.supportsMembershipChange,
@@ -483,10 +579,25 @@ public sealed partial class ConversationsPage : Page
             classToken: room is null
                 ? null
                 : FaunaConversationsMethods.RoomClassAttrToken(room.@class));
+        // `thread-room-notice` — the room's standing notice, which of the two (if
+        // any) holds decided by the shared `RoomNoticeFor` over the projected
+        // room's two facts, its sentence and `state` token by the shared helpers;
+        // there is no `room.notice()` on the C# record to ask instead.
+        var notice = room is null
+            ? null
+            : FaunaConversationsMethods.RoomNoticeFor(room.awaitingKey, room.moderationUnverified);
+        DetailThreadHeader.SetRoomNotice(
+            notice is { } noticeForLabel ? FaunaConversationsMethods.RoomNoticeLabel(noticeForLabel) : null,
+            notice is { } noticeForToken ? FaunaConversationsMethods.RoomNoticeAttrToken(noticeForToken) : null);
         // The editor's per-control gates follow the LIVE capabilities while it is
-        // open (the door itself is never greyed — see ThreadHeader.SetRoom).
+        // open (the door itself is never greyed — see ThreadHeader.SetRoom), and
+        // so does what stands pending on the room: the home nest serves that list
+        // on its own cadence, and a withdrawal re-reads it.
         if (RoomSettingsOverlay.Visibility == Visibility.Visible)
+        {
             PaintRoomEditorGates(detail.capabilities);
+            RestageRoomExtras();
+        }
         // Members chips list, each index-parallel with its post-succession
         // review mark (succession-aftermath.md § Propagation → *Removing a
         // flagged member*) — the shared synchronous join over the CACHED
@@ -557,6 +668,10 @@ public sealed partial class ConversationsPage : Page
         // (conversations.md § Attachments → Staged-attachment preview).
         DetailComposeBar.SetAttachments(compose.attachments);
 
+        // List-send texts — the shared compose.list_send, painted verbatim
+        // (mail-mass-mailing.md § Composing a list message).
+        DetailComposeBar.SetListSend(compose.listSend);
+
         // Reply preview banner — the shared reply_preview record (sender + excerpt of the
         // answered message), never derived here; none when no reply is armed.
         if (_vm?.ReplyPreviewText(detail.threadId) is { } replyPreview)
@@ -623,13 +738,11 @@ public sealed partial class ConversationsPage : Page
             // alongside Document, before Message (the DP whose change fires Bind) —
             // same ordering rule, same reason.
             bubble.Labels = m.labels;
-            // Reactions & message delete capabilities, set from the thread's
-            // shared capabilities (like ShowReplyAll) — never branching on the
-            // rail enum (conversations.md § Architectural rules #5). The bubble
-            // gates the ⋯ flyout's reaction options / delete button on these +
-            // the message's isOwn.
+            // Reactions capability, set from the thread's shared capabilities (like
+            // ShowReplyAll) — never branching on the rail enum (conversations.md §
+            // Architectural rules #5). The delete button is gated on the message's
+            // own canDelete (see ToMessageView), not on a thread capability here.
             bubble.SupportsReactions = detail.capabilities.supportsReactions;
-            bubble.SupportsMessageDelete = detail.capabilities.supportsMessageDelete;
             bubble.ShowReplyAll = showReplyAll;
             // A fresh view record per tick (its Reactions list is a new instance), so the DP
             // change fires Bind on every tick — which is what re-projects a document change
@@ -785,11 +898,27 @@ public sealed partial class ConversationsPage : Page
         // Staged-attachment chip row — render the shared compose.attachments
         // (conversations.md § Attachments → Staged-attachment preview).
         NewThreadComposeBar.SetAttachments(compose.attachments);
+        NewThreadComposeBar.SetListSend(compose.listSend);
 
         var picker = compose.recipientPicker;
+        // `recipient-picker-home-nest-toggle` — painted with the composer whether
+        // or not a chip is committed yet: it is a property of the room, chosen
+        // before its first message, and the class statement follows it. Off until
+        // the picker state exists (`include_home_nest` is a field of it).
+        var includeHomeNest = picker?.includeHomeNest ?? false;
+        NewThreadPicker.SetHomeNest(includeHomeNest);
+        // A send that FOUNDS a community room (the home-nest choice is on and the
+        // prospective class is community) is the `room.create` ceremony, never a
+        // queued channel append — the send gates on it (see DmComposeBar.SetFoundsRoom).
+        NewThreadComposeBar.SetFoundsRoom(
+            picker is not null
+            && includeHomeNest
+            && FaunaConversationsMethods.RoomProspectiveClass(picker.chips, includeHomeNest)
+                == RoomClass.Community);
         if (picker is not null)
         {
-            NewThreadPicker.SetChips(picker.chips.Select(a => new ChipItem(FaunaConversationsMethods.TypedAddressDisplay(a))).ToList());
+            NewThreadPicker.SetChips(picker.chips.Select(a => new ChipItem(ChipDisplay(a))).ToList());
+            NewThreadPicker.SetBridgeLabels(BridgeLabels());
             NewThreadPicker.UpdateResolveState(picker.resolveState);
             // `recipient-picker-class` — the class of the room this composer is
             // about to create, derived in shared Rust from the committed chips
@@ -866,6 +995,7 @@ public sealed partial class ConversationsPage : Page
             // composer, or the previously-selected thread) before opening this one.
             FlushActiveComposeDraft();
             _vm.OpenThread(row.ThreadIdValue);
+            _ = _vm.RefreshListSendAsync(row.ThreadIdValue);
             // No MarkRead here: the shared manager now reads a thread when it is
             // selected (ConversationsManager::notify, conversations.md § State &
             // data shape → When a thread is read) — an app calling it too would be
@@ -1034,6 +1164,10 @@ public sealed partial class ConversationsPage : Page
             _vm?.SetNewThreadRecipientInput(text);
             _ = _vm?.ResolveRecipientAsync();
         };
+        // The home-nest choice stages straight into the shared picker state; the
+        // snapshot tick repaints the toggle, `recipient-picker-class` and the send's
+        // gate off it.
+        NewThreadPicker.HomeNestToggled += (_, include) => _vm?.SetNewThreadHomeNest(include);
         NewThreadPicker.AcceptRequested += async (_, text) =>
         {
             if (_vm is null || string.IsNullOrWhiteSpace(text)) return;
@@ -1045,6 +1179,9 @@ public sealed partial class ConversationsPage : Page
             // status line (from the snapshot) says why.
             await _vm.ResolveRecipientAsync();
             _vm.AcceptCurrentRecipientChip();
+            // A committed chip may be a mailing list: re-read the list-send texts
+            // (tui's Op::AcceptRecipientChip does the same).
+            await _vm.RefreshListSendAsync(null);
         };
     }
 
@@ -1133,6 +1270,11 @@ public sealed partial class ConversationsPage : Page
 
         BuildRoomMemberRows();
         PaintRoomEditorGates(detail.capabilities);
+        RoomPendingInvitesList.ItemsSource = _roomPendingRows;
+        RestageRoomExtras();
+        // A community room's labeler set is staged over the labeler catalog, which
+        // this page reads through its own machine (built off the editor's open).
+        if (seed.labelers is not null) _ = StartRoomCatalogAsync(id);
         RoomSettingsError.Visibility = Visibility.Collapsed;
         RoomSettingsError.Text = "";
         RoomSettingsOverlay.Visibility = Visibility.Visible;
@@ -1155,6 +1297,7 @@ public sealed partial class ConversationsPage : Page
         RoomJoinRuleSelect.IsEnabled = caps.canSetPolicy;
         RoomHistoryPolicySelect.IsEnabled = caps.canSetPolicy;
         RoomSettingsSaveButton.IsEnabled = caps.canSetPolicy;
+        RoomNestReadToggle.IsEnabled = caps.canSetPolicy;
         RoomLeaveButton.IsEnabled = caps.canLeaveRoom;
     }
 
@@ -1403,6 +1546,268 @@ public sealed partial class ConversationsPage : Page
         Refresh();
     }
 
+    // ── The community room's controls in the editor (`ui/conversations.md`
+    //    § Element IDs → *The community room's three controls*, *Pending
+    //    invitations*, *The room's labeler set*) ──────────────────────────────
+
+    /// <summary>The page's own labeler-catalog machine (the windows
+    /// per-page-machine convention), live only while the editor is open on a room
+    /// whose draft carries a labeler set.</summary>
+    private LabelerCatalogMachine? _roomCatalog;
+
+    /// <summary>Held for the machine's lifetime — the observer is what ticks the
+    /// UI thread when the catalog (or its inspect view) changes.</summary>
+    private LabelerCatalogNotifyObserver? _roomCatalogObserver;
+
+    private List<RoomLabelerRow> _roomLabelerRows = new();
+
+    /// <summary>The pending-invite rows, keyed by invitee and updated in place so
+    /// a served-list tick destroys only the rows that actually left (a withdrawn
+    /// invitation's own row), never the whole list under a live automation
+    /// client — see <see cref="RoomMemberRow.Restage"/>.</summary>
+    private readonly ObservableCollection<RoomPendingInviteRow> _roomPendingRows = new();
+
+    /// <summary>Re-read the editor's three room-class sections off the staged
+    /// draft and the live projected room. Cheap; called on open, after every
+    /// staging gesture and on every observer tick while the editor is up.</summary>
+    private void RestageRoomExtras()
+    {
+        PaintRoomNestRead();
+        PaintRoomPendingInvites();
+        PaintRoomLabelers();
+    }
+
+    /// <summary>
+    /// <c>room-nest-read-toggle</c>: the home nest's read, painted only where
+    /// there is one to stage — a community room whose answer this device has read
+    /// (<c>RoomSettingsDraft.nestRead</c> is Some); absent (collapsed) otherwise.
+    /// Greyed unless the viewer may set policy. Staged into the shared draft by
+    /// the press, committed by Save.
+    /// </summary>
+    private void PaintRoomNestRead()
+    {
+        if (_roomDraft is not { } draft || draft.nestRead is not { } reads)
+        {
+            RoomNestReadToggle.Visibility = Visibility.Collapsed;
+            return;
+        }
+        RoomNestReadToggle.Content = RoomLabels.NestReadLabel(reads);
+        RoomNestReadToggle.IsChecked = reads;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
+            RoomNestReadToggle, reads ? "true" : "false");
+        RoomNestReadToggle.IsEnabled = _vm?.SelectedDetail?.capabilities.canSetPolicy == true;
+        RoomNestReadToggle.Visibility = Visibility.Visible;
+    }
+
+    private void RoomNestRead_Click(object sender, RoutedEventArgs e)
+    {
+        if (_roomDraft is not { } draft || draft.nestRead is null) return;
+        _roomDraft = FaunaConversationsMethods.RoomSettingsToggleNestRead(draft);
+        RestageRoomExtras();
+    }
+
+    /// <summary>
+    /// <c>room-pending-invite[i]</c> + its withdraw button: what stands pending on
+    /// the room, only once the home nest has served this viewer a list and only
+    /// while it is not empty — the section is absent for <c>None</c> and for an
+    /// empty answer alike. The sentence is the shared
+    /// <c>RoomPendingInviteText</c>; <c>lapsed</c> rides HelpText.
+    /// </summary>
+    private void PaintRoomPendingInvites()
+    {
+        var pending = _vm?.SelectedDetail?.room?.pendingInvites;
+        if (pending is null || pending.Length == 0)
+        {
+            RoomPendingInvitesSection.Visibility = Visibility.Collapsed;
+            _roomPendingRows.Clear();
+            return;
+        }
+        var wanted = new HashSet<string>(pending.Select(p => p.inviteeActorHex));
+        for (var i = _roomPendingRows.Count - 1; i >= 0; i--)
+        {
+            if (!wanted.Contains(_roomPendingRows[i].InviteeActorHex)) _roomPendingRows.RemoveAt(i);
+        }
+        for (var i = 0; i < pending.Length; i++)
+        {
+            var text = FaunaConversationsMethods.RoomPendingInviteText(pending[i]);
+            if (i < _roomPendingRows.Count && _roomPendingRows[i].InviteeActorHex == pending[i].inviteeActorHex)
+                _roomPendingRows[i].Update(text, pending[i].lapsed);
+            else
+                _roomPendingRows.Insert(i, new RoomPendingInviteRow(pending[i].inviteeActorHex, text, pending[i].lapsed));
+        }
+        RoomPendingInvitesSection.Visibility = Visibility.Visible;
+    }
+
+    private async void RoomPendingInviteWithdraw_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null || _roomThreadId is not { } id) return;
+        if (sender is not Button { Tag: string inviteeActorHex }) return;
+        // Acts at once — outside Save's staged set — and the manager re-reads the
+        // list on success. A refusal is already on Snapshot.error and lands on the
+        // editor's own error-message through Refresh().
+        await _vm.WithdrawRoomInvite(id, inviteeActorHex);
+        Refresh();
+    }
+
+    /// <summary>The withdrawal is the room plane's online-only
+    /// <c>room.revoke_invite</c> door (<c>offline_class.rs</c>).</summary>
+    private void RoomPendingInviteWithdraw_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button button) button.FaunaGate("fauna.conversations.room.revoke_invite");
+    }
+
+    /// <summary>
+    /// <c>room-labeler-toggle[i]</c> + <c>room-labeler-inspect-button[i]</c> per
+    /// catalog labeler a room may name. Every decision is shared Rust: which kinds
+    /// a room may name (<c>RoomMayNameLabelerKind</c>), the <c>checked</c> mark
+    /// (<c>RoomSettingsLabelerStaged</c>) and whether a row may act
+    /// (<c>RoomSettingsLabelerToggleLive</c> — a full set greys only the rows it
+    /// does not name); this adds the one capability term. Absent where the draft
+    /// has no set to stage (an end-to-end room, or a set that did not verify).
+    /// Built once per catalog shape and restaged in place — the row objects, and
+    /// so their automation peers, survive every staging gesture.
+    /// </summary>
+    private void PaintRoomLabelers()
+    {
+        if (_roomDraft is not { } draft || draft.labelers is null)
+        {
+            RoomLabelersSection.Visibility = Visibility.Collapsed;
+            return;
+        }
+        var snapshot = _roomCatalog?.Snapshot();
+        var entries = snapshot?.entries ?? Array.Empty<LabelerCatalogEntry>();
+
+        var shape = new List<(uint Index, LabelerCatalogEntry Entry)>();
+        for (var i = 0; i < entries.Length; i++)
+        {
+            if (FaunaConversationsMethods.RoomMayNameLabelerKind(entries[i].artifactKind))
+                shape.Add(((uint)i, entries[i]));
+        }
+        var sameShape = shape.Count == _roomLabelerRows.Count
+            && shape.Select((s, i) => _roomLabelerRows[i].Matches(s.Index, s.Entry.labelerId)).All(m => m);
+        if (!sameShape)
+        {
+            _roomLabelerRows = shape
+                .Select(s => new RoomLabelerRow(s.Index, s.Entry.labelerId, s.Entry.artifactKind))
+                .ToList();
+            RoomLabelersList.ItemsSource = _roomLabelerRows;
+        }
+        var canSetPolicy = _vm?.SelectedDetail?.capabilities.canSetPolicy == true;
+        foreach (var row in _roomLabelerRows)
+        {
+            row.Restage(
+                staged: FaunaConversationsMethods.RoomSettingsLabelerStaged(draft, row.LabelerId),
+                toggleEnabled: canSetPolicy
+                    && FaunaConversationsMethods.RoomSettingsLabelerToggleLive(draft, row.LabelerId));
+        }
+        RoomLabelerInspectPanel.Render(snapshot?.inspecting);
+        RoomLabelersSection.Visibility = Visibility.Visible;
+    }
+
+    private void RoomLabelerToggle_Click(object sender, RoutedEventArgs e)
+    {
+        if (_roomDraft is not { } draft) return;
+        if (sender is not ToggleButton { Tag: string labelerId }) return;
+        _roomDraft = FaunaConversationsMethods.RoomSettingsToggleLabeler(draft, labelerId);
+        RestageRoomExtras();
+    }
+
+    /// <summary>Inspecting is a read any member may make; it opens the catalog's own
+    /// inspect view IN PLACE, so the editor and its staged draft stay up.</summary>
+    private async void RoomLabelerInspect_Click(object sender, RoutedEventArgs e)
+    {
+        if (_roomCatalog is not { } catalog) return;
+        if (sender is not Button { Tag: uint index }) return;
+        await catalog.Inspect(index);
+        PaintRoomLabelers();
+    }
+
+    /// <summary><c>labeler-inspect-close-button</c> — back to the editor's labeler
+    /// rows; <c>close_inspect()</c> ticks the observer itself.</summary>
+    private void RoomLabelerInspect_CloseRequested(object? sender, EventArgs e)
+        => _roomCatalog?.CloseInspect();
+
+    private async Task StartRoomCatalogAsync(string threadId)
+    {
+        if (_rpc is null) return;
+        try
+        {
+            var observer = new LabelerCatalogNotifyObserver(OnRoomCatalogChanged);
+            var machine = await _rpc.BuildLabelerCatalogMachineAsync(observer);
+            // The editor may have closed (or moved to another room) while the
+            // machine was building: then this one belongs to nobody.
+            if (_roomThreadId != threadId) return;
+            _roomCatalogObserver = observer;
+            _roomCatalog = machine;
+            await machine.Refresh();
+            if (_roomThreadId == threadId) PaintRoomLabelers();
+        }
+        catch (Exception ex)
+        {
+            // The labeler rows simply stay empty; the rest of the editor is
+            // unaffected by a catalog that could not be read.
+            FaunaApp.Core.Logs.ShellLog.Warn("ConversationsPage", $"room labeler catalog unavailable: {ex.Message}");
+        }
+    }
+
+    private void OnRoomCatalogChanged()
+    {
+        if (RoomSettingsOverlay.Visibility == Visibility.Visible) PaintRoomLabelers();
+    }
+
+    // ── The invitations atop the list ────────────────────────────────────
+
+    /// <summary>The signature of the invitations last painted, so a tick that
+    /// changed nothing rebuilds nothing (a rebuild would destroy the very
+    /// accept button a driver just pressed).</summary>
+    private string _roomInvitationsPainted = "";
+
+    /// <summary>
+    /// <c>room-invitation[i]</c> + its accept/decline pair, atop the list. The rows
+    /// are already verified against their signers in shared Rust and the sentence
+    /// is the shared <c>RoomInvitationText</c>. Absent (collapsed) while none
+    /// stands.
+    /// </summary>
+    private void PaintRoomInvitations(RoomInvitationSnapshot[] invitations)
+    {
+        var rows = invitations
+            .Select(i => new RoomInvitationRow(
+                i.id,
+                FaunaConversationsMethods.RoomInvitationText(i),
+                FaunaConversationsMethods.RoomRoleAttrToken(i.@role)))
+            .ToList();
+        var signature = string.Join("\n", rows.Select(r => $"{r.Id}|{r.RoleToken}|{r.Text}"));
+        if (signature == _roomInvitationsPainted) return;
+        _roomInvitationsPainted = signature;
+        RoomInvitationsList.ItemsSource = rows;
+        RoomInvitationsList.Visibility = rows.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>Accepting is the room plane's online-only
+    /// <c>room.accept_invite</c> ceremony; declining (<c>inbox.ack</c>) is
+    /// offline-safe and stays UNGATED.</summary>
+    private void RoomInvitationAccept_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button button) button.FaunaGate("fauna.conversations.room.accept_invite");
+    }
+
+    private async void RoomInvitationAccept_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null || sender is not Button { Tag: long id }) return;
+        // The manager SELECTS the room's thread on success, switching the right
+        // pane's surface: keep a half-written reply first, like `+` does.
+        FlushActiveComposeDraft();
+        await _vm.AcceptRoomInvitation(id);
+        Refresh();
+    }
+
+    private async void RoomInvitationDecline_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null || sender is not Button { Tag: long id }) return;
+        await _vm.DeclineRoomInvitation(id);
+        Refresh();
+    }
+
     private void CloseRoomSettings()
     {
         RoomLeaveConfirmOverlay.Visibility = Visibility.Collapsed;
@@ -1411,6 +1816,16 @@ public sealed partial class ConversationsPage : Page
         RoomSettingsError.Text = "";
         RoomMembersList.ItemsSource = null;
         _roomRows = new List<RoomMemberRow>();
+        RoomPendingInvitesList.ItemsSource = null;
+        _roomPendingRows.Clear();
+        RoomLabelersList.ItemsSource = null;
+        _roomLabelerRows = new List<RoomLabelerRow>();
+        RoomLabelerInspectPanel.Render(null);
+        RoomNestReadToggle.Visibility = Visibility.Collapsed;
+        RoomPendingInvitesSection.Visibility = Visibility.Collapsed;
+        RoomLabelersSection.Visibility = Visibility.Collapsed;
+        _roomCatalog = null;
+        _roomCatalogObserver = null;
         _roomDraft = null;
         _roomThreadId = null;
         _roomParticipants = Array.Empty<TypedAddress>();
@@ -1550,7 +1965,7 @@ public sealed partial class ConversationsPage : Page
         if (target is null) return;
         ReportStatusText.Visibility = Visibility.Collapsed;
         _reportError = null;
-        var outcome = await Controls.ReportSheetDialog.ShowAsync(
+        var outcome = await Controls.ReportSheetDialog.OpenAsync(
             this.XamlRoot, _rpc, target, ReportPageError);
         if (outcome is null) return;
         ReportStatusText.Text = outcome.Acknowledgement ?? "";
@@ -1610,6 +2025,7 @@ public sealed partial class ConversationsPage : Page
             // ReactionGroup is internal (UniFFI) — map to the bubble's public
             // ReactionGroupVm so the public render surface carries no internal type.
             IsOwn: m.isOwn,
+            CanDelete: m.canDelete,
             Deleted: m.deleted,
             Reactions: m.reactions
                 .Select(r => new FaunaApp.Controls.ReactionGroupVm(r.emoji, r.count, r.reactedByMe))
@@ -1681,7 +2097,15 @@ public sealed class ThreadRow
         Label = Strings.Resolve(uniffi.fauna_ffi.FaunaFfiMethods.ThreadLabelDisplay(t.label));
         Snippet = t.snippet ?? "";
         UnreadCount = t.unreadCount;
-        ProtocolGlyph = ProtocolGlyphFor(t.glyph);
+        ProtocolGlyph = ProtocolTextFor(t.glyph, t.bridge);
+        ProtocolBridgeId = t.bridge?.id ?? "";
+        GuardianLabel = t.guardianState is { } gs
+            ? uniffi.fauna_conversations.FaunaConversationsMethods.GuardianStateLabel(gs)
+            : "";
+        GuardianToken = t.guardianState is { } gt
+            ? uniffi.fauna_conversations.FaunaConversationsMethods.GuardianStateAttrToken(gt)
+            : "";
+        GuardianVis = t.guardianState is null ? Visibility.Collapsed : Visibility.Visible;
         UnreadVis = t.unreadCount > 0 ? Visibility.Visible : Visibility.Collapsed;
         // Shared contextual last-activity timestamp (today → local clock /
         // Yesterday / weekday / older → date), per conversations.md § Layout +
@@ -1701,7 +2125,20 @@ public sealed class ThreadRow
     public string Label { get; }
     public string Snippet { get; }
     public uint UnreadCount { get; }
+    /// <summary>The <c>protocol-icon</c> text: the snapshot's glyph, and on a bridged
+    /// room the bridge's declared label beside it.</summary>
     public string ProtocolGlyph { get; }
+
+    /// <summary>The bridge id on <c>protocol-icon</c>'s <c>bridge</c> attribute
+    /// (HelpText); empty off a bridged room.</summary>
+    public string ProtocolBridgeId { get; }
+
+    /// <summary><c>conversation-guardian-state</c>: the shared label, the wire word
+    /// on its <c>state</c> attribute (HelpText), and Collapsed — absent — while the
+    /// nest reports no state for the room's peer.</summary>
+    public string GuardianLabel { get; }
+    public string GuardianToken { get; }
+    public Visibility GuardianVis { get; }
     public Visibility UnreadVis { get; }
 
     /// <summary>The shared contextual last-activity timestamp shown in the row's
@@ -1717,6 +2154,13 @@ public sealed class ThreadRow
     /// can't drift.</summary>
     internal static string ProtocolGlyphFor(uniffi.fauna_core.SourceGlyph glyph)
         => FaunaApp.Core.Helpers.SourceGlyphAsset.Emoji(glyph);
+
+    /// <summary>The glyph plus, on a bridged room, the bridge's DECLARED label so two
+    /// bridges sharing a glyph read apart (<c>conversations.md</c> § Where logic
+    /// lives → <i>The <c>Bridged</c> adapter</i>, ruling 2 (a)). No app-side mapping.</summary>
+    internal static string ProtocolTextFor(
+        uniffi.fauna_core.SourceGlyph glyph, uniffi.fauna_core.BridgeIdentitySnapshot? bridge)
+        => bridge is null ? ProtocolGlyphFor(glyph) : $"{ProtocolGlyphFor(glyph)} {bridge.label}";
 }
 
 /// <summary>
@@ -1800,6 +2244,129 @@ public sealed class RoomMemberRow : INotifyPropertyChanged
                      nameof(AdminChecked), nameof(TransferChecked),
                      nameof(AdminLabel), nameof(TransferLabel),
                  })
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+        }
+    }
+}
+
+/// <summary>
+/// One standing community-room invitation, atop the conversation list
+/// (<c>room-invitation[i]</c>). Plain strings and a number — the binding only
+/// reflects PUBLIC properties of public types (see <see cref="ChipItem.Address"/>
+/// for the measured trap with internal UniFFI types).
+/// </summary>
+public sealed class RoomInvitationRow
+{
+    internal RoomInvitationRow(long id, string text, string roleToken)
+    {
+        Id = id;
+        Text = text;
+        RoleToken = roleToken;
+    }
+
+    /// <summary>The handle accept and decline name it by — opaque, carried in each
+    /// button's Tag.</summary>
+    public long Id { get; }
+
+    /// <summary>The row's sentence — the shared <c>RoomInvitationText</c>.</summary>
+    public string Text { get; }
+
+    /// <summary>The <c>role</c> attribute (<c>admin | member</c>), in HelpText.</summary>
+    public string RoleToken { get; }
+
+    public string AcceptLabel => FaunaApp.Core.Services.Strings.Get("common/accept");
+
+    public string DeclineLabel => FaunaApp.Core.Services.Strings.Get("common/decline");
+}
+
+/// <summary>
+/// One row of the room editor's pending invitations
+/// (<c>room-pending-invite[i]</c> + its withdraw button), updated IN PLACE when
+/// the served list changes (<see cref="RoomMemberRow.Restage"/> says why).
+/// </summary>
+public sealed class RoomPendingInviteRow : INotifyPropertyChanged
+{
+    internal RoomPendingInviteRow(string inviteeActorHex, string text, bool lapsed)
+    {
+        InviteeActorHex = inviteeActorHex;
+        _text = text;
+        _lapsed = lapsed;
+    }
+
+    private string _text;
+    private bool _lapsed;
+
+    /// <summary>The withdraw button's Tag — the row's own invitee, never an index.</summary>
+    public string InviteeActorHex { get; }
+
+    public string Text => _text;
+
+    /// <summary>The <c>lapsed</c> attribute (<c>true</c> when the accept door would
+    /// refuse the invitation today), in HelpText.</summary>
+    public string LapsedToken => _lapsed ? "true" : "false";
+
+    public string WithdrawLabel => FaunaApp.Core.Services.Strings.Get("conversations/unified/room_pending_invite_withdraw");
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    internal void Update(string text, bool lapsed)
+    {
+        if (text == _text && lapsed == _lapsed) return;
+        _text = text;
+        _lapsed = lapsed;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Text)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(LapsedToken)));
+    }
+}
+
+/// <summary>
+/// One catalog labeler a room may name, in the room editor's labeler set
+/// (<c>room-labeler-toggle[i]</c> + <c>room-labeler-inspect-button[i]</c>). Every
+/// value is READ OFF THE SHARED DRAFT by <see cref="Restage"/> and the row objects
+/// outlive every staging gesture (<see cref="RoomMemberRow.Restage"/>).
+/// </summary>
+public sealed class RoomLabelerRow : INotifyPropertyChanged
+{
+    internal RoomLabelerRow(uint catalogIndex, string labelerId, string kind)
+    {
+        CatalogIndex = catalogIndex;
+        LabelerId = labelerId;
+        _kind = kind;
+    }
+
+    private readonly string _kind;
+
+    /// <summary>The inspect button's Tag: the entry's index into the catalog
+    /// SNAPSHOT (not into the filtered rows) — what <c>Inspect</c> is addressed by.</summary>
+    public uint CatalogIndex { get; }
+
+    /// <summary>The toggle's Tag: the labeler id the shared draft stages by.</summary>
+    public string LabelerId { get; }
+
+    public bool Staged { get; private set; }
+
+    public bool ToggleEnabled { get; private set; }
+
+    /// <summary>The `checked` attribute, carried in HelpText.</summary>
+    public string Checked => Staged ? "true" : "false";
+
+    public string Label => RoomLabels.LabelerToggleText(_kind, LabelerId, Staged);
+
+    public string InspectLabel => FaunaApp.Core.Services.Strings.Get("labeler_catalog/inspect");
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    internal bool Matches(uint catalogIndex, string labelerId)
+        => CatalogIndex == catalogIndex && LabelerId == labelerId;
+
+    internal void Restage(bool staged, bool toggleEnabled)
+    {
+        Staged = staged;
+        ToggleEnabled = toggleEnabled;
+        // Unconditional, for the reason RoomMemberRow.Restage gives: a click flips a
+        // ToggleButton's own IsChecked before the draft has spoken.
+        foreach (var name in new[] { nameof(Staged), nameof(ToggleEnabled), nameof(Checked), nameof(Label) })
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
         }

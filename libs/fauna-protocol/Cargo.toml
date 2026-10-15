@@ -69,6 +69,24 @@ zaps = ["payments"]
 # module docs) — the separability is what makes the store-safe third column
 # ("same-account PRESENT + p2p-share ABSENT") provable.
 p2p-share = []
+# The `fauna.feed.*`, `fauna.search.*` and `fauna.web.*` kind-catalog entries
+# (`KindRegistry::register_{feed,search,web}_kinds` + their `offline_class`
+# rows) — the three planes the KIDS flavor excises whose kinds would otherwise
+# ride every artifact as catalog text (`dynamic-features.md` § What "completely
+# compiled away" means, criterion 2; the kids paragraph of § Implementation
+# status today). Same depth rule as `payments` above: NOT in `default`. Each is
+# forwarded by the plane's own client crate on its dependency line
+# (`fauna-client-feed`, `fauna-client-search`, `fauna-client-web` — the crate IS
+# the plane, as `fauna-client-payments` is for `payments`), so any build that
+# links a plane's sender carries its catalog entries by construction, and
+# explicitly by the roots that answer or relay the plane without a client crate
+# (`bins/fauna-nest`; `fauna-sync-engine`'s and `fauna-devices-machine`'s own
+# `web` features). Only the catalog is gated: the plane's wire TYPES stay
+# ungated, because an excised build is a peer without a capability, never a fork
+# of the wire.
+feed = []
+search = []
+web = []
 # wasm: forward fauna-core's js-sys time backend (Timestamp::now()).
 # The wasm consumer (libs/fauna-rpc-wasm) enables this + getrandom/js.
 js = ["fauna-core/js"]

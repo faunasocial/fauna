@@ -97,7 +97,7 @@ Stamped 2026-09-23 at 039e9619ca.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | 0.1.2-dev+0d95e205 standalone |
-| linux | ⚠ partial | 0.1.2-dev+c4a95c20 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | |
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |
@@ -124,18 +124,18 @@ Stamped 2026-09-23 at 039e9619ca.
 | 5 | nest | `tests/e2e-unified/tests/api/test_mail_aliases_user.py::test_wildcard_conflicts_with_other_users_exact` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_over_per_alias_rate_cap_tempfails_451` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/test_mail_spam_threshold_override.py::test_per_account_spam_threshold_override_rides_the_message_to_the_scorer` | nest (linux): passed, nest (windows): passed |
-| 7 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_add_wildcard_prefix_from_the_sheet` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_add_sheet_sets_label_spam_threshold_and_hourly_limit` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_row_shows_hit_count_and_last_hit_after_real_inbound` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_edit_sheet_changes_label_and_controls_but_never_the_kind` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_add_sheet_sets_label_spam_threshold_and_hourly_limit` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_edit_sheet_changes_label_and_controls_but_never_the_kind` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_a_throwaway_address_lasts_and_takes_what_you_chose` | tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_generated_disposable_lands_on_top_copied_and_confirmed` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_add_wildcard_prefix_from_the_sheet` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_add_sheet_sets_label_spam_threshold_and_hourly_limit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_row_shows_hit_count_and_last_hit_after_real_inbound` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_edit_sheet_changes_label_and_controls_but_never_the_kind` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_add_sheet_sets_label_spam_threshold_and_hourly_limit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_edit_sheet_changes_label_and_controls_but_never_the_kind` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_a_throwaway_address_lasts_and_takes_what_you_chose` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_generated_disposable_lands_on_top_copied_and_confirmed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 14 | app | (none) | — |
 | 15 | app | (none) | — |
 | 16 | app | (none) | — |
-| 17 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_reserved_name_is_refused_on_the_page` | macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_reserved_name_is_refused_on_the_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 18 | nest | `tests/e2e-unified/tests/test_mail_bridge_alias_delivery.py::test_plus_suffix_reaches_the_owner_with_nothing_set_up` | nest (linux): passed |
 | 19 | nest | `tests/e2e-unified/tests/test_mail_bridge_alias_delivery.py::test_wildcard_prefix_address_reaches_the_owner` | nest (linux): passed |
 | 20 | nest | `tests/e2e-unified/tests/api/test_mail_aliases_user.py::test_wildcard_one_per_actor` | nest (linux): passed |
@@ -149,5 +149,5 @@ Stamped 2026-09-23 at 039e9619ca.
 | 26 | nest | `tests/e2e-unified/tests/test_mail_spam_threshold_override.py::test_changing_an_address_threshold_never_refiles_delivered_mail` | nest (linux): passed |
 | 27 | nest | `tests/e2e-unified/tests/api/test_mail_alias_policy.py::test_exact_alias_cap_enforced_from_put_alias_policy` | nest (linux): passed |
 | 28 | nest | `tests/e2e-unified/tests/api/test_mail_aliases_user.py::test_disposable_mints_capped_per_day` | nest (linux): passed |
-| 29 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_delete_confirm_relabels_the_button_before_deleting` | macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 29 | app | `tests/e2e-unified/tests/test_mail_aliases_controls.py::test_delete_confirm_relabels_the_button_before_deleting` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

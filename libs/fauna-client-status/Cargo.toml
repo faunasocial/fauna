@@ -13,8 +13,8 @@ license.workspace = true
 agent = ["dep:fauna-ipc"]
 # The finished-text half of the projection that needs the OS clock: the
 # `status-sync-last` relative time (`fauna_core::format::relative_time_text`)
-# and the one-call `render`. Native Rust apps turn it on; a wasm caller renders
-# the sync leg itself (it has none today) and takes the clock-free text fns.
+# and the one-call `render`. Native Rust apps turn it on; a wasm caller (web has
+# no sync leg) takes the clock-free `render_static` instead.
 local-clock = ["fauna-core/local-clock"]
 
 [dependencies]

@@ -65,6 +65,10 @@ internal static class FeedManagerHost
     /// most one already-disposed client is ever pinned.</summary>
     private static object? _builtOver;
 
+    /// <summary>Unsubscribes the session-level reconnect re-pull (see
+    /// <see cref="GetOrBuildAsync"/>); replaced on rebuild, cleared at an actor change.</summary>
+    private static Action? _offPageReconnectUnsub;
+
     /// <summary>
     /// The session's live manager, or <c>null</c> before the Feed page has built
     /// one (a state-protocol deep link straight to Settings can reach the e2e
@@ -98,13 +102,50 @@ internal static class FeedManagerHost
         {
             if (_current is { } raced && ReferenceEquals(_builtOver, transport)) return raced;
             var built = await build();
+            _offPageReconnectUnsub?.Invoke();
+            _offPageReconnectUnsub = null;
             _current = built;
             _builtOver = transport;
+            if (transport is Services.INestRpcClient rpc)
+            {
+                void OnReconnected()
+                {
+                    // The Feed page re-pulls on its own while it is open
+                    // (FeedViewModel's RefreshOnReconnect); this covers the session
+                    // being on ANY other page, where nothing else would re-query the
+                    // feed (transport.md § Push events — observers re-pull on
+                    // reconnect; the manager is session-scoped, so its re-pull is
+                    // too). Raised on the UI thread.
+                    if (ViewModels.FeedViewModel.Current is { IsReconnectWired: true }) return;
+                    if (!ReferenceEquals(_current, built)) return;
+                    _ = RepullAsync(built);
+                }
+                rpc.Reconnected += OnReconnected;
+                _offPageReconnectUnsub = () => rpc.Reconnected -= OnReconnected;
+            }
             return built;
         }
         finally
         {
             Gate.Release();
+        }
+    }
+
+    /// <summary>The page-less twin of <c>FeedViewModel.ReloadAsync</c>: the same
+    /// shared seams, in the same order. A fault is logged, never thrown into the
+    /// UI-thread event raise.</summary>
+    private static async Task RepullAsync(FfiFeedManager manager)
+    {
+        try
+        {
+            await manager.RefreshFeeds();
+            await manager.RefreshBridgeFeeds();
+            await manager.RefreshAvailableBridges();
+            await manager.RefreshCurrentFeed();
+        }
+        catch (Exception ex)
+        {
+            Logs.ShellLog.Warn("FeedManagerHost", $"off-page reconnect re-pull failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -116,6 +157,8 @@ internal static class FeedManagerHost
     /// </summary>
     public static void ResetForActorChange()
     {
+        _offPageReconnectUnsub?.Invoke();
+        _offPageReconnectUnsub = null;
         _current = null;
         _builtOver = null;
     }

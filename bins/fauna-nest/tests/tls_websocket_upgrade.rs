@@ -4,7 +4,7 @@
 //! `auto::Builder::serve_connection` (no upgrades) — over TLS the 101 was
 //! written but the upgraded byte-stream was never driven, so the socket died
 //! the instant after the handshake. Every client↔nest path is WS-RPC, so on any
-//! HTTPS deployment (example.com / any real VPS) the client connected, the WS
+//! HTTPS deployment (a live nest / any real VPS) the client connected, the WS
 //! dropped immediately, and the UI showed
 //! `rpc disconnected (was_in_flight=false)`. The plain-HTTP path
 //! (`axum::serve`) handles upgrades, so the e2e suite (plain HTTP) never caught

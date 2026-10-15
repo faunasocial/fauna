@@ -274,6 +274,13 @@ fn source_step_elements(snapshot: Option<&ArchiveImportSnapshot>) -> Vec<Element
     let kind = snapshot
         .map(|s| s.source_kind)
         .unwrap_or(ArchiveSourceKind::Facebook);
+    let help = match kind {
+        ArchiveSourceKind::Facebook => t::SOURCE_HELP_FACEBOOK,
+        ArchiveSourceKind::Instagram => t::SOURCE_HELP_INSTAGRAM,
+    };
+    // The deep link (§ The wizard and its machine, step 1) rides in the help
+    // as the platform's own address, from the shared constant.
+    let link = t::source_link_fmt(kind.export_request_url());
     vec![
         Element::chrome(t::SOURCE_TITLE),
         Element::select(
@@ -283,13 +290,7 @@ fn source_step_elements(snapshot: Option<&ArchiveImportSnapshot>) -> Vec<Element
             SOURCE_KINDS.into_iter().map(source_kind_label).collect(),
         )
         .labelled(t::SOURCE_TITLE),
-        Element::label(
-            ids::ARCHIVE_IMPORT_SOURCE_HELP,
-            match kind {
-                ArchiveSourceKind::Facebook => t::SOURCE_HELP_FACEBOOK,
-                ArchiveSourceKind::Instagram => t::SOURCE_HELP_INSTAGRAM,
-            },
-        ),
+        Element::label(ids::ARCHIVE_IMPORT_SOURCE_HELP, format!("{help} {link}")),
         next_button(),
     ]
 }
@@ -451,6 +452,16 @@ fn confirm_step_elements(snapshot: Option<&ArchiveImportSnapshot>) -> Vec<Elemen
     ]
 }
 
+/// Step 5's "elapsed + ETA" (§ The wizard and its machine), from the
+/// machine's derived snapshot fields.
+fn progress_timing(elapsed_secs: u64, eta_secs: Option<u64>) -> String {
+    let duration = |secs| crate::wizard::localized(&fauna_core::format::duration_secs(secs));
+    match eta_secs {
+        Some(eta) => t::progress_timing_fmt(&duration(elapsed_secs), &duration(eta)),
+        None => t::progress_timing_estimating_fmt(&duration(elapsed_secs)),
+    }
+}
+
 /// Step 5 — counters, the bar, pause/resume/cancel, the skip log, the
 /// per-category rows (FLAT — the `mail_import.rs` progress-row shape).
 fn progress_step_elements(
@@ -460,16 +471,22 @@ fn progress_step_elements(
     let (imported, skipped, total, run_state) = snapshot
         .map(|s| (s.imported, s.skipped, s.total, s.run_state))
         .unwrap_or((0, 0, 0, None));
+    let elapsed_secs = snapshot.map_or(0, |s| s.elapsed_secs);
+    let eta_secs = snapshot.and_then(|s| s.eta_secs);
     let fraction = fauna_core::format::quota_fraction((imported + skipped) as i64, total as i64);
     let mut els = vec![
         Element::chrome(t::PROGRESS_TITLE),
         Element::label(
             ids::ARCHIVE_IMPORT_PROGRESS_SUMMARY,
-            t::progress_summary_fmt(
-                run_state_label(run_state),
-                &imported.to_string(),
-                &total.to_string(),
-                &skipped.to_string(),
+            format!(
+                "{} · {}",
+                t::progress_summary_fmt(
+                    run_state_label(run_state),
+                    &imported.to_string(),
+                    &total.to_string(),
+                    &skipped.to_string(),
+                ),
+                progress_timing(elapsed_secs, eta_secs),
             ),
         ),
         Element::label(
@@ -789,9 +806,13 @@ mod tests {
             text_of(&els, "archive-import-source-picker", 0),
             source_kind_label(ArchiveSourceKind::Facebook)
         );
-        assert_eq!(
-            text_of(&els, "archive-import-source-help", 0),
-            t::SOURCE_HELP_FACEBOOK
+        let help = text_of(&els, "archive-import-source-help", 0);
+        assert!(help.starts_with(t::SOURCE_HELP_FACEBOOK), "{help}");
+        assert!(
+            help.ends_with(&t::source_link_fmt(
+                ArchiveSourceKind::Facebook.export_request_url()
+            )),
+            "step 1 carries the platform's export page: {help}"
         );
     }
 
@@ -931,7 +952,35 @@ mod tests {
         assert_eq!(text_of(&els, "archive-import-progress-bar", 0), "75%");
         assert_eq!(
             text_of(&els, "archive-import-progress-summary", 0),
-            t::progress_summary_fmt(t::STATE_RUNNING, "2", "4", "1")
+            format!(
+                "{} · {}",
+                t::progress_summary_fmt(t::STATE_RUNNING, "2", "4", "1"),
+                progress_timing(0, None)
+            )
+        );
+    }
+
+    #[test]
+    fn the_progress_summary_carries_elapsed_time_and_the_estimate() {
+        let mut snap = a_snapshot(ArchiveImportStep::Progress);
+        snap.run_state = Some(RunState::Running);
+        snap.elapsed_secs = 125;
+        snap.eta_secs = Some(3_600);
+        let text = text_of(
+            &archive_import_elements(&state_with(snap.clone())),
+            "archive-import-progress-summary",
+            0,
+        );
+        assert!(text.ends_with("2m elapsed · about 1h 0m left"), "{text}");
+        snap.eta_secs = None;
+        let text = text_of(
+            &archive_import_elements(&state_with(snap)),
+            "archive-import-progress-summary",
+            0,
+        );
+        assert!(
+            text.ends_with("2m elapsed · estimating the time left"),
+            "{text}"
         );
     }
 

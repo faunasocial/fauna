@@ -36,29 +36,32 @@ pub(crate) struct ClientChannel {
     pub push_presence: PushPresence,
 }
 
-/// The push device id a client announces as `fauna.push.presence` on every
-/// (re)connect, or `None` for a client that announces nothing — the default,
-/// so a caller that does not opt in announces nothing.
+/// The announce a client sends as `fauna.push.presence` on every (re)connect —
+/// the push device id and whether this client is that device's wake stand-in
+/// (`stand_in`, the sync agent's; an app's is plain) — or `None` for a client
+/// that announces nothing: the default, so a caller that does not opt in
+/// announces nothing. The kind lives in the slot, so wherever the slot's
+/// announce rides, the kind rides with it.
 ///
 /// Opt-in per caller on purpose: the id must be the one this install's push
 /// row is keyed under, and an announced id that matches no row would make the
 /// nest treat the app's own row as absent and dial it while the app is open
 /// (`common.md` § Registration → *Every connection announces*). Written by
-/// `NestClient::set_push_presence`, read on each connect.
-pub(crate) type PushPresence = Arc<std::sync::Mutex<Option<String>>>;
+/// `NestClient::set_push_presence` (an app) or `set_push_presence_stand_in` (the sync agent), read on each connect.
+pub(crate) type PushPresence = Arc<std::sync::Mutex<Option<fauna_protocol::push::PresenceRequest>>>;
 
 /// Ceiling on one presence announce. The nest registers the kind at 5 s; this
 /// is the client-side backstop for a nest that never answers.
 const PRESENCE_ANNOUNCE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Announce `device_id` on `dispatcher`'s connection — best-effort, and never
-/// in the way of the connection's own serving: a refusal or failure
-/// leaves the connection unannounced.
-pub(crate) async fn announce_presence(dispatcher: Arc<RpcDispatcher>, device_id: String) {
-    let payload = match fauna_protocol::encode_payload(&fauna_protocol::push::PresenceRequest {
-        device_id,
-        extra: Default::default(),
-    }) {
+/// Send `announce` on `dispatcher`'s connection — best-effort, and never in
+/// the way of the connection's own serving: a refusal or failure leaves the
+/// connection unannounced.
+pub(crate) async fn announce_presence(
+    dispatcher: Arc<RpcDispatcher>,
+    announce: fauna_protocol::push::PresenceRequest,
+) {
+    let payload = match fauna_protocol::encode_payload(&announce) {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("push presence: encode failed: {e}");
@@ -131,7 +134,9 @@ impl SupervisedChannel for ClientChannel {
         )
     }
 
-    /// Three refusals no retry can clear:
+    /// Five refusals no retry can clear (the fourth, a nest that needs
+    /// updating, and the fifth, a nest that no longer signs this identity in,
+    /// are commented at their arms):
     ///
     /// 1. **This identity has been succeeded** — the account now belongs to a
     ///    different keypair, so no bearer this client can mint will ever be
@@ -170,6 +175,34 @@ impl SupervisedChannel for ClientChannel {
                 err,
                 NestClientError::Rpc(e) if e.code == fauna_protocol::RpcError::CODE_SUPERSEDED
             )
+            // Case 4: the connect's bearer mint was refused because the nest
+            // needs updating — restarted into its degraded needs-update mode,
+            // which refuses the bearer upgrade with `401` and every handshake
+            // with `fauna.nest.outdated`. Nothing this client can do clears it
+            // until a newer nest binary is deployed, so the session ends onto
+            // the app's non-retry update surface (`version-compatibility.md`
+            // § Dimension 4) instead of "Connecting…" for as long as the nest
+            // stays stale. By action, never by string, like every reading.
+            || matches!(
+                err,
+                NestClientError::Rpc(e) if e.action() == fauna_protocol::RpcErrorAction::NeedsUpdate
+            )
+            // Case 5: the nest no longer signs this identity in — a reset wiped
+            // the actor's row, or the admin removed or suspended it. A restart
+            // drops the socket without a 4401, so the reconnect's own mint (at
+            // the dial, or the re-mint after the upgrade's `401`) is where the
+            // refusal lands; it ends the session onto the app's refused surface
+            // (`nest/common.md` § Factory reset → *Persistent-client reconnect
+            // across a reset*) instead of "Connecting…". Typed from
+            // `LaunchMachineBearer`; read off the latch when `WsChallengeBearer`
+            // flattened it, since only the latch tells a refusal from a mint
+            // nobody answered.
+            || matches!(err, NestClientError::Rpc(e) if e.is_not_registered())
+            || (matches!(err, NestClientError::Auth(_))
+                && self
+                    .auth
+                    .last_auth_refusal()
+                    .is_some_and(|r| r.is_not_registered()))
     }
 
     /// A locked account (`fauna.auth.account_locked`) is terminal until its
@@ -206,13 +239,13 @@ impl SupervisedChannel for ClientChannel {
         // (re)connect (`common.md` § Registration). Spawned, so a slow nest
         // never holds up the connect; the dispatcher handle it holds is
         // released when the reply (or the deadline) arrives.
-        let device_id = self
+        let announce = self
             .push_presence
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        if let Some(device_id) = device_id {
-            tokio::spawn(announce_presence(Arc::clone(dispatcher), device_id));
+        if let Some(announce) = announce {
+            tokio::spawn(announce_presence(Arc::clone(dispatcher), announce));
         }
         Ok(session)
     }
@@ -346,6 +379,35 @@ mod tests {
         );
     }
 
+    /// The nest no longer signs this identity in — the reconnect after a
+    /// factory reset wiped the actor's row (`nest/common.md` § Factory reset →
+    /// *Persistent-client reconnect across a reset*), or after a removal. The
+    /// nest restarted, so the session saw a transport drop and no 4401; the
+    /// reconnect's own mint is where the refusal lands. Before this arm it fell
+    /// through to the backoff path and the user sat on "Connecting…" while the
+    /// app re-signed a refused challenge at the nest every interval.
+    ///
+    /// Both bearer shapes: `LaunchMachineBearer` (linux, tui) carries the
+    /// refusal typed; `WsChallengeBearer` flattens it into `Auth` and latches
+    /// it, and only the latch tells it from a mint nobody answered.
+    #[test]
+    fn a_nest_that_no_longer_signs_this_identity_in_is_terminal() {
+        let channel = test_channel();
+        assert!(channel.connect_error_is_terminal(&NestClientError::Rpc(
+            fauna_protocol::RpcError::not_registered()
+        )));
+
+        let flattened = NestClientError::Auth("(403) fauna.auth.not_registered".into());
+        assert!(
+            !channel.connect_error_is_terminal(&flattened),
+            "a flattened mint failure with nothing latched is not a refusal"
+        );
+        channel
+            .auth
+            .latch_last_auth_refusal_for_test(fauna_protocol::RpcError::not_registered());
+        assert!(channel.connect_error_is_terminal(&flattened));
+    }
+
     /// A locked account holds the reconnect loop until its unlock time rather
     /// than stopping it (the lock lapses by itself) or backing off (each dial
     /// before then re-signs a ceremony the nest must refuse) — and once the
@@ -401,7 +463,11 @@ mod tests {
         use futures_util::StreamExt;
 
         let channel = test_channel();
-        *channel.push_presence.lock().unwrap() = Some("dev-42".into());
+        *channel.push_presence.lock().unwrap() = Some(fauna_protocol::push::PresenceRequest {
+            device_id: "dev-42".into(),
+            stand_in: true,
+            ..Default::default()
+        });
 
         let (client_end, mut server_end) = fauna_protocol::test_transport::make_pair();
         let (dispatcher, driver) = RpcDispatcher::new(client_end);
@@ -423,5 +489,6 @@ mod tests {
         let presence: fauna_protocol::push::PresenceRequest =
             fauna_cbor::decode_strict(&payload).unwrap();
         assert_eq!(presence.device_id, "dev-42");
+        assert!(presence.stand_in, "the slot's kind rides every (re)connect");
     }
 }

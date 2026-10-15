@@ -19,6 +19,13 @@
 
   let { children } = $props();
 
+  // `key` is the ui.yaml page key the row opens (or the two-element nav slug for
+  // an entry realized from the `settings` page itself — status/privacy/general/
+  // encryption): the row's id is `settings-nav-row[<key>]` (ui.yaml
+  // `navigation.sub_page_nav_rows`). The Account row has no `key`: it keeps its
+  // older `account-settings-link` (carried by the Status landing's Account
+  // section), so minting a second one here would duplicate the id.
+  //
   // Flat rail, one entry per page (settings.md § Navigation model). `id` is the
   // sub-page slug = the e2e two-element nav id (`{"view":"settings","id":<id>}`),
   // which the web test agent maps to `/app/settings/<id>`. The Status entry is
@@ -31,55 +38,58 @@
   // five mail entries deliberately drop web's former "Mail " label prefix to match
   // the canonical native labels (Aliases / Spam / Export mailbox / Lists / Members).
   const railEntries = [
-    { id: '', label: t.common.status },
+    { id: '', key: 'status', label: t.common.status },
     { id: 'account', label: t.common.account },
     // Members To Review — the permanent post-succession unattested-member
     // review page (succession-aftermath.md § Propagation item (iv); rail
     // slot user-approved 2026-08-16, directly after Account — mirrors
     // tui/linux/android). Holds whatever a review sweep left unanswered;
     // no sweep gate of its own.
-    { id: 'member-review', label: t.settings.member_review_page.title },
-    { id: 'privacy', label: t.settings.privacy },
+    { id: 'member-review', key: 'member_review', label: t.settings.member_review_page.title },
+    { id: 'privacy', key: 'privacy', label: t.settings.privacy },
     // Muted words (moderation.md § Muted keywords; settings.md § Navigation
     // model line 17 — rail order: right after Privacy). Sealed client-side
     // user-global keyword list; the collapse render lives on the Conversations
     // page, this rail entry is only the CRUD sub-page.
-    { id: 'muted-words', label: t.muted_words.title },
+    { id: 'muted-words', key: 'muted-words', label: t.muted_words.title },
     // Personalization home + Community-labelers catalog
     // (content-moderation-and-ranking.md § Composition + § Tier-3) — right
     // after Muted words, its sibling personal-filtering surface.
-    { id: 'personalization', label: t.personalization.title },
-    { id: 'labeler-catalog', label: t.labeler_catalog.title },
-    { id: 'general', label: t.settings.general },
-    { id: 'encryption', label: t.settings.encryption_page.title },
+    { id: 'personalization', key: 'personalization', label: t.personalization.title },
+    { id: 'labeler-catalog', key: 'labeler-catalog', label: t.labeler_catalog.title },
+    { id: 'general', key: 'general', label: t.settings.general },
+    { id: 'encryption', key: 'encryption', label: t.settings.encryption_page.title },
     // Devices (roster) + Folders (control plane) — the 2026-06-28 sync/folder
     // UI unification moved the former top-level Devices/Peers page into the
     // Settings shell and renamed the former `sync` sub-page to `folders`
     // (devices.md / folders.md). `t.folders.title` = "Folders".
-    { id: 'devices', label: t.common.devices },
-    { id: 'folders', label: t.folders.title },
-    { id: 'p2p', label: t.status.p2p.title },
-    { id: 'nostr', label: t.nostr.title },
+    { id: 'devices', key: 'devices', label: t.common.devices },
+    // Sessions — directly after Devices (settings.md § Navigation model):
+    // "machines enrolled" beside "sign-ins live now" (ui/sessions.md).
+    { id: 'sessions', key: 'sessions', label: t.sessions.title },
+    { id: 'folders', key: 'folders', label: t.folders.title },
+    { id: 'p2p', key: 'p2p', label: t.status.p2p.title },
+    { id: 'nostr', key: 'nostr', label: t.nostr.title },
     // Bluesky — the ATProto login-plane settings page, right after Nostr
     // (settings.md § Navigation model — the sibling federation-protocol
     // bridge settings page; atproto-pds-full.md § App surface).
-    { id: 'atproto', label: t.atproto_settings.title },
-    { id: 'subscription-settings', label: t.subscriptions.title },
-    { id: 'web', label: t.web_settings.title },
-    { id: 'mail-settings', label: t.mail_settings.title },
-    { id: 'mail-aliases', label: t.mail_aliases.title },
-    { id: 'mail-spam', label: t.mail_spam.title },
-    { id: 'mail-export', label: t.mail_export.title },
-    { id: 'mail-import', label: t.mail_import.title },
-    { id: 'mail-lists', label: t.mail_lists.title },
-    { id: 'mail-list-members', label: t.mail_lists.members_title },
-    { id: 'nests', label: t.nests.title },
+    { id: 'atproto', key: 'atproto', label: t.atproto_settings.title },
+    { id: 'subscription-settings', key: 'subscription-settings', label: t.subscriptions.title },
+    { id: 'web', key: 'web-settings', label: t.web_settings.title },
+    { id: 'mail-settings', key: 'mail-settings', label: t.mail_settings.title },
+    { id: 'mail-aliases', key: 'mail-aliases', label: t.mail_aliases.title },
+    { id: 'mail-spam', key: 'mail-spam', label: t.mail_spam.title },
+    { id: 'mail-export', key: 'mail-export', label: t.mail_export.title },
+    { id: 'mail-import', key: 'mail-import', label: t.mail_import.title },
+    { id: 'mail-lists', key: 'mail-lists', label: t.mail_lists.title },
+    { id: 'mail-list-members', key: 'mail-list-members', label: t.mail_lists.members_title },
+    { id: 'nests', key: 'nests', label: t.nests.title },
     // After Nests — the cross-participant capstone (settings.md § Navigation model).
-    { id: 'task-delegation', label: t.task_delegation.title },
+    { id: 'task-delegation', key: 'task-delegation', label: t.task_delegation.title },
     // Right after Task delegation (settings.md § Navigation model): the one
     // roster of everything acting for the user from outside the apps.
-    { id: 'connected-apps', label: t.connected_apps.title },
-    { id: 'logs', label: t.logs.title },
+    { id: 'connected-apps', key: 'connected-apps', label: t.connected_apps.title },
+    { id: 'logs', key: 'settings-logs', label: t.logs.title },
   ];
 
   // Current sub-page slug (undefined on the bare /app/settings → Status default).
@@ -106,7 +116,7 @@
         href={href(entry.id)}
         class="tab"
         class:active={current === entry.id}
-        data-testid="settings-nav-{entry.id || 'status'}"
+        data-testid={entry.key ? `${IDS.SETTINGS_NAV_ROW}[${entry.key}]` : undefined}
       >{entry.label}</a>
     {/each}
   </div>

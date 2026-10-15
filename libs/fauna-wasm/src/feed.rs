@@ -33,15 +33,17 @@
 //! `WasmConversationsManager` — no foreign `SnapshotObserver` callback crosses.
 
 use fauna_core::data::StructuredField;
-use fauna_core::source_glyph::SourceGlyph;
+use fauna_core::source_glyph::{BridgeIdentitySnapshot, SourceGlyph};
 use fauna_core::structured::structured_view_from_parts;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 /// JS-facing badge: a stable `id` for icon lookup, the canonical display
-/// `label`, and the shared `glyph` icon concept. Hides the serde-tagged Rust
-/// enum shape from JS.
+/// `label`, the shared `glyph` icon concept, and whether the label paints
+/// beside a glyph-only badge. Hides the serde-tagged Rust enum shape from JS;
+/// the same shape as the UniFFI `FfiSourceBadge` the native apps read.
 #[derive(Serialize)]
+#[cfg_attr(test, derive(Debug, Deserialize, PartialEq))]
 struct SourceBadge {
     /// `"fauna" | "bluesky" | "nostr" | "activitypub" | "email" |
     /// "facebook" | "instagram" | "other"`.
@@ -54,6 +56,9 @@ struct SourceBadge {
     /// the feed badge that the conversations rail already uses — killing the
     /// within-client rail-vs-badge split (render-model.md § Deltas → D5).
     glyph: SourceGlyph,
+    /// `SourceKind::badge_paints_label`: true for a third-party bridge's badge,
+    /// whose glyph does not name it. Web paints every badge's label already.
+    paints_label: bool,
 }
 
 /// The i18n key to paint for a feed-manager error that is a stated refusal
@@ -66,23 +71,78 @@ pub fn feed_refusal_i18n_key(err: &str) -> Option<String> {
     fauna_feed::refusal_i18n_key(err).map(str::to_string)
 }
 
+/// Whether a post whose wire `source` field is `source` offers *View thread*
+/// (`feed-post-view-thread-button`) — the browser twin of the UniFFI
+/// `post_offers_thread_view`, over the one shared
+/// `fauna_feed::PostSummary::offers_thread_view` (`bridges.md` § Bluesky-native
+/// thread view). Takes the snapshot post's `source` rather than the whole post,
+/// the `classifySources` posture: the predicate reads nothing else.
+#[wasm_bindgen(js_name = postOffersThreadView)]
+pub fn post_offers_thread_view(source: &str) -> bool {
+    fauna_feed::PostSummary {
+        source: source.to_string(),
+        ..Default::default()
+    }
+    .offers_thread_view()
+}
+
+/// What a card's `gated-post-badge` paints, `undefined` for no badge — the
+/// browser twin of the UniFFI `post_card_gate`, over the one shared
+/// `fauna_feed::PostSummary::card_gate` (`behavior/restricted-posts.md`
+/// § Encryption at rest, ruling 3). Takes the four snapshot-post fields the
+/// pick reads rather than the whole post, the `postOffersThreadView` posture;
+/// returns `{ tier, room_label }`.
+#[wasm_bindgen(js_name = postCardGate)]
+pub fn post_card_gate(
+    gated_tier: Option<String>,
+    room_label: Option<String>,
+    reposted_gated_tier: Option<String>,
+    reposted_room_label: Option<String>,
+) -> Result<JsValue, JsValue> {
+    let post = fauna_feed::PostSummary {
+        gated_tier,
+        room_label,
+        reposted_gated_tier,
+        reposted_room_label,
+        ..Default::default()
+    };
+    crate::rpc::to_js(&fauna_feed::post_card_gate(post))
+}
+
+/// How the thread page names a `feed-thread-post`'s author — the shared
+/// `fauna_feed::ThreadPostView::author_label` (display name, else `@handle`).
+/// `post` is one entry of the snapshot's `thread.posts`, as read off
+/// `WasmFeedManager.snapshot()`.
+#[wasm_bindgen(js_name = threadPostAuthorLabel)]
+pub fn thread_post_author_label(post: JsValue) -> Result<String, JsValue> {
+    let post: fauna_feed::ThreadPostView =
+        serde_wasm_bindgen::from_value(post).map_err(crate::rpc::err_to_js)?;
+    Ok(post.author_label())
+}
+
 /// Classify the comma-separated wire `source` field (e.g. `"fauna,
-/// bluesky"`) into an ordered, deduplicated array of `{ id, label, glyph }`
-/// badges. Returns a JS array.
+/// bluesky"`) into an ordered, deduplicated array of `{ id, label, glyph,
+/// paints_label }` badges. Returns a JS array.
+///
+/// `bridges` is the feed snapshot's `bridge_roster` array, passed as read off
+/// `WasmFeedManager.snapshot()`: a token naming a listed bridge classifies as
+/// that bridge, with its declared label and glyph, and an unlisted one stays
+/// the unknown source (`ui/feed.md` § Implementation status today,
+/// `SourceKind::Bridged`).
 #[wasm_bindgen(js_name = classifySources)]
-pub fn classify_sources(source_field: &str) -> Result<JsValue, JsValue> {
-    // No bridges roster yet: `BridgeStatus.glyph` is filled nest-side by the
-    // bridged family's nest slice, and the roster threads through here with the
-    // render slices (`ui/feed.md` § Implementation status today, `SourceKind::Bridged`).
-    let badges: Vec<SourceBadge> = fauna_feed::classify_sources(source_field, &[])
+pub fn classify_sources(source_field: &str, bridges: JsValue) -> Result<JsValue, JsValue> {
+    let bridges: Vec<BridgeIdentitySnapshot> =
+        serde_wasm_bindgen::from_value(bridges).map_err(crate::rpc::err_to_js)?;
+    let badges: Vec<SourceBadge> = fauna_feed::classify_sources(source_field, &bridges)
         .into_iter()
         .map(|k| SourceBadge {
             id: k.id(),
             label: k.label(),
             glyph: k.glyph(),
+            paints_label: k.badge_paints_label(),
         })
         .collect();
-    serde_wasm_bindgen::to_value(&badges).map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&badges)
 }
 
 /// The `Structured` arm of a decoded `PostBody`, captured loosely so the other
@@ -118,7 +178,7 @@ pub fn structured_view(decoded: JsValue) -> Result<JsValue, JsValue> {
         .structured
         .and_then(|s| structured_view_from_parts(&s.schema, &s.fields, s.content.as_deref()));
     match view {
-        Some(v) => serde_wasm_bindgen::to_value(&v).map_err(crate::rpc::err_to_js),
+        Some(v) => crate::rpc::to_js(&v),
         None => Ok(JsValue::NULL),
     }
 }
@@ -1155,6 +1215,27 @@ mod manager {
             })
         }
 
+        /// Open the Bluesky thread page (`feed-thread-page`, `bridges.md`
+        /// § Bluesky-native thread view) on `post_id` (hex) — over the shared
+        /// `fauna_feed::FeedManager::open_thread`. The page rides the snapshot's
+        /// `thread` key: loading at once, then loaded or failed (its reason on
+        /// `thread.error`). Resolves `undefined`; never rejects — a failed fetch
+        /// is page state, not an exception.
+        #[wasm_bindgen(js_name = openThread)]
+        pub fn open_thread(&self, post_id: String) -> js_sys::Promise {
+            let m = self.manager.clone();
+            future_to_promise(async move {
+                m.open_thread(post_id).await;
+                Ok(JsValue::UNDEFINED)
+            })
+        }
+
+        /// Leave the thread page — back to the post detail it was opened from.
+        #[wasm_bindgen(js_name = closeThread)]
+        pub fn close_thread(&self) {
+            self.manager.close_thread();
+        }
+
         /// The manager's `{started, completed, committed_gen}` reload triple
         /// (`fauna_e2e_agent::FEED_RELOADS_KEY`, which owns the contract; the
         /// JSON shape is derived once in `fauna_feed::feed_reloads_json`, the
@@ -1253,7 +1334,8 @@ mod manager {
         /// § Interaction bar → Repost, ratified 2026-08-10): absent → composes
         /// the caller's empty-body `Reference::Repost` post; present →
         /// un-reposts it through the interact door. A bridged post routes
-        /// through interact verbatim — the manager decides. Resolves
+        /// through interact (a Bluesky one as `repost`/`unrepost` on the post
+        /// itself, the rest one-way) — the manager decides. Resolves
         /// `undefined`; rejects with the error string.
         #[wasm_bindgen(js_name = repost)]
         pub fn repost(&self, post_id: String) -> js_sys::Promise {
@@ -1276,8 +1358,8 @@ mod manager {
         /// **Use this, never `interact(id, "like", null)`.** That call is
         /// one-way: the nest's like arm is idempotent per (actor, post), so a
         /// second tap moves nothing and a like can never be taken back. A
-        /// bridged post keeps the shipped one-way path internally — the
-        /// manager decides.
+        /// Bluesky post toggles the same way; any other bridged post keeps
+        /// the shipped one-way path internally — the manager decides.
         #[wasm_bindgen(js_name = like)]
         pub fn like(&self, post_id: String) -> js_sys::Promise {
             let m = self.manager.clone();
@@ -1406,36 +1488,23 @@ mod manager {
             })
         }
 
-        /// Report one per-exposure engagement observation when a card leaves the
-        /// viewport (or its media ends). The shell supplies only what a
-        /// visibility/playback observer can honestly compute — the peak playback
-        /// fraction (`mediaPlayedPm`, per-mille; `undefined` for a non-media post)
-        /// and the cumulative substantially-visible dwell at the two gate
-        /// fractions; **all derivation is shared Rust**. `observedAtMs` is the
-        /// shell's event time (the manager reads no clock). Resolves `undefined`.
+        /// Report one per-exposure engagement observation — exactly the object
+        /// `WasmCueTracker` emitted (`sample`/`drainAll`), relayed whole and
+        /// deserialized on the same serde path that serialized it. **All
+        /// derivation is shared Rust**, and the shell never spells the
+        /// object's fields: it has no honest way of its own to know how an
+        /// exposure ended (`ended_by`, which a `skip` requires to be a scroll —
+        /// engagement-cues.md § Cue vocabulary & derivation). Resolves
+        /// `undefined`; a malformed object rejects.
         #[wasm_bindgen(js_name = recordObservation)]
-        pub fn record_observation(
-            &self,
-            content_id: String,
-            is_media: bool,
-            media_played_pm: Option<u32>,
-            dwell_ms_at_skip_visibility: u64,
-            dwell_ms_at_long_visibility: u64,
-            observed_at_ms: u64,
-        ) -> js_sys::Promise {
+        pub fn record_observation(&self, exposure: JsValue) -> js_sys::Promise {
             let m = self.manager.clone();
             future_to_promise(async move {
-                m.record_observation(CueObservation {
-                    content_id,
-                    is_media,
-                    media_played_pm,
-                    dwell_ms_at_skip_visibility,
-                    dwell_ms_at_long_visibility,
-                    observed_at_ms,
-                })
-                .await
-                .map(|_verdict| JsValue::UNDEFINED)
-                .map_err(|e| JsValue::from_str(&e))
+                let obs: CueObservation = crate::rpc::from_js(exposure)?;
+                m.record_observation(obs)
+                    .await
+                    .map(|_verdict| JsValue::UNDEFINED)
+                    .map_err(|e| JsValue::from_str(&e))
             })
         }
 
@@ -1756,8 +1825,8 @@ mod manager {
         /// parameter reaches JS as a `BigInt` and a plain number argument then
         /// throws at the boundary.
         ///
-        /// Returns the finished exposures — each is a plain object whose fields
-        /// are exactly `recordObservation`'s arguments.
+        /// Returns the finished exposures — each is the plain object
+        /// `recordObservation` takes back whole, `ended_by` included.
         #[wasm_bindgen(js_name = sample)]
         pub fn sample(
             &self,
@@ -1788,6 +1857,51 @@ mod manager {
             let left = self.inner.borrow_mut().drain_all(ms(wall_now_ms));
             crate::rpc::to_js(&left)
         }
+
+        // ── e2e test clock (convention 14) ───────────────────────────────────
+        //
+        // The browser faces of the shared tracker's frozen clock pair
+        // (`fauna_feed::CueTracker` § The test clock), driven by the SPA's
+        // `feed_cue_clock_*` / `feed_cue_probe` agent commands
+        // (`$lib/feed-cues-e2e`) — the twins of tui's and linux's arms. Gated on
+        // this crate's off-by-default `test-helpers` feature, so a production
+        // wasm build does not export them (convention 15).
+
+        /// Freeze both readings at the shell's current real ones
+        /// (`performance.now()`, `Date.now()`). Idempotent.
+        #[cfg(feature = "test-helpers")]
+        #[wasm_bindgen(js_name = freezeClockForTest)]
+        pub fn freeze_clock_for_test(&self, mono_now_ms: f64, wall_now_ms: f64) {
+            self.inner
+                .borrow_mut()
+                .freeze_clock_for_test(ms(mono_now_ms), ms(wall_now_ms));
+        }
+
+        /// Move both frozen readings forward by `ms`. Throws when nothing is
+        /// frozen or when `ms` exceeds one sample's credit cap.
+        #[cfg(feature = "test-helpers")]
+        #[wasm_bindgen(js_name = advanceClockForTest)]
+        pub fn advance_clock_for_test(&self, step_ms: f64) -> Result<(), JsValue> {
+            self.inner
+                .borrow_mut()
+                .advance_clock_for_test(ms(step_ms))
+                .map_err(|e| JsValue::from_str(&e))
+        }
+
+        /// Back to the shell's real readings.
+        #[cfg(feature = "test-helpers")]
+        #[wasm_bindgen(js_name = thawClockForTest)]
+        pub fn thaw_clock_for_test(&self) {
+            self.inner.borrow_mut().thaw_clock_for_test();
+        }
+
+        /// The shared probe (`fauna_feed::CueProbe`) as a plain object, in the
+        /// client viewport's coordinate space.
+        #[cfg(feature = "test-helpers")]
+        #[wasm_bindgen(js_name = probeForTest)]
+        pub fn probe_for_test(&self) -> Result<JsValue, JsValue> {
+            crate::rpc::to_js(&self.inner.borrow().probe_for_test())
+        }
     }
 
     /// A JS millisecond reading as the `u64` the tracker takes. Negative and
@@ -1810,7 +1924,57 @@ mod manager {
     pub fn cue_sample_interval_ms() -> f64 {
         fauna_core::scoring::cues::CUE_SAMPLE_INTERVAL_MS as f64
     }
+
+    /// A player's position through its media as the per-mille a row's
+    /// `media_played_pm` carries — the wasm face of
+    /// [`fauna_core::scoring::cues::played_per_mille`], so the shell never
+    /// re-derives the clamp. `currentTime` and `duration` in seconds; returns
+    /// `undefined` while the duration is unknown (`NaN` before metadata).
+    #[wasm_bindgen(js_name = cuePlayedPerMille)]
+    pub fn cue_played_per_mille(position: f64, duration: f64) -> Option<u32> {
+        fauna_core::scoring::cues::played_per_mille(position, duration)
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use manager::{WasmCueTracker, WasmFeedManager, cue_sample_interval_ms};
+pub use manager::{WasmCueTracker, WasmFeedManager, cue_played_per_mille, cue_sample_interval_ms};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    /// `ui/feed.md` § Implementation status today, `SourceKind::Bridged`: the
+    /// roster web passes (the snapshot's `bridge_roster`, as JS) resolves a
+    /// listed bridge's token to that bridge's badge; with an empty roster the
+    /// same token is the unknown source.
+    #[wasm_bindgen_test]
+    fn a_listed_bridges_token_classifies_bridged() {
+        let roster = serde_wasm_bindgen::to_value(&vec![BridgeIdentitySnapshot {
+            id: "matrix".into(),
+            label: "Matrix".into(),
+            glyph: SourceGlyph::Globe,
+        }])
+        .unwrap();
+        let badges: Vec<SourceBadge> =
+            serde_wasm_bindgen::from_value(classify_sources("fauna, matrix", roster).unwrap())
+                .unwrap();
+        assert_eq!(badges.len(), 2);
+        assert!(!badges[0].paints_label);
+        assert_eq!(
+            badges[1],
+            SourceBadge {
+                id: "matrix".into(),
+                label: "Matrix".into(),
+                glyph: SourceGlyph::Globe,
+                paints_label: true,
+            }
+        );
+
+        let empty = serde_wasm_bindgen::to_value(&Vec::<BridgeIdentitySnapshot>::new()).unwrap();
+        let unlisted: Vec<SourceBadge> =
+            serde_wasm_bindgen::from_value(classify_sources("matrix", empty).unwrap()).unwrap();
+        assert_eq!(unlisted[0].glyph, SourceGlyph::Unknown);
+        assert!(!unlisted[0].paints_label);
+    }
+}

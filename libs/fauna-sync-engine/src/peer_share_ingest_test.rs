@@ -45,8 +45,8 @@ pub(crate) fn sign_as_serving_peer(change: &mut fauna_protocol::sync::SyncChange
 
 /// Strip the writer signature — a row as an unsigned writer would serve it.
 fn unsigned(
-    mut row: fauna_protocol::peer_share::PeerShareChange,
-) -> fauna_protocol::peer_share::PeerShareChange {
+    mut row: fauna_protocol::peer_row::PeerChangeRow,
+) -> fauna_protocol::peer_row::PeerChangeRow {
     row.change.signature = None;
     row.change.signer_key = None;
     row
@@ -211,8 +211,8 @@ pub(crate) fn peer_row(
     path: &str,
     manifest_hash: ContentHash,
     change_type: &str,
-) -> fauna_protocol::peer_share::PeerShareChange {
-    let mut row = fauna_protocol::peer_share::PeerShareChange {
+) -> fauna_protocol::peer_row::PeerChangeRow {
+    let mut row = fauna_protocol::peer_row::PeerChangeRow {
         change: fauna_protocol::sync::SyncChange {
             seq,
             path_hash: hex::encode(fauna_core::sync::path_hash(path)),
@@ -647,7 +647,7 @@ pub(crate) fn spool_blobs(spool: &std::path::Path, blobs: &[&Blob]) {
     }
 }
 
-pub(crate) fn encoded(rows: &[fauna_protocol::peer_share::PeerShareChange]) -> Vec<Vec<u8>> {
+pub(crate) fn encoded(rows: &[fauna_protocol::peer_row::PeerChangeRow]) -> Vec<Vec<u8>> {
     rows.iter()
         .map(|r| fauna_core::encoding::canonical_encode(r).unwrap().to_vec())
         .collect()
@@ -759,6 +759,102 @@ async fn a_row_refused_for_good_does_not_hold_the_pull_cursor() {
     assert_eq!(cursor, 9, "a permanent refusal moves the cursor on");
 }
 
+/// A hostile co-member serves a sequenced row at `seq = i64::MIN`
+/// whose bytes it never serves: the retry floor used to be `i64::MIN` and
+/// `floor - 1` panicked the resident loop (shipped profiles check overflow).
+/// A sequenced row at or below the requested cursor is a protocol violation —
+/// refused at the page door, so the cursor neither panics nor moves.
+#[tokio::test]
+async fn a_peer_served_seq_at_the_extremes_is_refused_without_a_panic() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = ingest_engine(watch.path().to_path_buf());
+    engine
+        .db()
+        .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None)
+        .unwrap();
+    engine
+        .advance_share_pull_cursor(&PEER_ACTOR_HEX, 5)
+        .unwrap();
+
+    let blob = sealed_blob(b"a body the hostile peer never serves");
+    let spool = tempfile::tempdir().unwrap(); // nothing spooled: every fetch fails
+    for seq in [i64::MIN, -1, 0, 3, 5] {
+        let rows = [peer_row(
+            seq,
+            "traps/never.txt",
+            blob.manifest_hash,
+            "create",
+        )];
+        let (report, cursor) = crate::always_resident::ingest_share_page(
+            &engine,
+            &PEER_ACTOR_HEX,
+            &encoded(&rows),
+            spool.path().to_path_buf(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("seq {seq}: {e:#}"));
+        assert_eq!(report.refused, 1, "seq {seq}: {report:?}");
+        assert_eq!(
+            report.retry_floor, None,
+            "seq {seq}: never reached the fetch"
+        );
+        assert_eq!(cursor, 5, "seq {seq}: the cursor stays where it was");
+    }
+}
+
+/// A fetcher whose every manifest fetch fails with the given error.
+struct FailingFetcher(fn() -> anyhow::Error);
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl fauna_core::file_download::BlobFetcher for FailingFetcher {
+    async fn fetch_manifest(&self, _hash: &ContentHash) -> anyhow::Result<Vec<u8>> {
+        Err((self.0)())
+    }
+    async fn fetch_chunks(
+        &self,
+        _store_keys: &[ContentHash],
+        _relative_path: &str,
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
+        Err((self.0)())
+    }
+}
+
+/// A fetch failure a retry cannot cure (a manifest from a newer
+/// format) must not pin the cursor below its row — an honest peer would be
+/// re-listed the same page on every pass — while a transient failure still
+/// holds it.
+#[tokio::test]
+async fn a_permanent_fetch_failure_does_not_hold_the_pull_cursor_but_a_transient_one_does() {
+    let blob = sealed_blob(b"a body whose manifest this reader cannot read");
+    let permanent: fn() -> anyhow::Error = || {
+        fauna_core::apply_failure::permanent(
+            fauna_core::apply_failure::PermanentApplyFailure::MANIFEST_TOO_NEW,
+            "manifest from a newer format",
+        )
+    };
+    let transient: fn() -> anyhow::Error = || anyhow::anyhow!("connection reset");
+    for (fail, expect_floor) in [(permanent, None), (transient, Some(6))] {
+        let watch = tempfile::tempdir().unwrap();
+        let engine = ingest_engine(watch.path().to_path_buf());
+        engine
+            .db()
+            .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None)
+            .unwrap();
+        let rows = [peer_row(
+            6,
+            "newer/format.txt",
+            blob.manifest_hash,
+            "create",
+        )];
+        let report = engine
+            .ingest_peer_share_rows(&rows, &PEER_ACTOR_HEX, &FailingFetcher(fail))
+            .await
+            .expect("ingest");
+        assert_eq!(report.retry_floor, expect_floor, "report: {report:?}");
+    }
+}
+
 // ── The relayed-row lift (writer-signed change records, ruling (3)) ─────────
 
 const SET_NONCE: [u8; 32] = [0x4E; 32];
@@ -782,7 +878,7 @@ fn signed_row(
     seq: i64,
     path: &str,
     manifest_hash: ContentHash,
-) -> fauna_protocol::peer_share::PeerShareChange {
+) -> fauna_protocol::peer_row::PeerChangeRow {
     let mut row = peer_row(seq, path, manifest_hash, "create");
     row.change.author_actor_id = Some(writer.actor_id().to_hex());
     // A real device id — the signed statement carries it as 32 bytes.
@@ -884,7 +980,7 @@ async fn a_third_writers_signed_row_relays_across_two_hops() {
     c.db()
         .cache_share_writer_roster(&[(writer_hex.clone(), true)], &[], None)
         .unwrap();
-    let hop2 = fauna_protocol::peer_share::PeerShareChange {
+    let hop2 = fauna_protocol::peer_row::PeerChangeRow {
         change: served[0].change.clone(),
         sequenced: served[0].sequenced,
         signer_cert: served[0].signer_cert.clone(),
@@ -1162,4 +1258,151 @@ async fn a_markerless_member_offline_takes_its_owner_off_the_cached_roster() {
         [(1, 0), (1, 0), (0, 1), (0, 1)],
         "(refused, overlaid) for the plant, the history row, the member's row, the owner's row"
     );
+}
+
+// ── The one ingest by page ORIGIN (the same-account row leg, decision 3) ─────
+
+/// A sibling device of this account, as the same-account leg names it.
+const SIBLING_DEVICE: &str = "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7";
+
+/// An ingest engine whose OWN actor is the set's owner — a replica of the
+/// owner's folder on one of its devices (device id `00…`), as the agent runs it.
+fn own_folder_engine(watch_dir: std::path::PathBuf) -> SyncEngine {
+    let bearer: Arc<dyn BearerSource> = Arc::new(StaticBearer("test.bearer".to_string()));
+    let auth = Arc::new(fauna_client::AuthClient::with_bearer_source(
+        "http://127.0.0.1:9".to_string(),
+        set_owner(),
+        bearer,
+        reqwest::Client::new(),
+    ));
+    let engine = SyncEngine::new(
+        watch_dir,
+        SyncDb::open_in_memory().unwrap(),
+        SyncClient::new(auth, &[0u8; 32]),
+        Some("__test".to_string()),
+        [0u8; 32],
+        None,
+        None,
+        None,
+        Some(vec![0x11; 32]),
+        Some(FolderContentKeys::genesis(CONTENT_KEY, 1_760_000_000)),
+        fauna_core::format::ConflictPolicy::default(),
+        FormatRegistry::new(),
+        IgnoreMatcher::default(),
+        4,
+        TransferPool::new(Arc::new(AdaptiveConcurrency::fixed(4)), None),
+        fauna_client::NestClient::new("http://127.0.0.1:9".to_string(), set_owner()),
+        crate::config::SyncMode::Sync,
+    );
+    engine.set_reader_binding(fauna_protocol::sync_row_verify::ReaderBinding {
+        set_nonce: Some(SET_NONCE),
+        owner: Some(set_owner().actor_id().0),
+        ..Default::default()
+    });
+    engine
+}
+
+/// One page, two origins: the judge, the overlay and materialization are the
+/// same code whichever leg served it, and each origin keys its OWN cursor — a
+/// sibling's under `device:<hex>`, never a share peer's actor space.
+#[tokio::test]
+async fn one_page_under_each_origin_lands_the_same_overlay_and_keys_its_own_cursor() {
+    use crate::always_resident::ingest_peer_page_landing;
+    use crate::peer_share_store::PeerPageOrigin;
+
+    let bytes = holiday_bytes();
+    let blob = sealed_blob(&bytes);
+    let rel = "clips/holiday.mp4";
+    let share = PeerPageOrigin::Share {
+        peer_actor_hex: PEER_ACTOR_HEX.to_string(),
+    };
+    let sibling = PeerPageOrigin::Sibling {
+        device_hex: SIBLING_DEVICE.to_string(),
+    };
+
+    let mut overlays = Vec::new();
+    for origin in [&share, &sibling] {
+        let watch = tempfile::tempdir().unwrap();
+        let engine = ingest_engine(watch.path().to_path_buf());
+        engine
+            .db()
+            .cache_share_writer_roster(&[(PEER_ACTOR_HEX.to_string(), true)], &[], None)
+            .unwrap();
+        let (report, cursor) = ingest_peer_page_landing(
+            &engine,
+            origin,
+            vec![peer_row(4, rel, blob.manifest_hash, "create")],
+            &FixtureFetcher::serving(&[&blob]),
+            None,
+        )
+        .await
+        .expect("ingest");
+        assert_eq!(report.materialized, 1, "{origin:?}: {report:?}");
+        assert_eq!(cursor, 4);
+        assert_eq!(engine.share_pull_cursor(&origin.cursor_key()).unwrap(), 4);
+        let other = if origin == &share { &sibling } else { &share };
+        assert_eq!(
+            engine.share_pull_cursor(&other.cursor_key()).unwrap(),
+            0,
+            "{origin:?} must not move the other leg's cursor"
+        );
+        assert_eq!(std::fs::read(watch.path().join(rel)).unwrap(), bytes);
+        overlays.push(
+            engine
+                .db()
+                .get_share_overlay(rel)
+                .unwrap()
+                .expect("overlay"),
+        );
+    }
+    assert_eq!(
+        overlays[0], overlays[1],
+        "the same overlay row under either origin"
+    );
+    assert_eq!(sibling.cursor_key(), format!("device:{SIBLING_DEVICE}"));
+}
+
+/// The same-account leg's own rows: every row's signed actor is THIS account,
+/// so the reader places it as the owner with no roster read, and relay
+/// retention keys on the DEVICE — a sibling's row is kept for relay onward,
+/// this device's own row served back is not.
+#[tokio::test]
+async fn a_siblings_own_account_row_is_admitted_and_kept_for_relay_but_this_devices_is_not() {
+    use crate::always_resident::ingest_peer_page_landing;
+    use crate::peer_share_store::PeerPageOrigin;
+
+    let bytes = holiday_bytes();
+    let blob = sealed_blob(&bytes);
+    let watch = tempfile::tempdir().unwrap();
+    // No cached roster at all: admission, not a roster, places the sibling.
+    let engine = own_folder_engine(watch.path().to_path_buf());
+    let sibling = PeerPageOrigin::Sibling {
+        device_hex: SIBLING_DEVICE.to_string(),
+    };
+
+    let from_sibling = signed_row(&set_owner(), SET_NONCE, 4, "a.mp4", blob.manifest_hash);
+    let mut from_here = signed_row(&set_owner(), SET_NONCE, 5, "b.mp4", blob.manifest_hash);
+    from_here.change.device_id = Some("00".repeat(32));
+    fauna_protocol::sync_writer_sig::ChangeSigner::direct(&set_owner())
+        .sign_row(&mut from_here.change, SET_NONCE)
+        .unwrap();
+
+    let (report, _) = ingest_peer_page_landing(
+        &engine,
+        &sibling,
+        vec![from_sibling, from_here],
+        &FixtureFetcher::serving(&[&blob]),
+        None,
+    )
+    .await
+    .expect("ingest");
+    assert_eq!(report.refused, 0, "{report:?}");
+    assert_eq!(report.overlaid, 2, "{report:?}");
+    let relayed = engine.db().relayed_changes_since(0, 10).unwrap();
+    assert_eq!(
+        relayed.iter().map(|r| r.seq).collect::<Vec<_>>(),
+        vec![Some(4)],
+        "the sibling's row is kept for relay, this device's own is not"
+    );
+    assert_eq!(relayed[0].device_id.as_deref(), Some(SIBLING_DEVICE));
 }

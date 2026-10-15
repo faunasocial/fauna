@@ -181,16 +181,5 @@ private func optionLabel(_ option: FfiPinOption, labels: [String: String]) -> St
 /// in-process bridge does no label normalization; see
 /// `tests/e2e-unified/actions/task_delegation.py`).
 private func optionKey(_ option: FfiPinOption) -> String {
-    switch option {
-    case .automatic: "automatic"
-    case .thisDevice: "this-device"
-    case .other(let who): participantKey(who)
-    }
-}
-
-private func participantKey(_ who: FfiParticipantRef) -> String {
-    switch who {
-    case .device(let deviceId): deviceId
-    case .nest(let actorPubkey): data_to_hex(actorPubkey)
-    }
+    (try? taskDelegationOptionKey(option: option)) ?? ""
 }

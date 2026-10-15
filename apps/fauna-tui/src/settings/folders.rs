@@ -68,9 +68,7 @@ use crate::sync_agent::RenderedLocationBinding;
 // share one implementation of "blank is a value" and of retention's inverted
 // omission rule. tui was the lead app and held the only copy until the six
 // apps' slice-e trickle-down lifted it out.
-use fauna_folders_machine::{
-    nest_place_edit_from_row, nest_snapshots_label, nest_snapshots_options,
-};
+use fauna_folders_machine::{nest_snapshots_label, nest_snapshots_options};
 // The save gesture is assembled in `super` (the action → `Op` mapping), so this
 // one is re-exported rather than merely used here.
 pub(super) use fauna_folders_machine::nest_place_write;
@@ -88,6 +86,10 @@ pub struct FoldersUiState {
     /// `find_and_expand_folder` toggles exactly one row and the unindexed body
     /// widgets then resolve uniquely to it).
     pub expanded: Option<usize>,
+    /// The default-conflict-policy refusal a store-change re-read put on
+    /// `error-message`, so the next good re-read retires that one and never a
+    /// folder gesture's (`PageErrors::retire_own`).
+    pub read_error: Option<String>,
     /// The expanded row's `folder-include-paths` buffer, pre-filled from
     /// `FolderSummary::include_paths` on expand; committed on
     /// `folder-save-paths`, never written live per keystroke (unlike the
@@ -128,7 +130,7 @@ pub struct FoldersUiState {
     /// [`release_nest_place`] handed them back at the save). A refresh re-seeds
     /// only while the buffers still equal this — see
     /// [`reseed_nest_place_if_untouched`].
-    pub nest_place_seeded: Option<[String; 6]>,
+    pub nest_place_seeded: Option<fauna_folders_machine::NestPlaceForm>,
     /// Whether `folder-delete-button`'s destructive confirm
     /// (`folder-delete-confirm`) is armed for the expanded row.
     pub delete_pending: bool,
@@ -472,8 +474,10 @@ pub(super) async fn set_audience(
 /// Set a folder's content residency — the phase-5 keyless `folders.update`
 /// setter (`FoldersClient::set_residency`). `"metadata_only"` reaches here only
 /// from the answered `folder-residency-confirm`; `"full"` (the flip back)
-/// commits on change. The nest's refusal text — "turn off website serving
-/// first" and kin — is the actionable half of any error, so it travels whole.
+/// commits on change. A serving-pair refusal ("turn off website serving first"
+/// and kin) arrives as its own typed code (`RpcError::CODE_FOLDERS_*`), so the
+/// `NestClientError` rendering — `RpcError::localized()` — is the sentence
+/// naming the repair; the nest's `details` text stays log-only.
 pub(super) async fn set_residency(
     nest: std::sync::Arc<fauna_client::NestClient>,
     name: String,
@@ -1366,22 +1370,30 @@ fn folder_row_elements(
         // `folder-row[i] / folder-location-row[k]` rather than being overwritten.
         let mut body = Vec::new();
         if !is_member {
-            body.push(
+            // A list this device could not open renders read-only as unavailable,
+            // never as a blank editable field (the machine refuses to save over it).
+            body.push(if fs.include_paths_unreadable {
+                Element::label(ids::FOLDER_INCLUDE_PATHS, t::PATHS_UNAVAILABLE)
+                    .labelled(t::INCLUDE_PATHS)
+            } else {
                 Element::input(
                     ids::FOLDER_INCLUDE_PATHS,
                     ui.include_paths_input.clone(),
                     Field::Settings(SettingsField::FolderIncludePaths),
                 )
-                .labelled(t::INCLUDE_PATHS),
-            );
-            body.push(
+                .labelled(t::INCLUDE_PATHS)
+            });
+            body.push(if fs.exclude_paths_unreadable {
+                Element::label(ids::FOLDER_EXCLUDE_PATHS, t::PATHS_UNAVAILABLE)
+                    .labelled(t::EXCLUDE_PATHS)
+            } else {
                 Element::input(
                     ids::FOLDER_EXCLUDE_PATHS,
                     ui.exclude_paths_input.clone(),
                     Field::Settings(SettingsField::FolderExcludePaths),
                 )
-                .labelled(t::EXCLUDE_PATHS),
-            );
+                .labelled(t::EXCLUDE_PATHS)
+            });
             body.push(Element::gesture_button(
                 ids::FOLDER_SAVE_PATHS,
                 t::SAVE_PATHS,
@@ -2607,7 +2619,7 @@ fn location_elements(
             .within(ids::FOLDER_LOCATION_ROW, k),
         );
         // The per-binding on-demand switch (`on-demand-files.md` § On-Demand
-        // Files → *The choice is the user's*; § Linux FUSE binding). What it
+        // Files → *The choice is the user's*; `on-demand-files-linux.md` § Linux FUSE binding). What it
         // shows is the shared rule's answer, projected by
         // `sync_agent::rendered_locations`: `None` where no switch is rendered
         // (macOS), else the agent's mode for this binding, disabled where the
@@ -2912,53 +2924,60 @@ pub(super) fn prefill_nest_place(ui: &mut FoldersUiState, fs: Option<&FolderSumm
     // Every prefill rule — unset renders blank, a zero bound renders blank
     // because zero is the nest's own spelling of unset — lives in shared Rust,
     // so this is a transcription into the page's buffers and nothing else.
-    let edit = nest_place_edit_from_row(
+    paint_nest_place(ui, nest_place_form_of(fs));
+}
+
+/// The row's six nest-place values through the shared prefill.
+fn nest_place_form_of(fs: Option<&FolderSummary>) -> fauna_folders_machine::NestPlaceForm {
+    fauna_folders_machine::nest_place_form_from_row(
         fs.and_then(|fs| fs.nest_snapshots),
         fs.and_then(|fs| fs.nest_snapshot_quiet_secs),
         fs.and_then(|fs| fs.retention_policy.clone()),
-    );
-    ui.nest_snapshots_input = edit.snapshots;
-    ui.nest_quiet_input = edit.quiet_secs;
-    ui.nest_retention_snapshots_input = edit.retention_snapshots;
-    ui.nest_retention_days_input = edit.retention_days;
-    let vr = fauna_folders_machine::version_retention_edit_from_bounds(
         fs.map_or(0, |fs| fs.version_retention_max_versions),
         fs.map_or(0, |fs| fs.version_retention_max_age_days),
-    );
-    ui.version_retention_count_input = vr.count;
-    ui.version_retention_days_input = vr.days;
-    ui.nest_place_seeded = Some(nest_place_buffers(ui));
+    )
 }
 
-/// The six nest-place buffers, in one comparable value.
-fn nest_place_buffers(ui: &FoldersUiState) -> [String; 6] {
-    [
-        ui.nest_snapshots_input.clone(),
-        ui.nest_quiet_input.clone(),
-        ui.nest_retention_snapshots_input.clone(),
-        ui.nest_retention_days_input.clone(),
-        ui.version_retention_count_input.clone(),
-        ui.version_retention_days_input.clone(),
-    ]
+/// Write `form` into the six buffers and record it as the seed.
+fn paint_nest_place(ui: &mut FoldersUiState, form: fauna_folders_machine::NestPlaceForm) {
+    ui.nest_snapshots_input = form.policy.snapshots.clone();
+    ui.nest_quiet_input = form.policy.quiet_secs.clone();
+    ui.nest_retention_snapshots_input = form.policy.retention_snapshots.clone();
+    ui.nest_retention_days_input = form.policy.retention_days.clone();
+    ui.version_retention_count_input = form.version_retention.count.clone();
+    ui.version_retention_days_input = form.version_retention.days.clone();
+    ui.nest_place_seeded = Some(form);
+}
+
+/// The six nest-place buffers as they stand on screen.
+fn nest_place_on_screen(ui: &FoldersUiState) -> fauna_folders_machine::NestPlaceForm {
+    fauna_folders_machine::NestPlaceForm {
+        policy: fauna_folders_machine::NestPlaceEdit {
+            snapshots: ui.nest_snapshots_input.clone(),
+            quiet_secs: ui.nest_quiet_input.clone(),
+            retention_snapshots: ui.nest_retention_snapshots_input.clone(),
+            retention_days: ui.nest_retention_days_input.clone(),
+        },
+        version_retention: fauna_folders_machine::VersionRetentionEdit {
+            count: ui.version_retention_count_input.clone(),
+            days: ui.version_retention_days_input.clone(),
+        },
+    }
 }
 
 /// A refreshed snapshot's re-seed of the nest-place editor — skipped while the
 /// user has staged edits there that `folder-nest-save-button` has not sent.
 ///
-/// The page re-hydrates on every account-store change, and a busy account
-/// changes its store all the time: an unconditional re-seed wiped staged values
-/// back to the nest's between the typing and the save, and the save then sent
-/// the old policy with no error. So a refresh moves the boxes only while they
-/// still hold what was last seeded (nobody has typed), or once the save has
-/// released them — which is how the save's own refresh shows what the nest
-/// actually stored rather than what was typed.
+/// The page re-hydrates on every account-store change; whether that moves the
+/// boxes is the shared rule's call (`fauna_folders_machine::nest_place_reseed`,
+/// which says why), so tui asks it exactly as every other app's refresh does.
 pub(super) fn reseed_nest_place_if_untouched(ui: &mut FoldersUiState, fs: Option<&FolderSummary>) {
-    let untouched = match &ui.nest_place_seeded {
-        Some(seeded) => *seeded == nest_place_buffers(ui),
-        None => true,
-    };
-    if untouched {
-        prefill_nest_place(ui, fs);
+    if let Some(fresh) = fauna_folders_machine::nest_place_reseed(
+        ui.nest_place_seeded.as_ref(),
+        &nest_place_on_screen(ui),
+        nest_place_form_of(fs),
+    ) {
+        paint_nest_place(ui, fresh);
     }
 }
 
@@ -2980,6 +2999,32 @@ mod tests {
 
     fn empty_state() -> SettingsState {
         SettingsState::default()
+    }
+
+    /// A serving-pair refusal of the residency flip paints the sentence naming
+    /// the repair (`file-sync.md` § Content residency, *v1 scope cuts*) inside
+    /// `error_set_residency` — the `NestClientError` rendering `set_residency`
+    /// returns — and never the nest's log-only `details`.
+    #[test]
+    fn a_residency_refusal_paints_its_repair_not_its_details() {
+        let code = fauna_protocol::RpcError::CODE_FOLDERS_RESIDENCY_BLOCKED_BY_WEBSITE;
+        let rpc = fauna_protocol::RpcError::new(
+            code,
+            format!("error.{}", code.strip_prefix("fauna.").unwrap()),
+        )
+        .with_details_text("a website-serving folder cannot go metadata-only");
+        let painted = fauna_i18n::strings::devices::error_set_residency(
+            &fauna_client::NestClientError::Rpc(rpc).to_string(),
+        );
+        assert!(
+            painted.contains(fauna_i18n::strings::error::folders::RESIDENCY_BLOCKED_BY_WEBSITE),
+            "{painted}"
+        );
+        assert!(
+            painted.contains("Turn off website serving first"),
+            "{painted}"
+        );
+        assert!(!painted.contains("cannot go metadata-only"), "{painted}");
     }
 
     fn snapshot_with_folders(
@@ -4333,6 +4378,24 @@ mod tests {
             ..Default::default()
         });
         state
+    }
+
+    /// A list this device could not open paints as a read-only "unavailable"
+    /// label under the same id — never as a blank editable input; the other
+    /// list stays an input.
+    #[test]
+    fn an_unreadable_selective_sync_list_paints_as_unavailable_not_a_blank_input() {
+        let mut state = lease_state(FolderSummary {
+            include_paths_unreadable: true,
+            ..folder("db")
+        });
+        state.folders.expanded = Some(0);
+        let els = folders_elements(&state, &[]);
+        let include = el(&els, "folder-include-paths").expect("include field");
+        assert!(matches!(include.role, Role::Label), "{:?}", include.role);
+        assert_eq!(include.text, "Unavailable on this device");
+        let exclude = el(&els, "folder-exclude-paths").expect("exclude field");
+        assert!(matches!(exclude.role, Role::Input(_)), "{:?}", exclude.role);
     }
 
     /// The toggle is the owner's, on the expanded body, and paints the nest's

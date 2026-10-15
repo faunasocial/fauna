@@ -304,7 +304,7 @@ pub struct FfiPendingActionSummary {
     /// `handle.change` / `account.delete` / `snapshot.delete` / …
     pub action_type: String,
     pub target: Option<String>,
-    /// `pending` / `executed` / `cancelled` / `expired`.
+    /// `pending` / `executing` / `executed` / `cancelled` / `expired`.
     pub status: String,
     pub created_at: i64,
     pub execute_after: i64,

@@ -536,15 +536,17 @@ class ProfileActions:
     def require_request_contact_supported(self) -> None:
         """Skip unless this app renders ``profile-request-contact-button`` —
         convention 7. tui is the lead app (2026-09-25); macOS + iOS (the shared
-        FaunaKit ``ProfileView``), linux and web followed 2026-09-26; the
-        remaining apps send the same knock only from the Contacts page so far
-        (profile.md § Implementation status today)."""
+        FaunaKit ``ProfileView``), linux and web followed 2026-09-26, windows
+        with the rest of the batch; the remaining apps send the same knock only
+        from the Contacts page so far (profile.md § Implementation status
+        today)."""
         if not (
             self.driver.is_tui()
             or self.driver.is_macos()
             or self.driver.is_ios()
             or self.driver.is_linux()
             or self.driver.is_web()
+            or self.driver.is_windows()
         ):
             from helpers.app_surface import skip_unbuilt
 

@@ -16,8 +16,10 @@ through:
       Approve flow with a guardian selected (`invite-request-row-guardian-select`)
       — `invite_requests_approve_handler` -> `create_user_with_handle` ->
       `insert_guardianship_tx`, all inside one admission transaction. This is
-      the ONLY supervised-admission path this shared test nest can exercise:
-      `nest_instance` is started registration-CLOSED by design (many other tests
+      the supervised-admission path whose UI every app can drive on this shared
+      test nest (direct admission, `fauna.admin.users.create` with a
+      `guardian_actor`, also mints a supervised account since 2026-08-30, but
+      its guardian picker is built on tui alone): `nest_instance` is started registration-CLOSED by design (many other tests
       rely on that default), and `account_core::register_core` refuses a closed
       posture UNCONDITIONALLY, before it ever looks at `invite_code` — so
       `fauna.account.register` (the OOB-code redeem path, whether driven by the
@@ -87,14 +89,25 @@ notice check, and every family-page mutation are real UI actions.
 import json
 import os
 import time
+from datetime import datetime
 
 import pytest
 from nacl.signing import SigningKey
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from clients.ws_rpc_anon_client import WsRpcAnonClient
 from common.launch_harness import reached_authenticated_app
 from helpers.app_surface import skip_unbuilt
+from helpers.family_wire import (
+    DEFAULT_WARD_POLICY,
+    actor_ws,
+    admit_adult_directly,
+    admit_ward,
+    blocked_dm_peers,
+    decide_dm_peer,
+    reset_ward_policy,
+    set_ward_policy,
+    submit_invite_request,
+)
 from helpers.budgets import RPC_ROUNDTRIP_S, UI_SETTLE_S
 from helpers.rpc_hold import (
     arm_rpc_hold,
@@ -144,326 +157,12 @@ def _handles(stem: str) -> tuple[str, str]:
     return f"family-guardian-{suffix}", f"family-ward-{suffix}"
 
 
-def _admin_client(nest_instance):
-    """A WS-RPC connection signing as the nest ADMIN — the fixture-setup door for
-    the admissions below (`WsRpcAdminClient` is actor-agnostic; it authenticates
-    as whatever key it is handed)."""
-    admin_sk = nest_instance["admin"]["signing_key"]
-    return WsRpcAdminClient(
-        nest_instance["url"], bytes(admin_sk.verify_key), bytes(admin_sk)
-    )
-
-
-def _submit_invite_request(nest_url: str, handle: str, message: str = "let me in") -> dict:
-    """Seed a real Ed25519-signed pending invite-request -- fixture setup
-    (not the action under test), mirrors test_admin_users_hub.py's helper.
-    Returns the requester's identity so the caller can log back in as them
-    once admitted.
-
-    Submits ONCE. This helper used to ride out the nest's anti-flood throttle
-    (`anonymous_rate_limit.rs::invite_request_config`) with a retry loop and a
-    five-second wait against a 90 s deadline, because 10 submits / 60 s per
-    source IP is a budget every test in this session-scoped module shares from
-    127.0.0.1 -- it "surfaced as a bogus red on tui while slower clients slipped
-    under it". That workaround was the wall-clock-dependent class the project's
-    testing conventions rule DEFUNCT, and that row 303 names as the one fix to
-    avoid; it also had the worse effect of HIDING the budget, since the throttle
-    was firing in real runs while the row that owned it read as unmeasured.
-    The budget is raised at compile time in a `test-hooks` build
-    (`INVITE_REQUEST_MAX_EVENTS`, the same split `register_config` already had),
-    so a rate-limited reply here is a genuine finding again -- let it raise.
-
-    ⚠ **THE `test-hooks` LIFT IS NOT AVAILABLE IN EVERY MODE, AND THIS MODULE
-    FITS THE SHIPPED BUDGET.** `conftest.py`'s `build_node` compiles the
-    standalone nest `--features test-hooks`, but the Docker image is a RELEASE
-    build (`Dockerfile:185`) and convention 15 forbids putting the automation
-    surface in a release artifact -- so under `--nest docker` this surface binds
-    at the shipped **10 submits / 60 s / source**, and every actor in a
-    container run arrives from the ONE bridge-gateway address. That mode is the
-    release-candidate vehicle (`testing.md` § Default app and nest mode), so a
-    family-safety cell blanked by the budget is a coverage hole, not a
-    classification: this module's subject is the family PAGE, never the budget,
-    so it MUST fit (`testing.md`'s fit-or-classify rule).
-
-    Measured 2026-08-29: at 2 submits per test the module spent exactly the 10
-    it is allowed by its 6th test and every later test raised
-    `fauna.protocol.rate_limited` here. Pacing the calls is not the fix (that is
-    the deleted five-second retry loop above all over again -- convention 14, and
-    naming it here in code would itself trip the sleep ratchet); REDUCING THE
-    COUNT is. So: every non-ward account comes from `_admit_adult_directly`
-    (0 submits), and the read/policy tests share ONE ward through
-    `family_pair` (1 submit for the module). Only these callers pay:
-
-      * `test_family_admission_and_ward_view` -- 2, and they are the point: the
-        admin's UI approval of a real pending request IS its subject.
-      * the six tests that consume or dirty the pairing (transfer-accept,
-        guardian-sees-ward, device-marker, guardian-notify,
-        screen-time-budget, device-mark-toggle) -- 1 each, for their own ward.
-        The last three moved here off `family_pair` 2026-09-15: each grows a
-        day-scoped or ever-growing counter on the ward that no wire surface
-        can clear short of ending the pairing, so the shared ward carried it
-        from one app leg into the next under a multi-app
-        invocation.
-      * `_shared_family` -- 1, once per module for everyone else.
-
-    Nine in total, against a budget of ten. **Adding a submit here is a budget
-    decision**: count the module's total before you add one, and prefer
-    `family_pair` (free) or `_admit_adult_directly` (free).
-
-    ⚠ The count above is PER APP LEG, not per invocation: every caller here
-    except `_shared_family` (module-scoped, built once) rides `admin_app`/
-    `app`, which is itself parametrized once per app in `--app`
-    (`conftest.py::app`), so each pays its submit again for every app leg. A
-    single-app run stays at nine; a multi-app run is unaudited against the
-    60 s window (`testing.md:160` -- "audited in ONE module", one app).
-    """
-    sk = SigningKey.generate()
-    actor_hex = bytes(sk.verify_key).hex()
-    from common.sig_domain import invite_submit_signed_message
-
-    ts = int(time.time() * 1000)
-    msg = invite_submit_signed_message(bytes.fromhex(actor_hex), handle, message, ts)
-    sig = sk.sign(msg).signature.hex()
-    with WsRpcAnonClient(nest_url) as anon:
-        anon.call(
-            "fauna.account.invite_request.submit",
-            {
-                "actor_id": actor_hex,
-                "handle": handle,
-                "message": message,
-                "timestamp": ts,
-                "signature": sig,
-            },
-        )
-    return {"signing_key": sk, "actor_id_hex": actor_hex}
-
-
-def _admit_adult_directly(nest_instance, handle: str) -> dict:
-    """Mint an ordinary (unsupervised, non-guardian) account at a cost of ZERO
-    anonymous submits.
-
-    `fauna.admin.users.create` is the **third** account-creation path
-    (`public-mode.md` § Registration & Identity — the ceremony, the admin claim,
-    or an admin admitting a user directly), and it is *admin*-authenticated, so
-    it never touches the anonymous `invite_request.submit` budget
-    `_submit_invite_request` documents. Every account this module needs that is
-    not a ward is an ordinary adult — the guardians, and the transfer
-    handshake's proposed guardians — so all of them come from here.
-
-    ⚠ It cannot mint a WARD. `fauna.admin.users.create` passes
-    `guardian: None` to `create_user_with_handle`, and family-safety.md
-    § The guardianship link sets supervision **at admission** through an invite
-    code or a request approval only ("v1 does not convert an existing full
-    account into a supervised one"). So a supervised account still has to walk
-    `_admit_ward`'s throttled path — see that helper.
-
-    `label=handle` below matches what the nest itself writes, not a picker
-    workaround anymore. The admin guardian pickers are now HANDLE (else
-    full-actor-hex) pickers everywhere (admin.md § 2 → *What identifies a user
-    in an admin picker*, ratified 2026-08-30, all 7 arms landed by
-    2026-09-09 — `apps/fauna-tui/src/admin/users.rs::guardian_picker` →
-    `super::picker_option`, and its linux/android/apple/web/windows twins), NOT
-    label pickers, so `register_user`'s label no longer decides picker
-    distinctness (the 2026-08-30 "picker painted `e2e-test` five times over"
-    label collision can't reproduce today — each caller here already passes
-    its own distinct `handle`). `label=handle` stays because
-    `create_user_with_handle` (`bins/fauna-nest/src/db/admin.rs:1272`) always
-    defaults a handle-registered user's `label` to its `handle` — this just
-    restores that production shape.
-
-    Fixture setup, not the action under test (e2e point 8): the direct-admission
-    UI path is itself the mutation under test in `test_admin_users_admit.py`,
-    which is this shortcut's point-8 citation.
-    """
-    from common.auth import register_user
-
-    sk = SigningKey.generate()
-    actor_hex = bytes(sk.verify_key).hex()
-    register_user(
-        nest_instance["port"],
-        actor_hex,
-        base_url=nest_instance["url"],
-        admin_signing_key=nest_instance["admin"]["signing_key"],
-        handle=handle,
-        label=handle,
-    )
-    return {"signing_key": sk, "actor_id_hex": actor_hex}
-
-
-def _admit_ward(
-    nest_instance, guardian_identity: dict, ward_handle: str, *, age_band: str | None = None
-) -> dict:
-    """Admit a SUPERVISED account linked to `guardian_identity` — the one
-    admission in this module that costs an anonymous submit (see
-    `_submit_invite_request`'s budget note).
-
-    Supervision is only ever set at admission, and only by an invite code or a
-    request approval (`family-safety.md` § The guardianship link). The code path
-    cannot redeem on this nest — `nest_instance` starts registration-`closed`
-    and `register_core` refuses a closed posture before it looks at any code
-    (module docstring (a)) — which leaves the request path and its one throttled
-    `invite_request.submit`.
-
-    The APPROVAL rides the admin RPC rather than the admin UI on purpose: for
-    every test whose subject is the family page this is pure fixture setup, and
-    routing it through `admin_app` would also pin these admissions to a
-    function-scoped fixture, which is exactly what `_shared_family` must not be.
-    The admin's real UI approval — pending-request row, guardian picker, tier,
-    Approve — is the mutation under test in
-    `test_family_admission_and_ward_view`, which is the point-8 citation here.
-
-    `age_band` (a wire token) admits the ward under that band beside the
-    guardian — the age-band readouts' fixture (`family-safety.md` § The
-    account age band); the admin UI's own band picker is
-    `test_pending_invite_journey.py`'s subject.
-    """
-    ward_identity = _submit_invite_request(nest_instance["url"], handle=ward_handle)
-    guardian_actor = bytes.fromhex(guardian_identity["actor_id_hex"])
-    with _admin_client(nest_instance) as admin:
-        rows = admin.call("fauna.admin.invite_requests.list", {})["invite_requests"]
-        pending = [r for r in rows if r["handle"] == ward_handle]
-        assert pending, (
-            f"the seeded invite request for {ward_handle!r} is not listed as pending; "
-            f"listed handles: {[r['handle'] for r in rows]!r}"
-        )
-        params = {
-            "id": pending[0]["id"],
-            "tier": "personal",
-            "guardian_actor": guardian_actor,
-        }
-        if age_band is not None:
-            params["age_band"] = age_band
-        admin.call("fauna.admin.invite_requests.approve", params)
-    return ward_identity
-
-
-#: The guardian-policy document with every knob at its default. `family-safety.md`
-#: § Wire & data shape: "Every default is the unsupervised-equivalent value" — a
-#: fresh link with an untouched policy changes nothing until the guardian
-#: tightens it.
-#:
-#: Written out in full rather than left partial because `policy.update` has two
-#: different absence rules (§ Policy-update compatibility): the four v1 reach
-#: knobs REPLACE, while the v1.x pillars (`content_policy`, `screen_time`,
-#: `content_notify`, `unknown_peer_dm`, `features`) are absent-means-UNCHANGED.
-#: A reset that omitted a pillar would silently carry the previous test's value
-#: forward — the order-dependence this whole fixture exists to prevent.
-_DEFAULT_WARD_POLICY = {
-    "contact_approval": False,
-    "unknown_sender_mail": "allow",
-    "federation_contact": True,
-    "feed_sources": "allow",
-    "content_policy": {
-        "nsfw": "inherit",
-        "spam": "inherit",
-        "phishing": "inherit",
-        "commercial": "inherit",
-    },
-    # `{}`, not three explicit nulls: the sub-document is PRESENT (so the write
-    # replaces the columns) and every field takes its `serde(default)` — which
-    # for `ScreenTimePolicy` is all-`None`, "no screen-time limit"
-    # (`fauna_core::screen_time`). Present-and-empty is how a reset clears a
-    # pillar; absent would leave it as the last test set it.
-    "screen_time": {},
-    "content_notify": False,
-    "unknown_peer_dm": "allow",
-    "features": {},
-}
-
-
-def _reset_ward_policy(nest_instance, guardian_identity: dict, ward_identity: dict) -> None:
-    """Put the shared ward's policy document back to its defaults, and clear any
-    pending transfer, as the GUARDIAN.
-
-    Both calls are link-authorized guardian mutations, so this is the same
-    authority the tests themselves drive through the UI — fixture setup for a
-    test whose subject is something else (point 8).
-
-    Runs at SETUP, never teardown: a test that fails half-way through a policy
-    edit must not leave the next one to inherit it, and a teardown reset does
-    not run when the test process dies. Setup-reset is also what keeps the
-    module order-INDEPENDENT — every sharing test starts from the same document
-    no matter what ran before it.
-    """
-    ward_actor = bytes.fromhex(ward_identity["actor_id_hex"])
-    guardian_actor = bytes.fromhex(guardian_identity["actor_id_hex"])
-    guardian_seed = bytes(guardian_identity["signing_key"])
-    with WsRpcAdminClient(nest_instance["url"], guardian_actor, guardian_seed) as guardian:
-        guardian.call(
-            "fauna.family.policy.update",
-            {"supervised_actor_id": ward_actor, "policy": dict(_DEFAULT_WARD_POLICY)},
-        )
-        # Denied bridge-DM peers are not part of the policy document, so the
-        # update above leaves them standing; a run that died between its denies
-        # and its un-deny would hand the next one extra rows. Allowing is the
-        # un-deny itself — the same guardian authority, idempotent.
-        for peer in _blocked_dm_peers(guardian, ward_actor):
-            _decide_dm_peer(guardian, ward_actor, peer["bridge_id"], peer["peer_id"], True)
-        # A ward's pending contact asks are not in the policy document either.
-        # `test_family_ward_asks_guardian_for_a_contact` leaves one on the shared
-        # ward, so under `--app linux,web` the second leg read it as the DURABLE
-        # pending state and was never offered the ask it asserts. A
-        # `contact_request` deny drops the ask and never blocks the peer
-        # (family-safety.md § Child-initiated contact requests).
-        for entry in guardian.call("fauna.family.approvals.list", {}).get("approvals") or []:
-            if entry["kind"] == "contact_request" and bytes(entry["supervised_actor_id"]) == ward_actor:
-                guardian.call(
-                    "fauna.family.approvals.decide",
-                    {
-                        "supervised_actor_id": ward_actor,
-                        "kind": "contact_request",
-                        "peer_actor_id": bytes(entry["peer_actor_id"]),
-                        "approve": False,
-                    },
-                )
-        # A proposal left pending by a previous test would render on the
-        # guardian's editor (`transfer-pending`) and be accepted/declined by the
-        # wrong test. Cancel is idempotent-shaped for our purpose: no pending
-        # proposal is a typed refusal, not a failure of the reset.
-        try:
-            guardian.call(
-                "fauna.family.transfer.cancel", {"supervised_actor_id": ward_actor}
-            )
-        except Exception:
-            pass
-
-
-def _blocked_dm_peers(guardian: WsRpcAdminClient, ward_actor: bytes) -> list[dict]:
-    """The ward's `block`-verdict bridge-DM peers, as the guardian's own
-    `fauna.family.status` carries them (`FamilyWardInfo::blocked_dm_peers`) —
-    the nest's truth the un-deny journey asserts against."""
-    status = guardian.call("fauna.family.status", {})
-    for ward in status.get("wards") or []:
-        if bytes(ward["actor_id"]) == ward_actor:
-            return list(ward.get("blocked_dm_peers") or [])
-    raise AssertionError("the ward is missing from its guardian's status read")
-
-
-def _decide_dm_peer(
-    guardian: WsRpcAdminClient, ward_actor: bytes, bridge_id: str, peer_id: str, approve: bool
-) -> None:
-    """`approvals_decide { kind: "dm_hold" }` — the guardian's verdict on one
-    bridge-DM peer. Not queue-scoped (family-safety.md § The bridge-DM gate →
-    *The un-deny surface*), so a deny needs no held conversation first."""
-    guardian.call(
-        "fauna.family.approvals.decide",
-        {
-            "supervised_actor_id": ward_actor,
-            "kind": "dm_hold",
-            "peer_actor_id": b"",
-            "bridge_id": bridge_id,
-            "peer_address": peer_id,
-            "approve": approve,
-        },
-    )
-
-
 @pytest.fixture(scope="module")
 def _shared_family(nest_instance):
     """ONE guardian + ONE ward, admitted once for the whole module.
 
     This is the module's answer to the shipped 10/60 s invite-request budget
-    (`_submit_invite_request`): ten of the fifteen tests here do not care *how*
+    (`submit_invite_request`): ten of the fifteen tests here do not care *how*
     their ward was admitted — they read or edit the family page — so they share
     one ward and the module pays ONE submit for all ten instead of two each.
 
@@ -476,8 +175,8 @@ def _shared_family(nest_instance):
     tests take, and it resets the policy document first.
     """
     guardian_handle, ward_handle = _handles("shared")
-    guardian_identity = _admit_adult_directly(nest_instance, guardian_handle)
-    ward_identity = _admit_ward(nest_instance, guardian_identity, ward_handle)
+    guardian_identity = admit_adult_directly(nest_instance, guardian_handle)
+    ward_identity = admit_ward(nest_instance, guardian_identity, ward_handle)
     return {
         "guardian_identity": guardian_identity,
         "ward_identity": ward_identity,
@@ -500,7 +199,7 @@ def family_pair(_shared_family, nest_instance):
 
     Returns `(guardian_identity, ward_identity, guardian_handle, ward_handle)`.
     """
-    _reset_ward_policy(
+    reset_ward_policy(
         nest_instance, _shared_family["guardian_identity"], _shared_family["ward_identity"]
     )
     return (
@@ -539,29 +238,32 @@ def _admit_guardian_and_ward_through_the_admin_ui(
     invite code. Returns (guardian_identity, ward_identity, code).
 
     ⚠ **The module's most expensive fixture: TWO anonymous invite-request
-    submits, a fifth of the shipped 10/60 s budget** (`_submit_invite_request`).
+    submits, a fifth of the shipped 10/60 s budget** (`submit_invite_request`).
     It has exactly ONE caller — `test_family_admission_and_ward_view`, whose
     subject IS this flow (the pending-request guardian picker, the tier, the
     Approve, and the guardian-scoped code mint are the mutations under test).
     Every other test takes `family_pair`, or `_admit_own_pair` when it needs a
     ward of its own; neither costs an admin-UI navigation either.
     """
-    guardian_identity = _submit_invite_request(nest_url, handle=guardian_handle)
+    guardian_identity = submit_invite_request(nest_url, handle=guardian_handle)
     _approve_pending(app, guardian_handle, guardian=None)
 
-    ward_identity = _submit_invite_request(nest_url, handle=ward_handle)
+    ward_identity = submit_invite_request(nest_url, handle=ward_handle)
     _approve_pending(app, ward_handle, guardian=guardian_handle)
 
     return guardian_identity, ward_identity, _mint_guardian_code(app, guardian_handle)
 
 
-def _mint_guardian_code(app, guardian_handle: str) -> str:
+def _mint_guardian_code(app, guardian_handle: str, age_band: str | None = None) -> str:
     """Mint a guardian-scoped invite code through the admin UI
-    (`admin-users-invite-guardian-select`) — the out-of-band code
-    `_check_notice_only` peeks at. A real UI mutation, and free of the anonymous
-    budget: minting is an admin act."""
+    (`admin-users-invite-guardian-select`, and `admin-users-invite-age-band-select`
+    when `age_band` is given) — the out-of-band code `_check_notice_only` peeks
+    at. A real UI mutation, and free of the anonymous budget: minting is an
+    admin act."""
     app.admin.navigate_invite_codes()
-    code = app.admin.create_invite_code(tier="free", uses=1, guardian=guardian_handle)
+    code = app.admin.create_invite_code(
+        tier="free", uses=1, guardian=guardian_handle, age_band=age_band
+    )
     assert code, f"mint (with guardian) returned no token. error: {app.error_text()!r}"
     return code
 
@@ -586,17 +288,17 @@ def _admit_own_pair(nest_instance, stem: str) -> tuple[dict, dict, str, str]:
     Returns (guardian_identity, ward_identity, guardian_handle, ward_handle).
     """
     guardian_handle, ward_handle = _handles(stem)
-    guardian_identity = _admit_adult_directly(nest_instance, guardian_handle)
-    ward_identity = _admit_ward(nest_instance, guardian_identity, ward_handle)
+    guardian_identity = admit_adult_directly(nest_instance, guardian_handle)
+    ward_identity = admit_ward(nest_instance, guardian_identity, ward_handle)
     return guardian_identity, ward_identity, guardian_handle, ward_handle
 
 
-def _check_notice_only(app, nest_url: str, code: str, guardian_handle: str) -> None:
+def _check_notice_only(app, nest_url: str, code: str, guardian_handle: str) -> str:
     """Fresh disposable joiner checks the OOB code and confirms
     invite-code-supervised-notice renders BEFORE redemption. Peek-only
     (fauna.account.invite_code.verify does not decrement `uses`) — does not
     redeem (see module docstring: registration.open gates redemption on this
-    nest regardless of a valid invite code)."""
+    nest regardless of a valid invite code). Returns the notice's text."""
     app.driver.reset()
     joiner_secret_hex = bytes(SigningKey.generate()).hex()
     app.onboarding.navigate_to_status()
@@ -620,6 +322,7 @@ def _check_notice_only(app, nest_url: str, code: str, guardian_handle: str) -> N
     )
     notice = app.driver.get_text("invite-code-supervised-notice")
     assert guardian_handle in notice, f"supervised notice missing guardian handle: {notice!r}"
+    return notice
 
 
 @pytest.mark.feature("family-safety")
@@ -630,7 +333,7 @@ def test_family_admission_and_ward_view(admin_app, request, nest_instance):
     # The one caller of the full UI admission, and the one test that spends two
     # of the module's six anonymous invite-request submits: the admin's pending-
     # request approval WITH a guardian selected is this test's subject, so it
-    # cannot be shortcut to `family_pair` (see `_submit_invite_request`).
+    # cannot be shortcut to `family_pair` (see `submit_invite_request`).
     guardian_handle, ward_handle = _handles("admission")
     guardian_identity, ward_identity, code = (
         _admit_guardian_and_ward_through_the_admin_ui(
@@ -661,6 +364,39 @@ def test_family_admission_and_ward_view(admin_app, request, nest_instance):
         f"family page supervised section missing guardian: {app.family.guardian_handle_text()!r}"
     )
     assert app.family.policy_summary_text(), "supervised section should render a read-only policy summary"
+
+
+def _require_a_relaunch_that_keeps_the_session(app) -> None:
+    """Pin the CURRENT launch's client store for the next relaunch — or skip,
+    declared as unbuilt, on an app whose relaunch cannot come back signed in as
+    the identity `_login_app_as` injected; a held-status window across a
+    relaunch needs the app to reach the read it holds.
+
+    ⚠ Call it AFTER the login and right before the relaunch:
+    `preserve_state_across_relaunch()` pins the store of the launch that is
+    running now, and a later `driver.reset()` starts a fresh launch the pin
+    does not cover — the relaunch then comes back signed out."""
+    if not app.driver.preserve_state_across_relaunch():
+        skip_unbuilt(
+            app.driver,
+            surface="a client store that can be pinned across a relaunch",
+            detail=(
+                "the driver hands the relaunched process a fresh store, so the "
+                "app returns signed out and never issues the read this test holds"
+            ),
+            tracked="drivers/http_bridge.py::preserve_state_across_relaunch",
+        )
+    if not app.driver.relaunch_preserves_injected_identity():
+        skip_unbuilt(
+            app.driver,
+            surface="a login that survives a relaunch",
+            detail=(
+                "_login_app_as injects the session with set_state, and on this "
+                "app the injection does not reach a store the relaunch keeps, so "
+                "the app returns signed out and never reaches the surface under test"
+            ),
+            tracked="drivers/http_bridge.py::relaunch_preserves_injected_identity",
+        )
 
 
 @pytest.mark.feature("family-safety")
@@ -735,27 +471,7 @@ def test_family_supervised_indicator_shows_restored_guardian_while_status_is_pen
         f"correct restore from an absent one: {indicator_text!r}"
     )
 
-    if not app.driver.preserve_state_across_relaunch():
-        skip_unbuilt(
-            app.driver,
-            surface="a client store that can be pinned across a relaunch",
-            detail=(
-                "the driver hands the relaunched process a fresh store, so the "
-                "app returns signed out and never issues the read this test holds"
-            ),
-            tracked="drivers/http_bridge.py::preserve_state_across_relaunch",
-        )
-    if not app.driver.relaunch_preserves_injected_identity():
-        skip_unbuilt(
-            app.driver,
-            surface="a login that survives a relaunch",
-            detail=(
-                "_login_app_as injects the session with set_state, and on this "
-                "app the injection does not reach a store the relaunch keeps, so "
-                "the app returns signed out and never reaches the surface under test"
-            ),
-            tracked="drivers/http_bridge.py::relaunch_preserves_injected_identity",
-        )
+    _require_a_relaunch_that_keeps_the_session(app)
 
     # Armed BEFORE the relaunch — the load-bearing ordering
     # `test_inbox_mode_is_unknown_while_its_fetch_is_still_pending` paid for:
@@ -803,11 +519,11 @@ def _admit_adult(nest_instance, handle: str) -> dict:
     """Admit an ordinary (unsupervised, non-guardian) account — the proposed
     guardian of the transfer handshake tests.
 
-    Direct-admitted (`_admit_adult_directly`), so it costs no anonymous submit:
+    Direct-admitted (`admit_adult_directly`), so it costs no anonymous submit:
     what these tests need from this actor is that it EXISTS and is admissible as
     a guardian, and the admission path it arrived by is not part of any
     assertion here."""
-    return _admit_adult_directly(nest_instance, handle)
+    return admit_adult_directly(nest_instance, handle)
 
 
 def _guardian_proposes(app, request, nest_instance, guardian_identity,
@@ -911,8 +627,8 @@ def test_family_age_band_readouts(admin_app, request, nest_instance, family_pair
 
     app = admin_app
     guardian_handle, ward_handle = _handles("band")
-    guardian_identity = _admit_adult_directly(nest_instance, guardian_handle)
-    ward_identity = _admit_ward(nest_instance, guardian_identity, ward_handle, age_band="13-15")
+    guardian_identity = admit_adult_directly(nest_instance, guardian_handle)
+    ward_identity = admit_ward(nest_instance, guardian_identity, ward_handle, age_band="13-15")
 
     # The guardian's view: the band on the ward's row.
     app.driver.reset()
@@ -1046,6 +762,151 @@ def test_family_transfer_decline_journey(admin_app, request, nest_instance, fami
     assert not app.family.transfer_pending_visible(), (
         "pending marker must clear after the decline"
     )
+
+
+def _family_status_read_landed(app, port: int, login) -> None:
+    """Run ``login`` with the nest HOLDING the app's ``fauna.family.status`` read,
+    then let it through and drain the app — the causal anchor a NEGATIVE
+    assertion about the family gate needs (convention 14).
+
+    An unrelated account's `family-tab` reads "absent" both before the post-auth
+    status read has answered and after it answered "no relationship", so a bare
+    absence check right after login passes against an app that never asked.
+    Holding the read proves the app issued it; the `released` counter proves the
+    reply went out; `barrier()` drains the UI work the reply enqueued. Armed
+    BEFORE the login, as every hold in this file is, so the app's own start-up
+    read cannot race the arm."""
+    before = rpc_hold_status(port, FAMILY_STATUS_KIND).get("released", 0)
+    arm_rpc_hold(port, FAMILY_STATUS_KIND)
+    try:
+        login()
+        wait_for_held_rpc(
+            port, FAMILY_STATUS_KIND, diagnose=lambda: f"error={app.error_text()!r}"
+        )
+    finally:
+        release_rpc_hold(port, FAMILY_STATUS_KIND)
+    wait_until(
+        lambda: rpc_hold_status(port, FAMILY_STATUS_KIND).get("released", 0) > before,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"status={rpc_hold_status(port, FAMILY_STATUS_KIND)!r}",
+    )
+    app.driver.barrier()
+
+
+@pytest.mark.feature("family-safety")
+def test_family_transfer_withdraw_journey(admin_app, request, nest_instance, family_pair):
+    """The withdraw arm of the hand-over (family-safety.md § Graduation &
+    transfer): guardian A proposes adult B, sees the proposal waiting with B's
+    handle, and withdraws it through `family-transfer-cancel-button`; the
+    pending marker clears, the link stands, and B — whose only tie to the
+    family was that proposal — no longer has a Family page to open.
+
+    Shares the module's one admitted pair: the withdraw leaves the link exactly
+    as it found it, and `family_pair`'s reset cancels a proposal a failed run
+    left pending.
+    """
+    from conftest import _login_app_as
+
+    app = admin_app
+    guardian_identity, _ward_identity, _guardian_handle, ward_handle = family_pair
+    target_handle = f"family-target-withdraw-{_unique_suffix()}"
+    target_identity = _admit_adult(nest_instance, target_handle)
+
+    _guardian_proposes(app, request, nest_instance, guardian_identity,
+                       ward_handle, target_identity["actor_id_hex"], target_handle)
+
+    app.family.cancel_transfer()
+    assert not app.has_error(), f"withdraw raised: {app.error_text()!r}"
+
+    def _pending_cleared() -> bool:
+        app.family.reload()
+        app.family.select_ward_by_handle(ward_handle)
+        return not app.family.transfer_pending_visible()
+
+    wait_until(
+        _pending_cleared,
+        RPC_ROUNDTRIP_S + UI_SETTLE_S,
+        diagnose=lambda: (
+            "family-transfer-pending still renders after the withdraw: "
+            f"{app.driver.diagnose('family-transfer-pending')} error: {app.error_text()!r}"
+        ),
+    )
+    assert ward_handle in app.family.ward_handles(), (
+        f"a withdrawn proposal must leave the link intact. error: {app.error_text()!r}"
+    )
+
+    # B's side: the proposal was B's only relationship, so once the status read
+    # has answered B has no Family page at all — the gate's "or a hand-over
+    # waiting for them" arm closes with the proposal.
+    app.driver.reset()
+    _family_status_read_landed(
+        app,
+        nest_instance["port"],
+        lambda: _login_app_as(app, request, nest_instance, target_identity),
+    )
+    assert not app.family.tab_visible(), (
+        "family-tab must hide for an adult whose only family tie was a withdrawn "
+        f"hand-over. {app.driver.diagnose('family-tab')} "
+        f"reference={app.driver.diagnose('settings-tab')}"
+    )
+
+
+@pytest.mark.feature("family-safety")
+def test_family_page_hidden_for_an_unrelated_account(admin_app, request, nest_instance, family_pair):
+    """The Family page's gate (family-safety.md § App surface): it appears only
+    for someone who supervises, is supervised, or has a hand-over waiting for
+    them. The hand-over arm is proven by the transfer journeys above; the
+    guardian and the ward reach it here as the control, and the negative is an
+    ordinary adult with none of the three, who never sees `family-tab` —
+    measured after the app's own status read has answered, never before it.
+    """
+    from conftest import _login_app_as
+
+    app = admin_app
+    guardian_identity, ward_identity, _guardian_handle, _ward_handle = family_pair
+    stranger_identity = _admit_adult(nest_instance, f"family-unrelated-{_unique_suffix()}")
+
+    for who, identity in (("guardian", guardian_identity), ("ward", ward_identity)):
+        app.driver.reset()
+        _login_app_as(app, request, nest_instance, identity)
+        wait_until(
+            app.family.tab_visible,
+            RPC_ROUNDTRIP_S + UI_SETTLE_S,
+            diagnose=lambda who=who: (
+                f"control: the {who} must see family-tab. error: {app.error_text()!r} "
+                f"{app.driver.diagnose('family-tab')}"
+            ),
+        )
+
+    app.driver.reset()
+    _family_status_read_landed(
+        app,
+        nest_instance["port"],
+        lambda: _login_app_as(app, request, nest_instance, stranger_identity),
+    )
+    assert not app.family.tab_visible(), (
+        "family-tab must stay hidden for an account that neither supervises, is "
+        f"supervised, nor has a hand-over waiting. {app.driver.diagnose('family-tab')} "
+        f"reference={app.driver.diagnose('settings-tab')}"
+    )
+
+
+@pytest.mark.feature("family-safety")
+def test_family_supervised_notice_names_the_codes_age_band(admin_app, nest_instance, family_pair):
+    """A supervised invite code minted with an age band tells the person joining
+    that band BEFORE redemption, in the same `invite-code-supervised-notice`
+    sentence that names the guardian ("… as a 13–15 account" — family-safety.md
+    § App surface → *Age-band surfaces*: the band rides the existing notice,
+    never a second one). The admin mints through the real form, the band select
+    enabled once the guardian is picked; the joiner only peeks (verify does not
+    spend the code), so the shared pair's guardian serves.
+    """
+    app = admin_app
+    _guardian_identity, _ward_identity, guardian_handle, _ward_handle = family_pair
+
+    code = _mint_guardian_code(app, guardian_handle, age_band="13-15")
+    notice = _check_notice_only(app, nest_instance["url"], code, guardian_handle)
+    assert "13–15" in notice, f"the supervised notice should name the code's age band: {notice!r}"
 
 
 @pytest.mark.feature("family-safety")
@@ -1327,6 +1188,14 @@ def test_family_ward_asks_guardian_for_a_contact(admin_app, request, nest_instan
     app.family.set_contact_approval(True)
     app.family.save_policy()
     assert not app.has_error(), f"save_policy raised: {app.error_text()!r}"
+    # The doorbell baseline (family-safety.md § Child-initiated contact requests
+    # → *Doorbell*): the guardian's feed is session-long, so the assertion below
+    # is "one more", never "one".
+    doorbell = S.notifications.row_family_contact_request
+    app.notifications.navigate()
+    doorbells_before = sum(
+        doorbell in t for t in app.driver.get_texts("notification-item")
+    )
 
     # ── The ward's session: the send is refused, and the refusal is not a dead
     #    end — the ask is offered in its place.
@@ -1387,6 +1256,32 @@ def test_family_ward_asks_guardian_for_a_contact(admin_app, request, nest_instan
         f"Approve/Deny buttons is the defect this asserts against. rows: {texts!r}"
     )
 
+    # ── The doorbell: the ask rang the guardian once, and the notification
+    #    opens the Family page where the decision is made.
+    app.notifications.navigate()
+
+    def _doorbell_rows() -> list[int] | None:
+        texts = app.driver.get_texts("notification-item")
+        rows = [i for i, t in enumerate(texts) if doorbell in t]
+        if len(rows) > doorbells_before:
+            return rows
+        app.notifications.navigate()
+        return None
+
+    rows = wait_until(
+        _doorbell_rows,
+        RPC_ROUNDTRIP_S + UI_SETTLE_S,
+        diagnose=lambda: (
+            f"the ward's ask never rang the guardian ({doorbells_before} before); rows="
+            f"{app.driver.get_texts('notification-item')!r}"
+        ),
+    )
+    assert len(rows) == doorbells_before + 1, (
+        f"one ask must ring exactly once: {len(rows)} doorbells, {doorbells_before} before"
+    )
+    app.notifications.open_notification(rows[0])
+    app.driver.wait_for("family-heading", timeout=UI_SETTLE_S)
+
 
 @pytest.mark.feature("family-safety")
 def test_family_guardian_un_denies_the_second_blocked_peer(
@@ -1411,7 +1306,7 @@ def test_family_guardian_un_denies_the_second_blocked_peer(
     app = admin_app
     app.family.require_blocked_peers_supported()
 
-    # Shares the module's one admitted pair: `_reset_ward_policy` un-denies any
+    # Shares the module's one admitted pair: `reset_ward_policy` un-denies any
     # peer a failed earlier run left behind, so exactly our two rows render.
     guardian_identity, ward_identity, _guardian_handle, ward_handle = family_pair
     ward_actor = bytes.fromhex(ward_identity["actor_id_hex"])
@@ -1421,8 +1316,8 @@ def test_family_guardian_un_denies_the_second_blocked_peer(
     peers = {os.urandom(32).hex(), os.urandom(32).hex()}
     with WsRpcAdminClient(nest_instance["url"], guardian_actor, guardian_seed) as guardian:
         for peer in peers:
-            _decide_dm_peer(guardian, ward_actor, "nostr", peer, False)
-        denied = {p["peer_id"] for p in _blocked_dm_peers(guardian, ward_actor)}
+            decide_dm_peer(guardian, ward_actor, "nostr", peer, False)
+        denied = {p["peer_id"] for p in blocked_dm_peers(guardian, ward_actor)}
     assert denied == peers, f"the seeded denies did not land: {denied!r}"
 
     from conftest import _login_app_as
@@ -1455,7 +1350,7 @@ def test_family_guardian_un_denies_the_second_blocked_peer(
         # poll and fails on the assertion instead of reading as "not yet".
         (still,) = wait_until(
             lambda: (lambda d: (d,) if len(d) < 2 else None)(
-                {p["peer_id"] for p in _blocked_dm_peers(guardian, ward_actor)} & peers
+                {p["peer_id"] for p in blocked_dm_peers(guardian, ward_actor)} & peers
             ),
             15.0,
             diagnose=lambda: f"no un-deny reached the nest; error {app.error_text()!r}",
@@ -1496,7 +1391,7 @@ def test_family_guardian_feature_limit_reaches_the_wards_status(
     guardian_identity, ward_identity, _guardian_handle, _ward_handle = family_pair
     guardian_limit = 3
 
-    policy = dict(_DEFAULT_WARD_POLICY)
+    policy = dict(DEFAULT_WARD_POLICY)
     policy["features"] = {
         "p2p-share": {"availability": "limit", "operations": {"per_day": guardian_limit}}
     }
@@ -1655,8 +1550,8 @@ def _set_ward_content_floor(
     ward_actor = bytes.fromhex(ward_identity["actor_id_hex"])
     guardian_actor = bytes.fromhex(guardian_identity["actor_id_hex"])
     guardian_seed = bytes(guardian_identity["signing_key"])
-    policy = dict(_DEFAULT_WARD_POLICY)
-    policy["content_policy"] = {**_DEFAULT_WARD_POLICY["content_policy"], category: floor}
+    policy = dict(DEFAULT_WARD_POLICY)
+    policy["content_policy"] = {**DEFAULT_WARD_POLICY["content_policy"], category: floor}
     with WsRpcAdminClient(nest_instance["url"], guardian_actor, guardian_seed) as guardian:
         guardian.call(
             "fauna.family.policy.update",
@@ -1945,6 +1840,121 @@ def test_own_spam_threshold_collapses_flagged_conversation_message(logged_in_app
     ), "the only rendered body should be the clean message, not the collapsed spam one"
 
 
+def _set_own_spam_threshold(nest_instance, user: dict, per_mille: int) -> None:
+    """Set the user's OWN spam threshold over the wire, as that user — the same
+    `fauna.spam.set_preferences` the Settings slider's save sends."""
+    with WsRpcAdminClient(
+        nest_instance["url"],
+        bytes.fromhex(user["actor_id_hex"]),
+        bytes(user["signing_key"]),
+    ) as client:
+        client.call("fauna.spam.set_preferences", {"spam_threshold": per_mille})
+
+
+# The nest's default own spam threshold (`fauna.spam.get_preferences` on an
+# account that never set one) — what the shared test user is restored to.
+_DEFAULT_OWN_SPAM_THRESHOLD = 500
+
+
+@pytest.mark.feature("privacy-settings")
+def test_own_spam_threshold_binds_on_ws_reconnect_without_relaunch(
+    logged_in_app, nest_instance, test_user
+):
+    """family-client-enforcement.md § Content policy — the viewer's own thresholds
+    refresh on the same two triggers as the guardian floor: cold launch and WS
+    reconnect. A threshold the user lowers AFTER this client's post-auth read
+    (from another device — here, the wire) binds at this client's next WS
+    reconnect, with no relaunch.
+
+    
+
+    The pre-flip assertion — the 300-per-mille message's body RENDERS under the
+    default 500 threshold — is what proves the reconnect, not the login, binds
+    the lowered one. Two post-flip barriers so a red names its layer
+    (convention 6): the reconnect itself (`feed_reloads` causal anchor), then
+    the collapse. Latency-independent (convention 14): the collapse is polled
+    under `RECONNECT_BIND_BUDGET_S`; no settle-sleep decides the verdict.
+
+    Restores the shared user's threshold to the default in `finally` — the
+    identity backs every later `logged_in_app` test.
+    """
+    from common.nest import restart_nest
+
+    conv = logged_in_app.conversations
+    d = logged_in_app.driver
+    logged_in_app.family.require_content_render_verdict_supported()
+
+    sender = "aborderline-otr@self-nest.test"
+    clean_body = "a plain note before the borderline one"
+    borderline_body = "a borderline message the labeler scored low"
+    thread_id = conv.inject_and_resolve_thread(rail="FaunaMls", sender=sender, body=clean_body)
+    conv.inject_inbound_for_test(
+        rail="FaunaMls",
+        sender=sender,
+        body=borderline_body,
+        labels=[{"category": "spam", "confidence_per_mille": 300}],
+    )
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        t = next((t for t in conv.list_threads() if t.thread_id == thread_id), None)
+        if t is not None and t.message_count >= 2:
+            break
+        time.sleep(0.2)
+    conv.open_thread_by_id(thread_id)
+
+    # ── Pre-state: 300 < the default 500, so both bodies render ──
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and d.count("dm-message-text") < 2:
+        time.sleep(0.3)
+    assert d.count("dm-message-text") == 2, (
+        "under the default own spam threshold (500) a 300-per-mille spam label must "
+        f"not collapse; dm-message-text count={d.count('dm-message-text')} — the "
+        "pre-state is wrong (was the shared user's threshold left lowered?), "
+        f"error={logged_in_app.error_text()!r}"
+    )
+
+    try:
+        # ── The user lowers their own threshold elsewhere — after this client's read ──
+        _set_own_spam_threshold(nest_instance, test_user, 200)
+        reloads_before = feed_reload_baseline(d)
+
+        # ── The benign flip: the WS drops; the client reconnects on its own ──
+        restart_nest(nest_instance, graceful=True)
+
+        # ── (1) The reconnect landed ──
+        await_feed_reload_after(
+            d,
+            reloads_before,
+            budget_s=RECONNECT_REQUERY_BUDGET_S,
+            what="the benign flip",
+        )
+
+        # ── (2) The re-read binds the lowered threshold: the borderline body collapses ──
+        # Each tick re-opens the thread, so it is a fresh render against whatever
+        # thresholds are loaded now.
+        def _collapsed() -> bool:
+            conv.open_thread_by_id(thread_id)
+            return d.count("dm-message-text") == 1
+
+        wait_until(
+            _collapsed,
+            RECONNECT_BIND_BUDGET_S,
+            interval=1.0,
+            diagnose=lambda: (
+                "the lowered own spam threshold (200) never bound after a PROVEN WS "
+                "reconnect (barrier (1) passed) — the reconnect sweep did not re-read "
+                "fauna.spam.get_preferences, or re-read it without moving the render "
+                "engine's own thresholds; dm-message-text "
+                f"count={d.count('dm-message-text')}, error={logged_in_app.error_text()!r}"
+            ),
+        )
+        assert d.get_text("dm-message-text", index=0).strip() == clean_body, (
+            "the only rendered body should be the clean message, not the collapsed one"
+        )
+    finally:
+        _set_own_spam_threshold(nest_instance, test_user, _DEFAULT_OWN_SPAM_THRESHOLD)
+
+
 @pytest.mark.feature("family-safety")
 def test_family_guardian_notify_surfaces_flagged_count(admin_app, request, nest_instance):
     """family-client-enforcement.md § Guardian Notify (Slice D-client): with the guardian's
@@ -2076,6 +2086,34 @@ def test_family_guardian_notify_surfaces_flagged_count(admin_app, request, nest_
         f"the guardian's Notify readout is missing the spam count. got {readout!r}; "
         f"expected to contain {spam_label!r} and {count_text!r}. error: {app.error_text()!r}"
     )
+
+    # ── The doorbell (family-client-enforcement.md § Guardian Notify): the
+    # report rang this guardian — whose feed is their own, fresh with this pair
+    # — exactly once for (ward, spam, today), and the row opens the Family page.
+    # One report is all a run can make inside the real cadence gate, so the
+    # once-per-day collapse of LATER reports is the nest's row dedup, proven
+    # below the app tier; what this pins is that a report reaches the guardian
+    # as one notification that leads where the decision is read.
+    doorbell = S.notifications.row_family_content_notice
+    app.notifications.navigate()
+
+    def _doorbell_rows() -> list[int] | None:
+        rows = [
+            i for i, t in enumerate(app.driver.get_texts("notification-item")) if doorbell in t
+        ]
+        if rows:
+            return rows
+        app.notifications.navigate()
+        return None
+
+    rows = wait_until(
+        _doorbell_rows,
+        RPC_ROUNDTRIP_S + UI_SETTLE_S,
+        diagnose=lambda: f"no Notify doorbell; rows={app.driver.get_texts('notification-item')!r}",
+    )
+    assert len(rows) == 1, f"one report for one category must ring once, got {len(rows)}"
+    app.notifications.open_notification(rows[0])
+    app.driver.wait_for("family-heading", timeout=UI_SETTLE_S)
 
 
 # ── Slice F: the guardian-enrolled-device marker (family-safety.md § Full
@@ -2246,7 +2284,7 @@ def test_family_device_marker_badge_and_ward_delete_refusal(admin_app, request, 
     # without the nest's guardian-mark check ever having been asked.
     await_device_removal_ready(d)
     d.click("device-remove-button", index=marked_index)
-    deadline = time.monotonic() + 10.0
+    deadline = time.monotonic() + RPC_ROUNDTRIP_S + UI_SETTLE_S
     while time.monotonic() < deadline and not app.has_error():
         time.sleep(0.5)
     assert app.has_error(), (
@@ -2262,7 +2300,7 @@ def test_family_device_marker_badge_and_ward_delete_refusal(admin_app, request, 
     # owner (proves the refusal is specific to the mark, not global breakage).
     plain_index = _device_card_index_by_name(d, "kids-phone")
     d.click("device-remove-button", index=plain_index)
-    deadline = time.monotonic() + 10.0
+    deadline = time.monotonic() + RPC_ROUNDTRIP_S + UI_SETTLE_S
     while time.monotonic() < deadline and "kids-phone" in _device_names(d):
         time.sleep(0.5)
     names = _device_names(d)
@@ -2493,8 +2531,11 @@ def test_family_screen_time_window_lock(admin_app, request, nest_instance, famil
     """Slice E, the window half (`family-client-enforcement.md` § Screen time): a guardian
     sets a usage window through the real editor UI, and the ward's own client
     renders the full-screen `screen-time-lock` when the local clock is outside
-    it — with the Family page still reachable read-only, and the lock gone once
-    the guardian clears the window.
+    it — with the Family page still reachable read-only. (Clearing the window outright
+    is not exercised here; the body moves the guardian from a locking window to
+    an allowed one, and
+    `test_family_screen_time_empty_field_clears_and_zero_budget_locks` proves
+    the empty-field clear.)
 
     Every mutation is a real UI gesture on the guardian's page (e2e point 8):
     the window is typed into `family-policy-screen-window-*-input` and saved
@@ -2614,7 +2655,7 @@ def test_family_screen_time_window_lock(admin_app, request, nest_instance, famil
     )
     message = app.family.screen_lock_message()
     assert guardian_handle in message, (
-        "the lock must name the guardian who set the policy (family-safety.md "
+        "the lock must name the guardian who set the policy (family-client-enforcement.md "
         f"§ Screen time), got {message!r}"
     )
     assert locked_start in message, (
@@ -2684,7 +2725,7 @@ def test_family_screen_time_budget_and_usage_readouts(admin_app, request, nest_i
     BUDGET_MINUTES = 120
     WARD_VISIBLE_BUDGET_S = 20.0
     READOUT_BUDGET_S = 30.0
-    LOCK_BUDGET_S = 30.0
+    LOCK_BUDGET_S = RPC_ROUNDTRIP_S + UI_SETTLE_S
 
     def _guardian_page() -> None:
         """Log in as the guardian and land on the Family page with the ward
@@ -2823,6 +2864,20 @@ def test_family_screen_time_budget_and_usage_readouts(admin_app, request, nest_i
     app.driver.reset()
     _login_app_as(app, request, nest_instance, ward_identity)
     app.family.navigate()
+    # Barrier: the heartbeat engine credits nothing until a status read has
+    # told it a budget exists (`HeartbeatEngine::accrue`, `budget_set`), so a
+    # poke that beats the post-auth read is silently lost — as in step 4.
+    def _budget_read_landed() -> bool:
+        if str(BUDGET_MINUTES) in app.family.policy_summary_text():
+            return True
+        app.family.reload()
+        return False
+
+    wait_until(
+        _budget_read_landed,
+        READOUT_BUDGET_S,
+        diagnose=lambda: f"the ward's status read never landed: {app.driver.diagnose('family-policy-summary')}",
+    )
     app.family.heartbeat(BUDGET_MINUTES)
     app.driver.navigate_to("feed")
     deadline = time.monotonic() + LOCK_BUDGET_S
@@ -2837,7 +2892,7 @@ def test_family_screen_time_budget_and_usage_readouts(admin_app, request, nest_i
     )
     message = app.family.screen_lock_message()
     assert guardian_handle in message, (
-        "the lock must name the guardian who set the policy (family-safety.md "
+        "the lock must name the guardian who set the policy (family-client-enforcement.md "
         f"§ Screen time), got {message!r}"
     )
     assert str(BUDGET_MINUTES) in message, (
@@ -2855,4 +2910,1060 @@ def test_family_screen_time_budget_and_usage_readouts(admin_app, request, nest_i
         "(family-client-enforcement.md § Screen time) — the ward has to be able to see who "
         f"supervises them and what the policy is: "
         f"{app.driver.diagnose('screen-time-lock')}"
+    )
+
+
+# ── The guardian's editor rules and the ward's read-only summary. Every
+# mutation is a real gesture on the guardian's editor (e2e point 8); the
+# readbacks are the editor refilled from the nest and the ward's own
+# `family-policy-summary`, so each assertion is about what was STORED. ──
+
+
+def _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle: str) -> None:
+    """Log in as the guardian and load ``ward_handle`` into the shared editor."""
+    from conftest import _login_app_as
+
+    app.driver.reset()
+    _login_app_as(app, request, nest_instance, guardian_identity)
+    app.family.navigate()
+
+    def _ward_listed() -> bool:
+        if ward_handle in app.family.ward_handles():
+            return True
+        app.family.reload()
+        return False
+
+    wait_until(
+        _ward_listed,
+        RPC_ROUNDTRIP_S + UI_SETTLE_S,
+        diagnose=lambda: f"ward {ward_handle!r} not in the guardian's list. error: {app.error_text()!r}",
+    )
+    app.family.select_ward_by_handle(ward_handle)
+    assert app.family.policy_editor_visible(), (
+        f"policy editor did not load. error: {app.error_text()!r}"
+    )
+
+
+def _reload_editor(app, ward_handle: str) -> None:
+    app.family.reload()
+    app.family.select_ward_by_handle(ward_handle)
+    assert app.family.policy_editor_visible(), (
+        f"policy editor did not reload. error: {app.error_text()!r}"
+    )
+
+
+def _ward_summary(app, request, nest_instance, ward_identity, expect) -> str:
+    """Log in as the ward and return `family-policy-summary` once ``expect(text)``
+    holds — the summary fills from the ward's own status read, so it is polled
+    toward the positive, never read once."""
+    from conftest import _login_app_as
+
+    app.driver.reset()
+    _login_app_as(app, request, nest_instance, ward_identity)
+    app.driver.wait_for("supervised-indicator", timeout=20)
+    app.family.navigate()
+
+    def _read() -> str | None:
+        text = app.family.policy_summary_text()
+        if expect(text):
+            return text
+        app.family.reload()
+        return None
+
+    return wait_until(
+        _read,
+        RPC_ROUNDTRIP_S + UI_SETTLE_S,
+        diagnose=lambda: (
+            f"the ward's family-policy-summary never matched: {app.family.policy_summary_text()!r} "
+            f"error: {app.error_text()!r}"
+        ),
+    )
+
+
+def _push_knock(nest_url: str, recipient_hex: str, sender_hex: str, summary: str) -> None:
+    """Store an inbound contact knock — the nest's `test-hooks` door onto the
+    production `db.push_knock` path, as `test_knock_sender_display.py` uses it.
+    Arranging the world: the stranger is not the user under test."""
+    import requests
+
+    resp = requests.post(
+        f"{nest_url}/api/v1/test/push/knock",
+        json={"actor_id": recipient_hex, "sender_id": sender_hex, "summary": summary},
+        timeout=10,
+    )
+    assert resp.status_code == 200 and resp.json().get("ok") is True, (
+        f"test-hooks knock endpoint returned {resp.status_code}: {resp.text}"
+    )
+
+
+def _contact_status(nest_url: str, identity: dict, peer_hex: str) -> str | None:
+    """The caller's edge toward ``peer_hex`` (`fauna.contacts.status`) — the API
+    readback (convention 5) of what a guardian's decision did to the ward."""
+    sk = identity["signing_key"]
+    with WsRpcAdminClient(nest_url, bytes(sk.verify_key), bytes(sk)) as client:
+        return client.call("fauna.contacts.status", {"peer_id": peer_hex}).get("status")
+
+
+@pytest.mark.feature("family-safety")
+def test_family_guardian_decides_a_strangers_contact_request(
+    admin_app, request, nest_instance, family_pair
+):
+    """family-safety.md § Guardian policy — the enforcement split: with contact
+    approval on, a stranger's request to contact the child waits in the
+    guardian's queue (`family-approval-item`, showing the request's own text),
+    and the guardian accepts or refuses it for the child — an accept makes the
+    two contacts, a refusal blocks the stranger on the child's behalf.
+
+    The guardian turns approval on through the editor (point 8); the two
+    requests are stored through the nest's knock door, as the strangers'
+    side is not under test. Shares the module's pair: both requests are
+    decided, so the queue ends empty, and the two strangers are fresh.
+    """
+    app = admin_app
+    url = nest_instance["url"]
+    guardian_identity, ward_identity, _guardian_handle, ward_handle = family_pair
+
+    _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)
+    app.family.set_contact_approval(True)
+    app.family.save_policy()
+    assert not app.has_error(), f"save raised: {app.error_text()!r}"
+
+    suffix = _unique_suffix()
+    accepted = _admit_adult(nest_instance, f"family-knock-yes-{suffix}")
+    refused = _admit_adult(nest_instance, f"family-knock-no-{suffix}")
+    yes_text, no_text = f"hello from yes {suffix}", f"hello from no {suffix}"
+    _push_knock(url, ward_identity["actor_id_hex"], accepted["actor_id_hex"], yes_text)
+    _push_knock(url, ward_identity["actor_id_hex"], refused["actor_id_hex"], no_text)
+
+    def _row_of(text: str) -> int | None:
+        rows = [app.family.approval_text(i) for i in range(app.family.approval_count())]
+        return next((i for i, row in enumerate(rows) if text in row), None)
+
+    def _both_waiting() -> bool:
+        if _row_of(yes_text) is not None and _row_of(no_text) is not None:
+            return True
+        app.family.reload()
+        return False
+
+    wait_until(
+        _both_waiting,
+        RPC_ROUNDTRIP_S + UI_SETTLE_S,
+        diagnose=lambda: (
+            "both strangers' requests must wait in the guardian's queue; rows="
+            f"{[app.family.approval_text(i) for i in range(app.family.approval_count())]!r} "
+            f"error: {app.error_text()!r}"
+        ),
+    )
+
+    app.family.approve(_row_of(yes_text))
+    assert not app.has_error(), f"approve raised: {app.error_text()!r}"
+    wait_until(
+        lambda: _row_of(yes_text) is None or app.family.reload(),
+        RPC_ROUNDTRIP_S + UI_SETTLE_S,
+        diagnose=lambda: f"the accepted request must leave the queue. error: {app.error_text()!r}",
+    )
+    row = _row_of(no_text)
+    assert row is not None, "the second request must still wait while the first is decided"
+    app.family.deny(row)
+    assert not app.has_error(), f"deny raised: {app.error_text()!r}"
+    wait_until(
+        lambda: _row_of(no_text) is None or app.family.reload(),
+        RPC_ROUNDTRIP_S + UI_SETTLE_S,
+        diagnose=lambda: f"the refused request must leave the queue. error: {app.error_text()!r}",
+    )
+
+    assert _contact_status(url, ward_identity, accepted["actor_id_hex"]) in ("accepted", "confirmed"), (
+        "an accepted request must make the stranger the child's contact"
+    )
+    assert _contact_status(url, ward_identity, refused["actor_id_hex"]) == "blocked", (
+        "a refused request must block the stranger on the child's behalf"
+    )
+
+
+@pytest.mark.feature("family-safety")
+def test_family_screen_time_editor_refuses_half_or_empty_window(
+    admin_app, request, nest_instance, family_pair
+):
+    """`family-client-enforcement.md` § Screen time: a usage window whose bounds
+    are only half filled in, or that starts and ends at the same minute, is
+    refused with its reason on `error-message`, and nothing is stored — the
+    editor refills from the nest with the window it had before.
+
+    The reason text is the shared `fauna_core::screen_time` rule's own (every
+    app refuses through it, client-side, before the nest would), so the
+    assertion keys on its words. Shares the module's pair: nothing is stored.
+    """
+    app = admin_app
+    app.family.require_screen_time_supported()
+    guardian_identity, _ward_identity, _guardian_handle, ward_handle = family_pair
+
+    _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)
+    assert (app.family.screen_window_start(), app.family.screen_window_end()) == ("", ""), (
+        "precondition: the reset pair carries no window"
+    )
+
+    for start, end, reason in (
+        ("08:00", "", "pairs"),
+        ("", "20:00", "pairs"),
+        ("09:30", "09:30", "start == end"),
+    ):
+        app.family.set_screen_window(start, end)
+        app.family.save_policy()
+        error = wait_until(
+            lambda: app.error_text(),
+            UI_SETTLE_S,
+            diagnose=lambda: f"no refusal on error-message for window {start!r}..{end!r}",
+        )
+        assert reason in error, (
+            f"the refusal of window {start!r}..{end!r} must give its reason "
+            f"(expected {reason!r} in it), got {error!r}"
+        )
+        _reload_editor(app, ward_handle)
+        assert (app.family.screen_window_start(), app.family.screen_window_end()) == ("", ""), (
+            f"a refused window {start!r}..{end!r} must store nothing, but the editor refilled "
+            f"{app.family.screen_window_start()!r}..{app.family.screen_window_end()!r}"
+        )
+
+
+@pytest.mark.feature("family-safety")
+def test_family_screen_time_empty_field_clears_and_zero_budget_locks(
+    admin_app, request, nest_instance, family_pair
+):
+    """`family-client-enforcement.md` § Screen time: the guardian removes a limit
+    by leaving its field empty, and a budget of zero is a deliberate full lock —
+    the ward's app is locked all day with no minute used.
+
+    Order is the proof: a window and a budget are stored (the editor refills
+    both), both fields are emptied and saved (the editor refills empty — the
+    limits are gone, not left unchanged), then a zero budget alone is saved and
+    the ward, who has heartbeated nothing, is locked on the budget arm. Shares
+    the module's pair: `family_pair` resets the policy, and a zero budget
+    accrues no usage residue (nothing heartbeats).
+    """
+    app = admin_app
+    app.family.require_screen_time_supported()
+    guardian_identity, ward_identity, guardian_handle, ward_handle = family_pair
+
+    _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)
+    app.family.set_screen_window("07:00", "21:00")
+    app.family.set_screen_daily_minutes("90")
+    app.family.save_policy()
+    assert not app.has_error(), f"save raised: {app.error_text()!r}"
+    _reload_editor(app, ward_handle)
+    stored = (
+        app.family.screen_window_start(),
+        app.family.screen_window_end(),
+        app.family.screen_daily_minutes(),
+    )
+    assert stored == ("07:00", "21:00", "90"), f"the limits did not store: {stored!r}"
+
+    app.family.set_screen_window("", "")
+    app.family.set_screen_daily_minutes("")
+    app.family.save_policy()
+    assert not app.has_error(), f"clearing raised: {app.error_text()!r}"
+    _reload_editor(app, ward_handle)
+    cleared = (
+        app.family.screen_window_start(),
+        app.family.screen_window_end(),
+        app.family.screen_daily_minutes(),
+    )
+    assert cleared == ("", "", ""), (
+        f"emptied fields must remove the limits, but the editor refilled {cleared!r}"
+    )
+
+    app.family.set_screen_daily_minutes("0")
+    app.family.save_policy()
+    assert not app.has_error(), f"zero budget raised: {app.error_text()!r}"
+    _reload_editor(app, ward_handle)
+    assert app.family.screen_daily_minutes() == "0", (
+        f"a zero budget must store as zero, got {app.family.screen_daily_minutes()!r}"
+    )
+
+    from conftest import _login_app_as
+
+    def _ward_locked() -> bool:
+        app.driver.reset()
+        _login_app_as(app, request, nest_instance, ward_identity)
+        app.family.navigate()
+        app.driver.navigate_to("feed")
+        return app.family.screen_lock_visible()
+
+    wait_until(
+        _ward_locked,
+        RPC_ROUNDTRIP_S * 3,
+        interval=0.5,
+        diagnose=lambda: (
+            f"a zero budget must lock the ward with no minute used. error: {app.error_text()!r} "
+            f"{app.driver.diagnose('screen-time-lock')}"
+        ),
+    )
+    message = app.family.screen_lock_message()
+    expected = S.family.screen_lock_budget(minutes="0", guardian=guardian_handle)
+    assert expected in message, (
+        f"the lock must be the budget arm naming the zero budget and the guardian: "
+        f"expected {expected!r} in {message!r}"
+    )
+
+
+@pytest.mark.feature("family-safety")
+def test_family_ward_summary_lists_content_floors_and_notify(
+    admin_app, request, nest_instance, family_pair
+):
+    """`family-client-enforcement.md` § Content policy + § Guardian Notify: the
+    ward's own read-only `family-policy-summary` lists each content category the
+    guardian set — with its setting — and shows whether Notify is on; a category
+    left at "use my settings" adds no line, and turning Notify off takes its
+    line away. Shares the module's pair: `family_pair` resets the floors.
+    """
+    app = admin_app
+    app.family.require_content_render_verdict_supported()
+    guardian_identity, ward_identity, _guardian_handle, ward_handle = family_pair
+    f = S.family
+    notify_label = f.policy_content_notify_label
+
+    _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)
+    app.family.set_content_floor("nsfw", "block")
+    app.family.set_content_floor("spam", "collapse")
+    app.family.set_content_floor("phishing", "block")
+    app.family.set_content_notify(True)
+    app.family.save_policy()
+    assert not app.has_error(), f"save raised: {app.error_text()!r}"
+
+    summary = _ward_summary(
+        app, request, nest_instance, ward_identity, lambda t: notify_label in (t or "")
+    )
+    lines = summary.splitlines() if "\n" in summary else [summary]
+    for label, value in (
+        (f.policy_content_nsfw_label, f.value_block),
+        (f.policy_content_spam_label, f.value_collapse),
+        (f.policy_content_phishing_label, f.value_block),
+    ):
+        assert any(label in line and value in line for line in lines), (
+            f"the ward's summary must list {label!r} as {value!r}: {summary!r}"
+        )
+    assert f.policy_content_commercial_label not in summary, (
+        f"a category left at the ward's own setting must add no line: {summary!r}"
+    )
+
+    _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)
+    app.family.set_content_notify(False)
+    app.family.save_policy()
+    assert not app.has_error(), f"save raised: {app.error_text()!r}"
+    summary = _ward_summary(
+        app, request, nest_instance, ward_identity, lambda t: bool(t) and notify_label not in t
+    )
+    assert f.policy_content_nsfw_label in summary, (
+        f"turning Notify off must leave the floors listed: {summary!r}"
+    )
+
+
+@pytest.mark.feature("family-safety")
+def test_family_guardian_hears_nothing_until_notify_is_on(
+    admin_app, request, nest_instance, family_pair
+):
+    """`family-client-enforcement.md` § Guardian Notify: hidden content is counted
+    for the guardian only once they turn Notify on. With the spam floor at block
+    and Notify OFF, the ward's app hides a spam post and is made to run its
+    report check now — and the guardian's per-ward readout stays empty.
+
+    The negative is anchored on the ward's own completed check
+    (`family_notify_check_now` returns after the client ran it), never on a wait.
+    The ON arm is `test_family_guardian_notify_surfaces_flagged_count`.
+
+    Shares the module's pair, deliberately not its own ward: the module is at
+    nine of the shipped ten anonymous submits (`submit_invite_request`), and a
+    CORRECT build writes nothing here — only a build that counts with Notify off
+    would leave a `guardian_content_notices` row on the shared ward, and that
+    build already fails this test.
+    """
+    from conftest import _login_app_as
+
+    app = admin_app
+    app.family.require_guardian_notify_client_supported()
+    guardian_identity, ward_identity, _guardian_handle, ward_handle = family_pair
+
+    _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)
+    app.family.set_content_floor("spam", "block")
+    app.family.save_policy()
+    assert not app.has_error(), f"save raised: {app.error_text()!r}"
+    _reload_editor(app, ward_handle)
+    assert app.family.content_notify_state() == "off", (
+        f"precondition: Notify is off by default, got {app.family.content_notify_state()!r}"
+    )
+
+    app.driver.reset()
+    _login_app_as(app, request, nest_instance, ward_identity)
+    app.driver.wait_for("supervised-indicator", timeout=20)
+    count = app.feed.seed_posts([
+        {"post_id": "gn-off-clean", "author": "afriend", "body": "an ordinary post"},
+        {
+            "post_id": "gn-off-spam",
+            "author": "aspammer",
+            "body": "this body must never render",
+            "labels": [{"category": "spam", "confidence_per_mille": 900}],
+        },
+    ])
+    assert count == 2, f"expected 2 seeded post-cards, got {count}. error: {app.error_text()!r}"
+    wait_until(
+        lambda: app.driver.is_visible("content-policy-blocked-notice", scope="post-card[1]"),
+        UI_SETTLE_S,
+        diagnose=lambda: "precondition: the spam floor must hide the post — nothing to count otherwise",
+    )
+    app.driver.call_command("family_notify_check_now", timeout=20)
+
+    _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)
+    assert app.family.ward_content_notices_text(0) == "", (
+        "with Notify off the guardian must hear nothing about hidden content, but "
+        f"the readout shows {app.family.ward_content_notices_text(0)!r}"
+    )
+
+
+# ── The child's own filter beside the guardian's floor, Notify's scope, and
+# offline enforcement (`family-client-enforcement.md` § Content policy, § Guardian
+# Notify). Each shares the module's pair: `family_pair` resets the floors,
+# Notify and screen time, and a test that moves the ward's OWN spam threshold
+# puts it back in a `finally`. ──
+
+
+def _save_own_spam_threshold_in_settings(app, nest_instance, user: dict, typed: str, per_mille: int) -> None:
+    """The signed-in user moves their own `spam-threshold` and saves it — the
+    real Settings gesture — then waits until the nest stores ``per_mille``
+    (`fauna.spam.get_preferences`, convention 5's readback), so a save the app
+    never sent cannot pass for one it did."""
+    app.settings.navigate()
+    app.settings.save_spam_preferences(spam_threshold=typed)
+
+    def _stored() -> bool:
+        with actor_ws(nest_instance, user) as ws:
+            return ws.call("fauna.spam.get_preferences", {}).get("spam_threshold") == per_mille
+
+    wait_until(
+        _stored,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: (
+            f"the own spam threshold {typed!r} never reached the nest as {per_mille} "
+            f"per-mille; error: {app.error_text()!r}"
+        ),
+    )
+
+
+@pytest.mark.feature("family-safety")
+def test_family_ward_can_make_their_own_filter_stricter_than_the_guardians_never_looser(
+    admin_app, request, nest_instance, family_pair
+):
+    """`family-client-enforcement.md` § Content policy: the guardian's floor and
+    the child's own spam threshold compose strictest-wins — "a ward may set
+    themselves stricter than the guardian floor, never looser".
+
+    The guardian sets `spam` to `collapse`, which bites at the shared trigger
+    (`fauna_core::obligation::GUARDIAN_FLOOR_TRIGGER_PERMILLE`, 500). One
+    conversation holds three messages: a clean one, a spam label at 900 (over
+    the trigger) and one at 300 (under it). The child then moves their own
+    threshold through Settings, twice:
+
+      * **looser** — 950: the 300 message shows, but the 900 one stays folded
+        away. The child's own looser setting does not undo the guardian's floor;
+      * **stricter** — 200: now the 300 message folds away too, which the
+        guardian's floor alone would never do.
+
+    The fold has no test id (the collapse reveal is untagged on every app), so
+    the witness is the set of message bodies that render. Each poll re-opens the
+    thread, so it renders against the thresholds the app holds now.
+    """
+    from conftest import _login_app_as
+
+    app = admin_app
+    app.family.require_content_render_verdict_supported()
+    guardian_identity, ward_identity, _guardian_handle, ward_handle = family_pair
+
+    _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)
+    app.family.set_content_floor("spam", "collapse")
+    app.family.save_policy()
+    assert not app.has_error(), f"save raised: {app.error_text()!r}"
+    _reload_editor(app, ward_handle)
+    assert app.family.content_floor_label("spam") == S.family.value_collapse, (
+        f"the spam floor did not persist as collapse: {app.family.content_floor_label('spam')!r}"
+    )
+
+    app.driver.reset()
+    _login_app_as(app, request, nest_instance, ward_identity)
+    app.driver.wait_for("supervised-indicator", timeout=20)
+
+    conv = app.conversations
+    d = app.driver
+    sender = "aneighbour-own@self-nest.test"
+    clean = "a plain note from a neighbour"
+    over_floor = "a message the labeler scored well over the floor"
+    under_floor = "a borderline message the labeler scored low"
+    thread_id = conv.inject_and_resolve_thread(rail="FaunaMls", sender=sender, body=clean)
+    for body, confidence in ((over_floor, 900), (under_floor, 300)):
+        conv.inject_inbound_for_test(
+            rail="FaunaMls",
+            sender=sender,
+            body=body,
+            labels=[{"category": "spam", "confidence_per_mille": confidence}],
+        )
+
+    def _all_three_stored() -> bool:
+        t = next((t for t in conv.list_threads() if t.thread_id == thread_id), None)
+        return t is not None and t.message_count >= 3
+
+    wait_until(
+        _all_three_stored,
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"the thread never held all three messages; error={app.error_text()!r}",
+    )
+
+    def _bodies() -> list[str]:
+        conv.open_thread_by_id(thread_id)
+        return sorted((t or "").strip() for t in d.get_texts("dm-message-text"))
+
+    def _await_bodies(want: list[str], why: str) -> None:
+        wait_until(
+            lambda: _bodies() == sorted(want),
+            RPC_ROUNDTRIP_S + UI_SETTLE_S,
+            interval=1.0,
+            diagnose=lambda: f"{why}; rendered bodies {_bodies()!r}, error={app.error_text()!r}",
+        )
+
+    try:
+        # ── Looser: the child's own permissive setting cannot undo the floor ──
+        _save_own_spam_threshold_in_settings(app, nest_instance, ward_identity, "0.95", 950)
+        conv.navigate()
+        _await_bodies(
+            [clean, under_floor],
+            "with the child's own threshold at 950 the 300 message must show, and the "
+            "900 one must stay folded under the guardian's collapse floor",
+        )
+
+        # ── Stricter: the child's own aggressive setting folds what the floor lets through ──
+        _save_own_spam_threshold_in_settings(app, nest_instance, ward_identity, "0.2", 200)
+        conv.navigate()
+        _await_bodies(
+            [clean],
+            "with the child's own threshold at 200 the 300 message must fold away too "
+            "(stricter than the guardian's floor)",
+        )
+    finally:
+        _set_own_spam_threshold(nest_instance, ward_identity, _DEFAULT_OWN_SPAM_THRESHOLD)
+
+
+@pytest.mark.feature("family-safety")
+def test_family_guardian_notify_counts_only_what_the_guardians_limits_hid(
+    admin_app, request, nest_instance, family_pair
+):
+    """`family-client-enforcement.md` § Guardian Notify: with Notify ON, the
+    ward's app counts what the GUARDIAN's floor hid, never what the child's own
+    settings hid. The guardian turns Notify on and leaves the spam floor at
+    "use my settings"; the child's own spam threshold (the default, 500) folds
+    away a spam post at 900; the ward's app is made to run its report check
+    now; and the guardian's per-ward readout stays empty.
+
+    The OFF arm is `test_family_guardian_hears_nothing_until_notify_is_on`, the
+    ON arm for a guardian-floor hide `test_family_guardian_notify_surfaces_flagged_count`.
+    The negative is anchored on the ward's own completed check
+    (`family_notify_check_now` returns after the app ran it), never on a wait.
+
+    Shares the module's pair for that sibling's reason: a CORRECT build writes
+    nothing here, so the shared ward carries no residue.
+    """
+    from conftest import _login_app_as
+
+    app = admin_app
+    app.family.require_guardian_notify_client_supported()
+    guardian_identity, ward_identity, _guardian_handle, ward_handle = family_pair
+    # The child's own threshold is what hides the post — pinned, not assumed.
+    _set_own_spam_threshold(nest_instance, ward_identity, _DEFAULT_OWN_SPAM_THRESHOLD)
+
+    _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)
+    app.family.set_content_notify(True)
+    app.family.save_policy()
+    assert not app.has_error(), f"save raised: {app.error_text()!r}"
+    _reload_editor(app, ward_handle)
+    assert app.family.content_notify_state() == "on", (
+        f"Notify did not persist: {app.family.content_notify_state()!r}"
+    )
+    assert app.family.content_floor_label("spam") == S.family.value_inherit, (
+        "precondition: the guardian's spam floor must be left to the child's own "
+        f"settings, got {app.family.content_floor_label('spam')!r}"
+    )
+
+    app.driver.reset()
+    _login_app_as(app, request, nest_instance, ward_identity)
+    app.driver.wait_for("supervised-indicator", timeout=20)
+    count = app.feed.seed_posts([
+        {"post_id": "gn-own-clean", "author": "afriend", "body": "an ordinary post"},
+        {
+            "post_id": "gn-own-spam",
+            "author": "aspammer",
+            "body": "this body is folded by the child's own setting",
+            "labels": [{"category": "spam", "confidence_per_mille": 900}],
+        },
+    ])
+    assert count == 2, f"expected 2 seeded post-cards, got {count}. error: {app.error_text()!r}"
+    d = app.driver
+    wait_until(
+        lambda: d.count("feed-post-text", scope="post-card[1]") == 0
+        and d.count("feed-post-text", scope="post-card[0]") >= 1,
+        UI_SETTLE_S,
+        diagnose=lambda: (
+            "precondition: the child's own threshold must fold the spam post away — "
+            f"nothing is hidden otherwise; {d.diagnose('feed-post-text')}"
+        ),
+    )
+    assert d.is_absent("content-policy-blocked-notice", scope="post-card[1]"), (
+        "the spam post must be folded by the child's own setting, not blocked by a "
+        "guardian floor — the floor was left at the child's settings"
+    )
+    app.driver.call_command("family_notify_check_now", timeout=20)
+
+    _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)
+    assert app.family.ward_content_notices_text(0) == "", (
+        "what the child's own setting hid must never be reported to the guardian, but "
+        f"the readout shows {app.family.ward_content_notices_text(0)!r}"
+    )
+
+
+@pytest.mark.feature("family-safety")
+def test_family_limits_and_lock_hold_while_the_app_cannot_reach_the_nest(
+    admin_app, request, nest_instance, family_pair
+):
+    """`family-client-enforcement.md` § Content policy, the unfetched-policy ruling
+    (clauses 1–2), and § Screen time: a policy the app could not FETCH keeps the
+    last-known state in force. The ward's app reads the policy once, live; it
+    is then relaunched while the nest holds every `fauna.family.status` reply,
+    so it starts without reaching the nest — and the content floor and the
+    screen-time lock still bind, from the persisted snapshot.
+
+    Two relaunches, one per pillar, because a lock hides the feed the floor
+    renders on: (1) a spam `block` floor blocks a spam post; (2) a usage window
+    that opens 3h from now and closes 4h from now locks the feed (the window
+    arithmetic is `test_family_screen_time_window_lock`'s — hours of margin on
+    both sides, so the verdict cannot flip mid-run).
+
+    The hold is armed BEFORE each relaunch, and the reply is proven still held
+    once each assertion has run — the pending-window pattern of
+    `test_family_supervised_indicator_shows_restored_guardian_while_status_is_pending`.
+    """
+    from conftest import _login_app_as
+
+    app = admin_app
+    app.family.require_content_render_verdict_supported()
+    app.family.require_screen_time_supported()
+    port = nest_instance["port"]
+    guardian_identity, ward_identity, guardian_handle, ward_handle = family_pair
+
+    def _ward_reads_live_then_relaunches_unreachable(live_ready, while_unreachable) -> None:
+        """Sign the ward in, wait for ``live_ready`` (the live read landed, and
+        with it the snapshot), then relaunch with the status read held and run
+        ``while_unreachable``."""
+        app.driver.reset()
+        _login_app_as(app, request, nest_instance, ward_identity)
+        live_ready()
+        _require_a_relaunch_that_keeps_the_session(app)
+        arm_rpc_hold(port, FAMILY_STATUS_KIND)
+        try:
+            assert app.driver.recover(), "the app did not come back up after the relaunch"
+            reached_authenticated_app(app.driver, timeout=90)
+            wait_for_held_rpc(
+                port, FAMILY_STATUS_KIND, diagnose=lambda: f"error={app.error_text()!r}"
+            )
+            while_unreachable()
+            assert rpc_hold_status(port, FAMILY_STATUS_KIND)["holding"] >= 1, (
+                "the status reply was released before the assertions ran, so they "
+                "proved nothing about an app that cannot reach the nest"
+            )
+        finally:
+            release_rpc_hold(port, FAMILY_STATUS_KIND)
+
+    # ── 1. The content floor ──
+    _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)
+    app.family.set_content_floor("spam", "block")
+    app.family.save_policy()
+    assert not app.has_error(), f"save raised: {app.error_text()!r}"
+
+    def _indicator_names_guardian() -> None:
+        # Gate on count(): linux mounts the indicator only once the live read
+        # lands, and get_text() raises LookupError on an absent element.
+        wait_until(
+            lambda: app.driver.count("supervised-indicator") > 0
+            and guardian_handle in (app.driver.get_text("supervised-indicator") or ""),
+            RPC_ROUNDTRIP_S + UI_SETTLE_S,
+            diagnose=lambda: f"the live read never landed; error={app.error_text()!r}",
+        )
+
+    def _floor_still_blocks() -> None:
+        count = app.feed.seed_posts([
+            {"post_id": "offline-clean", "author": "afriend", "body": "an ordinary post"},
+            {
+                "post_id": "offline-spam",
+                "author": "aspammer",
+                "body": "this body must never render",
+                "labels": [{"category": "spam", "confidence_per_mille": 900}],
+            },
+        ])
+        assert count == 2, f"expected 2 seeded post-cards, got {count}. error: {app.error_text()!r}"
+        wait_until(
+            lambda: app.driver.is_visible("content-policy-blocked-notice", scope="post-card[1]"),
+            UI_SETTLE_S,
+            diagnose=lambda: (
+                "with fauna.family.status unanswered the restored spam floor must still "
+                "block the spam post — an app that renders it treated 'no answer' as "
+                f"'no floor'; {app.driver.diagnose('content-policy-blocked-notice')}"
+            ),
+        )
+        assert app.driver.count("feed-post-text", scope="post-card[1]") == 0, (
+            "a blocked post must not render its body text"
+        )
+
+    _ward_reads_live_then_relaunches_unreachable(_indicator_names_guardian, _floor_still_blocks)
+
+    # ── 2. The screen-time lock ──
+    now = time.localtime()
+    now_minutes = now.tm_hour * 60 + now.tm_min
+
+    def hhmm(minutes_from_midnight: int) -> str:
+        m = minutes_from_midnight % 1440
+        return f"{m // 60:02d}:{m % 60:02d}"
+
+    locked_start, locked_end = hhmm(now_minutes + 180), hhmm(now_minutes + 240)
+    _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)
+    app.family.set_screen_window(locked_start, locked_end)
+    app.family.save_policy()
+    _reload_editor(app, ward_handle)
+    stored = (app.family.screen_window_start(), app.family.screen_window_end())
+    assert stored == (locked_start, locked_end), (
+        f"the guardian's window did not persist: got {stored!r}, expected "
+        f"{(locked_start, locked_end)!r}. error: {app.error_text()!r}"
+    )
+
+    def _locked_live() -> None:
+        def _locked() -> bool:
+            app.family.navigate()
+            app.driver.navigate_to("feed")
+            return app.family.screen_lock_visible()
+
+        wait_until(
+            _locked,
+            RPC_ROUNDTRIP_S + UI_SETTLE_S,
+            interval=1.0,
+            diagnose=lambda: (
+                f"precondition: outside the window ({locked_start}..{locked_end}, now "
+                f"{hhmm(now_minutes)}) the live read must lock the ward; "
+                f"{app.driver.diagnose('screen-time-lock')}"
+            ),
+        )
+
+    def _lock_still_up() -> None:
+        app.driver.navigate_to("feed")
+        wait_until(
+            app.family.screen_lock_visible,
+            UI_SETTLE_S,
+            diagnose=lambda: (
+                "with fauna.family.status unanswered the restored window must still lock "
+                "the ward — airplane mode is not a bedtime-lock bypass; "
+                f"{app.driver.diagnose('screen-time-lock')}"
+            ),
+        )
+        message = app.family.screen_lock_message()
+        assert guardian_handle in message and locked_start in message, (
+            "the restored lock must still name the guardian and when screen time "
+            f"resumes ({locked_start}), got {message!r}"
+        )
+
+    _ward_reads_live_then_relaunches_unreachable(_locked_live, _lock_still_up)
+
+
+# ── Screen time across devices and days (`family-client-enforcement.md`
+# § Screen time). The app under test is one of the ward's devices; the ward's
+# OTHER device is the wire (`fauna.family.usage_report` signed as the ward — the
+# nest accounts per account, never per device). Both tests share the module's
+# pair and are residue-proof by construction: the minutes earlier tests and app
+# legs left on the ward's day are READ first (a zero-minute report is a read),
+# and the budget is set just above them, so no assertion depends on the ward
+# starting the day at zero. The budget is arranged over the wire — the
+# guardian's editor gesture for it is `test_family_screen_time_budget_and_usage_readouts`'s
+# subject. ──
+
+
+def _local_utc_offset_minutes() -> int:
+    """This machine's UTC offset — the one the app under test reports, since it
+    runs here (`fauna_core::caltime::local_utc_offset_seconds`)."""
+    offset = datetime.now().astimezone().utcoffset()
+    return int(offset.total_seconds() // 60) if offset is not None else 0
+
+
+def _local_day(utc_offset_minutes: int) -> int:
+    """`fauna_core::day_bucket::local_day_bucket` for now at ``utc_offset_minutes``."""
+    return (int(time.time()) + utc_offset_minutes * 60) // 86_400
+
+
+def _usage_report_from_another_device(
+    nest_instance, ward_identity: dict, minutes: int, utc_offset_minutes: int
+) -> dict:
+    """One `fauna.family.usage_report` from another of the ward's devices; the
+    reply is ``{day, day_total_minutes}`` for the day the nest stamped."""
+    with actor_ws(nest_instance, ward_identity) as ward:
+        return ward.call(
+            "fauna.family.usage_report",
+            {"minutes": minutes, "utc_offset_minutes": utc_offset_minutes},
+        )
+
+
+def _budget_above_todays_use(
+    nest_instance, guardian_identity: dict, ward_identity: dict, headroom: int
+) -> tuple[int, int]:
+    """Set the ward's daily budget ``headroom`` minutes above what they have
+    already used today; return ``(budget, used_today)``. The nest accounts
+    only while a budget is set, so the read happens under a placeholder one."""
+    set_ward_policy(
+        nest_instance, guardian_identity, ward_identity, screen_time={"daily_minutes": 1440}
+    )
+    used = _usage_report_from_another_device(
+        nest_instance, ward_identity, 0, _local_utc_offset_minutes()
+    )["day_total_minutes"]
+    budget = used + headroom
+    assert budget <= 1440, (
+        f"the shared ward has already used {used} minutes today, so no budget can sit "
+        f"{headroom} above it — something left far more residue than this module makes"
+    )
+    set_ward_policy(
+        nest_instance, guardian_identity, ward_identity, screen_time={"daily_minutes": budget}
+    )
+    return budget, used
+
+
+def _minutes_used(readout: str, budget: int) -> int | None:
+    """The used figure in a "{used} of {budget} minutes" readout, or ``None``."""
+    import re
+
+    marker = "§"
+    pattern = re.escape(S.family.ward_usage_today_of_budget(used=marker, budget=str(budget)))
+    match = re.search(pattern.replace(marker, r"(\d+)"), readout or "")
+    return int(match.group(1)) if match else None
+
+
+def _ward_signs_in_under_the_budget(app, request, nest_instance, ward_identity, budget: int, used: int) -> None:
+    """Sign the ward in and wait until their own summary shows ``used`` of
+    ``budget`` — the status read that loads the budget into the app's heartbeat,
+    which reports nothing until it holds one."""
+    _ward_summary(
+        app,
+        request,
+        nest_instance,
+        ward_identity,
+        lambda text: _minutes_used(text or "", budget) == used,
+    )
+
+
+def _both_readouts_show(
+    app, request, nest_instance, family, budget: int, at_least: int, at_most: int
+) -> int:
+    """The ward's own summary and the guardian's per-ward row both show one used
+    figure in ``[at_least, at_most]`` against ``budget`` — the same number on
+    both (§ Screen time: "the ward's summary shows the same number"). Returns it.
+
+    A range, not one number: the app keeps crediting real foreground seconds
+    between the pokes, so how many whole minutes it adds beyond the poked ones
+    depends on how long the run took (convention 14) — ``at_most`` is the
+    caller's bound on that, derived from the run's own elapsed time."""
+    guardian_identity, ward_identity, _guardian_handle, ward_handle = family
+
+    def _in_range(text: str | None) -> bool:
+        used = _minutes_used(text or "", budget)
+        return used is not None and at_least <= used <= at_most
+
+    ward_used = _minutes_used(
+        _ward_summary(app, request, nest_instance, ward_identity, _in_range), budget
+    )
+
+    _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)
+
+    def _guardian_agrees() -> bool:
+        if _minutes_used(app.family.ward_usage_today_text(), budget) == ward_used:
+            return True
+        app.family.reload()
+        return False
+
+    wait_until(
+        _guardian_agrees,
+        RPC_ROUNDTRIP_S + UI_SETTLE_S,
+        interval=1.0,
+        diagnose=lambda: (
+            f"the guardian's readout must show the ward's own {ward_used} of {budget}, got "
+            f"{app.family.ward_usage_today_text()!r}; error: {app.error_text()!r}"
+        ),
+    )
+    return ward_used
+
+
+def _real_minutes_since(started: float) -> int:
+    """Whole minutes of real time since ``started`` (monotonic), rounded up, plus
+    one for a partial minute the app may have carried in — the most real
+    foreground time the app can have credited on top of the poked minutes."""
+    return int((time.monotonic() - started) // 60) + 2
+
+
+@pytest.mark.feature("family-safety")
+def test_family_screen_time_budget_counts_use_on_every_device_of_the_ward(
+    admin_app, request, nest_instance, family_pair
+):
+    """`family-client-enforcement.md` § Screen time: "Daily-budget enforcement
+    needs cross-device accounting (a per-device budget would multiply by device
+    count)". The ward uses the app under test for 10 minutes — well inside the
+    budget, no lock; another of their devices then reports the 20 minutes that
+    reach it; and at the app's next heartbeat, which returns the nest's
+    cross-device total, the app locks though its own use is far under the
+    budget. Both readouts then show the sum.
+
+    Clock movement is the `screen_time_heartbeat` poke (convention 14's fake
+    clock over the real `fauna.family.usage_report` wire), as in
+    `test_family_screen_time_budget_and_usage_readouts`.
+    """
+    app = admin_app
+    app.family.require_screen_time_supported()
+    guardian_identity, ward_identity, guardian_handle, _ward_handle = family_pair
+    started = time.monotonic()
+
+    APP_MINUTES = 10
+    OTHER_DEVICE_MINUTES = 20
+    NEXT_HEARTBEAT_MINUTES = 6  # past the 5-minute report cadence, so it is due
+    budget, used_before = _budget_above_todays_use(
+        nest_instance, guardian_identity, ward_identity, APP_MINUTES + OTHER_DEVICE_MINUTES
+    )
+
+    # ── 1. The app alone: 10 minutes, under the budget, no lock ──
+    _ward_signs_in_under_the_budget(app, request, nest_instance, ward_identity, budget, used_before)
+    app.family.heartbeat(APP_MINUTES)
+    app.driver.navigate_to("feed")
+    assert not app.family.screen_lock_visible(), (
+        f"{APP_MINUTES} minutes on this device, {used_before + APP_MINUTES} today of a "
+        f"{budget}-minute budget, must not lock: {app.driver.diagnose('screen-time-lock')}"
+    )
+
+    # ── 2. Another device of the ward's uses the rest of the day's budget ──
+    reply = _usage_report_from_another_device(
+        nest_instance, ward_identity, OTHER_DEVICE_MINUTES, _local_utc_offset_minutes()
+    )
+    assert reply["day_total_minutes"] >= budget, (
+        "the nest must sum the two devices' minutes into one day's total: after "
+        f"{used_before} + {APP_MINUTES} + {OTHER_DEVICE_MINUTES} it reports {reply!r}"
+    )
+
+    # ── 3. The app's next heartbeat learns the total, and the ward is locked ──
+    app.family.heartbeat(NEXT_HEARTBEAT_MINUTES)
+
+    def _locked() -> bool:
+        app.driver.navigate_to("family")
+        app.driver.navigate_to("feed")
+        return app.family.screen_lock_visible()
+
+    wait_until(
+        _locked,
+        RPC_ROUNDTRIP_S + UI_SETTLE_S,
+        interval=1.0,
+        diagnose=lambda: (
+            f"the ward's devices together used {reply['day_total_minutes']} of a "
+            f"{budget}-minute budget, so this app must lock though it used only "
+            f"{APP_MINUTES + NEXT_HEARTBEAT_MINUTES} itself; "
+            f"{app.driver.diagnose('screen-time-lock')}"
+        ),
+    )
+    message = app.family.screen_lock_message()
+    assert guardian_handle in message and str(budget) in message, (
+        f"the budget lock must name the guardian and the {budget}-minute budget, got {message!r}"
+    )
+
+    # ── 4. Both readouts show the sum of every device ──
+    floor = used_before + APP_MINUTES + OTHER_DEVICE_MINUTES + NEXT_HEARTBEAT_MINUTES
+    _both_readouts_show(
+        app,
+        request,
+        nest_instance,
+        family_pair,
+        budget,
+        at_least=floor,
+        at_most=floor + _real_minutes_since(started),
+    )
+
+
+@pytest.mark.feature("family-safety")
+def test_family_screen_time_budget_starts_over_at_the_wards_local_midnight(
+    admin_app, request, nest_instance, family_pair
+):
+    """`family-client-enforcement.md` § Screen time: "A daily budget must reset at
+    the ward's local midnight" — the day bucket is the ward's LOCAL day, which
+    the nest stamps from its own clock and the offset each report carries.
+
+    Latency-independent (convention 14), never a wait for midnight: another of
+    the ward's devices reports from a clock an hour on the far side of a local
+    midnight — 23:00 yesterday where the offset clamp allows it, else 01:00
+    tomorrow — and uses the WHOLE budget there. Those minutes land in another
+    local day's bucket, so the app under test (reporting at this machine's
+    offset) is not locked, and both readouts show only today's minutes. A nest
+    that bucketed by UTC day, or ignored the offset, would put both reports in
+    one day and lock the app.
+    """
+    app = admin_app
+    app.family.require_screen_time_supported()
+    guardian_identity, ward_identity, _guardian_handle, _ward_handle = family_pair
+    started = time.monotonic()
+
+    APP_MINUTES = 10
+    NEXT_HEARTBEAT_MINUTES = 6
+    budget, used_before = _budget_above_todays_use(
+        nest_instance, guardian_identity, ward_identity, 30
+    )
+
+    # The other device's offset: its local clock an hour past yesterday's 23:00
+    # mark or tomorrow's 01:00 mark relative to this machine's local day. The two
+    # windows meet, so one always fits the clamp (`-720..=840`).
+    here = _local_utc_offset_minutes()
+    local = time.localtime()
+    minutes_into_today = local.tm_hour * 60 + local.tm_min
+    yesterday = here - minutes_into_today - 60
+    tomorrow = here + (1440 - minutes_into_today) + 60
+    other_offset = yesterday if yesterday >= -720 else tomorrow
+    assert -720 <= other_offset <= 840, (here, minutes_into_today, other_offset)
+
+    # ── 1. The app: 10 minutes today ──
+    _ward_signs_in_under_the_budget(app, request, nest_instance, ward_identity, budget, used_before)
+    app.family.heartbeat(APP_MINUTES)
+
+    # ── 2. The other device uses the whole budget in its own local day ──
+    reply = _usage_report_from_another_device(nest_instance, ward_identity, budget, other_offset)
+    assert reply["day"] == _local_day(other_offset) and reply["day"] != _local_day(here), (
+        f"the nest must stamp the other device's report into ITS local day "
+        f"({_local_day(other_offset)}), not this machine's ({_local_day(here)}): {reply!r}"
+    )
+    assert reply["day_total_minutes"] >= budget, (
+        f"precondition: the other local day must hold the whole {budget}-minute budget: {reply!r}"
+    )
+
+    # ── 3. The app's next heartbeat, at this machine's offset: today, not locked ──
+    app.family.heartbeat(NEXT_HEARTBEAT_MINUTES)
+    floor = used_before + APP_MINUTES + NEXT_HEARTBEAT_MINUTES
+    used = _both_readouts_show(
+        app,
+        request,
+        nest_instance,
+        family_pair,
+        budget,
+        at_least=floor,
+        at_most=floor + _real_minutes_since(started),
+    )
+    assert used < budget, (
+        f"today's figure {used} must not include the other day's {budget} minutes"
+    )
+    assert _local_day(here) != reply["day"], (
+        "the run crossed this machine's local midnight into the other device's day, "
+        "so the assertions above did not separate two days — the offset choice "
+        "above has the wrong margin"
+    )
+
+    _ward_signs_in_under_the_budget(app, request, nest_instance, ward_identity, budget, used)
+    app.driver.navigate_to("feed")
+    assert not app.family.screen_lock_visible(), (
+        f"the whole {budget}-minute budget was used in ANOTHER local day; today's "
+        f"{used} minutes must not lock the ward: {app.driver.diagnose('screen-time-lock')}"
     )

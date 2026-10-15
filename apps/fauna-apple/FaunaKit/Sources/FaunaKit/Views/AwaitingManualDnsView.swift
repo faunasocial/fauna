@@ -79,6 +79,18 @@ public struct AwaitingManualDnsView: View {
                     }
                 }
 
+                // The exit for a box that never answers: borrows the launch
+                // surface's label. Enablement is the machine's answer — NOT the
+                // recheck button's busy rule, which would hide the exit exactly
+                // on a box that never answers.
+                Button(L.launch.useDifferentNest) { vm.abandonAwaitingManualDns() }
+                    .disabled(!vm.awaitingDnsFallthroughEnabled)
+                    .accessibilityIdentifier(Ids.awaitingDnsFallthroughButton)
+                    .automationActivate(Ids.awaitingDnsFallthroughButton,
+                                        isEnabled: { vm.awaitingDnsFallthroughEnabled }) {
+                        vm.abandonAwaitingManualDns()
+                    }
+
                 if let error = vm.errorMessage {
                     ErrorBanner(message: error)
                 }

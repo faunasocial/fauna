@@ -11,10 +11,10 @@
 //! `manager.{set_new_thread_recipient_input, accept_new_thread_chip,
 //! cancel_new_conversation, …}`.
 //!
-//! Indexed list IDs: `recipient-picker-chip[i]` sits on the per-chip label (it
-//! is only ever *read*). `recipient-picker-suggestion[i]` sits on the
-//! `gtk::ListBoxRow` instead, because it is *clicked*: the row is what carries
-//! the activation, and a `gtk::Label` is inert — see `build_suggestion`.
+//! Indexed list IDs: `recipient-picker-chip[i]` sits on the chip's `gtk::Button`
+//! (its × gesture — `remove_recipient_chip(i)`). `recipient-picker-suggestion[i]`
+//! sits on the `gtk::ListBoxRow`, because it is *clicked*: the row is what
+//! carries the activation, and a `gtk::Label` is inert — see `build_suggestion`.
 
 use fauna_ui_ids as ids;
 use std::cell::RefCell;
@@ -37,10 +37,23 @@ pub struct RecipientPicker {
     suggestions_list: gtk::ListBox,
     status_label: gtk::Label,
     class_label: gtk::Label,
+    /// `recipient-picker-home-nest-toggle` — whether this nest joins the room
+    /// being created (`ConversationsManager::set_new_thread_home_nest`). Painted
+    /// whether or not a chip is committed: it is a property of the room, chosen
+    /// before its first message.
+    home_nest_toggle: gtk::ToggleButton,
     /// Set true while the parent's `Refresh()` is updating widget contents,
     /// so the entry's `connect_changed` doesn't loop into another mutator.
     refreshing: Rc<RefCell<bool>>,
+    /// `accept_suggestion(i)` — wired by [`Self::connect_suggestion_accepted`];
+    /// unwired, a suggestion click falls back to `on_accept`.
+    on_suggestion: IndexCallback,
+    /// `remove_recipient_chip(i)` — wired by [`Self::connect_chip_removed`].
+    on_remove_chip: IndexCallback,
 }
+
+/// A late-bound `Fn(index)` callback slot shared with the widgets `render` rebuilds.
+type IndexCallback = Rc<RefCell<Option<Rc<dyn Fn(u32)>>>>;
 
 impl RecipientPicker {
     /// Build a picker. `on_input` is called for every keystroke (the
@@ -122,6 +135,15 @@ impl RecipientPicker {
         class_label.set_visible(false);
         root.append(&class_label);
 
+        // `recipient-picker-home-nest-toggle` — built hidden and un-id'd:
+        // only the new-thread composer turns it on
+        // ([`Self::enable_home_nest_toggle`]); the add-participant dialog and
+        // the folder share dialog reuse this widget and own no room choice.
+        let home_nest_toggle = gtk::ToggleButton::new();
+        home_nest_toggle.set_halign(gtk::Align::Start);
+        home_nest_toggle.set_visible(false);
+        root.append(&home_nest_toggle);
+
         let refreshing = Rc::new(RefCell::new(false));
 
         // Wire input → on_input callback (gated by refreshing flag to
@@ -145,18 +167,24 @@ impl RecipientPicker {
             input.connect_activate(move |_| on_accept());
         }
 
-        // Wire suggestion click → the same `on_accept`.
-        // `accept_current_recipient_chip` is the manager's documented "single
-        // entry point for the press-Enter / click-suggestion path on both
-        // apps" (`fauna_conversations::ConversationsManager::accept_current_recipient_chip`), and web
-        // (`+page.svelte:949`) and tui (`Action::AcceptRecipientChip`) both
-        // route the suggestion click into it. linux painted the suggestion rows
-        // but never connected anything, so clicking one did nothing — for a
-        // real user as much as for the agent.
+        // Wire suggestion click → `accept_suggestion(i)` once the parent wires
+        // it (`conversations.md` § Where logic lives → *Recipient suggestions*:
+        // the Enter path run over *that row's* spelling). Unwired — the folder
+        // share dialog, which owns no suggestion source — the click falls back to
+        // `on_accept`, the typed text's own path.
+        let on_suggestion: IndexCallback = Rc::new(RefCell::new(None));
         {
             let on_accept = Rc::clone(&on_accept);
-            suggestions_list.connect_row_activated(move |_, _| on_accept());
+            let on_suggestion = Rc::clone(&on_suggestion);
+            suggestions_list.connect_row_activated(move |_, row| {
+                let callback = on_suggestion.borrow().clone();
+                match callback {
+                    Some(cb) => cb(row.index().max(0) as u32),
+                    None => on_accept(),
+                }
+            });
         }
+        let on_remove_chip: IndexCallback = Rc::new(RefCell::new(None));
 
         Self {
             root,
@@ -166,8 +194,21 @@ impl RecipientPicker {
             suggestions_list,
             status_label,
             class_label,
+            home_nest_toggle,
             refreshing,
+            on_suggestion,
+            on_remove_chip,
         }
+    }
+
+    /// Route a suggestion row's click to `accept_suggestion(index)`.
+    pub fn connect_suggestion_accepted<F: Fn(u32) + 'static>(&self, f: F) {
+        *self.on_suggestion.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// Route a chip's × to `remove_recipient_chip(index)`.
+    pub fn connect_chip_removed<F: Fn(u32) + 'static>(&self, f: F) {
+        *self.on_remove_chip.borrow_mut() = Some(Rc::new(f));
     }
 
     /// Re-render the picker from the snapshot's `RecipientPickerState`.
@@ -192,8 +233,12 @@ impl RecipientPicker {
         while let Some(child) = self.chips_box.first_child() {
             self.chips_box.remove(&child);
         }
-        for chip_addr in &state.chips {
-            let chip = build_chip(&chip_addr.display_with_bridges(bridges));
+        for (i, chip_addr) in state.chips.iter().enumerate() {
+            let chip = build_chip(
+                &chip_addr.display_with_bridges(bridges),
+                i as u32,
+                Rc::clone(&self.on_remove_chip),
+            );
             self.chips_box.append(&chip);
         }
         self.chips_box.set_visible(!state.chips.is_empty());
@@ -204,11 +249,19 @@ impl RecipientPicker {
         }
 
         // Suggestions.
-        while let Some(child) = self.suggestions_list.first_child() {
-            self.suggestions_list.remove(&child);
-        }
-        for sug in &state.suggestions {
-            let row = build_suggestion(&sug.display_with_bridges(bridges));
+        crate::views::layout::clear_list_box_rows(&self.suggestions_list);
+        for (i, sug) in state.suggestions.iter().enumerate() {
+            // The finished label the manager derived, with the address beside it
+            // when the two differ (`conversations.md` § Where logic lives →
+            // *Recipient suggestions*) — the shape tui paints.
+            let address = sug.display_with_bridges(bridges);
+            let text = match state.suggestion_displays.get(i) {
+                Some(label) if !label.is_empty() && *label != address => {
+                    format!("{label} · {address}")
+                }
+                _ => address,
+            };
+            let row = build_suggestion(&text);
             self.suggestions_list.append(&row);
         }
         self.suggestions_list
@@ -253,7 +306,43 @@ impl RecipientPicker {
             None => self.class_label.set_visible(false),
         }
 
+        // The home-nest choice, straight off the shared state.
+        let included = state.include_home_nest;
+        self.home_nest_toggle.set_active(included);
+        self.home_nest_toggle.set_label(if included {
+            crate::i18n::strings::conversations::unified::ROOM_HOME_NEST_YES
+        } else {
+            crate::i18n::strings::conversations::unified::ROOM_HOME_NEST_NO
+        });
+        crate::testid::set_test_attr(
+            &self.home_nest_toggle,
+            "checked",
+            if included { "true" } else { "false" },
+        );
+
         *self.refreshing.borrow_mut() = false;
+    }
+
+    /// Turn on `recipient-picker-home-nest-toggle` — the new-thread composer
+    /// only. `on_toggle` receives the value the click asks for; the painted
+    /// `checked` state and label come back from the snapshot in [`Self::render`],
+    /// so a refused or no-op toggle never leaves the button lying.
+    pub fn enable_home_nest_toggle<H: Fn(bool) + 'static>(&self, on_toggle: H) {
+        crate::testid::set_test_id(
+            &self.home_nest_toggle,
+            ids::RECIPIENT_PICKER_HOME_NEST_TOGGLE,
+        );
+        crate::testid::set_test_attr(&self.home_nest_toggle, "checked", "false");
+        self.home_nest_toggle
+            .set_label(crate::i18n::strings::conversations::unified::ROOM_HOME_NEST_NO);
+        self.home_nest_toggle.set_visible(true);
+        let refreshing = self.refreshing.clone();
+        self.home_nest_toggle.connect_toggled(move |btn| {
+            if *refreshing.borrow() {
+                return;
+            }
+            on_toggle(btn.is_active());
+        });
     }
 
     /// Move keyboard focus to the input field.
@@ -262,22 +351,21 @@ impl RecipientPicker {
     }
 }
 
-fn build_chip(text: &str) -> gtk::Box {
-    let chip = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+/// One committed chip: a `gtk::Button` reading `"{address} ×"` whose click is the
+/// chip's one gesture, `remove_recipient_chip(index)`. The id rides the button —
+/// the element with the activation and an a11y peer (a `gtk::Label` is inert).
+fn build_chip(text: &str, index: u32, on_remove: IndexCallback) -> gtk::Button {
+    let chip = gtk::Button::with_label(&format!("{text} ×"));
     chip.add_css_class("pill");
     chip.set_margin_top(2);
     chip.set_margin_bottom(2);
-
-    let label = gtk::Label::new(Some(text));
-    label.set_margin_start(8);
-    label.set_margin_end(4);
-    // Per the windows lesson — id on the element with an a11y peer
-    // (Label has one; Box doesn't reliably expose set_widget_name to
-    // AT-SPI when nested), so the bridge sees recipient-picker-chip[i]
-    // by enumerating Label peers.
-    crate::testid::set_test_id(&label, ids::RECIPIENT_PICKER_CHIP);
-    chip.append(&label);
-
+    crate::testid::set_test_id(&chip, ids::RECIPIENT_PICKER_CHIP);
+    chip.connect_clicked(move |_| {
+        let callback = on_remove.borrow().clone();
+        if let Some(cb) = callback {
+            cb(index);
+        }
+    });
     chip
 }
 
@@ -360,9 +448,140 @@ mod tests {
             assert_eq!(
                 accepted.get(),
                 1,
-                "clicking a suggestion must run the accept callback \
-             (`accept_current_recipient_chip`), exactly as pressing Enter does"
+                "an unwired picker (the folder share dialog) falls back to the typed-text \
+             accept callback"
             );
+        });
+    }
+    /// Every descendant carrying `id`, in document order (the picker paints one
+    /// widget per indexed row/chip).
+    fn all_with_id(root: &gtk::Widget, id: &str, out: &mut Vec<gtk::Widget>) {
+        if root.widget_name() == id {
+            out.push(root.clone());
+        }
+        let mut child = root.first_child();
+        while let Some(c) = child {
+            all_with_id(&c, id, out);
+            child = c.next_sibling();
+        }
+    }
+
+    /// Wired, a suggestion click is `accept_suggestion(i)` with the clicked row's
+    /// own index (never the typed-text `on_accept`), the row paints the
+    /// manager-derived label with the address beside it, and a chip's × is
+    /// `remove_recipient_chip(i)`.
+    #[test]
+    fn suggestion_click_and_chip_remove_carry_their_index() {
+        crate::testid::run_on_gtk_thread(|| {
+            let typed_accepts = Rc::new(std::cell::Cell::new(0u32));
+            let picker = {
+                let typed_accepts = Rc::clone(&typed_accepts);
+                RecipientPicker::new(|_| {}, move || typed_accepts.set(typed_accepts.get() + 1))
+            };
+            let accepted = Rc::new(RefCell::new(Vec::new()));
+            let removed = Rc::new(RefCell::new(Vec::new()));
+            {
+                let accepted = Rc::clone(&accepted);
+                picker.connect_suggestion_accepted(move |i| accepted.borrow_mut().push(i));
+                let removed = Rc::clone(&removed);
+                picker.connect_chip_removed(move |i| removed.borrow_mut().push(i));
+            }
+
+            let email = |a: &str| TypedAddress::Email {
+                email_address: a.to_string(),
+            };
+            let state = RecipientPickerState {
+                chips: vec![email("kept@example.test"), email("gone@example.test")],
+                suggestions: vec![email("alice@example.test"), email("bob@example.test")],
+                suggestion_displays: vec!["Alice".to_string(), "bob@example.test".to_string()],
+                ..Default::default()
+            };
+            picker.render(&state, &[]);
+
+            let root: gtk::Widget = picker.root.clone().upcast();
+            let mut rows = Vec::new();
+            all_with_id(&root, "recipient-picker-suggestion", &mut rows);
+            assert_eq!(rows.len(), 2);
+            assert_eq!(
+                crate::automation::find::text_of(&rows[0]),
+                "Alice · alice@example.test",
+                "label, then the address beside it when they differ"
+            );
+            assert_eq!(
+                crate::automation::find::text_of(&rows[1]),
+                "bob@example.test",
+                "a label equal to the address paints once"
+            );
+            crate::automation::agent::actuate_click(&rows[1]);
+            assert_eq!(*accepted.borrow(), vec![1]);
+            assert_eq!(typed_accepts.get(), 0, "never the typed-text path");
+
+            let mut chips = Vec::new();
+            all_with_id(&root, "recipient-picker-chip", &mut chips);
+            assert_eq!(chips.len(), 2);
+            assert!(crate::automation::find::text_of(&chips[1]).ends_with('×'));
+            crate::automation::agent::actuate_click(&chips[1]);
+            assert_eq!(*removed.borrow(), vec![1]);
+        });
+    }
+
+    /// The home-nest toggle is the new-thread composer's alone, mirrors the
+    /// shared `include_home_nest` in its `checked` attribute, and a click asks
+    /// the manager for the NEW value without the render echoing it back.
+    #[test]
+    fn the_home_nest_toggle_follows_the_shared_state_and_reports_clicks() {
+        crate::testid::run_on_gtk_thread(|| {
+            let plain = RecipientPicker::new(|_| {}, || {});
+            let root: gtk::Widget = plain.root.clone().upcast();
+            assert!(
+                crate::testid::find_by_test_id(&root, ids::RECIPIENT_PICKER_HOME_NEST_TOGGLE)
+                    .is_none(),
+                "the add-participant and share dialogs reuse the widget without the toggle"
+            );
+
+            let asked = Rc::new(std::cell::RefCell::new(Vec::new()));
+            let picker = RecipientPicker::new(|_| {}, || {});
+            {
+                let asked = Rc::clone(&asked);
+                picker.enable_home_nest_toggle(move |v| asked.borrow_mut().push(v));
+            }
+            let root: gtk::Widget = picker.root.clone().upcast();
+            let toggle =
+                crate::testid::find_by_test_id(&root, ids::RECIPIENT_PICKER_HOME_NEST_TOGGLE)
+                    .expect("the composer paints the toggle");
+
+            let mut state = RecipientPickerState {
+                include_home_nest: true,
+                ..Default::default()
+            };
+            picker.render(&state, &[]);
+            assert!(
+                toggle
+                    .css_classes()
+                    .iter()
+                    .any(|c| c == "test-attr-checked-true")
+            );
+            assert!(
+                asked.borrow().is_empty(),
+                "a render must not report itself as a click"
+            );
+
+            state.include_home_nest = false;
+            picker.render(&state, &[]);
+            assert!(
+                toggle
+                    .css_classes()
+                    .iter()
+                    .any(|c| c == "test-attr-checked-false")
+            );
+
+            let reply = crate::automation::agent::actuate_click(&toggle);
+            assert_eq!(
+                reply.get("ok").and_then(|v| v.as_bool()),
+                Some(true),
+                "{reply:?}"
+            );
+            assert_eq!(*asked.borrow(), vec![true]);
         });
     }
 }

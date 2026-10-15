@@ -24,7 +24,9 @@
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!("fauna_client_search");
 
+#[cfg(feature = "query")]
 use fauna_protocol::RpcRequester;
+#[cfg(feature = "query")]
 use fauna_protocol::search::{SearchQueryReply, SearchQueryRequest};
 
 pub use fauna_protocol::search;
@@ -44,7 +46,9 @@ pub mod kind;
 /// The local (sealed-index) arm's seam. See [`local`].
 pub mod local;
 
-/// The shared `SearchManager`. See [`manager`].
+/// The shared `SearchManager`. See [`manager`]. Part of the `query` half — it
+/// drives [`SearchClient`].
+#[cfg(feature = "query")]
 pub mod manager;
 
 /// Snapshot reactivity callback. See [`observer`].
@@ -58,6 +62,7 @@ pub use local::{
     CompositeLocalSearch, LocalIndexResolver, LocalSearchHit, LocalSearchIndex,
     OwnPostIndexObserver,
 };
+#[cfg(feature = "query")]
 pub use manager::SearchManager;
 pub use observer::SearchSnapshotObserver;
 pub use snapshot::{SearchNav, SearchResultRow, SearchSnapshot, SearchSource};
@@ -70,10 +75,15 @@ pub use snapshot::{SearchNav, SearchResultRow, SearchSnapshot, SearchSource};
 /// The storage-mode-era `not_server_side` / `mode_not_configured` refusals
 /// retired with the axis itself (no-modes) — `search_handlers.rs` constructs
 /// neither.
+///
+/// The `query` feature's half: a build without it (the kids flavor) carries no
+/// search sender.
+#[cfg(feature = "query")]
 pub struct SearchClient<R: RpcRequester> {
     nest: R,
 }
 
+#[cfg(feature = "query")]
 impl<R: RpcRequester> SearchClient<R> {
     pub fn new(nest: R) -> Self {
         Self { nest }

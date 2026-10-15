@@ -1478,6 +1478,14 @@ impl fauna_core::folder_keys::FolderKeyResolver for SetNonceResolver {
         Ok(fauna_core::folder_keys::ResolvedCustody::owner_only())
     }
 
+    /// Keyed by name: no answer by identity.
+    async fn resolve_ref(
+        &self,
+        _folder_ref: &fauna_core::folder_keys::FolderRef,
+    ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+        anyhow::bail!("no set with that identity")
+    }
+
     async fn set_nonce(&self, _folder: &str) -> anyhow::Result<Option<[u8; 32]>> {
         Ok(Some(common::SET_NONCE))
     }

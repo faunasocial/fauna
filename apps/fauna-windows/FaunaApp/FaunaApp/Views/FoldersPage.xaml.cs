@@ -117,6 +117,15 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     /// disable-with-hint</c>) and never breaks the rest of the page load.</summary>
     private bool _canServeWebdav;
 
+    /// <summary>The roster row <c>device-this-mark-badge</c> marks (the shared rule
+    /// behind <see cref="INestRpcClient.ThisDeviceRowAsync"/>) and the last snapshot's
+    /// roster: the two inputs <c>folder-lease-status</c> needs beyond the folder row
+    /// itself, to name a holder by label and to say "this device" (ui/folders.md §
+    /// Exclusive editing). A failed read keeps the row held — the line then names
+    /// the holder as another device rather than guessing.</summary>
+    private string? _thisDeviceRow;
+    private DeviceSummary[] _devices = Array.Empty<DeviceSummary>();
+
     /// <summary>The creator's own subscription tier NAMES — the options the web-type
     /// paywall select offers (folders.md § Web paywall). Read per page-visit off the
     /// key-bearing subscriptions face (<c>SubscriptionsClient::tiers_list</c>), NOT the
@@ -189,6 +198,21 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         });
     }
 
+    /// <summary>
+    /// A bind push was confirmed: the agent has enrolled this device's seat by now
+    /// (file-sync.md § 4), so re-read the open row's roster and the new seat paints with no
+    /// collapse/re-expand — nest truth via the same re-run every place toggle makes. Raised
+    /// on the convergence loop's task, so it hops to the UI thread.
+    /// </summary>
+    private void OnBindConfirmed()
+    {
+        DispatcherQueue?.TryEnqueue(() =>
+        {
+            if (_expandedPlaceContainer is { } places && _expandedFolder is { } openFolder)
+                _ = LoadPlaceRowsAsync(openFolder, places);
+        });
+    }
+
     // The localized machine error (snapshot.error) currently displayed, combined with
     // the folder-binding VM error in UpdateErrorBar so both seams share the one
     // canonical error-message surface.
@@ -210,8 +234,20 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     // The set whose share flow a folder-share route asked to open — set by
     // RenderFolders as it expands that row, consumed by BuildSharingSection.
     private string? _openShareFor;
+    // The open row's nest-place editor (only an open row has a body, so at most one
+    // exists), and what RenderFolders read off it before clearing the container —
+    // set there, consumed by the rebuilt row's BuildNestPlaceSection, the
+    // _openShareFor idiom (backup-restore.md § 8b: a refresh never overwrites a
+    // staged edit).
+    private NestPlaceControls? _expandedNestPlace;
+    private (string Name, NestPlaceForm? Seeded, NestPlaceForm OnScreen)? _stagedNestPlace;
     // Nested local-folder binding controls for the single open set row.
     private StackPanel? _expandedLocationContainer;
+    // The open row's place-editor container (BuildPlaceEditorSection), kept so a
+    // confirmed bind can re-run LoadPlaceRowsAsync on it: the agent's bind enrols
+    // this device's seat (file-sync.md § 4), and the row must paint it without a
+    // collapse/re-expand — the twin of tui's FolderBindConfirmed roster resync.
+    private StackPanel? _expandedPlaceContainer;
     private TextBlock? _expandedLocationEmpty;
     private TextBox? _expandedLocationInput;
     // The currently-expanded row's per-set device-activity roster container
@@ -295,6 +331,88 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
             {
                 _rpc.FolderChangedPushed += OnFolderChangedPushed;
                 _rpc.Reconnected += OnReconnected;
+                // The shared store-change notice (account-runtime.md § A runtime's
+                // own pump is a source of the notice too): this page re-reads its
+                // store-backed halves while it is the open one.
+                _rpc.StoreChanged += OnStoreChanged;
+            }
+        }
+    }
+
+    private bool _storeResyncing;
+    private bool _storeResyncAgain;
+
+    /// <summary>The store-change re-read of the open Folders page: the folder
+    /// machine's refresh (its observer repaints the rows), the webdav serve
+    /// capability and the global default conflict policy select. Level-safe: a
+    /// failed read keeps the painted capability and policy (the visit's own load
+    /// still degrades a failure to disabled / automatic), the select moves only
+    /// under the suppress flag so a re-read never echoes back as a save, and the
+    /// page's <c>ErrorBar</c> is left alone.</summary>
+    private async void OnStoreChanged()
+    {
+        if (_rpc is null || _machine is null) return;
+        if (_storeResyncing)
+        {
+            _storeResyncAgain = true;
+            return;
+        }
+        _storeResyncing = true;
+        try
+        {
+            do
+            {
+                _storeResyncAgain = false;
+                try
+                {
+                    await _machine.Refresh();
+                }
+                catch (Exception ex)
+                {
+                    E2eTrace.Write($"[folders] store-change refresh failed: {ex.GetType().Name}");
+                }
+                try
+                {
+                    var canServe = await _rpc.FoldersCanServeWebdavAsync();
+                    if (canServe != _canServeWebdav)
+                    {
+                        _canServeWebdav = canServe;
+                        RenderPage();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    E2eTrace.Write($"[folders] store-change webdav read failed: {ex.GetType().Name}");
+                }
+                await ResyncSyncDefaultsAsync();
+            }
+            while (_storeResyncAgain);
+        }
+        finally
+        {
+            _storeResyncing = false;
+        }
+    }
+
+    /// <summary>Move the default-conflict-policy select to the stored value when
+    /// another device changed it; a failed read keeps the painted policy.</summary>
+    private async Task ResyncSyncDefaultsAsync()
+    {
+        if (_rpc is null) return;
+        string? stored;
+        try { stored = await _rpc.DefaultConflictPolicyGetAsync(); }
+        catch { return; }
+        var current = stored ?? "auto";
+        if (DefaultConflictPolicyCombo.SelectedItem is ComboBoxItem { Tag: string painted } && painted == current)
+            return;
+        for (var i = 0; i < DefaultConflictPolicyCombo.Items.Count; i++)
+        {
+            if (DefaultConflictPolicyCombo.Items[i] is ComboBoxItem { Tag: string tag } && tag == current)
+            {
+                _suppressDefaultPolicyEvents = true;
+                DefaultConflictPolicyCombo.SelectedIndex = i;
+                _suppressDefaultPolicyEvents = false;
+                return;
             }
         }
     }
@@ -308,12 +426,14 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         if (_boundController is { } controller)
         {
             controller.Changed -= OnBindingsChanged;
+            controller.BindConfirmed -= OnBindConfirmed;
             _boundController = null;
         }
         if (_rpc is not null)
         {
             _rpc.FolderChangedPushed -= OnFolderChangedPushed;
             _rpc.Reconnected -= OnReconnected;
+            _rpc.StoreChanged -= OnStoreChanged;
         }
         // The machine outlives this page (Core.DevicesMachineHost); only the repaint
         // is ours.
@@ -375,6 +495,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
 #endif
             _canServeWebdav = await canServeWebdavTask;
             _ownTiers = await ownTiersTask;
+            await LoadThisDeviceRowAsync();
             await _machine.Refresh();
 
             // Recipient-side pending-share knocks (folders.md § Sharing): a PEEK,
@@ -403,9 +524,14 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
                 _syncVm = new LocationsViewModel(controller);
                 // Page_Loaded re-runs on a re-navigated cached instance, so drop any prior
                 // subscription first — a doubled handler repaints twice per reconcile.
-                if (_boundController is { } previous) previous.Changed -= OnBindingsChanged;
+                if (_boundController is { } previous)
+                {
+                    previous.Changed -= OnBindingsChanged;
+                    previous.BindConfirmed -= OnBindConfirmed;
+                }
                 _boundController = controller;
                 controller.Changed += OnBindingsChanged;
+                controller.BindConfirmed += OnBindConfirmed;
             }
             _syncVm.PropertyChanged += SyncVm_PropertyChanged;
             _syncVm.Locations.CollectionChanged += (_, _) => RefreshExpandedLocations();
@@ -431,6 +557,21 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
             // nav-readiness barrier. ALWAYS in finally so the agent's bounded await
             // never hangs a navigation. See IAsyncLoadedPage.
             _loadComplete.TrySetResult();
+        }
+    }
+
+    /// <summary>Re-read which roster row is this device's (the same read the Devices
+    /// page makes for <c>device-this-mark-badge</c>). A failed read keeps the row held.</summary>
+    private async Task LoadThisDeviceRowAsync()
+    {
+        if (_rpc is null) return;
+        try
+        {
+            _thisDeviceRow = await _rpc.ThisDeviceRowAsync(_account?.ResolveDeviceId());
+        }
+        catch (Exception ex)
+        {
+            E2eTrace.Write($"[folders] this-device read failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -474,6 +615,12 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         _offlineShare = new P2pShare.OfflineShareSection();
         OfflineShareSectionHost.Content = _offlineShare;
         _offlineShare.Attach(_rpc, _crypto, OnOfflineShareActResolvedAsync, ReportOfflineShareError);
+
+        // The peer-transfer plane's surface hangs directly under the ceremony panel; it
+        // subscribes to SharePlaneModel itself and paints nothing until a plane runs.
+        var plane = new P2pShare.SharePlaneSection();
+        SharePlaneSectionHost.Content = plane;
+        plane.Render();
     }
 
     /// <summary>A ceremony act resolved: re-fetch the knock list always (the
@@ -523,6 +670,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         // serving). Best-effort on the machine's side, so `null` reaches the
         // shared hint as its own hedging arm rather than as "off".
         _websiteAddressEnabled = snap.websiteAddressEnabled;
+        _devices = snap.devices;
         RenderFolders(snap.folders);
         RenderFollowed(snap.followed);
         RenderConflicts(snap.conflicts);
@@ -575,11 +723,19 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         // on windows for the first time, 2026-08-10). Captured BEFORE the reset
         // below, which is what clears it.
         var reopen = _expandedFolder;
+        // The open row's nest-place boxes as the user left them, and the seed they
+        // were painted with: the re-opened row's editor is built from the fresh
+        // summary, and asks the shared rule whether that may replace them.
+        _stagedNestPlace = _expandedNestPlace is { } editor
+            ? (editor.Name, editor.Seeded, editor.Read())
+            : null;
+        _expandedNestPlace = null;
         FolderContainer.Children.Clear();
         _expandedInclude = null;
         _expandedExclude = null;
         _expandedFolder = null;
         _expandedLocationContainer = null;
+        _expandedPlaceContainer = null;
         _expandedLocationEmpty = null;
         _expandedLocationInput = null;
         _expandedDeviceActivityContainer = null;
@@ -662,14 +818,45 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     }
 #endif
 
+    /// <summary><c>folder-lease-status</c>: the one-line reading of the folder's
+    /// exclusive-editing lease, or <c>null</c> while the folder is not governed (the
+    /// element is then absent). The text is the shared function's answer off the
+    /// snapshot — never the hex device id, never probed by calling the lease acquire
+    /// kind (ui/folders.md § Exclusive editing).</summary>
+    private TextBlock? BuildLeaseStatusLabel(FolderSummary fs)
+    {
+        if (uniffi.fauna_ffi.FaunaFfiMethods.DevicesFolderLeaseStatus(fs, _devices, _thisDeviceRow) is not { } text)
+            return null;
+        var label = new TextBlock
+        {
+            Text = S.Resolve(text),
+            Opacity = 0.6,
+            FontSize = 12,
+            TextWrapping = TextWrapping.Wrap,
+        };
+        // AutomationId ONLY, no static Name — get_text reads the live text
+        // (reference_windows_flaui_gettext_dynamic_label_no_name).
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(label, Ids.FolderLeaseStatus);
+        return label;
+    }
+
     private Expander BuildFolderRow(FolderSummary fs)
     {
+        var title = $"{fs.name}   ({ValueFormat.ByteSize((ulong)Math.Max(0, fs.cachedTotalBytes))})";
         var exp = new Expander
         {
             HorizontalAlignment = HorizontalAlignment.Stretch,
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
-            Header = $"{fs.name}   ({ValueFormat.ByteSize((ulong)Math.Max(0, fs.cachedTotalBytes))})",
+            Header = title,
         };
+        // The lease line rides the HEADER, so a collapsed row shows the lock too.
+        if (BuildLeaseStatusLabel(fs) is { } lease)
+        {
+            var header = new StackPanel { Spacing = 2 };
+            header.Children.Add(new TextBlock { Text = title });
+            header.Children.Add(lease);
+            exp.Header = header;
+        }
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(exp, Ids.FolderRow);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(exp, fs.name);
         // Lazy body: realize only while expanded so the unindexed body IDs stay unique
@@ -707,7 +894,9 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
                 _expandedInclude = null;
                 _expandedExclude = null;
                 _expandedFolder = null;
+                _expandedNestPlace = null;
                 _expandedLocationContainer = null;
+                _expandedPlaceContainer = null;
                 _expandedLocationEmpty = null;
                 _expandedLocationInput = null;
                 _expandedDeviceActivityContainer = null;
@@ -779,6 +968,17 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
             TextWrapping = TextWrapping.NoWrap,
         };
         Grid.SetColumn(name, 0);
+        // A reader has no body and must see the lock too: the lease line sits under
+        // the name, in the same column (absent while the folder is not governed).
+        FrameworkElement nameCell = name;
+        if (BuildLeaseStatusLabel(fs) is { } lease)
+        {
+            var cell = new StackPanel { Spacing = 2 };
+            cell.Children.Add(name);
+            cell.Children.Add(lease);
+            Grid.SetColumn(cell, 0);
+            nameCell = cell;
+        }
 
         // "Shared by ‹…›" — the nest-precomputed FolderSummary.ownerDisplay (handle else
         // short_id; never a bare ellipsis or client-side truncation — folders.md §
@@ -803,7 +1003,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         // handler instead, the same guard shape RemoveSharedMemberAsync (below) uses.
         leave.Click += async (_, _) => await LeaveSharedFolderAsync(fs);
 
-        row.Children.Add(name);
+        row.Children.Add(nameCell);
         row.Children.Add(badge);
         row.Children.Add(leave);
         return row;
@@ -859,6 +1059,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
             {
                 _expandedFolder = null;
                 _expandedLocationContainer = null;
+                _expandedPlaceContainer = null;
                 _expandedLocationEmpty = null;
                 _expandedLocationInput = null;
             }
@@ -1222,6 +1423,17 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     }
 #endif
 
+    /// <summary>Paints a path box whose sealed list this device could not open as the
+    /// read-only "Unavailable on this device" text (same id, no new one) — never a blank
+    /// editable field. A disabled box is the marker <see cref="SavePaths_Click"/> reads to
+    /// send <c>null</c> ("leave unchanged") for that list.</summary>
+    private static void MarkPathsUnavailable(TextBox box)
+    {
+        box.Text = S.Get("devices/paths_unavailable");
+        box.IsReadOnly = true;
+        box.IsEnabled = false;
+    }
+
     private FrameworkElement BuildFolderBody(FolderSummary fs)
     {
         // Set the expanded-set context first so the nested folder section filters to it.
@@ -1235,6 +1447,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
             Text = uniffi.fauna_ffi.FaunaFfiMethods.JoinPathsField(fs.includePaths),
         };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(include, Ids.FolderIncludePaths);
+        if (fs.includePathsUnreadable) MarkPathsUnavailable(include);
 
         var exclude = new TextBox
         {
@@ -1242,6 +1455,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
             Text = uniffi.fauna_ffi.FaunaFfiMethods.JoinPathsField(fs.excludePaths),
         };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(exclude, Ids.FolderExcludePaths);
+        if (fs.excludePathsUnreadable) MarkPathsUnavailable(exclude);
 
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         var save = new Button { Content = S.Get("devices/save_paths"), Tag = fs.name };
@@ -1275,6 +1489,9 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         // Every owner row can be served over WebDAV — a folder has no type
         // (webdav-server.md § What the WebDAV namespace is).
         panel.Children.Add(BuildWebdavToggleRow(fs));
+        // One device at a time may edit — every owner row, default off
+        // (ui/folders.md § Exclusive editing).
+        panel.Children.Add(BuildExclusiveEditingToggleRow(fs));
         // Website-enabled sets can be paywalled to a subscription tier — keyed on the
         // website toggle, never on the retired `mode = "web"` spelling; the structural
         // sibling of the webdav toggle above (folders.md § Web paywall).
@@ -1856,7 +2073,35 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         TextBox RetentionSnapshots,
         TextBox RetentionDays,
         TextBox VersionCount,
-        TextBox VersionDays);
+        TextBox VersionDays)
+    {
+        /// <summary>What these boxes were last painted with, or <c>null</c> once the save
+        /// released them — the <c>seeded</c> half of the shared
+        /// <c>nest_place_reseed</c> rule.</summary>
+        public NestPlaceForm? Seeded { get; set; }
+
+        /// <summary>The six boxes as they stand. An unselected combo reads as "", which
+        /// the shared parse lands on unset.</summary>
+        public NestPlaceForm Read() => new(
+            new NestPlaceEdit(
+                (Snapshots.SelectedItem as ComboBoxItem)?.Tag as string ?? "",
+                Quiet.Text ?? "",
+                RetentionSnapshots.Text ?? "",
+                RetentionDays.Text ?? ""),
+            new VersionRetentionEdit(VersionCount.Text ?? "", VersionDays.Text ?? ""));
+
+        public void Paint(NestPlaceForm form)
+        {
+            Snapshots.SelectedItem = Snapshots.Items
+                .OfType<ComboBoxItem>()
+                .FirstOrDefault(item => item.Tag as string == form.policy.snapshots);
+            Quiet.Text = form.policy.quietSecs;
+            RetentionSnapshots.Text = form.policy.retentionSnapshots;
+            RetentionDays.Text = form.policy.retentionDays;
+            VersionCount.Text = form.versionRetention.count;
+            VersionDays.Text = form.versionRetention.days;
+        }
+    }
 
     private FrameworkElement BuildNestPlaceSection(FolderSummary fs)
     {
@@ -1867,45 +2112,56 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
             Style = (Style)Application.Current.Resources["BodyStrongTextBlockStyle"],
         });
 
-        // Seed every control from the row through the shared prefill BEFORE any handler
-        // exists (the render-echo discipline the two selects above follow): an unset
-        // knob shows BLANK, and so does a ZERO retention bound — zero is the nest's own
-        // spelling of unset, so rendering it would turn "nothing chosen" into a bound the
-        // owner appears to have picked.
-        var seed = uniffi.fauna_ffi.FaunaFfiMethods.NestPlaceEditFromRow(
-            fs.nestSnapshots, fs.nestSnapshotQuietSecs, fs.retentionPolicy);
-        var versionSeed = uniffi.fauna_ffi.FaunaFfiMethods.VersionRetentionEditFromBounds(
-            fs.versionRetentionMaxVersions, fs.versionRetentionMaxAgeDays);
-
         // Same value/label split as `folder-conflict-policy-select`: each item paints the
         // localized label and carries the WIRE VALUE ("default" / "on" / "off") as its
         // UIA Name, so the cross-app `select(id, value)` contract matches by Name and
         // `get_text` reads the stable value back. Options come from the shared catalog.
         var snapshots = new ComboBox { MinWidth = 220 };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(snapshots, Ids.FolderNestSnapshotsSelect);
-        int selectedIndex = -1;
-        int i = 0;
         foreach (var opt in uniffi.fauna_ffi.FaunaFfiMethods.NestSnapshotsOptions())
         {
             var item = new ComboBoxItem { Content = S.Resolve(opt.label), Tag = opt.value };
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(item, opt.value);
             snapshots.Items.Add(item);
-            if (opt.value == seed.snapshots) selectedIndex = i;
-            i++;
         }
-        if (selectedIndex >= 0) snapshots.SelectedIndex = selectedIndex;
         section.Children.Add(LabeledRow(S.Get("devices/nest_snapshots"), snapshots));
 
-        var quiet = NestPlaceBox("folder-nest-quiet-input", "devices/nest_quiet", seed.quietSecs);
+        var quiet = NestPlaceBox("folder-nest-quiet-input", "devices/nest_quiet");
         section.Children.Add(LabeledRow(S.Get("devices/nest_quiet"), quiet));
-        var retentionSnapshots = NestPlaceBox("folder-nest-retention-snapshots", "devices/nest_retention_snapshots", seed.retentionSnapshots);
+        var retentionSnapshots = NestPlaceBox("folder-nest-retention-snapshots", "devices/nest_retention_snapshots");
         section.Children.Add(LabeledRow(S.Get("devices/nest_retention_snapshots"), retentionSnapshots));
-        var retentionDays = NestPlaceBox("folder-nest-retention-days", "devices/nest_retention_days", seed.retentionDays);
+        var retentionDays = NestPlaceBox("folder-nest-retention-days", "devices/nest_retention_days");
         section.Children.Add(LabeledRow(S.Get("devices/nest_retention_days"), retentionDays));
-        var versionCount = NestPlaceBox("folder-version-retention-count", "devices/version_retention_count", versionSeed.count);
+        var versionCount = NestPlaceBox("folder-version-retention-count", "devices/version_retention_count");
         section.Children.Add(LabeledRow(S.Get("devices/version_retention_count"), versionCount));
-        var versionDays = NestPlaceBox("folder-version-retention-days", "devices/version_retention_days", versionSeed.days);
+        var versionDays = NestPlaceBox("folder-version-retention-days", "devices/version_retention_days");
         section.Children.Add(LabeledRow(S.Get("devices/version_retention_days"), versionDays));
+
+        var controls = new NestPlaceControls(
+            fs.name, snapshots, quiet, retentionSnapshots, retentionDays, versionCount, versionDays);
+        // Seed every control from the row through the shared prefill BEFORE any handler
+        // exists (the render-echo discipline the two selects above follow): an unset
+        // knob shows BLANK, and so does a ZERO retention bound — zero is the nest's own
+        // spelling of unset, so rendering it would turn "nothing chosen" into a bound the
+        // owner appears to have picked.
+        var seed = uniffi.fauna_ffi.FaunaFfiMethods.NestPlaceFormFromRow(
+            fs.nestSnapshots, fs.nestSnapshotQuietSecs, fs.retentionPolicy,
+            fs.versionRetentionMaxVersions, fs.versionRetentionMaxAgeDays);
+        controls.Paint(seed);
+        controls.Seeded = seed;
+        // A refresh rebuilt this row under an editor the user had typed into: put their
+        // values back unless the shared rule says the fresh seed stands, and keep the
+        // ORIGINAL seed, so the boxes still read as touched at the next rebuild.
+        if (_stagedNestPlace is { } staged && staged.Name == fs.name)
+        {
+            _stagedNestPlace = null;
+            if (uniffi.fauna_ffi.FaunaFfiMethods.NestPlaceReseed(staged.Seeded, staged.OnScreen, seed) is null)
+            {
+                controls.Paint(staged.OnScreen);
+                controls.Seeded = staged.Seeded;
+            }
+        }
+        _expandedNestPlace = controls;
 
         // Not decoration: the only on-screen statement that emptying a box is a real
         // choice rather than a no-op.
@@ -1920,8 +2176,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         {
             Content = S.Get("devices/nest_save"),
             HorizontalAlignment = HorizontalAlignment.Right,
-            Tag = new NestPlaceControls(
-                fs.name, snapshots, quiet, retentionSnapshots, retentionDays, versionCount, versionDays),
+            Tag = controls,
         };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(save, Ids.FolderNestSaveButton);
         save.Click += NestPlaceSave_Click;
@@ -1929,9 +2184,9 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         return section;
     }
 
-    private static TextBox NestPlaceBox(string id, string placeholderKey, string seed)
+    private static TextBox NestPlaceBox(string id, string placeholderKey)
     {
-        var box = new TextBox { PlaceholderText = S.Get(placeholderKey), Text = seed, MinWidth = 220 };
+        var box = new TextBox { PlaceholderText = S.Get(placeholderKey), MinWidth = 220 };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(box, id);
         return box;
     }
@@ -1953,21 +2208,22 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
     private async void NestPlaceSave_Click(object sender, RoutedEventArgs e)
     {
         if (_machine is null || sender is not Button b || b.Tag is not NestPlaceControls c) return;
+        var form = c.Read();
+        // The six boxes leave with this click, so they are no longer the user's: the
+        // refresh the write triggers re-seeds them from what the nest stored
+        // (`nest_place_reseed` with no seed on record).
+        c.Seeded = null;
         // The six raw control values go through the shared write functions, which own
         // both traps: every knob rides on every save (the nest applies the policy whole,
         // so an emptied box must arrive as unset), and a cleared retention rides as the
         // canonical binds-nothing policy — never `null`, which the wire reads as "leave
-        // unchanged" and would let a user set retention and never take it back. An
-        // unselected combo reads as "" and the shared parse lands it on unset.
-        var snapshotsValue = (c.Snapshots.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
-        var write = uniffi.fauna_ffi.FaunaFfiMethods.NestPlaceWrite(
-            new NestPlaceEdit(snapshotsValue, c.Quiet.Text ?? "", c.RetentionSnapshots.Text ?? "", c.RetentionDays.Text ?? ""));
+        // unchanged" and would let a user set retention and never take it back.
+        var write = uniffi.fauna_ffi.FaunaFfiMethods.NestPlaceWrite(form.policy);
         // The version-retention sibling rides the same save, its own family sent
         // whole: both boxes blank ⇒ the binds-nothing write that clears the policy
         // (never the wire's leave-unchanged null — the knobs are on screen, so what
         // they say is what the user said).
-        var versionRetention = uniffi.fauna_ffi.FaunaFfiMethods.VersionRetentionWrite(
-            new VersionRetentionEdit(c.VersionCount.Text ?? "", c.VersionDays.Text ?? ""));
+        var versionRetention = uniffi.fauna_ffi.FaunaFfiMethods.VersionRetentionWrite(form.versionRetention);
         // One `fauna.folders.update`; the machine refreshes on success (RenderFolders
         // re-opens this row) and surfaces a failure on the page ErrorBar through the
         // observer, like every other gesture on this page.
@@ -2091,9 +2347,9 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
 
         try
         {
-            await rpc.FoldersServeSetAsync(session, fs.name, fs.mlsGroupId, wantServed);
+            await rpc.FoldersServeSetAsync(session, fs.name, fs.mlsGroupId, wantServed, _account?.ResolveDeviceId());
             // Either direction moves the set's content key; the agent re-keys on the
-            // custody write's account-state change itself (on-demand-files.md § Shared sets
+            // custody write's account-state change itself (on-demand-files-shared-sets.md § Shared sets
             // on a capability host → One mechanism).
         }
         catch (Exception ex)
@@ -2104,6 +2360,48 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         finally
         {
             if (_machine is not null) await _machine.Refresh();
+        }
+    }
+
+    // Per-set exclusive editing (folder-exclusive-editing-toggle, every owner row) —
+    // ui/folders.md § Exclusive editing / file-sync.md § Exclusive editing. NON-
+    // optimistic: the toggle paints FolderSummary.exclusiveEditing as the nest holds
+    // it, so a refused write never leaves it showing a state the folder lacks. HelpText
+    // is deliberately UNSET: the e2e `checked` read falls back to the TogglePattern
+    // ("true"/"false"); the webdav toggle's served/unserved HelpText would be read
+    // back as the value instead.
+    private FrameworkElement BuildExclusiveEditingToggleRow(FolderSummary fs)
+    {
+        var toggle = new ToggleSwitch
+        {
+            Header = S.Get("devices/folder_exclusive_editing"),
+            DataContext = fs,
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(toggle, Ids.FolderExclusiveEditingToggle);
+        // Set IsOn BEFORE attaching Toggled so the initial bind doesn't fire a render echo.
+        toggle.IsOn = fs.exclusiveEditing;
+        toggle.Toggled += ExclusiveEditingToggle_Toggled;
+        return toggle;
+    }
+
+    private async void ExclusiveEditingToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_machine is null || sender is not ToggleSwitch t || t.DataContext is not FolderSummary fs) return;
+        var want = t.IsOn;
+        if (want == fs.exclusiveEditing) return; // render echo, not a user toggle
+        try
+        {
+            await _machine.SetFolderExclusiveEditing(fs.name, want);
+        }
+        catch (Exception ex)
+        {
+            ErrorBar.Message = S.Format("devices/error_set_exclusive_editing", ex.Message);
+            ErrorBar.IsOpen = true;
+        }
+        finally
+        {
+            // Repaint from nest truth either way (the refresh re-renders the rows).
+            await _machine.Refresh();
         }
     }
 
@@ -2232,8 +2530,10 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         if (_machine is null || sender is not Button b || b.Tag is not string name) return;
         await _machine.SetFolderPaths(
             name,
-            uniffi.fauna_ffi.FaunaFfiMethods.ParsePathsField(_expandedInclude?.Text ?? ""),
-            uniffi.fauna_ffi.FaunaFfiMethods.ParsePathsField(_expandedExclude?.Text ?? ""));
+            _expandedInclude is { IsEnabled: false } ? null
+                : uniffi.fauna_ffi.FaunaFfiMethods.ParsePathsField(_expandedInclude?.Text ?? ""),
+            _expandedExclude is { IsEnabled: false } ? null
+                : uniffi.fauna_ffi.FaunaFfiMethods.ParsePathsField(_expandedExclude?.Text ?? ""));
     }
 
     private async void DeleteFolder_Click(object sender, RoutedEventArgs e)
@@ -2358,6 +2658,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
 
         var container = new StackPanel { Spacing = 2 };
         section.Children.Add(container);
+        _expandedPlaceContainer = container;
         _ = LoadPlaceRowsAsync(fs.name, container);
         return section;
     }
@@ -3620,7 +3921,7 @@ public sealed partial class FoldersPage : Page, IAsyncLoadedPage
         if (_machine is null || sender is not Button b || b.Tag is not long id) return;
         // The restore record is attributed to this device (same device-id glue as
         // the Media restore).
-        var deviceId = _account?.DeviceId;
+        var deviceId = _account?.ResolveDeviceId();
         if (string.IsNullOrEmpty(deviceId)) return;
         await _machine.UseOtherVersion(id, deviceId!);
     }

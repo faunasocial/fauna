@@ -71,6 +71,15 @@ class MailExportVM @Inject constructor(
 
     init {
         hydrate()
+        // The wizard open here follows an export started, finished, failed or
+        // dismissed on another device (`StaleSurfaces::mail_export`,
+        // `mail-export.md` § A failed export is a record the wizard shows until
+        // the user moves on): the machine's own hydrate, which ignores the nudge
+        // while it holds a run. The VM lives only while the Export page is on the
+        // back stack, which is the page gate; a reconnect re-reads too — a push
+        // sent while the socket was down is never replayed.
+        viewModelScope.launch { api.mailExportChangedTick.collect { hydrate() } }
+        viewModelScope.launch { api.reconnectTick.collect { hydrate() } }
     }
 
     private fun hydrate() {

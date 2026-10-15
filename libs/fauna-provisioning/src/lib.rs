@@ -27,6 +27,12 @@ pub mod registrar;
 /// The DNS-cleanup plan for retiring a box (`behavior/nest-retirement.md`
 /// § DNS cleanup) — the inverse of `orchestrator::build_records`.
 pub mod retire_dns;
+/// Fauna's marker-scoped `TXT` slots, shared by the publish-time converge and
+/// the retire cleanup (`behavior/dns-management.md` § Fauna-managed).
+pub mod txt_slots;
+/// The update channel, the never-downgrade decision and the registry read the
+/// Fauna updater and the nest share (`architecture/nest/update-channel.md`).
+pub mod update_channel;
 pub mod verify_json;
 pub mod vps;
 

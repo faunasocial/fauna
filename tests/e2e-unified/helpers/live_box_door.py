@@ -8,7 +8,7 @@ resolves a box somebody else deployed (`testing.md` § Default app and nest mode
 provisioning fixtures fails in setup with a transport error that is a fact about
 the box, not about any feature. Raised raw, pytest reports each of them as a
 setup `error` and the ledger records it: one `--nest live` run launched minutes
-after a example.com outage on 2026-09-14 wrote 185 such `error`s into tui's ledger,
+after a live-nest outage on 2026-09-14 wrote 185 such `error`s into tui's ledger,
 turning working features ❌ on the public matrix.
 
 `reaching_the_live_box(what)` wraps the harness's first contacts with the box

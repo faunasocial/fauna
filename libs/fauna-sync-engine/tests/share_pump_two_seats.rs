@@ -320,6 +320,15 @@ struct HolidaySeats {
 }
 
 async fn holiday_seats(bob_path: Option<PathCell>) -> HolidaySeats {
+    holiday_seats_claiming(bob_path, None).await
+}
+
+/// [`holiday_seats`] with Alice's served change row stamping `claimed_size`
+/// as its `size_bytes` instead of the body's real length — a lying peer.
+async fn holiday_seats_claiming(
+    bob_path: Option<PathCell>,
+    claimed_size: Option<i64>,
+) -> HolidaySeats {
     let listeners = fauna_transport::testing::listeners();
 
     // ── Alice's seat: a recorded, sealed, multi-chunk file + retention, and
@@ -344,7 +353,7 @@ async fn holiday_seats(bob_path: Option<PathCell>) -> HolidaySeats {
             path_hash: hex::encode(fauna_core::sync::path_hash("holiday.mp4")),
             path_sealed: None,
             manifest_hash: Some(hex::encode(sealed.manifest_hash.digest())),
-            size_bytes: bytes.len() as i64,
+            size_bytes: claimed_size.unwrap_or(bytes.len() as i64),
             change_type: "create".to_string(),
             created_at: 1_700_000_000_000,
             content_key_version: Some(1),
@@ -520,6 +529,84 @@ async fn a_file_arrives_between_two_users_seats_over_the_peer_channel() {
     );
 }
 
+/// `p2p.md` § Cross-user shared-set transfer (the feature-gate item): both
+/// metered dimensions are this side's own count, never the counterparty's
+/// claim. Alice's row stamps `size_bytes: 0` for a 20 MiB file; the pump
+/// must still record one operation and megabytes of wire spend. Pins the
+/// recording line itself (the helper pins live in `share_pump.rs`): red if it
+/// records the peer-claimed `planned_volume` (0 here). The arrival guard
+/// (`materialized > 0` vs. bytes arrived) is pinned by the next test: a
+/// plaintext unsafe path never reaches it (`plan_page_fetch` skips the
+/// fetch), but a sealed-path row opening empty or unsafe, a target escaping
+/// the root through a symlink, a row provably staler than the overlay and a
+/// row refused inside `door.ingest` all fetch the body and materialize
+/// nothing.
+#[tokio::test]
+async fn a_peer_stamping_size_zero_is_metered_by_the_bytes_that_arrived() {
+    let mut seats = holiday_seats_claiming(None, Some(0)).await;
+    let mut ledger = fauna_sync_engine::share_pump::TransferUsageLedger::default();
+
+    let outcome = seats.pull(&mut ledger, NestPath::Reachable).await;
+    assert_eq!(outcome.materialized, 1, "{outcome:?}");
+    assert_eq!(seats.landed().as_deref(), Some(&seats.bytes[..]));
+    let spent = ledger.usage_counters(TODAY);
+    assert_eq!(spent.operations.day, 1);
+    assert!(
+        spent.volume.day > 1_000_000 && spent.volume.day < 2 * seats.bytes.len() as u64,
+        "a lying size_bytes: 0 must not make a 20 MiB transfer free, got {}",
+        spent.volume.day
+    );
+    assert_eq!(spent.counterparties.month, 1);
+}
+
+/// `p2p.md` § Cross-user shared-set transfer, the metering sentence: the
+/// record is unconditional on ARRIVAL, not on materialization — a body
+/// fetched for a row that never materializes still meters. Bob's overlay
+/// already holds a nest-sequenced row for the path at a higher seq (and a
+/// different manifest, so `plan_page_fetch` still plans the fetch), so
+/// Alice's seq-41 row is provably staler: the body crosses the wire, the
+/// ingest skips it, nothing lands. Red if the recording line is gated on
+/// `summary.materialized > 0`.
+#[tokio::test]
+async fn a_body_that_arrives_but_never_materializes_still_meters() {
+    let mut seats = holiday_seats(None).await;
+    {
+        let db = SyncDb::open(&seats.bob_db_path).unwrap();
+        assert!(
+            db.upsert_share_overlay(&fauna_sync_engine::db::ShareOverlayRow {
+                path: "holiday.mp4".to_string(),
+                seq: 99,
+                sequenced: true,
+                change_type: "modify".to_string(),
+                manifest_hash: Some("ab".repeat(32)),
+                size_bytes: 1,
+                content_key_version: Some(1),
+                proven_author: alice().actor_id().to_hex(),
+                materialized: false,
+                content_hash: None,
+            })
+            .unwrap()
+        );
+    }
+    let mut ledger = fauna_sync_engine::share_pump::TransferUsageLedger::default();
+
+    let outcome = seats.pull(&mut ledger, NestPath::Reachable).await;
+    assert_eq!(outcome.rows_accepted, 1, "{outcome:?}");
+    assert_eq!(outcome.materialized, 0, "{outcome:?}");
+    assert!(seats.landed().is_none(), "the staler row must not land");
+    let spent = ledger.usage_counters(TODAY);
+    assert!(
+        spent.operations.day >= 1,
+        "an arrived body is an operation even when nothing lands, got {}",
+        spent.operations.day
+    );
+    assert!(
+        spent.volume.day > 1_000_000 && spent.volume.day < 2 * seats.bytes.len() as u64,
+        "the arrived bytes meter though nothing materialized, got {}",
+        spent.volume.day
+    );
+}
+
 /// `p2p.md` § The relay, ruling 4, on the share pump: over a relayed
 /// connection with the set's nest answering, the page's rows are walked and
 /// handed through the door but no body crosses — the file is not landed, no
@@ -554,6 +641,79 @@ async fn a_relayed_seat_leaves_the_bodies_to_a_reachable_nest() {
     assert_eq!(outcome.materialized, 1, "{outcome:?}");
     assert_eq!(outcome.cursor, 41, "{outcome:?}");
     assert_eq!(seats.landed().as_deref(), Some(&seats.bytes[..]));
+}
+
+fn one_mib_cap() -> Option<fauna_core::feature_gate::BoundSource> {
+    Some(fauna_core::feature_gate::BoundSource {
+        limit: 1024 * 1024,
+        tier: fauna_core::feature_gate::RuleTier::Admin,
+    })
+}
+
+/// `p2p.md` § Cross-user shared-set transfer, the metering paragraph: "A
+/// capped file is a spool miss, never a page refusal: its row lands without
+/// the body and the cursor advances". Alice's 20 MiB file under a 1 MiB
+/// per-operation cap is dropped at the plan (its claimed size), nothing
+/// moves — and the cursor still passes the row, or every later pass would
+/// begin its page at it and the files behind it would never arrive. Red when
+/// the ingest reads the capped miss as a cut transfer and holds the cursor at
+/// 40.
+#[tokio::test]
+async fn a_file_the_cap_keeps_out_lets_the_cursor_pass_its_row() {
+    let mut seats = holiday_seats(None).await;
+    seats.policy.per_operation_max = one_mib_cap();
+    let mut ledger = fauna_sync_engine::share_pump::TransferUsageLedger::default();
+
+    let outcome = seats.pull(&mut ledger, NestPath::Reachable).await;
+    assert!(outcome.capped.is_some(), "{outcome:?}");
+    assert_eq!(
+        outcome.refusal, None,
+        "a capped file never refuses the page"
+    );
+    assert_eq!(outcome.materialized, 0, "{outcome:?}");
+    assert!(seats.landed().is_none(), "the capped body must not land");
+    assert_eq!(
+        ledger.usage_counters(TODAY).volume.day,
+        0,
+        "dropped at the plan: nothing moved, nothing metered"
+    );
+    assert_eq!(
+        outcome.cursor, 41,
+        "a capped miss is permanent: {outcome:?}"
+    );
+    {
+        let db = SyncDb::open(&seats.bob_db_path).unwrap();
+        let overlay = db
+            .get_share_overlay("holiday.mp4")
+            .unwrap()
+            .expect("the capped file's row lands without its body");
+        assert!(!overlay.materialized);
+    }
+}
+
+/// The same rule on the ARRIVAL stop: Alice's row claims `size_bytes: 0`, so
+/// the plan passes it, and the spool stops it at the manifest's own 20 MiB
+/// claim before any chunk. Only the manifest is metered, and the cursor still
+/// passes the row.
+#[tokio::test]
+async fn a_file_the_cap_stops_on_arrival_lets_the_cursor_pass_its_row() {
+    let mut seats = holiday_seats_claiming(None, Some(0)).await;
+    seats.policy.per_operation_max = one_mib_cap();
+    let mut ledger = fauna_sync_engine::share_pump::TransferUsageLedger::default();
+
+    let outcome = seats.pull(&mut ledger, NestPath::Reachable).await;
+    assert!(outcome.capped.is_some(), "{outcome:?}");
+    assert_eq!(outcome.materialized, 0, "{outcome:?}");
+    assert!(seats.landed().is_none(), "the capped body must not land");
+    let volume = ledger.usage_counters(TODAY).volume.day;
+    assert!(
+        volume > 0 && volume < 64 * 1024,
+        "the manifest alone is metered — no chunk crossed, got {volume}"
+    );
+    assert_eq!(
+        outcome.cursor, 41,
+        "a capped miss is permanent: {outcome:?}"
+    );
 }
 
 /// Ruling 4's one exception on the share pump: the nest path unavailable to

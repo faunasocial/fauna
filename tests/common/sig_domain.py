@@ -19,6 +19,7 @@ import struct
 
 AUTH_HANDSHAKE_V2 = b"fauna.auth.handshake.v2\0"
 AUTH_VERIFY_V2 = b"fauna.auth.verify.v2\0"
+DEVICE_HANDSHAKE_V2 = b"fauna.device-auth.handshake.v2\0"
 # The nest's own channel-binding context (deployment key) — what a login signer
 # verifies BEFORE signing, to learn the identity it binds (``login.md``
 # § Binding the nest; ``nest_identity.read_nest_identity``).
@@ -58,6 +59,18 @@ def handshake_signed_message(
     (``login.md`` § Binding the nest); the nonce is mandatory."""
     return domain_separated(
         AUTH_HANDSHAKE_V2, actor_id + struct.pack(">Q", timestamp_ms) + nest_id + client_nonce
+    )
+
+
+def device_handshake_signed_message(
+    actor_id: bytes, device_key: bytes, timestamp_ms: int, nest_id: bytes, nonce: bytes
+) -> bytes:
+    """``fauna.auth.device_handshake`` — a granted device key's mint (twin of
+    ``auth::device_handshake_signed_message``): ``actor_id ‖ device_key ‖
+    timestamp_be ‖ nest_id ‖ nonce``, signed by the DEVICE key, not the root."""
+    return domain_separated(
+        DEVICE_HANDSHAKE_V2,
+        actor_id + device_key + struct.pack(">Q", timestamp_ms) + nest_id + nonce,
     )
 
 

@@ -1,5 +1,6 @@
 package com.fauna.app.testing
 
+import com.fauna.app.ui.util.AutomationAttributePack
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -24,6 +25,7 @@ class AutomationSemanticsTest {
         isChecked: Boolean = false,
         isEnabled: Boolean = true,
         isClickable: Boolean = false,
+        isEditable: Boolean = false,
     ) = NodeFacts(
         resourceName = resourceName,
         text = text,
@@ -33,6 +35,7 @@ class AutomationSemanticsTest {
         isChecked = isChecked,
         isEnabled = isEnabled,
         isClickable = isClickable,
+        isEditable = isEditable,
     )
 
     // ── attr ────────────────────────────────────────────────────────────
@@ -96,6 +99,53 @@ class AutomationSemanticsTest {
         assertEquals("hello", AutomationSemantics.attrValue(node(text = "hello"), "text"))
     }
 
+    // ── several attributes on one node (the packed carrier) ─────────────
+
+    @Test
+    fun aPackedNodeAnswersEachKeyAndNothingElse() {
+        // The queue row's `content-label-badge`: `confidence` and `action`
+        // (moderation.md § Element IDs → *Queue row facts*).
+        val badge = node(stateDescription = AutomationAttributePack.pack("confidence" to "87%", "action" to "Hidden"))
+        assertEquals("confidence=87%25;action=Hidden", badge.stateDescription)
+        assertEquals("87%", AutomationSemantics.attrValue(badge, "confidence"))
+        assertEquals("Hidden", AutomationSemantics.attrValue(badge, "action"))
+        // A key the pack does not name is not set — never the whole pack.
+        assertNull(AutomationSemantics.attrValue(badge, "class"))
+        assertNull(AutomationSemantics.attrValue(badge, "state"))
+        // A local detection carries no action: an EMPTY value is not set.
+        val local = node(stateDescription = AutomationAttributePack.pack("confidence" to "87%", "action" to ""))
+        assertEquals("87%", AutomationSemantics.attrValue(local, "confidence"))
+        assertNull(AutomationSemantics.attrValue(local, "action"))
+    }
+
+    @Test
+    fun aPackedValueRoundTripsItsEscapes() {
+        // windows' PackedAttr grammar: `%` → `%25`, `;` → `%3B`, and a literal
+        // "%3B" in a value must come back as itself, not as `;`.
+        val packed = AutomationAttributePack.pack("a" to "x;y", "b" to "50%", "c" to "%3B", "d" to "k=v")
+        val node = node(stateDescription = packed)
+        assertEquals("x;y", AutomationSemantics.attrValue(node, "a"))
+        assertEquals("50%", AutomationSemantics.attrValue(node, "b"))
+        assertEquals("%3B", AutomationSemantics.attrValue(node, "c"))
+        assertEquals("k=v", AutomationSemantics.attrValue(node, "d"))
+    }
+
+    @Test
+    fun aBareValueIsNeverReadAsAPack() {
+        // One pair is not a pack (one value needs no packing) — so an id
+        // ending in base64 `=` keeps answering verbatim; neither is anything
+        // whose key is not lowercase kebab.
+        for (bare in listOf("abc=", "key=value", "Hidden; then shown", "A=1;B=2", "invite")) {
+            assertNull(bare, AutomationSemantics.packedValue(bare, "key"))
+            assertEquals(bare, AutomationSemantics.attrValue(node(stateDescription = bare), "kind"))
+        }
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun aPackOfOnePairIsRefused() {
+        AutomationAttributePack.pack("confidence" to "87%")
+    }
+
     // ── a picker's option set ───────────────────────────────────────────
 
     @Test
@@ -116,6 +166,20 @@ class AutomationSemanticsTest {
     }
 
     @Test
+    fun aMenuAnchorIsATokenSelectOrAReadOnlyTextField() {
+        // A `TokenSelect` anchor (`Role.DropdownList`).
+        assertTrue(AutomationSemantics.isMenuAnchor(node(className = AutomationSemantics.SPINNER_CLASS)))
+        // An `ExposedDropdownMenuBox` anchor: a READ-ONLY text field under
+        // `menuAnchor()` — the admin guardian / apex / DNS pickers.
+        val field = node(text = "None", className = AutomationSemantics.EDIT_TEXT_CLASS, isClickable = true)
+        assertTrue(AutomationSemantics.isMenuAnchor(field))
+        // An editable text field is a text field, never a picker: its
+        // `options` stay `null` rather than a menu read that paints nothing.
+        assertFalse(AutomationSemantics.isMenuAnchor(field.copy(isEditable = true)))
+        assertFalse(AutomationSemantics.isMenuAnchor(node(text = "hello")))
+    }
+
+    @Test
     fun aMenuOptionIsItsPaintedTextElseItsTokenAndNeverTheAnchor() {
         // The human-read label, so an injectivity assertion sees what a user does.
         val item = node(resourceName = null, text = "This device", stateDescription = "this-device", isClickable = true)
@@ -125,6 +189,18 @@ class AutomationSemanticsTest {
         // Not an option: the anchor itself, or a non-clickable label.
         assertNull(AutomationSemantics.optionValue(item.copy(resourceName = "picker"), "picker"))
         assertNull(AutomationSemantics.optionValue(item.copy(isClickable = false), "picker"))
+    }
+
+    @Test
+    fun aTrainedTopicOptionIsListedByItsName() {
+        // `feed-factor-select`'s menu paints a trained topic by its name (the
+        // `topic:<hex>` key is the selection's value, never painted) — the
+        // option the factor-picker witness reads must be that name.
+        val topic = node(resourceName = null, text = "Sourdough", isClickable = true)
+        assertEquals("Sourdough", AutomationSemantics.optionValue(topic, "feed-factor-select"))
+        // Even were the key carried as a token, the painted name wins.
+        val tokened = topic.copy(stateDescription = "topic:0a1b2c")
+        assertEquals("Sourdough", AutomationSemantics.optionValue(tokened, "feed-factor-select"))
     }
 
     // ── the select anchor's text ────────────────────────────────────────

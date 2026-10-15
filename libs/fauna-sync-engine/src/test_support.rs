@@ -93,10 +93,8 @@ pub struct BlobStore {
     /// The hash of the most recently POSTed manifest. The upload pipeline does
     /// not return it to `upload_file`'s caller, so it is captured server-side.
     pub last_manifest_hash: Arc<Mutex<Option<ContentHash>>>,
-    /// The **blob** store — a different store from `manifests`, which is the
-    /// whole reason the post-succession re-seal needs a second arm: a Media-page
-    /// upload records its blob-store primary's hash in the same column an
-    /// engine-recorded file uses for its chunk manifest.
+    /// The **blob** store — a different store from `manifests`: thumbnails,
+    /// each addressed by its own hash.
     pub blobs: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     /// Hex hash of the most recently POSTed blob, so a test can assert the byte
     /// plane moved (and open the stored bytes under the key it expects).
@@ -108,6 +106,9 @@ pub struct BlobStore {
     /// `fetch_manifest`, so a hash appearing here means the engine committed to
     /// delivering that row's content.
     pub fetched_manifests: Arc<Mutex<Vec<String>>>,
+    /// Every chunk store key GET-ed, in order, hit or miss — the observable for
+    /// "the engine asked the byte plane for this file's content at all".
+    pub fetched_chunks: Arc<Mutex<Vec<String>>>,
     /// How many `POST /api/v1/blob` requests the blob plane has served — the
     /// thumbnail tests' observable (Seam-A posts a thumbnail or it does not).
     pub blob_posts: Arc<AtomicUsize>,
@@ -148,6 +149,11 @@ impl BlobStore {
     /// The manifest hashes fetched back, in order.
     pub fn fetched_manifests(&self) -> Vec<String> {
         self.fetched_manifests.lock().unwrap().clone()
+    }
+
+    /// The chunk store keys GET-ed so far, in order, hits and misses alike.
+    pub fn fetched_chunks(&self) -> Vec<String> {
+        self.fetched_chunks.lock().unwrap().clone()
     }
 
     /// Whether `hash`'s manifest was ever GET-ed back — i.e. whether the engine
@@ -318,13 +324,16 @@ impl MockNest {
                 .await;
         }
 
-        // GET /chunks/{hash}
+        // GET /chunks/{hash} — recording each key asked for, in order.
         {
             let chunks = Arc::clone(&store.chunks);
+            let fetched = Arc::clone(&store.fetched_chunks);
             Mock::given(method("GET"))
                 .and(path_regex(r"^/api/v1/chunks/[0-9a-f]+$"))
                 .respond_with(move |req: &Request| {
-                    match chunks.lock().unwrap().get(&last_path_segment(req)) {
+                    let key = last_path_segment(req);
+                    fetched.lock().unwrap().push(key.clone());
+                    match chunks.lock().unwrap().get(&key) {
                         Some(bytes) => ResponseTemplate::new(200).set_body_bytes(bytes.clone()),
                         None => ResponseTemplate::new(404),
                     }

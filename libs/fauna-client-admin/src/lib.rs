@@ -29,6 +29,11 @@
 //! off their HTTP twins (the protocol payloads already exist in
 //! `fauna_protocol::admin`).
 
+// The dashboard's one card set — the fold and the five-read snapshot
+// (`admin.md` § 1. Dashboard → *The card set*).
+mod dashboard;
+pub use dashboard::{AdminDashboardReads, AdminDashboardSnapshot, StatCard, admin_dashboard_cards};
+
 use fauna_core::localized::LocalizedText;
 use fauna_protocol::ByteBuf;
 use fauna_protocol::RpcRequester;
@@ -169,12 +174,22 @@ impl<R: RpcRequester> AdminClient<R> {
     /// reply is discarded; a duplicate actor or taken handle is
     /// `fauna.admin.conflict`, a malformed/reserved handle
     /// `fauna.admin.invalid_params`.
+    ///
+    /// `guardian_actor` links the admitted account to a guardian — the
+    /// direct-admission arm of the supervised designation
+    /// (`admin-users-admit-guardian-select`; `family-safety.md` § The
+    /// guardianship link). The nest refuses a guardian equal to the admitted
+    /// actor and one on a handle-less admission. `age_band` is the guardian's
+    /// band dial, typed here so no client spells a wire token; the nest
+    /// refuses a band without a guardian.
     pub async fn users_create(
         &self,
         actor_id: Vec<u8>,
         tier: impl Into<String>,
         label: impl Into<String>,
         handle: Option<String>,
+        guardian_actor: Option<Vec<u8>>,
+        age_band: Option<AgeBand>,
     ) -> Result<(), R::Error> {
         let _: AdminOkReply = self
             .nest
@@ -185,6 +200,8 @@ impl<R: RpcRequester> AdminClient<R> {
                     tier: tier.into(),
                     label: label.into(),
                     handle,
+                    guardian_actor: guardian_actor.map(ByteBuf::from),
+                    age_band: age_band.map(|b| b.as_str().to_string()),
                     ..Default::default()
                 },
             )
@@ -1609,6 +1626,41 @@ pub fn parse_region_code(raw: &str) -> Result<RegionCode, &'static str> {
     RegionCode::parse(raw.trim()).map_err(|_| "admin.nest_page.region_invalid")
 }
 
+/// Why the add-a-tier form's drafts were refused before any wire call
+/// (`admin.md` § 3 → *Defining a new tier*). Each app words it with
+/// `admin.settings_page.add_tier_error_empty_name` / `…_invalid_cap`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TierCreateRefusal {
+    EmptyName,
+    InvalidCap,
+}
+
+/// Build the `fauna.admin.tiers.create` request from the add form's drafts —
+/// the name (trimmed; must be non-empty) and the five cap texts in wire order
+/// `[inbox, storage, devices, blob_size, feeds]`, each through the shared
+/// `fauna_core::format::parse_cap` (trims, clamps a negative to `0`, refuses a
+/// blank or fractional one). A name already taken is the nest's call
+/// (`fauna.admin.conflict`), not decided here.
+pub fn tier_create_request(
+    name: &str,
+    caps: [&str; 5],
+) -> Result<AdminTierCreateRequest, TierCreateRefusal> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(TierCreateRefusal::EmptyName);
+    }
+    let parse = |s: &str| fauna_core::format::parse_cap(s).ok_or(TierCreateRefusal::InvalidCap);
+    Ok(AdminTierCreateRequest {
+        name: name.to_string(),
+        max_inbox_bytes: parse(caps[0])?,
+        max_storage_bytes: parse(caps[1])?,
+        max_devices: parse(caps[2])?,
+        max_blob_size: parse(caps[3])?,
+        max_feeds: parse(caps[4])?,
+        extra: Default::default(),
+    })
+}
+
 // ── The web-app origin: the wire→render decisions, made once ─────────────────
 
 /// `true` when a transport error is the nest's typed "I don't know this kind"
@@ -2126,6 +2178,41 @@ mod tests {
     use super::*;
     use fauna_client_testkit::{FailingRequester, MockRequester, RecordingRequester, block_on};
     use std::sync::Arc;
+
+    #[test]
+    fn tier_create_request_trims_name_and_parses_caps() {
+        let req = tier_create_request("  gold ", ["1", " 2 ", "-3", "4", "5"]).unwrap();
+        assert_eq!(req.name, "gold");
+        assert_eq!(
+            (
+                req.max_inbox_bytes,
+                req.max_storage_bytes,
+                req.max_devices,
+                req.max_blob_size,
+                req.max_feeds
+            ),
+            (1, 2, 0, 4, 5),
+            "a negative clamps to 0 (parse_cap)"
+        );
+    }
+
+    #[test]
+    fn tier_create_request_refuses_empty_name_and_bad_caps() {
+        let ok = ["1"; 5];
+        assert_eq!(
+            tier_create_request("   ", ok).unwrap_err(),
+            TierCreateRefusal::EmptyName
+        );
+        for bad in ["", "1.5", "abc"] {
+            let mut caps = ok;
+            caps[3] = bad;
+            assert_eq!(
+                tier_create_request("gold", caps).unwrap_err(),
+                TierCreateRefusal::InvalidCap,
+                "cap {bad:?}"
+            );
+        }
+    }
 
     #[test]
     fn constructor_builds_over_generic_requester() {
@@ -3042,6 +3129,45 @@ mod tests {
         let req: AdminInviteRequestApproveRequest =
             fauna_protocol::decode_strict(&payload).expect("payload decodes as the request type");
         assert_eq!(req.guardian_actor, Some(ByteBuf::from(vec![6u8; 32])));
+    }
+
+    #[test]
+    fn users_create_composes_guardian_actor_and_band_for_supervised_admission() {
+        let rec = Arc::new(RecordingRequester::new(reply));
+        let client = AdminClient::new(rec.clone());
+
+        block_on(client.users_create(
+            vec![7u8; 32],
+            "personal",
+            "",
+            Some("ward".into()),
+            Some(vec![6u8; 32]),
+            Some(AgeBand::Teen13To15),
+        ))
+        .expect("infallible");
+
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.admin.users.create");
+        let req: AdminUserCreateRequest =
+            fauna_protocol::decode_strict(&payload).expect("payload decodes as the request type");
+        assert_eq!(req.handle.as_deref(), Some("ward"));
+        assert_eq!(req.guardian_actor, Some(ByteBuf::from(vec![6u8; 32])));
+        assert_eq!(req.age_band.as_deref(), Some("13-15"));
+    }
+
+    #[test]
+    fn users_create_without_a_guardian_sends_neither_field() {
+        let rec = Arc::new(RecordingRequester::new(reply));
+        let client = AdminClient::new(rec.clone());
+
+        block_on(client.users_create(vec![7u8; 32], "personal", "", None, None, None))
+            .expect("infallible");
+
+        let (_, payload) = rec.recorded();
+        let req: AdminUserCreateRequest =
+            fauna_protocol::decode_strict(&payload).expect("payload decodes as the request type");
+        assert_eq!(req.guardian_actor, None);
+        assert_eq!(req.age_band, None);
     }
 
     #[test]

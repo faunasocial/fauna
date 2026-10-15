@@ -19,7 +19,6 @@
 use anyhow::Result;
 use fauna_mail::outbound::backscatter::{
     self, InboundVerdictsSnapshot as MailVerdicts, SuppressReason as MailSuppress,
-    SuppressorToggles,
 };
 use fauna_mail::outbound::dsn::{DsnAction, DsnReport, build_dsn};
 
@@ -30,6 +29,7 @@ use crate::db::CacheDb;
 use crate::db::outbound::{
     InboundVerdictsSnapshot as DbVerdicts, NewOutbound, OutboundRow, SuppressReason as DbSuppress,
 };
+use crate::outbound_retry::suppressor_toggles_from_outbound;
 use crate::routes::AppState;
 
 /// Fallback enhanced status when the bridge's `reason` carries no
@@ -75,12 +75,8 @@ pub async fn generate_permfail_bounce(
     // legitimate admin choice ("no rate limiting beyond a same-instant
     // duplicate") and gets no floor, unlike `permanent_failure_timeout_hours`
     // (`mail-policy-config.md` ruling 2).
-    let ndr_rate_limit_secs = db
-        .get_outbound_policy()
-        .await?
-        .effective()
-        .ndr_rate_limit_days as i64
-        * 86_400;
+    let policy = db.get_outbound_policy().await?.effective();
+    let ndr_rate_limit_secs = policy.ndr_rate_limit_days as i64 * 86_400;
 
     // 0. Forwarded rows bounce to the **forwarder**, not the original sender,
     //    sealed straight into the forwarder's INBOX (a known in-domain actor)
@@ -115,7 +111,7 @@ pub async fn generate_permfail_bounce(
         &row.original_sender,
         row.is_forwarded,
         final_was_5xx,
-        &SuppressorToggles::default(),
+        &suppressor_toggles_from_outbound(&policy),
     ) {
         db.mark_outbound_suppressed(row.id, map_suppress(reason_kind))
             .await?;
@@ -207,9 +203,10 @@ pub async fn generate_permfail_bounce(
             submit_actor_id: None,
         },
         now,
-        // An NDR/DSN is never warm-up-deferred (it must reach the original
-        // sender promptly; mail-deliverability.md scopes warm-up to authed
-        // 465/587 submissions).
+        // An NDR/DSN is never warm-up-deferred: it is mail the nest composes
+        // on its own, which the cap never counts or holds, and it must reach
+        // the original sender promptly (mail-deliverability.md § Enforcement
+        // at submission time).
         false,
     )
     .await
@@ -954,6 +951,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backscatter_suppression_switched_off_sends_the_bounce() {
+        // The two admin backscatter toggles (`mail-policy-config.md` §
+        // Outbound delivery) must reach the suppressor: switched off, a
+        // permfail whose sender failed SPF / DMARC-reject bounces anyway.
+        let state = test_state().await;
+        let db: &CacheDb = &state.db;
+        db.put_outbound_policy(OutboundPolicyOverrides {
+            suppress_ndr_spf_hardfail: Some(false),
+            suppress_ndr_dmarc_reject: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let spf = seed(
+            db,
+            "spf-fail@sender.test",
+            "orig-spf-off@x",
+            verdicts("fail", "none", "none"),
+            false,
+        )
+        .await;
+        assert_eq!(
+            generate_permfail_bounce(&state, &spf, "550 5.1.1 nope", 1_000_000)
+                .await
+                .unwrap(),
+            BounceOutcome::Bounced
+        );
+        let dmarc = seed(
+            db,
+            "dmarc-fail@sender.test",
+            "orig-dmarc-off@x",
+            verdicts("pass", "fail", "reject"),
+            false,
+        )
+        .await;
+        assert_eq!(
+            generate_permfail_bounce(&state, &dmarc, "550 5.1.1 nope", 1_000_000)
+                .await
+                .unwrap(),
+            BounceOutcome::Bounced
+        );
+        // The null-sender suppressor is not an admin knob: it still fires.
+        let null = seed(
+            db,
+            "",
+            "orig-null-off@x",
+            verdicts("none", "none", "none"),
+            false,
+        )
+        .await;
+        assert_eq!(
+            generate_permfail_bounce(&state, &null, "550 5.1.1 nope", 1_000_000)
+                .await
+                .unwrap(),
+            BounceOutcome::SuppressedBackscatter
+        );
+    }
+
+    #[tokio::test]
     async fn second_bounce_in_window_suppresses_rate() {
         let state = test_state().await;
         let db: &CacheDb = &state.db;
@@ -1156,6 +1212,50 @@ mod tests {
             inbox.len(),
             1,
             "the in-domain original sender must receive the DSN in their sealed INBOX"
+        );
+    }
+
+    /// A bounce is mail the nest composes on its own, so the fresh-IP warm-up
+    /// cap never counts or holds it (`mail-deliverability.md` § Enforcement at
+    /// submission time): with the day's allowance spent, the DSN back to an
+    /// external sender still leaves now and the counter is untouched.
+    #[tokio::test]
+    async fn a_bounce_leaves_now_even_with_the_warmup_cap_spent() {
+        let state = test_state().await;
+        let db: &CacheDb = &state.db;
+        let now = 1_000_000;
+        let day_one = fauna_mail::warmup::max_for_day(1).unwrap() as u32;
+        assert_eq!(
+            db.try_consume_warmup(now, day_one).await.unwrap(),
+            crate::db::mail_warmup::WarmupDecision::Allowed
+        );
+        let row = seed(
+            db,
+            "alice@sender.test",
+            "orig-cap@sender.test",
+            verdicts("pass", "pass", "none"),
+            false,
+        )
+        .await;
+
+        let outcome = generate_permfail_bounce(&state, &row, "550 5.1.1 nope", now)
+            .await
+            .unwrap();
+        assert_eq!(outcome, BounceOutcome::Bounced);
+
+        let dsn = db
+            .fetch_all_outbound_for_test()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.recipient == "alice@sender.test")
+            .expect("the DSN is queued back to the sender");
+        assert_eq!(dsn.next_attempt_at, now, "a bounce is never held");
+        let status = db.read_warmup_status(now).await.unwrap();
+        assert_eq!(
+            status.today_used,
+            i64::from(day_one),
+            "a bounce never counts against the warm-up"
         );
     }
 }

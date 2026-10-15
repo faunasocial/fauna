@@ -135,8 +135,8 @@ const ATTR_ENROLLMENT_REFUSED: &str = "enrollment-refused";
 /// still on the roster) — the durable intent staged BEFORE `fauna.sync.devices.delete`
 /// so a crash, a failed write or a down runtime between the two legs cannot
 /// leave the removed device a fleet member for ever
-/// (`account-data-taxonomy.md` § The generation machinery → *Fleet-scope
-/// reclamation*, clause (4), *The completion rule*). In the credential slot
+/// (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (4), *The completion rule*). In the credential slot
 /// rather than the replicated store on purpose: it is this machine's own
 /// unfinished business, it must be writable before any plane write is, and
 /// every process sharing the slot (the co-located agent usually holds the
@@ -632,6 +632,30 @@ impl<S: SecretStore + ?Sized, X: SlotSection> PrincipalBundle<S, X> {
         self.set_view(merged, &dropped);
     }
 
+    /// Adopt into the in-memory view every key the slot carries that the view
+    /// lacks — a key another process of this machine recorded since this one
+    /// loaded the slot (the app's seed pass recovering a generation from
+    /// escrow beside a seedless engine holder, `account-runtime.md`
+    /// § Multi-instance concurrency → *The seed-leg role*, part 4, *Escrow
+    /// recovery*: "a recovered key lands in the shared slot's retained
+    /// bundle, where the holder reads it"). The view is read from memory
+    /// alone, so without this the holder read it only at its next own write
+    /// to the slot. Adds, never drops: an entry the slot no longer holds is
+    /// left to [`Self::drop_generation_key`]'s shred, and the overflow is
+    /// untouched. Returns how many keys were adopted.
+    pub fn adopt_slot_generation_keys(&self) -> usize {
+        let slot = load_retained(&*self.credentials, &self.actor_id_hex);
+        let mut view = self.retained.lock().expect("principal-slot mutex");
+        let mut adopted = 0usize;
+        for (generation, key) in slot {
+            if let std::collections::btree_map::Entry::Vacant(e) = view.entry(generation) {
+                e.insert(key);
+                adopted += 1;
+            }
+        }
+        adopted
+    }
+
     /// Replace the in-memory view with `merged` (the slot's state plus what
     /// this call changed) and the overflow: first moving the entries the
     /// carriage just `dropped` for room into the overflow, and taking out of
@@ -755,6 +779,10 @@ impl<S: SecretStore + ?Sized, X: SlotSection> PrincipalCustody for PrincipalBund
 
     fn grant_registration_row(&self) -> Option<String> {
         PrincipalBundle::grant_registration_row(self)
+    }
+
+    fn adopt_slot_generation_keys(&self) -> usize {
+        PrincipalBundle::adopt_slot_generation_keys(self)
     }
 
     fn record_grant_registered_on(&self, device_id_hex: &str) {
@@ -1146,7 +1174,7 @@ pub fn retained_generation_keys<S: SecretStore + ?Sized>(
 /// A slot's retained-key carriage as a [`RetainedKeyCustody`] of its own, for
 /// a process that shares the machine's slot but holds no bundle — a
 /// **capability host** in the app's process (android's SAF provider;
-/// `on-demand-files.md` § Shared sets on a capability host, decision 1′: the
+/// `on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 1′: the
 /// slot's custody is the host's, and its own unwraps are recorded there
 /// exactly as the runtime's are).
 ///
