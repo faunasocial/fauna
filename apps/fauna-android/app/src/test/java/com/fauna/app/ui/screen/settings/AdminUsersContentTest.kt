@@ -10,6 +10,7 @@ import com.fauna.app.ui.currentClipboardText
 import com.fauna.app.ui.util.getStringFmt
 import com.fauna.ffi.FfiAdminInviteCode
 import com.fauna.ffi.FfiAdminInviteRequest
+import com.fauna.ffi.FfiAdminPendingAction
 import com.fauna.ffi.FfiAdminUser
 import androidx.compose.ui.semantics.SemanticsProperties
 import com.fauna.ffi.FfiAdminUserRowControls
@@ -130,6 +131,9 @@ class AdminUsersContentTest {
         userOffset: Long = 0L,
         codes: List<FfiAdminInviteCode> = listOf(code("ABC123")),
         requests: List<FfiAdminInviteRequest> = listOf(request("bob")),
+        pendingActions: List<FfiAdminPendingAction> = emptyList(),
+        onApprovePendingAction: (FfiAdminPendingAction) -> Unit = {},
+        onCancelPendingAction: (FfiAdminPendingAction) -> Unit = {},
         mintedCode: String? = null,
         actionError: String? = null,
         // Section 2 — Registration. Defaults: a KNOWN posture (`closed`, the
@@ -156,7 +160,7 @@ class AdminUsersContentTest {
         onNextPage: () -> Unit = {},
         onPrevPage: () -> Unit = {},
         onSaveRegistration: (FfiRegistrationMode, String, Boolean) -> Unit = { _, _, _ -> },
-        onAdmitUser: (String, String, String) -> Unit = { _, _, _ -> },
+        onAdmitUser: (String, String, String, ByteArray?) -> Unit = { _, _, _, _ -> },
         // FFI-free stub for the shared `admin_user_row_controls` decision — the
         // real screen injects `com.fauna.ffi.adminUserRowControls`, which Robolectric
         // can't load. Default = an active user (evict + suspend, no restore); tests
@@ -175,6 +179,12 @@ class AdminUsersContentTest {
         composeTestRule.setContent {
             AdminUsersContent(
                 pendingRequests = requests,
+                pendingActions = pendingActions,
+                onApprovePendingAction = onApprovePendingAction,
+                onCancelPendingAction = onCancelPendingAction,
+                // FFI-free twin of the shared `format_unix_local` (the real screen
+                // injects `ValueFormat.absoluteLocal`).
+                absoluteLocal = { "t=$it" },
                 inviteCodes = codes,
                 users = users,
                 allUsers = allUsers,
@@ -240,6 +250,54 @@ class AdminUsersContentTest {
         composeTestRule.onNodeWithTag("admin-users-list-section").assertExists()
     }
 
+    // ── Section 6: Pending admin actions (admin.md § Pending admin actions) —
+    // the standing co-admin approve / veto surface; `description` and
+    // `actorShort` arrive derived from shared Rust on the record.
+
+    private fun pendingAction(id: Long) = FfiAdminPendingAction(
+        id = id,
+        actorId = ByteArray(32) { 3 },
+        actorShort = "030303030303…",
+        actionType = "admin.add",
+        target = null,
+        description = "Grant the admin role",
+        status = "pending",
+        isPending = true,
+        createdAt = 0,
+        executeAfter = 1_700_000_000,
+        requiresQuorum = 2,
+        approvals = listOf("aa"),
+    )
+
+    @Test
+    fun pendingSectionAnswersTheEmptyStateWhenNothingIsPending() {
+        render()
+        composeTestRule.onNodeWithTag("admin-users-pending-section", useUnmergedTree = true)
+            .performScrollTo()
+            .assertTextEquals(ApplicationProvider.getApplicationContext<Context>().getString(R.string.admin_users_page_pending_none))
+    }
+
+    @Test
+    fun pendingSectionListsRowsAndFiresApproveAndCancel() {
+        var approved: FfiAdminPendingAction? = null
+        var cancelled: FfiAdminPendingAction? = null
+        val action = pendingAction(3)
+        render(
+            pendingActions = listOf(action),
+            onApprovePendingAction = { approved = it },
+            onCancelPendingAction = { cancelled = it },
+        )
+        composeTestRule.onNodeWithTag("admin-pending-action-item").performScrollTo().assertExists()
+        composeTestRule.onNodeWithTag("admin-pending-action-description", useUnmergedTree = true)
+            .assertTextContains("Grant the admin role", substring = true)
+        composeTestRule.onNodeWithTag("admin-pending-action-execute-after", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithTag("admin-pending-action-approvals", useUnmergedTree = true).assertExists()
+        composeTestRule.onNodeWithTag("admin-pending-action-approve-button", useUnmergedTree = true).performClick()
+        composeTestRule.onNodeWithTag("admin-pending-action-cancel-button", useUnmergedTree = true).performClick()
+        assertEquals(action, approved)
+        assertEquals(action, cancelled)
+    }
+
     // ── Section: Admit (direct admission, public-mode.md § Registration &
     // Identity) — the third account-creation path, `admin-users-admit-*`.
 
@@ -257,7 +315,8 @@ class AdminUsersContentTest {
     fun admitButtonFiresWithTypedActorHandleAndTier() {
         var admitted: Triple<String, String, String>? = null
         val actorHex = "a".repeat(64)
-        render(onAdmitUser = { actor, handle, tier -> admitted = Triple(actor, handle, tier) })
+        var guardian: ByteArray? = byteArrayOf(1)
+        render(onAdmitUser = { actor, handle, tier, g -> admitted = Triple(actor, handle, tier); guardian = g })
         composeTestRule.onNodeWithTag("admin-users-admit-actor-input")
             .performScrollTo().performTextInput(actorHex)
         composeTestRule.onNodeWithTag("admin-users-admit-handle-input")
@@ -267,6 +326,25 @@ class AdminUsersContentTest {
         // Default tier is the first option — the screen passes through
         // whatever was typed; format validation is a VM concern.
         assertEquals(Triple(actorHex, "newperson", "free"), admitted)
+        // The guardian picker defaults to "None" — an ordinary admission.
+        assertEquals(null, guardian)
+    }
+
+    @Test
+    fun admitCarriesThePickedGuardianActor() {
+        var picked: ByteArray? = null
+        render(
+            users = listOf(this.guardian),
+            requests = emptyList(),
+            onAdmitUser = { _, _, _, g -> picked = g },
+        )
+        composeTestRule.onNodeWithTag("admin-users-admit-actor-input")
+            .performScrollTo().performTextInput("c".repeat(64))
+        composeTestRule.onNodeWithTag("admin-users-admit-handle-input")
+            .performScrollTo().performTextInput("ward1")
+        pickGuardian("admin-users-admit-guardian-select")
+        composeTestRule.onNodeWithTag("admin-users-admit-button").performScrollTo().performClick()
+        assertEquals(guardianActorId.toList(), picked?.toList())
     }
 
     @Test
@@ -274,7 +352,7 @@ class AdminUsersContentTest {
         // tui/linux's own idiom: nothing here clears the drafts on submit —
         // success feedback is the new row in the Users-section refetch.
         val actorHex = "b".repeat(64)
-        render(onAdmitUser = { _, _, _ -> })
+        render(onAdmitUser = { _, _, _, _ -> })
         composeTestRule.onNodeWithTag("admin-users-admit-actor-input")
             .performScrollTo().performTextInput(actorHex)
         composeTestRule.onNodeWithTag("admin-users-admit-button")
@@ -688,8 +766,11 @@ class AdminUsersContentTest {
         pickBand("admin-users-invite-age-band-select", "Under 13")
         // Back to "None": the band must not survive without its guardian.
         composeTestRule.onNodeWithTag("admin-users-invite-guardian-select").performScrollTo().performClick()
-        composeTestRule.onNodeWithText(
-            ApplicationProvider.getApplicationContext<Context>().getString(R.string.admin_users_page_guardian_none)
+        // The Admit section's picker also paints "None", so take the open menu's item.
+        composeTestRule.onNode(
+            hasText(
+                ApplicationProvider.getApplicationContext<Context>().getString(R.string.admin_users_page_guardian_none)
+            ) and hasAnyAncestor(isPopup())
         ).performClick()
         composeTestRule.onNodeWithTag("admin-users-invite-age-band-select")
             .assert(hasToken("not-set")).assertIsNotEnabled()

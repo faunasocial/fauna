@@ -263,6 +263,7 @@ async fn update_user_alias(
             label: label.into(),
             ..Default::default()
         },
+        ..Default::default()
     };
     let bytes = dispatch(
         router,

@@ -84,11 +84,13 @@ use fauna_account_store::{backend::StoreBackend, store::AccountStore};
 use fauna_core::generation::{
     EscrowReceiptRecord, EscrowTargetRecord, GenerationMintRecord, escrow_acked_generations,
     escrow_receipt_cell_key, escrow_receipted_generations, escrow_target_identity_key,
-    verify_escrow_receipt,
+    escrow_wrap_cell_key, verify_escrow_receipt,
 };
 use fauna_mls::wrapped_blob::generation_wraps::seal_generation_key_to_escrow;
 use fauna_protocol::generation_escrow::{EscrowPutReply, EscrowPutRequest, KIND_ESCROW_PUT};
-use fauna_protocol::merge_policy::{KIND_ESCROW_RECEIPT, KIND_ESCROW_TARGET, KIND_GENERATION_MINT};
+use fauna_protocol::merge_policy::{
+    KIND_ESCROW_RECEIPT, KIND_ESCROW_TARGET, KIND_ESCROW_WRAP, KIND_GENERATION_MINT,
+};
 use fauna_protocol::{ByteBuf, RpcRequester};
 
 use crate::account_state_plane::{AccountStatePlane, ItemId};
@@ -294,6 +296,7 @@ where
     let view = crate::fleet_removal::fleet_view(store, trust).await?;
     let mut reescrowed = BTreeSet::new();
     let mut restored = 0usize;
+    let mut wrap_rows = 0usize;
     let mut door_failure = None;
 
     for entry in live_rows(store, KIND_GENERATION_MINT).await? {
@@ -306,12 +309,22 @@ where
         if fauna_core::hex32::encode(&generation_id) != entry.key {
             continue;
         }
-        // Acked and — when this pass checks holdings — held: nothing owed. An
-        // acked generation the holder no longer holds (a rebuilt or restored
-        // box presenting the identity that signed the receipt) is owed a
-        // wrap, and its receipt row stands.
+        // Acked and — when this pass checks holdings — held: no deposit owed.
+        // An acked generation the holder no longer holds (a rebuilt or
+        // restored box presenting the identity that signed the receipt) is
+        // owed a wrap, and its receipt row stands. Either way the fleet plane
+        // owes its replicated copy of the wrap when merged state lacks one
+        // (*Escrow custody*, ruling (1)): a receipt with no wrap row is healed
+        // here, whoever wrote the receipt.
         let acked_here = acked.contains(&generation_id);
-        if acked_here && holdings.is_none_or(|held| held.contains(&generation_id)) {
+        let deposit_owed =
+            !(acked_here && holdings.is_none_or(|held| held.contains(&generation_id)));
+        let wrap_key = escrow_wrap_cell_key(&generation_id, &trust.root);
+        let wrap_row_owed = store
+            .state(KIND_ESCROW_WRAP, &wrap_key)
+            .await?
+            .is_none_or(|row| row.tombstone);
+        if !deposit_owed && !wrap_row_owed {
             continue;
         }
         let Ok(GenerationMintRecord::Minted { core, .. }) =
@@ -344,6 +357,31 @@ where
                     entry.key
                 )
             })?;
+        // The replicated copy first, with the bytes the holder is about to be
+        // handed: a door that fails leaves a row that acks nothing and keys a
+        // cold restore all the same.
+        if wrap_row_owed {
+            fleet
+                .put(
+                    &ItemId {
+                        kind: KIND_ESCROW_WRAP.into(),
+                        key: wrap_key,
+                    },
+                    wrap.clone(),
+                    None,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "re-escrow of generation {}: publishing the escrow-wrap row",
+                        entry.key
+                    )
+                })?;
+            wrap_rows += 1;
+        }
+        if !deposit_owed {
+            continue;
+        }
         let reply: EscrowPutReply = match holder
             .rpc
             .request(
@@ -426,6 +464,12 @@ where
                 )
             })?;
         reescrowed.insert(generation_id);
+    }
+    if wrap_rows > 0 {
+        tracing::info!(
+            wrap_rows,
+            "generation re-escrow: wrote the fleet plane's copy of escrow wraps it lacked"
+        );
     }
     Ok(Some(Deposits {
         reescrowed,
@@ -718,6 +762,11 @@ mod tests {
             acked_here(&f, &g).await,
             "the receipt row acks it for this identity"
         );
+        assert_eq!(
+            wrap_row(&f, &g).await.as_deref(),
+            Some(dep_wrap.as_slice()),
+            "the fleet plane's copy is the wrap the holder received, byte for byte"
+        );
         let cell =
             escrow_receipt_cell_key(&g, &holder_key().verifying_key().to_bytes(), &f.trust.root);
         assert!(
@@ -734,17 +783,50 @@ mod tests {
         assert_eq!(door.deposits.lock().unwrap().len(), 1);
     }
 
-    /// A generation already acked under this identity's key is left alone.
+    /// This identity's merged `fauna.state.escrow-wrap` row of `g`, if any.
+    async fn wrap_row(f: &Fixture, g: &[u8; 32]) -> Option<Vec<u8>> {
+        f.store
+            .state(KIND_ESCROW_WRAP, &escrow_wrap_cell_key(g, &f.trust.root))
+            .await
+            .unwrap()
+            .filter(|row| !row.tombstone)
+            .map(|row| row.value)
+    }
+
+    /// A generation already acked under this identity's key gets no
+    /// deposit — only, when merged state lacks it, the fleet plane's copy of
+    /// its wrap (*Escrow custody*, ruling (1): a receipt with no wrap row is
+    /// healed by this pass), sealed to this identity's target so the seed
+    /// opens it; and once that row stands, the pass is quiet. Red-verified
+    /// by dropping the `wrap_row_owed` arm: no row lands.
     #[tokio::test]
-    async fn a_generation_acked_for_this_identity_is_left_alone() {
+    async fn a_generation_acked_for_this_identity_gets_only_its_missing_wrap_row() {
         let mut f = fixture().await;
         let (door, bundle) = (Door::default(), Bundle::default());
         publish_target(&f).await;
-        acked_generation(&mut f, US, &[US], &target_key()).await;
+        let (g, key) = acked_generation(&mut f, US, &[US], &target_key()).await;
+        assert!(wrap_row(&f, &g).await.is_none(), "the receipt stands alone");
 
         let p = pass(&f, &door, &bundle).await.unwrap();
-        assert_eq!(p, ReescrowPass::Current);
+        assert_eq!(p, ReescrowPass::Current, "no deposit");
         assert!(door.deposits.lock().unwrap().is_empty());
+        let wrap = wrap_row(&f, &g).await.expect("the wrap row is written");
+        let opened = open_generation_key_from_escrow(
+            &wrap,
+            &derive_escrow_xwing_keypair(&ESCROW_SEED).secret,
+            &g,
+            &target_key(),
+            &key.commitment(),
+        )
+        .expect("the seed opens the healed row");
+        assert_eq!(opened.as_bytes(), key.as_bytes());
+
+        pass(&f, &door, &bundle).await.unwrap();
+        assert_eq!(
+            wrap_row(&f, &g).await,
+            Some(wrap),
+            "a standing row is left alone"
+        );
     }
 
     /// No target row for this identity yet → nothing to seal to, nothing

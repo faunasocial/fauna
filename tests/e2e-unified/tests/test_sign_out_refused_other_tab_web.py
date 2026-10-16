@@ -6,7 +6,7 @@ account-scoped store of the browser profile, so a tab signing out while a
 sibling tab still serves the account strands that sibling on an erased store —
 its conversations engine keeps writing a device leaf whose credentials are
 gone. Web's analogue of the native instance lock is the MLS-engine role Web
-Lock (``$lib/webLocks``): a sign-out finds it free, or refuses **entirely** —
+Lock (``fauna_mls::engine_role``): a sign-out finds it free, or refuses **entirely** —
 nothing erased, no credentials wiped, still signed in — with the shared line
 ``settings.sign_out_blocked_other_window`` on the Settings page's
 ``error-message``.

@@ -27,6 +27,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.fauna.app.R
+import com.fauna.app.core.AftermathProgress
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
@@ -37,6 +38,7 @@ import com.fauna.ffi.FfiRecoveryKitStatus
 import com.fauna.ffi.FfiSweepCopy
 import com.fauna.ffi.FfiSweepView
 import social.fauna.generated.Ids
+import uniffi.fauna_core.LocalizedText
 import uniffi.fauna_core.QrMatrix
 
 /**
@@ -71,6 +73,8 @@ fun RecoveryKitSection(
 ) {
     val state by vm.state.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
+    val inheritedFilterMarks by vm.inheritedFilterMarkIds.collectAsState()
+    val aftermath by vm.aftermathProgress.collectAsState()
     val appMessages = LocalAppMessages.current
     // What makes this section's state stale is who is signed in AND which
     // actor's seat the client signs as: a succession's owed kit/sweep defers
@@ -90,6 +94,8 @@ fun RecoveryKitSection(
     DisposableEffect(vm) {
         vm.onScreen = true
         vm.ceremonyHold.accountAppeared()
+        // Every Account entry re-reads the inherited-rule marks.
+        vm.reloadInheritedFilterMarks()
         onDispose {
             vm.onScreen = false
             // Leaving Account is also the edge a held-back supersession waits
@@ -115,7 +121,43 @@ fun RecoveryKitSection(
         onStolenConfirmChange = vm::onStolenConfirmChange,
         onStolen = { vm.succeedWithHeldKit(sessionActorIdHex, onSucceeded) },
         onSweepRetry = vm::retrySweep,
+        onLetGoConfirmChange = vm::onLetGoConfirmChange,
+        onLetGo = vm::letGo,
+        inheritedFiltersOpen = inheritedFilterMarks.size,
+        aftermath = aftermath,
     )
+}
+
+/**
+ * The six post-succession aftermath leg lines (`settings.md` § Recovery kit →
+ * *The post-succession aftermath's progress lines*), ABOVE `recovery-kit-status`
+ * — the freshest thing on the screen, describing what a pass just did. Each
+ * paints the **shared projection's already-resolved text** verbatim; a `null`
+ * line is absent, never present and empty, and there is no per-leg match here
+ * (priority #1/#3). Leg 7 renders before leg 6: the burn is the only leg that
+ * takes something away, so every restoring leg reports above it. Leg 5 is always
+ * `null` on this app (`FfiAftermathLeg` has no corpus case), so its line is
+ * unreachable here exactly as on apple.
+ */
+@Composable
+private fun AftermathProgressLines(progress: AftermathProgress) {
+    @Composable
+    fun line(text: LocalizedText?, id: String) {
+        localized(text)?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(id),
+            )
+        }
+    }
+    line(progress.backupRegrant, Ids.RECOVERY_KIT_BACKUP_REGRANT_STATUS)
+    line(progress.mlsReseal, Ids.RECOVERY_KIT_MLS_RESEAL_STATUS)
+    line(progress.grantRemint, Ids.RECOVERY_KIT_GRANT_REMINT_STATUS)
+    line(progress.corpusReseal, Ids.RECOVERY_KIT_CORPUS_RESEAL_STATUS)
+    line(progress.draftsReseal, Ids.RECOVERY_KIT_DRAFTS_RESEAL_STATUS)
+    line(progress.mailBurn, Ids.RECOVERY_KIT_MAIL_BURN_STATUS)
 }
 
 /**
@@ -146,10 +188,16 @@ fun RecoveryKitSectionContent(
     onStolenConfirmChange: (String) -> Unit = {},
     onStolen: () -> Unit = {},
     onSweepRetry: () -> Unit = {},
+    onLetGoConfirmChange: (String) -> Unit = {},
+    onLetGo: () -> Unit = {},
+    // How many inherited filter rules still await the owner's verdict — the
+    // count of the shared marks cache, never stored apart from them.
+    inheritedFiltersOpen: Int = 0,
+    // The post-succession aftermath's per-leg lines, as the sink resolved them.
+    aftermath: AftermathProgress = AftermathProgress(),
     // The shared `sweep_copy` projection — android renders the retry button,
-    // so it always declares `rendersRetry = true` (the degraded lines may then
-    // name it). Injected FFI-free for the Robolectric harness.
-    sweepCopyOf: (FfiSweepView) -> FfiSweepCopy = { view -> com.fauna.ffi.sweepCopy(view, true) },
+    // so the degraded lines name it. Injected FFI-free for the Robolectric harness.
+    sweepCopyOf: (FfiSweepView) -> FfiSweepCopy = { view -> com.fauna.ffi.sweepCopy(view) },
     // `recovery_pending_days_remaining` — the shared rounding rule; only `now`
     // is this view's to own. Injected FFI-free for the Robolectric harness.
     pendingDays: (landsAt: Long) -> Long = { landsAt ->
@@ -176,6 +224,8 @@ fun RecoveryKitSectionContent(
 
             state.sweepView?.let { view -> SweepLines(view, state.busy, sweepCopyOf, onSweepRetry) }
 
+            AftermathProgressLines(aftermath)
+
             Text(
                 statusLine(state.status, pendingDays),
                 style = MaterialTheme.typography.bodySmall,
@@ -186,6 +236,21 @@ fun RecoveryKitSectionContent(
                 stringResource(R.string.settings_recovery_kit_desc),
                 style = MaterialTheme.typography.bodySmall,
             )
+
+            // The route to the filter list for rules the aftermath carried
+            // across (`succession-aftermath.md` § Adjudicating what the
+            // aftermath carries across; `ui.yaml` — NOT a leg line like the
+            // aftermath's progress lines: it has no done line, and renders
+            // only while marks are open).
+            if (inheritedFiltersOpen > 0) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    stringResourceFmt(R.string.settings_recovery_kit_inherited_filters, inheritedFiltersOpen),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag(Ids.RECOVERY_KIT_INHERITED_FILTERS_STATUS),
+                )
+            }
 
             state.mintedSecretHex?.let { secret ->
                 MintedKitDisplay(
@@ -216,8 +281,51 @@ fun RecoveryKitSectionContent(
             state.status?.let { status -> ActionButtons(status, state.busy, onCreate, onReplace, onLost, onEscrowReseal, onVeto) }
 
             if (state.stolenVisible) StolenAction(state, onStolenConfirmChange, onStolen)
+
+            state.letGoStatus?.let { line -> LetGoAction(line, state, onLetGoConfirmChange, onLetGo) }
         }
     }
+}
+
+/**
+ * The let-go of a dead generation, beside the four actions (`settings.md`
+ * § Recovery kit, the fifth act; `fleet-scope-reclamation.md`
+ * § *Fleet-scope reclamation*, clause (3)(j)): the line, its
+ * type-to-confirm field and its button — rendered by the caller ONLY while the
+ * shared projection answers a [line], the veto's shape. The button arms on the
+ * shared confirm word alone, and [RecoveryKitVM.letGo] re-checks it when it
+ * fires. No offline gate: the act ends in the retire door, which the shared
+ * table declares offline-safe (apple's `letGoAction`).
+ */
+@Composable
+private fun LetGoAction(
+    line: LocalizedText,
+    state: RecoveryKitUiState,
+    onLetGoConfirmChange: (String) -> Unit,
+    onLetGo: () -> Unit,
+) {
+    Spacer(Modifier.height(12.dp))
+    Text(
+        localized(line).orEmpty(),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.tertiary,
+        modifier = Modifier.testTag(Ids.RECOVERY_KIT_UNREADABLE_STATUS),
+    )
+    OutlinedTextField(
+        value = state.letGoConfirmInput,
+        onValueChange = onLetGoConfirmChange,
+        label = { Text(stringResource(R.string.settings_recovery_kit_let_go_confirm_placeholder)) },
+        singleLine = true,
+        // The gate compares against an upper-case literal, so the keyboard
+        // opens in capitals and autocorrect must not rewrite what is typed.
+        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters, autoCorrect = false),
+        modifier = Modifier.fillMaxWidth().testTag(Ids.RECOVERY_KIT_LET_GO_CONFIRM_FIELD),
+    )
+    OutlinedButton(
+        onClick = onLetGo,
+        enabled = state.letGoArmed,
+        modifier = Modifier.testTag(Ids.RECOVERY_KIT_LET_GO_BUTTON),
+    ) { Text(stringResource(R.string.settings_recovery_kit_let_go), color = MaterialTheme.colorScheme.error) }
 }
 
 /**

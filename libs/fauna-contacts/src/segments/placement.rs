@@ -108,6 +108,17 @@ pub struct AddressbookState {
     #[serde(with = "serde_bytes")]
     pub encrypted_metadata: Vec<u8>,
     pub highestmodseq: u64,
+    /// The prune floor: the highest modseq any tombstone the retention prune
+    /// dropped from this address book carried (0 = none ever pruned) — the
+    /// calendar twin's `CalendarState::pruned_modseq`. Below it a replica
+    /// rebuilt from the manifest answers a sync-token stale. Omitted at rest
+    /// while 0, so a never-pruned manifest encodes as before.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pruned_modseq: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +235,7 @@ mod tests {
             addressbook_id: [0x42; 32],
             encrypted_metadata: vec![1, 2, 3],
             highestmodseq: 9,
+            pruned_modseq: 0,
         });
         let man_bytes = m.encode().expect("encode manifest");
         fauna_cbor::decode_strict::<CardPlacementManifest>(&man_bytes)
@@ -240,6 +252,7 @@ mod tests {
             addressbook_id: [0x42; 32],
             encrypted_metadata: vec![1, 2, 3],
             highestmodseq: 42,
+            pruned_modseq: 0,
         });
         m.tombstones.push(CardTombstoneRef {
             addressbook_id: [0x42; 32],

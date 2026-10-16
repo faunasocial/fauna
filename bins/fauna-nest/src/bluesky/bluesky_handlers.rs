@@ -48,13 +48,13 @@ fn not_found(reason: &str) -> RpcError {
 
 /// The post is blocked (upstream `BlockedPost`).
 fn blocked() -> RpcError {
-    RpcError::new("fauna.bluesky.blocked", "error.bluesky.blocked")
+    RpcError::new(RpcError::CODE_BLUESKY_BLOCKED, "error.bluesky.blocked")
 }
 
 /// The agent could not be restored (Bluesky not configured / not linked /
 /// session expired) or the upstream XRPC call failed.
 fn upstream(reason: impl std::fmt::Display) -> RpcError {
-    let mut e = RpcError::new("fauna.bluesky.upstream", "error.bluesky.upstream");
+    let mut e = RpcError::new(RpcError::CODE_BLUESKY_UPSTREAM, "error.bluesky.upstream");
     e.details = Some(Box::new(Value::String(format!("{reason}"))));
     e
 }

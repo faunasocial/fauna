@@ -65,7 +65,7 @@ pub struct NewerRelease {
 }
 
 impl NewerRelease {
-    fn from_tag(tag: String) -> Self {
+    pub(crate) fn from_tag(tag: String) -> Self {
         Self {
             version: tag.trim_start_matches('v').to_owned(),
             release_page_url: fauna_core::version::release_page_url(&tag),
@@ -118,7 +118,11 @@ pub async fn check_for_newer_release(feed_origin: String, user_agent: String) ->
     .into()
 }
 
-/// The once-per-sign-in look, called from each app's post-sign-in hook, over
+/// **Interim — the release-host sign-in look macOS and windows still call
+/// until each moves to `FfiNestClient::look_for_newer_release_at_sign_in`,
+/// which reads the signed-in nest and contacts no third party
+/// (`installers/README.md` § Knowing a newer version is out); then this
+/// function is deleted.** Over
 /// [`fauna_client::update_look::look_at_sign_in_over_http`]: the newer release
 /// to paint the same notice for, or `None` — nothing newer, or a failed look
 /// (silent by rule). Same arguments as [`check_for_newer_release`].

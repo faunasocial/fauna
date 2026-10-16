@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Forwards `fauna-core`'s `local-clock`, for `notification_text` to render a
+# deadline arg (`execute_after`, `lands_at`) as the reader's local time.
+# Native-only (the OS timezone database); wasm leaves it off and the web SPA
+# formats the raw seconds itself. Same shape as `fauna-client-dns`'s forward.
+local-clock = ["fauna-core/local-clock"]
+
 [dependencies]
 # fauna-protocol carries the typed `fauna.notifications.*` wire types + the
 # `RpcRequester` seam this crate is generic over (mirrors fauna-client-feed /

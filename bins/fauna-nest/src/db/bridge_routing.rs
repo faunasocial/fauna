@@ -154,6 +154,32 @@ pub struct ScanResultRow {
     pub delivered_to_actor: Option<[u8; 32]>,
 }
 
+/// The column list both scan-result reads select, in [`scan_result_row`]'s
+/// order.
+const SCAN_RESULT_SELECT: &str = "SELECT received_at, scanned_at, clamav_verdict, clamav_signature,
+            rspamd_score_raw, rspamd_score_scaled, rspamd_flagged_rules,
+            rspamd_score_breakdown, action_taken, delivered_to_actor
+     FROM message_scan_results";
+
+fn scan_result_row(r: &rusqlite::Row<'_>, message_id: [u8; 32]) -> rusqlite::Result<ScanResultRow> {
+    let actor_blob: Option<Vec<u8>> = r.get(9)?;
+    Ok(ScanResultRow {
+        message_id,
+        received_at: r.get(0)?,
+        scanned_at: r.get(1)?,
+        clamav_verdict: r.get(2)?,
+        clamav_signature: r.get(3)?,
+        rspamd_score_raw: r.get(4)?,
+        rspamd_score_scaled: r.get(5)?,
+        rspamd_flagged_rules: r.get(6)?,
+        rspamd_score_breakdown: r.get(7)?,
+        action_taken: r.get(8)?,
+        delivered_to_actor: actor_blob
+            .map(|v| blob_col_to_array(v, 9, "delivered_to_actor"))
+            .transpose()?,
+    })
+}
+
 impl CacheDb {
     /// Upsert both halves of an actor's standing recipient seal key in one
     /// write: the 32-byte X25519 `mls_pubkey` and the ML-KEM-768
@@ -563,6 +589,27 @@ impl CacheDb {
         })
     }
 
+    /// Read `actor_id`'s submission counter for `day_bucket` WITHOUT debiting
+    /// it — the `get_mail_quotas` readout. No row yet = nothing spent.
+    pub async fn get_submission_quota_used(
+        &self,
+        actor_id: &[u8; 32],
+        day_bucket: i64,
+    ) -> Result<u32> {
+        let conn = self.conn.lock().await;
+        let used = conn
+            .query_row(
+                "SELECT used FROM bridge_submission_quota
+                 WHERE actor_id = ?1 AND day_bucket = ?2",
+                rusqlite::params![&actor_id[..], day_bucket],
+                |row| row.get::<_, i64>(0).map(|v| v.max(0) as u32),
+            )
+            .optional()
+            .context("read submission quota")?
+            .unwrap_or(0);
+        Ok(used)
+    }
+
     /// Atomically read+update today's submission counter for `actor_id`.
     /// Returns `Allowed` and increments by `recipient_count` when the
     /// resulting total stays within `daily_limit`; otherwise returns
@@ -636,39 +683,42 @@ impl CacheDb {
         Ok(())
     }
 
-    /// Read one content-scan result by message_id. The future
-    /// `fauna.bridges.get_message_scan_result` user-read RPC reads through
-    /// this; today it backs the ingest-path tests. `None` if absent.
+    /// Read one content-scan result by message_id, whoever it belongs to —
+    /// the ingest-path tests' ground truth. A user-facing read goes through
+    /// [`Self::get_scan_result_for_actor`] instead, never this. `None` if
+    /// absent.
     pub async fn get_scan_result(&self, message_id: &[u8; 32]) -> Result<Option<ScanResultRow>> {
         let mid = *message_id;
         let conn = self.conn.lock().await;
         conn.query_row(
-            "SELECT received_at, scanned_at, clamav_verdict, clamav_signature,
-                    rspamd_score_raw, rspamd_score_scaled, rspamd_flagged_rules,
-                    rspamd_score_breakdown, action_taken, delivered_to_actor
-             FROM message_scan_results WHERE message_id = ?1",
+            &format!("{SCAN_RESULT_SELECT} WHERE message_id = ?1"),
             rusqlite::params![&mid[..]],
-            |r| {
-                let actor_blob: Option<Vec<u8>> = r.get(9)?;
-                Ok(ScanResultRow {
-                    message_id: mid,
-                    received_at: r.get(0)?,
-                    scanned_at: r.get(1)?,
-                    clamav_verdict: r.get(2)?,
-                    clamav_signature: r.get(3)?,
-                    rspamd_score_raw: r.get(4)?,
-                    rspamd_score_scaled: r.get(5)?,
-                    rspamd_flagged_rules: r.get(6)?,
-                    rspamd_score_breakdown: r.get(7)?,
-                    action_taken: r.get(8)?,
-                    delivered_to_actor: actor_blob
-                        .map(|v| blob_col_to_array(v, 9, "delivered_to_actor"))
-                        .transpose()?,
-                })
-            },
+            |r| scan_result_row(r, mid),
         )
         .optional()
         .context("read message_scan_results")
+    }
+
+    /// Read one content-scan result **only if `actor` received it** — the
+    /// `fauna.bridges.get_message_scan_result` user read
+    /// (`mail-content-scanning.md` § User sees their own message's row). The
+    /// scope is in the query: another actor's row and a reject-at-perimeter
+    /// forensic row (`delivered_to_actor IS NULL`, which equals nothing) both
+    /// come back `None`, the same as a message with no row at all.
+    pub async fn get_scan_result_for_actor(
+        &self,
+        message_id: &[u8; 32],
+        actor: &[u8; 32],
+    ) -> Result<Option<ScanResultRow>> {
+        let mid = *message_id;
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            &format!("{SCAN_RESULT_SELECT} WHERE message_id = ?1 AND delivered_to_actor = ?2"),
+            rusqlite::params![&mid[..], &actor[..]],
+            |r| scan_result_row(r, mid),
+        )
+        .optional()
+        .context("read message_scan_results for actor")
     }
 
     /// Upsert the uniform scoring-metadata bus rows for one content item —
@@ -1123,6 +1173,64 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn get_scan_result_for_actor_returns_only_the_recipients_own_row() {
+        let (_tmp, _manager, db) = setup();
+        let alice = [1u8; 32];
+        let bob = [2u8; 32];
+        let row = |id: u8, actor: Option<[u8; 32]>, action: &str| ScanResultRow {
+            message_id: [id; 32],
+            received_at: 1_700_000_000,
+            scanned_at: 1_700_000_000,
+            clamav_verdict: "clean".into(),
+            clamav_signature: None,
+            rspamd_score_raw: None,
+            rspamd_score_scaled: None,
+            rspamd_flagged_rules: None,
+            rspamd_score_breakdown: None,
+            action_taken: action.into(),
+            delivered_to_actor: actor,
+        };
+        db.insert_scan_result(&row(10, Some(alice), "delivered"))
+            .await
+            .unwrap();
+        // A reject-at-perimeter forensic row: no recipient.
+        db.insert_scan_result(&row(11, None, "rejected_malware"))
+            .await
+            .unwrap();
+
+        let own = db
+            .get_scan_result_for_actor(&[10u8; 32], &alice)
+            .await
+            .unwrap()
+            .expect("alice reads her own row");
+        assert_eq!(own.delivered_to_actor, Some(alice));
+        assert_eq!(own.action_taken, "delivered");
+
+        assert!(
+            db.get_scan_result_for_actor(&[10u8; 32], &bob)
+                .await
+                .unwrap()
+                .is_none(),
+            "bob must not read alice's row"
+        );
+        for actor in [alice, bob] {
+            assert!(
+                db.get_scan_result_for_actor(&[11u8; 32], &actor)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "a forensic row (NULL recipient) belongs to no user"
+            );
+        }
+        assert!(
+            db.get_scan_result_for_actor(&[12u8; 32], &alice)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

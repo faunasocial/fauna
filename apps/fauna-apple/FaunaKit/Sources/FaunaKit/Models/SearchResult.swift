@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import Foundation
 
 // Search renders the shared `SearchManager`'s merged, deduplicated,
@@ -17,3 +20,4 @@ public extension SearchResultRow {
     /// The already-localized badge, resolved through the apple i18n pipeline.
     var localizedBadge: String { renderLocalizedText(badge) }
 }
+#endif // !FAUNA_KIDS

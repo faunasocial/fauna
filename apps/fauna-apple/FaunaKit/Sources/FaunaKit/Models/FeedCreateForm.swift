@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import Foundation
 
 /// Shared mutable state for the create-feed form, lifted out of the per-platform
@@ -153,3 +156,4 @@ public struct TrainedFactorOption: Identifiable, Equatable {
         self.label = label
     }
 }
+#endif // !FAUNA_KIDS

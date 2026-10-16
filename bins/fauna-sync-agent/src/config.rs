@@ -217,7 +217,7 @@ impl SyncConfig {
 
 /// Resolves every filesystem location the sync service owns. Two modes:
 ///
-/// * **override** — `SyncPaths::new(Some(root))` is the `--data-dir <root>`
+/// * **override** — `SyncPaths::at(root)` is the `--data-dir <root>`
 ///   data-root override (dev/CI test isolation): `config.toml`, `device.db`, every
 ///   per-folder `fsid-*.db`, and the chunk-cache live directly under `root`.
 /// * **default** — `SyncPaths::new(None)` is the production per-user layout:
@@ -237,10 +237,13 @@ impl SyncConfig {
 /// keeps by resolving `device.toml` at `data_dir`'s parent).
 #[derive(Debug, Clone)]
 pub struct SyncPaths {
-    /// `Some` = the `--data-dir` override root (everything under it); `None` = the
-    /// production machine layout.
-    override_root: Option<PathBuf>,
-    /// Per-actor state scope (`on-demand-files.md` § Multi-account × File
+    /// The flat base, resolved ONCE at construction: the `--data-dir` override
+    /// root (everything under it), or the production machine layout.
+    root: PathBuf,
+    /// The pin-store dir, resolved with `root`: the install-scoped trust home in
+    /// production, `<root>/trust` under an override (see `trust::trust_dir`).
+    trust_dir: PathBuf,
+    /// Per-actor state scope (`on-demand-files-apple.md` § Multi-account × File
     /// Provider, consequence 3): when set, every path under [`Self::base_dir`]
     /// resolves inside `<flat base>/<actor-id-hex>/`, so one account's engines
     /// can never read another's state. Set from the provisioned capability's
@@ -253,20 +256,44 @@ pub struct SyncPaths {
 }
 
 impl SyncPaths {
-    /// Build from the optional `--data-dir` value.
-    pub fn new(data_dir: Option<PathBuf>) -> Self {
+    /// Build from the optional `--data-dir` value. The production layout (no
+    /// override) is resolved here, once, and REFUSED — an error carrying the
+    /// shared [`fauna_sync_engine::root::NO_HOME_REFUSAL`] — when no absolute
+    /// home exists (the derivation never falls back to a shared `/tmp`):
+    /// `run_main` calls this before anything is created, so every path below
+    /// is infallible by construction.
+    pub fn new(data_dir: Option<PathBuf>) -> anyhow::Result<Self> {
+        Ok(match data_dir {
+            Some(root) => Self::at(root),
+            None => Self::with(
+                Self::production_base_dir()?,
+                fauna_client::cert_binding::install_scoped_trust_home()
+                    .ok_or_else(|| anyhow::anyhow!(fauna_sync_engine::root::NO_HOME_REFUSAL))?,
+            ),
+        })
+    }
+
+    /// An explicit `--data-dir` root (tests, e2e): everything — the trust store
+    /// included — lives inside it. A test launch must never read or write the
+    /// box's real install-scoped state (testing.md § conventions point 10).
+    pub fn at(root: PathBuf) -> Self {
+        let trust_dir = root.join("trust");
+        Self::with(root, trust_dir)
+    }
+
+    fn with(root: PathBuf, trust_dir: PathBuf) -> Self {
         Self {
-            override_root: data_dir,
+            root,
+            trust_dir,
             actor_scope: std::sync::Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
-    /// The production (no `--data-dir` override) layout. The per-actor scope
-    /// no longer keys on it (it activates on every layout); the one remaining
-    /// consumer is `trust::trust_dir_for_paths`, which keeps the install-scoped
-    /// trust home only here and a `--data-dir` trust store inside that root.
-    pub fn is_production(&self) -> bool {
-        self.override_root.is_none()
+    /// The pin-store dir — scoped to the *install*, so it does not move when
+    /// the agent adopts a per-actor scope (which moves `base_dir`, never
+    /// `flat_base_dir`).
+    pub fn trust_dir(&self) -> PathBuf {
+        self.trust_dir.clone()
     }
 
     /// The current per-actor scope (lowercase actor-id hex), if any.
@@ -288,10 +315,7 @@ impl SyncPaths {
     /// The unscoped flat base — the home of the log dir and the custodian
     /// store (both process-level, never per-actor).
     pub fn flat_base_dir(&self) -> PathBuf {
-        match &self.override_root {
-            Some(root) => root.clone(),
-            None => Self::production_base_dir(),
-        }
+        self.root.clone()
     }
 
     /// Shared base directory for all sync-owned files. Override → the root; default →
@@ -313,7 +337,7 @@ impl SyncPaths {
     ///   opens the container; the container is the sandboxed File Provider
     ///   extension's root, and each set's engine state lives in its HOST's root
     ///   — a bound folder's in this one, an FP domain's in the extension's
-    ///   (`on-demand-files.md` § Apple File Provider binding, *state
+    ///   (`on-demand-files-apple.md` § Apple File Provider binding, *state
     ///   unification*; per-set single-writer via the one-local-presence rule).
     ///   The pre-unification `LOCALAPPDATA` fallback resolved to a relative
     ///   `C:\ProgramData` path here — unwritable under launchd, so no real macOS
@@ -340,7 +364,7 @@ impl SyncPaths {
     /// The values are unchanged: the layouts documented on
     /// [`Self::base_dir`] above, incident history included, moved with the
     /// code into `root.rs`.
-    fn production_base_dir() -> PathBuf {
+    fn production_base_dir() -> anyhow::Result<PathBuf> {
         fauna_sync_engine::root::platform_state_base()
     }
 
@@ -433,7 +457,7 @@ mod tests {
     #[test]
     fn two_same_named_sets_get_separate_state_dbs() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = SyncPaths::at(tmp.path().to_path_buf());
 
         let owned = paths.sync_db_path_for_ref(FolderRef::Local(7));
         let foreign = paths.sync_db_path_for_ref(FolderRef::Foreign([0xab; 32]));
@@ -547,7 +571,7 @@ file_set_id = "owner:documents"
         // Pause persists across a save/load — the property the Pause/Resume
         // handler relies on so a paused agent stays paused across a restart.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = SyncPaths::at(tmp.path().to_path_buf());
         let paused_cfg = SyncConfig {
             paused: true,
             ..SyncConfig::default()
@@ -636,7 +660,7 @@ mode = "on-demand"
         // directly under the override root — no `%PROGRAMDATA%`/`%LOCALAPPDATA%`
         // read, fully deterministic.
         let root = std::path::Path::new(r"C:\tmp\fauna-data");
-        let paths = SyncPaths::new(Some(root.to_path_buf()));
+        let paths = SyncPaths::at(root.to_path_buf());
         assert_eq!(paths.config_path(), root.join("config.toml"));
         assert_eq!(
             paths.sync_db_path_for_ref(FolderRef::Local(3)),
@@ -654,7 +678,7 @@ mode = "on-demand"
         // `$XDG_CONFIG_HOME|~/.config` + `fauna/sync` on linux. macOS moved to
         // the shared app-group container at the M4 state unification and has
         // its own pin (`macos_default_is_the_shared_app_group_sync_dir`).
-        let paths = SyncPaths::new(None);
+        let paths = SyncPaths::new(None).expect("this box has an absolute home");
         #[cfg(windows)]
         let fauna_sync = std::path::Path::new("Fauna").join("sync");
         #[cfg(all(unix, not(target_os = "macos")))]
@@ -673,13 +697,13 @@ mode = "on-demand"
 
     #[test]
     fn actor_scope_scopes_every_state_path_and_is_shared_across_clones() {
-        // Per-actor state scoping (`file-sync.md` § Multi-account × File
+        // Per-actor state scoping (`on-demand-files-apple.md` § Multi-account × File
         // Provider, consequence 3): the scope re-roots every state path under
         // `<base>/<actor-hex>/`, the flat base stays reachable for the
         // logs + custodian store, and the slot is shared across the clones
         // every handler holds so a provision-time re-scope reaches all of them.
         let root = std::path::Path::new("/tmp/fauna-agent-scope-test");
-        let paths = SyncPaths::new(Some(root.to_path_buf()));
+        let paths = SyncPaths::at(root.to_path_buf());
         let clone = paths.clone();
         assert_eq!(paths.base_dir(), root);
         assert_eq!(paths.actor_scope(), None);
@@ -717,7 +741,9 @@ mode = "on-demand"
         // the log stack before the agent can report anything (2026-07-20).
         // This asserts the REAL process env, so it also catches a future branch
         // that reintroduces an env-var-with-empty-default resolution.
-        let base = SyncPaths::new(None).base_dir();
+        let base = SyncPaths::new(None)
+            .expect("this box has an absolute home")
+            .base_dir();
         assert!(
             base.is_absolute(),
             "production base dir must be absolute, got {base:?}"
@@ -730,7 +756,7 @@ mode = "on-demand"
         // The user-domain root (2026-08-25): this agent never opens the
         // TCC-protected app-group container — a launchd agent is prompted
         // there per instance and no decision binds the next one.
-        let paths = SyncPaths::new(None);
+        let paths = SyncPaths::new(None).expect("this box has an absolute home");
         let base = paths.base_dir();
         assert!(base.ends_with("Library/Application Support/Fauna/sync"));
         assert!(
@@ -760,7 +786,7 @@ mode = "on-demand"
         if local.is_none() || prog.is_none() || local == prog {
             return;
         }
-        let paths = SyncPaths::new(None);
+        let paths = SyncPaths::new(None).expect("this box has an absolute home");
         let config_parent = paths
             .config_path()
             .parent()
@@ -784,7 +810,7 @@ mode = "on-demand"
         // `save_config`/`load_config` write+read `config.toml` under the override
         // root — the seam that makes `--data-dir` actually relocate writes.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = SyncPaths::at(tmp.path().to_path_buf());
         let config = SyncConfig {
             locations: vec![LocationConfig {
                 path: r"C:\Users\alice\Docs".to_string(),
@@ -859,7 +885,7 @@ mode = "on-demand"
     #[test]
     fn an_unknown_mode_loads_serves_nothing_and_survives_a_save() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = SyncPaths::at(tmp.path().to_path_buf());
         std::fs::write(paths.config_path(), newer_config_toml()).unwrap();
 
         let mut config = paths.load_config().expect("the config decodes");
@@ -898,7 +924,7 @@ mode = "on-demand"
     #[test]
     fn an_unreadable_config_is_never_overwritten() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = SyncPaths::at(tmp.path().to_path_buf());
         let newer = "locations = { by_path = { \"/data/docs\" = { mode = \"always\" } } }\n";
         std::fs::write(paths.config_path(), newer).unwrap();
 

@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.settings
 
+import com.fauna.app.ui.navigation.exitAdminToPrimary
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
@@ -24,10 +25,14 @@ import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.AdminNestVM
+import com.fauna.app.ui.viewmodel.FeatureAuthoringState
+import com.fauna.app.ui.viewmodel.FeatureEditorActions
 import com.fauna.ffi.FfiAdminRegionView
+import com.fauna.ffi.FfiAdminWebAppOriginView
 import com.fauna.ffi.FfiIssuerForcedArm
 import com.fauna.ffi.FfiIssuerKeyRow
 import com.fauna.ffi.FfiIssuerKeyView
+import com.fauna.ffi.FfiWebAppOrigin
 import uniffi.fauna_core.LocalizedText
 import uniffi.fauna_core.NodeMode
 import social.fauna.generated.Ids
@@ -82,6 +87,9 @@ fun AdminNestScreen(
     val natSubmitting by vm.natSubmitting.collectAsState()
     val regionView by vm.regionView.collectAsState()
     val regionWorking by vm.regionWorking.collectAsState()
+    val webAppOriginView by vm.webAppOriginView.collectAsState()
+    val webAppOriginDraft by vm.webAppOriginDraft.collectAsState()
+    val webAppOriginWorking by vm.webAppOriginWorking.collectAsState()
     val seedRotateConfirm by vm.seedRotateConfirm.collectAsState()
     val seedRotateStatus by vm.seedRotateStatus.collectAsState()
     val takedownArmed by vm.takedownArmed.collectAsState()
@@ -91,6 +99,7 @@ fun AdminNestScreen(
     // ONE flow for the whole sign-in key section, so a dispatch's verdict,
     // re-read key set and released in-flight guard recompose together.
     val oauth by vm.oauth.collectAsState()
+    val featureLimits by vm.featureLimits.state.collectAsState()
 
     val invalidServingPortMessage = stringResource(R.string.admin_nest_page_serving_port_invalid)
     val invalidRegionMessage = stringResource(R.string.admin_nest_page_region_invalid)
@@ -103,13 +112,22 @@ fun AdminNestScreen(
         osRebootPending = osRebootPending,
         restartingNow = restartingNow,
         working = working,
-        error = error,
+        // A refused cell or a failed editor write lands on the same page-level
+        // `error-message` as every other failure here.
+        error = error ?: featureLimits.error ?: featureLimits.readError,
+        featureLimits = featureLimits,
+        featureLimitsActions = vm.featureLimits.actions(),
         natSelectedMode = natSelectedMode,
         natMessage = natMessage,
         natSubmitEnabled = natSubmitEnabled,
         natSubmitting = natSubmitting,
         regionView = regionView,
         regionWorking = regionWorking,
+        webAppOriginView = webAppOriginView,
+        webAppOriginDraft = webAppOriginDraft,
+        webAppOriginWorking = webAppOriginWorking,
+        onSelectWebAppOrigin = vm::selectWebAppOrigin,
+        onSaveWebAppOrigin = vm::saveWebAppOrigin,
         seedRotateConfirm = seedRotateConfirm,
         seedRotateStatus = seedRotateStatus,
         takedownArmed = takedownArmed,
@@ -118,7 +136,7 @@ fun AdminNestScreen(
         oauthArmed = oauth.armed,
         oauthStatus = oauth.status,
         oauthInFlight = oauth.inFlight,
-        onBack = { navController.popBackStack() },
+        onBack = { navController.exitAdminToPrimary() },
         onSetPairing = vm::setPairing,
         onSaveServingPort = vm::setServingPort,
         onInvalidServingPort = { vm.reportInvalidServingPort(invalidServingPortMessage) },
@@ -139,6 +157,7 @@ fun AdminNestScreen(
         onCancelOauthForced = vm::cancelOauthForced,
         onConfirmOauthForced = vm::confirmOauthForced,
         onFactoryReset = { vm.factoryReset(onFactoryResetComplete) },
+        onRetire = { navController.navigate("settings/admin-nest-retire") },
         reports = reports,
         takedownPrefill = takedownPrefill,
         onResolveReport = vm::resolveReport,
@@ -193,6 +212,8 @@ fun AdminNestContent(
     onCancelOauthForced: () -> Unit,
     onConfirmOauthForced: (FfiIssuerForcedArm) -> Unit,
     onFactoryReset: () -> Unit,
+    /** `admin-nest-retire-button`: open the `nest_retire` page over this session. */
+    onRetire: () -> Unit = {},
     // The shared `parse_port` validator (u16 in [1, 65535], reject 0), injected so
     // the Robolectric content-test can pass an FFI-free stub (mirrors AttendeeRow's
     // `view`; symmetric with AdminCalendarContent's CaldavPortField).
@@ -202,6 +223,20 @@ fun AdminNestContent(
     parseRegionCode: (String) -> String? = {
         runCatching { com.fauna.ffi.adminParseRegionCode(it) }.getOrNull()
     },
+    // The admin host of the shared feature-policy editor
+    // (`admin-nest-feature-limits-*`) — defaulted like the sections below, so a
+    // content-test that predates it still composes (the section then reads as
+    // "not loaded yet" and is absent).
+    featureLimits: FeatureAuthoringState = FeatureAuthoringState(),
+    featureLimitsActions: FeatureEditorActions = FeatureEditorActions.None,
+    // Web-app origin section (`admin-nest-web-app-origin-*`) — defaulted so a
+    // content-test that predates the section still composes; the section then
+    // reads as "not loaded yet" (radios disabled, nothing marked).
+    webAppOriginView: FfiAdminWebAppOriginView? = null,
+    webAppOriginDraft: FfiWebAppOrigin? = null,
+    webAppOriginWorking: Boolean = false,
+    onSelectWebAppOrigin: (FfiWebAppOrigin) -> Unit = {},
+    onSaveWebAppOrigin: () -> Unit = {},
     // The shared `takedown_form_view` fold (moderation.md § Legal takedown →
     // Invocation surface), injected for the same FFI-free-test reason.
     takedownFormView: (String, Boolean, String, Boolean) -> com.fauna.ffi.FfiTakedownFormView =
@@ -303,6 +338,21 @@ fun AdminNestContent(
                 onSave = onSaveNatMode,
             )
 
+            // ── Web-app origin (fauna.admin.web_app_origin.{get,set}) ──
+            // What this nest's own address answers: the app it ships, or a
+            // redirect to the central origin (admin.md § N Nest → Web-app
+            // origin), directly after NAT mode and mirroring its radio shape.
+            // Every sentence and the can-set verdict are the shared
+            // FfiAdminWebAppOriginView fold (tui's admin/nest.rs, the
+            // reference leg) — this file paints and wires, decides nothing.
+            WebAppOriginSection(
+                view = webAppOriginView,
+                draft = webAppOriginDraft,
+                working = webAppOriginWorking,
+                onSelect = onSelectWebAppOrigin,
+                onSave = onSaveWebAppOrigin,
+            )
+
             // ── Declared region (fauna.admin.region.{get,set}) ──
             // The deployment's legal situs — the region tier's one human
             // choice (region-blocking.md § Region determination;
@@ -320,6 +370,14 @@ fun AdminNestContent(
                 onInvalidRegion = onInvalidRegion,
                 parseRegionCode = parseRegionCode,
             )
+
+            // ── Feature limits for everyone (fauna.features.policy.{get,update}) ──
+            // The admin's nest-wide authored documents, directly after Declared
+            // region (admin.md § N Nest → Feature limits). One row per gated
+            // feature the nest carries, and an Edit button that opens the shared
+            // editor right under the row; every sentence and the whole editor are
+            // the shared `FfiPolicyEditor`'s — this paints and wires.
+            FeatureLimitsAdminSection(featureLimits, featureLimitsActions)
 
             // ── Host-OS maintenance (nest-os-*, installers/vps.md § Host OS Maintenance § 4) ──
             // Read-only patch/reboot status for the host Ubuntu box of an
@@ -403,6 +461,13 @@ fun AdminNestContent(
                 onResolve = onResolveReport,
                 onOpenTakedown = onOpenReportTakedown,
             )
+
+            HorizontalDivider()
+
+            // ── Retire this server (nest-retirement.md § Layout & flow) — between
+            // the reports section and Factory reset, labelled sharply apart from
+            // it: reset wipes a box you keep, retire destroys it.
+            RetireSection(onRetire)
 
             HorizontalDivider()
 
@@ -645,6 +710,108 @@ private fun NatModeRadioRow(
             Text(label, style = MaterialTheme.typography.bodyLarge)
             Text(desc, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+    }
+}
+
+/** The web-app origin section (`admin-nest-web-app-origin-*`,
+ *  `fauna.admin.web_app_origin.{get,set}`; admin.md § N Nest → Web-app origin).
+ *  Radios stay unmarked and disabled until the read lands ([view] `null`) and
+ *  whenever `canSet` is false — pre-marking bundled would state a choice the
+ *  nest may not hold. A radio pick is local; the save commits it. */
+@Composable
+private fun WebAppOriginSection(
+    view: FfiAdminWebAppOriginView?,
+    draft: FfiWebAppOrigin?,
+    working: Boolean,
+    onSelect: (FfiWebAppOrigin) -> Unit,
+    onSave: () -> Unit,
+) {
+    val canSet = view?.canSet == true && !working
+    // The commit gates; the radios above it stay the buffer.
+    val gate = faunaGate("fauna.admin.web_app_origin.set", enabled = canSet && draft != null)
+    Card(modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_NEST_WEB_APP_ORIGIN_SECTION)) {
+        Column(
+            modifier = Modifier.padding(16.dp).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                stringResource(R.string.admin_nest_page_web_app_origin_label),
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                stringResource(R.string.admin_nest_page_web_app_origin_desc),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            WebAppOriginRadioRow(
+                testTag = Ids.ADMIN_NEST_WEB_APP_ORIGIN_BUNDLED_RADIO,
+                selected = draft == FfiWebAppOrigin.BUNDLED,
+                enabled = canSet,
+                onClick = { onSelect(FfiWebAppOrigin.BUNDLED) },
+                label = stringResource(R.string.admin_nest_page_web_app_origin_bundled),
+            )
+            WebAppOriginRadioRow(
+                testTag = Ids.ADMIN_NEST_WEB_APP_ORIGIN_CENTRAL_RADIO,
+                selected = draft == FfiWebAppOrigin.CENTRAL,
+                enabled = canSet,
+                onClick = { onSelect(FfiWebAppOrigin.CENTRAL) },
+                label = view?.let { localized(it.centralLabel) }
+                    ?: stringResource(R.string.admin_nest_page_web_app_origin_loading),
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    view?.let { localized(it.status) }
+                        ?: stringResource(R.string.admin_nest_page_web_app_origin_loading),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f).testTag(Ids.ADMIN_NEST_WEB_APP_ORIGIN_STATUS),
+                )
+                Button(
+                    onClick = onSave,
+                    enabled = gate.enabled,
+                    modifier = Modifier.testTag(Ids.ADMIN_NEST_WEB_APP_ORIGIN_SAVE_BUTTON),
+                ) { Text(stringResource(R.string.admin_nest_page_web_app_origin_save)) }
+            }
+            DisabledControlReasonText(gate.reason)
+            view?.let {
+                Text(
+                    localized(it.scope).orEmpty(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WebAppOriginRadioRow(
+    testTag: String,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    label: String,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .selectable(
+                selected = selected,
+                enabled = enabled,
+                role = Role.RadioButton,
+                onClick = onClick,
+            )
+            .testTag(testTag)
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        RadioButton(selected = selected, onClick = null, enabled = enabled)
+        Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
     }
 }
 
@@ -1336,6 +1503,32 @@ private fun ReportsQueueSection(
 // Moved off Settings (admin.md § Admin IA redesign): a nest-wide concern. The
 // confirm button lives in a transient AlertDialog (ui.yaml optional_elements),
 // present only while the dialog is open.
+
+/**
+ * Retire this server (`admin-nest-retire-section` / `-button`,
+ * `nest-retirement.md` § Layout & flow). Opens the `nest_retire` page over this
+ * live session; needs only a cloud token, so it is not nest-gated.
+ */
+@Composable
+private fun RetireSection(onRetire: () -> Unit) {
+    Column(modifier = Modifier.testTag(Ids.ADMIN_NEST_RETIRE_SECTION)) {
+        Text(
+            stringResource(R.string.admin_nest_page_retire_title),
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(vertical = 8.dp),
+        )
+        Text(
+            stringResource(R.string.admin_nest_page_retire_desc),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(vertical = 4.dp),
+        )
+        OutlinedButton(
+            onClick = onRetire,
+            modifier = Modifier.testTag(Ids.ADMIN_NEST_RETIRE_BUTTON),
+        ) { Text(stringResource(R.string.admin_nest_page_retire_button)) }
+    }
+}
 
 @Composable
 private fun FactoryResetSection(onFactoryReset: () -> Unit) {

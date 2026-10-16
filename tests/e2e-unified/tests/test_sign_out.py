@@ -156,12 +156,13 @@ def _skip_android_host_fault_injection(app) -> None:
     scoped directories are on-device — declared, not a bare skip."""
     app_surface.skip_unbuilt(
         app.driver,
-        surface="host-side account-scope directory read-back",
+        surface="host-side account-scope fault injection",
         detail=(
             "android's residue surface LANDED (pinned by AccountStoresEraseTest and "
             "SignOutResidueViewTest), but its scoped directories are on-device in the "
             "app's own filesDir, so the host cannot chmod one to inject the fault — "
-            "the same gap attach_cred_store documents for credentials"
+            "reading them back is possible (AndroidScopeStore), making them unwritable "
+            "from outside the app is not"
         ),
         tracked="docs/goal/architecture/long-term-store.md § Implementation status today",
     )
@@ -440,17 +441,6 @@ def test_sign_out_erases_the_account_scoped_state_directory(logged_in_app, test_
     app = logged_in_app
     client = app_surface.app_name(app.driver)
 
-    if client == "android":
-        app_surface.skip_unbuilt(
-            app.driver,
-            surface="host-side account-scope directory read-back",
-            detail=(
-                "android's account-scoped directories are on-device, in the app's "
-                "own filesDir; no host path exists to read them back — the same "
-                "gap attach_cred_store documents for the credential namespace"
-            ),
-            tracked="docs/goal/architecture/long-term-store.md § Implementation status today",
-        )
     if client == "web":
         app_surface.declared_absence(
             app.driver,
@@ -462,7 +452,9 @@ def test_sign_out_erases_the_account_scoped_state_directory(logged_in_app, test_
     actor = test_user["actor_id_hex"]
     dirs = store.scope_dirs(actor)
 
-    existed_before = [d for d in dirs if d.exists()]
+    # `store.exists`, not `d.exists()`: android's roots are on-device
+    # (`AndroidScopeStore`), where a host read is always False.
+    existed_before = [d for d in dirs if store.exists(d)]
     assert existed_before, (
         "precondition: at least one account-scoped directory must exist after "
         "sign-in — that is what sign-out has to erase. An empty set here means "
@@ -473,7 +465,7 @@ def test_sign_out_erases_the_account_scoped_state_directory(logged_in_app, test_
 
     app.settings.sign_out()
 
-    survivors = [d for d in existed_before if d.exists()]
+    survivors = [d for d in existed_before if store.exists(d)]
     assert survivors == [], (
         "sign-out must erase EVERY account-scoped directory this launch owns "
         "(account-scoping.md § Erasure follows scope), but these survived it: "

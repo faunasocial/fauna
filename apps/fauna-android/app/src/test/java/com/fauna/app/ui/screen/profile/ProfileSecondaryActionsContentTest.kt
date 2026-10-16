@@ -90,6 +90,27 @@ class ProfileSecondaryActionsContentTest {
         composeTestRule.onNodeWithTag("profile-block-button").assertIsNotEnabled()
     }
 
+    /** Between open and the open-time edge read the toggle is inert: a press on the
+     *  not-blocked default would re-send `knocks_block` for an actor the viewer
+     *  already blocks (mirrors tui's `the_toggle_is_inert_until_the_open_time_read_lands`). */
+    @Test
+    fun toggleDisabledUntilTheEdgeReadLands() {
+        var toggles = 0
+        composeTestRule.setContent {
+            ProfileSecondaryActionsRow(
+                blocked = false,
+                blockWorking = false,
+                blockKnown = false,
+                onStartDm = {},
+                onToggleBlock = { toggles++ },
+                blockLabel = { isBlocked -> if (isBlocked) "Unblock" else "Block" },
+            )
+        }
+        composeTestRule.onNodeWithTag("profile-block-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("profile-block-button").performClick()
+        assertEquals("a press before the read lands issues nothing", 0, toggles)
+    }
+
     @Test
     fun tapsFireTheCallbacks() {
         var startDms = 0

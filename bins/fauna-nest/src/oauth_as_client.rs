@@ -312,7 +312,10 @@ fn test_hook_client(
 /// would never mint for (`service_auth_lxm_admitted`, the deny half) refuses
 /// the document, and so does a document whose `scope` names
 /// `fauna:identity:op:atproto.service_auth` while declaring no entry — the
-/// scope would grant nothing.
+/// scope would grant nothing. The `activitypub_peers` member takes the second
+/// refusal too: a document whose `scope` names
+/// `fauna:identity:op:activitypub.http_sig` while declaring no peer is
+/// refused.
 ///
 /// # Errors
 /// `invalid_client` naming the manifest's refusal.
@@ -320,7 +323,9 @@ pub fn verified_manifest(
     client: &ResolvedClient,
 ) -> Result<Option<fauna_protocol::kind_manifest::VerifiedManifest>, OAuthDeny> {
     use fauna_bridge_atproto::authz::service_auth_lxm_admitted;
-    use fauna_bridge_atproto::fauna_scope::SCOPE_IDENTITY_OP_ATPROTO_SERVICE_AUTH;
+    use fauna_bridge_atproto::fauna_scope::{
+        SCOPE_IDENTITY_OP_ACTIVITYPUB_HTTP_SIG, SCOPE_IDENTITY_OP_ATPROTO_SERVICE_AUTH,
+    };
     use fauna_protocol::kind_manifest::{client_id_host, verify_manifest};
     let refuse = |why: String| {
         OAuthDeny::new(
@@ -332,11 +337,21 @@ pub fn verified_manifest(
         .declared_scopes
         .iter()
         .any(|s| s == SCOPE_IDENTITY_OP_ATPROTO_SERVICE_AUTH);
+    let asks_http_sig = client
+        .declared_scopes
+        .iter()
+        .any(|s| s == SCOPE_IDENTITY_OP_ACTIVITYPUB_HTTP_SIG);
     let Some(jws) = client.fauna_manifest.as_deref() else {
         if asks_service_auth {
             return Err(refuse(format!(
                 "the document's scope names {SCOPE_IDENTITY_OP_ATPROTO_SERVICE_AUTH} but it \
                  carries no manifest declaring a service_auth entry"
+            )));
+        }
+        if asks_http_sig {
+            return Err(refuse(format!(
+                "the document's scope names {SCOPE_IDENTITY_OP_ACTIVITYPUB_HTTP_SIG} but it \
+                 carries no manifest declaring an activitypub_peers host"
             )));
         }
         return Ok(None);
@@ -359,6 +374,12 @@ pub fn verified_manifest(
         return Err(refuse(format!(
             "the document's scope names {SCOPE_IDENTITY_OP_ATPROTO_SERVICE_AUTH} but its \
              manifest declares no service_auth entry"
+        )));
+    }
+    if asks_http_sig && verified.activitypub_peers.is_empty() {
+        return Err(refuse(format!(
+            "the document's scope names {SCOPE_IDENTITY_OP_ACTIVITYPUB_HTTP_SIG} but its \
+             manifest declares no activitypub_peers host"
         )));
     }
     Ok(Some(verified))
@@ -662,7 +683,7 @@ mod tests {
         .await
         .expect("a manifest of this host's own resolves");
         let verified = verified_manifest(&client).unwrap().unwrap();
-        assert_eq!(verified.publisher_key, key.verifying_key().to_bytes());
+        assert_eq!(verified.publisher_key, Some(key.verifying_key().to_bytes()));
         assert_eq!(
             verified.kinds[0].kind.to_string(),
             "ext.client.example.notes"
@@ -779,6 +800,54 @@ mod tests {
             assert_eq!(deny.error, ERR_INVALID_CLIENT, "{why}");
             assert!(
                 deny.description.contains("manifest refused"),
+                "{why}: {deny:?}"
+            );
+        }
+    }
+
+    const HTTP_SIG_SCOPE: &str = "atproto fauna:identity:op:activitypub.http_sig";
+
+    /// `third-party.md` § The manifest: the `activitypub_peers` member
+    /// resolves into the declared peer set, and a document asking for the
+    /// `activitypub.http_sig` scope without declaring a peer refuses — with a
+    /// manifest and without one.
+    #[tokio::test]
+    async fn the_activitypub_peers_member_is_required_by_the_http_sig_scope() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+        let client_id = "https://client.example/metadata.json";
+        let client = resolve_doc(
+            client_id,
+            &doc_with_manifest(
+                client_id,
+                &key,
+                serde_json::json!({ "activitypub_peers": ["mastodon.example"] }),
+                Some(HTTP_SIG_SCOPE),
+            ),
+        )
+        .await
+        .expect("a declared peer with the scope resolves");
+        let verified = verified_manifest(&client).unwrap().unwrap();
+        assert_eq!(verified.activitypub_peers, ["mastodon.example"]);
+
+        for (doc, why) in [
+            (
+                doc_with_manifest(client_id, &key, serde_json::json!({}), Some(HTTP_SIG_SCOPE)),
+                "the scope with a manifest declaring no peer",
+            ),
+            (
+                {
+                    let mut d: serde_json::Value =
+                        serde_json::from_str(&metadata_doc(client_id)).unwrap();
+                    d["scope"] = serde_json::Value::String(HTTP_SIG_SCOPE.into());
+                    d.to_string()
+                },
+                "the scope with no manifest at all",
+            ),
+        ] {
+            let deny = resolve_doc(client_id, &doc).await.expect_err(why);
+            assert_eq!(deny.error, ERR_INVALID_CLIENT, "{why}");
+            assert!(
+                deny.description.contains("activitypub_peers"),
                 "{why}: {deny:?}"
             );
         }

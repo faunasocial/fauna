@@ -68,7 +68,13 @@ fauna-client-posts = { path = "../fauna-client-posts" }
 # code through this edge (web never registers an observer).
 fauna-client-search = { path = "../fauna-client-search" }
 fauna-client-linkpreview = { path = "../fauna-client-linkpreview" }
+# The playback-ticket mint (`fauna.media.playback_ticket`) behind
+# `playback_source`'s `ProxiedVideo` arm. wasm-clean by that crate's charter.
+fauna-client-media = { path = "../fauna-client-media" }
 fauna-client-bridges = { path = "../fauna-client-bridges" }
+# The `bluesky.feed.thread` call behind `FeedManager::open_thread` — the thread
+# page every app reads off the snapshot. wasm-clean by that crate's charter.
+fauna-client-bluesky = { path = "../fauna-client-bluesky" }
 fauna-client-core = { path = "../fauna-client-core", default-features = false }
 # The tip attribution read (`fauna.tips.list`) behind `resolve_post_tips`.
 # OPTIONAL: reached only through this crate's own `payments` feature, so a
@@ -96,6 +102,11 @@ fauna-client-personalization = { path = "../fauna-client-personalization" }
 # (content-moderation-and-ranking.md § Tier-3 artifact kinds). Pure RPC over
 # `fauna-protocol`, so wasm-safe like the personalization client above.
 fauna-client-labelers = { path = "../fauna-client-labelers" }
+# The subscribed post-kind `wasm` labeler seam (same § → *Where it runs*,
+# position (1)): the shared prepare/run boundary runs the module at the
+# subscriber's app. wasm-safe — `fauna-client-region` already carries it into
+# the web build for a region document's bundled scorers.
+fauna-labeler = { workspace = true }
 fauna-client-config = { path = "../fauna-client-config" }
 
 # Layer-B engagement-signal producer (engagement-cues.md § Layer B write path):
@@ -159,3 +170,6 @@ async-trait = "0.1"
 # The door-exact in-memory period-key store (`period_keys::MemoryPeriodKeyStore`)
 # the gated compose / unlock / sell-post tests install on the manager.
 fauna-client-subscriptions = { path = "../fauna-client-subscriptions", features = ["test-helpers"] }
+# The sell-path refusal tests render the stamped `LocalizedText` through the
+# generated English strings, so an unfilled `{placeholder}` shows up as one.
+fauna-i18n = { path = "../fauna-i18n" }

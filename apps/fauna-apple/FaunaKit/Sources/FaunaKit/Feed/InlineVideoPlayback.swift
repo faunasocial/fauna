@@ -76,6 +76,7 @@ public enum VideoPlaybackPlan: Equatable, Sendable {
     case openSealed(hash: String)
     case unplayable
 
+#if !FAUNA_KIDS
     public init(_ source: PlaybackSource) {
         switch source {
         case .url(let url): self = .stream(path: url)
@@ -83,6 +84,7 @@ public enum VideoPlaybackPlan: Equatable, Sendable {
         case .unplayable: self = .unplayable
         }
     }
+#endif
 }
 
 /// The hardened temp file a sealed video plays from: no URL can serve its

@@ -159,9 +159,7 @@ pub fn update_book_list(
     client: &Rc<FaunaClient>,
 ) {
     let lb = &handles.book_list_box;
-    while let Some(child) = lb.first_child() {
-        lb.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(lb);
     for book in books {
         lb.append(&build_book_row(book, &handles.open_book, client));
     }
@@ -198,18 +196,14 @@ pub fn open_located_card(
     client: &Rc<FaunaClient>,
 ) {
     let lb = &handles.book_list_box;
-    while let Some(child) = lb.first_child() {
-        lb.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(lb);
     for book in books {
         lb.append(&build_book_row(book, &handles.open_book, client));
     }
 
     set_detail_placeholder(&handles.detail_container);
     let cl = &handles.card_list_box;
-    while let Some(child) = cl.first_child() {
-        cl.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(cl);
     // The holding book is the open one now — or none, when no book holds it.
     *handles.open_book.borrow_mut() = open.as_ref().map(|(book_id, _, _)| book_id.clone());
     let Some((_, cards, card_id)) = open else {
@@ -232,9 +226,7 @@ pub fn update_card_list(handles: &AddressBookHandles, addressbook_id: &str, card
         return;
     }
     let lb = &handles.card_list_box;
-    while let Some(child) = lb.first_child() {
-        lb.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(lb);
     set_detail_placeholder(&handles.detail_container);
     for card in cards {
         lb.append(&build_card_row(card, &handles.detail_container));

@@ -137,21 +137,30 @@ const PIPE_NAME_CALLER_ALLOWLIST: &[&str] = &[
 
 /// Files where the pipe-qualified `fauna-sync.` prefix may appear outside a
 /// comment: the same four files above (they own the name, including their
-/// own `#[cfg(test)]` fixtures that assert its shape), plus one file that
-/// holds it only as an inert STRING, never a raw open — the tool connects
-/// through `connect_pipe`/`AgentEndpoint::connect` like every other
-/// consumer, same as the [`PIPE_NAME_CALLER_ALLOWLIST`] fix made true of
-/// it:
-///
-/// - `apps/fauna-windows/shellext-fixture/src/main.rs` — a `.context(...)`
-///   error message naming the pipe for a human reading the dev tool's output.
+/// own `#[cfg(test)]` fixtures that assert its shape). These files are skipped
+/// whole; any other file holding the prefix is a violation unless the line is
+/// named in [`PIPE_LITERAL_LINE_EXEMPTIONS`].
 const PIPE_LITERAL_ALLOWLIST: &[&str] = &[
     "libs/fauna-ipc/src/sync.rs",
     "libs/fauna-ipc/src/sync_pipe_client.rs",
     "libs/fauna-ipc/src/endpoint.rs",
     "bins/fauna-sync-agent/src/lib.rs",
-    "apps/fauna-windows/shellext-fixture/src/main.rs",
 ];
+
+/// `(path, needle)` pairs exempting ONE known line by its content, not its
+/// file: the file holds the pipe-qualified prefix only as an inert STRING,
+/// never a raw open — the tool connects through
+/// `connect_pipe`/`AgentEndpoint::connect` like every other consumer, same as
+/// the [`PIPE_NAME_CALLER_ALLOWLIST`] fix made true of it. Any other pipe-qualified line in the file still reds, so a raw
+/// sync open reintroduced there cannot hide behind the exemption.
+/// A needle keys on text, not a line number, so the file may move freely.
+///
+/// - `apps/fauna-windows/shellext-fixture/src/main.rs` — a `.context(...)`
+///   error message naming the pipe for a human reading the dev tool's output.
+const PIPE_LITERAL_LINE_EXEMPTIONS: &[(&str, &str)] = &[(
+    "apps/fauna-windows/shellext-fixture/src/main.rs",
+    "(is a service running?)",
+)];
 
 /// Beside-control floor: a walk that silently found nothing (a moved `src`, a
 /// renamed workspace member) would otherwise pass every check below
@@ -230,7 +239,10 @@ fn the_tree_has_one_pipe_qualified_prefix_owner_set() {
                 line.get(window_start..at)
                     .is_some_and(|w| w.contains("pipe"))
             });
-            if is_pipe_qualified {
+            let is_exempt_line = PIPE_LITERAL_LINE_EXEMPTIONS
+                .iter()
+                .any(|(path, needle)| *path == rel.as_str() && line.contains(needle));
+            if is_pipe_qualified && !is_exempt_line {
                 violations.push(format!("{rel}:{}", i + 1));
             }
         }

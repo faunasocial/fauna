@@ -35,8 +35,9 @@ pub enum WsRpcError {
     #[error("not connected")]
     NotConnected,
     /// The nest rejected this client's subprotocol: a version skew no retry
-    /// clears. Only a reconnect loop that stopped on a 4426 close reports it
-    /// (`WsRpcClient::supervisor_stop`). Mirrors native
+    /// clears. Reported only on a 4426 close: by a reconnect loop that stopped
+    /// on one (`WsRpcClient::supervisor_stop`), or by a fixed connection's
+    /// request that one ended (`fixed_conn::request`). Mirrors native
     /// `NestClientError::SubprotocolMismatch` and shares its string.
     #[error("{}", fauna_i18n::strings::errors::SUBPROTOCOL_MISMATCH)]
     SubprotocolMismatch,
@@ -186,6 +187,10 @@ impl RpcErrorClass for WsRpcError {
 
     fn is_rejection(&self) -> bool {
         self.as_rpc_error().is_some()
+    }
+
+    fn is_subprotocol_mismatch(&self) -> bool {
+        matches!(self, WsRpcError::SubprotocolMismatch)
     }
 }
 

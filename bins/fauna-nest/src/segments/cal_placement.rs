@@ -72,6 +72,18 @@ impl super::PlacementKind for CalPlacementKind {
     fn tombstone_deleted_at(t: &Self::Tombstone) -> Option<i64> {
         Some(t.deleted_at)
     }
+
+    fn note_pruned(m: &mut Self::Manifest, pruned: &[Self::Tombstone]) {
+        for t in pruned {
+            if let Some(c) = m
+                .calendars
+                .iter_mut()
+                .find(|c| c.calendar_id == t.calendar_id)
+            {
+                c.pruned_modseq = c.pruned_modseq.max(t.modseq);
+            }
+        }
+    }
 }
 
 /// The calendar journal is part of the backed-up calendar corpus, so a rebuilt
@@ -111,6 +123,11 @@ impl super::AdoptableJournal for CalPlacementKind {
                 .tombstones
                 .iter()
                 .all(|t| corpus.tombstones.contains(t))
+    }
+
+    /// Every placed event of the corpus, still placed exactly so.
+    fn extends_adoption_of(current: &CalPlacementManifest, corpus: &CalPlacementManifest) -> bool {
+        corpus.events.iter().all(|e| current.events.contains(e))
     }
 }
 
@@ -160,6 +177,7 @@ fn apply_record_to_manifest(record: &CalPlacementRecord, m: &mut CalPlacementMan
                 calendar_id: *calendar_id,
                 encrypted_metadata: encrypted_metadata.clone(),
                 highestmodseq: 1,
+                pruned_modseq: 0,
             });
         }
         CalPlacementRecord::UpdateCalendarMetadata {

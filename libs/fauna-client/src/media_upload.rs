@@ -71,7 +71,8 @@ pub async fn upload_public_post_blob_bytes(
 }
 
 /// POST an **already processed and sealed** blob's multipart parts and return
-/// the nest's hex content hash.
+/// its hex content hash — the client-computed `blake3` of the primary bytes,
+/// verified against the nest's echo.
 ///
 /// The one transport body every blob producer in this module shares, and the
 /// door for a producer that sealed its bytes *elsewhere* — notably
@@ -97,14 +98,24 @@ pub async fn upload_prepared_blob(
         tracing::warn!("blob upload: thumbnail failed (non-fatal): {e}");
     }
 
+    // The user signs this hash, so it is the client's own
+    // `blake3(bytes)` — the nest's reply is only an acknowledgement and a
+    // differing echo is refused (`security.md` § sign-over-cid).
+    let local_hash = primary.content_hash_hex();
     let resp = nest
         .post_multipart_blob(paths::blob::UPLOAD, primary.sidecar_cbor, primary.bytes)
         .await
         .map_err(|e| format!("blob upload: {e}"))?;
-    serde_json::from_slice::<serde_json::Value>(&resp)
+    let echoed = serde_json::from_slice::<serde_json::Value>(&resp)
         .ok()
         .and_then(|v| v.get("hash").and_then(|h| h.as_str()).map(String::from))
-        .ok_or_else(|| "blob upload response missing hash".to_string())
+        .ok_or_else(|| "blob upload response missing hash".to_string())?;
+    if !echoed.eq_ignore_ascii_case(&local_hash) {
+        return Err(format!(
+            "blob upload hash mismatch: nest echoed {echoed}, local blake3 is {local_hash}"
+        ));
+    }
+    Ok(local_hash)
 }
 
 /// Upload `file_path` as a `PublicPost` blob — reads the file, derives `name`
@@ -324,6 +335,44 @@ mod tests {
         // `process_and_seal` gives for these bytes, which is now true by
         // construction (it delegates here).
         assert!(payload.thumbnail.is_none());
+    }
+
+    /// The nest's upload reply is an acknowledgement, never the
+    /// source of the hash the user signs: an echo that differs from the
+    /// client-computed `blake3(bytes)` is refused.
+    #[tokio::test]
+    async fn upload_refuses_a_reply_hash_that_differs_from_the_local_blake3() {
+        use fauna_nest_http::{FakeNestContentApi, Verb, paths};
+        let nest = FakeNestContentApi::new();
+        nest.set_ok(
+            Verb::PostMultipartBlob,
+            paths::blob::UPLOAD,
+            format!(r#"{{"hash":"{}"}}"#, "ab".repeat(32)),
+        );
+        let err = super::upload_public_post_blob_bytes(&nest, "a.bin", b"attachment bytes")
+            .await
+            .expect_err("a mismatched echo must be refused");
+        assert!(err.contains("hash mismatch"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn upload_accepts_a_reply_hash_equal_to_the_local_blake3() {
+        use fauna_nest_http::{FakeNestContentApi, Verb, paths};
+        let data = b"attachment bytes";
+        let local = public_post_upload_payload(data)
+            .into_multipart_parts()
+            .0
+            .content_hash_hex();
+        let nest = FakeNestContentApi::new();
+        nest.set_ok(
+            Verb::PostMultipartBlob,
+            paths::blob::UPLOAD,
+            format!(r#"{{"hash":"{local}"}}"#),
+        );
+        let up = super::upload_public_post_blob_bytes(&nest, "a.bin", data)
+            .await
+            .expect("a matching echo is accepted");
+        assert_eq!(up.blob_hash, local);
     }
 
     #[test]

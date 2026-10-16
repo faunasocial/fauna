@@ -293,10 +293,46 @@ impl ThreadStore {
         let mut out: Vec<_> = inner
             .threads
             .values()
-            .map(|detail| summarize(detail, inner.unread.get(&detail.thread_id)))
+            .map(|detail| {
+                summarize(
+                    detail,
+                    inner.unread.get(&detail.thread_id),
+                    inner.launch_floor_ms,
+                )
+            })
             .collect();
         out.sort_by_key(|s| -s.last_activity_ms);
         out
+    }
+
+    /// Every thread's participants with their stored displays, newest thread
+    /// first by the thread list's own activity stamp — the correspondents half
+    /// of the recipient picker's completion (`conversations.md` § Where logic
+    /// lives → *Recipient suggestions*). Clones no messages.
+    pub fn correspondents(&self) -> Vec<(ThreadId, Vec<TypedAddress>, Vec<String>)> {
+        let inner = self.inner.read().unwrap();
+        let now_ms = fauna_core::data::Timestamp::now_millis_or_zero() as i64;
+        let mut out: Vec<_> = inner
+            .threads
+            .values()
+            .map(|d| {
+                let last = d
+                    .messages
+                    .last()
+                    .map(|m| bounded_activity_ms(m.timestamp_ms, now_ms, inner.launch_floor_ms))
+                    .unwrap_or(0);
+                (
+                    last,
+                    (
+                        d.thread_id.clone(),
+                        d.participants.clone(),
+                        d.participant_displays.clone(),
+                    ),
+                )
+            })
+            .collect();
+        out.sort_by_key(|(last, _)| -last);
+        out.into_iter().map(|(_, row)| row).collect()
     }
 
     /// The user has thread `id` open (or said so): nothing in it is unread any
@@ -1283,7 +1319,33 @@ fn launch_floor_ms() -> i64 {
     fauna_core::data::Timestamp::now_millis_or_zero() as i64
 }
 
-fn summarize(detail: &ThreadDetail, unread: Option<&HashSet<MessageId>>) -> ThreadSummary {
+/// How far past the observer's clock a message stamp may read before the thread
+/// list stops believing it. A FaunaMls message carries the sender's own clock, so
+/// an unbounded list stamp lets one correspondent pin a thread to the top of every
+/// app's list for ever; same cushion as the backup audit's
+/// observation fold (`fauna_client_backup::audit::OBSERVATION_MAX_FUTURE_SKEW_SECS`).
+pub(crate) const LAST_ACTIVITY_MAX_FUTURE_SKEW_MS: i64 = 5 * 60 * 1000;
+
+/// The stamp the thread list shows and sorts by: the message's own, unless it
+/// reads past `now + skew`, in which case it falls back to the run's launch floor.
+/// The floor, not `now`, so the bounded value is stable across snapshots (a moving
+/// stamp would make every state push differ) and a forged thread sorts below every
+/// honest message that arrives after launch. The stored message keeps the sender's
+/// claim; only what the list derives from it is bounded.
+fn bounded_activity_ms(stamp_ms: i64, now_ms: i64, launch_floor_ms: i64) -> i64 {
+    if stamp_ms > now_ms.saturating_add(LAST_ACTIVITY_MAX_FUTURE_SKEW_MS) {
+        launch_floor_ms
+    } else {
+        stamp_ms
+    }
+}
+
+fn summarize(
+    detail: &ThreadDetail,
+    unread: Option<&HashSet<MessageId>>,
+    launch_floor_ms: i64,
+) -> ThreadSummary {
+    let now_ms = fauna_core::data::Timestamp::now_millis_or_zero() as i64;
     let last = detail.messages.last();
     // Counted against the live messages rather than taken as the set's size: a
     // message that was evicted, deleted, or turned out to be the user's own
@@ -1303,7 +1365,9 @@ fn summarize(detail: &ThreadDetail, unread: Option<&HashSet<MessageId>>) -> Thre
         flavor: detail.flavor.clone(),
         label: detail.label.clone(),
         snippet: last.map(|m| snippet_preview(&m.body)).unwrap_or_default(),
-        last_activity_ms: last.map(|m| m.timestamp_ms).unwrap_or(0),
+        last_activity_ms: last
+            .map(|m| bounded_activity_ms(m.timestamp_ms, now_ms, launch_floor_ms))
+            .unwrap_or(0),
         unread_count,
         participant_count: detail.participants.len() as u32,
         // Projected by `ConversationsManager::snapshot` from the rail's
@@ -1400,6 +1464,37 @@ mod tests {
             ThreadFlavor::MlsGroup,
             None,
         )
+    }
+
+    /// A correspondent's future-dated stamp is bounded in the list: the summary
+    /// reads at most `now + skew`, so the thread sorts below an honestly stamped
+    /// recent one — while the stored message keeps the sender's claim intact.
+    #[test]
+    fn a_future_dated_message_cannot_pin_its_thread_to_the_top() {
+        let store = ThreadStore::new();
+        let now = fauna_core::data::Timestamp::now_millis_or_zero() as i64;
+        store.set_launch_floor_for_test(now - 10_000);
+        let forged = channel_thread(&store, "f0", vec![fauna("", 1)]);
+        let honest = channel_thread(&store, "f1", vec![fauna("", 2)]);
+        let mut far = msg("far", "from the future");
+        far.timestamp_ms = 4_102_444_800_000; // year 2100
+        store.append_message(&forged, far);
+        let mut recent = msg("recent", "hello");
+        recent.timestamp_ms = now - 1_000;
+        store.append_message(&honest, recent);
+
+        let list = store.list_summaries();
+        let forged_row = list.iter().find(|s| s.thread_id == forged).unwrap();
+        assert!(
+            forged_row.last_activity_ms <= now + LAST_ACTIVITY_MAX_FUTURE_SKEW_MS,
+            "the list stamp is bounded by the observer's clock"
+        );
+        assert_eq!(list[0].thread_id, honest, "the honest recent thread leads");
+        assert_eq!(
+            store.get(&forged).unwrap().messages[0].timestamp_ms,
+            4_102_444_800_000,
+            "the stored stamp is the sender's claim, kept intact"
+        );
     }
 
     // ── handle provenance: which rows a succession's tier 2 may dial ────────

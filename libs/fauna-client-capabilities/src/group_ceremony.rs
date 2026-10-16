@@ -1047,6 +1047,95 @@ mod tests {
         ));
     }
 
+    /// The ADMIT's revocation feed pin: the authority line is built from the deliver snapshot's own
+    /// `fauna.group.authority-revocation` rows. Cut that filter to an empty
+    /// iterator and the second half goes green on an entry (and tip mint)
+    /// signed by a device the authority has revoked. The first half keeps the
+    /// pin honest: the same deliver without the row admits.
+    #[test]
+    fn a_deliver_snapshot_revoking_the_entrys_authority_device_is_refused() {
+        let now = Timestamp(1_700_000_000);
+        let mut alice_cfg = GroupShareConfig::default();
+        let mut bob_cfg = GroupShareConfig::default();
+        let begun =
+            begin_group_share(&mut alice_cfg, &alice(), bob().actor_id(), now).expect("begin");
+        let scope = begun.scope_id;
+        ingest_group_frame(
+            &mut bob_cfg,
+            &bob().actor_id(),
+            &alice().actor_id(),
+            &begun.frame,
+            now,
+        )
+        .expect("offer");
+        let bob_reception = GroupReceptionKeyRecord::mint(now_ms(now));
+        let accept_frame =
+            build_group_accept(&mut bob_cfg, &bob(), &scope, &bob_reception, now).expect("accept");
+        ingest_group_frame(
+            &mut alice_cfg,
+            &alice().actor_id(),
+            &bob().actor_id(),
+            &accept_frame,
+            now,
+        )
+        .expect("accept ingest");
+        let delivered = build_group_deliver(
+            &mut alice_cfg,
+            &alice(),
+            &alices_device(),
+            alices_device_cert(),
+            &GroupReceptionKeyRecord::mint(now_ms(now)),
+            &scope,
+            &bob().actor_id(),
+            now,
+        )
+        .expect("deliver");
+        ingest_group_frame(
+            &mut bob_cfg,
+            &bob().actor_id(),
+            &alice().actor_id(),
+            &delivered.frame,
+            now,
+        )
+        .expect("deliver ingest");
+
+        // Without a revocation row the delivery admits.
+        admit_group_share(&bob_cfg, &bob(), &bob_reception, &scope, now)
+            .expect("the same deliver without a revocation row admits");
+
+        // Re-sign the deliver (Alice is the initiator) with a revocation of
+        // her own device — the one that authored Bob's entry and the tip mint —
+        // added to its snapshot.
+        let record = bob_cfg
+            .invited
+            .iter_mut()
+            .find(|r| r.scope_id == scope)
+            .expect("bob's invitation");
+        let envelope: fauna_core::encoding::EmbedAsBytes =
+            fauna_core::encoding::canonical_decode(&record.deliver).expect("recorded deliver");
+        let mut deliver =
+            verify_group_share_deliver(&envelope, &alice().actor_id()).expect("verify deliver");
+        let (key, revocation) = fauna_core::group_scope::sign_authority_revocation(
+            alice().signing_key(),
+            Vec::new(),
+            scope,
+            alices_device().verifying_key().to_bytes(),
+            5_000,
+        );
+        deliver.machinery_snapshot.push(GroupPlaneRow {
+            kind: KIND_GROUP_AUTHORITY_REVOCATION.into(),
+            key,
+            value: canonical_encode(&revocation).expect("encode").to_vec(),
+        });
+        let resigned = sign_group_share_deliver(&alice(), &deliver).expect("re-sign");
+        record.deliver = canonical_encode(&resigned).expect("encode").to_vec();
+
+        let err = admit_group_share(&bob_cfg, &bob(), &bob_reception, &scope, now)
+            .err()
+            .expect("a delivery signed by a revoked authority device admits nobody");
+        assert!(matches!(err, GroupCeremonyError::Payload(_)), "{err}");
+    }
+
     /// A declined invitation stays declined (monotone), and accepting it is
     /// refused.
     #[test]

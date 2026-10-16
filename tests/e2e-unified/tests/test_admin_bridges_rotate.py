@@ -28,12 +28,14 @@ compile-verified only) (``admin.md``
 § Approved-bridges roster; tracked internally, Phase 3).
 """
 
+import datetime
 import secrets
 import time
 
 import pytest
 
 from i18n.strings import S
+from helpers.audit_time import audit_time_near
 from helpers.bridge_enrollment import enroll_and_approve_bridge
 
 # `tui` added 2026-07-29 with the page itself (`apps/fauna-tui/src/admin/bridges.rs`),
@@ -177,3 +179,148 @@ def test_mda_rotation_hides_dkim_warning(admin_app, nest_instance):
     )
     # Cancel — this test asserts the dialog contents, not the rotation itself.
     admin_app.driver.click("admin-bridges-rotate-cancel-button")
+
+
+def _service_user(nest_instance, pubkey_hex: str) -> dict | None:
+    """The nest's own row for ``pubkey_hex`` (admin side-channel read via
+    ``fauna.bridges.list_service_users`` — an observation, not a mutation)."""
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    sk = nest_instance["admin"]["signing_key"]
+    with WsRpcAdminClient(
+        nest_instance["url"], actor_id=bytes(sk.verify_key), signing_key=bytes(sk)
+    ) as admin_ws:
+        rows = admin_ws.call("fauna.bridges.list_service_users", {})["service_users"]
+    return next(
+        (r for r in rows if bytes(r["ed25519_pubkey"]).hex() == pubkey_hex), None
+    )
+
+
+@pytest.mark.feature("admin-bridges")
+def test_cancelling_a_rotation_leaves_the_helper_approved(admin_app, nest_instance):
+    """Cancelling the rotate confirm changes nothing: the confirm closes, the
+    helper stays in the Approved roster, and the nest still holds it approved
+    under the same key (``mail-bridge-lifecycle.md`` § Service-user re-keying —
+    only the confirm revokes)."""
+    pubkey_hex = _seed_approved_bridge(nest_instance, "mta")
+    before = _service_user(nest_instance, pubkey_hex)
+    assert before and before["status"] == "approved", f"seed not approved: {before!r}"
+    admin_app.admin.navigate_bridges_pending()
+
+    aidx = _poll_card(admin_app, "admin-bridges-approved", pubkey_hex, want=True)
+    assert aidx is not None, f"approved bridge {pubkey_hex[:16]}… not in roster"
+    admin_app.driver.click("admin-bridges-approved-rotate-button", index=aidx)
+    deadline = time.time() + 10.0
+    while time.time() < deadline and not admin_app.driver.is_visible(
+        "admin-bridges-rotate-confirm"
+    ):
+        time.sleep(0.5)  # sleep-ok: poll interval of a deadline loop
+    assert admin_app.driver.is_visible("admin-bridges-rotate-confirm"), (
+        "the rotate button must open the confirm"
+    )
+
+    admin_app.driver.click("admin-bridges-rotate-cancel-button")
+    deadline = time.time() + 10.0
+    while time.time() < deadline and not admin_app.driver.is_absent(
+        "admin-bridges-rotate-confirm"
+    ):
+        time.sleep(0.5)  # sleep-ok: poll interval of a deadline loop
+    assert admin_app.driver.is_absent("admin-bridges-rotate-confirm"), (
+        "cancel must close the rotate confirm"
+    )
+
+    assert _find_card(admin_app, "admin-bridges-approved", pubkey_hex) is not None, (
+        "a cancelled rotation must leave the helper in the Approved roster"
+    )
+    after = _service_user(nest_instance, pubkey_hex)
+    assert after is not None and after["status"] == "approved", (
+        f"a cancelled rotation must leave the helper approved; the nest says {after!r} "
+        f"(error: {admin_app.driver.get_text('error-message') if admin_app.has_error() else 'none'})"
+    )
+    assert bytes(after["ed25519_pubkey"]) == bytes(before["ed25519_pubkey"]), (
+        "a cancelled rotation must leave the helper's key unchanged"
+    )
+
+
+@pytest.mark.feature("admin-bridges")
+def test_approved_row_shows_name_and_when_approved(admin_app, nest_instance):
+    """Each approved helper's row shows its friendly per-role name and when it
+    was approved (``admin.md`` § Approved-bridges roster) — a helper approved a
+    moment ago reads as the fixed local audit timestamp, never the empty
+    placeholder."""
+    made = datetime.datetime.now()
+    pubkey_hex = _seed_approved_bridge(nest_instance, "mta")
+    row = _service_user(nest_instance, pubkey_hex)
+    assert row and row.get("approved_at"), f"the nest stamped no approval time: {row!r}"
+    admin_app.admin.navigate_bridges_pending()
+
+    aidx = _poll_card(admin_app, "admin-bridges-approved", pubkey_hex, want=True)
+    assert aidx is not None, f"approved bridge {pubkey_hex[:16]}… not in roster"
+    name = (admin_app.driver.get_text("admin-bridges-approved-card-name", index=aidx) or "").strip()
+    assert name == S.admin.bridges_pending.name_mail, (
+        f"an MTA's approved row must be named {S.admin.bridges_pending.name_mail!r}, got {name!r}"
+    )
+    approved_at = (
+        admin_app.driver.get_text("admin-bridges-approved-approved-at", index=aidx) or ""
+    ).strip()
+    assert audit_time_near(approved_at, made), (
+        f"the approved row must say when it was approved (YYYY-MM-DD HH:MM, "
+        f"near {made:%Y-%m-%d %H:%M}), got {approved_at!r}"
+    )
+
+
+def _dns_dkim_values(admin_app, domain: str) -> list[str]:
+    """The DNS page's signing-record values for ``domain`` — the
+    ``admin-dns-record-value`` of every row whose name is
+    ``<selector>._domainkey.<domain>``."""
+    names = admin_app.driver.get_texts("admin-dns-record-name")
+    values = admin_app.driver.get_texts("admin-dns-record-value")
+    return sorted(
+        (values[i] or "").strip()
+        for i, name in enumerate(names)
+        if f"._domainkey.{domain}" in (name or "") and i < len(values)
+    )
+
+
+def _poll_dns_dkim(admin_app, domain: str) -> list[str]:
+    deadline = time.time() + 15.0
+    found: list[str] = []
+    while time.time() < deadline:
+        found = _dns_dkim_values(admin_app, domain)
+        if found and all(found):
+            return found
+        time.sleep(0.5)  # sleep-ok: poll interval of a deadline loop
+    return found
+
+
+@pytest.mark.feature("admin-bridges")
+def test_mta_rotation_leaves_the_dns_page_signing_record_unchanged(admin_app, nest_instance):
+    """After the mail-sending helper's key is rotated from the Approved roster,
+    each domain's signing record on the DNS page reads exactly as before —
+    nothing needs republishing (`mail-bridge-lifecycle.md` § Service-user
+    re-keying → *DKIM consequence of an MTA re-key — none*: the nest holds the
+    DKIM key, so the re-key touches no key and no published record)."""
+    domain = _add_mail_domain(nest_instance)
+    admin_app.admin.navigate_dns()
+    before = _poll_dns_dkim(admin_app, domain)
+    assert before and all(before), (
+        f"the DNS page shows no signing record for {domain!r} "
+        f"(error: {admin_app.driver.get_text('error-message') if admin_app.has_error() else 'none'})"
+    )
+
+    pubkey_hex = _seed_approved_bridge(nest_instance, "mta")
+    admin_app.admin.navigate_bridges_pending()
+    aidx = _poll_card(admin_app, "admin-bridges-approved", pubkey_hex, want=True)
+    assert aidx is not None, f"approved bridge {pubkey_hex[:16]}… not in roster"
+    admin_app.driver.click("admin-bridges-approved-rotate-button", index=aidx)
+    admin_app.driver.click("admin-bridges-rotate-confirm-button")
+    assert _poll_card(admin_app, "admin-bridges-approved", pubkey_hex, want=False) is None, (
+        "the rotated helper never left the Approved roster"
+    )
+
+    admin_app.admin.navigate_dns()
+    after = _poll_dns_dkim(admin_app, domain)
+    assert after == before, (
+        f"rotating the mail-sending helper must leave {domain!r}'s signing record "
+        f"on the DNS page unchanged; before={before!r} after={after!r}"
+    )

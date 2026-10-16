@@ -22,6 +22,7 @@ import signal
 import sys
 import tempfile
 import threading
+import time
 from collections import deque
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -49,6 +50,59 @@ SCREENSHOT_DIR = Path(__file__).parent.parent / "screenshots"
 # outlast launch+goto so it never times out first.
 _SESSION_LAUNCH_TIMEOUT_MS = 90_000
 _SESSION_NAV_TIMEOUT_MS = 90_000
+
+# Playwright's error when a navigation tears down the document an evaluate
+# runs in — "Page.evaluate: Execution context was destroyed, most likely
+# because of a navigation".
+_CONTEXT_DESTROYED = "Execution context was destroyed"
+
+
+def evaluate_across_navigation(page, script, arg, budget_s: float):
+    """`page.evaluate`, carried across a navigation that destroys its context.
+
+    For the driver's READINESS PROBES only (`POST /execute` with
+    `across_navigation`): "is the agent in this page yet?" has the same answer
+    sought on whichever document is current, so a probe that lands while the
+    SPA navigates is waited out — the new document's `load`, then the script
+    again — instead of failing the test's setup on where the navigation fell
+    (convention 14). Any other error is raised untouched, and a page still
+    navigating when `budget_s` runs out fails loudly with the count. A test
+    body's evaluate never comes here: a navigation under it is its business.
+    """
+    deadline = time.monotonic() + budget_s
+    retries = 0
+    while True:
+        try:
+            return page.evaluate(script, arg)
+        except Exception as exc:
+            if _CONTEXT_DESTROYED not in str(exc):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"{exc} — still navigating after {retries} wait(s) for the "
+                    f"new document over the {budget_s:.0f}s probe budget"
+                ) from exc
+            retries += 1
+            page.wait_for_load_state("load", timeout=remaining * 1000)
+
+
+def evaluate_that_navigates(page, script, arg):
+    """`page.evaluate` of an action that ENDS in a navigation by design (the
+    driver's reset: `applyPatch({__action: 'reset'})` sets `location.href`
+    inside the promise it returns, so the navigation can commit before the
+    result reaches Playwright). The context that navigation destroys under the
+    evaluate is the action's expected outcome, answered as `None`; any other
+    error is raised untouched. It does NOT wait for the new document: the
+    driver keeps its old timing and its navigation-tolerant probes (see
+    web.py `reset`)."""
+    try:
+        return page.evaluate(script, arg)
+    except Exception as exc:
+        if _CONTEXT_DESTROYED not in str(exc):
+            raise
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Global state managed by session lifecycle
@@ -944,7 +998,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
             elif route == "/execute":
                 req = self._read_json()
                 page = self._require_page(req)
-                result = page.evaluate(req["script"], req.get("arg"))
+                if req.get("across_navigation"):
+                    result = evaluate_across_navigation(
+                        page, req["script"], req.get("arg"),
+                        float(req.get("navigation_budget_s", 60)),
+                    )
+                elif req.get("navigates"):
+                    result = evaluate_that_navigates(page, req["script"], req.get("arg"))
+                else:
+                    result = page.evaluate(req["script"], req.get("arg"))
                 self._respond(200, {"result": result})
 
             elif route == "/element/fill":
@@ -1322,12 +1384,49 @@ def _forward_signal_to_group(signum, frame):
     os.kill(os.getpid(), signum)  # non-leader (manual run): plain default exit
 
 
+class BridgeServer(HTTPServer):
+    """`HTTPServer` defaults `allow_reuse_address = True`, and on Windows a
+    second such server binds a port a first one holds with no error at all — a
+    silent dual listener nothing can detect or retry on. Off, a held port is
+    always an `OSError`. A lone bridge's bind is unchanged."""
+
+    allow_reuse_address = False
+
+
+PORT_MAX_ATTEMPTS = 20  # mirrors flaui-bridge/PortPicker.cs::MaxAttempts
+
+
+def bind_fresh_port(draw):
+    """Bind a `BridgeServer` on a port from `draw()`, redrawing on a bind
+    conflict up to `PORT_MAX_ATTEMPTS` times (convention 10, the bounded
+    distinct-port retry). Returns `(server, port)`; the caller reports the
+    port only after this returns."""
+    last = None
+    tried = set()
+    for _ in range(PORT_MAX_ATTEMPTS):
+        port = draw()
+        if port in tried:
+            continue  # a redraw of a port already found taken spends an attempt, not a bind
+        try:
+            return BridgeServer(("127.0.0.1", port), BridgeHandler), port
+        except OSError as exc:
+            last = exc
+            tried.add(port)
+    raise RuntimeError(
+        f"no free bridge port after {PORT_MAX_ATTEMPTS} attempts (tried {sorted(tried)})"
+    ) from last
+
+
 def main():
     if os.name == "posix":
         signal.signal(signal.SIGTERM, _forward_signal_to_group)
         signal.signal(signal.SIGINT, _forward_signal_to_group)
-    port = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else randint(18000, 19000)
-    server = HTTPServer(("127.0.0.1", port), BridgeHandler)
+    if "--port" in sys.argv:
+        # A caller-chosen port is theirs to own: one attempt, a conflict is loud.
+        port = int(sys.argv[sys.argv.index("--port") + 1])
+        server = BridgeServer(("127.0.0.1", port), BridgeHandler)
+    else:
+        server, port = bind_fresh_port(lambda: randint(18000, 19000))
     print(f"BRIDGE_PORT={port}", flush=True)
     server.serve_forever()
 

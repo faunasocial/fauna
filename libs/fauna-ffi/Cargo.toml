@@ -26,16 +26,16 @@ default = ["store-safe", "payments", "zaps", "p2p-share"]
 # lands here (kept by the kids app) or in `store-safe`'s own tail (excised),
 # never in a second copy. The kids build is
 # `--no-default-features --features kids-safe,kids-floor`.
-kids-safe = ["accounts-registry", "pairing", "value-format", "moderation-badge", "mime", "render", "folders", "folders-author", "logs", "conversations-session", "markdown-authoring", "backup-destinations", "backup-audit", "task-delegation", "deployment-seed", "host-address", "muted-keywords", "sync-prefs", "member-review", "contact-overlays", "recovery-ceremony", "recovery-aftermath", "filter-marks", "spam-threshold-override", "custody", "snapshots-immediate-delete", "profile-client", "nest-trust", "drafts", "labeler", "qr-render", "personalization", "sync-engine-host", "sync-agent-provisioning", "push-subscription", "account-runtime"]
+kids-safe = ["accounts-registry", "pairing", "value-format", "moderation-badge", "mime", "render", "folders", "folders-author", "logs", "conversations-session", "markdown-authoring", "backup-destinations", "backup-audit", "task-delegation", "deployment-seed", "host-address", "muted-keywords", "sync-prefs", "member-review", "contact-overlays", "recovery-ceremony", "recovery-aftermath", "filter-marks", "spam-threshold-override", "custody", "snapshots-immediate-delete", "profile-client", "nest-trust", "drafts", "labeler", "qr-render", "personalization", "sync-engine-host", "sync-agent-provisioning", "push-subscription", "account-runtime", "sessions"]
 # Every app surface that is NOT a gated-feature-registry member. This is the
 # App-Store escape-hatch flavor's feature set: the kids complement plus the
 # planes the kids flavor excises — the feed and posting (`feed-badge`,
-# `feed-rules`, `feed-manager`, the feed's source-badge `search`), discovery
-# (`search-manager`), every bridge (`mail-admin`, `mail-import`,
+# `feed-rules`, `feed-manager`, `feed-client`, the feed's source-badge
+# `search`), discovery (`search-manager`, `search-client`), every bridge (`mail-admin`, `mail-import`,
 # `atproto-settings`, `nostr-npub-confirm`), web publishing (`web-content`),
 # monetization (`subscriptions-author`) and third-party anything
 # (`connected-apps`, `labeler-catalog`).
-store-safe = ["kids-safe", "feed-badge", "feed-rules", "feed-manager", "search", "search-manager", "mail-admin", "mail-import", "atproto-settings", "nostr-npub-confirm", "web-content", "subscriptions-author", "connected-apps", "labeler-catalog"]
+store-safe = ["kids-safe", "feed-badge", "feed-rules", "feed-manager", "feed-client", "search", "search-manager", "search-client", "mail-admin", "mail-import", "atproto-settings", "nostr-npub-confirm", "web-content", "subscriptions-author", "connected-apps", "labeler-catalog"]
 # The kids flavor's compiled-in content floor (`family-safety.md` § The account
 # age band → the kids-app bullet, item (4)): composes
 # `fauna_core::obligation::KIDS_CONTENT_FLOOR` — the four guardian categories at
@@ -43,7 +43,10 @@ store-safe = ["kids-safe", "feed-badge", "feed-rules", "feed-manager", "search",
 # (src/family.rs `render_guardian_policy`). Off everywhere but the kids build:
 # it is an ADDITION a flavor asks for, not an excision, so it sits in no
 # `default`. Guardian Notify is deliberately not floored. Pure cfg gate — the
-# constant is ungated data in fauna-core, so no dep is forwarded.
+# constant is ungated data in fauna-core, so no dep is forwarded. Being the one
+# feature only the kids build turns on, it also selects the kids bundle's iOS
+# App ID for the attested age claim (src/family.rs `ios_age_attestation_app_id`
+# — App Attest signs under the running bundle's App ID).
 kids-floor = []
 # The community-labeler WASM executor FFI (src/labeler.rs — `run_wasm_labeler`
 # over the shared fauna-labeler runtime; labeler-registry design §6). Default-on
@@ -119,13 +122,46 @@ zaps = ["payments", "fauna-protocol/zaps", "fauna-client-nostr/zaps"]
 # `--no-default-features` flavor `just e2e-ffi` builds pulls it from nowhere
 # else. Names `fauna-client-capabilities` for the same reason: the `ext.*`
 # grant builder and the principal's row sealer run its mint and its open.
-# Names `fauna-bridge-nostr` for `fauna_harness_nostr_gift_wrap_dm`: the far
-# Nostr user's gift wrap is built by the in-tree `nip17::wrap_dm`, and no app
+# Names `fauna-bridge-nostr` for the `fauna_harness_nostr_*` exports: the far
+# Nostr user's gift wrap (`nip17::wrap_dm`), an outside-held key's signature
+# (`signing`) and its NIP-19 faces are built by the in-tree crate, and no app
 # flavor links that crate (the nest holds the custodial key, not the app).
 # Names `fauna-client-share` for `fauna_harness_create_private_link`: the private
 # share link a viewer journey opens is minted and registered by the shared
 # `ShareClient`, which no app flavor names directly yet.
-e2e-harness = ["sync-engine-host", "dep:fauna-credential-store", "dep:fauna-client-capabilities", "dep:fauna-bridge-nostr", "dep:fauna-client-share"]
+# Turns on `mail-admin` + `mail-import` for `fauna_harness_mail_import`: an
+# app-less import runs the very `MailImportMachine` and native source connector
+# the apps build (`rpc_glue::build_mail_import_machine`), so the harness flavor
+# needs the same two app surfaces the default flavor already carries — plus
+# `fauna-mail/test-helpers`, because `just e2e-ffi` builds `--release` and the
+# source-IMAP trust seed a harness source server is reached through is gated
+# `debug_assertions OR test-helpers` (the forward `test-helpers` below makes too).
+# Turns on the consent machine (`dep:fauna-atproto-settings-machine`) and
+# `fauna-client-folders/mls` for `fauna_harness_answer_consent` /
+# `fauna_harness_serve_set`: an app-less approve runs the machine's shared
+# `answer_consent` over the very seams tui wires, and an app-less serve flip
+# runs `FoldersAuthor`, whose unserve tail revokes the principals' folder read
+# twins only under `mls`. `dep:fauna-archive-import-machine` for
+# `fauna_harness_archive_import`: the shared archive-import wizard an app-less
+# witness runs over a fixture archive.
+# Names `fauna-client-atproto` for `fauna_harness_atproto_rotation_key` /
+# `fauna_harness_atproto_retire`: a held user rotation key and the PLC tombstone
+# it signs come from the very keygen and retirement steps the apps run.
+# Names `fauna-feed` for `fauna_harness_topic_train` /
+# `fauna_harness_cues_record_and_flush` / `fauna_harness_topic_publish_model`
+# and the owner-side opens: a post is marked, a cue rollup folded and flushed,
+# and a topic's vocabulary rebuilt for publish, by the apps' own `FeedManager`,
+# which the minimal flavor `just e2e-ffi` builds pulls from nowhere else.
+# Names `fauna-client-dns/test-helpers` and `fauna-client-pair` for
+# `fauna_harness_dns_dispatch`: an app-less managed issue runs the apps' own
+# `DnsManagementMachine` through the shared builder, whose e2e fake DNS provider
+# and ACME directory seed are gated `debug_assertions OR test-helpers` (this
+# flavor builds `--release`), and aims the order at the bound nest the way the
+# apps' glue does (`resolve_this_nest_id`). Names `fauna-core/test-helpers`
+# for the seed's managed-path mirror (`authoritative_dns::send_txt_update`, gated
+# the same way; `fauna-client-dns/test-helpers` cannot forward it — fauna-wasm
+# turns that feature on for wasm32).
+e2e-harness = ["sync-engine-host", "dep:fauna-iroh", "dep:fauna-feed", "dep:fauna-archive-import-machine", "dep:fauna-credential-store", "dep:fauna-client-capabilities", "dep:fauna-bridge-nostr", "dep:fauna-client-share", "dep:fauna-atproto-settings-machine", "dep:fauna-client-atproto", "fauna-client-folders/mls", "mail-admin", "mail-import", "fauna-mail/test-helpers", "fauna-client-dns/test-helpers", "fauna-core/test-helpers", "dep:fauna-client-pair"]
 labeler = ["dep:fauna-labeler", "dep:serde_bare", "fauna-mail/parser"]
 # The personalization surface's community-labeler-catalog page FFI
 # (src/labeler_catalog.rs — the `LabelerCatalogMachine` browse /
@@ -234,6 +270,9 @@ backup-audit = [
     "backup-destinations",
     "dep:fauna-client-backup",
     "dep:fauna-client-pair",
+    # The recovery result's lines are resolved before they cross
+    # (`backup_recover_from_destination`).
+    "dep:fauna-i18n",
     "fauna-core/uniffi",
 ]
 # (The `backup-lease` feature — the lease wiring for the in-app segment-backup
@@ -270,9 +309,10 @@ task-delegation = ["fauna-core/uniffi", "dep:fauna-client-delegation", "account-
 # server with no onboarding/recovery surface (same dead-code rationale as
 # `backup-destinations`). Pulls `fauna-client-pair` for the bound-nest-id
 # comparand and `account-runtime` for the account-store handle the custody leg
-# and the rotation drive write through. `box-recovery.md` § The plane-era
+# and the rotation drive write through, and `value-format` for the
+# `LocalizedText` the custody warning crosses as. `box-recovery.md` § The plane-era
 # recovery floor.
-deployment-seed = ["dep:fauna-client-pair", "account-runtime"]
+deployment-seed = ["dep:fauna-client-pair", "account-runtime", "value-format"]
 # The client host-address reporting FFI (src/host_address.rs — the native twin of
 # linux's direct drive + the web `reportHostAddress` binding: classify the
 # dial-address, never publish a private/LAN one, report the public IP via
@@ -433,6 +473,15 @@ filter-marks = ["account-runtime"]
 # Default-on: the excised flavor is what a build FLAVOR asks for, never the
 # default posture. The Go mail-bridge build drops it (no settings UI on a
 # server), which also keeps the checked-in Go binding byte-identical.
+#
+# The Sessions page's face (src/sessions.rs — `ui/sessions.md` § Where logic
+# lives). Pulls `folders` for the Devices machine that names device-minted
+# sessions, and `recovery-ceremony` for the lock's confirm word, whose home is
+# `fauna_client_recovery::ceremony` (which also brings `accounts-registry`, the
+# `LocalizedText` registration and `fauna-i18n`). Kept by the kids flavor: a
+# child's account is signed in somewhere too. Dropped by the Go mail-bridge
+# build (no settings UI on a server), keeping its binding byte-identical.
+sessions = ["folders", "recovery-ceremony"]
 custody = [
     "dep:fauna-client-custody",
     "dep:fauna-client-capabilities",
@@ -576,7 +625,7 @@ subscriptions-author = []
 # Forwards `fauna-core/uniffi` so SourceGlyph gets its `uniffi::Enum` registration
 # (also on via the non-optional `fauna-conversations`/uniffi dep, but stated here for
 # self-containment, like `render`).
-feed-badge = ["fauna-core/uniffi"]
+feed-badge = ["fauna-core/uniffi", "dep:fauna-feed"]
 # The create-feed rule-builder *presentation* FFI (src/feed_rules.rs — the
 # 11-type picker catalog + input-kind classification, the added-rule summary
 # chip, the required/excluded toggle label). Default-on so the Apple / Windows /
@@ -586,11 +635,9 @@ feed-badge = ["fauna-core/uniffi"]
 # the SAME reason as `feed-badge` / `value-format` / `search`: every export
 # returns a `fauna_core` LocalizedText, for which uniffi-bindgen-go emits an
 # uncompilable bare `fauna_core` cross-namespace import. The bridge has no
-# create-feed surface. Note the *encoding* half (`encode_filter_rule` /
-# `normalize_filter_rules`, src/feed_client.rs) stays UNGATED and does cross to Go —
-# it returns only built-in types. fauna-client-feed is already a non-optional
-# dep, so this gates only the module's compilation.
-feed-rules = ["fauna-core/uniffi"]
+# create-feed surface. (The *encoding* half — `encode_filter_rule` /
+# `normalize_filter_rules`, src/feed_client.rs — rides `feed-client` below.)
+feed-rules = ["fauna-core/uniffi", "dep:fauna-client-feed"]
 # The shared stateful Feed-page manager façade (src/feed_manager.rs — FfiFeedManager
 # over fauna_feed::FeedManager<Arc<NestClient>> + FfiNestClient::feed_manager). Default-on
 # so the Apple/Android/Windows app FFI exports it for the Feed page (the 5-client lift
@@ -603,7 +650,7 @@ feed-rules = ["fauna-core/uniffi"]
 # the snapshot types get their `uniffi::Record`/`Enum` registration (it transitively enables
 # `fauna-core/uniffi` for the embedded `LocalizedText`); `fauna-feed` itself stays a plain
 # (non-uniffi) dep for src/feed.rs's gate-free `classifySources` badge export.
-feed-manager = ["fauna-feed/uniffi"]
+feed-manager = ["dep:fauna-feed", "fauna-feed/uniffi"]
 # The shared, stateful Search page (src/search_manager.rs — the FfiSearchManager
 # façade over fauna_client_search::SearchManager<Arc<NestClient>> +
 # FfiNestClient::search_manager). Default-on so the Apple/Android/Windows app FFI
@@ -621,7 +668,23 @@ feed-manager = ["fauna-feed/uniffi"]
 # stays a plain (non-uniffi) dep for src/search.rs's gate-free render + paging faces
 # and src/search_client.rs's FfiSearchClient, both of which the un-migrated legs
 # still depend on.
-search-manager = ["fauna-client-search/uniffi"]
+search-manager = ["dep:fauna-client-search", "fauna-client-search/uniffi", "fauna-client-search/query"]
+# The feed plane's thin RPC client (src/feed_client.rs — FfiFeedClient over the
+# `fauna.feed.*` CRUD/query/contributor kinds, `FfiNestClient::feed`) and the
+# filter-rule codec faces beside it (`encode_filter_rule` /
+# `normalize_filter_rules`). In `store-safe`'s tail, so the KIDS flavor
+# excises it: a kids artifact carries no feed wire sender and — because it is
+# what pulls `fauna-client-feed`, the crate that carries the plane's
+# kind-catalog entries (`fauna-protocol/feed`) — no `fauna.feed.*` text
+# (`dynamic-features.md` § What "completely compiled away" means, criterion
+# 2). Off in the Go mail-bridge `--no-default-features` build as well: no Go
+# code calls either face.
+feed-client = ["dep:fauna-client-feed"]
+# The search plane's thin RPC client (src/search_client.rs — FfiSearchClient
+# over the full-text query kind, `FfiNestClient::search`). Same placement and
+# reason as `feed-client`: kids excises it, and with it `fauna-client-search`
+# and the `fauna.search.*` catalog text it carries.
+search-client = ["dep:fauna-client-search", "fauna-client-search/query"]
 # The markdown authoring-toolbar helper (src/markdown.rs `wrap_markdown_selection`):
 # wraps a selection in `*`/`**`/`` ` `` markers, keeping edge whitespace OUTSIDE the
 # markers. Default-on so the Apple/Android/Windows app FFI exports it for their
@@ -637,7 +700,12 @@ markdown-authoring = []
 # build drops it — the bridge has no use for the client web machine, and re-exporting
 # fauna-client-web's uniffi view types makes uniffi-bindgen-go emit uncompilable bare
 # cross-namespace imports (same Go-incompatibility reason as `mail-admin` / `pairing`).
-web-content = ["dep:fauna-client-web"]
+# It is also the web plane's switch for the two senders that live outside
+# this crate — the Devices page's website hint (`fauna-devices-machine/web`)
+# and the sync engine's sealed-file prune (`fauna-sync-engine/web`) — forwarded
+# from HERE (rule (b)), so the kids flavor, which excises `web-content`,
+# carries no `fauna.web.*` sender or catalog text at all.
+web-content = ["dep:fauna-client-web", "fauna-devices-machine?/web", "fauna-sync-engine/web"]
 # The Devices-page folder creation wizard machine (src/folders.rs). Default-on
 # so the Apple/Android/Windows app FFI exports it, but gated so the Go
 # mail-bridge `--no-default-features` build drops it — the bridge has no use for
@@ -692,7 +760,7 @@ sync-engine-host = ["fauna-sync-engine/engine-lifecycle", "dep:tracing", "accoun
 account-runtime = ["dep:fauna-client-account-runtime", "dep:tracing", "accounts-registry", "fauna-core/local-clock"]
 # The control-inverted on-demand host (src/file_provider_host.rs) — the
 # hydration host apple's `NSFileProviderReplicatedExtension` calls
-# (`on-demand-files.md` § Apple File Provider binding) and, through its
+# (`on-demand-files-apple.md` § Apple File Provider binding) and, through its
 # owned-tree constructor `app_dead_owned_tree`, android's SAF
 # `DocumentsProvider` (§ Android SAF DocumentsProvider binding). Its own
 # default-OFF feature rather than a rider on `sync-engine-host`'s default-on
@@ -772,14 +840,14 @@ folders-author = ["fauna-client-folders/mls", "conversations-session", "dep:faun
 # (not a `fauna_core` type), so it carries none of this feature's own
 # Go-incompatibility; harmless to bundle since the Go build already turns the
 # whole feature off.
-value-format = ["fauna-core/local-clock", "dep:fauna-client-features", "dep:fauna-client-region", "dep:fauna-client-status"]
+value-format = ["fauna-core/local-clock", "fauna-client-notifications/local-clock","dep:fauna-client-features", "dep:fauna-client-region", "dep:fauna-client-status"]
 # Shared search-result card formatters (src/search.rs — content_type_badge +
 # clean_snippet over fauna_client_search::render). Default-on for the
 # Apple/Android/Windows app FFI; gated out of the Go mail-bridge
 # `--no-default-features` build for the same reason as `value-format`
 # (`search_content_type_badge` returns a `fauna_core` LocalizedText →
 # uniffi-bindgen-go cross-namespace import). The bridge has no search surface.
-search = []
+search = ["dep:fauna-client-search"]
 # Shared content-label badge presentation (src/content_category.rs —
 # content_label_style over fauna_core::content_category). Default-on for the
 # Apple/Android/Windows app FFI (replaces the per-app category→label/icon/
@@ -991,6 +1059,12 @@ test-helpers = [
     # (`account-runtime` feature), so the weak `?/` form is required — a plain
     # `/` would turn the dependency on unconditionally.
     "fauna-client-account-runtime?/e2e-agent",
+    # The custody owner's send-again poke (`FfiNestClient::custody_owner_resend_now`,
+    # the `custody_owner_resend_now` agent command's mechanism) — same
+    # rationale: `fauna_client_custody::spawn_owner_resend` gates on
+    # `debug_assertions OR e2e-agent`, and the dep is optional (`custody`), so
+    # the weak `?/` form.
+    "fauna-client-custody?/e2e-agent",
     # The conversations push-arm kill-switch (`conv_push_source`'s
     # `FAUNA_E2E_SUPPRESS_CONV_PUSH` read) — the layer-5 missed-push receive
     # proof's only lever on the four UniFFI apps (macos, ios, windows, android),
@@ -1051,7 +1125,7 @@ crate-type = ["lib", "staticlib", "cdylib"]
 
 [build-dependencies]
 # The one derivation of `FAUNA_BUILD_COMMIT` (`ui/status.md` § State & data shape,
-# the build leg) — stamped so `fauna_ffi_build_commit()` names the commit the
+# the build leg) — stamped so `status_text` names the commit the
 # native app's shared Rust was compiled from.
 fauna-build-commit = { path = "../fauna-build-commit" }
 
@@ -1153,7 +1227,10 @@ fauna-client-config = { path = "../fauna-client-config" }
 fauna-client-personalization = { path = "../fauna-client-personalization" }
 fauna-client-delegation = { path = "../fauna-client-delegation", optional = true }
 fauna-client-email = { path = "../fauna-client-email" }
-fauna-client-feed = { path = "../fauna-client-feed" }
+# The feed plane's client crate — optional, pulled by `feed-client`,
+# `feed-rules` and (through `fauna-feed`) `feed-manager`, so a build without
+# the feed plane (kids) links none of it nor its kind-catalog entries.
+fauna-client-feed = { path = "../fauna-client-feed", optional = true }
 # Shared post-source classification (`classify_sources` / `SourceKind`), wrapped
 # by src/feed.rs as the `classifySources` UniFFI façade returning a flat
 # `FfiSourceBadge { id, label, glyph }` list (mirroring web's `fauna_wasm::classifySources`
@@ -1166,8 +1243,9 @@ fauna-client-feed = { path = "../fauna-client-feed" }
 # the default-on `feed-badge` feature (above) — the Go mail-bridge `--no-default-features`
 # build drops it. Plain (non-uniffi) dep: `fauna-feed`'s own types never cross the FFI
 # boundary (only the local `FfiSourceBadge` does); `feed-badge` forwards
-# `fauna-core/uniffi` for SourceGlyph's registration.
-fauna-feed = { path = "../fauna-feed" }
+# `fauna-core/uniffi` for SourceGlyph's registration. Optional — pulled only by
+# `feed-badge` / `feed-manager`, since it carries the feed plane's senders.
+fauna-feed = { path = "../fauna-feed", optional = true }
 # Devices/Backups page folder control plane — WS-RPC twins of the deleted
 # `/api/v1/file-sets/*` HTTP (`fauna.folders.*`: list/create/update/delete/
 # devices/members.{add,list,remove}/schedule.set/lease.*). Wrapped by
@@ -1217,8 +1295,9 @@ fauna-client-spam = { path = "../fauna-client-spam" }
 # Full-text search transport (fauna.search.query), wrapped over UniFFI as
 # FfiSearchClient in src/search_client.rs so Apple / Windows / Android reach the
 # WS-RPC kind the Rust-native Linux app calls directly, off the legacy
-# GET /api/v1/search HTTP twin.
-fauna-client-search = { path = "../fauna-client-search" }
+# GET /api/v1/search HTTP twin. Optional — pulled by `search-client`, `search`
+# and `search-manager`, so the kids flavor links no search sender.
+fauna-client-search = { path = "../fauna-client-search", optional = true }
 # Push-subscription-management transport (fauna.push.{vapid_key,subscribe,
 # unsubscribe}), wrapped over UniFFI as FfiPushClient in src/push_client.rs so
 # Apple / Windows / Android manage their device push subscriptions over the
@@ -1286,14 +1365,6 @@ fauna-client-notifications = { path = "../fauna-client-notifications" }
 # Fauna-native inbox delivery-queue drain (`fauna.inbox.{fetch,ack}`), wrapped
 # by src/inbox_client.rs. The transport migration of the HTTP inbox-GET twin.
 fauna-client-inbox = { path = "../fauna-client-inbox" }
-# Bluesky-native thread view (`bluesky.feed.thread`), wrapped by
-# src/bluesky_client.rs as FfiBlueskyClient so Apple / Windows / Android reach
-# the one protocol-unique consume-side Bluesky kind the Rust-native Linux app
-# calls directly, off the deleted GET /api/v1/bluesky/{feed/thread,thread} HTTP
-# twins. Built-in/projected types only over the FFI boundary, so the Go
-# mail-bridge `--no-default-features` build emits it cleanly (same as
-# fauna-client-inbox/-search).
-fauna-client-bluesky = { path = "../fauna-client-bluesky" }
 # Moderation scan-report feedback (`fauna.moderation.scan_report`), wrapped by
 # src/moderation_client.rs as FfiModerationClient so Android's client-side
 # scan-label batches reach the nest over the WS-RPC kind, off the deleted POST
@@ -1307,6 +1378,9 @@ fauna-client-moderation = { path = "../fauna-client-moderation" }
 # wrap (tracked internally).
 fauna-client-dns = { path = "../fauna-client-dns", features = ["uniffi"], optional = true }
 fauna-client-mail-settings = { path = "../fauna-client-mail-settings", features = ["uniffi", "rpc-glue"], optional = true }
+# The archive-import wizard's machine and its native WS-RPC seam — `e2e-harness`
+# only (`fauna_harness_archive_import`); no app reaches it through this crate yet.
+fauna-archive-import-machine = { path = "../fauna-archive-import-machine", features = ["rpc-glue"], optional = true }
 # The user-settings Linked-nests machine (fauna.pair.* over the bearer
 # connection), exported over UniFFI in src/pairing.rs.
 # Also carries the audit's two native seams (`native_backup_destination_connector`
@@ -1343,7 +1417,7 @@ fauna-log = { path = "../fauna-log", features = ["uniffi"], optional = true }
 # (Path dep, not `workspace = true`: the workspace-level entry implies
 # default features, and a member cannot override that to false.)
 fauna-bridge-atproto = { path = "../fauna-bridge-atproto", default-features = false, features = ["uniffi"] }
-# The e2e harness's gift-wrap builder only (the `e2e-harness` feature above).
+# The e2e harness's Nostr exports only (the `e2e-harness` feature above).
 fauna-bridge-nostr = { workspace = true, optional = true }
 fauna-protocol = { workspace = true }
 fauna-provisioning = { path = "../fauna-provisioning", features = ["uniffi"] }
@@ -1386,7 +1460,7 @@ fauna-labeler-catalog-machine = { path = "../fauna-labeler-catalog-machine", fea
 fauna-atproto-settings-machine = { path = "../fauna-atproto-settings-machine", features = ["uniffi", "rpc-glue"], optional = true }
 # Page-level connected-apps machine (the roster / Requests tray / Connect an
 # app). UniFFI re-export lives in src/connected_apps.rs; gated by `connected-apps`.
-fauna-client-connected-apps = { path = "../fauna-client-connected-apps", features = ["uniffi", "rpc-glue"], optional = true }
+fauna-client-connected-apps = { path = "../fauna-client-connected-apps", features = ["uniffi", "rpc-glue", "local-clock"], optional = true }
 # The app-wide critical-alerts registry (critical-alerts.md) feeder #1 (the
 # atproto-settings machine's genesis-seniority custody check) posts to.
 # src/critical_alerts.rs exposes the process-wide singleton — one native
@@ -1440,10 +1514,10 @@ fauna-launch-machine = { path = "../fauna-launch-machine", features = ["uniffi"]
 # selection fn (priority #2: one selection rule across nest/clients/bridge).
 # `spam` carries the per-user spam disposition seam (`decide_spam_disposition`,
 # re-exported in src/mail.rs) AND the WASM-safe `spam-classifier` it implies —
-# the on-device scorer (`weighted_bayesian_milli_for_model`, `BayesianKnobs`) the
-# native apps + the MDA-Go run at the search-equivalent position
-# (`mail-spam.md` § Scoring placement). Declared explicitly rather than left to
-# transitive feature unification, since this crate re-exports the surface.
+# the shared scorer (`weighted_bayesian_milli_for_model`, `BayesianKnobs`, exported
+# over UniFFI by `fauna_mail` itself) the MDA-Go runs at the search-equivalent
+# position (`mail-spam.md` § Scoring placement). Declared explicitly rather than
+# left to transitive feature unification.
 # `msgid-mint` exports `new_fauna_msgid_local` — the Go submission server's
 # Message-ID stamp shares the self-describing mint with the native compose
 # path (family-safety.md § The mail gate; no Go reimplementation).

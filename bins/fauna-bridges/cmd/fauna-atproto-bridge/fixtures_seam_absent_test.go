@@ -9,6 +9,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/atprotocrawl"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/atprotolex"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/safefetch"
 )
@@ -37,6 +38,17 @@ func TestPermissionSetFixtureSeamIsInertInProduction(t *testing.T) {
 	real := &inertProbeResolver{}
 	if got := permissionSetFixtureWrap(real); got != atprotolex.DocumentResolver(real) {
 		t.Fatalf("production build must return the resolver it was given whatever the environment says, got %T", got)
+	}
+}
+
+// Spelled out for the same reason as its siblings above.
+const productionInertCrawlRelayEnv = "FAUNA_ATPROTO_RELAY_URL"
+
+func TestCrawlRelaySeamIsInertInProduction(t *testing.T) {
+	t.Setenv(productionInertCrawlRelayEnv, "http://127.0.0.1:4321")
+	got := crawlRelays()
+	if len(got) != len(atprotocrawl.DefaultRelays) || got[0] != atprotocrawl.DefaultRelays[0] {
+		t.Fatalf("production build must announce to the hard-coded relays whatever the environment says, got %v", got)
 	}
 }
 

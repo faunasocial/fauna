@@ -21,7 +21,7 @@ use fauna_core::secret::SecretString;
 use fauna_protocol::atproto_pds::{AtprotoGrantInfo, AtprotoSessionInfo};
 use fauna_protocol::nostr::BunkerAppEntry;
 use fauna_protocol::oauth_consent::BlockedClient;
-use fauna_protocol::principals::PrincipalInfo;
+use fauna_protocol::principals::{OracleOp, PrincipalInfo};
 use fauna_protocol::{RpcErrorClass, RpcRequester};
 
 use super::{ConnectedAppsApiError, ConnectedAppsNestApi};
@@ -71,6 +71,12 @@ where
             .map_err(map_roster_err)?
             .principals)
     }
+    async fn do_list_principal_ops(
+        &self,
+        id: Vec<u8>,
+    ) -> Result<Vec<OracleOp>, ConnectedAppsApiError> {
+        Ok(self.apps.list_principal_ops(id).await.map_err(map_err)?.ops)
+    }
     async fn do_revoke_principal(&self, id: Vec<u8>) -> Result<bool, ConnectedAppsApiError> {
         Ok(self
             .apps
@@ -95,10 +101,11 @@ where
         &self,
         id: Vec<u8>,
         approved: bool,
+        folder: Option<i64>,
     ) -> Result<bool, ConnectedAppsApiError> {
         let reply = self
             .atproto
-            .resolve_consent(id, approved)
+            .resolve_consent(id, approved, folder)
             .await
             .map_err(map_err)?;
         Ok(reply.resolved)
@@ -172,6 +179,14 @@ where
     }
     async fn do_list_bunker_apps(&self) -> Result<Vec<BunkerAppEntry>, ConnectedAppsApiError> {
         self.bunker.list().await.map_err(map_err)
+    }
+    async fn do_external_apps_enabled(&self) -> Result<bool, ConnectedAppsApiError> {
+        Ok(self
+            .atproto
+            .list_app_credentials()
+            .await
+            .map_err(map_err)?
+            .external_apps_enabled)
     }
     async fn do_revoke_bunker_app(&self, id: i64) -> Result<bool, ConnectedAppsApiError> {
         self.bunker.revoke(id).await.map_err(map_err)
@@ -264,6 +279,12 @@ mod native {
         async fn revoke_principal(&self, id: Vec<u8>) -> Result<bool, ConnectedAppsApiError> {
             self.do_revoke_principal(id).await
         }
+        async fn list_principal_ops(
+            &self,
+            id: Vec<u8>,
+        ) -> Result<Vec<OracleOp>, ConnectedAppsApiError> {
+            self.do_list_principal_ops(id).await
+        }
         async fn list_pending_consents(
             &self,
         ) -> Result<Vec<NestConsentRow>, ConnectedAppsApiError> {
@@ -273,8 +294,9 @@ mod native {
             &self,
             id: Vec<u8>,
             approved: bool,
+            folder: Option<i64>,
         ) -> Result<bool, ConnectedAppsApiError> {
-            self.do_resolve_consent(id, approved).await
+            self.do_resolve_consent(id, approved, folder).await
         }
         async fn mint_grant(&self, grant_blob: Vec<u8>) -> Result<(), ConnectedAppsApiError> {
             self.do_mint_grant(grant_blob).await
@@ -309,6 +331,9 @@ mod native {
         }
         async fn list_grants(&self) -> Result<Vec<AtprotoGrantInfo>, ConnectedAppsApiError> {
             self.do_list_grants().await
+        }
+        async fn external_apps_enabled(&self) -> Result<bool, ConnectedAppsApiError> {
+            self.do_external_apps_enabled().await
         }
         async fn revoke_session(&self, id: Vec<u8>) -> Result<bool, ConnectedAppsApiError> {
             self.do_revoke_session(id).await
@@ -364,6 +389,12 @@ mod wasm {
         async fn revoke_principal(&self, id: Vec<u8>) -> Result<bool, ConnectedAppsApiError> {
             self.do_revoke_principal(id).await
         }
+        async fn list_principal_ops(
+            &self,
+            id: Vec<u8>,
+        ) -> Result<Vec<OracleOp>, ConnectedAppsApiError> {
+            self.do_list_principal_ops(id).await
+        }
         async fn list_pending_consents(
             &self,
         ) -> Result<Vec<NestConsentRow>, ConnectedAppsApiError> {
@@ -373,8 +404,9 @@ mod wasm {
             &self,
             id: Vec<u8>,
             approved: bool,
+            folder: Option<i64>,
         ) -> Result<bool, ConnectedAppsApiError> {
-            self.do_resolve_consent(id, approved).await
+            self.do_resolve_consent(id, approved, folder).await
         }
         async fn mint_grant(&self, grant_blob: Vec<u8>) -> Result<(), ConnectedAppsApiError> {
             self.do_mint_grant(grant_blob).await
@@ -409,6 +441,9 @@ mod wasm {
         }
         async fn list_grants(&self) -> Result<Vec<AtprotoGrantInfo>, ConnectedAppsApiError> {
             self.do_list_grants().await
+        }
+        async fn external_apps_enabled(&self) -> Result<bool, ConnectedAppsApiError> {
+            self.do_external_apps_enabled().await
         }
         async fn revoke_session(&self, id: Vec<u8>) -> Result<bool, ConnectedAppsApiError> {
             self.do_revoke_session(id).await

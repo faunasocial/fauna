@@ -127,7 +127,10 @@ class StubMX:
                  tls_context: "ssl.SSLContext | None" = None,
                  out_dir: str | None = None,
                  on_message: "callable | None" = None) -> None:
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # An IPv6 literal (`::1`) binds an IPv6-only listener: the address
+        # family is what the IPv6-off outbound witness tells apart.
+        family = socket.AF_INET6 if ":" in bind_host else socket.AF_INET
+        self._sock = socket.socket(family, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         # port=0 binds an ephemeral port (the in-process default, used by the
         # `mail_bridge_mta` fixture); a fixed port is needed when the stub runs
@@ -195,7 +198,10 @@ class StubMX:
 
     @property
     def target(self) -> str:
-        """`host:port` string for the operator-hatch `mta_mx_override` value."""
+        """`host:port` string for the operator-hatch `mta_mx_override` value
+        (`[host]:port` for an IPv6 listener, the form Go's `SplitHostPort` reads)."""
+        if ":" in self.host:
+            return f"[{self.host}]:{self.port}"
         return f"{self.host}:{self.port}"
 
     def start(self) -> "StubMX":

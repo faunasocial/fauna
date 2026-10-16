@@ -168,7 +168,11 @@ class MailAliasesContentTest {
     fun revokeFiresWithAliasId() {
         var revoked: String? = null
         render(aliases = listOf(alias(id = "deadbeef")), onRevoke = { revoked = it })
-        composeTestRule.onNodeWithTag("mail-aliases-list-item-revoke-button").performScrollTo().performClick()
+        // Two-click confirm (`common.md`): the first press only arms.
+        val revoke = composeTestRule.onNodeWithTag("mail-aliases-list-item-revoke-button").performScrollTo()
+        revoke.performClick()
+        assertEquals(null, revoked)
+        revoke.performClick()
         assertEquals("deadbeef", revoked)
     }
 

@@ -96,6 +96,11 @@ UNSEEDED: dict[tuple[str, str], str] = {
         "NativeLaunchHarness.relaunch",
     ): "re-seeds through the same writer, pinned by the same test",
     (
+        "tests/common/launch_harness.py",
+        "NativeLaunchHarness.relaunch_as_launched",
+    ): "relaunches with the seed the FIRST launch carried, kept in the harness's "
+    "own config on purpose (a down or reset nest has no identity to re-read)",
+    (
         "tests/e2e-unified/helpers/instance_guard.py",
         "expect_launch_refused",
     ): "the instance guard refuses this launch: the process exits before any "

@@ -5,6 +5,8 @@ import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.ReportSheetStore
 import com.fauna.ffi.FfiReportLedgerRow
+import com.fauna.ffi.appealFormView
+import com.fauna.ffi.appealVerdict
 import com.fauna.ffi.moderationQueue
 import com.fauna.ffi.reportWithdrawVerdict
 import com.fauna.ffi.shortId
@@ -54,8 +56,59 @@ class ModerationQueueVM @Inject constructor(
     /** The line the last withdraw painted (`null` before one). */
     val reportStatus = MutableStateFlow<LocalizedText?>(null)
 
+    /** The appeal the user is composing (moderation.md § Legal takedown — the
+     *  transparency triple's second leg). At most one is open at a time. */
+    data class AppealDraft(val contentId: String, val reason: String = "")
+
+    /** The open appeal form, or `null`. It captures its row's `content_id` at OPEN
+     *  time — the queue refetches, so a dispatch keyed on the row index could
+     *  appeal the wrong decision. */
+    val appealDraft = MutableStateFlow<AppealDraft?>(null)
+
+    /** The last appeal's outcome line (`appeal-status`). Deliberately NOT
+     *  [errorMessage]: a refused appeal is form feedback, and routing it to the
+     *  page-level banner would blank the queue the user is reading. */
+    val appealStatus = MutableStateFlow<LocalizedText?>(null)
+
+    private val appealBusy = MutableStateFlow(false)
+
     init {
         load()
+    }
+
+    fun openAppeal(contentId: String) {
+        appealDraft.value = AppealDraft(contentId)
+        appealStatus.value = null
+    }
+
+    fun cancelAppeal() {
+        appealDraft.value = null
+        appealStatus.value = null
+    }
+
+    fun setAppealReason(reason: String) {
+        appealDraft.value = appealDraft.value?.copy(reason = reason)
+    }
+
+    /** Dispatch the open appeal. Success closes the form (the decision is with an
+     *  admin now; the queue row stays — appeals are additive history); a failure
+     *  KEEPS it open so the reason can be fixed and resent. The shared fold gates
+     *  the dispatch, so a reasonless appeal never reaches the wire. */
+    fun submitAppeal() {
+        val draft = appealDraft.value ?: return
+        if (!appealFormView(draft.contentId, draft.reason).canSubmit) return
+        if (!appealBusy.compareAndSet(false, true)) return
+        viewModelScope.launch {
+            try {
+                api.moderationAppeal(draft.contentId, draft.reason.trim())
+                appealDraft.value = null
+                appealStatus.value = appealVerdict(null)
+            } catch (e: Exception) {
+                appealStatus.value = appealVerdict(e.message ?: e.toString())
+            } finally {
+                appealBusy.value = false
+            }
+        }
     }
 
     /** Read the reporter's ledger (`fauna.moderation.abuse_report.mine`). A failed
@@ -150,27 +203,12 @@ class ModerationQueueVM @Inject constructor(
         api.trainSpamModelClient(text, false) // is_spam = false (ham); ServerPath no-ops here
     }
 
-    /** Server-row correction — the 1d surface switch (mail-spam.md § Encrypted-mode
-     *  interaction; co-design § Revision history 2026-07-06): when the nest advertises
-     *  `spam-model-sealed-at-rest` and mail is enabled, train the sealed model
-     *  client-side over the post body (unwrap → mutate → re-seal → `put_spam_model`),
-     *  else degrade to server-side `fauna.moderation.train` (mirrors linux
-     *  `train_moderation_flow`). */
+    /** Server-row correction — the one shared flow (mail-spam.md § Encrypted-mode
+     *  interaction; moderation.md § State & data shape → *Training correction*):
+     *  the sealed model write when possible, then `fauna.moderation.train` always,
+     *  so every correction reports. A failure surfaces (rethrows) to [correct]. */
     private suspend fun trainServerRow(contentId: String) {
-        if (api.sealedSpamWriteAvailable()) {
-            // A fetch/decode miss falls through to the server train (linux's
-            // `if let Ok(reply)`); a sealed-write failure surfaces (rethrows).
-            val body = try {
-                api.postBodyText(contentId)
-            } catch (_: Exception) {
-                null
-            }
-            if (!body.isNullOrEmpty()) {
-                if (api.trainSpamModelClient(body, false)) return // "ham"
-                // ServerPath race (e.g. mail disabled mid-flow) → fall through.
-            }
-        }
-        api.submitModerationTrain(contentId, "ham")
+        api.trainModerationCorrection(contentId, false) // "ham" — a false positive
     }
 
     companion object {

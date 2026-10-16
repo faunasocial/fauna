@@ -18,11 +18,15 @@ the apps it drove, plus `nest.json` when it ran nest witnesses.
 Two things a caller must get right, and both are why they are functions here rather
 than inline in the hooks:
 
-* **App attribution is decided by the run, not by a marker** (§ The marker). A test
-  is attributed to *every* app whose driver it launched — a multi-seat test that
-  drives three desktop apps witnesses all three — and a test that launched no driver
-  is a `nest` witness. `note_app()` is called from the two doors every driver comes
-  through, so no test has to remember.
+* **App attribution is decided by the run, not by a marker** (§ The marker). An
+  app-parametrized test is attributed to the apps its parametrization names — a
+  convention-16 seat pair names both — and a driver it launched for any other app
+  is a *peer* (a helper seat) that writes no record. A test with no app
+  parametrization is attributed to *every* app whose driver it launched — a
+  multi-seat test that drives three desktop apps witnesses all three — and one that
+  launched no driver is a `nest` witness. `attributed_apps()` is that fold;
+  `note_app()` is called from the two doors every driver comes through and
+  `note_param_apps()` from conftest's per-test setup, so no test has to remember.
 * **`skip_environment` writes nothing** (§ Cell semantics). A missing credential says
   nothing about the feature, so the previous ledger line must stand rather than be
   overwritten with a skip. That is why the three declaration helpers call
@@ -105,6 +109,9 @@ NEST = "nest"
 
 # ── per-test state, reset by the hooks ──────────────────────────────────────
 _apps_this_test: set = set()
+#: The apps the test's own parametrization names (`conftest.py::_item_param_apps`),
+#: empty for an item with no app parametrization. Set by conftest at setup.
+_param_apps_this_test: set = set()
 _skip_class: str | None = None
 #: Why this test's outcome cannot be attributed to the run's artifact, or `None`.
 #: Set per test by conftest from the fixture closure (`nest_surface.OWN_IMAGE_FIXTURES`).
@@ -163,6 +170,12 @@ def note_app(app: str) -> None:
         _apps_this_test.add(app)
 
 
+def note_param_apps(apps) -> None:
+    """The apps this test's own parametrization names (called from conftest's setup)."""
+    _param_apps_this_test.clear()
+    _param_apps_this_test.update(a for a in apps if a)
+
+
 def note_skip_class(kind: str) -> None:
     """The declaration helper about to skip says which of convention 7's classes it is."""
     global _skip_class
@@ -189,6 +202,7 @@ def note_own_artifact(reason: str) -> None:
 def reset_test_state() -> None:
     global _skip_class, _own_artifact, _own_artifact_tallied, _closure_this_test
     _apps_this_test.clear()
+    _param_apps_this_test.clear()
     _skip_class = None
     _own_artifact = None
     _own_artifact_tallied = False
@@ -198,6 +212,18 @@ def reset_test_state() -> None:
 
 def apps_this_test() -> set:
     return set(_apps_this_test)
+
+
+def attributed_apps() -> set:
+    """The apps this test's outcome is recorded against (§ The marker).
+
+    An app-parametrized test is attributed to the apps its parametrization names: a
+    driver it launched for any other app is a helper seat playing the peer (a linux
+    sender for a web receiver), and the outcome was observed on the app the run's
+    app axis selected. Without an app parametrization every launched driver is a
+    seat under test; with none launched either, the test is a `nest` witness.
+    """
+    return set(_param_apps_this_test or _apps_this_test) or {NEST}
 
 
 def skip_class_this_test() -> str | None:
@@ -741,11 +767,12 @@ def _load_releases(path: Path) -> list:
 
 def record_release(ledger_dir: Path = LEDGER, *, version: str, commit: str,
                    image_digest: str | None, image: str | None = None,
+                   public_commit: str | None = None,
                    today: str | None = None) -> Path:
     """Append this candidate run's row to the release table; return the file written.
 
     § Tag gate and release table. The row is `(version, commit, image_digest, date,
-    promoted)` plus the exact `image` string the run drove — recorded rather than
+    candidate_run, promoted)` plus the exact `image` string the run drove — recorded rather than
     re-derived, so the pin the table later feeds names the tag that was actually
     tested rather than one reconstructed from a naming convention.
 
@@ -753,10 +780,18 @@ def record_release(ledger_dir: Path = LEDGER, *, version: str, commit: str,
     re-runnable by design — "a fix → C′ → re-run; the same version string is legal
     until it ships" — and re-running the *same* artifact at the *same* commit is the
     ordinary case (a flake, a wider `--app` set, a second machine's leg). Those are
-    one release, observed twice, so the row's date advances and `promoted` is
-    preserved; only a genuinely different (commit, digest) pair is a new row. Without
+    one release, observed twice, so the date and `candidate_run` advance, `verified` and
+    `promoted` are preserved; only a genuinely different (commit, digest) pair is a new
+    row. `just release-verified` upserts into the same row on the same key. Without
     this the tag gate's "exactly one image digest at HEAD's commit" would be
     satisfiable one moment and ambiguous the next, for no reason but a repeat run.
+
+    **A public build is keyed on the private commit too.** The public repository
+    builds its own artifact of the published tree, so its image carries the PUBLIC
+    commit; the run that accepted it (`release_candidate_verdict_for_image`, paired by
+    the Sync-Point trailer) passes that commit here as `public_commit`, recorded beside
+    the digest it names (§ Tag gate and release table, "Promotion copies the tested
+    digest").
     """
     ledger_dir.mkdir(parents=True, exist_ok=True)
     path = ledger_dir / "releases.json"
@@ -772,9 +807,11 @@ def record_release(ledger_dir: Path = LEDGER, *, version: str, commit: str,
         row = {"promoted": False}
         releases.append(row)
     row.update({"version": version, "commit": commit, "image_digest": image_digest,
-                "date": stamp_date})
+                "date": stamp_date, "candidate_run": stamp_date})
     if image:
         row["image"] = image
+    if public_commit:
+        row["public_commit"] = public_commit
     row.setdefault("promoted", False)
 
     path.write_text(json.dumps({"schema": 1, "releases": releases}, indent=2,
@@ -863,7 +900,8 @@ def image_digest_of(ref: str) -> str | None:
     return None
 
 
-def release_candidate_refusal(mode, repo: Path = REPO) -> str | None:
+def release_candidate_refusal(mode, repo: Path = REPO,
+                              public_clone: Path | None = None) -> str | None:
     """Why this run may NOT stamp a bare version, or `None` if it may.
 
     The three preconditions of § Release-candidate run, re-verified here rather than
@@ -878,20 +916,45 @@ def release_candidate_refusal(mode, repo: Path = REPO) -> str | None:
     this. Running both is deliberate defence in depth, not duplication: the recipe
     saves a wasted docker-mode run, and this one is what actually guards the stamp.
     """
+    return release_candidate_verdict(mode, repo=repo, public_clone=public_clone)[0]
+
+
+def release_candidate_verdict(mode, repo: Path = REPO,
+                              public_clone: Path | None = None) -> tuple:
+    """`(refusal, public_commit)` for a run mode: `release_candidate_refusal` plus the
+    public build commit the release row records beside the digest — `None` for a
+    private build, whose `FAUNA_BUILD_COMMIT` IS the row's commit."""
     if not getattr(mode, "is_docker", False):
-        return "a candidate run goes against the nest IMAGE (`--nest docker:<image>`)"
+        return ("a candidate run goes against the nest IMAGE (`--nest docker:<image>`)",
+                None)
     image = getattr(mode, "argument", None)
     if not image:
-        return "`--nest docker` names no image; a candidate run needs the exact tag"
-    return release_candidate_refusal_for_image(image, repo=repo)
+        return "`--nest docker` names no image; a candidate run needs the exact tag", None
+    return release_candidate_verdict_for_image(image, repo=repo, public_clone=public_clone)
 
 
-def release_candidate_refusal_for_image(image: str, repo: Path = REPO) -> str | None:
+def release_candidate_refusal_for_image(image: str, repo: Path = REPO,
+                                        public_clone: Path | None = None) -> str | None:
     """The same three preconditions, addressed by image rather than by run mode.
 
     Split out so `just e2e-release-candidate` can refuse before it spends a docker-mode
     e2e run finding out. Everything below this line is mode-independent — it asks about
     the tree and the artifact, never about the harness.
+    """
+    return release_candidate_verdict_for_image(image, repo=repo,
+                                               public_clone=public_clone)[0]
+
+
+def release_candidate_verdict_for_image(image: str, repo: Path = REPO,
+                                        public_clone: Path | None = None) -> tuple:
+    """`(refusal, public_commit)` for an image — see `release_candidate_verdict`.
+
+    The commit precondition has two passing shapes (feature-catalog.md § Tag gate and
+    release table, "Promotion copies the tested digest"): the image was built from
+    HEAD itself, or it is the PUBLIC repository's build of the tree published from
+    HEAD — its `FAUNA_BUILD_COMMIT` a public commit whose `Sync-Point:` trailer names
+    HEAD (`public_build_refusal`). The row stays keyed on the private HEAD either way;
+    the second shape also hands back the public commit to record beside the digest.
     """
     # The same `tree_dirt` the ordinary run MARKS by — one definition of dirt, two
     # callers, so the gate can never call clean what the mark calls dirty or vice
@@ -899,20 +962,14 @@ def release_candidate_refusal_for_image(image: str, repo: Path = REPO) -> str | 
     # where the run's is a mark, because a bare stamp claims the released artifact.
     dirt = tree_dirt(repo)
     if dirt is None:
-        return "`git status` failed; the tree must be provably clean"
+        return "`git status` failed; the tree must be provably clean", None
     if dirt:
-        return "the working tree is not clean"
+        return "the working tree is not clean", None
 
     try:
-        inspected = subprocess.run(
-            ["docker", "inspect", "--format",
-             "{{json .Config.Env}}\t{{json .RepoDigests}}", image],
-            capture_output=True, text=True, timeout=60, check=True).stdout.strip()
-        env_json, _, digests_json = inspected.partition("\t")
-        env = json.loads(env_json) or []
-        digests = json.loads(digests_json) or []
+        env, digests = _inspect_image(image)
     except Exception as exc:
-        return f"`docker inspect {image}` failed ({exc})"
+        return f"`docker inspect {image}` failed ({exc})", None
 
     build_commit = ""
     for entry in env:
@@ -921,14 +978,102 @@ def release_candidate_refusal_for_image(image: str, repo: Path = REPO) -> str | 
             build_commit = value.strip()
     head = head_commit(repo)
     if not build_commit:
-        return f"{image} carries no FAUNA_BUILD_COMMIT"
+        return f"{image} carries no FAUNA_BUILD_COMMIT", None
+    public_commit = None
     if not head or build_commit != head:
-        return (f"{image} was built from {build_commit[:12]}, HEAD is "
-                f"{(head or '?')[:12]} — a candidate run witnesses its own commit")
+        unpaired = (public_build_refusal(build_commit, head, public_clone=public_clone,
+                                         repo=repo)
+                    if head else "HEAD is unknown")
+        if unpaired:
+            return (f"{image} was built from {build_commit[:12]}, HEAD is "
+                    f"{(head or '?')[:12]} — a candidate run witnesses its own commit, "
+                    f"or the public build of the tree published from it, and this is "
+                    f"neither: {unpaired}"), None
+        public_commit = build_commit
     if not digests:
         return (f"{image} has no registry digest — a locally built image has none, and "
                 "a candidate is always the immutable `:sha-<commit>` tag the pipeline "
-                "pushed")
+                "pushed"), None
+    return None, public_commit
+
+
+def _inspect_image(image: str) -> tuple:
+    """`(Config.Env, RepoDigests)` off `docker inspect`; raises when docker cannot say."""
+    inspected = subprocess.run(
+        ["docker", "inspect", "--format",
+         "{{json .Config.Env}}\t{{json .RepoDigests}}", image],
+        capture_output=True, text=True, timeout=60, check=True).stdout.strip()
+    env_json, _, digests_json = inspected.partition("\t")
+    return json.loads(env_json) or [], json.loads(digests_json) or []
+
+
+# ── the public build's pairing: a public commit → the private commit it published ──
+_SYNC_POINT_RE = re.compile(r"^Sync-Point:[ \t]*([0-9a-f]{7,40})[ \t]*$",
+                            re.IGNORECASE | re.MULTILINE)
+
+
+def mirror_dir_default(repo: Path = REPO) -> Path:
+    """`<dev-parent>/fauna`, the standing mirror that holds the public history.
+
+    The same derivation as the publish tool's own `mirror_dir_default` — from the
+    git COMMON dir, so every linked checkout of the repository lands on the same
+    path as the main one: the sibling `fauna` of the directory holding the checkout."""
+    try:
+        common = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--path-format=absolute",
+             "--git-common-dir"],
+            capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+    except Exception:
+        common = str(repo / ".git")
+    return Path(common).parent.parent / "fauna"
+
+
+def sync_point_of(public_commit: str, public_clone: Path | None = None,
+                  repo: Path = REPO) -> tuple:
+    """`(private short sha, reason)` — the `Sync-Point:` trailer of `public_commit`.
+
+    Every public sync commit the publish tool creates ends with
+    `Sync-Point: <short sha of the private rev it snapshotted>`, and the squash-merge
+    inherits the message verbatim, so the trailer IS the pairing and nothing else has
+    to record it. Read in `public_clone` (default the standing mirror,
+    `mirror_dir_default`). `(None, why)` when the clone, the commit or the trailer is
+    missing — never a guess.
+    """
+    clone = Path(public_clone) if public_clone else mirror_dir_default(repo)
+    if not clone.is_dir():
+        return None, (f"no public clone at {clone} to read the Sync-Point trailer from "
+                      "(pass --public-clone)")
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(clone), "log", "-1", "--format=%B",
+             f"{public_commit}^{{commit}}", "--"],
+            capture_output=True, text=True, timeout=30)
+    except Exception as exc:
+        return None, f"`git log` in {clone} failed ({exc})"
+    if out.returncode != 0:
+        return None, (f"public commit {public_commit[:12]} is not in {clone} "
+                      "(fetch the public repository there, or pass --public-clone)")
+    found = _SYNC_POINT_RE.findall(out.stdout)
+    if not found:
+        return None, (f"public commit {public_commit[:12]} carries no Sync-Point "
+                      "trailer — `fauna-publish pr` did not make it")
+    return found[-1].lower(), ""
+
+
+def public_build_refusal(public_commit: str, private_commit: str,
+                         public_clone: Path | None = None,
+                         repo: Path = REPO) -> str | None:
+    """Why `public_commit` is NOT the public build of `private_commit`, or `None`.
+
+    Paired when the public commit's Sync-Point names the private commit (a short-sha
+    prefix of it). The one check both the candidate run and `just release-promoted
+    --public-commit` make, so the two can never disagree on what pairs."""
+    sync_point, why = sync_point_of(public_commit, public_clone=public_clone, repo=repo)
+    if sync_point is None:
+        return why
+    if not private_commit or not private_commit.lower().startswith(sync_point):
+        return (f"public commit {public_commit[:12]} was published from {sync_point} "
+                f"(its Sync-Point), not {(private_commit or '?')[:12]}")
     return None
 
 

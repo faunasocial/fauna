@@ -394,3 +394,73 @@ def test_export_withholds_below_k_and_restricted_posts(two_trend_nests):
     # import-triggered fetch, so neither body was pulled across either.
     assert _trend_score(nest_b["db_path"], below_k_id) is None, "B: no below-k trend row"
     assert _trend_score(nest_b["db_path"], gated_id) is None, "B: no restricted trend row"
+
+
+@pytest.mark.feature("room-restricted-posts")
+def test_a_room_post_never_trends_nor_crosses_the_exchange(two_trend_nests):
+    """A room post never appears in the public feed or in Trending
+    (`room-restricted-posts` outcome 13; `restricted-posts.md` § Encryption at
+    rest — a room post is restricted, and `trending.md` § The factor: "a
+    restricted post never gets a `trending` row and never appears in any
+    export").
+
+    The room-addressed twin of the tier-gated arm above: a community room is
+    founded on A over the wire (``helpers/community_room.py``) and its owner
+    posts to it; a public control post by the same owner gets the same three
+    distinct likers. The public read of Trending on A — the built-in feed that
+    reads public posts only — lists the control and not the room post, A gives
+    the room post no trending row, and when B's discovery feed pulls A's export
+    the control's arrival settles the batch that would have carried the room
+    post too (the same anchor as above, convention 14)."""
+    from helpers.community_room import found_room, room_post
+
+    nest_a, nest_b = two_trend_nests
+    port_a, port_b = nest_a["port"], nest_b["port"]
+    admin_sk_a = nest_a["admin"]["signing_key"]
+
+    room = found_room(nest_a)
+    author = room.owner
+    control_id = ws_api.create_post(
+        port_a,
+        author,
+        sign_and_encode_post(
+            author["signing_key"], int(time.time() * 1_000_000), "Public: roombeacon control"
+        ),
+    )
+    room_id, _, _ = room_post(
+        room, "Room: roombeacon teaser", "Room: roombeacon teaser\n\nFor the square only."
+    )
+
+    for post_id in (control_id, room_id):
+        for _ in range(3):
+            liker = create_actor_and_register(port_a, admin_signing_key=admin_sk_a)
+            ws_api.interact(port_a, liker, post_id, action="like")
+
+    assert _trend_score(nest_a["db_path"], control_id) == 130, "A: the control is trending"
+    assert _trend_score(nest_a["db_path"], room_id) is None, (
+        "A: a room post never gets a trending row, however much engagement it has"
+    )
+    reader = create_actor_and_register(port_a, admin_signing_key=admin_sk_a)
+    trending = [p.get("post_id") for p in ws_api.trending_feed_posts(port_a, reader, limit=200)]
+    assert control_id in trending, f"A's Trending read lists the control: {trending!r}"
+    assert room_id not in trending, "A's Trending read never lists a room post"
+
+    b_user = create_actor_and_register(port_b, admin_signing_key=nest_b["admin"]["signing_key"])
+    ws_api.create_feed(
+        port_b,
+        b_user,
+        "cross-nest room-post discovery",
+        rules=[{"BodyContains": {"terms": ["roombeacon"]}}],
+        scope="discovery",
+        contributor_seeds=[nest_a["peer_url"]],
+    )
+    waiting.wait_until(
+        lambda: _peer_trend_row(nest_b["db_path"], control_id),
+        budgets.FEDERATION_EXCHANGE_CYCLE_S,
+        interval=1.0,
+        diagnose=lambda: "B never imported A's trending control entry",
+    )
+    assert _peer_trend_row(nest_b["db_path"], room_id) is None, (
+        "a room post never appears in any export"
+    )
+    assert _trend_score(nest_b["db_path"], room_id) is None, "B: no room-post trend row"

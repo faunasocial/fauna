@@ -42,6 +42,7 @@ impl From<fauna_protocol::files::FileVersionInfo> for FileVersionSummary {
             ),
             pruned: v.pruned.unwrap_or(false),
             purge_after: v.purge_after,
+            folder_id: v.folder_id,
         }
     }
 }
@@ -67,10 +68,11 @@ pub struct WsRpcMediaNest<R: RpcRequester> {
     /// is carried sealed and rendered by the machine, which holds the label
     /// custody (`MediaMachine::render_sealed_folder_names`).
     nest: R,
-    /// This seat's own actor id — the trusted owner every folder in the
-    /// owner-scoped list is verified against (`encryption-at-rest.md`
-    /// § Readable classes → *The declassification is owner-ATTESTED*). `None`
-    /// when the builder could not read one: every folder then seals.
+    /// This seat's own actor id — the trusted owner each of the caller's OWN
+    /// rows is verified against; a member row is verified against its
+    /// `owner_actor_id` (`encryption-at-rest.md` § Readable classes → *The
+    /// declassification is owner-ATTESTED*). `None` when the builder could not
+    /// read one: every own folder then seals.
     own: Option<fauna_core::identity::ActorId>,
     /// What this seat remembers about each folder's attestations, by folder
     /// id — the replay floor. **Process-lifetime only**: Media holds no
@@ -105,7 +107,7 @@ where
     R::Error: RpcErrorClass + core::fmt::Display,
 {
     /// `own` is the connection's actor id — the declassification anchor for
-    /// the owner-scoped folder list; `None` seals every folder.
+    /// the caller's own folders; `None` seals every one of them.
     pub fn new(nest: R, own: Option<fauna_core::identity::ActorId>) -> Self {
         Self {
             media: MediaClient::new(nest.clone()),
@@ -193,18 +195,21 @@ where
         Ok((listing.items, tally))
     }
 
-    /// `fauna.folders.list`, owner-scoped (`include_shared_with_me` unset —
-    /// see the seam's `list_folders` doc for why the member projection is
-    /// deliberately not used here). Transcribes to the mode-carrying
-    /// [`MediaFolder`]; the browse/upload scope rules live in that type, not
-    /// here, so all seven apps apply them identically.
+    /// `fauna.folders.list` with the member-visible projection
+    /// (`include_shared_with_me`) — the caller's own sets plus the sets shared
+    /// with it, each member row carrying its owner and the caller's access
+    /// (`media.md` § Layout & flow → *Where the offerable sets come from*). The
+    /// rows are rostered, not joined: the page machine runs the MLS
+    /// join-filter over them before any is offered. Transcribes to the
+    /// mode-carrying [`MediaFolder`]; the browse/upload scope rules live in
+    /// that type, not here, so all seven apps apply them identically.
     async fn do_list_folders(&self) -> Result<Vec<MediaFolder>, MediaApiError> {
         let reply: fauna_protocol::folders::FoldersListReply = self
             .nest
             .request(
                 fauna_protocol::folders::KIND_FOLDERS_LIST,
                 fauna_protocol::folders::FoldersListRequest {
-                    include_shared_with_me: None,
+                    include_shared_with_me: Some(true),
                     extra: Default::default(),
                 },
             )
@@ -213,12 +218,14 @@ where
         // The verdict is asked HERE, at the one seam that holds a whole
         // `FolderSummary`, and carried on the row — the declassification rule
         // stays the one verifier's (`FolderSummary::judge_declassification`:
-        // the OWNER's attestation over this row, verified under this seat's own
-        // actor id — the trusted owner of every row in an owner-scoped list —
-        // above the seat's floor; WebDAV fail-safe included), and `MediaFolder`
-        // never re-derives it from an audience string it would have to
-        // re-type. A folder this seat remembered that the
-        // list no longer carries is burned like any withdrawn verdict.
+        // the OWNER's attestation over this row, verified under the row's
+        // owner — this seat's own actor id for an own row, the row's
+        // `owner_actor_id` for a member row, nobody (sealed) for a member row
+        // naming none — above the seat's floor; WebDAV fail-safe included),
+        // and `MediaFolder` never re-derives it from an audience string it
+        // would have to re-type. A folder this seat
+        // remembered that the list no longer carries is burned like any
+        // withdrawn verdict.
         let mut memories = self.memories.lock().unwrap_or_else(|p| p.into_inner());
         let listed: std::collections::HashSet<i64> = reply.folders.iter().map(|fs| fs.id).collect();
         memories.retain(|id, memory| {
@@ -232,18 +239,33 @@ where
             .folders
             .into_iter()
             .map(|fs| {
+                let member = fs.role.as_deref() == Some("member");
+                let row_owner = if member {
+                    fs.owner_actor_id
+                        .as_deref()
+                        .and_then(|hex| fauna_core::identity::ActorId::from_hex(hex).ok())
+                } else {
+                    self.own
+                };
                 let memory = memories.get(&fs.id).copied().unwrap_or_default();
                 let (rests_unsealed, memory) =
-                    fs.judge_declassification(&fs.name, self.own.as_ref(), memory);
+                    fs.judge_declassification(&fs.name, row_owner.as_ref(), memory);
                 memories.insert(fs.id, memory);
                 MediaFolder {
                     id: fs.id,
                     rests_unsealed,
                     metadata_only: fs.is_metadata_only(),
-                    owner_only: fs.mls_group_id.is_none() && !fs.webdav_enabled,
+                    // A member's set is never its owner-only set: the link
+                    // eligibility asks whether THIS seat's owner root seals it.
+                    owner_only: !member && fs.mls_group_id.is_none() && !fs.webdav_enabled,
                     // Rendered by the machine, which holds the label custody.
                     name_sealed: fs.name_sealed.map(|b| b.into_vec()),
                     name_hash: fs.name_hash.map(|b| b.into_vec()),
+                    member,
+                    writer: member && fs.access.as_deref() == Some("writer"),
+                    owner_handle: fs.owner_handle,
+                    owner_actor_id: fs.owner_actor_id,
+                    mls_group_id: fs.mls_group_id,
                     name: fs.name,
                 }
             })
@@ -254,6 +276,7 @@ where
     async fn do_record_member(
         &self,
         folder: &str,
+        folder_id: Option<i64>,
         device_id: &str,
         path: &str,
         manifest_hash: String,
@@ -268,6 +291,7 @@ where
         // and the sealed generation for a content-keyed one — carried verbatim.
         self.record_self_healing(
             folder,
+            folder_id.map(fauna_core::folder_keys::FolderRef::Local),
             device_id,
             path,
             Some(manifest_hash),
@@ -283,6 +307,7 @@ where
     async fn do_delete_member(
         &self,
         folder: &str,
+        folder_id: Option<i64>,
         device_id: &str,
         path: &str,
         path_sealed: Option<Vec<u8>>,
@@ -293,6 +318,7 @@ where
         // trait doc on `delete_member` owns the contract.
         self.record_self_healing(
             folder,
+            folder_id.map(fauna_core::folder_keys::FolderRef::Local),
             device_id,
             path,
             None,
@@ -308,12 +334,15 @@ where
     async fn do_file_versions(
         &self,
         folder: &str,
+        folder_id: Option<i64>,
         path: &str,
         include_pruned: bool,
     ) -> Result<Vec<ListedVersion>, MediaApiError> {
         // `MediaItemSummary.path` is already normalized; one shared owner does
         // the hashing (file-sync.md § Path hashing).
-        let (versions, _) = self.judged_versions(folder, path, include_pruned).await?;
+        let (versions, _) = self
+            .judged_versions(folder, folder_id, path, include_pruned)
+            .await?;
         Ok(versions
             .into_iter()
             .map(|v| ListedVersion {
@@ -330,6 +359,7 @@ where
     async fn judged_versions(
         &self,
         folder: &str,
+        folder_id: Option<i64>,
         path: &str,
         include_pruned: bool,
     ) -> Result<
@@ -346,6 +376,7 @@ where
                 folder,
                 include_pruned,
                 &self.seat(),
+                folder_id.map(fauna_core::folder_keys::FolderRef::Local),
             )
             .await
             .map_err(map_err)?;
@@ -394,6 +425,7 @@ where
     async fn do_restore_member(
         &self,
         folder: &str,
+        folder_id: Option<i64>,
         device_id: &str,
         path: &str,
         manifest_hash: String,
@@ -410,7 +442,8 @@ where
         //
         // Media has no local copy of the file (it is a nest-side library fetched by
         // hash), so the § Restore "recording device re-points its own local copy"
-        // step does not apply here.
+        // step does not apply here. The version's own row rides as the
+        // record's `folder_id` (`set-addressing.md` § The row form).
         self.sync
             .restore_version(
                 folder,
@@ -420,6 +453,7 @@ where
                 size_bytes,
                 content_key_version,
                 path_sealed,
+                folder_id.map(fauna_core::folder_keys::FolderRef::Local),
             )
             .await
             .map(|_| ())
@@ -453,6 +487,7 @@ where
     async fn record_self_healing(
         &self,
         folder: &str,
+        row: Option<fauna_core::folder_keys::FolderRef>,
         device_id: &str,
         path: &str,
         manifest_hash: Option<String>,
@@ -479,6 +514,7 @@ where
                 // binaries anyway).
                 None,
                 None,
+                row,
             )
             .await
             .map(|_| ())
@@ -519,6 +555,7 @@ mod native {
         async fn record_member(
             &self,
             folder: &str,
+            folder_id: Option<i64>,
             device_id: &str,
             path: &str,
             manifest_hash: String,
@@ -529,6 +566,7 @@ mod native {
         ) -> Result<(), MediaApiError> {
             self.do_record_member(
                 folder,
+                folder_id,
                 device_id,
                 path,
                 manifest_hash,
@@ -542,20 +580,23 @@ mod native {
         async fn delete_member(
             &self,
             folder: &str,
+            folder_id: Option<i64>,
             device_id: &str,
             path: &str,
             path_sealed: Option<Vec<u8>>,
         ) -> Result<(), MediaApiError> {
-            self.do_delete_member(folder, device_id, path, path_sealed)
+            self.do_delete_member(folder, folder_id, device_id, path, path_sealed)
                 .await
         }
         async fn file_versions(
             &self,
             folder: &str,
+            folder_id: Option<i64>,
             path: &str,
             include_pruned: bool,
         ) -> Result<Vec<ListedVersion>, MediaApiError> {
-            self.do_file_versions(folder, path, include_pruned).await
+            self.do_file_versions(folder, folder_id, path, include_pruned)
+                .await
         }
 
         fn set_reader_predecessors(&self, predecessors: Vec<[u8; 32]>) {
@@ -586,6 +627,7 @@ mod native {
         async fn restore_member(
             &self,
             folder: &str,
+            folder_id: Option<i64>,
             device_id: &str,
             path: &str,
             manifest_hash: String,
@@ -595,6 +637,7 @@ mod native {
         ) -> Result<(), MediaApiError> {
             self.do_restore_member(
                 folder,
+                folder_id,
                 device_id,
                 path,
                 manifest_hash,
@@ -658,7 +701,7 @@ mod native {
                 set_nonce: fauna_client_sync::SetNonceSource::Resolver(resolver),
             });
         // The seat's own actor id, the declassification anchor for every
-        // (owner-scoped) folder the seam lists; unreadable ⇒ `None` ⇒ sealed.
+        // OWN folder the seam lists; unreadable ⇒ `None` ⇒ sealed.
         let own = fauna_core::identity::ActorId::from_hex(&nest.actor_id_hex()).ok();
         let mut seam = WsRpcMediaNest::new(nest, own);
         if let Some(signing) = signing {
@@ -725,6 +768,7 @@ mod wasm {
         async fn record_member(
             &self,
             folder: &str,
+            folder_id: Option<i64>,
             device_id: &str,
             path: &str,
             manifest_hash: String,
@@ -735,6 +779,7 @@ mod wasm {
         ) -> Result<(), MediaApiError> {
             self.do_record_member(
                 folder,
+                folder_id,
                 device_id,
                 path,
                 manifest_hash,
@@ -748,20 +793,23 @@ mod wasm {
         async fn delete_member(
             &self,
             folder: &str,
+            folder_id: Option<i64>,
             device_id: &str,
             path: &str,
             path_sealed: Option<Vec<u8>>,
         ) -> Result<(), MediaApiError> {
-            self.do_delete_member(folder, device_id, path, path_sealed)
+            self.do_delete_member(folder, folder_id, device_id, path, path_sealed)
                 .await
         }
         async fn file_versions(
             &self,
             folder: &str,
+            folder_id: Option<i64>,
             path: &str,
             include_pruned: bool,
         ) -> Result<Vec<ListedVersion>, MediaApiError> {
-            self.do_file_versions(folder, path, include_pruned).await
+            self.do_file_versions(folder, folder_id, path, include_pruned)
+                .await
         }
 
         fn set_reader_predecessors(&self, predecessors: Vec<[u8; 32]>) {
@@ -792,6 +840,7 @@ mod wasm {
         async fn restore_member(
             &self,
             folder: &str,
+            folder_id: Option<i64>,
             device_id: &str,
             path: &str,
             manifest_hash: String,
@@ -801,6 +850,7 @@ mod wasm {
         ) -> Result<(), MediaApiError> {
             self.do_restore_member(
                 folder,
+                folder_id,
                 device_id,
                 path,
                 manifest_hash,
@@ -842,7 +892,7 @@ mod wasm {
     /// ingests folder custody passes a
     /// [`crate::folder_keys::FolderKeyResolver`] so a `download_file` of a
     /// **shared** set opens under its content keys (and its sealed names
-    /// render — `folder_keys_for` feeds both), not the owner `BackupKey`. The
+    /// render — `folder_keys_for_key` feeds both), not the owner `BackupKey`. The
     /// resolver is `fauna_client_folders::NestFolderKeyResolver` over the
     /// same `WsRpcClient`, built by the SPA's session glue (`fauna-wasm-media`'s
     /// constructor) exactly as tui/linux/the FFI apps build theirs. Until
@@ -868,8 +918,13 @@ mod wasm {
         // The full-file download leg: the neutral-home `fauna-core` binding
         // (priority #2 dedup — it used to be a media-local copy,
         // `WasmDownloadFetcher`, byte-for-byte identical to this).
+        // Its folder reads carry the session bearer beside the relay hint, so
+        // the nest's store-miss arm can name the browser and relay a
+        // metadata-only folder's chunk from a seat (`file-sync.md` § Relay
+        // serving, step (4)); a plain read stays bearer-less.
         let download: Arc<dyn fauna_core::file_download::BlobFetcher> = Arc::new(
-            fauna_core::file_download::WasmPublicChunkFetcher::new(nest.nest_url()),
+            fauna_core::file_download::WasmPublicChunkFetcher::new(nest.nest_url())
+                .with_session_bearer(std::rc::Rc::new(SessionBearer(nest.clone()))),
         );
         let signing = folder_keys.clone().zip(identity).map(|(resolver, kp)| {
             fauna_client_sync::RecordSigning {
@@ -878,7 +933,7 @@ mod wasm {
             }
         });
         // The seat's own actor id, the declassification anchor for every
-        // (owner-scoped) folder the seam lists; unreadable ⇒ `None` ⇒ sealed.
+        // OWN folder the seam lists; unreadable ⇒ `None` ⇒ sealed.
         let own = fauna_core::identity::ActorId::from_hex(nest.actor_id_hex()).ok();
         let mut seam = WsRpcMediaNest::new(nest, own);
         if let Some(signing) = signing {
@@ -904,6 +959,21 @@ mod wasm {
         // resolver above is what routes a foreign set's `download_file` here.
         machine.set_foreign_fetchers(Arc::new(WasmForeignFetchers));
         machine
+    }
+
+    /// The browser session's bearer for the download fetcher's hinted folder
+    /// reads — the same JS-provided token every HTTP surface beside the WS-RPC
+    /// connection rides (`WsRpcClient::bearer`).
+    struct SessionBearer(WsRpcClient);
+
+    #[async_trait::async_trait(?Send)]
+    impl fauna_core::file_download::SessionBearer for SessionBearer {
+        async fn bearer(&self) -> anyhow::Result<String> {
+            self.0
+                .bearer(false)
+                .await
+                .map_err(|e| anyhow::anyhow!("session bearer: {e}"))
+        }
     }
 
     /// Wasm [`crate::folder_keys::ForeignBlobFetcherFactory`] — a
@@ -1110,6 +1180,63 @@ mod tests {
         assert_eq!(unsealed_ids(&seam).await, [3]);
     }
 
+    /// A shared set's row is judged under ITS owner (`media.md` § Encryption
+    /// at rest → *The filter and the upload target address the row*, (c)): the
+    /// attestation is the owner's, and the member projection names the owner
+    /// on the row. The same row attested by the seat itself — the trusted owner
+    /// an owner-scoped read assumed — does not arm it. The row's member facts
+    /// ride the transcription.
+    #[tokio::test]
+    async fn a_member_rows_declassification_is_judged_under_its_owner() {
+        let seat = fauna_core::identity::ActorKeypair::from_secret([3u8; 32]);
+        let member_row = |attest_by: &fauna_core::identity::ActorKeypair| {
+            fauna_protocol::folders::FolderSummary {
+                role: Some("member".into()),
+                access: Some("writer".into()),
+                owner_handle: Some("alice".into()),
+                owner_actor_id: Some(owner().actor_id().to_hex()),
+                mls_group_id: Some("aa".into()),
+                ..public_row(4, Some(attest_by), 1_000)
+            }
+        };
+        let seam_over = |row| {
+            WsRpcMediaNest::new(
+                FoldersRequester {
+                    folders: Arc::new(Mutex::new(vec![row])),
+                },
+                Some(seat.actor_id()),
+            )
+        };
+
+        let by_owner = seam_over(member_row(&owner()));
+        assert_eq!(
+            unsealed_ids(&by_owner).await,
+            [4],
+            "the owner's attestation arms"
+        );
+        let row = by_owner.do_list_folders().await.expect("list").remove(0);
+        assert!(row.member && row.writer);
+        assert_eq!(row.owner_handle.as_deref(), Some("alice"));
+        assert_eq!(row.mls_group_id.as_deref(), Some("aa"));
+        assert!(
+            !row.owner_only,
+            "a shared set is never the seat's owner-only set"
+        );
+
+        let by_seat = seam_over(member_row(&seat));
+        assert!(
+            unsealed_ids(&by_seat).await.is_empty(),
+            "the seat's own signature over someone else's set arms nothing"
+        );
+
+        let mut unnamed = member_row(&owner());
+        unnamed.owner_actor_id = None;
+        assert!(
+            unsealed_ids(&seam_over(unnamed)).await.is_empty(),
+            "a member row naming no owner seals"
+        );
+    }
+
     #[tokio::test]
     async fn snapshot_targets_media_list_kind() {
         let (seam, kinds) = seam(None);
@@ -1230,7 +1357,7 @@ mod tests {
         assert_eq!(snap.items.len(), 1, "the grid renders the judged listing");
 
         let (versions, tally) = seam
-            .judged_versions("photos", "good.jpg", false)
+            .judged_versions("photos", None, "good.jpg", false)
             .await
             .expect("versions");
         assert_eq!(
@@ -1239,7 +1366,7 @@ mod tests {
         );
         assert_eq!((tally.verified, tally.refused), (1, 1));
         let summaries = seam
-            .do_file_versions("photos", "good.jpg", false)
+            .do_file_versions("photos", None, "good.jpg", false)
             .await
             .expect("summaries");
         assert_eq!(summaries.len(), 1, "a refused version is never restorable");
@@ -1320,7 +1447,7 @@ mod tests {
         seam.do_set_reader_predecessors(vec![predecessor.actor_id().0]);
 
         let listed = seam
-            .do_file_versions("photos", "old.jpg", false)
+            .do_file_versions("photos", None, "old.jpg", false)
             .await
             .expect("versions");
         assert_eq!(listed.len(), 1, "a history row is listed as a version");
@@ -1403,6 +1530,7 @@ mod tests {
         let _ = seam
             .do_record_member(
                 "photos",
+                None,
                 "dev-1",
                 "photos/c.jpg",
                 "abc123".into(),
@@ -1413,7 +1541,13 @@ mod tests {
             )
             .await;
         let _ = seam
-            .do_delete_member("photos", "dev-1", "photos/b.png", Some(vec![7u8; 40]))
+            .do_delete_member(
+                "photos",
+                Some(9),
+                "dev-1",
+                "photos/b.png",
+                Some(vec![7u8; 40]),
+            )
             .await;
 
         let calls = captured.lock().unwrap();
@@ -1444,6 +1578,8 @@ mod tests {
         let del: SyncChangeRecordRequest =
             fauna_protocol::decode_strict(&calls[1].1).expect("decode delete");
         assert_eq!(del.path, "photos/b.png");
+        // The tombstone names its row (`set-addressing.md` § The row form).
+        assert_eq!(del.folder_id, Some(9));
         assert_eq!(del.change_type, "delete");
         assert_eq!(del.manifest_hash, None);
         assert_eq!(del.size_bytes, 0);
@@ -1534,6 +1670,7 @@ mod tests {
         // retries, so the gesture ultimately succeeds.
         seam.do_record_member(
             "photos",
+            None,
             "dev-1",
             "photos/c.jpg",
             "abc123".into(),
@@ -1568,6 +1705,7 @@ mod tests {
         let _ = seam
             .do_restore_member(
                 "photos",
+                Some(9),
                 "dev-1",
                 "photos/c.jpg",
                 "abc123".into(),
@@ -1593,6 +1731,8 @@ mod tests {
             rec.path_sealed.as_ref().map(|b| &b[..]),
             Some(&[9u8; 40][..])
         );
+        // The version's own row rides as the record's address.
+        assert_eq!(rec.folder_id, Some(9));
     }
 
     #[tokio::test]
@@ -1606,7 +1746,9 @@ mod tests {
             None,
         );
 
-        let _ = seam.do_file_versions("photos", "photos/c.jpg", false).await;
+        let _ = seam
+            .do_file_versions("photos", Some(9), "photos/c.jpg", false)
+            .await;
 
         let calls = captured.lock().unwrap();
         assert_eq!(calls[0].0, "fauna.files.versions.list");
@@ -1622,6 +1764,9 @@ mod tests {
         assert!(fauna_protocol::folders::SetAddressed::addresses(
             &req, "photos"
         ));
+        // The row the caller holds narrows the list to it among same-named
+        // sets (`set-addressing.md` § The row form).
+        assert_eq!(req.folder_id, Some(9));
     }
 
     #[tokio::test]
@@ -1636,6 +1781,7 @@ mod tests {
         let err = seam
             .do_record_member(
                 "photos",
+                None,
                 "dev-1",
                 "photos/c.jpg",
                 "abc123".into(),

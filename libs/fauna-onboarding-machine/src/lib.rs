@@ -27,14 +27,17 @@ pub use admin_nat_mode::AdminNatModeMachine;
 pub use error::OnboardingError;
 pub use helpers::{
     format_price, handle_tld, qualify_reclaim_handle, server_type_allowed_for_mail,
-    server_type_label,
+    server_type_label, update_channel_description_key,
+};
+pub use machine::{
+    EmergencyLockoutOutcome, OnboardingMachine, RecoveryEntryOutcome,
+    emergency_lockout_outcome_message, recovery_entry_outcome_message,
 };
 /// The machine-free E2E-bridge dispatcher — the arms every app can drive
 /// with or without a live machine (the nest-identity pin seed/read). See
 /// [`machine::call_machine_free_method`].
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 pub use machine::{FreeMethodOutcome, call_machine_free_method};
-pub use machine::{OnboardingMachine, RecoveryEntryOutcome, recovery_entry_outcome_message};
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 pub use nest_api::FakeNestApi;
 pub use nest_api::{NestApi, WsNestApi};
@@ -42,8 +45,8 @@ pub use observer::OnboardingObserver;
 pub use outcome::WizardOutcome;
 pub use poll::{AWAITING_DNS_POLL_MS, INVITE_RECHECK_POLL_MS};
 pub use retire::{
-    HeldDnsCredential, ManagedServerRow, NestRetireMachine, RetireInputs, RetirePhase,
-    RetireSnapshot, RetireStep, RetireStepRow, StepState, TransferCodeState,
+    HeldDnsCredential, ManagedServerRow, NestRetireMachine, RememberedDnsSlots, RetireInputs,
+    RetirePhase, RetireSnapshot, RetireStep, RetireStepRow, StepState, TransferCodeState,
 };
 pub use snapshots::*;
 pub use state::*;

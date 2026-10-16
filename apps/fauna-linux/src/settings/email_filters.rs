@@ -85,6 +85,10 @@ struct Widgets {
     add_btn: gtk::Button,
     form: FormWidgets,
     rows: RefCell<Vec<gtk::Box>>,
+    /// The filter list and marks the rows were last built from. A re-read
+    /// answering the same pair rebuilds nothing — the store-change notice
+    /// re-drives `refresh` while the page is open (a level, not an event).
+    painted: RefCell<Option<(Vec<EmailFilter>, Vec<i64>)>>,
     /// `Some(id)` while the form edits an existing filter; `None` in create mode.
     editing_id: RefCell<Option<i64>>,
     /// The Reject reason of the filter being edited. The form has no field
@@ -176,6 +180,7 @@ fn build_group_widgets() -> (adw::PreferencesGroup, Widgets) {
         add_btn,
         form,
         rows: RefCell::new(Vec::new()),
+        painted: RefCell::new(None),
         editing_id: RefCell::new(None),
         reject_reason: RefCell::new(String::new()),
     };
@@ -364,8 +369,15 @@ fn apply_load(ctx: &Rc<Ctx>, result: LoadResult, marks: Option<Vec<i64>>) {
     }
 }
 
-/// Rebuild the `filter-item` row list from the persisted filter list.
+/// Rebuild the `filter-item` row list from the persisted filter list. The
+/// rows paint the marks too, so a list and marks equal to the ones already
+/// painted rebuild nothing.
 fn render_rows(ctx: &Rc<Ctx>, filters: &[EmailFilter]) {
+    let painted = (filters.to_vec(), ctx.filter_marks.borrow().clone());
+    if ctx.w.painted.borrow().as_ref() == Some(&painted) {
+        return;
+    }
+    *ctx.w.painted.borrow_mut() = Some(painted);
     let mut rows = ctx.w.rows.borrow_mut();
     for row in rows.drain(..) {
         ctx.w.list.remove(&row);

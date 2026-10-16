@@ -10,6 +10,12 @@
 //! the two audiences do not overlap: the signed-in device that can *repair* a
 //! missing blob is the one party the RecoveryKey gate keeps from *seeing* it.
 //!
+//! **The custodian copy** (§ Seed escrow → *The custodian copy*): `pull` is the
+//! one CUSTODIAN-class kind of the family — a custody pump reads the owner's
+//! blob into its pair store — and `fetch` has a second arm, answered from that
+//! copy when the actor is not resident here, so a kit holder whose home nest
+//! is gone restores at a custodian with the same ceremony.
+//!
 //! - [`register_recovery_handlers`] wires the `fauna.recovery.*` kinds, of
 //!   which the two registration-chain ones set the pattern:
 //!   - **`fauna.recovery.registration.submit`** — USER class. The owner
@@ -48,12 +54,13 @@ use fauna_core::recovery::{
 use fauna_protocol::RpcError;
 use fauna_protocol::decode_strict as decode;
 use fauna_protocol::recovery::{
-    EscrowChallengeReply, EscrowChallengeRequest, EscrowFetchReply, EscrowFetchRequest,
-    EscrowPutReply, EscrowPutRequest, EscrowStatusReply, EscrowStatusRequest, OwedNest,
-    RegistrationChainReply, RegistrationChainRequest, RegistrationSubmitReply,
-    RegistrationSubmitRequest, ReplacementChallengeReply, ReplacementChallengeRequest,
-    ReplacementPendingInfo, ReplacementRequestReply, ReplacementRequestRequest,
-    ReplacementStatusReply, ReplacementStatusRequest, ReplacementVetoReply, ReplacementVetoRequest,
+    ESCROW_PULL_KIND, EscrowChallengeReply, EscrowChallengeRequest, EscrowFetchReply,
+    EscrowFetchRequest, EscrowPullReply, EscrowPullRequest, EscrowPutReply, EscrowPutRequest,
+    EscrowStatusReply, EscrowStatusRequest, OwedNest, RegistrationChainReply,
+    RegistrationChainRequest, RegistrationSubmitReply, RegistrationSubmitRequest,
+    ReplacementChallengeReply, ReplacementChallengeRequest, ReplacementPendingInfo,
+    ReplacementRequestReply, ReplacementRequestRequest, ReplacementStatusReply,
+    ReplacementStatusRequest, ReplacementVetoReply, ReplacementVetoRequest,
     SUCCESSION_OWED_SETTLE_KIND, SUCCESSION_STATUS_KIND, SuccessionLookupReply,
     SuccessionLookupRequest, SuccessionOwedSettleReply, SuccessionOwedSettleRequest,
     SuccessionStatusReply, SuccessionStatusRequest, SuccessionSubmitReply, SuccessionSubmitRequest,
@@ -303,22 +310,31 @@ fn escrow_fetch_handler() -> RpcHandler {
             // produces valid bytes, and they stop authorizing anything the
             // moment a replacement registration lands.
             //
-            // An identity with no registration is refused here, before any
-            // signature check. That is not a new oracle: whether an actor has a
-            // registered RecoveryKey is already public through
-            // `fauna.recovery.registration.chain`, deliberately
+            // An identity with no registration HERE is not resident here: it
+            // is answered from the custodied copy, if this nest custodies it,
+            // and otherwise refused — `not_registered` either way, before or
+            // after a signature check alike (the custodied arm's opacity, see
+            // `custodied_escrow_fetch`). For a resident that is not a new
+            // oracle: whether an actor has a registered RecoveryKey is already
+            // public through `fauna.recovery.registration.chain`, deliberately
             // (`identity-succession.md:34`).
-            let head = state
+            let Some(head) = state
                 .db
                 .recovery_registration_head(&actor[..])
                 .await
                 .map_err(internal)?
-                .ok_or_else(|| {
-                    RpcError::new(
-                        "fauna.recovery.not_registered",
-                        "error.recovery.not_registered",
-                    )
-                })?;
+            else {
+                let blob =
+                    custodied_escrow_fetch(&state, actor, nonce, req.signature.as_ref()).await?;
+                tracing::info!(
+                    target: "recovery",
+                    "custodied seed escrow served to a recovery-key holder"
+                );
+                return encode_reply(&EscrowFetchReply {
+                    blob: ByteBuf::from(blob),
+                    extra: Default::default(),
+                });
+            };
             let recovery_pubkey: [u8; 32] = head
                 .recovery_pubkey
                 .as_slice()
@@ -367,6 +383,95 @@ fn escrow_fetch_handler() -> RpcHandler {
 
             encode_reply(&EscrowFetchReply {
                 blob: ByteBuf::from(row.blob),
+                extra: Default::default(),
+            })
+        })
+    })
+}
+
+fn not_registered() -> RpcError {
+    RpcError::new(
+        "fauna.recovery.not_registered",
+        "error.recovery.not_registered",
+    )
+}
+
+/// **The custodied arm of `escrow.fetch`** (`identity-succession.md` § Seed
+/// escrow → *The custodian copy*, ruling 3): the home arm's exact sequence —
+/// the nonce already consumed by the caller, the signature verified against
+/// the head of the CUSTODIED chain, the custodied succession record
+/// consulted, then the blob — answered from the pair store of the newest live
+/// hosting row for `actor` (`custody_fleet::custodied_recovery_of`, the fleet
+/// doors' own row selection).
+///
+/// **Every refusal is the one opaque `not_registered`** — not custodied, a
+/// lapsed or refused row, no verifiable chain, a signature that fails, no
+/// blob, even an unreadable pair store — so a caller without the kit cannot
+/// tell a custodied owner from an actor this nest never heard of: the custody
+/// relationship is sealed fleet state and stays unobservable here. The one
+/// distinct answer is `superseded`, and only behind a verified signature (a
+/// proven kit holder, owed the same routing signal the home arm gives it).
+async fn custodied_escrow_fetch(
+    state: &crate::routes::AppState,
+    actor: [u8; 32],
+    nonce: [u8; 32],
+    signature: &[u8],
+) -> Result<Vec<u8>, RpcError> {
+    use fauna_sync_engine::custody_recovery::{custodied_chain_head, custodied_successor};
+
+    let material = match crate::custody_fleet::custodied_recovery_of(state, actor).await {
+        Ok(Some(material)) => material,
+        Ok(None) => return Err(not_registered()),
+        Err(e) => {
+            tracing::warn!(
+                target: "recovery",
+                "custodied recovery material unreadable (answered not_registered): {e:#}"
+            );
+            return Err(not_registered());
+        }
+    };
+    let head = custodied_chain_head(ActorId(actor), &material).ok_or_else(not_registered)?;
+    EscrowChallenge::new(ActorId(actor), nonce)
+        .verify(&head.recovery_pubkey, signature)
+        .map_err(|_| not_registered())?;
+    if let Some(successor) = custodied_successor(ActorId(actor), &material) {
+        return Err(RpcError::superseded(&successor.0));
+    }
+    material
+        .escrow
+        .map(|escrow| escrow.blob)
+        .ok_or_else(not_registered)
+}
+
+/// `fauna.recovery.escrow.pull` — a CUSTODIAN reads the custodied owner's
+/// seed-escrow blob (`identity-succession.md` § Seed escrow → *The custodian
+/// copy*, ruling 1). Admitted as the custody read doors are: the caller is
+/// the custody bearer (the class gate), and a live `Account`-form custody row
+/// must name it as holder over `owner_actor_id`
+/// (`custody_admission::admit_recovery_material_for_custody`). Answers the
+/// row with its write stamp, or `no_escrow` — the only distinct answer, and
+/// only to an admitted custodian.
+fn escrow_pull_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_class(&state, &actor_id, ESCROW_PULL_KIND).await?;
+            let req: EscrowPullRequest = decode(&payload).map_err(malformed)?;
+            let owner = actor_id_from(&req.owner_actor_id)?;
+            crate::custody_admission::admit_recovery_material_for_custody(
+                &state, &actor_id, &owner,
+            )
+            .await?;
+            let row = state
+                .db
+                .get_recovery_escrow(&owner[..])
+                .await
+                .map_err(internal)?
+                .ok_or_else(|| {
+                    RpcError::new("fauna.recovery.no_escrow", "error.recovery.no_escrow")
+                })?;
+            encode_reply(&EscrowPullReply {
+                blob: ByteBuf::from(row.blob),
+                updated_at: row.updated_at,
                 extra: Default::default(),
             })
         })
@@ -944,6 +1049,12 @@ fn succession_submit_handler() -> RpcHandler {
             // it, as every other admin-roster change does.
             crate::nest_sync_worker::refresh_pairing_targets(&state).await;
 
+            // The transaction also re-pointed the web-serving routing rows (the
+            // apex designation, custom domains, subdomain opt-in) to the
+            // successor; the live resolver is memory, so re-seed it from them
+            // now — or the account's site answers 404 until the next boot.
+            crate::seed_host_resolver(&state).await;
+
             // The filesystem half of the ownership move: the transaction
             // re-pointed the actor-scoped segment *rows*, and the files live
             // under `<data_dir>/__<kind>/<actor_hex>/` — renamed here, right
@@ -1222,6 +1333,15 @@ pub fn register_recovery_handlers(b: &mut RpcRouterBuilder) {
             forbid_replay: false,
             default_deadline: Duration::from_secs(5),
             handler: escrow_status_handler(),
+        },
+    );
+    // The custodian copy's pull — a pure read, replay-safe.
+    b.add(
+        ESCROW_PULL_KIND,
+        RpcKindMeta {
+            forbid_replay: false,
+            default_deadline: Duration::from_secs(10),
+            handler: escrow_pull_handler(),
         },
     );
     // The seed-initiated replacement window. `request` is replay-safe because

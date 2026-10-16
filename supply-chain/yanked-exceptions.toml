@@ -1,0 +1,33 @@
+# Owner-approved exceptions for a YANKED crate in Cargo.lock — the one warning kind
+# `cargo audit --deny warnings` raises that `.cargo/audit.toml` cannot except, because a
+# yank carries no advisory id. Graded by the advisory check (the daily check
+# and the supply-chain workflow's cargo-audit job alike).
+# Owner: docs/goal/architecture/release-integrity.md § Dependency verification.
+#
+# An entry names one exact (package, version) whose release the registry withdrew with no
+# advisory, and that no version off the withdrawn ones can replace yet. It covers only the
+# yank: an advisory, unsound or unmaintained warning for the same version still fails. Every
+# field is required. An entry that matches no reported yank — the crate left the lock, or the
+# release was restored — fails the check: delete it, so it cannot cover a later yank by
+# accident. Entries are added only by an owner decision in a bump round.
+#
+# [[exception]]
+# package = "name"
+# version = "x.y.z"
+# reason = "..."      # our own words
+# approved = "YYYY-MM-DD"
+
+# Bump round 12 (C). crates.io withdrew every zip release but 9.0.3 (published
+# 2026-10-13) with no advisory and no stated reason. 9.0.3 is a major move, under the
+# 7-day minimum release age until 2026-10-20, and is queued.
+[[exception]]
+package = "zip"
+version = "2.4.2"
+reason = "Our own archive-import and mail code depends on it directly. The only release left is 9.0.3, a major version 2.5 days old at the decision; the version we run has shipped since 0.1.3."
+approved = "2026-10-16"
+
+[[exception]]
+package = "zip"
+version = "8.6.0"
+reason = "Pulled in by c2pa (content credentials), whose every release requires zip ^8.6.0 while every 8.x release is withdrawn, so no resolution off a withdrawn version exists until c2pa accepts zip 9."
+approved = "2026-10-16"

@@ -54,6 +54,7 @@ public sealed partial class AdminUsersPage : Page
             _vm = new AdminUsersViewModel(clients.Rpc!);
             _vm.PropertyChanged += ViewModel_PropertyChanged;
             _vm.Users.CollectionChanged += (_, _) => UpdateUserCount();
+            _vm.PendingActions.CollectionChanged += (_, _) => UpdatePendingActionsTitle();
         }
     }
 
@@ -63,6 +64,7 @@ public sealed partial class AdminUsersPage : Page
         RequestsList.ItemsSource = _vm.InviteRequests;
         InviteCodesList.ItemsSource = _vm.InviteCodes;
         UsersList.ItemsSource = _vm.Users;
+        PendingActionsList.ItemsSource = _vm.PendingActions;
         await _vm.LoadCommand.ExecuteAsync(null);
         PopulateTierCombo(CreateFormTierSelect, _vm.NewCodeTier);
         PopulateGuardianCombo(CreateFormGuardianSelect, _vm.NewCodeGuardianActor);
@@ -76,6 +78,7 @@ public sealed partial class AdminUsersPage : Page
         UpdatePagination();
         UpdateRequestsEmpty();
         UpdateCodesEmpty();
+        UpdatePendingActionsTitle();
     }
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -380,6 +383,28 @@ public sealed partial class AdminUsersPage : Page
     {
         if (_vm is null) return;
         NoRequestsText.Visibility = _vm.InviteRequests.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>The Pending admin actions title (<c>admin-users-pending-section</c>): the
+    /// empty-state line or the counted title (admin.md § Pending admin actions).</summary>
+    private void UpdatePendingActionsTitle()
+    {
+        if (_vm is null) return;
+        PendingActionsTitleText.Text = _vm.PendingActions.Count == 0
+            ? S.Get("admin/users_page/pending_none")
+            : Strings.Format("admin/users_page/pending_count", _vm.PendingActions.Count);
+    }
+
+    private async void ApprovePendingAction_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null || sender is not Button { DataContext: AdminPendingActionRow row }) return;
+        await _vm.ApprovePendingActionAsync(row);
+    }
+
+    private async void CancelPendingAction_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null || sender is not Button { DataContext: AdminPendingActionRow row }) return;
+        await _vm.CancelPendingActionAsync(row);
     }
 
     private void UpdateCodesEmpty()

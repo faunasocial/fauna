@@ -37,6 +37,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from nacl.signing import SigningKey
 
 from common import build_registry_seed, create_actor_and_register
 from drivers import create_driver
@@ -45,7 +46,8 @@ from tests.test_sign_out_web import (  # noqa: F401
     _wait_registry_active,
 )
 from drivers.machine_test_setter import set_handle_check_snapshot
-from helpers.budgets import APP_RELAUNCH_S
+from helpers import web_store
+from helpers.budgets import APP_RELAUNCH_S, RPC_ROUNDTRIP_S
 from helpers.waiting import assert_no_relaunch, await_session_actor, wait_until
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.web]
@@ -77,6 +79,7 @@ PASTE_SECRET_FIELD = "paste-secret-field"
 IMPORT_SUBMIT_BUTTON = "import-submit-button"
 HANDLE_INPUT = "handle-input"
 HANDLE_CONTINUE_BUTTON = "handle-entry-continue-button"
+INVITE_SUBMIT_BUTTON = "invite-request-submit-button"
 
 # Two-element nav to the Account sub-page: the web nav agent reads the sub-page id
 # from stack[1].id (stack[0] is the top-level view), so /app/settings/account needs
@@ -86,17 +89,30 @@ ACCOUNT_PAGE_NAV = {
 }
 
 
-def _seed_two_accounts(nest_instance, node_url, active="user"):
+def _seed_two_accounts(nest_instance, node_url, active="user", second="admin"):
     """A claimed-admin account + a freshly-registered regular-user account, seeded
     active on the regular user (``active="admin"`` flips it, which the admin
     auto-default journey needs). Returns (seed_map, user_actor, user_secret,
     admin_actor, admin_secret). The admin is `nest_instance`'s own claimed
     identity (so `am-i-admin` is true for it); the user is registered via the
     admin key. `node_url` is the SPA's API base (the spa_url proxy) so a
-    cross-origin silent-challenge after the admin switch is same-origin."""
+    cross-origin silent-challenge after the admin switch is same-origin.
+
+    ``second="user"`` seeds a second fresh regular user in the admin's row
+    instead, for a journey that needs two identities but not an admin — one
+    that removes the second identity after signing it in and reads its nest
+    roster, which must be exact; the admin is shared by the whole run, and a
+    removal whose nest half were deferred would leave a grant no teardown could
+    find to retire (`e2e-launch-isolation.md`, *A discarded driver retires its
+    machine*)."""
     admin_sk = nest_instance["admin"]["signing_key"]
-    admin_actor = bytes(admin_sk.verify_key).hex()
-    admin_secret = bytes(admin_sk).hex()
+    if second == "user":
+        other = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
+        admin_actor = other["actor_id_hex"]
+        admin_secret = bytes(other["signing_key"]).hex()
+    else:
+        admin_actor = bytes(admin_sk.verify_key).hex()
+        admin_secret = bytes(admin_sk).hex()
 
     user = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
     user_actor = user["actor_id_hex"]
@@ -148,8 +164,8 @@ def test_web_account_switcher_lists_switches_and_reveals_admin(nest_instance, sp
         assert driver.count(ACTIVE_INDICATOR) == 1, (
             "exactly one row (the active/user row) carries the active indicator"
         )
-        assert driver.is_absent(ADMIN_TAB), (
-            "a regular (non-admin) active identity must have no admin shell"
+        _admin_tab_absent_off_settings(
+            driver, "a regular (non-admin) active identity must have no admin shell"
         )
 
         # (3) Tap the admin row → set_active + full reload → the
@@ -213,6 +229,173 @@ def test_web_remove_account_shrinks_switcher_live(nest_instance, spa_url):
         driver.teardown()
 
 
+#: A switch's full reload, the silent sign-in and the account runtime's
+#: assembly — the store exists once the runtime has opened it.
+ACCOUNT_STORE_OPEN_S = 90.0
+
+
+def _local_storage_keys_with(driver, needle: str) -> list[str]:
+    """Every `localStorage` key carrying `needle` (an actor hex), sorted."""
+    return sorted(driver.eval_js(
+        f"Object.keys(localStorage).filter(k => k.includes({json.dumps(needle)}))"
+    ))
+
+
+@pytest.mark.feature("multiple-accounts")
+def test_web_removing_an_identity_deletes_its_data_and_leaves_the_others(
+    nest_instance, spa_url
+):
+    """Removing an identity deletes THAT identity's data in this browser and
+    leaves every other identity's data untouched — the web twin of
+    `test_tui_removing_an_identity_deletes_its_data_and_leaves_the_others`
+    (`account-scoping.md` § Serialized switching → *Erasure follows scope*).
+
+    `test_web_remove_account_shrinks_switcher_live` proves the switcher row and
+    the registry entry go; this proves the account's own state goes with them:
+    every `localStorage` key carrying the second identity's actor id (the registry's
+    `fauna/<other>/*` slots and the actor-keyed keys outside that namespace,
+    `account_scope::ACTOR_KEY_BUILDERS`) and the second identity's account store
+    (`fauna-account-store/<other>`), while the user's secret, keys and store and
+    every install-scoped key survive.
+
+    Precondition seed: `fauna_backup_audit_<actor>` is written only by the
+    Backups page's audit pass, which no session runs deterministically, so the
+    test writes one for EACH identity by `eval_js` — the second identity's is what the
+    erase must take, the user's what it must leave. Everything else is minted by
+    real sessions (the second identity's through a switch). Every wait is on state
+    (`e2e-conventions.md` point 14); the mutations are the switcher's own taps.
+
+    The removal also retires this browser from the second identity, as a
+    sign-out does (§ Erasure follows scope → *Removing an account retires this
+    machine from it, as a sign-out does*): its named row stays on the nest with
+    its grant cleared. The roster read sits behind causal barriers (convention
+    14) — the second identity's own enrollment latch before the removal, the
+    cleared roster within a named budget after it.
+
+    The second identity is a fresh regular user, never the run's shared admin:
+    the roster must be exact (``helpers.enrollment``), and a removal whose nest
+    half were deferred would leave a grant no teardown could find to retire
+    (`e2e-launch-isolation.md`, *A discarded driver retires its machine*)."""
+    from helpers import enrollment
+
+    seed, user_actor, user_secret, other_actor, other_secret = _seed_two_accounts(
+        nest_instance, spa_url, second="user"
+    )
+    nest_url = nest_instance["url"]
+    other = {
+        "actor_id_hex": other_actor,
+        "signing_key": SigningKey(bytes.fromhex(other_secret)),
+    }
+    other_store = f"{web_store.ACCOUNT_STORE_ROOT}/{other_actor}"
+    user_store = f"{web_store.ACCOUNT_STORE_ROOT}/{user_actor}"
+
+    def await_store(name, what):
+        seen = {}
+
+        def present():
+            seen.update(web_store.account_store_names(driver))
+            return name in seen.get("indexeddb", [])
+
+        wait_until(
+            present, ACCOUNT_STORE_OPEN_S, interval=1.0,
+            diagnose=lambda: f"{what}: no {name} in this origin; it holds {seen!r}",
+        )
+
+    def switch_to(index, actor):
+        driver.set_state(ACCOUNT_PAGE_NAV)
+        driver.wait_for(SWITCHER_ITEM, timeout=30)
+        _wait_switcher_rows(2)
+        driver.click(SWITCHER_ITEM, index=index)
+        _wait_session_actor(driver, actor, timeout=60)
+
+    def _wait_switcher_rows(n):
+        wait_until(
+            lambda: driver.count(SWITCHER_ITEM) == n, 30.0,
+            diagnose=lambda: f"switcher item count={driver.count(SWITCHER_ITEM)}",
+        )
+
+    driver = create_driver("web")
+    driver.launch({"url": spa_url + "/app/"})
+    try:
+        _auth_on_account_page(driver, seed, user_secret, "user", user_actor, spa_url)
+
+        # Give the second identity a real session of its own, so it has data to lose.
+        switch_to(1, other_actor)
+        await_store(other_store, "the second identity's session")
+        # This browser is enrolled on it now: its named row carries a grant.
+        _writer, other_row, _ = enrollment.await_enrollment(
+            SimpleNamespace(driver=driver), nest_url, other
+        )
+        assert enrollment.principals(nest_url, other).get(other_row), (
+            f"the precondition: the latched row {other_row} carries this browser's grant"
+        )
+
+        # Back to the user: the second identity's row is now the non-active one, the only
+        # row the switcher offers a remove button on.
+        switch_to(0, user_actor)
+        await_store(user_store, "the user's session")
+        web_store.seed(driver, {
+            f"fauna_backup_audit_{other_actor}": "{}",
+            f"fauna_backup_audit_{user_actor}": "{}",
+        })
+        other_keys = _local_storage_keys_with(driver, other_actor)
+        assert f"fauna/{other_actor}/secret" in other_keys, (
+            f"precondition: the second identity's secret is in this browser; its keys are {other_keys}"
+        )
+        kept_before = [
+            k for k in driver.eval_js("Object.keys(localStorage)") if other_actor not in k
+        ]
+
+        # The switch's reload lands wherever the app routes a load; the remove
+        # button lives on the Account page.
+        driver.set_state(ACCOUNT_PAGE_NAV)
+        driver.wait_for(SWITCHER_ITEM, timeout=30)
+        _wait_switcher_rows(2)
+        driver.click(REMOVE_BUTTON)
+        index = _wait_registry_count(driver, 1, timeout=30)
+        assert [a["actor_id"] for a in index["accounts"]] == [user_actor], (
+            f"only the removed identity may leave the registry; got {index!r}"
+        )
+
+        # Registry removal, then the erase, in one gesture — so a registry
+        # that shrank means the erase is already running or done.
+        left = {}
+
+        def other_gone():
+            left["keys"] = _local_storage_keys_with(driver, other_actor)
+            left["stores"] = web_store.account_store_names(driver)
+            return not left["keys"] and other_store not in left["stores"]["indexeddb"]
+
+        wait_until(
+            other_gone, RPC_ROUNDTRIP_S, interval=1.0,
+            diagnose=lambda: (
+                "the removed identity's data survived in this browser: localStorage "
+                f"{left.get('keys')!r}, stores {left.get('stores')!r}; error-message: "
+                f"{driver.get_text('error-message') if driver.is_visible('error-message') else ''!r}"
+            ),
+        )
+        lost = sorted(
+            set(kept_before) - set(driver.eval_js("Object.keys(localStorage)"))
+        )
+        assert not lost, (
+            "removing the second identity must leave every other key in this browser — the user's "
+            f"and the install's — untouched; gone: {lost}"
+        )
+        assert _ls(driver, f"fauna/{user_actor}/secret") == user_secret, (
+            "the remaining identity's secret must survive the removal"
+        )
+        assert user_store in web_store.account_store_names(driver)["indexeddb"], (
+            "the remaining identity's account store must survive the removal"
+        )
+        # The nest half: the named row stays, its grant cleared — as after a
+        # sign-out (the barrier's diagnosis names every other reading).
+        enrollment.await_grant_cleared(
+            nest_url, other, other_row, "after removing the identity through the switcher"
+        )
+    finally:
+        driver.teardown()
+
+
 def _seed_one_account(nest_instance, node_url):
     """A SINGLE registered regular-user account, seeded active — the pre-append
     single-identity state a first-run install lands in. Returns (seed_map,
@@ -260,6 +443,23 @@ def _auth_on_account_page(driver, seed, secret, handle, actor, spa_url):
     driver.wait_for(SWITCHER_ITEM, timeout=30)
 
 
+def _admin_tab_absent_off_settings(driver, what):
+    """Assert ``admin-tab`` is absent from the app shell, then return to the Account page.
+
+    ``admin-tab`` lives in the app sidebar, and Settings is the sidebar-SWAP shell
+    (its rail replaces the app sidebar), so on ``/app/settings/*`` the element is
+    not in the DOM for ANY identity — a negative read taken there is vacuous: a
+    gate-bypass mutant (``{#if userIsAdmin}`` forced true) leaves it green
+    (measured 2026-10-14). Leave Settings first; ``feed-tab`` (an ungated sibling
+    in the same sidebar) is the causal anchor that the shell this read is about is
+    the one mounted."""
+    driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+    driver.wait_for("feed-tab", timeout=30)
+    assert driver.is_absent(ADMIN_TAB), what
+    driver.set_state(ACCOUNT_PAGE_NAV)
+    driver.wait_for(SWITCHER_ITEM, timeout=30)
+
+
 def _read_registry_index(driver):
     """The `fauna/index` AccountIndex (`{active, accounts:[{actor_id,...}]}`) the
     wasm registry persists verbatim, or None if unset. The registry is the source
@@ -270,6 +470,27 @@ def _read_registry_index(driver):
     and does)."""
     raw = driver.eval_js("localStorage.getItem('fauna/index')")
     return json.loads(raw) if raw else None
+
+
+def _wait_registry_active_is(driver, actor, timeout=30):
+    """Poll `fauna/index` until its `active` names `actor`; return the index.
+
+    The append is `accountsAdd` then `accountsSwitch` — two awaits — so the
+    registry reads count 2 a tick before it reads the new account active.
+    Asserting `active` straight after `_wait_registry_count` races that gap
+    (convention 14); this waits for the switch itself.
+    """
+    last = {}
+
+    def switched():
+        last["index"] = _read_registry_index(driver)
+        return last["index"] and last["index"].get("active") == actor
+
+    wait_until(
+        switched, timeout, interval=0.5,
+        diagnose=lambda: f"`fauna/index` never named {actor} active; last index={last.get('index')!r}",
+    )
+    return last["index"]
 
 
 def _wait_registry_count(driver, n, timeout=30):
@@ -388,6 +609,7 @@ def test_web_add_account_appends_second_identity_to_registry(nest_instance, spa_
             "the original account must survive the append (no-user-data-loss)"
         )
         assert second_actor in actor_ids, "the imported account must be appended"
+        index = _wait_registry_active_is(driver, second_actor)
         assert index["active"] == second_actor, (
             "the append switches to the newly-added account (design Decision 1)"
         )
@@ -419,6 +641,74 @@ def test_web_add_account_appends_second_identity_to_registry(nest_instance, spa_
             "the typed handle domain, NOT the harness dial override; got "
             f"{stored_url!r}"
         )
+    finally:
+        driver.teardown()
+
+
+@pytest.mark.feature("multiple-accounts")
+def test_web_add_account_pending_invite_submit_switches_the_live_session(nest_instance, spa_url):
+    """A pending-invite submit during "Add account" registers the joiner, writes its
+    per-actor pending-invite slot and switches to it — registry and in-memory session
+    together (`onboarding.md` § Multi-account). Web twin of
+    ``test_apple_add_account_pending_invite_submit_switches_the_live_session``.
+
+    The append IMPORT step already moved the in-memory session to the joiner
+    (`identity.login`, store.ts); the SUBMIT's append arm
+    (`persistPendingInvite` in `routes/onboarding/+page.svelte`) is what runs
+    `accountsAdd` + `accountsSwitch` before the slot write. Deleting that block leaves
+    the registry on the outgoing account while the session names the joiner, so the
+    registry assertions below are the ones that redden. Web counts no
+    `session_generation` teardown on this path, hence no generation witness.
+
+    Mutation (2026-10-12): deleting the `accountsAdd`/`accountsSwitch` block turned the
+    registry-count assertion red ("registry never reached 2 accounts"); restored, green."""
+    seed, first_actor, first_secret = _seed_one_account(nest_instance, spa_url)
+
+    joiner_key = SigningKey.generate()
+    joiner_secret = bytes(joiner_key).hex()
+    joiner_actor = bytes(joiner_key.verify_key).hex()
+    handle = f"addpending-{int(time.time() * 1000)}"
+
+    driver = create_driver("web")
+    driver.launch({"url": spa_url + "/app/"})
+    try:
+        _auth_on_account_page(driver, seed, first_secret, "user", first_actor, spa_url)
+        assert driver.count(SWITCHER_ITEM) == 1, "exactly one account before Add account"
+
+        driver.click(ADD_BUTTON)
+        driver.wait_for(IMPORT_IDENTITY_BUTTON, timeout=30)
+        driver.click(IMPORT_IDENTITY_BUTTON)
+        driver.wait_for(PASTE_SECRET_FIELD, timeout=15)
+        driver.clear_and_type(PASTE_SECRET_FIELD, joiner_secret)
+        driver.click(IMPORT_SUBMIT_BUTTON)
+        driver.wait_for(HANDLE_INPUT, timeout=15)
+
+        # A test nest is not DNS-discoverable, so hop to `invite_request` directly
+        # (the same hop test_pending_invite_journey.py makes), then the REAL submit.
+        driver.call_machine_method(
+            "navigate_to_invite_request_for_known_nest",
+            json.dumps([nest_instance["url"], handle]),
+        )
+        driver.wait_for(INVITE_SUBMIT_BUTTON, timeout=20)
+        driver.click(INVITE_SUBMIT_BUTTON)
+
+        index = _wait_registry_count(driver, 2, timeout=30)
+        actor_ids = [a["actor_id"] for a in index["accounts"]]
+        assert first_actor in actor_ids, (
+            "the original account must survive the append (no-user-data-loss)"
+        )
+        assert joiner_actor in actor_ids, "the joiner must be registered on the submit return"
+        index = _wait_registry_active_is(driver, joiner_actor)
+        assert index["active"] == joiner_actor, (
+            "the pending-invite submit activates the joiner (onboarding.md § Multi-account)"
+        )
+        assert driver.eval_js(
+            f"localStorage.getItem('fauna/{joiner_actor}/pending_invite')"
+        ), f"the joiner's per-actor pending-invite slot must be written; index={index!r}"
+        assert driver.eval_js(f"localStorage.getItem('fauna/{first_actor}/secret')") == first_secret, (
+            "the outgoing account's secret must survive the switch"
+        )
+        _wait_session_actor(driver, joiner_actor, timeout=30)
     finally:
         driver.teardown()
 
@@ -572,8 +862,8 @@ def test_web_require_confirm_gates_switch_decline_then_approve(nest_instance, sp
         assert index["active"] == user_actor, (
             "a declined re-auth must leave the persisted registry untouched"
         )
-        assert driver.is_absent(ADMIN_TAB), (
-            "a declined re-auth must not reveal the admin shell"
+        _admin_tab_absent_off_settings(
+            driver, "a declined re-auth must not reveal the admin shell"
         )
 
         # (3) APPROVE: the same tap, confirmed, completes the switch (full

@@ -1,7 +1,7 @@
 """The tier_4 docker helpers must NEVER build the nest image on a dev machine.
 
-`build-system.md` § Image tags & channels: building `ghcr.io/faunasocial/nest` is
-the self-hosted runner's job, dispatched through `build-nest-image.yml`. The three
+`image-pipeline.md` § Image tags & channels: building `ghcr.io/faunasocial/nest` is
+the GitHub-hosted runners' job, dispatched through `build-nest-image.yml`. The three
 dev VMs are guests on one physical host, so an image build on any of them starves
 every sibling session — the standing user stop of 2026-06-13, and the reason the
 nest-mode axis's `_DockerProvider` refuses rather than falls back:

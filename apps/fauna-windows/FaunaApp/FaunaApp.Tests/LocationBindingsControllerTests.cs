@@ -397,7 +397,7 @@ public class LocationBindingsControllerTests
 
     /// <summary>A bind is just the recorded row plus the bind push — no content-key push
     /// precedes it: the agent resolves the newly-bound set's keys from the account's custody
-    /// itself (on-demand-files.md § Shared sets on a capability host → <i>One
+    /// itself (on-demand-files-shared-sets.md § Shared sets on a capability host → <i>One
     /// mechanism</i>).</summary>
     [Fact]
     public async Task AddAsync_RecordsTheRowAndPushesTheBind_WithNoKeyPushFirst()

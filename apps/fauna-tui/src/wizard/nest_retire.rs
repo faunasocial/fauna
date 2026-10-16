@@ -39,10 +39,11 @@ use fauna_core::data::DnsConfig;
 use fauna_i18n::strings::onboarding::retire as t;
 use fauna_onboarding_machine::FieldTypePlain;
 use fauna_onboarding_machine::retire::{
-    HeldDnsCredential, ManagedServerRow, NestRetireMachine, RetireInputs, RetirePhase,
-    RetireSnapshot, StepState, TransferCodeState,
+    HeldDnsCredential, ManagedServerRow, NestRetireMachine, RememberedDnsSlots, RetireInputs,
+    RetirePhase, RetireSnapshot, StepState, TransferCodeState,
 };
 use fauna_provisioning::providers_generated::{Capability, PROVIDERS};
+use fauna_sync_engine::preference_surfaces::{plane_failure, refused_as_not_ready};
 use fauna_ui_ids as ids;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -187,7 +188,12 @@ pub fn open(app: &mut App, entry: RetireEntry) {
         current_ipv4: None,
         held_dns,
         provider_base_url: app.wizard.machine.provider_base_url("vps".into()),
-        doh_base_url: None,
+        // The e2e seam for the public-DNS attribution read: the harness's
+        // `set_provider_base_urls` map carries a `"doh"` entry pointing at its
+        // fake resolver; a release build never has the map, so this is `None`
+        // there and the machine asks the real resolver.
+        doh_base_url: app.wizard.machine.provider_base_url("doh".into()),
+        ..RetireInputs::default()
     });
     let domains = match entry {
         RetireEntry::Admin => crate::admin::retire_local_domains(&app.admin),
@@ -258,9 +264,21 @@ fn spawn_app_inputs(
             }
             if let Some(store) = account_store {
                 match store.dns().await {
-                    Ok(dns) => machine.set_held_dns(retire_inputs_from(None, Some(&dns)).1),
+                    Ok(dns) => {
+                        machine.set_held_dns(retire_inputs_from(None, Some(&dns)).1);
+                        // The remembered DKIM / `_atproto` / `_fauna` names ride
+                        // in with the same record (read-only for the machine).
+                        machine.set_remembered_slots(RememberedDnsSlots::from_config(&dns));
+                    }
                     Err(e) => {
-                        tracing::info!("nest_retire: DNS record read failed (best-effort): {e:#}")
+                        tracing::info!("nest_retire: DNS record read failed (best-effort): {e:#}");
+                        // A first-listing refusal is not "the account holds
+                        // none": say why the held credentials could not be read
+                        // (`account-client-lifecycle.md` § The first listing).
+                        let reason = plane_failure(e);
+                        if refused_as_not_ready(&reason) {
+                            machine.set_input_error(reason);
+                        }
                     }
                 }
             }

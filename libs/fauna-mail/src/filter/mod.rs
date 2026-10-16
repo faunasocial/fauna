@@ -99,11 +99,11 @@ pub enum FilterCondition {
 /// [`FilterAction::Discard`], [`FilterAction::Allow`]) and [`FilterAction::Reject`]
 /// are wired at the Go MTA perimeter; [`FilterAction::Forward`] is owned by
 /// `mail-forwarding.md`; [`FilterAction::AutoReply`] is wired via the perimeter
-/// loop-guard ([`auto_reply_decision`]) + compose
-/// ([`crate::outbound::autoreply::compose_auto_reply`]) → sign →
-/// `fauna.bridges.send_auto_reply` (atomic rate-limit + null-sender enqueue). The
-/// evaluator returns the matched action regardless — composition + side effects
-/// are the caller's job (`smtp-server.md` § Email filter rules spells out the
+/// loop-guard ([`auto_reply_decision`]) → `fauna.bridges.send_auto_reply`, where
+/// the nest rate-limits atomically, composes the reply from the stored rule
+/// ([`crate::outbound::autoreply::compose_auto_reply`]), signs it at the outbound
+/// hand-out and enqueues it with a null sender. The evaluator returns the matched
+/// action regardless — side effects are the caller's job (`smtp-server.md` § Email filter rules spells out the
 /// precedence).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]

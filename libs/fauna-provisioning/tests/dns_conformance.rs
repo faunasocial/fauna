@@ -828,7 +828,7 @@ async fn porkbun_find_apex_omits_the_subdomain_segment() {
 // breaking the two that cannot defend. That exact asymmetry caused a
 // production outage on 2026-07-24 — `RpcDnsProvider` passed fully-qualified
 // owners, and Hetzner's RRset API stored every record at a doubled name
-// (`_acme-challenge.example.com.example.com.`), API-visible but never resolvable,
+// (`_acme-challenge.example.net.example.net.`), API-visible but never resolvable,
 // failing ACME twice (`docs/goal/architecture/nest/tls-certificates.md`
 // § the 2026-07-24 dual defect).
 //

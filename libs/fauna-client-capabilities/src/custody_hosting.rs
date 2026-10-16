@@ -231,8 +231,13 @@ impl<R: RpcRequester> AdminHostingClient<R> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AdminHostingSnapshot {
     /// Every hosting row on this nest, heaviest hold first
-    /// (`crate::view_model::admin_hosting_rows`).
-    pub rows: Vec<crate::view_model::AdminHostingRowView>,
+    /// (`crate::view_model::admin_hosting_rows`) — `None` while the nest has
+    /// not ANSWERED, a failed read included. `None` is deliberately not an
+    /// empty list: a page paints the count and "nothing held" only from
+    /// `Some`, so an admin who reads "nothing held" is reading the nest's
+    /// answer, never a read that timed out (`account-replica-posture.md`
+    /// § The custody grant + ceremony; web's `rows = null` twin).
+    pub rows: Option<Vec<crate::view_model::AdminHostingRowView>>,
     /// The last remove's outcome sentence. NOT an error: `removed: false` on a
     /// row someone else already dropped is an honest no-op, and an error line
     /// would report the opposite of what happened.
@@ -263,17 +268,44 @@ pub async fn load_admin_hosting_snapshot<R: RpcRequester>(
 ) -> AdminHostingSnapshot {
     match AdminHostingClient::new(nest).list().await {
         Ok(reply) => AdminHostingSnapshot {
-            rows: crate::view_model::admin_hosting_rows(
+            rows: Some(crate::view_model::admin_hosting_rows(
                 &reply,
                 fauna_core::data::Timestamp::now().0,
-            ),
+            )),
             status: None,
             error,
         },
         Err(e) => AdminHostingSnapshot {
-            rows: Vec::new(),
+            rows: None,
             status: None,
             error: Some(error.unwrap_or_else(|| format!("load held custody: {e}"))),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A failed registry read is not an answer: the snapshot carries the error
+    /// and NO rows — never an empty list, which a page paints as "nothing
+    /// held" (`account-replica-posture.md` § The custody grant + ceremony).
+    #[test]
+    fn a_failed_read_is_unanswered_never_an_empty_registry() {
+        let snap = fauna_client_testkit::block_on(load_admin_hosting_snapshot(
+            fauna_client_testkit::FailingRequester::new("the nest took too long to respond"),
+            None,
+        ));
+        assert_eq!(
+            snap.rows, None,
+            "a failed read must leave the registry unanswered"
+        );
+        assert!(
+            snap.error
+                .as_deref()
+                .is_some_and(|e| e.contains("took too long")),
+            "the failure is the page's error: {:?}",
+            snap.error
+        );
     }
 }

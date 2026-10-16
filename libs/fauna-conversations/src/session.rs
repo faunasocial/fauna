@@ -750,6 +750,16 @@ impl ConversationsSession {
         *self.folder_gate.lock().unwrap() = Some(gate);
     }
 
+    /// Register where the recipient picker's contacts come from — a plain
+    /// pass-through to [`ConversationsManager::register_contact_roster`]; the
+    /// receive loop then re-reads it at start, on reconnect, on every tick and
+    /// when a picker opens (`docs/goal/ui/conversations.md` § Where logic
+    /// lives → *Recipient suggestions*). Every host passes the shared
+    /// `fauna_client_conversations::NestContactRoster`.
+    pub fn register_contact_roster(&self, source: Arc<dyn crate::backend::ContactRosterSource>) {
+        self.manager.register_contact_roster(source);
+    }
+
     /// Register the member content-key **custody-ingest** seam (Phase 0 — the read
     /// leg; `docs/goal/ui/folders.md` § Sharing). Plain pass-through to the
     /// FaunaMls backend (which holds the engine the open needs); the FFI/wasm
@@ -1671,16 +1681,23 @@ impl ConversationsSession {
     /// so a relaunched client still resolves it. `None` ⇒ same-nest set (or no
     /// record): the plain local path. Callers thread it into
     /// `FoldersClient::leave_with_home` before calling
-    /// [`Self::leave_folder`].
-    pub async fn folder_home_url(&self, group_id_hex: &str) -> Option<String> {
-        let raw = hex::decode(group_id_hex.trim())
+    /// [`Self::leave_folder`]. `Err` ⇒ the custody record could not be read, so
+    /// whether the set is foreign is **unknown**: the caller must stop before
+    /// any mutation, never fall back to the same-nest path.
+    pub async fn folder_home_url(&self, group_id_hex: &str) -> Result<Option<String>, String> {
+        let Some(raw) = hex::decode(group_id_hex.trim())
             .ok()
-            .filter(|b| !b.is_empty())?;
+            .filter(|b| !b.is_empty())
+        else {
+            return Ok(None);
+        };
         let channel_id = fauna_mls::types::ChannelId::from_group_id(&raw);
         if let Some(url) = self.fauna_mls.channel_home_url(&channel_id) {
-            return (!url.is_empty()).then_some(url);
+            return Ok((!url.is_empty()).then_some(url));
         }
-        let sink = self.fauna_mls.folder_custody_sink()?;
+        let Some(sink) = self.fauna_mls.folder_custody_sink() else {
+            return Ok(None);
+        };
         sink.foreign_home_url(&channel_id.0).await
     }
 
@@ -2014,6 +2031,24 @@ pub fn report_welcome_ingest_failure(kind: &WelcomeChannelKind, e: &BackendError
 #[cfg(not(target_arch = "wasm32"))]
 pub const KEYPACKAGE_TARGET: u64 = 20;
 
+/// The available one-time key-package count below which a Settings →
+/// Encryption page paints its read-only "low" flag
+/// (`docs/goal/behavior/direct-messages.md` § Key Package Management: "fewer
+/// than five" — a display flag only, never an auto-mint trigger; the pool is
+/// topped up to [`KEYPACKAGE_TARGET`] at sign-in and by the page's manual
+/// refresh). The ONE threshold every app reads, through [`keypackages_low`] —
+/// never a per-app literal.
+pub const KEYPACKAGE_LOW_THRESHOLD: u64 = 5;
+
+/// Whether `count` available key packages is low enough for the Encryption
+/// page's read-only warning ([`KEYPACKAGE_LOW_THRESHOLD`]). Exported to the
+/// native apps over UniFFI and to the web SPA as `fauna-wasm`'s
+/// `keypackagesLow`.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn keypackages_low(count: u64) -> bool {
+    count < KEYPACKAGE_LOW_THRESHOLD
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(feature = "uniffi", fauna_uniffi_async::export)]
 impl ConversationsSession {
@@ -2088,6 +2123,12 @@ impl ConversationsSession {
         let mail_read_poke = Arc::new(tokio::sync::Notify::new());
         self.manager.set_mail_read_poke(Arc::new({
             let poke = Arc::clone(&mail_read_poke);
+            move || poke.notify_one()
+        }));
+        // A recipient picker opening owes the contact roster a fresh read.
+        let contact_roster_poke = Arc::new(tokio::sync::Notify::new());
+        self.manager.set_contact_roster_poke(Arc::new({
+            let poke = Arc::clone(&contact_roster_poke);
             move || poke.notify_one()
         }));
 
@@ -2508,6 +2549,11 @@ impl ConversationsSession {
                     // the user's decision (`conversation-rooms.md` § Join rules
                     // and invites). A peek, so re-listing every sweep is safe.
                     manager.refresh_room_invitations().await;
+                    // The contact roster the recipient picker completes over
+                    // (`conversations.md` § Where logic lives → *Recipient
+                    // suggestions*) — re-read at start, on reconnect and on
+                    // every tick; a no-op with no source registered.
+                    manager.refresh_contact_roster().await;
                     conv_sweep!();
                     mail_sweep!();
                     bridged_sweep!();
@@ -2553,6 +2599,12 @@ impl ConversationsSession {
                     _ = receive_poke.notified() => {
                         full_sweep!();
                     }
+                    // A recipient picker opened: read the contact roster now,
+                    // so a contact accepted a moment ago is offered (only the
+                    // roster — nothing else waits on a picker opening).
+                    _ = contact_roster_poke.notified() => {
+                        manager.refresh_contact_roster().await;
+                    }
                     // A thread read owes the nest `\Seen` writes
                     // (`ConversationsManager::read_thread`): send them now, not
                     // at the next sweep, so another device hears of the read
@@ -2588,6 +2640,7 @@ impl ConversationsSession {
                                         shared_by_handle: w.shared_by_handle,
                                         shared_by_domain: w.shared_by_domain,
                                         set_name_seal: w.set_name_seal,
+                                        residency: w.residency,
                                     };
                                     match ingest_welcome_by_kind(
                                         &backend, &manager, &w.kind, &channel_hex, &w.welcome_bytes,
@@ -2750,6 +2803,12 @@ pub struct FolderWelcomeContext {
     /// scrubbed cross-nest Welcome carries; [`join_folder_welcome`] opens it
     /// once the join has ingested custody.
     pub set_name_seal: Option<fauna_core::label_custody::SealedSetName>,
+    /// The folder's residency as its home nest stamped it on the Welcome
+    /// relay (`WelcomePayload.residency` — `"metadata_only"` / `"full"`;
+    /// `federation.md` § … *The `residency` stamp*) — [`join_folder_welcome`]
+    /// seeds the accept-time foreign-set record with it, so the member's seat
+    /// arms before any federated read. Absent means *not stated*, never *full*.
+    pub residency: Option<String>,
 }
 
 /// Ingest an MLS Welcome by [`WelcomeChannelKind`] — the single ingest dispatch
@@ -3294,5 +3353,21 @@ mod weak_room_post_keys_tests {
         assert!(keys.room_post_seal_key([7; 32]).await.is_err());
         assert!(keys.room_post_rooms().await.is_empty());
         assert_eq!(keys.room_home_nest_url([7; 32]).await, None);
+    }
+}
+
+#[cfg(test)]
+mod keypackage_low_tests {
+    use super::*;
+
+    /// `direct-messages.md` § Key Package Management: low means FEWER than
+    /// five — five itself is healthy, four is low.
+    #[test]
+    fn low_means_fewer_than_five() {
+        assert_eq!(KEYPACKAGE_LOW_THRESHOLD, 5);
+        assert!(keypackages_low(0));
+        assert!(keypackages_low(4));
+        assert!(!keypackages_low(5));
+        assert!(!keypackages_low(20));
     }
 }

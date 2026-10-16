@@ -13,6 +13,9 @@
 //! - `claims.redeem`: binds the bearer, grants through the same engine,
 //!   rejects unknown/voided/foreign-redeemed codes, and is idempotent for
 //!   the same actor.
+//! - `claims.void`: the author-side revoke — an unredeemed code stops
+//!   redeeming; a redeemed one also voids the redeemer's entitlement; a
+//!   non-author answers `claim_not_found`; a repeat answers the same stamp.
 //! - `requests.approve` stamping a payment-marked request's window onto the
 //!   subscriber row.
 //!
@@ -47,9 +50,10 @@ use fauna_payments::{Buyer, PaymentEntitlement};
 use fauna_protocol::{
     RpcError, decode_strict as decode, encode_canonical,
     payments::{
-        ClaimMintReply, ClaimMintRequest, ClaimRedeemReply, ClaimRedeemRequest, ClaimsListReply,
-        ClaimsListRequest, ProviderRemoveReply, ProviderRemoveRequest, ProviderSetReply,
-        ProviderSetRequest, ProvidersListReply, ProvidersListRequest,
+        ClaimMintReply, ClaimMintRequest, ClaimRedeemReply, ClaimRedeemRequest, ClaimVoidReply,
+        ClaimVoidRequest, ClaimsListReply, ClaimsListRequest, ProviderRemoveReply,
+        ProviderRemoveRequest, ProviderSetReply, ProviderSetRequest, ProvidersListReply,
+        ProvidersListRequest,
     },
     subscriptions::{RequestsListReply, RequestsListRequest},
 };
@@ -265,6 +269,7 @@ fn entitlement(
         tier: tier.into(),
         valid_until_secs: valid_until.map(|s| s as u64),
         external_ref: external_ref.into(),
+        return_ref: None,
     }
 }
 
@@ -963,4 +968,182 @@ async fn claims_list_is_caller_scoped_and_shows_full_audit_state() {
         claims_list(&router, state, other).await.claims.is_empty(),
         "another actor must not see the author's claim codes"
     );
+}
+
+// ── claims.void ─────────────────────────────────────────────────
+
+async fn claims_void(
+    router: &RpcRouter,
+    state: Arc<AppState>,
+    caller: [u8; 32],
+    code: &str,
+) -> Result<ClaimVoidReply, RpcError> {
+    let req = encode_canonical(&ClaimVoidRequest {
+        code: code.into(),
+        extra: Default::default(),
+    })
+    .unwrap();
+    let reply = common::call_raw(
+        router,
+        state,
+        "fauna.payments.claims.void",
+        caller,
+        Bytes::from(req.to_vec()),
+    )
+    .await?;
+    Ok(decode(&reply).expect("decode claims.void reply"))
+}
+
+/// An author voids a code nobody has redeemed: `claims.redeem` refuses it
+/// from then on, `claims.list` shows the stamp, and a second void answers the
+/// same stamp (idempotent — `forbid_replay: false`).
+#[tokio::test]
+async fn author_void_of_an_unredeemed_claim_refuses_redemption_and_is_idempotent() {
+    let (router, state) = router_with_db().await;
+    let author = seed_author_with_gold(&router, &state).await.actor_id().0;
+    let buyer = ActorKeypair::generate().actor_id().0;
+    state.db.create_user(&buyer, "free", "buyer").await.unwrap();
+
+    let minted = claims_mint(&router, state.clone(), author, "gold", None)
+        .await
+        .expect("mint ok");
+    let first = claims_void(&router, state.clone(), author, &minted.code)
+        .await
+        .expect("void ok");
+
+    let err = claims_redeem(&router, state.clone(), buyer, &minted.code)
+        .await
+        .expect_err("a voided code must not redeem");
+    assert_eq!(err.code, "fauna.payments.claim_voided");
+
+    let listed = claims_list(&router, state.clone(), author).await;
+    let row = listed
+        .claims
+        .iter()
+        .find(|c| c.code == minted.code)
+        .expect("claim listed");
+    assert_eq!(row.voided_at, Some(first.voided_at));
+    assert!(row.redeemed_by.is_none());
+
+    let second = claims_void(&router, state, author, &minted.code)
+        .await
+        .expect("a repeat void is ok");
+    assert_eq!(
+        second.voided_at, first.voided_at,
+        "a repeat answers the first void's stamp"
+    );
+}
+
+/// An author voids a code a buyer already redeemed: the redeemer's
+/// entitlement to the tier ends at once (as a refund ends it), and the code
+/// itself carries `voided_at`, which is what the web redeem door honours.
+#[tokio::test]
+async fn author_void_of_a_redeemed_claim_voids_the_redeemers_entitlement() {
+    let (router, state) = router_with_db().await;
+    let author_kp = seed_author_with_gold(&router, &state).await;
+    let author = author_kp.actor_id().0;
+    let buyer = ActorKeypair::generate().actor_id().0;
+    state.db.create_user(&buyer, "free", "buyer").await.unwrap();
+
+    let minted = claims_mint(&router, state.clone(), author, "gold", Some(future_secs()))
+        .await
+        .expect("mint ok");
+    claims_redeem(&router, state.clone(), buyer, &minted.code)
+        .await
+        .expect("redeem ok");
+    author_client_approves(&router, &state, &author_kp, buyer).await;
+    assert!(
+        state
+            .db
+            .is_subscriber(&author, &buyer, "gold")
+            .await
+            .unwrap()
+    );
+
+    let voided = claims_void(&router, state.clone(), author, &minted.code)
+        .await
+        .expect("void ok");
+    assert!(
+        !state
+            .db
+            .is_subscriber(&author, &buyer, "gold")
+            .await
+            .unwrap(),
+        "the redeemer's window is voided immediately"
+    );
+    let row = state
+        .db
+        .get_payment_claim(&minted.code)
+        .await
+        .unwrap()
+        .expect("claim row survives (audit-preserving)");
+    assert_eq!(
+        row.voided_at.map(|s| (s as u64) * 1_000_000),
+        Some(voided.voided_at.0),
+        "the bound code stops opening the web too"
+    );
+    assert_eq!(row.redeemed_by.as_deref(), Some(buyer.as_slice()));
+
+    // The redeemer cannot re-bind it to regain the entitlement.
+    let err = claims_redeem(&router, state, buyer, &minted.code)
+        .await
+        .expect_err("a voided code must not re-redeem");
+    assert_eq!(err.code, "fauna.payments.claim_voided");
+}
+
+/// A void landing before the author's client approved the redemption leaves
+/// no payment-entitled request for it to approve later.
+#[tokio::test]
+async fn author_void_before_approval_drops_the_pending_payment_marker() {
+    let (router, state) = router_with_db().await;
+    let author = seed_author_with_gold(&router, &state).await.actor_id().0;
+    let buyer = ActorKeypair::generate().actor_id().0;
+    state.db.create_user(&buyer, "free", "buyer").await.unwrap();
+
+    let minted = claims_mint(&router, state.clone(), author, "gold", None)
+        .await
+        .expect("mint ok");
+    let redeemed = claims_redeem(&router, state.clone(), buyer, &minted.code)
+        .await
+        .expect("redeem ok");
+    assert!(redeemed.queued);
+
+    claims_void(&router, state.clone(), author, &minted.code)
+        .await
+        .expect("void ok");
+    let rows = state.db.list_subscribe_requests(&author).await.unwrap();
+    assert!(
+        rows.iter().all(|r| !r.payment_entitled),
+        "no payment-entitled request survives the void"
+    );
+}
+
+/// Another actor's codes are never acknowledged: a void by anyone but the
+/// author answers exactly what an unknown code answers, and changes nothing.
+#[tokio::test]
+async fn void_by_a_non_author_is_claim_not_found() {
+    let (router, state) = router_with_db().await;
+    let author = seed_author_with_gold(&router, &state).await.actor_id().0;
+    let other = ActorKeypair::generate().actor_id().0;
+    state.db.create_user(&other, "free", "other").await.unwrap();
+
+    let minted = claims_mint(&router, state.clone(), author, "gold", None)
+        .await
+        .expect("mint ok");
+    let err = claims_void(&router, state.clone(), other, &minted.code)
+        .await
+        .expect_err("a foreign void must fail");
+    assert_eq!(err.code, "fauna.payments.claim_not_found");
+    let err = claims_void(&router, state.clone(), other, "NOSUCHCODE")
+        .await
+        .expect_err("an unknown code must fail");
+    assert_eq!(err.code, "fauna.payments.claim_not_found");
+
+    let row = state
+        .db
+        .get_payment_claim(&minted.code)
+        .await
+        .unwrap()
+        .expect("claim row");
+    assert!(row.voided_at.is_none(), "a foreign void changes nothing");
 }

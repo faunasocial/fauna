@@ -640,7 +640,8 @@ impl SecurityEvent {
 
 /// Sends multi-channel security notifications for a given actor.
 ///
-/// Channel 1 (guaranteed): local inbox system message via `push_inbox`.
+/// Channel 1b (guaranteed): the `notifications` row; channel 1 (the local
+/// inbox system message via `push_inbox`) follows only once the row stands.
 /// Channel 3 (best-effort): email enqueued via the SMTP outbound queue.
 ///
 /// Channel 2 (a push-relay POST) was deleted 2026-08-15 — see the note at its
@@ -658,6 +659,44 @@ impl SecurityNotifier {
         Self { db, nest_identity }
     }
 
+    /// Channel 1: the inbox system message. Called only once the matching
+    /// `notifications` row stands (see [`SecurityNotifier::notify`]). Wraps the
+    /// notice in the canonical DAG-CBOR inbox envelope (layer 1) as a
+    /// SecurityNotice so the shared drain surfaces it by `kind`.
+    async fn push_inbox_envelope(&self, actor_id: &[u8; 32], subject: &str, body: &str) {
+        match fauna_protocol::inbox::InboxEnvelope::security_notice(
+            &fauna_protocol::inbox::SecurityNoticeInbox {
+                subject: subject.to_string(),
+                body: body.to_string(),
+                extra: Default::default(),
+            },
+        )
+        .and_then(|e| e.to_canonical_bytes())
+        {
+            Ok(payload) => match self.db.push_inbox(actor_id, &payload, None).await {
+                Ok(_) => tracing::debug!(
+                    actor = hex::encode(actor_id),
+                    subject = %subject,
+                    "security notification delivered to inbox"
+                ),
+                Err(e) => tracing::error!(
+                    actor = hex::encode(actor_id),
+                    subject = %subject,
+                    error = %e,
+                    "failed to deliver security notification to inbox"
+                ),
+            },
+            // Best-effort: skip the inbox channel on the (effectively impossible)
+            // encode failure of two short strings; channel 3 still attempts.
+            Err(e) => tracing::error!(
+                actor = hex::encode(actor_id),
+                subject = %subject,
+                error = %e,
+                "failed to encode security notice inbox envelope"
+            ),
+        }
+    }
+
     /// Send a security notification to `actor_id`.
     ///
     /// Always inserts an inbox system message plus the `notifications` row the
@@ -670,110 +709,82 @@ impl SecurityNotifier {
         let subject = event.subject();
         let body = event.body();
 
-        // Channel 1: guaranteed inbox delivery. Wrap the notice in the canonical
-        // DAG-CBOR inbox envelope (layer 1) as a SecurityNotice so the shared
-        // drain surfaces it by `kind` (replaces the old plain-UTF-8 payload).
-        match fauna_protocol::inbox::InboxEnvelope::security_notice(
-            &fauna_protocol::inbox::SecurityNoticeInbox {
-                subject: subject.clone(),
-                body: body.clone(),
-                extra: Default::default(),
-            },
-        )
-        .and_then(|e| e.to_canonical_bytes())
-        {
-            Ok(payload) => match self.db.push_inbox(actor_id, &payload, None).await {
-                Ok(inbox_row_id) => {
-                    tracing::debug!(
-                        actor = hex::encode(actor_id),
-                        subject = %subject,
-                        "security notification delivered to inbox"
-                    );
-
-                    // Channel 1b: the notifications row — what the apps'
-                    // Notifications page actually renders (`notifications.md`
-                    // § Security notices). Clients ack the redundant inbox
-                    // envelope on sight because this row is the durable render
-                    // surface. The summary carries the FULL notice (subject +
-                    // body): the body holds the actionable detail (the IP, the
-                    // pending action id), and on a no-mail deployment this row is the
-                    // only place it ever reaches the user.
-                    //
-                    // The inbox row id is a per-event dedup token, not a
-                    // content identifier (the `feed_request_dedup_key`
-                    // pattern): `insert_notification` dedups on
-                    // (actor, type, sender, content), and a second
-                    // `NewTokenIssued` — a fresh compromise signal — must ring
-                    // again, never be swallowed as a duplicate of the first.
-                    let notif_text = crate::db::notifications::NotificationText::new(
-                        event.row_body(),
-                        format!("{subject}\n\n{body}"),
-                    );
-                    let dedup_token = inbox_row_id.to_le_bytes();
-                    let now_micros = fauna_core::data::Timestamp::now().as_i64();
-                    match self
-                        .db
-                        .insert_notification(
+        // Channel 1b FIRST: the notifications row — what the apps'
+        // Notifications page actually renders (`notifications.md` § Security
+        // notices). Clients ack the redundant inbox envelope on sight because
+        // this row is the durable render surface, so the row is the CONDITION
+        // of the envelope: it is written before the envelope exists, and a
+        // failed row write delivers no envelope (an ackable envelope with no
+        // rendered twin would lose the alarm). The summary carries the FULL
+        // notice (subject + body): the body holds the actionable detail (the
+        // IP, the pending action id), and on a no-mail deployment this row is
+        // the only place it ever reaches the user.
+        //
+        // The dedup token is a fresh per-event nonce, not a content
+        // identifier (the `feed_request_dedup_key` pattern):
+        // `insert_notification` dedups on (actor, type, sender, content), and
+        // a second `NewTokenIssued` — a fresh compromise signal — must ring
+        // again, never be swallowed as a duplicate of the first.
+        let notif_text = crate::db::notifications::NotificationText::new(
+            event.row_body(),
+            format!("{subject}\n\n{body}"),
+        );
+        let mut dedup_token = [0u8; 16];
+        if let Err(e) = getrandom::fill(&mut dedup_token) {
+            tracing::error!(
+                actor = hex::encode(actor_id),
+                subject = %subject,
+                error = %e,
+                "failed to mint security notification dedup token"
+            );
+        } else {
+            let now_micros = fauna_core::data::Timestamp::now().as_i64();
+            match self
+                .db
+                .insert_notification(
+                    actor_id,
+                    &fauna_protocol::notifications::NotifType::SecurityNotice,
+                    "fauna",
+                    None,
+                    Some(&dedup_token),
+                    None,
+                    &notif_text,
+                    now_micros,
+                )
+                .await
+            {
+                Ok(notif_id) => {
+                    if let Some(notif_id) = notif_id {
+                        state.ws.notify_push(
                             actor_id,
-                            &fauna_protocol::notifications::NotifType::SecurityNotice,
-                            "fauna",
-                            None,
-                            Some(&dedup_token),
-                            None,
-                            &notif_text,
-                            now_micros,
-                        )
-                        .await
-                    {
-                        Ok(Some(notif_id)) => {
-                            state.ws.notify_push(
-                                actor_id,
-                                fauna_protocol::PushEvent::Notification(
-                                    fauna_protocol::push_events::NotificationPayload {
-                                        notification_id: notif_id,
-                                        notif_type: fauna_protocol::notifications::NotifType::SecurityNotice,
-                                        source: "fauna".into(),
-                                        sender_id: None,
-                                        content_id: Some(hex::encode(dedup_token)),
-                                        summary: notif_text.summary().to_string(),
-                                        body: notif_text.body().cloned(),
-                                        timestamp: fauna_core::data::Timestamp::now_secs() as u64,
-                                        extra: std::collections::BTreeMap::new(),
-                                    },
-                                ),
-                            );
-                        }
-                        // Unreachable with a fresh inbox row id in the token;
-                        // an already-standing row needs no second push.
-                        Ok(None) => {}
-                        Err(e) => {
-                            tracing::error!(
-                                actor = hex::encode(actor_id),
-                                subject = %subject,
-                                error = %e,
-                                "failed to write security notification row"
-                            );
-                        }
+                            fauna_protocol::PushEvent::Notification(
+                                fauna_protocol::push_events::NotificationPayload {
+                                    notification_id: notif_id,
+                                    notif_type:
+                                        fauna_protocol::notifications::NotifType::SecurityNotice,
+                                    source: "fauna".into(),
+                                    sender_id: None,
+                                    content_id: Some(hex::encode(dedup_token)),
+                                    summary: notif_text.summary().to_string(),
+                                    body: notif_text.body().cloned(),
+                                    timestamp: fauna_core::data::Timestamp::now_secs() as u64,
+                                    extra: std::collections::BTreeMap::new(),
+                                },
+                            ),
+                        );
                     }
+                    // `None` is unreachable with a fresh nonce in the token;
+                    // an already-standing row needs no second push.
+                    self.push_inbox_envelope(actor_id, &subject, &body).await;
                 }
                 Err(e) => {
                     tracing::error!(
                         actor = hex::encode(actor_id),
                         subject = %subject,
                         error = %e,
-                        "failed to deliver security notification to inbox"
+                        "failed to write security notification row; inbox envelope withheld"
                     );
                 }
-            },
-            // Best-effort: skip the inbox channel on the (effectively impossible)
-            // encode failure of two short strings; channels 2/3 still attempt.
-            Err(e) => {
-                tracing::error!(
-                    actor = hex::encode(actor_id),
-                    subject = %subject,
-                    error = %e,
-                    "failed to encode security notice inbox envelope"
-                );
             }
         }
 
@@ -977,6 +988,38 @@ mod tests {
         for event in &events {
             crate::db::notifications::assert_body_is_catalog_complete(&event.row_body());
         }
+        // Clause parity: the localized row is the only place the actionable
+        // warning reaches a user on a mailless nest, so any event whose
+        // English `body()` tells the owner what to do if it was not them must
+        // say it in the row's sentence too. A new event cannot drift.
+        let has_warning = |text: &str| {
+            let t = text.to_lowercase();
+            [
+                "was not you",
+                "did not request",
+                "did not authorize",
+                "did not perform",
+            ]
+            .iter()
+            .any(|marker| t.contains(marker))
+        };
+        let mut warned = 0;
+        for event in &events {
+            if !has_warning(&event.body()) {
+                continue;
+            }
+            warned += 1;
+            let row = event.row_body();
+            let sentence = crate::db::notifications::NotificationText::localized(row.clone())
+                .summary()
+                .to_string();
+            assert!(
+                has_warning(&sentence),
+                "{} drops the warning its body() carries: {sentence:?}",
+                row.key
+            );
+        }
+        assert!(warned >= 8, "the parity check saw only {warned} warnings");
         // The actionable detail the row exists to show rides as an arg: the
         // action's id and deadline (there is no cancel URL — cancelling is the
         // Settings → Pending actions section).
@@ -1179,6 +1222,38 @@ mod tests {
             2,
             "each security event must get its own notifications row; the \
              second event was dedup-swallowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_notifications_row_write_leaves_no_ackable_inbox_envelope() {
+        // The apps ack the inbox envelope on sight because the `notifications`
+        // row is the durable render surface (`notifications.md` § Security
+        // notices → *Apps ack the redundant inbox copy*). That ack is only
+        // honest if the row exists before the envelope does: with the row
+        // write failing, no envelope may be consumable, or the alarm renders
+        // nowhere. Fault injection: drop the table the row insert targets.
+        let db = make_db();
+        let actor_id = [0x31u8; 32];
+        let notifier = SecurityNotifier::new(Arc::clone(&db), make_nest_identity());
+        let state = Arc::new(AppState::for_test(Arc::clone(&db)));
+
+        db.conn()
+            .await
+            .execute_batch("DROP TABLE notifications")
+            .unwrap();
+
+        let event = SecurityEvent::NewTokenIssued {
+            ip_address: Some("198.51.100.5".to_string()),
+        };
+        notifier.notify(&state, &actor_id, &event).await;
+
+        let messages = db.poll_inbox(&actor_id).await.unwrap();
+        assert!(
+            messages.is_empty(),
+            "an inbox envelope was delivered although its notifications row \
+             could not be written; the apps would ack it and the notice would \
+             render nowhere"
         );
     }
 

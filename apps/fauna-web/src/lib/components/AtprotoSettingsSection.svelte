@@ -31,6 +31,7 @@
   import { resolveLocalized } from '$lib/i18n/localized';
   import { isSafeNavUrl } from '$lib/safe-url';
   import { onMount, onDestroy } from 'svelte';
+  import { registerActorScopedReset, sameActorSince } from '$lib/actorScope';
   import { t } from '$lib/i18n/strings';
   import type { AtprotoSettingsSnapshot } from '$lib/atproto-settings-machine';
   import type { AtprotoSettingsMachine } from '../../../static/fauna_wasm_atproto_settings.js';
@@ -69,6 +70,14 @@
   let snap = $state<AtprotoSettingsSnapshot | null>(null);
   let ready = $state(false);
   let timer: ReturnType<typeof setInterval> | null = null;
+  // The 15 s poll writes this actor's snapshot, so the canonical drop retires it
+  // (`account-scoping.md` § The scoping taxonomy: background loops die with the
+  // state they write); it must not outlive an in-place identity change.
+  function stopTimer(): void {
+    if (timer) clearInterval(timer);
+    timer = null;
+  }
+  const unregisterActorReset = registerActorScopedReset(stopTimer);
   // Secrets revealed (by mint or explicit reveal) this session, keyed by
   // credential_id. Never persisted, never part of the snapshot (D3) — the
   // reveal button's OWN text becomes the secret once revealed (no separate
@@ -194,6 +203,7 @@
   }
 
   onMount(async () => {
+    const sameActor = sameActorSince();
     // Seed the pre-fetch state from the SHARED Rust default FIRST, before the
     // identity check below can return early — so there is exactly one source of
     // pre-fetch truth on this page and the signed-out path paints off it too.
@@ -239,7 +249,11 @@
       // `getAtprotoSettingsMachine`), the observer this mount registered was
       // never wired in, so nothing repaints `snap` unless this timer pulls
       // it itself.
-      timer = setInterval(async () => { await machine?.refresh(); applySnapshot(); }, 15000);
+      // A drop that landed during the awaits above already ran; starting the poll
+      // now would resurrect the outgoing actor's loop.
+      if (sameActor()) {
+        timer = setInterval(async () => { await machine?.refresh(); applySnapshot(); }, 15000);
+      }
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
       ready = true;
@@ -247,7 +261,8 @@
   });
 
   onDestroy(() => {
-    if (timer) clearInterval(timer);
+    stopTimer();
+    unregisterActorReset();
     // Drop the rehydrate hook with the page, so the command fails loudly ("the
     // AT Protocol settings page is not mounted") instead of poking a torn-down
     // closure whose `machine` reference is stale.
@@ -301,6 +316,13 @@
 
   function cancelDelete(): void {
     machine?.cancelDelete(); // fires the registered observer → applySnapshot
+    applySnapshot();
+  }
+
+  // The terminal opt-in is card state on the machine, not a gesture — nothing
+  // is sent until the confirm.
+  function setRetireIdentity(enabled: boolean): void {
+    machine?.setDeleteRetireIdentity(enabled); // fires the registered observer → applySnapshot
     applySnapshot();
   }
 
@@ -547,7 +569,7 @@
               checked={snap.history_backfill}
               onchange={toggleHistoryBackfill}
             />
-            {t.atproto_settings.history_backfill_label}
+            {resolveLocalized(card.history_backfill_label)}
           </label>
         {/if}
         <div class="card-actions">
@@ -636,10 +658,25 @@
     {/if}
     {#if snap?.delete_confirm}
       {@const deleteConfirm = snap.delete_confirm}
+      {@const retire = deleteConfirm.retire_identity}
       <div class="card" data-testid={IDS.ATPROTO_DELETE_CONFIRM_CARD}>
         {#each deleteConfirm.lines as line}
           <p>{resolveLocalized(line)}</p>
         {/each}
+        <label class="toggle">
+          <input
+            type="checkbox"
+            data-testid={IDS.ATPROTO_DELETE_TOMBSTONE}
+            data-state={!retire.available ? 'unavailable' : retire.selected ? 'on' : 'off'}
+            checked={retire.selected}
+            disabled={!retire.available || deleteConfirm.in_progress}
+            onchange={(e) => setRetireIdentity(e.currentTarget.checked)}
+          />
+          {t.atproto_settings.delete_retire_identity_label}
+        </label>
+        {#if retire.unavailable_reason}
+          <p>{resolveLocalized(retire.unavailable_reason)}</p>
+        {/if}
         <div class="card-actions">
           <button class="btn" data-testid={IDS.ATPROTO_DELETE_CANCEL} disabled={deleteConfirm.in_progress} onclick={cancelDelete}>
             {t.atproto_settings.delete_cancel_button}
@@ -663,6 +700,7 @@
         data-state={snap?.external_apps_enabled ? 'on' : 'off'}
         onclick={toggleExternalApps}
       >{t.atproto_settings.external_apps_toggle}</button>
+      <p class="muted small">{t.atproto_settings.external_apps_hint}</p>
 
       <div class="creds">
         <h3>{t.atproto_settings.app_credentials_heading}</h3>

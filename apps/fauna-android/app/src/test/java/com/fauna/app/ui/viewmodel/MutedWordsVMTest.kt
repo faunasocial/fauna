@@ -1,6 +1,7 @@
 package com.fauna.app.ui.viewmodel
 
 import com.fauna.app.core.ApiClient
+import com.fauna.ffi.FfiException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -9,7 +10,9 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -29,6 +32,9 @@ import uniffi.fauna_client_config.MutedWordsSnapshot
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class MutedWordsVMTest {
+
+    /** `common.needs_nest`, as the shared crate words it (`fauna_i18n::strings::common::NEEDS_NEST`). */
+    private val NEEDS_NEST = "Needs a connection to your nest"
 
     @Before
     fun installMainDispatcher() = Dispatchers.setMain(UnconfinedTestDispatcher())
@@ -58,6 +64,38 @@ class MutedWordsVMTest {
             vm.page.value.loaded,
         )
         verify(api, times(2)).mutedKeywordsList()
+    }
+
+    // The first-listing gate's refusal (`common.needs_nest`) reaches the load as
+    // `FfiException.General(msg)`; the page says why on `error-message`, and no
+    // empty state paints (`loaded` stays false). Needs the host FFI library for
+    // the shared `refusedAsNotReady` predicate (account-client-lifecycle.md
+    // § The first listing, clauses (4)/(5)).
+    @Test
+    fun aRefusedLoadShowsTheReasonAndNoEmptyState() = runTest {
+        val api = mock(ApiClient::class.java)
+        whenever(api.storeChangedTick).thenReturn(MutableSharedFlow())
+        whenever(api.mutedKeywordsList())
+            .thenAnswer { throw FfiException.General(msg = NEEDS_NEST) }
+
+        val vm = MutedWordsVM(api)
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(NEEDS_NEST, vm.errorMessage.value)
+        assertFalse(vm.page.value.loaded)
+    }
+
+    @Test
+    fun anyOtherFailedLoadStaysQuiet() = runTest {
+        val api = mock(ApiClient::class.java)
+        whenever(api.storeChangedTick).thenReturn(MutableSharedFlow())
+        whenever(api.mutedKeywordsList())
+            .thenAnswer { throw FfiException.General(msg = "connection reset") }
+
+        val vm = MutedWordsVM(api)
+        testScheduler.advanceUntilIdle()
+
+        assertNull(vm.errorMessage.value)
     }
 
     @Test

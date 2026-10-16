@@ -604,18 +604,18 @@ def test_family_ward_feed_source_ask_redeems_once(app, bridges_nest, request):
     from clients.ws_rpc_admin_client import WsRpcAdminClient
     from conftest import _login_app_as
     from helpers.waiting import wait_until
-    from tests.test_family import (
-        _DEFAULT_WARD_POLICY,
-        _admit_adult_directly,
-        _admit_ward,
-        _unique_suffix,
+    from helpers.family_wire import (
+        DEFAULT_WARD_POLICY,
+        admit_adult_directly,
+        admit_ward,
     )
+    from tests.test_family import _unique_suffix
 
     app.bridges.require_source_request_supported()
 
     suffix = _unique_suffix()
-    guardian = _admit_adult_directly(bridges_nest, f"feedask-guardian-{suffix}")
-    ward = _admit_ward(bridges_nest, guardian, f"feedask-ward-{suffix}")
+    guardian = admit_adult_directly(bridges_nest, f"feedask-guardian-{suffix}")
+    ward = admit_ward(bridges_nest, guardian, f"feedask-ward-{suffix}")
     ward_actor = bytes.fromhex(ward["actor_id_hex"])
 
     def rpc_as(identity):
@@ -630,7 +630,7 @@ def test_family_ward_feed_source_ask_redeems_once(app, bridges_nest, request):
             "fauna.family.policy.update",
             {
                 "supervised_actor_id": ward_actor,
-                "policy": {**_DEFAULT_WARD_POLICY, "feed_sources": "block"},
+                "policy": {**DEFAULT_WARD_POLICY, "feed_sources": "block"},
             },
         )
 

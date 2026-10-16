@@ -17,7 +17,16 @@
 //!   channel deliberately does not carry — bounded frames instead);
 //! - the **ranged chunk pull** (`fauna.peer.sync.chunks.pull`) — a file-sync
 //!   folder's stored chunk bodies from a sibling device that holds the file,
-//!   sliced to the frame (the nest's analog is `GET /api/v1/chunks/{key}`).
+//!   sliced to the frame (the nest's analog is `GET /api/v1/chunks/{key}`);
+//! - the **folder row pull** (`fauna.peer.sync.changes.list` +
+//!   `fauna.peer.sync.manifests.get`) — a file-sync folder's change rows and
+//!   the manifests they name, so two siblings keep passing files while no
+//!   nest answers (`docs/goal/behavior/p2p.md` § Same-account nest-down
+//!   folder transfer). The share leg's pair mirrored field for field, the
+//!   folder named where the share leg names its set; the row element is the
+//!   one both legs carry ([`crate::peer_row::PeerChangeRow`]). Deliberately
+//!   NOT the account plane's `fauna.sync.changes.list`, whose file-row form
+//!   stays refused.
 //!
 //! **Kind-family separability (wormability rule 5).** The same-account leg's
 //! kinds live under `fauna.peer.sync.` — a family distinct from the base
@@ -56,6 +65,12 @@ pub const KIND_PEER_SYNC_BLOCKS_PULL: &str = "fauna.peer.sync.blocks.pull";
 /// Peer-channel kind: ranged want-list pull of a file-sync folder's stored
 /// chunk bodies from an admitted sibling (see [`PeerSyncChunksPullRequest`]).
 pub const KIND_PEER_SYNC_CHUNKS_PULL: &str = "fauna.peer.sync.chunks.pull";
+/// Peer-channel kind: one page of a file-sync folder's change rows from an
+/// admitted sibling's replica (see [`PeerSyncChangesListRequest`]).
+pub const KIND_PEER_SYNC_CHANGES_LIST: &str = "fauna.peer.sync.changes.list";
+/// Peer-channel kind: a file-sync folder's chunk manifests by content hash
+/// from an admitted sibling (see [`PeerSyncManifestsGetRequest`]).
+pub const KIND_PEER_SYNC_MANIFESTS_GET: &str = "fauna.peer.sync.manifests.get";
 
 /// The `DeviceAuthorization` witness kind — same-account admission
 /// (`fauna_core::encoding::verify_device_admission_witness`). The seam's
@@ -250,6 +265,82 @@ pub struct PeerSyncChunksPullReply {
     /// This device holds no body for it — the nest path serves it.
     pub missing: Vec<ByteBuf>,
     /// Not looked at within this reply's budget — re-request.
+    pub deferred: Vec<ByteBuf>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+// ── fauna.peer.sync.changes.list / fauna.peer.sync.manifests.get ─────────────
+//
+// A folder's change rows and the manifests they name, between devices of one
+// account — the share leg's `fauna.peer.share.changes.list` /
+// `fauna.peer.share.manifests.get` pair with the folder's `FolderRef` wire
+// string in the set's place (`p2p-shared-set-build.md` § Build design — the
+// same-account row leg, decision 1). Admitted by an own-account
+// `DeviceAuthorization` verdict alone, as the chunk door is.
+
+/// `fauna.peer.sync.changes.list` request — read the named folder's change
+/// rows from an admitted sibling's replica.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PeerSyncChangesListRequest {
+    /// The folder, as its `FolderRef` wire string (the spelling
+    /// [`PeerSyncChunksPullRequest::folder`] carries).
+    pub folder: String,
+    /// Return rows with `seq` strictly greater than this — the per-sibling
+    /// catch-up cursor. Pending (un-sequenced) rows ride the tail page
+    /// whatever the cursor, as the share leg serves them.
+    #[serde(default)]
+    pub since: i64,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// `fauna.peer.sync.changes.list` reply — one page of the rows the serving
+/// sibling holds for the folder. Carries no serving-device field, for the
+/// share reply's reason: a row's writer is its verified signature, never a
+/// claim on the page.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PeerSyncChangesListReply {
+    pub changes: Vec<crate::peer_row::PeerChangeRow>,
+    /// `true` ⇒ the page stopped at the serve bound with rows still to come —
+    /// a fact (the server asks its store for one row more), never a guess.
+    #[serde(default)]
+    pub more: bool,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// `fauna.peer.sync.manifests.get` request — a folder's chunk manifests by
+/// their own content hash. Multi-source safe: the receiver re-hashes each
+/// served manifest against the hash it asked for (rule 4).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PeerSyncManifestsGetRequest {
+    /// The folder, as its `FolderRef` wire string.
+    pub folder: String,
+    /// The 32-byte manifest content hashes, most-wanted first.
+    pub manifest_hashes: Vec<ByteBuf>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// One served manifest — canonical-encoded `ChunkManifest` bytes, exactly as
+/// the serving replica retained them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PeerSyncManifest {
+    pub hash: ByteBuf,
+    pub bytes: ByteBuf,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// `fauna.peer.sync.manifests.get` reply — served / missing / deferred, the
+/// three disjoint outcomes of [`PeerSyncBlocksPullReply`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PeerSyncManifestsGetReply {
+    pub manifests: Vec<PeerSyncManifest>,
+    /// This sibling retains no manifest by that hash — the nest path serves it.
+    pub missing: Vec<ByteBuf>,
+    /// Held, but over this reply's budget — re-request in a smaller want list.
     pub deferred: Vec<ByteBuf>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,

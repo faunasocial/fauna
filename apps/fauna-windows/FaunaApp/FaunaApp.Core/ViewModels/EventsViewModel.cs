@@ -1,5 +1,7 @@
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Linq;
+using System.Text;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using FaunaApp.Core.Models;
@@ -84,6 +86,10 @@ public partial class EventsViewModel : ViewModelBase
     /// (mirrors macOS `EventsVM.selectedCalendar`).
     [ObservableProperty] private CalendarInfo? _selectedCalendar;
 
+    // An import/export notice names the calendar it ran on; it must not outlive a
+    // switch to another one.
+    partial void OnSelectedCalendarChanged(CalendarInfo? value) => NoticeMessage = null;
+
     public ObservableCollection<CalendarInfo> Calendars { get; } = new();
     public ObservableCollection<EventInfo> Events { get; } = new();
 
@@ -158,9 +164,65 @@ public partial class EventsViewModel : ViewModelBase
     // web/linux read — events.md § Encrypted store). Ids are lowercase hex.
     private readonly INestRpcClient _rpc;
 
-    internal EventsViewModel(INestRpcClient rpc)
+    // Where `calendar-export-button` writes: the Downloads folder in production, the
+    // driver's `download_dir()` under e2e (MailExportSaveDir resolves both). A seam so
+    // a unit test can point it at a scratch directory instead of the user's profile.
+    private readonly Func<string> _exportDir;
+
+    internal EventsViewModel(INestRpcClient rpc, Func<string>? exportDir = null)
     {
         _rpc = rpc;
+        _exportDir = exportDir ?? MailExportSaveDir.Resolve;
+    }
+
+    /// <summary><c>calendar-import-button</c> — import the <c>.ics</c> at
+    /// <paramref name="path"/> into <see cref="SelectedCalendar"/> through the shared
+    /// <c>import_calendar_ics</c> and say the counts (<c>events.import_result</c>).
+    /// Nothing chosen answers <c>events.ics_file_required</c> on the error banner —
+    /// never a silent no-op (events.md § Import / Export; e2e convention 2). The
+    /// controls only paint while a calendar is selected, so no selection is a no-op.</summary>
+    internal async Task ImportCalendarFileAsync(string? path)
+    {
+        if (SelectedCalendar is not { } cal) return;
+        ErrorMessage = null;
+        NoticeMessage = null;
+        var picked = path?.Trim();
+        if (string.IsNullOrEmpty(picked))
+        {
+            SetError(Strings.Get("events/ics_file_required"));
+            return;
+        }
+        try
+        {
+            var text = await File.ReadAllTextAsync(picked);
+            var result = await _rpc.CaldavImportCalendarIcsAsync(cal.Id, text);
+            await LoadAsync();
+            // LoadAsync clears the banners, so the counts are said after the re-read.
+            NoticeMessage = Strings.Format(
+                "events/import_result", result.@imported, result.@skipped, result.@imported + result.@skipped);
+        }
+        catch (Exception ex) { ShowError(ex); }
+    }
+
+    /// <summary><c>calendar-export-button</c> — write <see cref="SelectedCalendar"/> as
+    /// ONE new <c>.ics</c> file (never overwriting an earlier export) and say where
+    /// (<c>events.calendar_exported</c>). The text is the shared
+    /// <c>export_calendar_ics</c>'s; only the file write is app glue.</summary>
+    internal async Task ExportSelectedCalendarAsync()
+    {
+        if (SelectedCalendar is not { } cal) return;
+        ErrorMessage = null;
+        NoticeMessage = null;
+        try
+        {
+            var text = await _rpc.CaldavExportCalendarIcsAsync(cal.Id);
+            var dir = _exportDir();
+            Directory.CreateDirectory(dir);
+            var path = IcsExportPath.Unused(dir, cal.Name);
+            await File.WriteAllTextAsync(path, text, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            NoticeMessage = Strings.Format("events/calendar_exported", path);
+        }
+        catch (Exception ex) { ShowError(ex); }
     }
 
     [RelayCommand]

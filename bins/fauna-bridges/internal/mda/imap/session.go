@@ -163,6 +163,10 @@ type Session struct {
 	// construction time so all Sessions share one push consumer
 	// goroutine on the wsrpc reader.
 	router *notificationRouter
+	// preparedIdle is the push subscription PrepareIdle registered ahead of
+	// the `+ idling` continuation; the IDLE loop that follows takes it over.
+	// Non-nil only between the two — Close releases one whose IDLE never ran.
+	preparedIdle *idleRegistration
 	// idleTimeout is the per-server IDLE timeout (RFC 2177 §3; default
 	// 29 minutes per imap-server.md § IDLE; configurable via
 	// `imap.idle_timeout_seconds` mail-policy-config knob). Plumbed
@@ -254,6 +258,10 @@ func (s *Session) Close() error {
 		s.indexSession.Zeroize()
 	}
 	s.indexSession = nil
+	if s.preparedIdle != nil && s.router != nil {
+		s.router.Unregister(s.preparedIdle.subscriptionID)
+	}
+	s.preparedIdle = nil
 	// Report only when AUTH succeeded (actorID is non-nil).
 	if s.actorID != nil && s.client != nil {
 		// Use a short deadline so a stuck nest doesn't block conn

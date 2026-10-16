@@ -16,41 +16,43 @@
 //! re-ratified 2026-07-14; `docs/goal/behavior/backup-restore.md` § 3). The
 //! legacy plaintext snapshot routes were removed 2026-09-27.
 
+use std::sync::Arc;
+
+use fauna_client_snapshots::{SnapshotEntryReader, SnapshotSet};
+use fauna_client_sync::row_judge::ReaderSeat;
+use fauna_client_sync::{SetNonceSource, SyncClient};
 use fauna_core::data::ContentHash;
 use fauna_core::file_download::{FileDownloadKeys, WasmPublicChunkFetcher};
-use wasm_bindgen::prelude::*;
+use fauna_core::identity::ActorKeypair;
 
 /// Download one file's **decrypted** bytes out of a snapshot — the web leg of
-/// `snapshot-file-download-button`.
+/// `snapshot-file-download-button`, exported as
+/// `WsRpcClient::downloadSnapshotFileBytes` (`rpc.rs`), since the licence a
+/// plaintext entry restores under is read over the WS-RPC control plane.
 ///
 /// `manifest_hash` is the file entry's `manifest_hash` from
 /// `fauna.filesync.snapshot.get` (raw 32-byte digest, as it rides the wire);
 /// `relative_path` is that entry's `path`; `secret_hex` is the 64-char hex
 /// Ed25519 identity seed the owner `BackupKey` derives from (the same argument
-/// `process_and_seal_library` takes). The SPA saves the returned bytes as a
-/// browser blob download.
+/// `process_and_seal_library` takes); `folder` / `folder_hash_hex` name the set
+/// the snapshot was taken of, as the Backups machine's detail carries them.
+/// The SPA saves the returned bytes as a browser blob download.
 ///
-/// A snapshot is an **owner-only** backup, so the walk opens under the derived
-/// `BackupKey` and no content-key generation applies — hence
-/// `content_key_version: None`. A bound shared folder would stamp one; that is
-/// the same shared code path, unused here.
-#[wasm_bindgen(js_name = downloadSnapshotFileBytes)]
-pub async fn download_snapshot_file_bytes(
+/// The read is the ONE snapshot entry reader every app drives
+/// (`fauna_client_snapshots::entry_reader`; `backup-restore.md` § Security
+/// Properties → Integrity): the manifest hash is the home nest's unsigned
+/// snapshot word and its seal is not a licence, so the entry — sealed or
+/// plaintext — opens under the derived `BackupKey` only once the judged
+/// change row of the set that named exactly it under this path licenses it,
+/// judged as this seat under the custody the account runtime holds.
+pub(crate) async fn download_snapshot_file_bytes(
+    client: &fauna_rpc_wasm::WsRpcClient,
     manifest_hash: &[u8],
     relative_path: &str,
     secret_hex: &str,
     nest_url: &str,
-) -> Result<Vec<u8>, JsValue> {
-    download_snapshot_file_bytes_inner(manifest_hash, relative_path, secret_hex, nest_url)
-        .await
-        .map_err(crate::rpc::err_to_js)
-}
-
-async fn download_snapshot_file_bytes_inner(
-    manifest_hash: &[u8],
-    relative_path: &str,
-    secret_hex: &str,
-    nest_url: &str,
+    folder: &str,
+    folder_hash_hex: Option<&str>,
 ) -> anyhow::Result<Vec<u8>> {
     let digest: [u8; 32] = manifest_hash.try_into().map_err(|_| {
         anyhow::anyhow!(
@@ -64,16 +66,30 @@ async fn download_snapshot_file_bytes_inner(
         .as_slice()
         .try_into()
         .map_err(|_| anyhow::anyhow!("secret must be 32 bytes"))?;
+    let keypair = ActorKeypair::from_secret(seed);
 
     let fetcher = WasmPublicChunkFetcher::new(nest_url.trim_end_matches('/'));
     let keys = FileDownloadKeys::owner(fauna_core::crypto::BackupKey::derive(&seed));
-
-    fauna_core::file_download::download_file_bytes_by_manifest(
-        &fetcher,
-        &keys,
-        ContentHash::from_digest_raw(digest),
-        None,
-        relative_path,
-    )
-    .await
+    // The seat the licence read is judged as: this identity, each set's nonce
+    // through the same resolver-backed custody every other wasm reader uses.
+    let resolver: Arc<dyn fauna_core::folder_keys::FolderKeyResolver> =
+        Arc::new(fauna_client_folders::NestFolderKeyResolver::new(
+            client.clone(),
+            crate::account_runtime::folder_key_store(keypair.actor_id_hex()),
+        ));
+    let seat = ReaderSeat {
+        own: Some(keypair.actor_id().0),
+        nonces: Some(SetNonceSource::Resolver(resolver)),
+        ..Default::default()
+    };
+    let sync = SyncClient::new(client.clone());
+    let set = SnapshotSet::from_named(folder, folder_hash_hex);
+    SnapshotEntryReader::new(&sync, &seat, &set)
+        .download_bytes(
+            &fetcher,
+            &keys,
+            relative_path,
+            ContentHash::from_digest_raw(digest),
+        )
+        .await
 }

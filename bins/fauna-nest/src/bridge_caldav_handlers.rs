@@ -478,13 +478,35 @@ fn put_event_ciphertext_handler() -> crate::rpc_router::RpcHandler {
 /// exactly the path a calendar app's PUT does: the segment append first, then
 /// the row, then the placement journal and the change notification. The caller
 /// has already authorized the write and proven both halves sealed.
-pub(crate) async fn store_sealed_event(
+///
+/// `pub` for the reason [`crate::nest_sync_worker::place_relayed_record`] is:
+/// a tier_3 harness that needs an event filed the way production files one
+/// calls this rather than a lookalike (`tests/nest_backup_coordinator.rs`).
+pub async fn store_sealed_event(
     state: &Arc<AppState>,
     target: [u8; 32],
     cal: [u8; 32],
     req: &PutEventCiphertextRequest,
     sealed_body: fauna_mls::wrapped_blob::SealedRecordBytes,
     sealed_hint: fauna_mls::wrapped_blob::SealedRecordBytes,
+) -> Result<PutEventCiphertextReply, RpcError> {
+    store_sealed_event_in(state, target, cal, req, sealed_body, sealed_hint, false).await
+}
+
+/// [`store_sealed_event`], with `create_only` selecting the write: `false` is a
+/// calendar app's replace-by-UID; `true` is the inbound-invitation placement's
+/// create-only insert, which writes only if no event carries the UID on ANY of
+/// the actor's calendars (tested in the write's own transaction) and otherwise
+/// answers `PreconditionFailed` having touched no row — the content record
+/// appended just before is then unreachable and the orphan reaper reclaims it.
+async fn store_sealed_event_in(
+    state: &Arc<AppState>,
+    target: [u8; 32],
+    cal: [u8; 32],
+    req: &PutEventCiphertextRequest,
+    sealed_body: fauna_mls::wrapped_blob::SealedRecordBytes,
+    sealed_hint: fauna_mls::wrapped_blob::SealedRecordBytes,
+    create_only: bool,
 ) -> Result<PutEventCiphertextReply, RpcError> {
     // The shared storage quota (`caldav-server.md` § QUOTA → § Enforcement
     // points), checked before the segment append below so a refusal writes
@@ -551,23 +573,49 @@ pub(crate) async fn store_sealed_event(
     .await
     .map_err(internal)?;
 
-    let outcome = state
-        .db
-        .replace_caldav_event_by_uid(
-            &target,
-            &cal,
-            &req.uid_hash,
-            req.if_match.as_deref(),
-            &event_id,
-            &record_cid,
-            &req.encrypted_index_hint,
-            req.encrypted_fauna_ext.as_deref(),
-            req.timestamp,
-            req.ciphertext_size,
-            now,
-        )
-        .await
-        .map_err(internal)?;
+    let outcome = if create_only {
+        match state
+            .db
+            .create_caldav_event_if_uid_absent(
+                &target,
+                &cal,
+                &req.uid_hash,
+                &event_id,
+                &record_cid,
+                &req.encrypted_index_hint,
+                req.timestamp,
+                req.ciphertext_size,
+                now,
+            )
+            .await
+            .map_err(internal)?
+        {
+            Some(outcome) => outcome,
+            None => {
+                return Ok(PutEventCiphertextReply::PreconditionFailed {
+                    current_etag: String::new(),
+                });
+            }
+        }
+    } else {
+        state
+            .db
+            .replace_caldav_event_by_uid(
+                &target,
+                &cal,
+                &req.uid_hash,
+                req.if_match.as_deref(),
+                &event_id,
+                &record_cid,
+                &req.encrypted_index_hint,
+                req.encrypted_fauna_ext.as_deref(),
+                req.timestamp,
+                req.ciphertext_size,
+                now,
+            )
+            .await
+            .map_err(internal)?
+    };
 
     let reply = match outcome {
         ReplaceCaldavEventOutcome::Created {
@@ -896,7 +944,9 @@ fn sync_calendar_since_handler() -> crate::rpc_router::RpcHandler {
             // branch above — retention expiry is expected, not forensic, so
             // NO bridge_restore_divergence row is written. A full sync
             // (since_modseq == 0) asks for everything and can never be stale,
-            // so the check is scoped to incremental syncs.
+            // so the check is scoped to incremental syncs. The same check
+            // answers stale below the calendar's restore-carried prune floor,
+            // where the rebuilt log has lost such a tombstone outright.
             if since_modseq > 0 {
                 // The retention window is the *effective* deployment policy
                 // (catalog ⊕ admin `put_imap_policy` override) with the
@@ -1059,7 +1109,9 @@ pub(crate) async fn place_sealed_invite(
         if_match: None,
         encrypted_fauna_ext: None,
     };
-    let stored = match store_sealed_event(state, target, cal, &req, body, hint).await {
+    // Create-only in the write's own transaction, not just the pre-check above:
+    // a calendar app can store the UID between the two, on any calendar.
+    let stored = match store_sealed_event_in(state, target, cal, &req, body, hint, true).await {
         // No room on the account (`caldav-server.md` § QUOTA → § Enforcement
         // points): the invitation is not placed. The mail copy is delivered
         // already, so this is an outcome the MTA logs, never an error that
@@ -1071,14 +1123,15 @@ pub(crate) async fn place_sealed_invite(
     };
     match stored {
         PutEventCiphertextReply::Created { .. } => Ok(PlaceInboundInviteReply::Placed),
-        // A calendar app stored the same UID between the check above and the
-        // write; its body lost the race to the organizer's, which is what the
-        // invitation said anyway. Nothing the user wrote is at stake: they had
-        // not seen this event before they stored it.
-        PutEventCiphertextReply::Updated { .. } => Ok(PlaceInboundInviteReply::Placed),
+        // The create-only insert found the UID taken (a calendar app stored it
+        // between the check above and the write): it wins, untouched.
         PutEventCiphertextReply::PreconditionFailed { .. } => {
             Ok(PlaceInboundInviteReply::AlreadyOnCalendar)
         }
+        // A create-only write never replaces a row, so it cannot answer Updated.
+        PutEventCiphertextReply::Updated { .. } => Err(internal(
+            "the create-only placement answered Updated — it must never replace",
+        )),
         PutEventCiphertextReply::CalendarNotFound => Err(internal(
             "the Personal calendar vanished between provisioning and the write",
         )),
@@ -5321,6 +5374,142 @@ mod tests {
         assert_eq!(
             count, 0,
             "past-retention stale must NOT write a divergence row"
+        );
+    }
+
+    /// caldav-server.md § Stale sync-token handling: a token that predates a
+    /// pruned tombstone gets `stale: true`, never a partial `expunged` list.
+    /// The live `bridge_caldav_expunged` table keeps every row, so only a
+    /// restore (which rebuilds that table from the pruned placement manifest)
+    /// can lose one; the manifest's per-calendar prune floor rides the restore
+    /// and the serve path answers stale below it.
+    #[tokio::test]
+    async fn sync_calendar_since_after_restore_is_stale_below_the_prune_floor() {
+        let state = fixture_state().await;
+        let mda = [0x5au8; 32];
+        approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
+        let actor = [0x5bu8; 32];
+        let cal_id = [0x5cu8; 32];
+        let (uid_a, uid_b) = ([0x5du8; 32], [0x5eu8; 32]);
+        provision_one(&state, &mda, &actor, &cal_id).await;
+        for uid in [uid_a, uid_b] {
+            let body = sealed(b"icalendar");
+            let payload = make_put_payload(
+                &actor,
+                &cal_id,
+                &uid,
+                &body,
+                &sealed(b"hint"),
+                1_700_000_000,
+                None,
+            );
+            put_event_ciphertext_handler()(state.clone(), mda, payload)
+                .await
+                .expect("put ok");
+        }
+        // The client's sync checkpoint: both events present.
+        let token0 = state
+            .db
+            .caldav_calendar_highestmodseq(&actor, &cal_id)
+            .await
+            .unwrap()
+            .expect("calendar exists");
+        let delete = |uid: [u8; 32]| {
+            let state = state.clone();
+            async move {
+                delete_event_handler()(
+                    state,
+                    mda,
+                    make_delete_payload(&actor, &cal_id, &uid, None),
+                )
+                .await
+                .expect("delete ok");
+            }
+        };
+        let sync = |token: String| {
+            let state = state.clone();
+            async move {
+                let bytes = sync_calendar_since_handler()(
+                    state,
+                    mda,
+                    make_sync_payload(&actor, &cal_id, &token, 0),
+                )
+                .await
+                .expect("sync ok");
+                match fauna_cbor::decode_strict(&bytes).unwrap() {
+                    SyncCalendarSinceReply::Ok {
+                        stale, expunged, ..
+                    } => (stale, expunged.len()),
+                    other => panic!("expected Ok, got {other:?}"),
+                }
+            }
+        };
+
+        delete(uid_a).await;
+        // Age A's manifest tombstone past the retention window; the next
+        // DELETE piggybacks the prune. The live table keeps its fresh stamp.
+        state
+            .cal_placement
+            .update_manifest(&actor, |m| {
+                for t in &mut m.tombstones {
+                    t.deleted_at = 1;
+                }
+                true
+            })
+            .await
+            .unwrap();
+        delete(uid_b).await;
+
+        let manifest = state.cal_placement.current_manifest(&actor).await.unwrap();
+        assert!(
+            !manifest.tombstones.iter().any(|t| t.uid_hash == uid_a),
+            "A's aged tombstone was pruned from the manifest"
+        );
+        let floor = manifest
+            .calendars
+            .iter()
+            .find(|c| c.calendar_id == cal_id)
+            .expect("calendar state")
+            .pruned_modseq;
+        assert!(
+            floor > token0 as u64,
+            "the prune floor is A's tombstone modseq"
+        );
+
+        // Live path unchanged: the live table still holds both tombstones.
+        assert_eq!(sync(token0.to_string()).await, (false, 2));
+
+        // Restore the calendar from the (pruned) manifest, as the snapshot
+        // restore does (`filesync_handlers::rebuild_calendar_rows_from_disk`).
+        {
+            let conn = state.db.conn().await;
+            let tx = conn.unchecked_transaction().unwrap();
+            for table in [
+                "bridge_caldav_events",
+                "bridge_caldav_calendars",
+                "bridge_caldav_expunged",
+            ] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE actor_id = ?1"),
+                    rusqlite::params![actor.as_slice()],
+                )
+                .unwrap();
+            }
+            crate::restore::cal::replay_cal_manifest_into_sqlite(&tx, &actor, &manifest).unwrap();
+            crate::restore::cal::replay_cal_tombstones_into_sqlite(&tx, &actor, &manifest).unwrap();
+            tx.commit().unwrap();
+        }
+
+        assert_eq!(
+            sync(token0.to_string()).await,
+            (true, 0),
+            "a token older than the pruned tombstone must be told stale, \
+             not handed B's tombstone alone"
+        );
+        assert_eq!(
+            sync(floor.to_string()).await,
+            (false, 1),
+            "at the floor the rebuilt log is complete: B's tombstone only"
         );
     }
 

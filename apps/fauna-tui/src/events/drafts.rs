@@ -59,8 +59,8 @@ pub(crate) type EventDraftsSync = DraftsSync<Arc<NestClient>>;
 /// Wire event-draft persistence for the just-authenticated actor: build the
 /// shared [`DraftsSync`], kick the launch restore, and return the channel
 /// [`EventsState`](crate::events::EventsState) ticks on every compose edit,
-/// alongside the `DraftsSync` itself for `main.rs`'s leave-door flush
-/// ([`flush_now`], stored on `EventsState::drafts_sync`).
+/// alongside the `DraftsSync` itself for the leave-door flush
+/// ([`crate::drafts_autosave::LeaveFlush`], stored on `EventsState::drafts_sync`).
 ///
 /// A malformed secret is logged and skipped — `(None, None)` disables
 /// persistence for the session rather than failing login, the same non-fatal
@@ -86,14 +86,6 @@ pub fn start(
     restore_on_launch(Arc::clone(&sync), session_generation, tx.clone());
     let drafts_tx = attach_autosave(Arc::clone(&sync));
     (Some(drafts_tx), Some(sync))
-}
-
-/// Force an immediate save of `draft` (the caller's current live compose
-/// state — [`EventsState::event_draft`]), bypassing the debounce entirely —
-/// the leave-door flush (`reserved-folders.md` § The leave-flush promise, row
-/// 481), awaited directly in `main.rs` right before the process exits.
-pub(crate) async fn flush_now(sync: &EventDraftsSync, draft: &EventDrafts) {
-    save(sync, draft).await;
 }
 
 /// Assemble this rail's [`DraftsSync`] — factored out of [`start`] so the

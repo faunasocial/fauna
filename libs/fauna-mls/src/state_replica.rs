@@ -1561,6 +1561,62 @@ mod tests {
         assert!(matches!(got.body, ChannelMessageBody::Text(t) if t == "after snapshot"));
     }
 
+    /// **A parked retired leaf restores clean into an engine of the
+    /// predecessor, and that engine can author from it** — the parked arm of
+    /// the sweep retry (`succession-propagation.md` § Propagation → *Own device
+    /// fleet*, *Where the retired leaf rests on a device with no local MLS
+    /// store*, rule (2)). The snapshot rests sealed under the SUCCESSOR's key
+    /// (the park is written by the successor's device, at its own path), but
+    /// the engine it restores into is rebuilt from the predecessor's seed —
+    /// and the checked door's seating verdict is clean exactly because that
+    /// engine's identity is the leaf the snapshot seats. Authoring is the
+    /// point: the owed sweep's first act is a commit by the retired leaf.
+    #[test]
+    fn a_parked_retired_leaf_restores_clean_into_the_predecessor_and_authors_a_commit() {
+        let predecessor_secret = ActorKeypair::generate().signing_key().to_bytes();
+        let successor_secret = ActorKeypair::generate().signing_key().to_bytes();
+        let predecessor =
+            MlsEngine::new_in_memory(ActorKeypair::from_secret(predecessor_secret)).unwrap();
+        let bob = MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap();
+        let (channel_id, welcome) = predecessor
+            .create_group(&bob.generate_key_packages(1).unwrap())
+            .unwrap();
+        bob.join_from_welcome(welcome).unwrap();
+
+        // Parked: sealed under the successor's BackupKey, then read back.
+        let successor_key = BackupKey::derive(&successor_secret);
+        let parked = encrypt_backup_chunk(
+            &successor_key,
+            &ProviderReplica::from_engine(&predecessor)
+                .to_bytes()
+                .unwrap(),
+        )
+        .unwrap();
+        let read =
+            ProviderReplica::from_bytes(&decrypt_backup_chunk(&successor_key, &parked).unwrap())
+                .unwrap();
+
+        // The successor's own engine refuses it (the door's rule (1))...
+        let successor =
+            MlsEngine::new_in_memory(ActorKeypair::from_secret(successor_secret)).unwrap();
+        assert!(!read.restore_into(&successor).unwrap().is_clean());
+        assert!(!successor.has_group(&channel_id));
+
+        // ...an engine rebuilt from the predecessor's seed takes it clean.
+        let retired =
+            MlsEngine::new_in_memory(ActorKeypair::from_secret(predecessor_secret)).unwrap();
+        let verdict = read.restore_into(&retired).unwrap();
+        assert!(
+            verdict.is_clean(),
+            "the predecessor's engine is the leaf it seats: {verdict:?}"
+        );
+        assert!(retired.has_group(&channel_id));
+
+        // And it authors: a commit bob's engine accepts.
+        let commit = retired.self_update(&channel_id).unwrap();
+        bob.process_commit(&channel_id, &commit).unwrap();
+    }
+
     /// Two "second devices" of one identity and a group only one of them
     /// joined — the fixture every targeted-import test below starts from.
     /// Returns `(the sibling that holds the group, the peer in it, the channel,

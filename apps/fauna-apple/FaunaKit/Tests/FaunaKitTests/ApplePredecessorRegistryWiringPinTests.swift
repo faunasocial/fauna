@@ -56,6 +56,15 @@ struct ApplePredecessorRegistryWiringPinTests {
         #expect(body.contains("predecessorActorIds: predecessorActorIds"))
     }
 
+    @Test("the conversations session and the serve-set walk are handed the registry")
+    func theFileSeatsAreHandedTheRegistry() throws {
+        let api = try codeLines("Core/APIClient.swift")
+        let session = try #require(functionBody(api, "public func conversationsSession("))
+        #expect(session.contains("accounts: FaunaAccounts.registry()"))
+        let serve = try #require(functionBody(api, "public func serveFolderWebdav("))
+        #expect(serve.contains("accounts: FaunaAccounts.registry()"))
+    }
+
     @Test("the sync engine host is handed the registry")
     func theEngineHostIsHandedTheRegistry() throws {
         let api = try codeLines("Core/APIClient.swift")

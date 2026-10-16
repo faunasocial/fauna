@@ -10,7 +10,7 @@
   // (monetization.md § The asking price), so a priced tier survives an edit.
   import AskingPriceInput from '$lib/components/payments/AskingPriceInput.svelte';
   import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import { PAYMENTS_IDS } from '$lib/components/payments/generatedIds';
 
   interface Props {
     priceHint: string;
@@ -26,7 +26,7 @@
 
 <input
   class="input" type="text" placeholder={t.subscriptions.price_hint}
-  data-testid={IDS.SUBSCRIPTION_TIER_FORM_PRICE_HINT} bind:value={priceHint}
+  data-testid={PAYMENTS_IDS.SUBSCRIPTION_TIER_FORM_PRICE_HINT} bind:value={priceHint}
 />
 <AskingPriceInput
   variant="subscription-tier-form"
@@ -36,7 +36,7 @@
 />
 <input
   class="input" type="text" placeholder={t.subscriptions.payment_url}
-  data-testid={IDS.SUBSCRIPTION_TIER_FORM_PAYMENT_URL} bind:value={paymentUrl}
+  data-testid={PAYMENTS_IDS.SUBSCRIPTION_TIER_FORM_PAYMENT_URL} bind:value={paymentUrl}
 />
 
 <style>

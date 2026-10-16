@@ -4,6 +4,7 @@ use super::spam_baseline::BaselineDeparture;
 use super::{CacheDb, now_epoch_millis};
 use super::{ContentLabelRow, ObligationActionRow, SpamPreferences, SpamTrainingHistoryRecord};
 use anyhow::{Context, Result};
+use fauna_protocol::wrapped_blob::SpamModelPrecondition;
 use rusqlite::OptionalExtension;
 use uuid::Uuid;
 
@@ -85,6 +86,11 @@ pub enum SpamModelWrite {
     /// written: not the model, not the row, not the holder copy. The stored
     /// model stays byte-identical to the last accepted write.
     DuplicateSignal,
+    /// The write's compare-and-swap precondition no longer names the stored
+    /// model — another write landed after the writer fetched — so NOTHING was
+    /// written; the writer re-fetches and retries (`mail-spam.md`
+    /// § Transactional update).
+    StaleModel,
 }
 
 /// The lesson a `put_spam_model` history `Delete` removed — the plaintext row
@@ -1252,12 +1258,17 @@ impl CacheDb {
     /// it mirrors (`mail-spam.md` § Encrypted-mode interaction, ratified
     /// 2026-07-13). `None` leaves any stored copy untouched (a writer that opted out or has no
     /// holder merely leaves stale weights, never drops the contributor).
+    /// `expected` is the writer's compare-and-swap precondition — the stored
+    /// model it computed this write from: when it no longer matches the row,
+    /// [`SpamModelWrite::StaleModel`] and nothing is written. `None` ⇒
+    /// last-write-wins.
     pub async fn put_spam_model_with_history(
         &self,
         actor_id: &[u8; 32],
         sealed_model: &[u8],
         op: Option<SpamHistoryDbOp<'_>>,
         holder_copy: Option<(&[u8], &[u8])>,
+        expected: Option<SpamModelPrecondition>,
     ) -> Result<SpamModelWrite> {
         let now = now_epoch_millis();
         let conn = self.conn.lock().await;
@@ -1272,6 +1283,24 @@ impl CacheDb {
         {
             return Ok(SpamModelWrite::DuplicateSignal);
         }
+        // The compare-and-swap precondition, under the same lock that
+        // serializes every write: a write computed from a model that is no
+        // longer the stored one is refused whole, so a concurrent writer's
+        // lesson is never overwritten (`mail-spam.md` § Transactional update).
+        // Checked after the one-lesson rule: a repeat is final, while a stale
+        // write is retried — and its retry would collapse as the repeat anyway.
+        if let Some(expected) = expected {
+            let stored: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT model_json FROM spam_models WHERE actor_id = ?1",
+                    rusqlite::params![actor_id.as_slice()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if !expected.holds_for(stored.as_deref()) {
+                return Ok(SpamModelWrite::StaleModel);
+            }
+        }
         if let Some((holder_pubkey, sealed_copy)) = holder_copy {
             tx.execute(
                 "INSERT INTO spam_model_holder_copies (actor_id, holder_pubkey, sealed_copy, updated_at)
@@ -1280,6 +1309,13 @@ impl CacheDb {
                     sealed_copy = excluded.sealed_copy,
                     updated_at = excluded.updated_at",
                 rusqlite::params![actor_id.as_slice(), holder_pubkey, sealed_copy, now],
+            )?;
+            // One resolved holder at a time: a copy for any other holder
+            // is stale (a holder switch) and never served, so it goes.
+            tx.execute(
+                "DELETE FROM spam_model_holder_copies
+                  WHERE actor_id = ?1 AND holder_pubkey <> ?2",
+                rusqlite::params![actor_id.as_slice(), holder_pubkey],
             )?;
         }
         // Store the holder's re-sealed blob VERBATIM (opaque; counts 0/0),
@@ -3313,7 +3349,13 @@ mod spam_history_tests {
             history_id: Some(hid),
             undone: None,
         } = db
-            .put_spam_model_with_history(&actor, &[0xEEu8; 300], Some(insert(&msg, "spam")), None)
+            .put_spam_model_with_history(
+                &actor,
+                &[0xEEu8; 300],
+                Some(insert(&msg, "spam")),
+                None,
+                None,
+            )
             .await
             .unwrap()
         else {
@@ -3324,6 +3366,7 @@ mod spam_history_tests {
                 &actor,
                 &[0xEFu8; 300],
                 Some(SpamHistoryDbOp::Delete { history_id: &hid }),
+                None,
                 None,
             )
             .await
@@ -3343,6 +3386,7 @@ mod spam_history_tests {
                 &actor,
                 &[0xEFu8; 300],
                 Some(SpamHistoryDbOp::Delete { history_id: &hid }),
+                None,
                 None,
             )
             .await
@@ -3377,6 +3421,7 @@ mod spam_history_tests {
                 &[0xEEu8; 300],
                 Some(insert(&[3u8; 32], "ham")),
                 None,
+                None,
             )
             .await
             .unwrap()
@@ -3388,6 +3433,7 @@ mod spam_history_tests {
                 &bob,
                 &[0xEEu8; 300],
                 Some(SpamHistoryDbOp::Delete { history_id: &hid }),
+                None,
                 None,
             )
             .await

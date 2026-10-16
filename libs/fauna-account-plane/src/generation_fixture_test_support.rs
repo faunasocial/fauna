@@ -23,7 +23,9 @@ use fauna_core::identity::ActorKeypair;
 use fauna_mls::wrapped_blob::generation_wraps::build_mint;
 use fauna_protocol::RpcRequester;
 use fauna_protocol::account_state::ACCOUNT_STATE_FLEET_SCOPE;
-use fauna_protocol::merge_policy::{KIND_DEVICE_SET, KIND_GENERATION_MINT, home_scope_for_kind};
+use fauna_protocol::merge_policy::{
+    KIND_DEVICE_SET, KIND_GENERATION_MINT, KIND_GENERATION_SHRED, home_scope_for_kind,
+};
 
 use crate::account_state_plane::AccountStatePlane;
 use crate::generation_tip::{GenerationTrust, RetainedKeyCustody};
@@ -124,6 +126,41 @@ pub fn machinery_row<T: serde::Serialize>(kind: &str, key: String, value: &T) ->
         entry_version: 0,
         tombstone: false,
     }
+}
+
+/// The mint row's `Shredded` marker by `seed` — availability and attribution
+/// only: on its own it is the shape any `BackupKey` holder can write.
+pub fn shred_marker_row(seed: [u8; 32], core: MintCore, at_ms: i64) -> StateEntry {
+    let id = fauna_core::generation::generation_id(&core).unwrap();
+    machinery_row(
+        KIND_GENERATION_MINT,
+        fauna_core::hex32::encode(&id),
+        &GenerationMintRecord::Shredded {
+            core,
+            shredded_at_ms: at_ms,
+            shredded_by: device_id_of(seed),
+        },
+    )
+}
+
+/// `seed`'s shred attestation for `generation` in its own
+/// `fauna.state.generation-shred` cell — the authored act.
+pub fn shred_cell_row(seed: [u8; 32], generation: &[u8; 32], at_ms: i64) -> StateEntry {
+    machinery_row(
+        KIND_GENERATION_SHRED,
+        fauna_core::generation::shred_cell_key(generation, &device_id_of(seed)),
+        &fauna_core::generation::sign_shred(&device_key(seed), generation, at_ms),
+    )
+}
+
+/// Both rows of `seed`'s shred of `core`'s generation, as its pass writes
+/// them: the marker into the mint row and the attestation into its cell.
+pub fn authored_shred_rows(seed: [u8; 32], core: MintCore, at_ms: i64) -> [StateEntry; 2] {
+    let id = fauna_core::generation::generation_id(&core).unwrap();
+    [
+        shred_marker_row(seed, core, at_ms),
+        shred_cell_row(seed, &id, at_ms),
+    ]
 }
 
 /// Pull-only plane: a put that reached the wire would be the failure.

@@ -142,3 +142,82 @@ def test_muted_post_collapses_behind_reveal(logged_in_app):
                 app.muted_words.remove(0)
         except Exception:  # noqa: BLE001 — best-effort cleanup
             pass
+
+
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.tui
+@pytest.mark.windows
+@pytest.mark.android
+@pytest.mark.feature("muted-words")
+def test_a_word_inside_a_longer_word_collapses_and_removing_it_brings_the_post_back(
+    logged_in_app,
+):
+    """Two promises of the muted-word match, driven end to end on one post
+    (``content-moderation-and-ranking.md`` § Resolved design decisions — the
+    match is a case-insensitive SUBSTRING; § Composition — the mute is the
+    user's lens, so taking the word out takes the lens off):
+
+    - a post whose body contains the muted word only inside a longer word
+      collapses behind ``feed-post-muted``;
+    - removing the word in Settings — the mutation under test, not cleanup —
+      brings the post back with its body on the next feed visit."""
+    app = logged_in_app
+    d = app.driver
+    term = _unique("zzsub").replace("-", "")
+    # The term never stands alone: it is the middle of one longer word.
+    embedded_body = f"spoilers ahead: pre{term}post was the twist"
+
+    try:
+        d.set_state({"nav": {"stack": [{"view": "feed"}]}})
+        app.feed.create_post(text=embedded_body)
+        assert app.feed.wait_post_count(1) >= 1, (
+            f"the seeded post should render; error={app.error_text()!r}"
+        )
+
+        app.muted_words.navigate()
+        app.muted_words.add(term)
+        assert app.muted_words.wait_for_word(term), (
+            f"muted term did not persist; words={app.muted_words.words()!r}"
+        )
+
+        d.set_state({"nav": {"stack": [{"view": "feed"}]}})
+        assert _wait_muted_count(app, 1) == 1, (
+            f"a word muted inside a longer word must still collapse the post; "
+            f"error={app.error_text()!r}"
+        )
+        texts = [app.feed.post_text(i) for i in range(app.feed.post_count())]
+        assert not any(term in (t or "") for t in texts), (
+            f"the collapsed post must not leak its body; texts={texts!r}"
+        )
+
+        # ── Remove the word: the post comes back.
+        app.muted_words.navigate()
+        app.muted_words.remove(app.muted_words.words().index(term))
+        deadline = time.monotonic() + 12.0
+        while term in app.muted_words.words() and time.monotonic() < deadline:
+            time.sleep(0.3)
+        assert term not in app.muted_words.words(), (
+            f"the remove did not land; words={app.muted_words.words()!r}"
+        )
+        d.set_state({"nav": {"stack": [{"view": "feed"}]}})
+        assert _wait_muted_count(app, 0) == 0, (
+            f"removing the word must bring the post back; error={app.error_text()!r}"
+        )
+        deadline = time.monotonic() + 20.0
+        texts = []
+        while time.monotonic() < deadline:
+            texts = [app.feed.post_text(i) for i in range(app.feed.post_count())]
+            if any(embedded_body in (t or "") for t in texts):
+                break
+            time.sleep(0.3)
+        assert any(embedded_body in (t or "") for t in texts), (
+            f"the post's body must render again; texts={texts!r}"
+        )
+    finally:
+        try:
+            app.muted_words.navigate()
+            while app.muted_words.row_count() > 0:
+                app.muted_words.remove(0)
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            pass

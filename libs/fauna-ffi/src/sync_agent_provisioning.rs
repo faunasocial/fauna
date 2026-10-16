@@ -852,7 +852,7 @@ impl FfiSyncAgentProvisioner {
     /// file materialized, `on-demand` serves placeholders that hydrate on access.
     /// Backs the per-row `folder-location-mode-toggle`, which today only **windows**
     /// offers (its cfapi placeholder host is the one shipped on-demand root;
-    /// `file-sync.md` § On-Demand Files).
+    /// `on-demand-files.md` § On-Demand Files).
     ///
     /// Orthogonal to binding: re-binding does not reset a folder's mode, and
     /// toggling mode does not re-push a binding — so this is its own verb rather
@@ -1008,6 +1008,7 @@ impl FfiSyncAgentProvisioner {
                     held: r.held,
                     served: r.served,
                     observed_at: r.observed_at,
+                    floored_at: r.floored_at,
                 })
                 .collect(),
         })
@@ -1089,6 +1090,46 @@ impl FfiSyncAgentProvisioner {
             Ok(outcome) => crate::reseed::finish(&nest, outcome, &this_device_id).await,
             Err(stop) => crate::FfiReseedResult::stopped(stop.to_string()),
         })
+    }
+}
+
+#[cfg(feature = "backup-audit")]
+#[fauna_uniffi_async::export]
+impl FfiSyncAgentProvisioner {
+    /// Recover the signed-in nest from this device's copy after an accepted
+    /// source regression — the confirm of `backup-audit-recover-button` on this
+    /// device's own client-device row, on a desktop
+    /// (`segment-backup-protocol.md` § Client-device custodian (pull) →
+    /// *Restore* → *Recovery from this device's own store*, question (2): the
+    /// agent hosts the store, so the agent runs the leg).
+    ///
+    /// The shared app half, whole: start the agent's job and wait for its own
+    /// terminal state (`fauna_client_sync::recover_wire::await_agent_recover`),
+    /// then the one finish every recovery entry point ends in
+    /// (`backup_destinations`' `recovery_result`). The agent grants the key to
+    /// the nest it is provisioned for before it delivers. After it returns,
+    /// run the audit pass again for the page.
+    ///
+    /// # Errors
+    ///
+    /// `FfiError::General` for a run that stopped before the driver's outcome
+    /// (the agent unreachable, the grant refused, a transport fault, the other
+    /// store ceremony running) — nothing the owner can lose: a re-run resumes.
+    pub async fn recover_custodian_store(
+        &self,
+        owner_secret: Vec<u8>,
+    ) -> Result<crate::FfiRecoveryResult, FfiError> {
+        use fauna_client_sync::recover_wire::{AGENT_RECOVER_POLL, await_agent_recover};
+        let secret = crate::crypto::secret32(&owner_secret)?;
+        // Held in its own zeroize-on-drop type; the one bare copy is the IPC
+        // frame's, which zeroizes itself too.
+        let key = fauna_core::crypto::NestBackupKey::derive(&secret);
+        let result =
+            await_agent_recover(self.inner.as_ref(), key.to_bytes(), AGENT_RECOVER_POLL).await;
+        drop(key);
+        result
+            .map(|outcome| crate::backup_destinations::recovery_result(&outcome))
+            .map_err(crate::general_err)
     }
 }
 

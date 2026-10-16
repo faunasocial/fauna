@@ -1,5 +1,5 @@
 """tier_4 (live-remote, OPT-IN, NON-DESTRUCTIVE): the ActivityPub serving
-surface on an already-deployed production nest (example.com), driven through
+surface on an already-deployed production nest (the live nest), driven through
 the linux app UI for every mutation and plain public HTTPS GETs (stdlib
 ``urllib.request``, the suite's convention) for every assertion.
 

@@ -40,7 +40,6 @@ use std::io::Write;
 ///
 /// Adding an ordinary (non-sealed) table here is fine and needs no ceremony.
 pub const DUMP_TABLES: &[&str] = &[
-    "admins",
     "users",
     "tiers",
     "audit_log",
@@ -52,7 +51,6 @@ pub const DUMP_TABLES: &[&str] = &[
     // list — path 2 of the owner-scoped ruling). Post ids, citations and blob
     // digests only; nothing sealed.
     "legal_takedown_deleted_posts",
-    "sessions",
     "content",
     "content_links",
     "content_meta",
@@ -271,6 +269,87 @@ mod tests {
              The daily logical dump is written UNENCRYPTED-at-source and rests in the self-backup \
              store; a sealed plane must not enter it. See the DUMP_TABLES doc comment.",
             offenders.join("; ")
+        );
+    }
+
+    /// Does this column name mark credential material (a bearer token, a
+    /// password hash, a secret, a private or symmetric key)?
+    fn is_credential_column(col: &str) -> bool {
+        col == "token"
+            || col.ends_with("_token")
+            || col.ends_with("_hash")
+            || col.starts_with("secret")
+            || col.contains("privkey")
+            || col.ends_with("_key")
+    }
+
+    /// Every dumped table is checked for credential-named columns: `SELECT *`
+    /// would stream such a column to an admin and into the daily self-backup.
+    /// The sealed-plane pin above checks `sealed` names only, so a future table
+    /// reusing a generic name (`sessions`, `admins`) for bearer material would
+    /// pass it. Each legitimate hit is allowlisted by `table.column` with a reason.
+    #[test]
+    fn the_dump_carries_no_credential_column() {
+        // (table.column, why it is not credential material)
+        const ALLOWED: &[(&str, &str)] = &[
+            ("content.blob_hash", "public content digest of a blob"),
+            ("audit_log.prev_hash", "audit hash-chain link, not a secret"),
+            (
+                "audit_log.entry_hash",
+                "audit hash-chain link, not a secret",
+            ),
+            ("blob_metadata.thumbnail_hash", "public content digest"),
+            ("backup_snapshots.blob_hash", "public content digest"),
+        ];
+
+        let db = crate::db::CacheDb::open_in_memory().unwrap();
+        let conn = db.conn_blocking();
+
+        let mut offenders: Vec<String> = Vec::new();
+        let mut dumped_seen = 0usize;
+        let mut allowed_used: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for table in DUMP_TABLES {
+            let mut stmt = conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap_or_else(|e| panic!("table_info({table}): {e}"));
+            let mut rows = stmt.query([]).unwrap();
+            let mut any = false;
+            while let Some(row) = rows.next().unwrap() {
+                any = true;
+                let col: String = row.get(1).unwrap();
+                if !is_credential_column(&col) {
+                    continue;
+                }
+                let key = format!("{table}.{col}");
+                match ALLOWED.iter().find(|(k, _)| *k == key) {
+                    Some((k, _)) => {
+                        allowed_used.insert(k);
+                    }
+                    None => offenders.push(key),
+                }
+            }
+            if any {
+                dumped_seen += 1;
+            }
+        }
+
+        // Every name must be a table the schema creates (no dead allowlist names),
+        // otherwise the dump quietly skips it and the check proves nothing.
+        assert_eq!(
+            dumped_seen,
+            DUMP_TABLES.len(),
+            "DUMP_TABLES names a table the schema does not create"
+        );
+        // A stale allowlist entry would hide a future real hit under its name.
+        for (k, _) in ALLOWED {
+            assert!(allowed_used.contains(k), "stale ALLOWED entry {k}");
+        }
+        assert!(
+            offenders.is_empty(),
+            "DUMP_TABLES carries credential-named columns (the dump is streamed to admins and \
+             written to the daily self-backup via SELECT *): {}. Drop the table from the list, \
+             or allowlist a non-secret column by name with a reason.",
+            offenders.join(", ")
         );
     }
 

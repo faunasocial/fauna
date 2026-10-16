@@ -136,6 +136,15 @@ type Caller interface {
 // (either via Close() or by the server tearing the WS down).
 var ErrClosed = errors.New("wsrpc: client closed")
 
+// ErrUpgradeRefused is wrapped by [Dial] when the nest refuses the WS upgrade
+// with 401 even for a freshly minted bearer. The bearer validator asks the
+// actor's standing at the upgrade, so a revoked service user lands here and
+// never reaches `whoami`; the reconnect loop then asks the pre-identity
+// status surface whether the bridge was revoked
+// ([ReconnectConfig.CheckRevoked]; mail-bridge-lifecycle.md § Service-user
+// re-keying step 4).
+var ErrUpgradeRefused = errors.New("wsrpc: ws upgrade refused for a fresh bearer")
+
 // ErrServerError is wrapped by Call when the Reply.OK field is false.
 // The wrapped error carries the raw CBOR payload bytes (the typed
 // RpcError shape is Phase B.5's responsibility).
@@ -177,6 +186,47 @@ func (e *ServerError) Unwrap() error { return ErrServerError }
 // Mailbox full`. See `docs/goal/behavior/imap-server.md` § Quota
 // enforcement points.
 const CodeOverQuota = "fauna.bridges.over_quota"
+
+// CodeSendDisabled is the `RpcError.code` (shared
+// `fauna_protocol::bridge_routing::SEND_DISABLED_CODE`) check_submission_quota
+// returns when the authenticated sender turned sending off for their own
+// account (`docs/goal/behavior/mail-policy-config.md` § Tier 3,
+// `mail.account.send_enabled`). The submission MTA maps it to a permanent
+// `550 5.7.1` — a retry cannot succeed until the user turns sending back on.
+const CodeSendDisabled = "fauna.bridges.send_disabled"
+
+// CodeListSubmissionRequiresSendRPC is the `RpcError.code` `enqueue_outbound_mail`
+// returns when the submitting sender is a list address — a permanent refusal
+// (`docs/goal/behavior/mail-mass-mailing.md` § Architectural rules: a list send
+// goes through the send RPC, never raw SMTP). The submission MTA maps it to a
+// permanent `550 5.7.1` at DATA instead of the transport-class `451`.
+const CodeListSubmissionRequiresSendRPC = "fauna.bridges.list_submission_requires_send_rpc"
+
+// CodeSenderNotOwned is the `RpcError.code` (shared
+// `fauna_protocol::bridge_routing::SENDER_NOT_OWNED_CODE`) `enqueue_outbound_mail`
+// returns when the message's From: names an address on a domain the deployment
+// signs for that the submitting actor does not own
+// (`docs/goal/behavior/mail-multidomain.md` § From: header ownership). The
+// submission MTA maps it to a permanent `550 5.7.1`, the code its own
+// From-header check answers with.
+const CodeSenderNotOwned = "fauna.bridges.sender_not_owned"
+
+// CodeSubmitterNotProven is the `RpcError.code` (shared
+// `fauna_protocol::bridge_routing::SUBMITTER_NOT_PROVEN_CODE`)
+// `enqueue_outbound_mail` returns when the MTA's submission token does not
+// prove the submitter it names — another actor's, a bad signature, expired,
+// over its recipient bound, or its credential revoked
+// (`docs/goal/behavior/mail-multidomain.md` § From: header ownership → *Per
+// door, nest-side*). The submission MTA maps it to a permanent `550 5.7.1`,
+// beside CodeSenderNotOwned.
+const CodeSubmitterNotProven = "fauna.bridges.submitter_not_proven"
+
+// CodeProtocolMalformed is the shared `fauna.protocol.malformed` `RpcError.code`:
+// the request itself is invalid (empty msgid or sender, no or too many
+// recipients, an oversize body, an invalid recipient address), so re-sending
+// the same bytes can never succeed. The submission MTA maps it, at DATA, to a
+// permanent `554 5.6.0`.
+const CodeProtocolMalformed = "fauna.protocol.malformed"
 
 // CodeHeldForReview is the `RpcError.code` the nest move handler returns
 // when a message in the guardian held mailbox still has a live hold — a
@@ -281,7 +331,10 @@ func Dial(ctx context.Context, cfg ClientConfig) (*Client, error) {
 		if merr != nil {
 			return nil, fmt.Errorf("wsrpc dial: re-mint after an upgrade 401: %w", merr)
 		}
-		conn, _, err = dial(fresh)
+		conn, resp, err = dial(fresh)
+		if err != nil && resp != nil && resp.StatusCode == http.StatusUnauthorized {
+			return nil, fmt.Errorf("wsrpc dial: ws connect %s: %w: %w", wsURL, ErrUpgradeRefused, err)
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("wsrpc dial: ws connect %s: %w", wsURL, err)

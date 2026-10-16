@@ -227,6 +227,9 @@ fn registry() -> Vec<(&'static str, fn())> {
         ("request-report-tls-attempt.cbor", || {
             check::<ReportTlsAttemptRequest>("request-report-tls-attempt.cbor")
         }),
+        ("request-report-dmarc-observation.cbor", || {
+            check::<ReportDmarcObservationRequest>("request-report-dmarc-observation.cbor")
+        }),
         ("request-fetch-recipient-forward-config.cbor", || {
             check::<FetchRecipientForwardConfigRequest>(
                 "request-fetch-recipient-forward-config.cbor",

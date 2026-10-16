@@ -64,7 +64,7 @@ Stamped 2026-09-19 at e9152e3330.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | |
-| linux | ✅ full | 0.1.2-dev+c4a95c20 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ✅ full | |
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |
@@ -89,7 +89,7 @@ Stamped 2026-09-19 at e9152e3330.
 | 4 | app | `tests/e2e-unified/tests/test_conversations_attachments_outbound.py::test_macos_real_send_with_oversized_attachment_surfaces_on_error_message` | macos (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_conversations_attachments_outbound.py::test_ios_real_send_with_oversized_attachment_surfaces_on_error_message` | ios (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_conversations_attachments_outbound.py::test_android_real_send_with_oversized_attachment_surfaces_on_error_message` | — |
-| 5 | app | `tests/e2e-unified/tests/test_conversations_attachments_outbound.py::test_real_faunamls_conversation_attachment_survives_a_blob_gc_sweep` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_conversations_attachments_outbound.py::test_real_faunamls_conversation_attachment_survives_a_blob_gc_sweep` | web (linux): passed, linux (linux): failed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_conversations_attachments_outbound.py::test_windows_conversation_attachment_survives_a_blob_gc_sweep` | windows (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_conversations_attachments_outbound.py::test_macos_conversation_attachment_survives_a_blob_gc_sweep` | macos (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_conversations_attachments_outbound.py::test_ios_conversation_attachment_survives_a_blob_gc_sweep` | ios (macos): passed |

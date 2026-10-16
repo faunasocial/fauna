@@ -29,6 +29,7 @@ Stamped 2026-10-01 at dc4b94e0f1.
 3. [app] A nest that needs updating shows the app a message saying so, with no retry offered and the choice of another nest kept — `docs/goal/architecture/version-compatibility.md` § Dimension 4 — Honest version / compatibility error surfacing
    - `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_outdated_nest_launch_shows_non_retry_update_surface`
    - `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_outdated_nest_launch_shows_non_retry_update_surface_web`
+   - `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_a_signed_in_app_whose_nest_restarts_degraded_shows_the_update_surface`
 4. [nest] A newer app's extra fields are ignored, on a read and on a save alike, and an older app's minimal requests are accepted; an unknown call gets a typed refusal and the connection stays usable — `docs/goal/architecture/version-compatibility.md` § Dimension 2 — Wire / WS-RPC evolution
    - `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_old_client_minimal_payloads_accepted_by_new_nest`
    - `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_new_client_extra_fields_ignored_by_old_nest`
@@ -43,32 +44,36 @@ Stamped 2026-10-01 at dc4b94e0f1.
 7. [app] A list of accounts no version can read is never silently replaced: the app says nothing has been changed, and starting over is offered only behind a confirmation that first says what will be lost — `docs/goal/behavior/onboarding.md` § App-launch routing
    - `tests/e2e-unified/tests/test_account_index_unreadable_launch.py::test_a_malformed_index_reaches_the_floor_only_through_a_confirm_that_states_the_residual`
    - `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_start_over_refuses_while_another_instance_serves_an_account`
+   - `tests/e2e-unified/tests/test_erase_refused_other_instance_windows.py::test_windows_start_over_refuses_on_error_message_while_another_instance_serves`
 8. [app] One app keeps working with several nests at once when they run different versions of the same major version — `docs/goal/architecture/version-compatibility.md` § I2 — Full bidirectional compatibility within a major version
-   - (none)
+   - (maintainer-only)
 9. [app] A feature your nest is too old for is hidden or switched off in the app, instead of failing with a raw error when you try it — `docs/goal/architecture/version-compatibility.md` § Dimension 3 — Version & capability negotiation
-   - (none)
+   - `tests/e2e-unified/tests/test_feature_limits.py::test_a_feature_the_nest_is_too_old_for_is_hidden_not_an_error`
 10. [app] When someone on a newer app sends a kind of message your app does not know, you miss only that one message and the conversation keeps working — `docs/goal/architecture/version-compatibility.md` § MLS application-message payloads (client↔client)
-   - (none)
+   - `tests/e2e-unified/tests/test_conversations_unknown_message_kind.py::test_a_message_of_an_unknown_kind_is_missed_alone_and_the_conversation_keeps_working`
 11. [app] A send your nest refuses because it needs updating shows that reason and offers no retry — `docs/goal/architecture/version-compatibility.md` § Dimension 4 — Honest version / compatibility error surfacing
-   - (none)
+   - `tests/e2e-unified/tests/test_send_refused_by_nest_version.py::test_a_send_refused_because_the_nest_needs_updating_says_so_and_offers_no_retry`
 12. [nest] A request that fails because the nest's stored data does not match its software is answered as the nest needing an update, in your language, never with a database message — `docs/goal/architecture/version-compatibility.md` § Dimension 4 — Honest version / compatibility error surfacing
-   - (none)
+   - `tests/e2e-unified/tests/api/test_schema_version_compat.py::test_a_query_time_mismatch_is_answered_as_needing_an_update`
 13. [nest] Once the newer build is back, the nest serves normally again with its admin and all its data intact — `docs/goal/architecture/version-compatibility.md` § 2.2 Schema version & honest downgrade detection
    - `tests/e2e-unified/tests/platform/docker/test_mail_deploy_schema_upgrade.py::test_incompatible_schema_boots_degraded_then_recovers`
 14. [app] A refusal from your nest that your app is too old to recognise is shown as a refusal, and the app does not keep retrying — `docs/goal/architecture/version-compatibility.md` § Dimension 4 — Honest version / compatibility error surfacing
-   - (none)
-15. [app] An app and a nest too far apart in version to work together tell you what to update, never fail with a raw error — `docs/goal/architecture/version-compatibility.md` § Dimension 6 — Support matrix & version-skew testing
-   - (none)
-16. [app] An app too old to read its own saved settings tells you to update it and that the settings are intact, instead of calling them damaged — `docs/goal/architecture/version-compatibility.md` § Dimension 1 — At-rest schema evolution (the nest DB + client-local stores)
-   - (none)
-17. [nest] Anyone can ask a nest its version without signing in, and is told only the major and minor number, never the exact build — `docs/goal/architecture/version-compatibility.md` § Dimension 3 — Version & capability negotiation
-   - (none)
+   - `tests/e2e-unified/tests/test_send_refused_by_nest_version.py::test_a_refusal_the_app_does_not_recognise_is_shown_as_a_refusal_and_not_retried`
+15. [app] An app and a nest too far apart in version to work together tell you what to update, never fail with a raw error — `docs/goal/architecture/version-compatibility.md` § Dimension 4 — Honest version / compatibility error surfacing
+   - `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_an_app_too_old_for_its_nest_says_to_update_and_offers_no_retry`
+   - `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_an_app_too_old_for_its_nest_says_to_update_and_offers_no_retry_web`
+   - `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_a_signed_in_app_whose_nest_is_upgraded_past_it_shows_the_update_surface`
+16. [app] An app too old to read the conversations it saved on this device tells you to update it and that they are intact, instead of calling them damaged or showing none — `docs/goal/architecture/version-compatibility.md` § Dimension 1 — At-rest schema evolution (the nest DB + client-local stores)
+   - `tests/e2e-unified/tests/test_mls_state_newer_build_tui.py::test_conversations_a_newer_build_saved_say_update_the_app_and_stay_untouched`
+17. [nest] Anyone can ask a nest its version without signing in and is told only the major and minor number; the exact build is answered only at the nest's health address, which a release pipeline reads to tell one build from another — `docs/goal/architecture/federation.md` § Security — the anonymous & federation attack surface
+   - `tests/e2e-unified/tests/api/test_anonymous_version_surfaces.py::test_anonymous_version_answers_are_major_minor_and_only_health_tells_the_build`
 18. [nest] Upgrading your nest to a newer build keeps everything it already held; no upgrade removes data you cannot recreate — `docs/goal/architecture/version-compatibility.md` § I1 — Never destroy user-irrecoverable data (iron-clad)
-   - (none)
+   - (maintainer-only)
+   - (maintainer-only)
 19. [nest] A nest tells apps which features it has as a short list of plain names, and lists none it does not have — `docs/goal/architecture/version-compatibility.md` § Dimension 3 — Version & capability negotiation
    - `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_nest_info_advertises_capability_set`
 20. [nest] When something you do with a person on another nest fails because their nest is too old for it, your nest says so in your language instead of failing with a raw error — `docs/goal/architecture/version-compatibility.md` § Dimension 5 — Federation across nest versions
-   - (none)
+   - `tests/e2e-unified/tests/api/test_peer_nest_outdated_relay.py::test_send_to_a_too_old_home_nest_is_answered_peer_nest_outdated`
 
 ## Status
 
@@ -85,13 +90,14 @@ Stamped 2026-10-01 at dc4b94e0f1.
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | (maintainer-only) | linux (linux): passed, windows (windows): passed |
-| 1 | app | (maintainer-only) | linux (linux): passed, windows (windows): passed, macos (macos): passed |
+| 1 | app | (maintainer-only) | linux (linux): xfailed, windows (windows): passed |
+| 1 | app | (maintainer-only) | linux (linux): xfailed, windows (windows): passed, macos (macos): passed |
 | 1 | app | (maintainer-only) | — |
-| 2 | app | (maintainer-only) | linux (linux): passed |
-| 2 | app | (maintainer-only) | linux (linux): passed |
+| 2 | app | (maintainer-only) | linux (linux): failed, windows (windows): passed |
+| 2 | app | (maintainer-only) | linux (linux): passed, windows (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_outdated_nest_launch_shows_non_retry_update_surface` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_outdated_nest_launch_shows_non_retry_update_surface_web` | web (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_a_signed_in_app_whose_nest_restarts_degraded_shows_the_update_surface` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_old_client_minimal_payloads_accepted_by_new_nest` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_new_client_extra_fields_ignored_by_old_nest` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_new_client_unknown_kind_gets_graceful_unknown_kind` | nest (linux): passed |
@@ -102,17 +108,21 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | 6 | app | `tests/e2e-unified/tests/test_account_index_unreadable_launch.py::test_a_newer_builds_index_tells_the_user_to_update_and_offers_nothing_else` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_account_index_unreadable_launch.py::test_a_malformed_index_reaches_the_floor_only_through_a_confirm_that_states_the_residual` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_start_over_refuses_while_another_instance_serves_an_account` | linux (linux): passed, tui (linux): passed |
-| 8 | app | (none) | — |
-| 9 | app | (none) | — |
-| 10 | app | (none) | — |
-| 11 | app | (none) | — |
-| 12 | nest | (none) | — |
+| 7 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance_windows.py::test_windows_start_over_refuses_on_error_message_while_another_instance_serves` | windows (windows): passed |
+| 8 | app | (maintainer-only) | tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_a_feature_the_nest_is_too_old_for_is_hidden_not_an_error` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_conversations_unknown_message_kind.py::test_a_message_of_an_unknown_kind_is_missed_alone_and_the_conversation_keeps_working` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_send_refused_by_nest_version.py::test_a_send_refused_because_the_nest_needs_updating_says_so_and_offers_no_retry` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 12 | nest | `tests/e2e-unified/tests/api/test_schema_version_compat.py::test_a_query_time_mismatch_is_answered_as_needing_an_update` | nest (linux): passed |
 | 13 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_deploy_schema_upgrade.py::test_incompatible_schema_boots_degraded_then_recovers` | — |
-| 14 | app | (none) | — |
-| 15 | app | (none) | — |
-| 16 | app | (none) | — |
-| 17 | nest | (none) | — |
-| 18 | nest | (none) | — |
+| 14 | app | `tests/e2e-unified/tests/test_send_refused_by_nest_version.py::test_a_refusal_the_app_does_not_recognise_is_shown_as_a_refusal_and_not_retried` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_an_app_too_old_for_its_nest_says_to_update_and_offers_no_retry` | linux (linux): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_an_app_too_old_for_its_nest_says_to_update_and_offers_no_retry_web` | web (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_version_mismatch_launch.py::test_a_signed_in_app_whose_nest_is_upgraded_past_it_shows_the_update_surface` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_mls_state_newer_build_tui.py::test_conversations_a_newer_build_saved_say_update_the_app_and_stay_untouched` | linux (linux): passed, tui (linux): passed |
+| 17 | nest | `tests/e2e-unified/tests/api/test_anonymous_version_surfaces.py::test_anonymous_version_answers_are_major_minor_and_only_health_tells_the_build` | nest (linux): passed |
+| 18 | nest | (maintainer-only) | nest (linux): passed |
+| 18 | nest | (maintainer-only) | nest (linux): passed |
 | 19 | nest | `tests/e2e-unified/tests/api/test_wire_version_skew.py::test_nest_info_advertises_capability_set` | nest (linux): passed |
-| 20 | nest | (none) | — |
+| 20 | nest | `tests/e2e-unified/tests/api/test_peer_nest_outdated_relay.py::test_send_to_a_too_old_home_nest_is_answered_peer_nest_outdated` | nest (linux): passed |
 <!-- features-render:end -->

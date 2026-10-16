@@ -57,6 +57,7 @@ public sealed partial class AdminSettingsPage : Page
             {
                 _vm = new AdminSettingsViewModel(clients.Rpc!);
                 _vm.PropertyChanged += ViewModel_PropertyChanged;
+                AddTierSection.DataContext = _vm;
                 _vm.Tiers.CollectionChanged += (_, _) => UpdateEmptyState();
                 _vm.MembershipTiers.CollectionChanged += (_, _) => UpdateEmptyState();
             }
@@ -120,6 +121,19 @@ public sealed partial class AdminSettingsPage : Page
         {
             await _vm.SaveTierAsync(row);
         }
+    }
+
+    /// <summary>
+    /// <c>admin-settings-tier-add-button</c> → define a new tier via
+    /// <c>fauna.admin.tiers.create</c> (admin.md § 3 → Defining a new tier). The
+    /// two-way-bound inputs have already pushed their text into the VM, which
+    /// validates, creates, refetches and clears the form only on success; errors
+    /// surface via the VM's ErrorMessage.
+    /// </summary>
+    private async void AddTier_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null) return;
+        await _vm.AddTierAsync();
     }
 
     /// <summary>

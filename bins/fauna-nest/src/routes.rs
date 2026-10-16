@@ -148,6 +148,11 @@ pub struct AppState {
     /// omission: a restart mid-flow fails that flow cleanly and the user
     /// retries, so there is no interior state a crash can strand.
     pub oauth_as: Arc<crate::oauth_as_state::OAuthAsRuntime>,
+    /// The oracle's `atproto.service_auth` requests in flight — the door
+    /// waiting on the PDS bridge's mint ([`crate::atproto_oracle`]).
+    /// **Ephemeral**: a restart refuses the in-flight calls, and the caller
+    /// asks again.
+    pub atproto_service_auth: Arc<crate::atproto_oracle::ServiceAuthRequests>,
     /// The nest-hosted WASM plugins (`third-party.md` § Execution forms →
     /// *WASM components*): the running supervisors and the install cards
     /// awaiting approval. In memory only — the rows and the files on disk are
@@ -247,6 +252,14 @@ pub struct AppState {
     /// `ArcSwap` for the same reason as `cors_origins`: the reader is the `/app`
     /// router's per-request probe.
     pub web_app_origin: Arc<arc_swap::ArcSwap<fauna_protocol::web_app_origin::WebAppOrigin>>,
+    /// The update channel in force (`nest/update-channel.md` § The channel as
+    /// nest state) — the `nest_update_channel` row, else the `FAUNA_IMAGE_TAG`
+    /// seed; `None` is a pinned box. Boot-resolved
+    /// (`update_channel::resolve_update_channel`), swapped live by
+    /// `fauna.admin.update_channel.set`. `ArcSwap` so `/api/v1/health` reads it
+    /// without a lock or a DB query.
+    pub update_channel:
+        Arc<arc_swap::ArcSwap<Option<fauna_provisioning::cloud_init::UpdateChannel>>>,
     /// Sync **cache** of the deployment's identity domain — a projection of the
     /// primary `mail_domains` row, which IS the nest's identity
     /// (`docs/goal/behavior/dns-management.md`); there is no separate identity
@@ -474,6 +487,15 @@ pub struct AppState {
     /// `crate::anonymous_rate_limit::report_shed`.
     pub invite_verify_rate_limit_shed: Arc<fauna_conn_limit::ShedCounter>,
 
+    /// Per-source throttle on the web paywall's two visitor entitlement doors
+    /// (`/api/v1/paywall/{redeem,return/…}`), one bucket per door. Keyed on
+    /// the HTTP `ConnectInfo` peer (PROXY-v2-resolved behind the SNI router).
+    /// See `crate::anonymous_rate_limit::paywall_door_config`.
+    pub paywall_door_rate_limit: Arc<crate::bridge_rate_limit::Limiter>,
+
+    /// Rate-limited reporter for `paywall_door_rate_limit`'s trips.
+    pub paywall_door_rate_limit_shed: Arc<fauna_conn_limit::ShedCounter>,
+
     /// Per-source throttle on the self-service registration surface
     /// (`fauna.account.register`). Register is an anonymous signature-bound write
     /// that creates an account (handle reservation + Ed25519 verify); unthrottled
@@ -611,6 +633,13 @@ pub struct AppState {
     #[cfg(feature = "test-hooks")]
     pub outbound_clock_override: std::sync::Arc<std::sync::atomic::AtomicI64>,
 
+    /// Test-only override of the `state` token `fauna.bridges.mail_health`
+    /// returns — what a newer nest sending a state this app has never heard of
+    /// looks like on the wire. `None` = the fold's own answer. Driven by
+    /// `POST /api/v1/test/mail_health/state`. Never compiled into production.
+    #[cfg(feature = "test-hooks")]
+    pub mail_health_state_override: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+
     /// Test-only re-score worklist serve counters — the drain's decision-point
     /// observable, so an e2e can prove "the nest decided after my plant landed"
     /// instead of sleeping a settle window. Bumped by
@@ -633,6 +662,14 @@ pub struct AppState {
     pub post_fanout_initiations:
         std::sync::Arc<crate::post_fanout_test_hook::PostFanoutInitiations>,
 
+    /// Test-only per-actor count of sign-ins refused as
+    /// `fauna.auth.account_locked`, bumped synchronously at the three mint
+    /// gates in `auth_core`, read via `GET /api/v1/test/account_lock/{actor}/refusals`
+    /// — the outside witness that a locked app stops retrying. Never compiled
+    /// into production; see [`crate::account_lock_test_hook`].
+    #[cfg(feature = "test-hooks")]
+    pub account_lock_refusals: std::sync::Arc<crate::account_lock_test_hook::AccountLockRefusals>,
+
     /// Test-only forced-on override for the content-sealing-epochs mail
     /// write gate (`fauna_mls::wrapped_blob::MAIL_EPOCH_SEALING_WRITE_DEFAULT`,
     /// `true` since the 2026-07-19 flip — this force-on override is now
@@ -643,6 +680,10 @@ pub struct AppState {
     #[cfg(feature = "test-hooks")]
     pub epoch_sealing_test_override: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
+    /// The custody-hosting pump's per-custody T15 ingest brakes —
+    /// state that must outlive a sweep (each sweep builds a fresh worker).
+    pub custody_hosting_brakes: std::sync::Arc<crate::custody_hosting_worker::CustodyHostingBrakes>,
+
     /// Test-only hold on the custody-hosting pump's PERIODIC loop
     /// ([`crate::custody_hosting_worker::CustodyHostingWorker::spawn`]):
     /// `true` = every scheduled tick skips its pass, so the only passes are
@@ -652,6 +693,25 @@ pub struct AppState {
     /// /api/v1/test/custody_hosting/hold`. Never compiled into production.
     #[cfg(feature = "test-hooks")]
     pub custody_hosting_periodic_held: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
+    /// Test-only shift of the custody-hosting pump's clock, in seconds — a
+    /// pass's `now` is the wall clock plus this. Lets a test walk a hosting
+    /// row past its witness's expiry and past the 30-day store grace
+    /// ([`fauna_core::custody_ceremony::HOSTING_EXPIRED_STORE_GC_GRACE_SECS`])
+    /// without waiting a month (convention 14): the register door refuses an
+    /// already-expired witness, so the clock is the only way there. Read only
+    /// where the pump computes its pass `now`; driven by `POST
+    /// /api/v1/test/custody_hosting/clock`. Never compiled into production.
+    #[cfg(feature = "test-hooks")]
+    pub custody_hosting_clock_offset_secs: std::sync::Arc<std::sync::atomic::AtomicI64>,
+
+    /// Test-only metering fault on the custody-hosting pump: while `true`,
+    /// every budget pass takes the `Err` branch a failed
+    /// [`fauna_sync_engine::custody_leg::meter_and_evict`] takes, so a pin
+    /// drives the T15 brake's real metering-failure arm rather than writing
+    /// the brake directly. Never compiled into production.
+    #[cfg(feature = "test-hooks")]
+    pub custody_hosting_meter_fault: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
     /// MTA-STS policy fetcher for `fauna.bridges.fetch_mta_sts_policy`
     /// (T2.1a). nest owns the `_mta-sts.<domain>` TXT + `.well-known/
@@ -778,6 +838,29 @@ pub struct AppState {
     pub atproto_identity_withheld:
         std::sync::Arc<std::sync::Mutex<std::collections::HashSet<[u8; 32]>>>,
 
+    /// Capability tokens `fauna.nest.info` stops advertising — the running nest
+    /// standing in for one too old for a feature, so a test can witness the
+    /// client hiding it (`version-compatibility.md` § Dimension 3). Filtered at
+    /// the advertise point only (`discovery_core::nest_info_core`); the
+    /// handlers behind a withheld token keep serving. Driven by
+    /// `POST /api/v1/test/capability-withhold/{token}` and its `clear` twin
+    /// (`capability_withhold_test_hook`). Never compiled into production;
+    /// gated on `test-hooks` alone.
+    #[cfg(feature = "test-hooks")]
+    pub capabilities_withheld: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+
+    /// `(bridge_role, bridge_id)` pairs whose `fauna.bridges.fetch_tls_cert_blob`
+    /// answers "no blob" — a real bridge booted into the cert-less state its
+    /// refresh loop heals from (`mail-bridge-lifecycle.md` § Implementation
+    /// status today). Checked in the fetch handler only; the on-disk cert and
+    /// the stored blobs are untouched. Driven by
+    /// `POST /api/v1/test/tls-cert-withhold/{role}/{bridge_id}` and its `clear`
+    /// twin (`tls_cert_withhold_test_hook`). Never compiled into production;
+    /// gated on `test-hooks` alone.
+    #[cfg(feature = "test-hooks")]
+    pub tls_cert_fetch_withheld:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashSet<(String, String)>>>,
+
     /// Per-channel refusal of one class of `fauna.conversations.channel.send`
     /// envelope — the seam that lets a tier_3 journey stage a succession sweep
     /// which is genuinely *partial*, and so render and press
@@ -811,6 +894,20 @@ pub struct AppState {
     /// same as the overrides above.
     #[cfg(feature = "test-hooks")]
     pub rpc_hold: std::sync::Arc<crate::rpc_hold_test_hook::RpcHoldRegistry>,
+
+    /// Test-only registry the admin region status read
+    /// (`fauna.admin.region.get`) judges *enrolled* against — and nothing
+    /// else: the refresh worker, the demand doors and every ingest keep
+    /// reading the real compiled-in registry, so a synthetic enrollment never
+    /// sends a real fetch to `region_tier::REGION_LOG_BASE_URL`. `None` (the
+    /// default) is the real registry. Driven by `POST /api/v1/test/region/
+    /// authority-silent` and its `clear` twin; why it exists is
+    /// `region_status_test_hook`'s module doc. Unlike
+    /// `region_registry_override` (set before the `Arc` wrap, for in-process
+    /// tests) this one is armed at runtime by an HTTP hook, hence the mutex.
+    #[cfg(feature = "test-hooks")]
+    pub region_status_registry_override:
+        std::sync::Arc<std::sync::Mutex<Option<fauna_core::region_authority::RegionRegistry>>>,
 }
 
 impl AppState {
@@ -1162,6 +1259,7 @@ impl AppState {
         actor_id: [u8; 32],
         token_id: Option<String>,
         bound_device_key: Option<[u8; 32]>,
+        loopback_peer: bool,
     ) -> (
         Arc<crate::ws::RpcConnection>,
         tokio::sync::mpsc::Receiver<Bytes>,
@@ -1187,9 +1285,9 @@ impl AppState {
             }
             None => None,
         };
-        let (conn, rx) = self
-            .ws
-            .subscribe_with_session(actor_id, token_id, bound_device_key);
+        let (conn, rx) =
+            self.ws
+                .subscribe_with_session(actor_id, token_id, bound_device_key, loopback_peer);
         if let Some(token_id) = conn.token_id.as_deref()
             && !self
                 .auth
@@ -1357,10 +1455,10 @@ impl Default for RegistrationConfig {
             // config key feeds this field — the deleted `--reserved-handle`
             // flag's plumbing used to replace this list with the flag's empty
             // default on every production boot. The field itself stays only so
-            // tests can inject a custom list.
-            reserved_handles: fauna_protocol::handle::RESERVED_HANDLES
-                .iter()
-                .map(|s| s.to_string())
+            // tests can inject a custom list. `reserved_handles()` is that list
+            // plus the six mail role names, derived from the mail constant.
+            reserved_handles: fauna_protocol::handle::reserved_handles()
+                .map(str::to_string)
                 .collect(),
         }
     }
@@ -2185,14 +2283,20 @@ pub async fn ws_handler(
         }
     };
 
-    if subprotocol != "fauna.v1" {
-        // 4426 = subprotocol mismatch. WebSocketUpgrade can't set custom
-        // close codes pre-upgrade, so we surface as HTTP 426 + reject.
-        return (
-            axum::http::StatusCode::UPGRADE_REQUIRED,
-            format!("subprotocol mismatch: {subprotocol}"),
-        )
-            .into_response();
+    match classify_client_subprotocol([subprotocol.as_str()]) {
+        ClientSubprotocolOffer::Required => {}
+        // Answered before the bearer is consulted: a too-old app learns it
+        // is too old whatever the state of its session.
+        ClientSubprotocolOffer::Unserved(offered) => {
+            return upgrade_and_close_subprotocol_mismatch(ws, offered.to_owned());
+        }
+        ClientSubprotocolOffer::NotFauna => {
+            return (
+                axum::http::StatusCode::UPGRADE_REQUIRED,
+                format!("subprotocol mismatch: {subprotocol}"),
+            )
+                .into_response();
+        }
     }
 
     // `validate_with_session`, not `validate`: the connection has to remember
@@ -2259,10 +2363,25 @@ pub async fn ws_handler(
         return ApiError::forbidden("token does not match actor_id").into_response();
     }
 
+    // The peer's one fact the authenticated connection keeps: was it the
+    // nest's own box? Never `peer_addr` (the loopback gate below must keep
+    // refusing every authenticated caller — see `ws::RpcConnection::peer_addr`);
+    // a separate flag only the developer carve-out reads
+    // (`third-party.md` § Developer loop). Unknown is not loopback.
+    let loopback_peer = peer_addr.is_some_and(|a| a.ip().is_loopback());
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .max_frame_size(MAX_WS_MESSAGE_SIZE)
         .protocols(["fauna.v1"])
-        .on_upgrade(move |socket| handle_ws(state, actor_id, token_id, bound_device_key, socket))
+        .on_upgrade(move |socket| {
+            handle_ws(
+                state,
+                actor_id,
+                token_id,
+                bound_device_key,
+                loopback_peer,
+                socket,
+            )
+        })
 }
 
 /// GET /api/v1/ws — anonymous (pre-identity) WebSocket upgrade. No `{actor_id}`
@@ -2276,13 +2395,20 @@ pub async fn ws_anonymous_handler(
     crate::registration::OptionalConnectInfo(peer_addr): crate::registration::OptionalConnectInfo,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if !subprotocol_offers(&headers, "fauna.v1") {
-        // No `fauna.v1` offered — same 426 shape as the authenticated endpoint.
-        return (
-            axum::http::StatusCode::UPGRADE_REQUIRED,
-            "subprotocol fauna.v1 required",
-        )
-            .into_response();
+    match classify_client_subprotocol(offered_subprotocols(&headers)) {
+        ClientSubprotocolOffer::Required => {}
+        ClientSubprotocolOffer::Unserved(offered) => {
+            return upgrade_and_close_subprotocol_mismatch(ws, offered.to_owned());
+        }
+        // No Fauna client subprotocol offered — the same 426 shape as the
+        // authenticated endpoint.
+        ClientSubprotocolOffer::NotFauna => {
+            return (
+                axum::http::StatusCode::UPGRADE_REQUIRED,
+                format!("subprotocol {} required", required_client_subprotocol()),
+            )
+                .into_response();
+        }
     }
     // `peer_addr` is populated on both the plain-HTTP listener (the in-container
     // bridge↔nest hop) and the TLS path (`serve_tls` injects it via
@@ -2296,18 +2422,130 @@ pub async fn ws_anonymous_handler(
         .on_upgrade(move |socket| handle_ws_anonymous(state, socket, peer_addr))
 }
 
-/// True if `Sec-WebSocket-Protocol` offers `token`. Unlike `parse_subprotocol`,
-/// no `bearer.<token>` element is required — shared by the anonymous
-/// (`fauna.v1`) and federation (`FEDERATION_SUBPROTOCOL`) upgrade handlers,
-/// neither of which binds a bearer-authenticated actor at upgrade time.
-pub(crate) fn subprotocol_offers(headers: &axum::http::HeaderMap, token: &str) -> bool {
-    use axum::http::header::SEC_WEBSOCKET_PROTOCOL;
+/// The subprotocol an app's WebSocket upgrade must offer — `fauna.v1`, the
+/// one both client endpoints (`ws_handler`, `ws_anonymous_handler`) serve;
+/// any other offer is refused per [`classify_client_subprotocol`]
+/// (`transport-connection.md` § Connection lifecycle).
+///
+/// Under `test-hooks` **only**, and only when `FAUNA_TEST_REQUIRED_SUBPROTOCOL`
+/// is set, the upgrade requires that token instead, so an e2e can stand up a
+/// nest an unmodified app is too old for and witness the needs-update surface
+/// (`version-compatibility.md` § Dimension 4) — the same double gate (feature
+/// **and** env) as `FAUNA_TEST_NOSTR_ALLOW_LOOPBACK`
+/// (`nostr::relays::relay_dial_policy`). Test instrumentation, never a
+/// setting: production is built without `test-hooks`, so the read is not
+/// compiled into the shipping nest. Read once and kept for the process.
+pub(crate) fn required_client_subprotocol() -> &'static str {
+    #[cfg(feature = "test-hooks")]
+    {
+        static OVERRIDE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        if let Some(token) = OVERRIDE
+            .get_or_init(|| std::env::var("FAUNA_TEST_REQUIRED_SUBPROTOCOL").ok())
+            .as_deref()
+        {
+            return token;
+        }
+    }
+    "fauna.v1"
+}
+
+/// What an app's `Sec-WebSocket-Protocol` offer means to a client upgrade
+/// endpoint — see [`classify_client_subprotocol`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ClientSubprotocolOffer<'a> {
+    /// The required token was offered: the upgrade proceeds.
+    Required,
+    /// No required token, but this Fauna client subprotocol (`fauna.v<N>`,
+    /// decimal N) was: the app is one the nest recognises and does not serve.
+    Unserved(&'a str),
+    /// No Fauna client subprotocol at all.
+    NotFauna,
+}
+
+/// Classify the offered subprotocol tokens, the one rule both client upgrade
+/// endpoints apply (`transport-connection.md` § Connection lifecycle, the 4426
+/// paragraph): [`Required`](ClientSubprotocolOffer::Required) proceeds,
+/// [`Unserved`](ClientSubprotocolOffer::Unserved) completes the upgrade only to
+/// close it 4426 ([`upgrade_and_close_subprotocol_mismatch`]) — the refusal a
+/// browser can read — and [`NotFauna`](ClientSubprotocolOffer::NotFauna) keeps
+/// the pre-upgrade HTTP 426.
+pub(crate) fn classify_client_subprotocol<'a>(
+    offered: impl IntoIterator<Item = &'a str>,
+) -> ClientSubprotocolOffer<'a> {
+    let required = required_client_subprotocol();
+    let mut unserved = None;
+    for token in offered {
+        if token == required {
+            return ClientSubprotocolOffer::Required;
+        }
+        if unserved.is_none() && is_fauna_client_subprotocol(token) {
+            unserved = Some(token);
+        }
+    }
+    unserved.map_or(
+        ClientSubprotocolOffer::NotFauna,
+        ClientSubprotocolOffer::Unserved,
+    )
+}
+
+/// The grammar of a Fauna client subprotocol: `fauna.v<N>`, N decimal (one per
+/// major). `fauna.federation.v1` is a nest↔nest token, not one of these.
+fn is_fauna_client_subprotocol(token: &str) -> bool {
+    token
+        .strip_prefix("fauna.v")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Every token `Sec-WebSocket-Protocol` offers, across all its header values.
+fn offered_subprotocols(headers: &axum::http::HeaderMap) -> impl Iterator<Item = &str> {
     headers
-        .get_all(SEC_WEBSOCKET_PROTOCOL)
+        .get_all(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(','))
-        .any(|tok| tok.trim() == token)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+}
+
+/// The WS close code an app offering an unserved Fauna client subprotocol is
+/// closed with (`transport-connection.md` § Close codes).
+pub(crate) const SUBPROTOCOL_MISMATCH_CLOSE_CODE: u16 = 4426;
+
+/// How long the 4426 path waits for the app's close echo, so the code reaches
+/// it as a clean close rather than a dropped TCP stream.
+const SUBPROTOCOL_MISMATCH_CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Complete the upgrade selecting the app's own `offered` token (a browser —
+/// and tungstenite — fails a connection whose server selects a token it did
+/// not offer), then close it 4426 naming the required token and end. Enters no
+/// dispatcher: no subscription, no bearer validation, no `RpcConnection`.
+fn upgrade_and_close_subprotocol_mismatch(ws: WebSocketUpgrade, offered: String) -> Response {
+    ws.protocols([offered]).on_upgrade(|mut socket| async move {
+        use axum::extract::ws::{CloseFrame, Message};
+        let reason = format!("subprotocol {} required", required_client_subprotocol());
+        let _ = socket
+            .send(Message::Close(Some(CloseFrame {
+                code: SUBPROTOCOL_MISMATCH_CLOSE_CODE,
+                reason: reason.into(),
+            })))
+            .await;
+        let _ = tokio::time::timeout(SUBPROTOCOL_MISMATCH_CLOSE_GRACE, async {
+            while let Some(Ok(msg)) = socket.recv().await {
+                if matches!(msg, Message::Close(_)) {
+                    break;
+                }
+            }
+        })
+        .await;
+    })
+}
+
+/// True if `Sec-WebSocket-Protocol` offers `token`. Unlike `parse_subprotocol`,
+/// no `bearer.<token>` element is required — used by the federation
+/// (`FEDERATION_SUBPROTOCOL`) upgrade handler, which binds no
+/// bearer-authenticated actor at upgrade time.
+pub(crate) fn subprotocol_offers(headers: &axum::http::HeaderMap, token: &str) -> bool {
+    offered_subprotocols(headers).any(|tok| tok == token)
 }
 
 async fn handle_ws(
@@ -2315,11 +2553,12 @@ async fn handle_ws(
     actor_id: [u8; 32],
     token_id: String,
     bound_device_key: Option<[u8; 32]>,
+    loopback_peer: bool,
     socket: axum::extract::ws::WebSocket,
 ) {
     use std::sync::Arc;
     let (conn, rx) = state
-        .register_upgraded_connection(actor_id, Some(token_id), bound_device_key)
+        .register_upgraded_connection(actor_id, Some(token_id), bound_device_key, loopback_peer)
         .await;
     run_connection(Arc::clone(&state), Arc::clone(&conn), rx, socket).await;
     state.ws.remove(&actor_id, conn.conn_id);
@@ -4087,9 +4326,9 @@ pub async fn get_post(
 /// The `commit` field is served **unauthenticated by deliberate design**. The review flagged it as a commit→CVE
 /// hint, but the production redeploy-verify contract reads it over a plain,
 /// credential-less `curl https://<host>/api/v1/health` to confirm a Watchtower
-/// auto-update flipped the running image (memory
-/// `redeploy-faunafan-watchtower-autoupdate`) — gating it behind auth would
-/// break that workflow on a fresh, pre-claim box that has no admin credential
+/// auto-update flipped the running image (the redeploy-verify runbook) —
+/// gating it behind auth would break that workflow on a fresh, pre-claim box
+/// that has no admin credential
 /// to present. The residual leak is marginal: `version`
 /// (`CARGO_PKG_VERSION`) already approximates the build, and the deployed SHA
 /// reveals nothing an attacker couldn't read from the public source tree. So
@@ -4101,8 +4340,29 @@ pub async fn get_post(
 /// the release pipeline's promotion gate must distinguish two *builds* of one
 /// commit, which `commit` alone cannot do (`crate::build_identity` owns the
 /// pair and the rationale).
-pub async fn health() -> Json<serde_json::Value> {
-    Json(crate::build_identity::identity_json("ok"))
+///
+/// `binaries` (the sha256 of each binary the image ships, present once the
+/// nest has hashed them — `crate::build_identity::binary_hashes`) joins on the
+/// same terms: the deploy binary gate has no shell on a box and reads them
+/// here, and they are hashes of files in a public image.
+///
+/// Ratified 2026-10-09 as the ONE anonymous exception to the `major.minor`
+/// coarsening of every discovery surface: `docs/goal/architecture/federation.md`
+/// § Security (the enumeration bullet) owns the ruling and its reasons; the catalog outcome that promises the coarsening
+/// names this address as the exception, and
+/// `tests/e2e-unified/tests/api/test_anonymous_version_surfaces.py` pins both
+/// halves — every discovery answer coarse, this one exact.
+///
+/// `update_channel` (the channel id in force, `null` when pinned) joins for the
+/// updater, which has no shell on the box either; it is not a secret — every
+/// channel tag is publicly pullable (`nest/update-channel.md` § The channel as
+/// nest state → *What the nest reports*). Read from the live `ArcSwap`, so
+/// health still runs no DB query.
+pub async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(crate::build_identity::identity_json(
+        "ok",
+        crate::update_channel::reported(&state),
+    ))
 }
 
 // `GET /api/v1/setup-status` removed in S4c2: setup
@@ -4209,6 +4469,64 @@ pub(crate) fn parse_name_hash(
             })
         })
         .transpose()
+}
+
+/// The address a per-set request resolves by (`set-addressing.md` § The row
+/// form): its row when it carries `folder_id` — the row wins, the name forms
+/// are not read — else its name with the `name_hash` validated as in
+/// [`parse_name_hash`]. Every per-set handler reads its address through this,
+/// so none picks a form by hand.
+pub(crate) fn parse_set_address<'r>(
+    req: &'r impl fauna_protocol::folders::SetAddressed,
+    invalid_request: impl FnOnce(&str) -> fauna_protocol::RpcError,
+) -> Result<crate::folder_authz::FolderAddress<'r>, fauna_protocol::RpcError> {
+    use crate::folder_authz::FolderAddress;
+    use fauna_protocol::folders::SetAddress;
+    Ok(match req.address() {
+        SetAddress::Row(id) => FolderAddress::Row(id),
+        SetAddress::Name { name, name_hash } => {
+            FolderAddress::name(name, parse_name_hash(&name_hash.cloned(), invalid_request)?)
+        }
+    })
+}
+
+/// The gate a per-set kind admits its address under — each kind's own, which
+/// the address form never changes (`set-addressing.md` § The row form).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetGate {
+    /// The set's owner alone ([`crate::folder_authz::resolve_owned_folder`]).
+    Owner,
+    /// The owner or a roster member
+    /// ([`crate::folder_authz::resolve_readable_folder`]).
+    Reader,
+    /// The owner or a `writer`-granted roster member
+    /// ([`crate::folder_authz::resolve_writable_folder`]).
+    Writer,
+}
+
+/// Resolve the set `req` addresses under `gate` for `caller`: its row when it
+/// carries one (never falling through to the name forms), else its name
+/// owner-first — folding absent, unreachable and not-under-this-gate into one
+/// `fauna.<ns>.not_found` (ST-RES-1: a probe by id learns nothing a probe by
+/// name would not). The one road a per-set handler takes to its row.
+pub(crate) async fn resolve_set(
+    db: &crate::db::CacheDb,
+    ns: &str,
+    req: &impl fauna_protocol::folders::SetAddressed,
+    gate: SetGate,
+    caller: &[u8; 32],
+) -> Result<crate::db::FolderRow, fauna_protocol::RpcError> {
+    use crate::folder_authz::{
+        resolve_owned_folder, resolve_readable_folder, resolve_writable_folder,
+    };
+    let address = parse_set_address(req, |msg| crate::rpc_errors::invalid_request_ns(ns, msg))?;
+    match gate {
+        SetGate::Owner => resolve_owned_folder(db, address, caller).await,
+        SetGate::Reader => resolve_readable_folder(db, address, caller).await,
+        SetGate::Writer => resolve_writable_folder(db, address, caller).await,
+    }
+    .map_err(|e| crate::rpc_errors::internal_ns(ns, e))?
+    .ok_or_else(|| crate::rpc_errors::not_found_ns(ns, "folder not found"))
 }
 
 #[cfg(test)]
@@ -4947,6 +5265,84 @@ mod loopback_gate_tests {
             "loopback peer must pass the gate, not be refused"
         );
         assert_eq!(err.code, "fauna.protocol.unknown_kind");
+    }
+
+    /// An authenticated connection from the nest's own box carries the
+    /// loopback fact to its handlers (`dispatch_core::CallerRef::loopback_peer`,
+    /// the developer carve-out's one input — `third-party.md` § Developer
+    /// loop) and still fails the loopback gate CLOSED: the fact never becomes
+    /// a `peer_addr`, so an authenticated caller of a pre-identity
+    /// loopback-only kind stays refused.
+    #[tokio::test]
+    async fn an_authenticated_loopback_connection_reaches_handlers_but_not_the_loopback_gate() {
+        const KIND: &str = "fauna.posts.create";
+        let db = Arc::new(crate::db::CacheDb::open_in_memory().unwrap());
+        let actor = [0x1b; 32];
+        db.create_user(&actor, "free", "dev").await.unwrap();
+        let mut b = crate::rpc_router::RpcRouter::builder();
+        b.add(
+            KIND,
+            crate::rpc_router::RpcKindMeta {
+                forbid_replay: false,
+                default_deadline: std::time::Duration::from_secs(5),
+                handler: Box::new(|_state, _actor, _payload| {
+                    Box::pin(async move {
+                        Ok(bytes::Bytes::from(
+                            fauna_protocol::encode_canonical(
+                                &crate::dispatch_core::current_caller_is_loopback(),
+                            )
+                            .unwrap()
+                            .to_vec(),
+                        ))
+                    })
+                }),
+            },
+        );
+        let state = Arc::new(AppState {
+            rpc_router: Arc::new(b.build()),
+            ..AppState::for_test(db)
+        });
+
+        for loopback_peer in [true, false] {
+            let (conn, mut rx) = state
+                .ws
+                .subscribe_with_session(actor, None, None, loopback_peer);
+            assert_eq!(conn.peer_addr, None, "never a peer_addr when authenticated");
+
+            dispatch_request(
+                Arc::clone(&state),
+                Arc::clone(&conn),
+                enroll_request_frame(),
+            )
+            .await;
+            let err = recv_error(&mut rx).await;
+            assert_eq!(err.code, "fauna.bridges.remote_enrollment_unsupported");
+
+            dispatch_request(
+                Arc::clone(&state),
+                Arc::clone(&conn),
+                fauna_protocol::Request {
+                    correlation_id: 2,
+                    kind: KIND.to_string(),
+                    // Per arm: the actor's idempotency cache would replay
+                    // the first arm's reply to the second.
+                    idempotency_key: [u8::from(loopback_peer) + 2; 16],
+                    ..enroll_request_frame()
+                },
+            )
+            .await;
+            let bytes = rx.recv().await.expect("a reply frame");
+            let fauna_protocol::Frame::Reply(reply) = fauna_protocol::decode_frame(&bytes).unwrap()
+            else {
+                panic!("expected a Reply frame");
+            };
+            assert!(reply.ok, "{reply:?}");
+            assert_eq!(
+                reply.payload,
+                fauna_protocol::Value::Bool(loopback_peer),
+                "the handler sees the connection's loopback fact"
+            );
+        }
     }
 }
 
@@ -6267,19 +6663,59 @@ mod upgrade_revocation_race_tests {
             "precondition: the actor holds no session row at all"
         );
 
-        let (untracked, _rx) = state.register_upgraded_connection(actor, None, None).await;
+        let (untracked, _rx) = state
+            .register_upgraded_connection(actor, None, None, false)
+            .await;
         assert!(
             !untracked.is_revoked(),
             "a connection with no recorded token_id was closed by the re-read"
         );
 
         let (gone, _rx) = state
-            .register_upgraded_connection(actor, Some("0123456789abcdef".into()), None)
+            .register_upgraded_connection(actor, Some("0123456789abcdef".into()), None, false)
             .await;
         assert!(
             gone.is_revoked(),
             "a connection whose session row is absent at registration must be \
              revoked before it can dispatch"
         );
+    }
+}
+
+#[cfg(test)]
+mod client_subprotocol_offer_tests {
+    use super::{ClientSubprotocolOffer, classify_client_subprotocol};
+
+    #[test]
+    fn the_required_token_anywhere_in_the_offer_proceeds() {
+        assert_eq!(
+            classify_client_subprotocol(["fauna.v0", "fauna.v1"]),
+            ClientSubprotocolOffer::Required
+        );
+    }
+
+    #[test]
+    fn an_unserved_fauna_major_is_recognised() {
+        assert_eq!(
+            classify_client_subprotocol(["nope", "fauna.v7"]),
+            ClientSubprotocolOffer::Unserved("fauna.v7")
+        );
+    }
+
+    #[test]
+    fn only_the_decimal_major_grammar_is_a_fauna_client_subprotocol() {
+        for token in [
+            "fauna.federation.v1",
+            "fauna.v",
+            "fauna.vx",
+            "fauna.v1a",
+            "bearer.abc",
+        ] {
+            assert_eq!(
+                classify_client_subprotocol([token]),
+                ClientSubprotocolOffer::NotFauna,
+                "{token}"
+            );
+        }
     }
 }

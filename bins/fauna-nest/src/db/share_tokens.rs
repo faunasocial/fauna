@@ -227,6 +227,25 @@ impl CacheDb {
     pub async fn is_share_token_revoked(&self, token_id: &[u8; 32]) -> Result<bool> {
         Ok(self.share_token_registration(token_id).await? == Some(true))
     }
+
+    /// Move every share-link row one author registered back by `secs`:
+    /// `created_at` and `expires_at` both, as if each link had been made that
+    /// much earlier. Returns how many rows moved. Test-only: the
+    /// `share_link_age_test_hook` seam, so a tier_3 can reach a link's expiry
+    /// (a day at the shortest) without waiting it out.
+    #[cfg(feature = "test-hooks")]
+    pub async fn test_age_share_tokens(&self, author: &[u8; 32], secs: i64) -> Result<u64> {
+        let conn = self.conn.lock().await;
+        let n = conn
+            .execute(
+                "UPDATE share_tokens
+                 SET created_at = created_at - ?1, expires_at = expires_at - ?1
+                 WHERE author = ?2",
+                rusqlite::params![secs, author.as_slice()],
+            )
+            .context("test_age_share_tokens")?;
+        Ok(n as u64)
+    }
 }
 
 /// The column list [`parse_row`] reads, in its order. The envelope itself is
@@ -275,6 +294,27 @@ mod tests {
 
     fn db() -> CacheDb {
         CacheDb::open_in_memory().unwrap()
+    }
+
+    /// The aging seam moves exactly the named author's rows, both times.
+    #[cfg(feature = "test-hooks")]
+    #[tokio::test]
+    async fn aging_moves_one_authors_rows_back() {
+        let db = db();
+        let (a, b) = ([1u8; 32], [9u8; 32]);
+        let mine = db
+            .register_share_token(&[2u8; 32], &a, &[3u8; 32], b"s", 10_000, true)
+            .await
+            .unwrap();
+        db.register_share_token(&[4u8; 32], &b, &[3u8; 32], b"s", 10_000, true)
+            .await
+            .unwrap();
+        assert_eq!(db.test_age_share_tokens(&a, 5_000).await.unwrap(), 1);
+        let aged = &db.list_share_tokens_for_author(&a).await.unwrap()[0];
+        assert_eq!(aged.expires_at, 5_000);
+        assert_eq!(aged.created_at, mine.created_at - 5_000);
+        let theirs = &db.list_share_tokens_for_author(&b).await.unwrap()[0];
+        assert_eq!(theirs.expires_at, 10_000);
     }
 
     #[tokio::test]

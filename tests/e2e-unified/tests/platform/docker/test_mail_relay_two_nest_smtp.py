@@ -13,7 +13,7 @@ gate stays relaxed for the synthetic docker peer (dnsbl/fcrdns/HELO-identity are
 real-PTR/RBL gates a container peer can't satisfy — orthogonal to the AUTH gate
 under enforcement). No-modes retirement (ratified 2026-07-12): both boxes used
 to additionally commit **Encrypted** storage mode (slice 2, 2026-06-06) to
-mirror example.com's default; that commit is gone along with the axis itself —
+mirror the production default; that commit is gone along with the axis itself —
 every nest is sealed at rest unconditionally now, so this loop is still the
 closest in-CI mirror of the live box (enforced AUTH perimeter +
 cross-container real-DNS SMTP) with nothing left to additionally commit. The
@@ -85,7 +85,7 @@ the sender-domain MX/A gate and SPF still run cross-container. **The AUTH gate i
 ENFORCED** (``put_auth_policy(enforce_dmarc=true, log_only=false)`` + the published
 ``_dmarc … p=reject``) — that is the 2g prod-parity upgrade over the formerly-relaxed
 loop. The shared fail-closed ``fake_clamd``/``fake_rspamd`` sidecars satisfy the C.7
-scan gate on both boxes. Storage committed **Encrypted** (example.com's default and
+scan gate on both boxes. Storage committed **Encrypted** (the production default and
 the goal-doc prod-parity axis — `testing.md` § Gap 2 Target; certs still provision
 via the self-signed boot bootstrap, same as the Encrypted factory-reset test); the
 mail seal path is storage-mode-independent, so this exercises
@@ -207,7 +207,7 @@ def _start_box(net, dns_ip, scanners, *, name, domain, claim_code, http_port, ma
     """Start one claimed full-MTA+MDA box on `net`, resolver pointed at the fake
     DNS, scan gate at the shared sidecars. The NODE domain is `localhost` (ACME-off
     boot); `domain` is the box's primary MAIL domain, registered later. Storage
-    committed **Encrypted** — example.com's privacy-respecting default (the
+    committed **Encrypted** — the production privacy-respecting default (the
     storage-mode redesign) and the goal-doc prod-parity posture (`testing.md` §
     Gap 2 Target). The mail seal/store/IMAP-decrypt path is storage-mode-independent
     (msek-gated, not `StorageMode`-gated), so this exercises identical

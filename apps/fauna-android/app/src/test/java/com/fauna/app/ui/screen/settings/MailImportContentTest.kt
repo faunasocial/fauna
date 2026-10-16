@@ -3,13 +3,17 @@ package com.fauna.app.ui.screen.settings
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import org.robolectric.annotation.Config
+import uniffi.fauna_client_mail_settings.ImportMailboxProgress
 import uniffi.fauna_client_mail_settings.ImportSourceKind
 import uniffi.fauna_client_mail_settings.ImportStatus
 import uniffi.fauna_client_mail_settings.ImportStep
@@ -42,6 +46,12 @@ class MailImportContentTest {
         // u64 on the snapshot, unlike the export twin's u32 counts.
         totalCount: ULong = 0uL,
         importedCount: ULong = 0uL,
+        // The session's clock; 0 = no session read yet (the untimed summaries).
+        startedAt: Long = 0L,
+        lastProgressAt: Long = 0L,
+        mailboxProgress: List<ImportMailboxProgress> = emptyList(),
+        errorLog: List<String> = emptyList(),
+        resumeNeedsCredentials: Boolean = false,
     ) = MailImportSnapshot(
         step = step,
         sourceKind = sourceKind,
@@ -58,9 +68,13 @@ class MailImportContentTest {
         skippedCount = 0u,
         erroredCount = 0u,
         totalCount = totalCount,
-        errorLog = emptyList(),
+        errorLog = errorLog,
+        mailboxProgress = mailboxProgress,
+        startedAt = startedAt,
+        lastProgressAt = lastProgressAt,
         status = ImportStatus.IDLE,
         error = null,
+        resumeNeedsCredentials = resumeNeedsCredentials,
     )
 
     private fun render(
@@ -68,6 +82,7 @@ class MailImportContentTest {
         onConnect: (ImportSourceKind, String, String, String, String) -> Unit = { _, _, _, _, _ -> },
         onScopeNext: (String, String) -> Unit = { _, _ -> },
         onStart: () -> Unit = {},
+        onResume: (String, String) -> Unit = { _, _ -> },
     ) {
         composeTestRule.setContent {
             MailImportContent(
@@ -84,12 +99,36 @@ class MailImportContentTest {
                 onPrev = {},
                 onStart = onStart,
                 onPause = {},
-                onResume = {},
+                onResume = onResume,
                 onCancel = {},
                 onViewImported = {},
-                onReviewSkipped = {},
             )
         }
+    }
+
+    /**
+     * Review skipped (§ Wizard steps step 6, outcomes 11 and 33): the skip log
+     * stays out of the Done card until the button is pressed, lists every line
+     * of the snapshot's `errorLog` once it is, and a second press hides it.
+     */
+    @Test
+    fun reviewSkippedRevealsAndHidesTheSkipLogOnTheDoneScreen() {
+        render(
+            snap(
+                ImportStep.DONE,
+                errorLog = listOf("INBOX uid 2: too large", "Archive uid 1: mailbox gone"),
+            ),
+        )
+        composeTestRule.onNodeWithTag("mail-import-error-log").assertDoesNotExist()
+
+        composeTestRule.onNodeWithTag("mail-import-review-skipped-button").performClick()
+        composeTestRule.onNodeWithTag("mail-import-error-log").assertExists()
+        composeTestRule.onNodeWithText("INBOX uid 2: too large").assertExists()
+        composeTestRule.onNodeWithText("Archive uid 1: mailbox gone").assertExists()
+        composeTestRule.onNodeWithTag("mail-import-done-summary").assertExists()
+
+        composeTestRule.onNodeWithTag("mail-import-review-skipped-button").performClick()
+        composeTestRule.onNodeWithTag("mail-import-error-log").assertDoesNotExist()
     }
 
     @Test
@@ -256,6 +295,103 @@ class MailImportContentTest {
         composeTestRule.onNodeWithTag("mail-import-cancel-button").assertExists()
     }
 
+    /**
+     * The cross-app journeys read two attributes off these nodes
+     * (`tests/e2e-unified/tests/test_mail_import.py`): the progress bar's
+     * `fraction` and the app-password field's `help`. Android serves both as the
+     * node's bare `stateDescription`, the one value the bridge answers any name from.
+     */
+    @Test
+    fun progressBarPublishesItsFractionAndAppPasswordFieldItsHelp() {
+        render(snap(ImportStep.PROGRESS, totalCount = 10uL, importedCount = 3uL))
+        composeTestRule.onNodeWithTag("mail-import-progress-bar")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "0.3000"))
+    }
+
+    /**
+     * A session adopted after a restart (`resumeNeedsCredentials`) asks for the
+     * Generic source's port (seeded from the session), connection security and
+     * password beside Resume, and Resume carries the port and the typed
+     * password out (`mailbox-migration.md` § Resume protocol step 2).
+     */
+    @Test
+    fun anAdoptedSessionAsksForTheGenericCredentialBesideResume() {
+        var resumed: Pair<String, String>? = null
+        render(
+            snap(ImportStep.PROGRESS, resumeNeedsCredentials = true),
+            onResume = { port, password -> resumed = port to password },
+        )
+        composeTestRule.onNodeWithTag("mail-import-source-port").assertTextContains("993")
+        composeTestRule.onNodeWithTag("mail-import-source-tls-mode").assertExists()
+        composeTestRule.onNodeWithTag("mail-import-source-password").performScrollTo().performTextInput("hunter2")
+        composeTestRule.onNodeWithTag("mail-import-resume-button").performScrollTo().performClick()
+        assertEquals("993" to "hunter2", resumed)
+    }
+
+    /** Without the flag the Progress step paints no credential field. */
+    @Test
+    fun aSessionThisAppStartedPaintsNoResumeCredential() {
+        render(snap(ImportStep.PROGRESS))
+        composeTestRule.onNodeWithTag("mail-import-source-password").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("mail-import-source-port").assertDoesNotExist()
+    }
+
+    /** One row per mailbox the run takes, worded from the machine's own counts. */
+    @Test
+    fun progressListPaintsEachMailboxFromTheMachinesCounts() {
+        render(
+            snap(
+                ImportStep.PROGRESS,
+                totalCount = 5uL,
+                mailboxProgress = listOf(
+                    ImportMailboxProgress(name = "INBOX", imported = 2uL, skipped = 1uL, errored = 0uL, total = 3uL),
+                    ImportMailboxProgress(name = "Archive", imported = 0uL, skipped = 0uL, errored = 0uL, total = 2uL),
+                ),
+            ),
+        )
+        composeTestRule.onAllNodesWithTag("mail-import-mailbox-progress-list-item").assertCountEquals(2)
+        composeTestRule.onAllNodesWithTag("mail-import-mailbox-progress-list-item-progress")[0]
+            .assertTextContains("2 of 3 · 1 skipped · 0 errored")
+        composeTestRule.onAllNodesWithTag("mail-import-mailbox-progress-list-item-progress")[1]
+            .assertTextContains("0 of 2 · 0 skipped · 0 errored")
+    }
+
+    @Test
+    fun appPasswordFieldCarriesTheProvidersExplanationAsItsHelp() {
+        render(snap(ImportStep.SOURCE, sourceKind = ImportSourceKind.GMAIL))
+        composeTestRule.onNodeWithTag("mail-import-source-app-password")
+            .assert(
+                SemanticsMatcher("help names the provider's app-password page") {
+                    it.config.getOrNull(SemanticsProperties.StateDescription)
+                        ?.contains("myaccount.google.com/apppasswords") == true
+                },
+            )
+    }
+
+    /**
+     * A finished session (not running, so its clock is frozen at the last
+     * transition) reports how long it took on the Done card, and the progress
+     * summary carries the elapsed time — both from the shared `transfer_timing`.
+     */
+    @Test
+    fun doneAndProgressSummariesReportTheElapsedTime() {
+        render(snap(ImportStep.DONE, importedCount = 12uL, startedAt = 1_000L, lastProgressAt = 1_090L))
+        composeTestRule.onNodeWithTag("mail-import-done-summary")
+            .assertTextContains("took", substring = true)
+    }
+
+    @Test
+    fun progressSummaryAddsElapsedTime() {
+        render(
+            snap(
+                ImportStep.PROGRESS, totalCount = 10uL, importedCount = 3uL,
+                startedAt = 1_000L, lastProgressAt = 1_090L,
+            ),
+        )
+        composeTestRule.onNodeWithTag("mail-import-progress-summary")
+            .assertTextContains("elapsed", substring = true)
+    }
+
     @Test
     fun doneStepShowsSummaryAndBothDeepLinks() {
         render(snap(ImportStep.DONE, importedCount = 12uL))
@@ -299,10 +435,9 @@ class MailImportContentTest {
                 onPrev = {},
                 onStart = {},
                 onPause = {},
-                onResume = {},
+                onResume = { _, _ -> },
                 onCancel = {},
                 onViewImported = {},
-                onReviewSkipped = {},
             )
         }
 

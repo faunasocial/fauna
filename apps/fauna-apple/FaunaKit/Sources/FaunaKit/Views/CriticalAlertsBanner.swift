@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// Process-wide owner of the cross-page critical-alerts registry
@@ -157,3 +160,4 @@ public struct CriticalAlertsBanner: View {
         }
     }
 }
+#endif // !FAUNA_KIDS

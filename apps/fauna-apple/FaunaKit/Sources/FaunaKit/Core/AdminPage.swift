@@ -14,6 +14,7 @@ public enum AdminPage: String, CaseIterable, Identifiable {
     case users
     case tiers      // nav id "settings" (tier *definitions*; nav label "Tiers")
     case nest       // nav id "admin-nest"
+    #if !FAUNA_KIDS
     case mail       // nav id "admin-mail"
     case calendar   // nav id "admin-calendar" (CalDAV-enable toggle; sibling of admin-mail)
     case contacts   // nav id "admin-contacts" (CardDAV-enable toggle; contacts sibling of admin-calendar)
@@ -22,6 +23,7 @@ public enum AdminPage: String, CaseIterable, Identifiable {
     case dns        // nav id "admin-dns" (full surface: records + CRUD + managed + cert)
     case web        // nav id "admin-web" (apex-actor designation; sibling of admin-mail)
     case bridgesPending  // nav id "admin-bridges-pending" (contextual detail page)
+    #endif
     case custodyHosting  // nav id "admin-custody-hosting" (contextual detail page)
     case adminLogs  // nav id "admin-logs" (nest fauna_log ring via fauna.admin.logs)
 
@@ -34,6 +36,7 @@ public enum AdminPage: String, CaseIterable, Identifiable {
         case .users: "users"
         case .tiers: "settings"
         case .nest: "admin-nest"
+        #if !FAUNA_KIDS
         case .mail: "admin-mail"
         case .calendar: "admin-calendar"
         case .contacts: "admin-contacts"
@@ -42,6 +45,7 @@ public enum AdminPage: String, CaseIterable, Identifiable {
         case .dns: "admin-dns"
         case .web: "admin-web"
         case .bridgesPending: "admin-bridges-pending"
+        #endif
         case .custodyHosting: "admin-custody-hosting"
         case .adminLogs: "admin-logs"
         }
@@ -53,6 +57,7 @@ public enum AdminPage: String, CaseIterable, Identifiable {
         case "users": self = .users
         case "settings": self = .tiers
         case "admin-nest": self = .nest
+        #if !FAUNA_KIDS
         case "admin-mail": self = .mail
         case "admin-calendar": self = .calendar
         case "admin-contacts": self = .contacts
@@ -61,6 +66,7 @@ public enum AdminPage: String, CaseIterable, Identifiable {
         case "admin-dns": self = .dns
         case "admin-web": self = .web
         case "admin-bridges-pending": self = .bridgesPending
+        #endif
         case "admin-custody-hosting": self = .custodyHosting
         case "admin-logs": self = .adminLogs
         default: return nil
@@ -73,6 +79,7 @@ public enum AdminPage: String, CaseIterable, Identifiable {
         case .users: L.admin.usersPage.title
         case .tiers: L.admin.settingsPage.title
         case .nest: L.admin.nestPage.title
+        #if !FAUNA_KIDS
         case .mail: L.admin.mailPage.title
         case .calendar: L.admin.calendarPage.title
         case .contacts: L.admin.contactsPage.title
@@ -81,6 +88,7 @@ public enum AdminPage: String, CaseIterable, Identifiable {
         case .dns: L.admin.dns.title
         case .web: L.admin.webPage.title
         case .bridgesPending: L.admin.bridgesPending.title
+        #endif
         case .custodyHosting: L.admin.custodyHosting.title
         case .adminLogs: L.admin.logsPage.title
         }
@@ -92,6 +100,7 @@ public enum AdminPage: String, CaseIterable, Identifiable {
         case .users: "person.3"
         case .tiers: "square.stack.3d.up"
         case .nest: "server.rack"
+        #if !FAUNA_KIDS
         case .mail: "envelope"
         case .calendar: "calendar"
         case .contacts: "person.crop.rectangle.stack"
@@ -100,6 +109,7 @@ public enum AdminPage: String, CaseIterable, Identifiable {
         case .dns: "network"
         case .web: "globe"
         case .bridgesPending: "link"
+        #endif
         case .custodyHosting: "archivebox"
         case .adminLogs: "doc.text.magnifyingglass"
         }
@@ -125,6 +135,13 @@ public enum AdminPage: String, CaseIterable, Identifiable {
     /// nor files has a port knob: both ride the DAV listener calendar already
     /// governs.
     public static var built: [AdminPage] {
+        #if FAUNA_KIDS
+        // The Fauna Kids build's admin pages: the mail, DAV, DNS, web and bridge
+        // planes are compiled out (family-safety.md § The account age band, the
+        // kids-app bullet, item (4)).
+        [.dashboard, .users, .tiers, .nest, .custodyHosting, .adminLogs]
+        #else
         [.dashboard, .users, .tiers, .nest, .mail, .calendar, .contacts, .files, .aliases, .bridgesPending, .custodyHosting, .dns, .web, .adminLogs]
+        #endif
     }
 }

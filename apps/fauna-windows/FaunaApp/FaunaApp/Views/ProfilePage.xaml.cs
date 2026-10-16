@@ -90,15 +90,127 @@ public sealed partial class ProfilePage : Page
             _vm = new ProfileViewModel(clients.Rpc, actorId, isSelf);
             _vm.PropertyChanged += ViewModel_PropertyChanged;
 
-            // Rich identity is publish-path-gated — render the actor_id (the handle
-            // fallback, mirroring linux build_header / apple displayName).
-            HandleText.Text = actorId;
+            // Rich identity is publish-path-gated, so until the profile read lands the
+            // header is the shared resolver's answer with no display name: the viewer's
+            // nickname, else the canonical short id (never a windows-side fallback).
+            _vm.RepaintHeader();
+            HandleText.Text = _vm.HeaderName;
+            ApplyPublicName();
             PageHeading.Text = S.Get("profile/posts");
 
             // Header primary action (edit vs follow) + Tiers-tab branch (author
             // management vs offers browse) follow the is_self split.
             ApplyProfileMode(isSelf);
+
+            // The private section's editor: one per open of one OTHER person's profile,
+            // over the manager as it stands now (profile.md § The private section).
+            _private.Reset();
+            if (!isSelf && !string.IsNullOrEmpty(actorId))
+            {
+                _private.Open(actorId);
+                PaintPrivate();
+            }
         }
+    }
+
+    // ── Private section (profile.md § The private section) ─────────────────────
+    private readonly ProfilePrivateViewModel _private = new();
+
+    // Set while a programmatic text assignment syncs a field to the editor, so
+    // reflecting state never echoes back as a staging gesture.
+    private bool _syncingPrivate;
+
+    /// <summary>The overlay projection moved (this device's Save, a sibling device's
+    /// edit, a late load after a relaunch): re-ask the header's two names, and let an
+    /// UNTOUCHED section follow the live overlay (the editor's own staging rule).
+    /// Raised off the UI thread — marshalled by the caller.</summary>
+    private void OnOverlayMoved() => DispatcherQueue.TryEnqueue(() =>
+    {
+        _vm?.RepaintHeader();
+        if (_private.Reload()) PaintPrivate();
+    });
+
+    /// <summary><c>profile-public-name</c>: the public name a nickname replaced —
+    /// collapsed (absent from UIA) while no nickname is the primary line.</summary>
+    private void ApplyPublicName()
+    {
+        var name = _vm?.HeaderPublicName ?? "";
+        PublicNameText.Text = name;
+        PublicNameText.Visibility = name.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>Paint the section from the editor: the two text fields (only where the
+    /// text differs, so typing never fights the caret) and the label chips.</summary>
+    private void PaintPrivate()
+    {
+        _syncingPrivate = true;
+        try
+        {
+            if (PrivateNicknameBox.Text != _private.Nickname) PrivateNicknameBox.Text = _private.Nickname;
+            if (PrivateNotesBox.Text != _private.Notes) PrivateNotesBox.Text = _private.Notes;
+        }
+        finally { _syncingPrivate = false; }
+
+        PrivateLabelList.Children.Clear();
+        for (var i = 0; i < _private.Labels.Count; i++)
+        {
+            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            // AutomationId ONLY, no static Name — get_text reads the label itself
+            // (reference_windows_flaui_gettext_dynamic_label_no_name).
+            var chip = new TextBlock { Text = _private.Labels[i], VerticalAlignment = VerticalAlignment.Center };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(chip, Ids.ProfileLabelChip);
+            var remove = new Button
+            {
+                Content = S.Get("profile/private_label_remove"),
+                Tag = i,
+            };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(remove, Ids.ProfileLabelRemoveButton);
+            remove.Click += PrivateLabelRemove_Click;
+            row.Children.Add(chip);
+            row.Children.Add(remove);
+            PrivateLabelList.Children.Add(row);
+        }
+    }
+
+    private void PrivateNickname_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_syncingPrivate) return;
+        _private.SetNickname(PrivateNicknameBox.Text);
+    }
+
+    private void PrivateNotes_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_syncingPrivate) return;
+        _private.SetNotes(PrivateNotesBox.Text);
+    }
+
+    private void PrivateLabelAdd_Click(object sender, RoutedEventArgs e)
+    {
+        // A staged label empties the add field; a refused one keeps the text and shows
+        // its refusal on error-message.
+        if (_private.AddLabel(PrivateLabelBox.Text)) PrivateLabelBox.Text = "";
+        RenderError(_private.ErrorMessage);
+        PaintPrivate();
+    }
+
+    private void PrivateLabelRemove_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: int index })
+        {
+            _private.RemoveLabel(index);
+            PaintPrivate();
+        }
+    }
+
+    private async void PrivateSave_Click(object sender, RoutedEventArgs e)
+    {
+        // No ConfigureAwait(false): the paint after the await must stay on the UI thread.
+        await _private.SaveAsync();
+        RenderError(_private.ErrorMessage);
+        PaintPrivate();
+        // The Save reloads the projection before it returns: the header re-reads the
+        // names at once rather than waiting for the observer wake.
+        _vm?.RepaintHeader();
     }
 
     /// <summary>Toggle the SELF vs OTHER surfaces: the header primary action
@@ -110,6 +222,8 @@ public sealed partial class ProfilePage : Page
         FollowButton.Visibility = isSelf ? Visibility.Collapsed : Visibility.Visible;
         // Secondary relationship actions (start-DM + block) — OTHER profile only.
         SecondaryActions.Visibility = isSelf ? Visibility.Collapsed : Visibility.Visible;
+        // The private section never renders on the viewer's own profile.
+        PrivateSection.Visibility = isSelf ? Visibility.Collapsed : Visibility.Visible;
         SelfAuthorSections.Visibility = isSelf ? Visibility.Visible : Visibility.Collapsed;
         OffersSection.Visibility = isSelf ? Visibility.Collapsed : Visibility.Visible;
     }
@@ -139,11 +253,17 @@ public sealed partial class ProfilePage : Page
 #endif
 
         Current = this;
+        ContactOverlayNames.Moved += OnOverlayMoved;
+        // The ward's durable asks moved (a status read landed): repaint the ask pair.
+        WardAsksCache.Changed += OnWardAsksChanged;
+        PaintKnock();
 
-        // Render the published display_name (else the actor-id fallback) into the
-        // header on load (the HeaderName change pushes through ViewModel_PropertyChanged).
+        // Render the header's two names on load: the shared resolver's answer over the
+        // published display_name (the HeaderName / HeaderPublicName changes push through
+        // ViewModel_PropertyChanged).
         await _vm.RefreshHeaderAsync();
         HandleText.Text = _vm.HeaderName;
+        ApplyPublicName();
 
         await _vm.HydrateAsync();
         UpdateDerivedUi();
@@ -156,12 +276,46 @@ public sealed partial class ProfilePage : Page
             ApplyFollowLabel(false);
             await _vm.RefreshBlockStateAsync();
             ApplyBlockLabel();
+            ApplyBlockEnabled();
         }
     }
 
     private void Page_Unloaded(object sender, RoutedEventArgs e)
     {
         if (ReferenceEquals(Current, this)) Current = null;
+        ContactOverlayNames.Moved -= OnOverlayMoved;
+        WardAsksCache.Changed -= OnWardAsksChanged;
+    }
+
+    private void OnWardAsksChanged() => DispatcherQueue.TryEnqueue(PaintKnock);
+
+    /// <summary>Paint <c>profile-request-contact-button</c> and the guardian-ask pair
+    /// from the VM (OTHER profile only; the row is collapsed on SELF). The knock reads
+    /// "Request sent" and stays disabled once sent or in flight; the pair shows the
+    /// durable pending label first, else the ask after a TYPED refusal this open saw,
+    /// else nothing — no supervision test here (rule (h)).</summary>
+    private void PaintKnock()
+    {
+        if (_vm is null || _vm.IsSelf) return;
+        var ask = _vm.KnockAsk;
+        RequestContactButton.Content = S.Get(ask.KnockSent ? "profile/request_contact_sent" : "profile/request_contact");
+        RequestContactButton.IsEnabled = !ask.KnockSent && !ask.KnockInFlight;
+        var render = _vm.ContactAskRenderNow();
+        AskGuardianButton.Visibility = render == ContactAskRender.Ask ? Visibility.Visible : Visibility.Collapsed;
+        AskGuardianButton.IsEnabled = !ask.AskInFlight;
+        AskPendingText.Visibility = render == ContactAskRender.Pending ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private async void RequestContact_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null) return;
+        await _vm.RequestContactAsync();
+    }
+
+    private async void AskGuardian_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null) return;
+        await _vm.AskGuardianAsync();
     }
 
     /// <summary>Render the <c>profile-block-button</c> toggle label from the VM's
@@ -175,6 +329,15 @@ public sealed partial class ProfilePage : Page
     {
         if (_vm is null) return;
         BlockButton.Content = S.Resolve(uniffi.fauna_ffi.FaunaFfiMethods.ContactToggleBlockLabel(_vm.IsBlocked));
+    }
+
+    /// <summary>Hold the <c>profile-block-button</c> disabled until the open-time
+    /// contact-edge read lands (<see cref="ProfileViewModel.IsBlockKnown"/>), so a press
+    /// cannot re-send <c>knocks_block</c> to an actor the viewer already blocks (tui parity).</summary>
+    private void ApplyBlockEnabled()
+    {
+        if (_vm is null) return;
+        BlockButton.IsEnabled = _vm.IsBlockKnown;
     }
 
     /// <summary>Render the <c>profile-follow-button</c> toggle label — "Following"
@@ -204,8 +367,17 @@ public sealed partial class ProfilePage : Page
             case nameof(ProfileViewModel.HeaderName):
                 HandleText.Text = _vm.HeaderName;
                 break;
+            case nameof(ProfileViewModel.HeaderPublicName):
+                ApplyPublicName();
+                break;
+            case nameof(ProfileViewModel.KnockAsk):
+                PaintKnock();
+                break;
             case nameof(ProfileViewModel.IsBlocked):
                 ApplyBlockLabel();
+                break;
+            case nameof(ProfileViewModel.IsBlockKnown):
+                ApplyBlockEnabled();
                 break;
             case nameof(ProfileViewModel.IsApproving):
                 RequestBusyText.Visibility = _vm.IsApproving ? Visibility.Visible : Visibility.Collapsed;
@@ -330,7 +502,7 @@ public sealed partial class ProfilePage : Page
         ReportStatusText.Visibility = Visibility.Collapsed;
         RenderError(null);
         var target = uniffi.fauna_ffi.FaunaFfiMethods.ReportActorTarget(_vm.ActorId);
-        var outcome = await Controls.ReportSheetDialog.ShowAsync(
+        var outcome = await Controls.ReportSheetDialog.OpenAsync(
             this.XamlRoot, rpc, target, msg => RenderError(msg));
         if (outcome is null) return;
         ReportStatusText.Text = outcome.Acknowledgement ?? "";

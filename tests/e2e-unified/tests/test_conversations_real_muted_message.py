@@ -82,7 +82,7 @@ def test_real_muted_message_collapses_behind_reveal(real_faunamls_app, nest_inst
         # so alice can add him to a group — bob keeps the private half, which is
         # what lets him DECRYPT (and thus render-classify) below.
         wait_until(
-            lambda: conv_api.keypackage_count(port, alice, bob_actor_id) > 0,
+            lambda: conv_api.keypackage_count(port, test_user, bob_actor_id) > 0,
             MLS_HANDSHAKE_S,
             diagnose=lambda: "waiting for bob's client to publish a key package",
         )

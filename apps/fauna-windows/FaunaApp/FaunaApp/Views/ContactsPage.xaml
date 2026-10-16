@@ -64,13 +64,14 @@
                     SelectionMode="None"
                     MaxHeight="250">
                     <ListView.ItemTemplate>
-                        <DataTemplate x:DataType="models:KnockInfo">
+                        <DataTemplate x:DataType="models:KnockRow">
                             <!-- Name is load-bearing, not decoration: a Grid root with no
                                  AutomationProperties.Name is pruned from UI Automation, so
                                  knock-card counts 0 while its buttons still resolve. It used to
                                  bind Handle, which fauna.knocks.list never supplies, and
-                                 FallbackValue does not cover a null value. SenderLabel is
-                                 never empty. -->
+                                 FallbackValue does not cover a null value. SenderLabel is the
+                                 shared overlay face's answer (the viewer's nickname, else the
+                                 canonical short id) and is never empty. -->
                             <Grid Padding="8" ColumnSpacing="8"
                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.KnockCard}"
                                   AutomationProperties.Name="{x:Bind SenderLabel}">
@@ -169,14 +170,17 @@
                 SelectionChanged="ContactsList_SelectionChanged"
                 ContainerContentChanging="ContactsList_ContainerContentChanging">
                 <ListView.ItemTemplate>
-                    <DataTemplate x:DataType="models:ContactInfo">
+                    <DataTemplate x:DataType="models:ContactRow">
                         <!-- Name must never be empty, or UI Automation prunes this Grid
                              root and contact-row counts 0 (see the knock template above).
-                             DisplayLabel falls back to the short id for a handle-less
-                             (federated) peer. -->
+                             Name is the shared overlay face's primary line (nickname, else
+                             handle, else the canonical short id). contact-public-name and
+                             contact-labels are DESCENDANTS of this row, so the scoped
+                             contact-row[i] reads resolve them by nesting, and are collapsed
+                             (absent from UIA) when the face answers none. -->
                         <Grid Padding="8" ColumnSpacing="12"
                               AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactRow}"
-                              AutomationProperties.Name="{x:Bind DisplayLabel}">
+                              AutomationProperties.Name="{x:Bind Name}">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="*" />
@@ -194,8 +198,20 @@
                             <StackPanel Grid.Column="1" Spacing="2">
                                 <TextBlock
                                     AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactName}"
-                                    Text="{x:Bind DisplayLabel}"
+                                    Text="{x:Bind Name}"
                                     Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <TextBlock
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactPublicName}"
+                                    Text="{x:Bind PublicName, Mode=OneTime, FallbackValue=''}"
+                                    Visibility="{x:Bind local:ContactsPage.PresentToVisibility(PublicName)}"
+                                    Opacity="0.7"
+                                    FontSize="12" />
+                                <TextBlock
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactLabels}"
+                                    Text="{x:Bind Labels, Mode=OneTime, FallbackValue=''}"
+                                    Visibility="{x:Bind local:ContactsPage.PresentToVisibility(Labels)}"
+                                    Opacity="0.7"
+                                    FontSize="11" />
                                 <TextBlock
                                     Text="{x:Bind ActorId}"
                                     FontSize="11"
@@ -295,7 +311,8 @@
                      Add button that knocks the RESOLVED actor id. -->
                 <ListView x:Name="SearchResultsList"
                           SelectionMode="None" Visibility="Collapsed"
-                          MaxHeight="240">
+                          MaxHeight="240"
+                          ContainerContentChanging="SearchResultsList_ContainerContentChanging">
                     <ListView.ItemTemplate>
                         <DataTemplate x:DataType="models:ContactInfo">
                             <Grid Padding="4" ColumnSpacing="8"
@@ -304,6 +321,10 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
                                 <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                                     <TextBlock Text="{x:Bind Handle, FallbackValue=''}"
                                                Style="{StaticResource BodyStrongTextBlockStyle}" />
@@ -317,6 +338,32 @@
                                         Content="{loc:Localize Key=contacts/knock}" Click="AddFoundContact_Click"
                                         Tag="{x:Bind ActorId}"
                                         VerticalAlignment="Center" />
+
+                                <!-- The supervised ward's in-place ask (family-safety.md §
+                                     Child-initiated contact requests → App affordance). Both
+                                     start Collapsed (absent from UIA) and are CONDITIONAL and
+                                     mutually exclusive: the button reveals only after the nest
+                                     refused the knock with the TYPED guardian-approval error,
+                                     and the pending label replaces it once an ask is
+                                     outstanding (durable, from the ward's own
+                                     status.contact_requests). Painted by PaintFindAsk from the
+                                     VM's render verdict — the template decides nothing, and
+                                     re-tests no supervision (rule (h)). The label carries an
+                                     AutomationId ONLY, no static Name: it is a get_text target. -->
+                                <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Spacing="4"
+                                            Orientation="Horizontal">
+                                    <Button x:Name="AskGuardianButton"
+                                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactRequestGuardianButton}"
+                                            Content="{loc:Localize Key=contacts/ask_guardian}"
+                                            Tag="{x:Bind ActorId}"
+                                            Click="AskGuardian_Click"
+                                            Visibility="Collapsed" />
+                                    <TextBlock x:Name="AskPendingText"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactRequestPending}"
+                                               Text="{loc:Localize Key=contacts/contact_request_pending}"
+                                               Opacity="0.7" VerticalAlignment="Center"
+                                               Visibility="Collapsed" />
+                                </StackPanel>
                             </Grid>
                         </DataTemplate>
                     </ListView.ItemTemplate>

@@ -68,7 +68,7 @@ use fauna_ws_substrate::{Supervisor, run_supervisor};
 
 use crate::config::{ModeResolution, SyncMode};
 use crate::engine::SyncEngine;
-use crate::pull_remote_changes_test::test_engine_with_nest_client;
+use crate::pull_remote_changes_test::test_engine_with_nest_client_keyed;
 
 const FOLDER: &str = "holiday";
 
@@ -105,6 +105,12 @@ struct NestDouble {
     /// This seat's device id, set once the engine exists — the roster row
     /// `fauna.folders.members.list` serves for it (see [`served_roster`]).
     device_id_hex: Mutex<String>,
+    /// While true, a `fauna.sync.changes.list` request is logged but its reply
+    /// waits for [`Self::release_pull`] — so a test can read the engine's state
+    /// with the eager first pull genuinely in flight, the one instant that
+    /// tells "ran before the pull" from "ran after it".
+    hold_pull: AtomicBool,
+    pull_released: tokio::sync::Notify,
 }
 
 impl NestDouble {
@@ -114,6 +120,8 @@ impl NestDouble {
             serving: AtomicBool::new(false),
             folders: Mutex::new(vec![served_folder()]),
             device_id_hex: Mutex::new(String::new()),
+            hold_pull: AtomicBool::new(false),
+            pull_released: tokio::sync::Notify::new(),
         })
     }
 
@@ -129,6 +137,12 @@ impl NestDouble {
 
     fn log(&self) -> Vec<String> {
         self.kinds.lock().unwrap().clone()
+    }
+
+    /// Let a held `fauna.sync.changes.list` reply go (see `hold_pull`).
+    fn release_pull(&self) {
+        self.hold_pull.store(false, Ordering::SeqCst);
+        self.pull_released.notify_one();
     }
 
     /// How many times `kind` has been requested since the double was built.
@@ -301,6 +315,15 @@ fn stand_up() -> Harness {
 /// its per-tick row read resolves by (`SeatRowKey::Ref`), exactly as the
 /// resident agent installs it.
 fn stand_up_bound(folder_ref: fauna_core::folder_keys::FolderRef) -> Harness {
+    stand_up_with(folder_ref, None)
+}
+
+/// [`stand_up_bound`] over an engine holding `backup_key` — a seat whose
+/// once-per-start passes seal something and so put frames on the double.
+fn stand_up_with(
+    folder_ref: fauna_core::folder_keys::FolderRef,
+    backup_key: Option<fauna_core::crypto::OwnerSealKey>,
+) -> Harness {
     let double = NestDouble::new();
     let watch_dir = tempfile::tempdir().unwrap();
 
@@ -320,6 +343,11 @@ fn stand_up_bound(folder_ref: fauna_core::folder_keys::FolderRef) -> Harness {
                 continue; // pushes/acks are not this double's business
             };
             let (ok, payload) = reply_for(&server_double, &req.kind);
+            if req.kind == "fauna.sync.changes.list"
+                && server_double.hold_pull.load(Ordering::SeqCst)
+            {
+                server_double.pull_released.notified().await;
+            }
             let reply = Frame::Reply(Reply {
                 ty: Reply::TYPE,
                 correlation_id: req.correlation_id,
@@ -361,12 +389,17 @@ fn stand_up_bound(folder_ref: fauna_core::folder_keys::FolderRef) -> Harness {
     // (never spawned), so this `Arc` never crosses a thread boundary.
     #[allow(clippy::arc_with_non_send_sync)]
     let engine = Arc::new(
-        test_engine_with_nest_client(watch_dir.path().to_path_buf(), FOLDER, Arc::clone(&client))
-            .with_binding_edge(crate::binding_edge::BindingEdge {
-                folder_ref,
-                basis: crate::binding_edge::BindingBasis::of(&served_folder()),
-                on_rebuild: Arc::new(|| {}),
-            }),
+        test_engine_with_nest_client_keyed(
+            watch_dir.path().to_path_buf(),
+            FOLDER,
+            Arc::clone(&client),
+            backup_key,
+        )
+        .with_binding_edge(crate::binding_edge::BindingEdge {
+            folder_ref,
+            basis: crate::binding_edge::BindingBasis::of(&served_folder()),
+            on_rebuild: Arc::new(|| {}),
+        }),
     );
     *double.device_id_hex.lock().unwrap() = engine.device_id_hex().to_string();
 
@@ -498,6 +531,143 @@ async fn the_connected_arm_re_resolves_the_seat_and_pulls() {
         "…and the device roster with it — the two reads are one resolution \
          (log after the transition: {after:?})"
     );
+
+    h.server_task.abort();
+}
+
+/// **The once-per-start corpus passes run behind the loop's first pull** (`mls-group-key-material.md` § M2 → *(B) Reclaim*, property
+/// (1)). A re-seal reads this seat's local row; run ahead of the pull, that row
+/// is whatever the seat last saw, and a seat that was offline while a peer
+/// recorded a newer edit reissued the OLDER content as the path's newest head.
+///
+/// The observable is the wire order on the double: the set-name stamp is the
+/// last corpus pass, and a keyed seat's stamp is a `fauna.folders.update`
+/// frame, so its index must follow the eager pull's `fauna.sync.changes.list`.
+/// Reverting the move (the passes back in the agent's driver, ahead of the
+/// loop) leaves no stamp in the loop at all, and running them at the loop's
+/// top puts the stamp before the pull — either reddens this pin.
+#[tokio::test]
+async fn the_corpus_passes_run_behind_the_first_pull() {
+    let h = stand_up_with(
+        fauna_core::folder_keys::FolderRef::Local(served_folder().id),
+        Some(fauna_core::crypto::OwnerSealKey::Client(
+            fauna_core::crypto::BackupKey::from_bytes([0x33; 32]),
+        )),
+    );
+    h.double.serving.store(true, Ordering::SeqCst);
+    let loop_fut = crate::always_resident::run_watch_loop(
+        Arc::clone(&h.engine),
+        h.watch_dir.path().to_path_buf(),
+        FOLDER.to_string(),
+        NO_TICK,
+        None,
+        None,
+    );
+    tokio::pin!(loop_fut);
+
+    let stamped = Arc::clone(&h.double);
+    race(
+        &mut loop_fut,
+        until("the start's set-name stamp to be issued", || {
+            stamped.count("fauna.folders.update") >= 1
+        }),
+    )
+    .await;
+
+    let log = h.double.log();
+    let first = |kind: &str| log.iter().position(|k| k == kind);
+    let pull = first("fauna.sync.changes.list").expect("the eager first pull went out");
+    let stamp = first("fauna.folders.update").expect("waited for above");
+    assert!(
+        pull < stamp,
+        "the corpus passes must run after the first pull (log: {log:?})"
+    );
+
+    h.server_task.abort();
+}
+
+/// **The loop-entry posture pair runs behind the first pull too** (`mls-group-key-material.md` § M2 → *(B) Reclaim*, property
+/// (1)). The audience convergence and the website convergence re-seal,
+/// declassify and reissue heads off this seat's local rows exactly as the
+/// once-per-start passes do, so run at loop entry ahead of the eager pull they
+/// reissued the content this seat last saw — a seat offline while a peer
+/// recorded X′ and flipped the set public → private republished its stale X
+/// as the newest head. Only the posture refresh may precede the pull
+/// (`file-sync.md` § 4: the pull can deliver the delete the mode decides).
+///
+/// The seat's rows disagree with what it will read: its `corpus_audience`
+/// stamp says it last converged a public window (`plaintext`) while its
+/// posture is sealed, and the served row turns the website toggle on. Both
+/// passes stamp their meta row when they run (an empty corpus re-shapes
+/// nothing but still converges), so the stamps are the observable: read with
+/// the eager pull's reply held, neither has moved; released, both converge.
+/// Moving the pair back to loop entry stamps both before the pull and reddens
+/// the first assertions; dropping it from the start entirely reddens the last.
+#[tokio::test]
+async fn the_entry_corpus_pair_runs_behind_the_first_pull() {
+    let h = stand_up_with(
+        fauna_core::folder_keys::FolderRef::Local(served_folder().id),
+        Some(fauna_core::crypto::OwnerSealKey::Client(
+            fauna_core::crypto::BackupKey::from_bytes([0x33; 32]),
+        )),
+    );
+    h.engine.db().set_corpus_audience("plaintext").unwrap();
+    h.double.serve_folder(FolderSummary {
+        website_enabled: true,
+        ..served_folder()
+    });
+    h.double.serving.store(true, Ordering::SeqCst);
+    h.double.hold_pull.store(true, Ordering::SeqCst);
+    // Connected before the loop starts, so the entry refresh really reads the
+    // served row and installs the toggle — a pair run at entry then has
+    // something to converge to, and the pin cannot pass by a race.
+    until_connected(&h.engine).await;
+    let loop_fut = crate::always_resident::run_watch_loop(
+        Arc::clone(&h.engine),
+        h.watch_dir.path().to_path_buf(),
+        FOLDER.to_string(),
+        NO_TICK,
+        None,
+        None,
+    );
+    tokio::pin!(loop_fut);
+
+    let pulled = Arc::clone(&h.double);
+    race(
+        &mut loop_fut,
+        until("the eager first pull to be issued", || {
+            pulled.count("fauna.sync.changes.list") >= 1
+        }),
+    )
+    .await;
+    assert!(
+        h.engine.is_website_enabled(),
+        "the entry refresh installed the served toggle ahead of the pull — \
+         otherwise the website half below proves nothing"
+    );
+    assert_eq!(
+        h.engine.db().corpus_audience().unwrap().as_deref(),
+        Some("plaintext"),
+        "no audience pass may run ahead of the first pull (log: {:?})",
+        h.double.log()
+    );
+    assert_eq!(
+        h.engine.db().corpus_website().unwrap(),
+        None,
+        "no website pass may run ahead of the first pull (log: {:?})",
+        h.double.log()
+    );
+
+    h.double.release_pull();
+    let probe = Arc::clone(&h.engine);
+    race(
+        &mut loop_fut,
+        until("both start passes to converge behind the pull", || {
+            probe.db().corpus_audience().unwrap().as_deref() == Some("sealed")
+                && probe.db().corpus_website().unwrap().as_deref() == Some("served")
+        }),
+    )
+    .await;
 
     h.server_task.abort();
 }

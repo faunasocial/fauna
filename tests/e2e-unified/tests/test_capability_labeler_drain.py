@@ -55,8 +55,13 @@ import pytest
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from common.auth import create_actor_and_register
 from helpers.budgets import RESCORE_WORKLIST_SERVE_S
+from helpers.labeler_publish import new_publisher, publish_labeler_version
 from helpers.mail_wire import _connect_smtp_starttls
-from helpers.waiting import await_rescore_worklist_serve_after, rescore_worklist_serves
+from helpers.waiting import (
+    await_rescore_worklist_serve_after,
+    rescore_worklist_serves,
+    wait_until,
+)
 
 pytestmark = pytest.mark.tier_3
 
@@ -111,24 +116,6 @@ def _labeler_row(db_path: str, actor_id: bytes, content_id: bytes, factor: str):
         conn.close()
 
 
-def _bump_model_version(db_path: str, model_kind: str, version: int) -> None:
-    """Raise the model-version registry for `model_kind` (== the labeler factor).
-    No RPC exposes this — the registry is nest-internal; the SQLite poke is the
-    harness path (mirrors `test_capability_rescore_drain._bump_model_version`,
-    which bumps `clamav`). A bump makes the already-scored rows owe a re-score."""
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.execute(
-            "INSERT INTO model_versions (model_kind, version, updated_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(model_kind) DO UPDATE SET version = excluded.version, "
-            "updated_at = excluded.updated_at",
-            (model_kind, version, int(time.time())),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def _recipient_ws(nest_url: str, recipient):
     """A User-class WS-RPC client authenticated as the recipient owner (mints /
     revokes its own grants, subscribes to labelers)."""
@@ -147,21 +134,21 @@ def _mint_grant(
     content.read{mail}+content.label-write grant to the MDA holder — every tuple
     and wrap confined to `labeler:<hex>` of ``labeler_id``, the grant a labeler
     subscription over sealed mail mints. The composed "read and filter my mail"
-    grant licenses no community labeler, so a drain under it runs none.
+    grant licenses no community labeler, so a drain under it runs none;
+    ``labeler_id=None`` mints exactly that composed grant.
     Returns the 16-byte grant_id."""
     grant_id = secrets.token_bytes(16)
-    grant_blob = run_seal_helper(
-        "mint-grant",
-        {
-            "owner_actor_id_b64": base64.b64encode(recipient.actor_id).decode(),
-            "grant_id_b64": base64.b64encode(grant_id).decode(),
-            "holder_pubkey_b64": base64.b64encode(holder_pubkey).decode(),
-            "msek_b64": base64.b64encode(recipient.msek).decode(),
-            "epoch_start": epoch_start,
-            "epoch_end": epoch_end,
-            "labeler_id_b64": base64.b64encode(labeler_id).decode(),
-        },
-    )
+    params = {
+        "owner_actor_id_b64": base64.b64encode(recipient.actor_id).decode(),
+        "grant_id_b64": base64.b64encode(grant_id).decode(),
+        "holder_pubkey_b64": base64.b64encode(holder_pubkey).decode(),
+        "msek_b64": base64.b64encode(recipient.msek).decode(),
+        "epoch_start": epoch_start,
+        "epoch_end": epoch_end,
+    }
+    if labeler_id is not None:
+        params["labeler_id_b64"] = base64.b64encode(labeler_id).decode()
+    grant_blob = run_seal_helper("mint-grant", params)
     with _recipient_ws(nest_url, recipient) as ws:
         reply = ws.call("fauna.capabilities.mint", {"grant_blob": grant_blob})
     assert reply.get("ok") is True, f"mint reply not ok: {reply!r}"
@@ -197,45 +184,38 @@ def _poke_config_changed(nest_url, admin) -> None:
         )
 
 
-def _publish_cat_labeler(run_seal_helper, nest_url, port, admin, now):
-    """Publish a signed `content_kind="mail"` cat-detector labeler as a fresh
-    registered User whose keypair is ALSO the labeler's `algorithm_id` (signer;
-    public-key-is-identity). Returns (labeler_id_bytes, factor)."""
-    publisher = create_actor_and_register(
-        port, base_url=nest_url, admin_signing_key=admin["signing_key"]
-    )
-    pub_seed = bytes(publisher["signing_key"])  # 32-byte Ed25519 seed
-    labeler_id = publisher["actor_id_bytes"]  # == algorithm_id (verify key)
+# The cat module re-tuned to 0.5 confidence: the pre-baked hit blob's f64 0.9
+# (`cd cc cc cc cc cc ec 3f`) swapped for 0.5 (`00 00 00 00 00 00 e0 3f`), so a
+# cat mail scores 500 instead of 900. A *new version* of the labeler that scores
+# differently is what lets a witness tell the new module's score from the old.
+_CAT_090 = rb"\cd\cc\cc\cc\cc\cc\ec\3f"
+_CAT_050 = rb"\00\00\00\00\00\00\e0\3f"
+
+
+def _cat_wat(*, half_confidence: bool = False) -> bytes:
     wat = _CAT_WAT_PATH.read_bytes()
-    metadata_blob = run_seal_helper(
-        "publish-labeler",
-        {
-            "signing_seed_b64": base64.b64encode(pub_seed).decode(),
-            "wasm_b64": base64.b64encode(wat).decode(),
-            "version": 1,
-            "needs_text": True,
-            "needs_hashtags": False,
-            "needs_media_metadata": False,
-            "needs_author": False,
-            "max_memory_bytes": 16 * 1024 * 1024,
-            "max_cpu_microseconds": 100_000,
-            "updated_at": now,
-        },
+    if half_confidence:
+        assert wat.count(_CAT_090) == 1, "the cat fixture's 0.9 confidence bytes moved"
+        wat = wat.replace(_CAT_090, _CAT_050)
+    return wat
+
+
+def _publish_cat_version(run_seal_helper, nest_url, labeler_id, pub_seed, version, wat):
+    """Publish ``version`` of the mail-kind cat labeler over ``wat``."""
+    publish_labeler_version(
+        run_seal_helper, nest_url, labeler_id, pub_seed, wat,
+        version=version, content_kind="mail", artifact_kind="wasm",
     )
-    pub_ws = WsRpcAdminClient(nest_url, actor_id=labeler_id, signing_key=pub_seed)
-    with pub_ws:
-        reply = pub_ws.call(
-            "fauna.labelers.publish",
-            {
-                "metadata_blob": metadata_blob,
-                "wasm_bytes": wat,
-                "content_kind": "mail",
-                "artifact_kind": "wasm",
-            },
-        )
-    assert reply.get("ok") is True, f"publish reply not ok: {reply!r}"
-    assert bytes(reply["labeler_id"]) == labeler_id, "publish echoed a different labeler_id"
-    return labeler_id, "labeler:" + labeler_id.hex()
+
+
+def _publish_cat_labeler(run_seal_helper, nest_instance):
+    """Publish version 1 of a signed `content_kind="mail"` cat-detector labeler
+    as a fresh registered User whose keypair is ALSO the labeler's
+    `algorithm_id` (signer; public-key-is-identity). Returns (labeler_id_bytes,
+    factor, publisher_seed) — the seed is what a later version is signed with."""
+    labeler_id, pub_seed = new_publisher(nest_instance)
+    _publish_cat_version(run_seal_helper, nest_instance["url"], labeler_id, pub_seed, 1, _cat_wat())
+    return labeler_id, "labeler:" + labeler_id.hex(), pub_seed
 
 
 def _subscribe(nest_url, recipient, labeler_id: bytes, grant_id: bytes) -> str:
@@ -309,7 +289,6 @@ def test_labeler_drain_scores_mail_via_subscription_and_user_minted_capability(
     assert recipient is not None, "inbound fixture must expose the MSEK recipient"
     db_path = nest_instance["db_path"]
     nest_url = nest_instance["url"]
-    port = nest_instance["port"]
     admin = nest_instance["admin"]
     holder_pubkey = mail_bridge_mda.x25519_pubkey
     now = int(time.time())
@@ -317,7 +296,7 @@ def test_labeler_drain_scores_mail_via_subscription_and_user_minted_capability(
     handle.assert_mta_running()
 
     # ── 1. A publisher publishes a signed mail-kind cat-detector labeler.
-    labeler_id, factor = _publish_cat_labeler(run_seal_helper, nest_url, port, admin, now)
+    labeler_id, factor, pub_seed = _publish_cat_labeler(run_seal_helper, nest_instance)
 
     # ── 2. Deliver a cat mail and a non-cat mail. Both enter the owner's mail
     # universe (`message_scan_results`), so the subscribe-time backlog seed picks
@@ -361,8 +340,9 @@ def test_labeler_drain_scores_mail_via_subscription_and_user_minted_capability(
         f"a non-cat mail must score 0 (empty Vec<Label> path), got {plain_score}"
     )
 
-    # ── 6. Revoke arm: revoke the grant, THEN bump the labeler model version
-    # 1→2 (a fresh obligation on the already-scored rows), then wake the drain.
+    # ── 6. Revoke arm: revoke the grant, THEN republish the labeler as version
+    # 2 (the publish raises the subscribed factor's registered version — a fresh
+    # obligation on the already-scored rows), then wake the drain.
     # A revoked holder has no content.read grant → empty worklist → no
     # write-back, so the drain goes dark and the obligation STAYS owed (the cat
     # row must not advance past 1). Revoke-before-bump is load-bearing: the
@@ -378,10 +358,10 @@ def test_labeler_drain_scores_mail_via_subscription_and_user_minted_capability(
     # advance" is trivially true because the drain may never have looked.
     serves, _ = rescore_worklist_serves(nest_url)
     _revoke_grant(nest_url, recipient, grant_id)
-    _bump_model_version(db_path, factor, 2)
+    _publish_cat_version(run_seal_helper, nest_url, labeler_id, pub_seed, 2, _cat_wat())
     _poke_config_changed(nest_url, admin)
     await_rescore_worklist_serve_after(
-        nest_url, serves, budget_s=RESCORE_WORKLIST_SERVE_S, what="the grant revoke + version bump"
+        nest_url, serves, budget_s=RESCORE_WORKLIST_SERVE_S, what="the grant revoke + republish"
     )
     _, cat_ver = _labeler_row(db_path, recipient.actor_id, cat_id, factor)
     assert cat_ver == 1, (
@@ -450,7 +430,6 @@ def test_labeler_obligation_seeded_and_drained_at_ingest_without_config_changed(
     assert recipient is not None, "inbound fixture must expose the MSEK recipient"
     db_path = nest_instance["db_path"]
     nest_url = nest_instance["url"]
-    port = nest_instance["port"]
     admin = nest_instance["admin"]
     holder_pubkey = mail_bridge_mda.x25519_pubkey
     now = int(time.time())
@@ -464,7 +443,7 @@ def test_labeler_obligation_seeded_and_drained_at_ingest_without_config_changed(
     # The drain's worklist-serve counters are read here so step 2 can prove no
     # drain cycle ran while the world was being armed.
     _, armed_units = rescore_worklist_serves(nest_url)
-    labeler_id, factor = _publish_cat_labeler(run_seal_helper, nest_url, port, admin, now)
+    labeler_id, factor, _ = _publish_cat_labeler(run_seal_helper, nest_instance)
     grant_id = _mint_grant(
         run_seal_helper, nest_url, recipient, holder_pubkey, epoch_start=now, epoch_end=now + 3600,
         labeler_id=labeler_id,
@@ -525,3 +504,359 @@ def test_labeler_obligation_seeded_and_drained_at_ingest_without_config_changed(
     # grant left against session-scoped fixtures breaks later absence-of-access
     # tests rather than this one.
     _revoke_grant(nest_url, recipient, grant_id)
+
+
+@pytest.mark.feature("community-labelers")
+def test_a_new_labeler_version_rescores_the_mail_the_old_one_scored(
+    mail_bridge_inbound_to_imap, mail_bridge_mda, nest_instance, run_seal_helper,
+):
+    """`community-labelers` outcome 9: when a labeler you subscribe to publishes a
+    new version, the mail it already scored is scored again by the new one
+    (`content-moderation-and-ranking.md` § Tier-3 → *Re-score obligation*).
+
+    The publisher's own `fauna.labelers.publish` of version 2 is the only thing
+    that changes between the two drains — no registry poke — and version 2 is a
+    different module (the cat detector at 0.5 confidence instead of 0.9), so the
+    mail's score moving 900 → 500 at scorer_version 2 is the NEW module's output,
+    not a re-stamp of the old one.
+    """
+    handle = mail_bridge_inbound_to_imap
+    recipient = handle.recipient
+    assert recipient is not None, "inbound fixture must expose the MSEK recipient"
+    db_path = nest_instance["db_path"]
+    nest_url = nest_instance["url"]
+    admin = nest_instance["admin"]
+    holder_pubkey = mail_bridge_mda.x25519_pubkey
+    now = int(time.time())
+
+    handle.assert_mta_running()
+
+    labeler_id, factor, pub_seed = _publish_cat_labeler(run_seal_helper, nest_instance)
+    cat_id = _deliver_and_capture(handle, db_path, "feline note", "I love my cat.")
+    grant_id = _mint_grant(
+        run_seal_helper, nest_url, recipient, holder_pubkey, epoch_start=now, epoch_end=now + 3600,
+        labeler_id=labeler_id,
+    )
+    assert _subscribe(nest_url, recipient, labeler_id, grant_id) == factor
+
+    # ── Version 1 scores the mail.
+    _poke_config_changed(nest_url, admin)
+    assert _poll_labeler_version(db_path, recipient.actor_id, cat_id, factor, expected=1) == 1, (
+        f"version 1 never scored the cat mail (MDA log {mail_bridge_mda.log_file})"
+    )
+    assert _labeler_row(db_path, recipient.actor_id, cat_id, factor)[0] == 900
+
+    # ── The publisher releases version 2, a re-tuned module.
+    _publish_cat_version(
+        run_seal_helper, nest_url, labeler_id, pub_seed, 2, _cat_wat(half_confidence=True)
+    )
+
+    # ── The next drain re-scores the already-scored mail with version 2.
+    _poke_config_changed(nest_url, admin)
+    got = _poll_labeler_version(db_path, recipient.actor_id, cat_id, factor, expected=2)
+    assert got == 2, (
+        f"the mail version 1 scored was not re-scored after version 2 was published "
+        f"(still at scorer_version {got}; MDA log {mail_bridge_mda.log_file})"
+    )
+    score = _labeler_row(db_path, recipient.actor_id, cat_id, factor)[0]
+    assert score == 500, (
+        f"the re-score must be version 2's output (500 per-mille), got {score} — "
+        f"900 would mean the old module ran again"
+    )
+
+    _unsubscribe(nest_url, recipient, labeler_id)
+    # Session-scoped holder + owner: never leave a live grant behind (see the
+    # first test's step 9).
+    _revoke_grant(nest_url, recipient, grant_id)
+
+
+def _drain_pass_done(nest_url, admin, *, what):
+    """Wake the drain, and return once a pass that was HANDED work has finished
+    processing it.
+
+    `await_rescore_worklist_serve_after` is the barrier for an owner the nest
+    leaves OUT of the worklist. These arms are the other case: the nest hands
+    the unit out and the holder is what refuses to run it, so the absence of a
+    write-back is evidence only once the holder is done with the batch. A drain
+    pass fetches its worklist, processes it and writes back before it ends, and
+    passes never overlap — a poke landing mid-pass queues the next one (`runOnce`
+    and `start` in `bins/fauna-bridges/internal/mda/rescore_drain.go`). So: wait
+    for a serve that handed out work, poke again, and wait for the next serve;
+    by then the pass that had the work is over, write-backs included
+    (convention 14).
+    """
+    planted = rescore_worklist_serves(nest_url)
+    _poke_config_changed(nest_url, admin)
+    wait_until(
+        lambda: rescore_worklist_serves(nest_url)[1] > planted[1],
+        RESCORE_WORKLIST_SERVE_S,
+        diagnose=lambda: (
+            f"the nest handed the drain no work after {what} (at plant: "
+            f"{planted}; now: {rescore_worklist_serves(nest_url)})"
+        ),
+    )
+    served, _ = rescore_worklist_serves(nest_url)
+    _poke_config_changed(nest_url, admin)
+    await_rescore_worklist_serve_after(
+        nest_url, served, budget_s=RESCORE_WORKLIST_SERVE_S,
+        what=f"the pass that had the work after {what}",
+    )
+
+
+def _stored_artifact(db_path, labeler_id):
+    """``(metadata_blob, wasm_bytes, wasm_hash, wasm_size)`` of the nest's
+    stored copy of ``labeler_id`` — the row `fauna.labelers.inspect` serves."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        row = conn.execute(
+            "SELECT metadata_blob, wasm_bytes, wasm_hash, wasm_size FROM labelers "
+            "WHERE labeler_id = ?",
+            (labeler_id,),
+        ).fetchone()
+        assert row is not None, "the labeler is not in the registry"
+        return row
+    finally:
+        conn.close()
+
+
+def _write_stored_artifact(db_path, labeler_id, artifact) -> None:
+    """Overwrite the nest's stored copy of ``labeler_id`` with ``artifact`` (a
+    `_stored_artifact` tuple) — the nest acting as an adversary to the labeler
+    it serves. A dishonest or compromised nest can hand the holder any bytes it
+    likes from `fauna.labelers.inspect`; this is exactly that, done to the row
+    inspect reads (`get_labeler`)."""
+    conn = sqlite3.connect(db_path, timeout=10.0)
+    try:
+        conn.execute(
+            "UPDATE labelers SET metadata_blob = ?, wasm_bytes = ?, wasm_hash = ?, "
+            "wasm_size = ? WHERE labeler_id = ?",
+            (*artifact, labeler_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.feature("community-labelers")
+def test_the_mail_filtering_grant_lets_no_community_labeler_read_your_mail(
+    mail_bridge_inbound_to_imap, mail_bridge_mda, nest_instance, run_seal_helper,
+):
+    """`community-labelers` outcome 6: letting your nest read and filter your
+    mail does not let any community labeler read it; only that labeler's own
+    grant does (§ Tier-3 → the composed mail grant carries no factor and
+    licenses no community labeler).
+
+    The owner subscribes to a mail labeler naming the composed "read and filter
+    my mail" grant — the most a subscription could lean on it. A drain pass
+    served after that grant is live leaves the mail unscored: the nest hands the
+    holder no labeler work under it. Minting the labeler's OWN grant then lets
+    the very next pass score the mail — so the first absence was the grant's,
+    not a drain that never looked.
+    """
+    handle = mail_bridge_inbound_to_imap
+    recipient = handle.recipient
+    assert recipient is not None, "inbound fixture must expose the MSEK recipient"
+    db_path = nest_instance["db_path"]
+    nest_url = nest_instance["url"]
+    admin = nest_instance["admin"]
+    holder_pubkey = mail_bridge_mda.x25519_pubkey
+    now = int(time.time())
+
+    handle.assert_mta_running()
+
+    labeler_id, factor, _ = _publish_cat_labeler(run_seal_helper, nest_instance)
+    cat_id = _deliver_and_capture(handle, db_path, "feline note", "I love my cat.")
+
+    composed_id = _mint_grant(
+        run_seal_helper, nest_url, recipient, holder_pubkey, epoch_start=now, epoch_end=now + 3600,
+        labeler_id=None,
+    )
+    own_id = None
+    try:
+        assert _subscribe(nest_url, recipient, labeler_id, composed_id) == factor
+
+        # ── The composed grant alone: a pass served after it scores nothing.
+        serves, _ = rescore_worklist_serves(nest_url)
+        _poke_config_changed(nest_url, admin)
+        await_rescore_worklist_serve_after(
+            nest_url, serves, budget_s=RESCORE_WORKLIST_SERVE_S,
+            what="the subscription under the composed mail grant",
+        )
+        row = _labeler_row(db_path, recipient.actor_id, cat_id, factor)
+        assert row is not None and row[1] == 0, (
+            f"the composed mail grant let the community labeler score the mail "
+            f"(row {row!r}); only the labeler's own grant may"
+        )
+
+        # ── The labeler's own grant: the next pass scores it.
+        own_id = _mint_grant(
+            run_seal_helper, nest_url, recipient, holder_pubkey, epoch_start=now,
+            epoch_end=now + 3600, labeler_id=labeler_id,
+        )
+        _poke_config_changed(nest_url, admin)
+        assert _poll_labeler_version(db_path, recipient.actor_id, cat_id, factor, expected=1) == 1, (
+            f"the labeler's own grant did not let it score the mail "
+            f"(MDA log {mail_bridge_mda.log_file})"
+        )
+        assert _labeler_row(db_path, recipient.actor_id, cat_id, factor)[0] == 900
+    finally:
+        _unsubscribe(nest_url, recipient, labeler_id)
+        # Session-scoped holder + owner: never leave a live grant behind (see
+        # the first test's step 9).
+        _revoke_grant(nest_url, recipient, composed_id)
+        if own_id is not None:
+            _revoke_grant(nest_url, recipient, own_id)
+
+
+@pytest.mark.feature("community-labelers")
+def test_your_nest_cannot_swap_another_module_in_for_the_labeler_you_subscribed_to(
+    mail_bridge_inbound_to_imap, mail_bridge_mda, nest_instance, run_seal_helper,
+):
+    """`community-labelers` outcome 7: only the labeler you subscribed to,
+    exactly as its publisher signed it, ever runs over your mail; your nest
+    cannot swap in another (§ Tier-3 → the holder pins the fetched module's
+    signed `algorithm_id` to the factor's id, and re-verifies signature and
+    hash before it runs anything).
+
+    The nest is the adversary here, so the test plays it: between subscribe and
+    the drain it rewrites its stored copy of the subscribed labeler — first to
+    a DIFFERENT labeler, validly signed by that labeler's own publisher (it
+    would score the cat mail 500), then to the subscribed labeler's own signed
+    metadata over that other module's bytes. After a finished drain pass for
+    each, the mail is unscored. Putting the genuine labeler back lets the next
+    pass score it 900 — so the holder was running, and refused only the swap.
+    """
+    handle = mail_bridge_inbound_to_imap
+    recipient = handle.recipient
+    assert recipient is not None, "inbound fixture must expose the MSEK recipient"
+    db_path = nest_instance["db_path"]
+    nest_url = nest_instance["url"]
+    admin = nest_instance["admin"]
+    holder_pubkey = mail_bridge_mda.x25519_pubkey
+    now = int(time.time())
+
+    handle.assert_mta_running()
+
+    labeler_id, factor, _ = _publish_cat_labeler(run_seal_helper, nest_instance)
+    # Another publisher's labeler: a real, validly signed module that scores a
+    # cat mail 500 — what a nest would swap in.
+    other_id, other_seed = new_publisher(nest_instance)
+    _publish_cat_version(
+        run_seal_helper, nest_url, other_id, other_seed, 1, _cat_wat(half_confidence=True)
+    )
+    genuine = _stored_artifact(db_path, labeler_id)
+    other = _stored_artifact(db_path, other_id)
+
+    cat_id = _deliver_and_capture(handle, db_path, "feline note", "I love my cat.")
+    grant_id = _mint_grant(
+        run_seal_helper, nest_url, recipient, holder_pubkey, epoch_start=now, epoch_end=now + 3600,
+        labeler_id=labeler_id,
+    )
+    try:
+        assert _subscribe(nest_url, recipient, labeler_id, grant_id) == factor
+
+        swaps = {
+            "another labeler, as its own publisher signed it": other,
+            "the subscribed labeler's signature over another module": (
+                genuine[0], other[1], other[2], other[3],
+            ),
+        }
+        for what, artifact in swaps.items():
+            _write_stored_artifact(db_path, labeler_id, artifact)
+            _drain_pass_done(nest_url, admin, what=f"the nest swapped in {what}")
+            row = _labeler_row(db_path, recipient.actor_id, cat_id, factor)
+            assert row is not None and row[1] == 0, (
+                f"the holder ran {what} over the mail (row {row!r}); only the "
+                f"subscribed labeler as its publisher signed it may run "
+                f"(MDA log {mail_bridge_mda.log_file})"
+            )
+
+        _write_stored_artifact(db_path, labeler_id, genuine)
+        _poke_config_changed(nest_url, admin)
+        assert _poll_labeler_version(db_path, recipient.actor_id, cat_id, factor, expected=1) == 1, (
+            f"the genuine labeler never scored the mail once restored "
+            f"(MDA log {mail_bridge_mda.log_file})"
+        )
+        assert _labeler_row(db_path, recipient.actor_id, cat_id, factor)[0] == 900
+    finally:
+        _write_stored_artifact(db_path, labeler_id, genuine)
+        _unsubscribe(nest_url, recipient, labeler_id)
+        _revoke_grant(nest_url, recipient, grant_id)
+
+
+# A host import the module asks for — a socket send, in the WASI shape. Every
+# import is a capability only the host can hand over, and the sandbox hands over
+# none, so a module that asks for one cannot run.
+_SOCKET_IMPORT = (
+    b'(import "wasi_snapshot_preview1" "sock_send" '
+    b"(func $sock_send (param i32 i32 i32 i32 i32) (result i32)))"
+)
+
+
+def _networked_cat_wat() -> bytes:
+    """The cat module, unchanged but for one import of a socket send."""
+    wat = _cat_wat()
+    assert wat.count(b"\n(module\n") == 1, "the cat fixture's module header moved"
+    return wat.replace(b"\n(module\n", b"\n(module\n  " + _SOCKET_IMPORT + b"\n")
+
+
+@pytest.mark.feature("community-labelers")
+def test_a_subscribed_labeler_that_wants_the_network_never_runs(
+    mail_bridge_inbound_to_imap, mail_bridge_mda, nest_instance, run_seal_helper,
+):
+    """`community-labelers` outcome 16: a subscribed labeler runs sealed off from
+    the network, so it cannot send what it reads anywhere (§ Tier-3 — the
+    holder's sandbox links no host functions: no WASI, no clock, no I/O).
+
+    Two labelers over the same cat mail, each subscribed under its own grant:
+    the plain cat module, and the same module asking for a socket send. One
+    finished drain pass scores the plain one 900 and leaves the networked one
+    unscored — the holder had the mail open and the grant to label it, and the
+    only difference is the network the module asked for and was not given.
+    """
+    handle = mail_bridge_inbound_to_imap
+    recipient = handle.recipient
+    assert recipient is not None, "inbound fixture must expose the MSEK recipient"
+    db_path = nest_instance["db_path"]
+    nest_url = nest_instance["url"]
+    admin = nest_instance["admin"]
+    holder_pubkey = mail_bridge_mda.x25519_pubkey
+    now = int(time.time())
+
+    handle.assert_mta_running()
+
+    plain_id, plain_factor, _ = _publish_cat_labeler(run_seal_helper, nest_instance)
+    net_id, net_seed = new_publisher(nest_instance)
+    _publish_cat_version(run_seal_helper, nest_url, net_id, net_seed, 1, _networked_cat_wat())
+    net_factor = "labeler:" + net_id.hex()
+
+    cat_id = _deliver_and_capture(handle, db_path, "feline note", "I love my cat.")
+    grants = []
+    subscribed = []
+    try:
+        for lid in (plain_id, net_id):
+            grants.append(_mint_grant(
+                run_seal_helper, nest_url, recipient, holder_pubkey, epoch_start=now,
+                epoch_end=now + 3600, labeler_id=lid,
+            ))
+            _subscribe(nest_url, recipient, lid, grants[-1])
+            subscribed.append(lid)
+
+        _drain_pass_done(nest_url, admin, what="subscribing to both labelers")
+
+        plain = _labeler_row(db_path, recipient.actor_id, cat_id, plain_factor)
+        assert plain == (900, 1), (
+            f"the plain cat labeler did not score the mail in the pass (row {plain!r}) — "
+            f"without it the networked labeler's absence proves nothing "
+            f"(MDA log {mail_bridge_mda.log_file})"
+        )
+        net = _labeler_row(db_path, recipient.actor_id, cat_id, net_factor)
+        assert net is not None and net[1] == 0, (
+            f"a labeler that asked for a socket ran over the mail (row {net!r}); the "
+            f"sandbox must give it no way to reach the network"
+        )
+    finally:
+        for lid in subscribed:
+            _unsubscribe(nest_url, recipient, lid)
+        for gid in grants:
+            _revoke_grant(nest_url, recipient, gid)

@@ -118,7 +118,7 @@ public sealed partial class SettingsAccountPage : Page
         // failure line (and, for a disable, by still clearing the bit).
         var pushRpc = _rpc;
         var pushActor = _sessionActorIdHex;
-        var pushDevice = (e.Parameter as ServiceClients)?.Account.DeviceId;
+        var pushDevice = (e.Parameter as ServiceClients)?.Account.ResolveDeviceId();
         _push = new PushNotificationsViewModel(
             buildRegistration: async () =>
                 pushRpc is null || string.IsNullOrEmpty(pushActor) || string.IsNullOrEmpty(pushDevice)
@@ -193,6 +193,7 @@ public sealed partial class SettingsAccountPage : Page
         _recoveryKitHydratedActor = null;
         RecoveryPhraseBox.Text = string.Empty;
         StolenConfirmBox.Text = string.Empty;
+        LetGoConfirmBox.Text = string.Empty;
         FaunaApp.Helpers.QrPainter.Clear(MintedKitQrCanvas);
 
         // AFTER the discharge above: leaving Account is the persist-failure
@@ -383,6 +384,9 @@ public sealed partial class SettingsAccountPage : Page
         FaunaApp.Core.Logs.E2eTrace.Write(
             $"[account-page] before LoadStatusAsync signedIn={(signedIn is null ? "<null>" : "set")}");
         await _recoveryKit.LoadStatusAsync();
+        // The let-go's dead read, after the status as apple's hydrate orders it —
+        // it lives on this process's account runtime, not the chain.
+        await _recoveryKit.LoadDeadGenerationsAsync();
         FaunaApp.Core.Logs.E2eTrace.Write("[account-page] before DischargeOwedSuccessionKitAsync");
         RenderRecoveryKit();
         // A relaunch adoption's owed sweep first — the ceremony's own order (sweep,
@@ -481,6 +485,11 @@ public sealed partial class SettingsAccountPage : Page
         StolenActionPanel.Visibility = BoolToVisibility(_recoveryKit.StolenVisible);
         IdentityStolenButton.IsEnabled = _recoveryKit.StolenArmed;
 
+        // The let-go trio — gated as one on the shared projection's line.
+        LetGoPanel.Visibility = BoolToVisibility(_recoveryKit.LetGoVisible);
+        LetGoStatusText.Text = _recoveryKit.LetGoStatus ?? string.Empty;
+        RecoveryLetGoButton.IsEnabled = _recoveryKit.LetGoArmed;
+
         RenderMintedKit();
     }
 
@@ -542,12 +551,13 @@ public sealed partial class SettingsAccountPage : Page
         MintedSecretText.Text = secret;
         try
         {
-            // The secret itself, over the SHARED fauna_core qr grid — never a
-            // platform/NuGet QR library (priorities #1/#2), and the same artifact
-            // apple's section encodes (`qrMatrix(data: secret)`). The richer
-            // `fauna://recovery` URI form is not reachable at this boundary:
-            // FfiMintedKit carries the secret alone.
-            FaunaApp.Helpers.QrPainter.Paint(MintedKitQrCanvas, secret);
+            // The account-naming `fauna://recovery` URI (the shared
+            // `recovery_kit_display_uri` export, built once per mint in the VM) over
+            // the SHARED fauna_core qr grid — never a platform/NuGet QR library
+            // (priorities #1/#2). The bare secret is the fallback when the builder
+            // refused; the on-screen text above stays the bare hex either way.
+            FaunaApp.Helpers.QrPainter.Paint(
+                MintedKitQrCanvas, _recoveryKit?.MintedKitUri ?? secret);
         }
         catch (Exception ex)
         {
@@ -596,10 +606,12 @@ public sealed partial class SettingsAccountPage : Page
 
     private void MintedSecretCopyButton_Click(object sender, RoutedEventArgs e)
     {
-        var secret = _recoveryKit?.MintedSecretHex;
-        if (string.IsNullOrEmpty(secret)) return;
+        // The URI, not the bare hex: a copied kit must restore knowing its account,
+        // exactly as a scanned one does (identity-succession.md § The RecoveryKey).
+        var payload = _recoveryKit?.MintedKitUri ?? _recoveryKit?.MintedSecretHex;
+        if (string.IsNullOrEmpty(payload)) return;
         var package = new Windows.ApplicationModel.DataTransfer.DataPackage();
-        package.SetText(secret);
+        package.SetText(payload);
         Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(package);
     }
 
@@ -674,6 +686,27 @@ public sealed partial class SettingsAccountPage : Page
         StolenConfirmBox.Text = vm.StolenConfirmInput;
     }
 
+    /// <summary>The let-go's type-to-confirm gate, the twin of
+    /// <see cref="StolenConfirmBox_TextChanged"/>: <c>recovery-kit-let-go-button</c>
+    /// stays disabled until this reads exactly the shared confirm word.</summary>
+    private void LetGoConfirmBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_recoveryKit is null) return;
+        _recoveryKit.LetGoConfirmInput = LetGoConfirmBox.Text;
+        RecoveryLetGoButton.IsEnabled = _recoveryKit.LetGoArmed;
+    }
+
+    /// <summary>The let-go — the VM re-checks the word, calls the door, and
+    /// replaces the dead read with the outcome's, which collapses the trio once
+    /// nothing is dead.</summary>
+    private async void RecoveryLetGoButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_recoveryKit is not { } vm) return;
+        vm.LetGoConfirmInput = LetGoConfirmBox.Text;
+        await vm.LetGoAsync();
+        LetGoConfirmBox.Text = vm.LetGoConfirmInput;
+    }
+
     /// <summary>Tapping a row switches to that identity (live in-session reconnect).
     /// The VM guards the already-active case, so tapping the active row is a no-op.</summary>
     private async void AccountRow_Click(object sender, RoutedEventArgs e)
@@ -706,15 +739,17 @@ public sealed partial class SettingsAccountPage : Page
     }
 
     /// <summary>Remove a non-active account from this install. Does NOT switch, so the
-    /// list must refresh in place — the ObservableCollection is what delivers that.</summary>
-    private void AccountRemove_Click(object sender, RoutedEventArgs e)
+    /// list must refresh in place — the ObservableCollection is what delivers that.
+    /// Awaited, not blocked on: the erase behind it waits for the removed account's store
+    /// to stop (<see cref="AccountSwitcherViewModel.RemoveAsync"/>).</summary>
+    private async void AccountRemove_Click(object sender, RoutedEventArgs e)
     {
         if (_switcherViewModel is null) return;
         if (sender is FrameworkElement { Tag: string actorId })
         {
             try
             {
-                _switcherViewModel.Remove(actorId);
+                await _switcherViewModel.RemoveAsync(actorId);
             }
             catch (System.Exception ex)
             {

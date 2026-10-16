@@ -33,7 +33,9 @@ use fauna_mls::wrapped_blob::{
 };
 use fauna_protocol::bridge_routing::{SpamHistoryOp, SpamLabel as WireSpamLabel, TrainingSource};
 use fauna_protocol::discovery::capability::SPAM_MODEL_SEALED_AT_REST;
-use fauna_protocol::wrapped_blob::HolderSealTarget;
+use fauna_protocol::wrapped_blob::{
+    HolderSealTarget, SPAM_MODEL_STALE_RETRIES, SpamModelPrecondition,
+};
 
 const ACTOR: [u8; 32] = [0x11; 32];
 const SIGNER_SEED: [u8; 32] = [0x22; 32];
@@ -665,6 +667,125 @@ async fn train_mail_facade_reports_a_duplicate_as_sealed_with_the_count_on_recor
     assert!(
         nest.state().put_spam_model_history_op.is_none(),
         "the fake, like the nest, recorded no history op for a rejected write"
+    );
+}
+
+/// Seal `model` to the actor's own key, the shape a stored model rests in.
+fn seal_own(model: &SpamModel) -> Vec<u8> {
+    let (_secret, public) = recipient_keys();
+    seal_to_recipient(&model.to_bytes(), &public)
+        .expect("seal")
+        .to_canonical_bytes()
+        .expect("canonical")
+}
+
+/// The compare-and-swap precondition (`mail-spam.md` § Transactional update):
+/// two devices train the same stored model at once. Device B's put lands first;
+/// device A's put, computed from the model B replaced, is refused as stale, and
+/// A re-fetches B's model, re-applies its own lesson and writes again — so the
+/// stored model carries BOTH lessons, where last-write-wins would have dropped
+/// B's.
+#[tokio::test]
+async fn two_interleaved_trains_both_land_through_the_stale_model_retry() {
+    let mut start = SpamModel::new();
+    start.train_ham("weekly team sync notes");
+    let sealed_start = seal_own(&start);
+
+    // Device B fetched `start` and trained its lesson; its write lands while
+    // device A is between its own fetch and put.
+    let mut after_b = start.clone();
+    after_b.train_spam("limited offer act now");
+    let sealed_after_b = seal_own(&after_b);
+
+    let (machine, nest, _cfg) = build(&[SPAM_MODEL_SEALED_AT_REST], true);
+    nest.state().spam_model = Some(sealed_start.clone());
+    nest.state()
+        .concurrent_spam_model_writes
+        .push_back(sealed_after_b.clone());
+
+    let out = machine
+        .apply_spam_model_write(
+            ModelWriteOp::Train {
+                text: "buy cheap pills now".into(),
+                label: SpamLabel::Spam,
+            },
+            None,
+        )
+        .await
+        .expect("the retry lands the write");
+    assert!(
+        matches!(
+            out,
+            SpamModelWriteOutcome::Sealed {
+                sample_count: 3,
+                ..
+            }
+        ),
+        "1 ham + B's spam + A's spam, got {out:?}"
+    );
+
+    let expected = nest.state().put_spam_model_expected.clone();
+    assert_eq!(
+        expected,
+        vec![
+            Some(SpamModelPrecondition::of_stored(Some(&sealed_start))),
+            Some(SpamModelPrecondition::of_stored(Some(&sealed_after_b))),
+        ],
+        "the first put named the model A fetched, the retry the model B left"
+    );
+    let stored = nest.state().spam_model.clone().expect("stored");
+    let model = SpamModel::from_bytes(&open_own(&stored)).expect("decode");
+    assert_eq!(model.ham_messages, 1);
+    assert_eq!(model.spam_messages, 2, "neither lesson was lost");
+    for ngram in SpamModel::delta_ngrams("limited offer act now")
+        .into_iter()
+        .chain(SpamModel::delta_ngrams("buy cheap pills now"))
+    {
+        assert!(
+            model.ngrams.get(&ngram).is_some_and(|c| c.spam > 0),
+            "the stored model carries {ngram:?}"
+        );
+    }
+}
+
+/// A writer that only ever loses the race gives up after
+/// `SPAM_MODEL_STALE_RETRIES` retries with an error, having written nothing
+/// over any of the concurrent writes.
+#[tokio::test]
+async fn a_train_that_keeps_losing_the_race_gives_up_after_the_retry_bound() {
+    let (machine, nest, _cfg) = build(&[SPAM_MODEL_SEALED_AT_REST], true);
+    let mut start = SpamModel::new();
+    start.train_ham("weekly team sync notes");
+    nest.state().spam_model = Some(seal_own(&start));
+    let racers: Vec<Vec<u8>> = (0..=SPAM_MODEL_STALE_RETRIES)
+        .map(|i| {
+            let mut m = start.clone();
+            m.train_spam(&format!("racing lesson number {i}"));
+            seal_own(&m)
+        })
+        .collect();
+    nest.state().concurrent_spam_model_writes = racers.iter().cloned().collect();
+
+    let err = machine
+        .apply_spam_model_write(
+            ModelWriteOp::Train {
+                text: "buy cheap pills now".into(),
+                label: SpamLabel::Spam,
+            },
+            None,
+        )
+        .await
+        .expect_err("the bound is reached");
+    assert!(matches!(err, DispatchError::Nest(NestError::Rejected(_))));
+    assert_eq!(
+        nest.state().put_spam_model_expected.len() as u32,
+        SPAM_MODEL_STALE_RETRIES + 1,
+        "one put plus the bounded retries"
+    );
+    assert_eq!(
+        nest.state().spam_model.as_deref(),
+        racers.last().map(Vec::as_slice),
+        "the last concurrent write stands"
     );
 }
 

@@ -181,27 +181,53 @@ def test_apple_an_account_the_nest_stops_accepting_erases_nothing_on_the_device(
     account's scoped `mls.db` rests). The relaunch pins both halves of the
     store (`preserve_state_across_relaunch`: keychain + relocated home on
     macOS, keychain + simulator container on iOS)."""
-    if apple_app == "ios":
-        setup = request.getfixturevalue("ios_setup")
-        launch = {"app_path": setup["app_path"], "udid": setup["udid"]}
-    else:
-        launch = {"app_path": request.getfixturevalue("macos_app_path")}
+    from helpers.app_launch import app_launch_config
+
     _an_account_the_nest_stops_accepting_erases_nothing(
         apple_app, None, None, delete_account_nest, tmp_path, request,
-        apple_launch=launch,
+        apple_launch=app_launch_config(apple_app, request),
+    )
+
+
+@pytest.mark.android
+@pytest.mark.feature("account")
+def test_android_an_account_the_nest_stops_accepting_erases_nothing_on_the_device(
+    delete_account_nest, request
+):
+    """android's leg of the tui journey above — the same contract over the
+    on-device credential file (read over the bridge, `credential_map`) and the
+    account scope `AndroidScopeStore` names (`<filesDir>/<actor>`, read from
+    outside the app, `app_data_exists`). The relaunch is a force-stop and a
+    fresh start over the same `filesDir`, with the seed withheld so the file the
+    first process left is the one the second reads
+    (`AndroidBridgeDriver._session_body`)."""
+    from pathlib import Path
+
+    from helpers import android_device
+
+    launch = {
+        "app_path": request.getfixturevalue("android_app_path"),
+        **android_device.run_launch_facts(Path(__file__).resolve().parents[3]),
+    }
+    _an_account_the_nest_stops_accepting_erases_nothing(
+        "android", None, None, delete_account_nest, None, request,
+        android_launch=launch,
     )
 
 
 def _an_account_the_nest_stops_accepting_erases_nothing(
     app, app_path, flat_base, delete_account_nest, tmp_path, request,
-    *, apple_launch=None,
+    *, apple_launch=None, android_launch=None,
 ):
     """The shared body: `app` is the driver name, `flat_base` its
     `XdgScopeStore` flat base (tui `fauna-tui`, linux `fauna`; `None` for
     windows, whose scoped state is under `WindowsScopeStore`). The apple
     drivers pass `apple_launch` (their own launch keys) instead: their store
     is the host-side keychain file and their scoped state is under
-    `AppleScopeStore`."""
+    `AppleScopeStore`. android passes `android_launch`: its store and its
+    scope are both on-device, read through the driver (`credential_map`,
+    `AndroidScopeStore.exists`), and it lands on its launch surface as
+    `onboarding/…` rather than `welcome`."""
     import json
     import os
 
@@ -229,6 +255,8 @@ def _an_account_the_nest_stops_accepting_erases_nothing(
     }
     if apple_launch is not None:
         config.update(apple_launch)
+    elif android_launch is not None:
+        config.update(android_launch)
     else:
         config.update({
             "app_path": app_path,
@@ -249,6 +277,8 @@ def _an_account_the_nest_stops_accepting_erases_nothing(
         )
 
     def store_slot(key):
+        if android_launch is not None:
+            return driver.credential_map().get(key)
         try:
             with open(store_path()) as f:
                 return json.load(f).get(key)
@@ -262,13 +292,22 @@ def _an_account_the_nest_stops_accepting_erases_nothing(
             APP_RELAUNCH_S,
             diagnose=lambda: f"session={(driver.get_state() or {}).get('session')!r}",
         )
-        if apple_launch is not None or app == "windows":
+        scope_store = None
+        if android_launch is not None:
+            # The account's own scope dir, not a file inside it: android opens
+            # its scoped MLS store only once a conversations session needs it.
+            scope_store = attach_scope_store(app, driver)
+            scoped_db = scope_store.scope_dirs(actor)[0]
+        elif apple_launch is not None or app == "windows":
             scoped_db = attach_scope_store(app, driver).scope_dirs(actor)[0] / "mls.db"
         else:
             scoped_db = XdgScopeStore(app, driver.config_home, flat_base).scope_dirs(
                 actor
             )[0] / "mls_state.db"
-        wait_until(scoped_db.exists, 30, diagnose=lambda: f"{scoped_db} never appeared")
+        on_device = (
+            (lambda p: scope_store.exists(p)) if scope_store is not None else (lambda p: p.exists())
+        )
+        wait_until(lambda: on_device(scoped_db), 30, diagnose=lambda: f"{scoped_db} never appeared")
         secret_before = store_slot(f"fauna/{actor}/secret")
         assert secret_before, "precondition: the identity's secret is on the device"
 
@@ -280,7 +319,9 @@ def _an_account_the_nest_stops_accepting_erases_nothing(
         assert ran.get("executed", 0) >= 1, f"the deletion never applied: {ran}"
 
         # (3) Relaunch onto the SAME store: the next sign-in is the refused one.
-        assert driver.preserve_state_across_relaunch(), (
+        # android's relaunch needs no pin: `filesDir` outlives the force-stop,
+        # and withholding the seed (below) leaves the credential file alone.
+        assert android_launch is not None or driver.preserve_state_across_relaunch(), (
             f"the {app} driver must be able to pin its file store across a relaunch"
         )
         driver.teardown()
@@ -293,7 +334,13 @@ def _an_account_the_nest_stops_accepting_erases_nothing(
         def refused_surface():
             s = driver.get_state() or {}
             nav = [v.get("view") for v in s.get("nav", {}).get("stack", [])]
-            return not s.get("session", {}).get("authenticated") and "welcome" in nav
+            if s.get("session", {}).get("authenticated"):
+                return False
+            if android_launch is not None:
+                # android publishes its whole launch surface as one view
+                # (`TestAgent`'s `onboarding/identity-choice` while onboarding).
+                return any(str(v).startswith("onboarding") for v in nav)
+            return "welcome" in nav
 
         def describe_surface():
             s = driver.get_state() or {}
@@ -320,9 +367,9 @@ def _an_account_the_nest_stops_accepting_erases_nothing(
             attach_scope_store(app, driver).scope_dirs(actor)[0] / "mls.db"
             if apple_launch is not None else scoped_db
         )
-        assert survived_db.exists(), (
+        assert on_device(survived_db), (
             f"the refused identity's on-device data must survive; {survived_db} is gone "
-            f"(first launch's path {scoped_db}: exists={scoped_db.exists()})"
+            f"(first launch's path {scoped_db}: exists={on_device(scoped_db)})"
         )
     finally:
         driver.teardown()

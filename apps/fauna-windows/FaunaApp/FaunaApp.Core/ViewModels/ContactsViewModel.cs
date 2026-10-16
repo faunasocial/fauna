@@ -39,19 +39,67 @@ public partial class ContactsViewModel : ViewModelBase
     /// first realize rather than lagging one load behind.</summary>
     internal IReadOnlyList<FfiMemberReview> MemberReviewRoster { get; private set; } = Array.Empty<FfiMemberReview>();
 
+    /// <summary>The painted roster rows — <see cref="Contacts"/> with the names the
+    /// shared overlay face answered (<see cref="ContactOverlayNames"/>). Rebuilt on
+    /// every load and whenever <see cref="RefreshNames"/> sees the projection's
+    /// revision move. The page binds the list to this, never to
+    /// <see cref="Contacts"/>.</summary>
+    public ObservableCollection<ContactRow> Rows { get; } = new();
+
+    /// <summary>The painted knock cards (<see cref="Knocks"/> + the sender names).</summary>
+    public ObservableCollection<KnockRow> KnockRows { get; } = new();
+
+    private ulong _namesRevision;
+
+    /// <summary>Re-read every painted name from the overlay face. Cheap; the pages
+    /// call <see cref="RefreshNamesIfMoved"/> on each manager wake instead.</summary>
+    public void RefreshNames()
+    {
+        using var names = ContactOverlayNames.Open();
+        _namesRevision = names.Revision();
+        Rows.Clear();
+        foreach (var c in Contacts)
+            Rows.Add(RowFor(names, c));
+        KnockRows.Clear();
+        foreach (var k in Knocks)
+            KnockRows.Add(new KnockRow(k, names.PeerLabel(null, null, k.ActorId).primary));
+    }
+
+    /// <summary>Re-paint the names only when the projection's content moved (the
+    /// face's <c>revision()</c>), so a manager wake for a message re-paints nothing.
+    /// Returns whether it did.</summary>
+    public bool RefreshNamesIfMoved()
+    {
+        ulong now;
+        using (var names = ContactOverlayNames.Open()) now = names.Revision();
+        if (now == _namesRevision) return false;
+        RefreshNames();
+        return true;
+    }
+
+    private static ContactRow RowFor(ContactOverlayNames.Reader names, ContactInfo c)
+    {
+        // Roster row: `peer_label(None, handle, id)` (the face's contract).
+        var label = names.PeerLabel(null, c.Handle, c.ActorId);
+        return new ContactRow(c, label.primary, label.@public, names.LabelsLine(c.ActorId));
+    }
+
     /// <summary>The <c>contacts-search-field</c> roster filter: narrows the
-    /// already-loaded accepted-contacts roster by a case-insensitive substring over
-    /// handle + domain + actor-id, through the shared predicate
-    /// <c>fauna_core::format::contact_matches_filter</c> (FFI <c>ContactMatchesFilter</c>;
-    /// contacts.md § Where logic lives → Contact roster filter). Local-only — never a
-    /// nest query. An empty query matches all (the shared fn's contract); the page
-    /// short-circuits empty to rebind the live collection instead of a snapshot.
-    /// Extracted here (Core) so the row→predicate arg-wiring is unit-tested against the
-    /// real FFI dll, rather than buried in the page event handler.</summary>
-    public static IReadOnlyList<ContactInfo> FilterRoster(IEnumerable<ContactInfo> contacts, string query) =>
-        contacts
-            .Where(c => FaunaFfiMethods.ContactMatchesFilter(query, c.Handle, c.Domain, c.ActorId))
+    /// already-loaded accepted-contacts roster through the shared predicate on the
+    /// overlay face (handle, domain, actor id, plus the viewer's nickname and
+    /// labels for that person; never notes — contacts.md § The private overlay).
+    /// Local-only — never a nest query. An empty query matches all (the shared fn's
+    /// contract); the page short-circuits empty to rebind the live collection instead
+    /// of a snapshot. Extracted here (Core) so the row→predicate arg-wiring is
+    /// unit-tested against the real FFI dll, rather than buried in the page event
+    /// handler.</summary>
+    public IReadOnlyList<ContactRow> FilterRows(string query)
+    {
+        using var names = ContactOverlayNames.Open();
+        return Rows
+            .Where(r => names.MatchesFilter(query, r.Contact.Handle, r.Contact.Domain, r.ActorId))
             .ToList();
+    }
 
     /// <summary>Which of the three find-user branches the
     /// <c>contact-actor-id-field</c> input takes, from the shared classifier.</summary>
@@ -72,7 +120,7 @@ public partial class ContactsViewModel : ViewModelBase
     /// contacts.md § Where logic lives → Contact lookup by handle). The positional
     /// <c>[kind, actor_id, user, domain]</c> reply is re-keyed into the named branch.
     /// Static so the classify → branch decision is unit-tested against the real FFI dll,
-    /// exactly like <see cref="FilterRoster"/>.</summary>
+    /// exactly like <see cref="FilterRows"/>.</summary>
     public static RecipientClassification ClassifyRecipientInput(string? input)
     {
         var p = FaunaFfiMethods.ClassifyRecipient(input?.Trim() ?? string.Empty);
@@ -94,6 +142,27 @@ public partial class ContactsViewModel : ViewModelBase
         // ResyncRequired sweep set; transport.md § Push events). LoadAsync
         // re-pulls both rosters.
         RefreshOnReconnect(rpc, LoadCommand);
+    }
+
+    /// <summary>Start re-reading the review roster on the shared store-change
+    /// notice — call from the page's <c>Page_Loaded</c>, pair with
+    /// <see cref="ViewModelBase.CleanupStoreChange"/> on navigate-away.</summary>
+    public void WatchStore() => WatchStoreChange(_rpc, StoreResyncAsync);
+
+    /// <summary>The store-change re-read (<c>account-runtime.md</c> § A runtime's
+    /// own pump is a source of the notice too, part 4): the succession ledger's
+    /// member-review roster paints the <c>contact-unattested-mark</c> badges, so a
+    /// person put up for (or cleared from) review shows on the OPEN page with no
+    /// re-visit. Answers <c>true</c> only when the roster differs; a failed read
+    /// keeps the roster held; skipped while a load is in flight. The contacts and
+    /// knocks lists are the nest's, never re-read here.</summary>
+    internal async Task<bool> StoreResyncAsync()
+    {
+        if (IsLoading) return false;
+        var roster = await _rpc.MemberReviewsListAsync();
+        if (IsLoading || MemberReviewViewModel.SameRoster(roster, MemberReviewRoster)) return false;
+        MemberReviewRoster = roster;
+        return true;
     }
 
     [RelayCommand]
@@ -118,6 +187,7 @@ public partial class ContactsViewModel : ViewModelBase
             Knocks.Clear();
             foreach (var k in knocks)
                 Knocks.Add(k);
+            RefreshNames();
         }
         catch (Exception ex)
         {
@@ -193,6 +263,20 @@ public partial class ContactsViewModel : ViewModelBase
         }
     }
 
+    /// <summary>The Find User result's per-peer knock/ask state (family-safety.md §
+    /// Child-initiated contact requests → <i>App affordance</i>). Keyed on the resolved
+    /// peer, so a new lookup drops the previous peer's refusal instead of carrying it
+    /// over (rule (g)); the durable pending list is consulted per peer at render.</summary>
+    [ObservableProperty] private KnockAskState _knockAsk = KnockAskState.ForPeer(null);
+
+    /// <summary>What the find-user result shows beside the knock for the peer it
+    /// resolved: the durable pending label first, else the ask button after a TYPED
+    /// refusal this lookup saw, else nothing. No supervision test (rule (h)).</summary>
+    internal ContactAskRender? ContactAskRenderNow() =>
+        KnockAsk.Peer is { } peer
+            ? WardAskFolds.ContactAskRenderOf(WardAsksCache.ContactAskPending(peer), KnockAsk)
+            : null;
+
     [RelayCommand]
     private async Task AddFoundContactAsync(string actorId)
     {
@@ -200,12 +284,56 @@ public partial class ContactsViewModel : ViewModelBase
         // find-by-handle add affordance; the standalone Search page does NOT feed
         // this — its content_ids are opaque FTS keys, not actor ids).
         ErrorMessage = null;
+        KnockAsk = KnockAsk with { KnockInFlight = true };
+        var result = await WardAskFolds.ClassifyKnockAsync(() => _rpc.SendKnockAsync(actorId));
+        var (next, effect) = WardAskFolds.FoldKnockReply(KnockAsk, actorId, result);
+        KnockAsk = next;
+        switch (effect)
+        {
+            case KnockErrorEffect.Clear:
+                try { await LoadAsync(); }
+                catch (Exception ex) { ShowError(ex); }
+                break;
+            case KnockErrorEffect.Guardian:
+                // Clause (b): the refusal STAYS on error-message — the knock did not
+                // happen — with the ask offered beside it.
+                SetError(Strings.Get("contacts/guardian_approval_required"));
+                break;
+            case KnockErrorEffect.Failed failed:
+                ShowError(failed.Error);
+                break;
+        }
+    }
+
+    /// <summary><c>contact-request-guardian-button</c> — ask the guardian about the
+    /// resolved peer (<c>fauna.family.contact.request</c>). A pending ask is not
+    /// re-sent. Mirrors android <c>askGuardian</c> / tui <c>contacts::ask_guardian</c>.</summary>
+    [RelayCommand]
+    private async Task AskGuardianAsync(string peerActorIdHex)
+    {
+        var before = KnockAsk;
+        if (before.AskInFlight) return;
+        if (WardAskFolds.ContactAskRenderOf(WardAsksCache.ContactAskPending(peerActorIdHex), before)
+            == ContactAskRender.Pending)
+            return;
+        KnockAsk = before with { AskInFlight = true };
         try
         {
-            await _rpc.SendKnockAsync(actorId);
-            await LoadAsync();
+            await _rpc.FamilyContactRequestAsync(peerActorIdHex);
+            KnockAsk = WardAskFolds.FoldContactAsked(KnockAsk, peerActorIdHex);
+            ErrorMessage = null;
         }
-        catch (Exception ex) { ShowError(ex); }
+        catch (Exception ex)
+        {
+            KnockAsk = WardAskFolds.FoldContactAskFailed(KnockAsk, peerActorIdHex);
+            ShowError(ex);
+        }
+    }
+
+    private void SetFindResult(ContactInfo? result)
+    {
+        ActorIdResult = result;
+        KnockAsk = KnockAskState.ForPeer(result?.ActorId);
     }
 
     [RelayCommand]
@@ -220,7 +348,7 @@ public partial class ContactsViewModel : ViewModelBase
         // knocks the RESOLVED actor id (AddFoundContactAsync), never the typed input.
         var c = ClassifyRecipientInput(input);
         ActorIdError = null;
-        ActorIdResult = null;
+        SetFindResult(null);
         switch (c.Kind)
         {
             case RecipientKind.Invalid:
@@ -234,13 +362,13 @@ public partial class ContactsViewModel : ViewModelBase
                     // the WS-RPC roster instead. Not-on-the-roster ⇒ the Pending fallback
                     // (the actor exists but isn't yet a contact), matching the old behaviour.
                     var contacts = await _rpc.ContactsListAsync();
-                    ActorIdResult = contacts.FirstOrDefault(
+                    SetFindResult(contacts.FirstOrDefault(
                         x => string.Equals(x.ActorId, c.ActorId, StringComparison.OrdinalIgnoreCase))
-                        ?? new ContactInfo(c.ActorId, null, ContactStatus.Pending, null);
+                        ?? new ContactInfo(c.ActorId, null, ContactStatus.Pending, null));
                 }
                 catch
                 {
-                    ActorIdResult = new ContactInfo(c.ActorId, null, ContactStatus.Pending, null);
+                    SetFindResult(new ContactInfo(c.ActorId, null, ContactStatus.Pending, null));
                 }
                 return;
 
@@ -262,9 +390,9 @@ public partial class ContactsViewModel : ViewModelBase
                     // (fauna.actor.domain_not_local) → the catch below surfaces not-found.
                     // resolved = [actor_id, handle, domain]
                     var resolved = await FaunaFfiMethods.ResolveHandle(nodeUrl, c.User, c.Domain);
-                    ActorIdResult = new ContactInfo(
+                    SetFindResult(new ContactInfo(
                         resolved[0], $"{resolved[1]}@{resolved[2]}", ContactStatus.Pending, null)
-                    { Domain = resolved[2] };
+                    { Domain = resolved[2] });
                 }
                 catch
                 {

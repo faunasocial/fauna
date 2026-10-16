@@ -534,9 +534,7 @@ fn render_rows(
     busy: bool,
     client: &Rc<FaunaClient>,
 ) {
-    while let Some(child) = handles.snapshot_list_box.first_child() {
-        handles.snapshot_list_box.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(&handles.snapshot_list_box);
     for snap in &page.snapshots {
         let row = build_snapshot_row(
             snap,

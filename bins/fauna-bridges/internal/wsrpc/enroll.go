@@ -196,6 +196,31 @@ func EnrollAndAwaitApproval(ctx context.Context, nestEndpoint string, id Enrollm
 	return PollEnrollmentUntilApproved(ctx, anon, id, EnrollPollOptions{Logger: logger})
 }
 
+// EnrollmentStatus asks the nest once, over a transient anonymous WS, for the
+// enrollment status of id — the same idempotent `request_enrollment` call the
+// cold-boot poll makes. It is the only status surface a revoked bridge can
+// still reach: its bearer is refused at the upgrade, so `whoami` is out of
+// reach (mail-bridge-lifecycle.md § Service-user re-keying step 4).
+func EnrollmentStatus(ctx context.Context, nestEndpoint string, id EnrollmentIdentity, logger *slog.Logger, httpClient *http.Client) (string, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	dialCtx, dialCancel := context.WithTimeout(ctx, anonymousDialTimeout)
+	anon, err := DialAnonymous(dialCtx, AnonymousClientConfig{
+		NestEndpoint: nestEndpoint,
+		Logger:       logger,
+		HTTPClient:   httpClient,
+	})
+	dialCancel()
+	if err != nil {
+		return "", fmt.Errorf("dial anonymous ws for enrollment status: %w", err)
+	}
+	defer func() { _ = anon.Close() }()
+	callCtx, cancel := context.WithTimeout(ctx, enrollCallTimeout)
+	defer cancel()
+	return RequestEnrollment(callCtx, anon, id)
+}
+
 // sleepCtx waits for d or until ctx is cancelled, returning ctx.Err() on
 // cancel. The production EnrollPollOptions.sleep.
 func sleepCtx(ctx context.Context, d time.Duration) error {

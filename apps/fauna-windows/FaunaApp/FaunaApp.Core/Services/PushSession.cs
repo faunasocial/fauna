@@ -15,7 +15,7 @@ namespace FaunaApp.Core.Services;
 /// <i>Registration</i>); this class only names windows' inputs to it, the same two tui names
 /// (<c>apps/fauna-tui/src/push.rs</c>):</para>
 /// <list type="bullet">
-/// <item><b>the device id</b> — <c>RegistrySessionAccount.DeviceId</c>, i.e.
+/// <item><b>the device id</b> — <c>RegistrySessionAccount.ResolveDeviceId()</c>, i.e.
 /// <c>FfiAccountRegistry.DeviceIdForActor</c>, the same id the sync agent's capability is
 /// minted from, so the id the row is keyed under, the id this app's connection announces
 /// and the id the agent announces are one value by construction;</item>

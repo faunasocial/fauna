@@ -10,7 +10,7 @@ import os
 /// `<ref-component>@<actor>` — `local%3A1@…`), from which this instance recovers
 /// the account it serves under and the set's bare ref for the Rust host. Each instance holds one `folder`-scoped
 /// `FfiFileProviderHost` — the app-dead hydration host that runs the shared
-/// `fauna-sync-engine` behind the OS callbacks (`file-sync.md` § On-Demand Files →
+/// `fauna-sync-engine` behind the OS callbacks (`on-demand-files-apple.md` § On-Demand Files →
 /// Apple File Provider binding, *the extension hosts the engines*). The OS owns the
 /// on-disk tree under `~/Library/CloudStorage/` and drives enumerate / `item` /
 /// `fetchContents` / eviction; fauna supplies the engine face.
@@ -146,7 +146,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     /// (`defaultRescanIntervalSecs()` — the one constant every seat ticks at
     /// since folders re-model phase 5, crossed from Rust rather than copied
     /// here) we `host.refresh()` and, iff it folded something new, tell the OS to
-    /// re-enumerate via `signalEnumerator(for: .rootContainer)` (`file-sync.md`
+    /// re-enumerate via `signalEnumerator(for: .rootContainer)` (`on-demand-files.md`
     /// § Apple File Provider binding — *a pulled remote change signals the
     /// enumerator*). A `nil` host or an indeterminate binding starts no tick.
     ///
@@ -371,7 +371,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     /// The read-only gate every write callback passes first, before any byte
     /// is staged: a set the account holds as a reader advertises no write
     /// capability, and a write the OS sends anyway is refused here with the
-    /// platform's read-only error (`on-demand-files.md` § Shared sets on a
+    /// platform's read-only error (`on-demand-files-shared-sets.md` § Shared sets on a
     /// capability host, decision 3). The host refuses it too.
     private func refuseIfReadOnly(_ host: FfiFileProviderHost) async throws {
         if await FileProviderItemCapabilities.isReadOnly(host) {

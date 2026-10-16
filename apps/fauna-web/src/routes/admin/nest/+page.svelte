@@ -11,6 +11,10 @@
     rotateDeploymentSeed,
     adminRegionStatus,
     adminSetRegion,
+    featureAuthoredRows,
+    featureEditorOpen,
+    adminWebAppOriginStatus,
+    adminSetWebAppOrigin,
     moderationLegalTakedown,
     adminAbuseReportQueue,
     adminAbuseReportResolve,
@@ -19,7 +23,10 @@
     adminForceRotateIssuer,
     type SeedRotationConfirmView,
     type AdminRegionView,
+    type AdminWebAppOriginView,
   } from '$lib/rpc';
+  import type { AuthoredRow, PolicyEditorHandle } from '$lib/wasm';
+  import FeaturePolicyEditor from '$lib/components/FeaturePolicyEditor.svelte';
   import {
     armOauthForced,
     beginOauthRotate,
@@ -63,6 +70,7 @@
   } from '$lib/wasm';
   import { makeOfflineGate } from '$lib/offline-gate';
   import { resolveLocalized } from '$lib/i18n/localized';
+  import { relativeTime } from '$lib/value-format';
   import { IDS } from '$lib/generated/uiIds';
 
   // W4 (account-data-plane.md § Workstreams) phase 4's UI desensitizing (`account-data-plane.md` § The
@@ -179,6 +187,43 @@
     natRender();
   }
 
+  // ── Web-app origin (`fauna.admin.web_app_origin.{get,set}`) ──
+  // What this nest's own address answers: the app it ships, or a redirect to the
+  // central origin (admin.md § N Nest → Web-app origin). Every sentence and the
+  // `can_set` verdict are the shared `admin_web_app_origin_view` fold (tui
+  // `admin/nest.rs`, the reference leg); this file paints and wires. Radios stay
+  // unmarked and disabled until the read lands — pre-marking bundled would state a
+  // choice the nest may not hold. The save repaints from the set's own reply.
+  let webOrigin = $state<AdminWebAppOriginView | null>(null);
+  let webOriginDraft = $state<'bundled' | 'central' | null>(null);
+  let webOriginSaving = $state(false);
+
+  async function loadWebOrigin() {
+    const id = $identity;
+    if (!id?.secretHex) return;
+    try {
+      webOrigin = await adminWebAppOriginStatus(id.secretHex);
+      webOriginDraft = webOrigin.selected;
+    } catch (e) {
+      error = t.admin.nest_page.web_app_origin_load_error({ message: detail(e) });
+    }
+  }
+
+  async function saveWebOrigin() {
+    const id = $identity;
+    if (!id?.secretHex || !webOrigin?.can_set || !webOriginDraft) return;
+    error = '';
+    webOriginSaving = true;
+    try {
+      webOrigin = await adminSetWebAppOrigin(id.secretHex, webOriginDraft);
+      webOriginDraft = webOrigin.selected;
+    } catch (e) {
+      error = t.admin.nest_page.web_app_origin_save_error({ message: detail(e) });
+    } finally {
+      webOriginSaving = false;
+    }
+  }
+
   // ── Declared region (`fauna.admin.region.{get,set}`) ──
   // The deployment's legal situs — the region tier's one human choice
   // (region-blocking.md § Region determination; dynamic-features.md § The
@@ -221,6 +266,9 @@
     try {
       await adminSetRegion(id.secretHex, newRegion);
       await loadRegion();
+      // A re-declaration retires the previous region's feature-policy document
+      // nest-side, so the authored rows are re-read with it.
+      await loadFeatureLimits();
     } catch (e) {
       error = t.admin.nest_page.region_save_error({ message: detail(e) });
     } finally {
@@ -243,6 +291,45 @@
 
   function withdrawRegion() {
     setRegion(undefined);
+  }
+
+  // ── Feature limits for everyone (`admin-nest-feature-limits-*`) ──
+  // The admin tier's AUTHORED document per gated feature (`fauna.features.policy.get`,
+  // never `fauna.features.status`, which answers the admin's own effective meet),
+  // as the shared `AuthoredRow`s; the edit button opens the shared
+  // `feature-policy-editor` at the admin tier under its row
+  // (dynamic-features.md § Authoring surfaces). This file paints; every word and
+  // every decision is shared Rust's. `null` = the read has not resolved — the
+  // section renders nothing rather than "No limit set" with no basis.
+  let featureLimits = $state<AuthoredRow[] | null>(null);
+  let featureEditor = $state<PolicyEditorHandle | null>(null);
+  let featureEditorFor = $state<string | null>(null);
+
+  async function loadFeatureLimits() {
+    const id = $identity;
+    if (!id?.secretHex) return;
+    try {
+      featureLimits = await featureAuthoredRows(id.secretHex, 'admin');
+    } catch (e) {
+      error = t.features.editor_load_failed({ error: detail(e) });
+    }
+  }
+
+  async function openFeatureEditor(feature: string) {
+    const id = $identity;
+    if (!id?.secretHex) return;
+    error = '';
+    try {
+      featureEditor = await featureEditorOpen(id.secretHex, 'admin', feature);
+      featureEditorFor = feature;
+    } catch (e) {
+      error = t.features.editor_load_failed({ error: detail(e) });
+    }
+  }
+
+  function closeFeatureEditor() {
+    featureEditor = null;
+    featureEditorFor = null;
   }
 
   // ── Deployment-seed rotation (`admin-nest-seed-rotate-*`, box-recovery.md
@@ -553,7 +640,7 @@
       row.subject.kind === 'post' ? row.subject.cid
       : row.subject.kind === 'message' ? row.subject.record_cid
       : row.subject.actor_id;
-    let text = `${resolveLocalized(row.reason)} · ${row.subject.kind} ${subjectId} · ${resolveLocalized(row.origin)} · ${new Date(row.created_at / 1000).toLocaleString()}`;
+    let text = `${resolveLocalized(row.reason)} · ${row.subject.kind} ${subjectId} · ${resolveLocalized(row.origin)} · ${relativeTime(row.created_at / 1000)}`;
     if (row.note) text += ` — ${row.note}`;
     if (row.excerpt) text += ` — “${row.excerpt}”`;
     return text;
@@ -568,6 +655,8 @@
     loadPairing();
     loadServingPort();
     loadRegion();
+    loadFeatureLimits();
+    loadWebOrigin();
     loadOsMaintenance();
     loadNatMode();
     loadOauthKeys();
@@ -885,6 +974,63 @@
   </div>
 </section>
 
+<!-- Web-app origin (fauna.admin.web_app_origin.{get,set}) — admin.md § N Nest →
+     Web-app origin. Placed directly after NAT mode, mirroring its radio shape. -->
+<section class="section" data-testid={IDS.ADMIN_NEST_WEB_APP_ORIGIN_SECTION}>
+  <div class="nat-mode-card">
+    <div class="service-name">{t.admin.nest_page.web_app_origin_label}</div>
+    <div class="service-desc">{t.admin.nest_page.web_app_origin_desc}</div>
+    <label class="nat-radio">
+      <input
+        type="radio"
+        name="admin-web-app-origin"
+        value="bundled"
+        data-testid={IDS.ADMIN_NEST_WEB_APP_ORIGIN_BUNDLED_RADIO}
+        checked={webOriginDraft === 'bundled'}
+        disabled={!webOrigin?.can_set || webOriginSaving}
+        onchange={() => (webOriginDraft = 'bundled')}
+      />
+      {t.admin.nest_page.web_app_origin_bundled}
+    </label>
+    <label class="nat-radio">
+      <input
+        type="radio"
+        name="admin-web-app-origin"
+        value="central"
+        data-testid={IDS.ADMIN_NEST_WEB_APP_ORIGIN_CENTRAL_RADIO}
+        checked={webOriginDraft === 'central'}
+        disabled={!webOrigin?.can_set || webOriginSaving}
+        onchange={() => (webOriginDraft = 'central')}
+      />
+      {webOrigin
+        ? resolveLocalized(webOrigin.central_label)
+        : t.admin.nest_page.web_app_origin_loading}
+    </label>
+    <div class="nat-actions">
+      <span class="service-desc" data-testid={IDS.ADMIN_NEST_WEB_APP_ORIGIN_STATUS}>
+        {webOrigin
+          ? resolveLocalized(webOrigin.status)
+          : t.admin.nest_page.web_app_origin_loading}
+      </span>
+      <button
+        type="button"
+        class="btn"
+        data-testid={IDS.ADMIN_NEST_WEB_APP_ORIGIN_SAVE_BUTTON}
+        use:offlineGate={{
+          kind: 'fauna.admin.web_app_origin.set',
+          disabled: !webOrigin?.can_set || !webOriginDraft || webOriginSaving,
+        }}
+        onclick={saveWebOrigin}
+      >
+        {t.admin.nest_page.web_app_origin_save}
+      </button>
+    </div>
+    {#if webOrigin}
+      <div class="service-desc">{resolveLocalized(webOrigin.scope)}</div>
+    {/if}
+  </div>
+</section>
+
 <!-- Declared region (fauna.admin.region.{get,set}) — region-blocking.md § Region
      determination. DECLARED, NEVER DETECTED: no detect/prefill affordance here. -->
 <section class="section" data-testid={IDS.ADMIN_NEST_REGION_SECTION}>
@@ -948,6 +1094,45 @@
     </div>
   </div>
 </section>
+
+<!-- Feature limits for everyone (`admin-nest-feature-limits-*`) — directly after the
+     declared region (admin.md § N Nest → Feature limits). One row per gated
+     feature the nest carries, with the admin tier's authored document in words
+     and an Edit button that opens the shared editor right under the row. -->
+{#if featureLimits}
+  <section class="section" data-testid={IDS.ADMIN_NEST_FEATURE_LIMITS_SECTION}>
+    <h2>{t.features.admin_section_title}</h2>
+    <p class="muted">{t.features.admin_section_desc}</p>
+    {#each featureLimits as row (row.feature)}
+      <div class="field-group" data-testid={IDS.ADMIN_NEST_FEATURE_LIMITS_ROW}>
+        <div class="field-row">
+          <span>
+            <span class="service-name" data-testid={IDS.ADMIN_NEST_FEATURE_LIMITS_NAME}>{resolveLocalized(row.name)}</span>
+            <span class="service-desc" data-testid={IDS.ADMIN_NEST_FEATURE_LIMITS_SUMMARY}>{resolveLocalized(row.summary)}</span>
+          </span>
+          <button
+            type="button"
+            class="btn"
+            data-testid={IDS.ADMIN_NEST_FEATURE_LIMITS_EDIT_BUTTON}
+            onclick={() => openFeatureEditor(row.feature)}
+          >
+            {t.features.admin_edit}
+          </button>
+        </div>
+        {#if featureEditor && featureEditorFor === row.feature && $identity?.secretHex}
+          <FeaturePolicyEditor
+            secretHex={$identity.secretHex}
+            editor={featureEditor}
+            tier="admin"
+            onwritten={loadFeatureLimits}
+            oncancel={closeFeatureEditor}
+            onerror={(message) => (error = message)}
+          />
+        {/if}
+      </div>
+    {/each}
+  </section>
+{/if}
 
 <!-- Host-OS maintenance status (installers/vps.md § Host OS Maintenance § 4) -->
 <section class="section">
@@ -1260,6 +1445,21 @@
     </div>
   {/each}
   {#if reportsStatus}<p class="muted">{reportsStatus}</p>{/if}
+</section>
+
+<!-- Retire this server (nest-retirement.md § Layout & flow) — beside Factory
+     reset and worded sharply apart from it: reset wipes a box the admin keeps,
+     retire destroys the box. Opens the `nest_retire` page in the onboarding
+     route's wizard host over the live session (`?retire=1`, the `?add=1`
+     append-entry precedent). -->
+<section class="section danger-zone" data-testid={IDS.ADMIN_NEST_RETIRE_SECTION}>
+  <h2>{t.admin.nest_page.retire_title}</h2>
+  <p class="muted">{t.admin.nest_page.retire_desc}</p>
+  <button
+    class="btn danger"
+    data-testid={IDS.ADMIN_NEST_RETIRE_BUTTON}
+    onclick={() => goto('/app/onboarding?retire=1')}
+  >{t.admin.nest_page.retire_button}</button>
 </section>
 
 <!-- Factory Reset Danger Zone (moved off Settings) -->

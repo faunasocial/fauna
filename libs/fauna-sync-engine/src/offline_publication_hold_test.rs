@@ -1,4 +1,4 @@
-//! Decision 2′'s engine tier (`on-demand-files.md` § Shared sets on a
+//! Decision 2′'s engine tier (`on-demand-files-shared-sets.md` § Shared sets on a
 //! capability host, decision 2′): a write made on a same-nest shared set while
 //! its row cannot be read **seals on the last floor the engine read and mints
 //! its own-pending row** (b), but **publishes nothing to a nest** (c) until a

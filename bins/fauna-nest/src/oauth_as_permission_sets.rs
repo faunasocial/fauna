@@ -9,7 +9,8 @@
 //! answers over the BRIDGE-class kind
 //! `fauna.bridges.atproto.deliver_permission_set` with the verified dag-cbor
 //! bytes — or with no record at all when its chain refused. The two legs are
-//! correlated here, by `request_id`, in [`PermissionSetRequests`].
+//! correlated by `request_id` in [`PermissionSetRequests`], the shared
+//! nest→bridge waiter registry ([`crate::bridge_round_trip`]).
 //!
 //! # Why a push out and an RPC back, not a nest-initiated `Request` frame
 //!
@@ -33,15 +34,14 @@
 //! serves repeats under the spec's TTLs, and a second cache here would be a
 //! second freshness rule for one document.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use fauna_bridge_atproto::permission_set::ParsedInclude;
 use fauna_protocol::PushEvent;
 use fauna_protocol::atproto_pds::BridgeAtprotoPermissionSetRequestedPush;
-use tokio::sync::oneshot;
 
+use crate::bridge_round_trip::RoundTrips;
 use crate::db::bridge_service_users::BridgeRole;
 use crate::routes::AppState;
 
@@ -55,128 +55,23 @@ use crate::routes::AppState;
 /// waits.
 pub const PERMISSION_SET_RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How many resolutions may be in flight at once before the oldest is shed.
-///
-/// Bounded like every other store the ceremony keeps (`ParStore`,
-/// `ConsentWakes`): `/oauth/par` is anonymous, so an unbounded map keyed by
-/// caller-driven requests is a memory lever. Sized far above what the per-IP
-/// PAR budget lets through in one deadline window, so an honest population
-/// never sheds anything; a flood sheds its own oldest, and a shed waiter is
-/// **refused**, never guessed — the same closed-world answer as a timeout.
-pub const PERMISSION_SET_REQUEST_CAPACITY: usize = 1024;
-
-/// Bytes of entropy in a `request_id`. The id names an in-memory waiter for at
-/// most one deadline; 128 bits is what stops another party's answer landing
-/// on it by guess, and no more is needed.
-pub const REQUEST_ID_LEN: usize = 16;
-
 /// What the bridge delivered for one request: the verified dag-cbor bytes, or
 /// `None` when its chain refused the set.
 pub type Delivery = Option<Vec<u8>>;
 
-struct Waiter {
-    sender: oneshot::Sender<Delivery>,
-    /// Monotonic open order, for oldest-first shedding.
-    opened: u64,
-}
-
-#[derive(Default)]
-struct Inner {
-    waiters: HashMap<[u8; REQUEST_ID_LEN], Waiter>,
-    next_open: u64,
-}
-
 /// The in-flight permission-set requests: `request_id` → the PAR waiting on
 /// it. One entry per include, opened before the push goes out and removed by
-/// the delivery, the deadline, or the shed.
-#[derive(Default)]
-pub struct PermissionSetRequests {
-    inner: Mutex<Inner>,
-}
+/// the delivery, the deadline, or the shed — the shared nest→bridge registry
+/// ([`crate::bridge_round_trip`]), sized by its
+/// [`crate::bridge_round_trip::ROUND_TRIP_CAPACITY`]: `/oauth/par` is
+/// anonymous, and that bound sits far above what the per-IP PAR budget lets
+/// through in one deadline window.
+pub type PermissionSetRequests = RoundTrips<Delivery>;
 
-impl PermissionSetRequests {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Mint a request id and register the waiter that will receive its answer.
-    ///
-    /// Registered **before** the push is sent, so an answer that arrives
-    /// faster than the caller can await it is not lost — the `oneshot` holds
-    /// it. At capacity the oldest waiter is shed: its sender drops, its
-    /// receiver sees `RecvError`, and [`resolve_permission_sets`] refuses.
-    pub fn open(&self) -> ([u8; REQUEST_ID_LEN], oneshot::Receiver<Delivery>) {
-        use rand::RngCore as _;
-
-        let mut inner = self.inner.lock().expect("permission-set requests poisoned");
-        if inner.waiters.len() >= PERMISSION_SET_REQUEST_CAPACITY {
-            let oldest = inner
-                .waiters
-                .iter()
-                .min_by_key(|(_, w)| w.opened)
-                .map(|(id, _)| *id);
-            if let Some(id) = oldest {
-                inner.waiters.remove(&id);
-                tracing::warn!(
-                    target: "oauth_as",
-                    "permission-set requests at capacity; shed the oldest waiter (it is refused, never guessed)"
-                );
-            }
-        }
-        let mut id = [0u8; REQUEST_ID_LEN];
-        loop {
-            rand::rngs::OsRng.fill_bytes(&mut id);
-            if !inner.waiters.contains_key(&id) {
-                break;
-            }
-        }
-        let (sender, receiver) = oneshot::channel();
-        let opened = inner.next_open;
-        inner.next_open += 1;
-        inner.waiters.insert(id, Waiter { sender, opened });
-        (id, receiver)
-    }
-
-    /// Hand the bridge's answer to the waiting PAR. `false` when nothing waits
-    /// under that id — the deadline already answered, the id was never minted,
-    /// or the waiter was shed — which is a log line for the bridge and never an
-    /// error: a late answer is ordinary.
-    pub fn deliver(&self, request_id: &[u8], record: Delivery) -> bool {
-        let Ok(id) = <[u8; REQUEST_ID_LEN]>::try_from(request_id) else {
-            return false;
-        };
-        let waiter = self
-            .inner
-            .lock()
-            .expect("permission-set requests poisoned")
-            .waiters
-            .remove(&id);
-        match waiter {
-            // A receiver that has already gone away (the caller's future was
-            // dropped) makes the send fail; that is the same "nobody waits"
-            // answer, not a fault.
-            Some(w) => w.sender.send(record).is_ok(),
-            None => false,
-        }
-    }
-
-    /// Drop a waiter the caller has stopped waiting on.
-    pub fn forget(&self, request_id: &[u8; REQUEST_ID_LEN]) {
-        self.inner
-            .lock()
-            .expect("permission-set requests poisoned")
-            .waiters
-            .remove(request_id);
-    }
-
-    #[cfg(test)]
-    fn pending(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("permission-set requests poisoned")
-            .waiters
-            .len()
-    }
+/// A fresh, empty registry for [`crate::oauth_as_state::OAuthAsRuntime`].
+#[must_use]
+pub fn new_requests() -> PermissionSetRequests {
+    RoundTrips::new("permission-set")
 }
 
 /// The set that could not be resolved — the first one to fail, named because
@@ -301,47 +196,6 @@ mod tests {
             nsid: nsid.to_string(),
             aud: None,
         }
-    }
-
-    #[tokio::test]
-    async fn a_delivery_before_the_await_is_not_lost() {
-        let registry = PermissionSetRequests::new();
-        let (id, receiver) = registry.open();
-        assert!(registry.deliver(&id, Some(b"doc".to_vec())));
-        assert_eq!(receiver.await.unwrap(), Some(b"doc".to_vec()));
-        assert_eq!(registry.pending(), 0);
-    }
-
-    #[test]
-    fn an_unknown_or_malformed_id_is_not_accepted() {
-        let registry = PermissionSetRequests::new();
-        let (id, _receiver) = registry.open();
-        assert!(!registry.deliver(&[0u8; REQUEST_ID_LEN], Some(vec![])));
-        assert!(!registry.deliver(&id[..5], Some(vec![])));
-        assert!(registry.deliver(&id, None), "a refusal is a delivery too");
-        assert!(
-            !registry.deliver(&id, None),
-            "a second answer matches nothing"
-        );
-    }
-
-    #[tokio::test]
-    async fn at_capacity_the_oldest_waiter_is_shed_and_refused() {
-        let registry = PermissionSetRequests::new();
-        let (_, oldest) = registry.open();
-        let mut later = Vec::new();
-        for _ in 1..PERMISSION_SET_REQUEST_CAPACITY {
-            later.push(registry.open());
-        }
-        assert_eq!(registry.pending(), PERMISSION_SET_REQUEST_CAPACITY);
-        let (_, newest) = registry.open();
-        assert_eq!(registry.pending(), PERMISSION_SET_REQUEST_CAPACITY);
-        assert!(
-            oldest.await.is_err(),
-            "the shed waiter must be refused, not left hanging"
-        );
-        drop(newest);
-        drop(later);
     }
 
     #[tokio::test]

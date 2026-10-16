@@ -116,6 +116,10 @@ pub struct BlocklistEntry {
     /// The query did not give a clean listed/not-listed answer (resolver
     /// error, rate-limited force-refresh).
     pub errored: bool,
+    /// The list's own reason for a listing (its TXT record), empty when it
+    /// gave none — inlined on the self-check row (`mail-deliverability.md`
+    /// § Blocklist self-check → *Admin-pane rendering*).
+    pub reason: String,
 }
 
 /// One row of the latest diagnostics run (`name` + `pass`/`warn`/`fail`).
@@ -197,6 +201,38 @@ pub fn delist_url_for(server: &str) -> Option<&'static str> {
     }
 }
 
+/// The standing per-list result over the self-check history, newest row first
+/// (`mail-deliverability.md` § Blocklist self-check → *Admin-pane rendering*:
+/// on a resolver error "the prior result is preserved until the next
+/// successful query"). Each list's newest entry decides whether it errored
+/// last time; its `listed` and `reason` come from its newest ANSWERED entry,
+/// so a list that did not answer never clears a listing an earlier check
+/// found. A list never answered reads as errored and not listed. Lists keep
+/// the order they first appear in, newest row first; `None` when no check has
+/// ever run.
+pub fn standing_blocklist(history: &[Vec<BlocklistEntry>]) -> Option<Vec<BlocklistEntry>> {
+    if history.is_empty() {
+        return None;
+    }
+    let mut out: Vec<BlocklistEntry> = Vec::new();
+    for entry in history.iter().flatten() {
+        if out.iter().any(|e| e.server == entry.server) {
+            continue;
+        }
+        let answered = history
+            .iter()
+            .flatten()
+            .find(|e| e.server == entry.server && !e.errored);
+        out.push(BlocklistEntry {
+            server: entry.server.clone(),
+            listed: answered.is_some_and(|a| a.listed),
+            errored: entry.errored,
+            reason: answered.map(|a| a.reason.clone()).unwrap_or_default(),
+        });
+    }
+    Some(out)
+}
+
 /// The categorical state alone — worst wins, in [`MailHealthState::ORDER`].
 pub fn fold(inputs: &HealthInputs) -> MailHealthState {
     MailHealthState::ORDER
@@ -265,12 +301,19 @@ pub fn evaluate(inputs: &HealthInputs) -> HealthReport {
     };
 
     let listed: Vec<&str> = listed_on(i).map(|e| e.server.as_str()).collect();
+    // Each list named, with the reason it gave inlined when it gave one.
+    let listed_detail: Vec<String> = listed_on(i)
+        .map(|e| match e.reason.trim() {
+            "" => e.server.clone(),
+            reason => format!("{} ({reason})", e.server),
+        })
+        .collect();
     let blocklist = match &i.blocklist {
         None => check(1, CheckState::Info, "not checked yet"),
         Some(_) if !listed.is_empty() => check(
             1,
             CheckState::Fail,
-            format!("listed on {}", listed.join(", ")),
+            format!("listed on {}", listed_detail.join(", ")),
         ),
         Some(rows) => match rows.iter().filter(|e| e.errored).count() {
             0 => check(1, CheckState::Pass, "not listed"),
@@ -343,6 +386,7 @@ mod tests {
                 server: "zen.spamhaus.org".into(),
                 listed: false,
                 errored: false,
+                ..Default::default()
             }]),
             stalled_outbound: 0,
             diagnostics: Some(vec![DiagnosticEntry {
@@ -392,11 +436,13 @@ mod tests {
                 server: "zen.spamhaus.org".into(),
                 listed: false,
                 errored: false,
+                ..Default::default()
             },
             BlocklistEntry {
                 server: "bl.spamcop.net".into(),
                 listed: true,
                 errored: false,
+                ..Default::default()
             },
         ]);
         i.stalled_outbound = 1;
@@ -414,11 +460,101 @@ mod tests {
             server: "zen.spamhaus.org".into(),
             listed: false,
             errored: true,
+            ..Default::default()
         }]);
         let r = evaluate(&i);
         assert_eq!(r.state, MailHealthState::Delivering);
         assert_eq!(r.checks[1].state, CheckState::Warn);
         assert_eq!(r.delist_url, None);
+    }
+
+    fn entry(server: &str, listed: bool, errored: bool, reason: &str) -> BlocklistEntry {
+        BlocklistEntry {
+            server: server.into(),
+            listed,
+            errored,
+            reason: reason.into(),
+        }
+    }
+
+    #[test]
+    fn an_unanswered_check_leaves_an_earlier_listing_standing() {
+        // Newest first: the list did not answer, the check before listed us.
+        let history = vec![
+            vec![entry("zen.spamhaus.org", false, true, "")],
+            vec![entry("zen.spamhaus.org", true, false, "listed for spam")],
+        ];
+        let standing = standing_blocklist(&history).unwrap();
+        assert_eq!(
+            standing,
+            vec![entry("zen.spamhaus.org", true, true, "listed for spam")]
+        );
+        let mut i = healthy();
+        i.blocklist = Some(standing);
+        let r = evaluate(&i);
+        assert_eq!(r.state, MailHealthState::Blocklisted);
+        assert_eq!(r.delist_url, delist_url_for("zen.spamhaus.org"));
+    }
+
+    #[test]
+    fn a_later_answered_check_clears_a_listing() {
+        let history = vec![
+            vec![entry("zen.spamhaus.org", false, false, "")],
+            vec![entry("zen.spamhaus.org", true, false, "listed for spam")],
+        ];
+        assert_eq!(
+            standing_blocklist(&history).unwrap(),
+            vec![entry("zen.spamhaus.org", false, false, "")]
+        );
+    }
+
+    #[test]
+    fn a_list_missing_from_the_newest_row_keeps_its_own_newest_answer() {
+        // A rate-limited re-check asks no list and records nothing for it.
+        let history = vec![
+            vec![entry("bl.spamcop.net", false, false, "")],
+            vec![
+                entry("zen.spamhaus.org", true, false, ""),
+                entry("bl.spamcop.net", false, false, ""),
+            ],
+        ];
+        let standing = standing_blocklist(&history).unwrap();
+        assert_eq!(
+            standing,
+            vec![
+                entry("bl.spamcop.net", false, false, ""),
+                entry("zen.spamhaus.org", true, false, ""),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_list_that_never_answered_reads_errored_not_listed() {
+        let history = vec![vec![entry("zen.spamhaus.org", false, true, "")]];
+        let mut i = healthy();
+        i.blocklist = standing_blocklist(&history);
+        let r = evaluate(&i);
+        assert_eq!(r.state, MailHealthState::Delivering);
+        assert_eq!(r.checks[1].state, CheckState::Warn);
+    }
+
+    #[test]
+    fn no_history_is_never_checked() {
+        assert_eq!(standing_blocklist(&[]), None);
+    }
+
+    #[test]
+    fn a_listing_names_the_list_and_its_reason() {
+        let mut i = healthy();
+        i.blocklist = Some(vec![
+            entry("zen.spamhaus.org", true, false, "listed for spam pattern X"),
+            entry("bl.spamcop.net", true, false, ""),
+        ]);
+        let r = evaluate(&i);
+        assert_eq!(
+            r.checks[1].detail,
+            "listed on zen.spamhaus.org (listed for spam pattern X), bl.spamcop.net"
+        );
     }
 
     #[test]

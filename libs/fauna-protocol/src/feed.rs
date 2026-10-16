@@ -331,6 +331,29 @@ pub struct FeedPostItem {
     /// degrade). Additive + `None`-default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gated_room: Option<String>,
+    /// On a **repost row** ([`reposted_post_id`](Self::reposted_post_id)
+    /// `Some`), the repost TARGET's tier — its `content_meta.gated_tier`,
+    /// projected beside `reposted_post_id` so the repost card paints the
+    /// target's `gated-post-badge` over the target's teaser
+    /// (`docs/goal/behavior/restricted-posts.md` § Encryption at rest, ruling
+    /// 3: a repost renders "as the target's own gated card, teaser and
+    /// badge"). Deliberately a SEPARATE field from
+    /// [`gated_tier`](Self::gated_tier), which stays the repost post's own
+    /// (always `None` — a repost is public and wordless): every consumer that
+    /// reads `gated_tier` as "this row is sealed" (the reply audience, the
+    /// detail unseal, the own-post web verbs) must keep reading the repost as
+    /// public. `None` = the target is public, or not indexed on this nest.
+    /// Additive + `None`-default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reposted_gated_tier: Option<String>,
+    /// On a repost row, the hex channel id of the room the repost TARGET
+    /// addresses (its `content_meta.gated_room`) — the
+    /// [`gated_room`](Self::gated_room) twin of
+    /// [`reposted_gated_tier`](Self::reposted_gated_tier), so a member's
+    /// repost card names the room by their own label exactly as the target's
+    /// card does. Additive + `None`-default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reposted_gated_room: Option<String>,
     /// The post's web-publish slug — the `content_links` `link_type='web_published'`
     /// row's slug, projected without touching `content.payload` exactly like
     /// `quoted_post_id`. `None` = not published to the web. The **publish-state twin of

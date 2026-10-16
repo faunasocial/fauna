@@ -4,7 +4,7 @@
 The regression this pins (found live during the first tri-machine multiseat
 run, 2026-07-18): `_driver_cache` used to take `nest_instance` + `test_user`
 as EAGER fixture params, so every `app`-using test — including live-remote
-tests that sign into example.com and never touch a local nest — paid a full
+tests that sign into the live nest and never touch a local nest — paid a full
 `fauna-nest` build (~15-25 min cold, per machine) for a nest that was then
 launched-and-ignored. The fix resolves them lazily and skips them entirely
 when every selected test carries `live_nest`.

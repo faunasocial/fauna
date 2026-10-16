@@ -185,11 +185,40 @@ def test_app_attribution_accumulates_every_driver_the_test_took():
     assert fl.apps_this_test() == {"tui", "macos"}
 
 
+def test_a_peer_driver_of_an_app_parametrized_item_is_not_attributed():
+    """A helper seat is not an app under test (§ The marker): a `[web]` item that
+    launched the linux sender witnesses web alone."""
+    fl.note_param_apps({"web"})
+    fl.note_app("web")
+    fl.note_app("linux")
+    assert fl.attributed_apps() == {"web"}
+
+
+def test_an_unparametrized_item_is_attributed_every_driver_it_launched():
+    fl.note_param_apps(set())
+    fl.note_app("tui")
+    fl.note_app("macos")
+    assert fl.attributed_apps() == {"tui", "macos"}
+
+
+def test_a_seat_pair_parametrization_attributes_both_apps():
+    fl.note_param_apps({"tui", "linux"})
+    fl.note_app("tui")
+    fl.note_app("linux")
+    assert fl.attributed_apps() == {"tui", "linux"}
+
+
+def test_an_item_with_no_parametrization_and_no_driver_is_a_nest_witness():
+    assert fl.attributed_apps() == {fl.NEST}
+
+
 def test_the_per_test_slots_reset_between_tests():
+    fl.note_param_apps({"web"})
     fl.note_app("tui")
     fl.note_skip_class(fl.UNBUILT)
     fl.reset_test_state()
     assert fl.apps_this_test() == set()
+    assert fl.attributed_apps() == {fl.NEST}
     assert fl.skip_class_this_test() is None
 
 
@@ -354,6 +383,24 @@ def test_a_repeat_run_never_un_promotes_a_release(tmp_path):
                       image_digest="sha256:" + "b" * 64, today="2026-08-29")
     row, = _table(tmp_path)
     assert row["promoted"] is True
+
+
+def test_record_release_writes_candidate_run_and_keeps_verified(tmp_path):
+    """The run writes `candidate_run` (the field the tag gate reads); `verified`, written
+    by `just release-verified` into the same (commit, digest) row, survives the upsert."""
+    fl.record_release(tmp_path, version="0.4.1", commit="a" * 40,
+                      image_digest="sha256:" + "b" * 64, today="2026-08-27")
+    table = json.loads((tmp_path / "releases.json").read_text(encoding="utf-8"))
+    assert table["releases"][0]["candidate_run"] == "2026-08-27"
+    table["releases"][0]["verified"] = "2026-08-26"
+    (tmp_path / "releases.json").write_text(json.dumps(table), encoding="utf-8")
+
+    fl.record_release(tmp_path, version="0.4.1", commit="a" * 40,
+                      image_digest="sha256:" + "b" * 64, today="2026-08-29")
+    row, = _table(tmp_path)
+    assert row["candidate_run"] == "2026-08-29"
+    assert row["date"] == "2026-08-29"
+    assert row["verified"] == "2026-08-26"
 
 
 def test_a_different_artifact_at_the_same_commit_is_a_second_row(tmp_path):
@@ -1074,6 +1121,101 @@ def test_the_candidate_gate_shares_the_one_definition_of_clean(tmp_path):
     assert refusal and "docker inspect" in refusal and "not clean" not in refusal, refusal
 
 
+# ── the public build: paired with the private HEAD by its Sync-Point trailer ──
+# feature-catalog.md § Tag gate and release table, "Promotion copies the tested
+# digest": the public repository builds its OWN artifact of the published tree, so
+# its image carries the PUBLIC commit. The candidate run accepts it when that public
+# commit's `Sync-Point:` trailer (written by `fauna-publish pr`) names HEAD, keys the
+# row on HEAD, and records the public commit beside the digest.
+def _public_clone(tmp_path, sync_point: str | None):
+    """A one-commit stand-in for the public clone, its message carrying the trailer."""
+    clone = tmp_path / "public"
+    clone.mkdir()
+    git = ["git", "-c", "user.name=ledger-test", "-c",
+           "user.email=ledger-test@example.invalid", "-c", "commit.gpgsign=false",
+           "-C", str(clone)]
+    subprocess.run(["git", "init", "-q", str(clone)], check=True, capture_output=True)
+    (clone / "a.txt").write_text("a\n", encoding="utf-8")
+    subprocess.run(git + ["add", "."], check=True, capture_output=True)
+    message = "Sync from the private tree\n\nA public-voice summary."
+    if sync_point:
+        message += f"\n\nSync-Point: {sync_point}"
+    subprocess.run(git + ["commit", "-qm", message], check=True, capture_output=True)
+    sha = subprocess.run(git + ["rev-parse", "HEAD"], check=True, capture_output=True,
+                         text=True).stdout.strip()
+    return clone, sha
+
+
+def _built_from(monkeypatch, build_commit: str):
+    monkeypatch.setattr(fl, "_inspect_image", lambda image: (
+        [f"FAUNA_BUILD_COMMIT={build_commit}", "PATH=/usr/bin"],
+        ["ghcr.io/faunasocial/nest@sha256:" + "c" * 64]))
+
+
+def test_a_public_build_paired_by_its_sync_point_is_a_candidate(tmp_path, monkeypatch):
+    repo = _git_repo(tmp_path)
+    head = fl.head_commit(repo)
+    clone, public = _public_clone(tmp_path, head[:10])
+    _built_from(monkeypatch, public)
+    assert fl.release_candidate_verdict_for_image(
+        "ghcr.io/faunasocial/nest:test", repo=repo, public_clone=clone) == (None, public)
+    assert fl.release_candidate_refusal_for_image(
+        "ghcr.io/faunasocial/nest:test", repo=repo, public_clone=clone) is None
+
+
+def test_a_public_build_of_another_private_commit_is_refused(tmp_path, monkeypatch):
+    repo = _git_repo(tmp_path)
+    head = fl.head_commit(repo)
+    clone, public = _public_clone(tmp_path, "0123456789")
+    _built_from(monkeypatch, public)
+    refusal, public_commit = fl.release_candidate_verdict_for_image(
+        "ghcr.io/faunasocial/nest:test", repo=repo, public_clone=clone)
+    assert public_commit is None
+    assert refusal and public[:12] in refusal and head[:12] in refusal, refusal
+    assert "0123456789" in refusal, refusal
+
+
+def test_a_public_commit_without_a_sync_point_is_refused(tmp_path, monkeypatch):
+    repo = _git_repo(tmp_path)
+    clone, public = _public_clone(tmp_path, None)
+    _built_from(monkeypatch, public)
+    refusal = fl.release_candidate_refusal_for_image(
+        "ghcr.io/faunasocial/nest:test", repo=repo, public_clone=clone)
+    assert refusal and "no Sync-Point" in refusal, refusal
+
+
+def test_a_build_commit_the_public_clone_lacks_is_refused(tmp_path, monkeypatch):
+    repo = _git_repo(tmp_path)
+    clone, _public = _public_clone(tmp_path, "0123456789")
+    _built_from(monkeypatch, "f" * 40)
+    refusal = fl.release_candidate_refusal_for_image(
+        "ghcr.io/faunasocial/nest:test", repo=repo, public_clone=clone)
+    assert refusal and "is not in" in refusal, refusal
+
+
+def test_a_private_build_of_head_records_no_public_commit(tmp_path, monkeypatch):
+    repo = _git_repo(tmp_path)
+    _built_from(monkeypatch, fl.head_commit(repo))
+    assert fl.release_candidate_verdict_for_image(
+        "ghcr.io/faunasocial/nest:sha-x", repo=repo,
+        public_clone=tmp_path / "no-such-clone") == (None, None)
+
+
+def test_the_public_clone_defaults_to_the_standing_mirror(tmp_path):
+    """`<dev-parent>/fauna` — `fauna-publish`'s own `mirror_dir_default` derivation."""
+    repo = _git_repo(tmp_path)
+    assert fl.mirror_dir_default(repo) == (tmp_path / "fauna").resolve()
+
+
+def test_a_candidate_run_of_a_public_build_records_the_public_commit(tmp_path):
+    fl.record_release(tmp_path, version="0.4.1", commit="a" * 40,
+                      image_digest="sha256:" + "b" * 64,
+                      image="ghcr.io/faunasocial/nest:test", public_commit="d" * 40,
+                      today="2026-10-13")
+    row, = _table(tmp_path)
+    assert row["commit"] == "a" * 40 and row["public_commit"] == "d" * 40
+
+
 # ── rebased commits: `commit` names what ran; `base` names what will still resolve ──
 # Found 2026-09-05: a record's `commit` is the run's own HEAD,
 # and every landing path rebases onto `origin/main` before it fast-forward-pushes,
@@ -1399,7 +1541,7 @@ def test_the_live_provisioning_doors_are_wired():
 
 
 # ── The live-box PREFLIGHT: a box that answered "not mine" is setup, not product ──
-# 2026-10-04: a `--nest live` run against a reset example.com reached the admin
+# 2026-10-04: a `--nest live` run against a reset live nest reached the admin
 # probe, and the box ANSWERED `fauna.auth.not_registered` for the admin seed.
 # The door above leaves every typed answer a product signal, so all 3 tui tests
 # died in setup as recorded `error`s and the AP serving test wrote a `failed`
@@ -1474,7 +1616,7 @@ def test_the_preflight_is_wired_where_a_live_run_first_signs_in():
 
 def test_the_admin_probe_skip_names_the_seed_source_it_was_refused_with(_live_run):
     """A `not_registered` to the admin seed is only diagnosable when the skip says
-    WHICH seed was refused — example.com's ~/.fauna-id offered to dev.example.com read
+    WHICH seed was refused — the former live nest's ~/.fauna-id offered to dev.example.com read
     as a reset box for a whole session."""
     what = live_box_door.admin_probe_what("https://box", "~/.fauna-id")
     with pytest.raises(pytest.skip.Exception, match=r"admin seed from ~/\.fauna-id.*not_registered"):

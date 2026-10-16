@@ -175,6 +175,8 @@ async fn a_replica_walks_its_sibling_over_real_quic() {
             custody_revoked: None,
             device_removed: None,
             file_chunks: None,
+            folder_changes: None,
+            folder_manifests: None,
             quotas: QuotaConfig::default(),
             now: now_fn,
         },

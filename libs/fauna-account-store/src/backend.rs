@@ -20,13 +20,9 @@ use fauna_core::data::ContentHash;
 
 use crate::segments::{AdoptedBlock, SegmentHalf, SegmentKey, SegmentSink};
 use crate::types::{
-    InsertOutcome, IssuedRetire, ItemRef, JournalRow, NewOutboxIntent, OutboxIntent,
-    RecordIndexEntry, RelayRow, StateEntry, WriterId,
+    CustodiedRecovery, InsertOutcome, IssuedRetire, ItemRef, JournalRow, NewOutboxIntent,
+    OutboxIntent, RecordIndexEntry, RelayRow, StateEntry, WriterId,
 };
-
-/// A readable, seekable staged `.dat` — what [`crate::segments::admit`] reads.
-pub trait ReadSeek: std::io::Read + std::io::Seek {}
-impl<T: std::io::Read + std::io::Seek> ReadSeek for T {}
 
 /// One incoming segment pair, staged in the backend's own segment area
 /// ([`StoreBackend::segment_stage`]) — written chunk by chunk as a
@@ -39,6 +35,11 @@ impl<T: std::io::Read + std::io::Seek> ReadSeek for T {}
 /// replays a scope drop's pending file sweep.
 #[allow(async_fn_in_trait)]
 pub trait SegmentStaging: SegmentSink {
+    /// The staged `.dat` read by range ([`Self::dat_reader`]).
+    type DatReader<'a>: fauna_carv2::ReadAt
+    where
+        Self: 'a;
+
     /// Bytes staged so far for `half`.
     fn len(&self, half: SegmentHalf) -> u64;
 
@@ -46,9 +47,11 @@ pub trait SegmentStaging: SegmentSink {
     /// sidecar is (it grows with the record count, not the record bytes).
     async fn meta(&mut self) -> Result<Vec<u8>>;
 
-    /// The staged `.dat`, read back from where it rests (buffered by
-    /// [`crate::segments::SEGMENT_TRANSFER_CHUNK`]).
-    async fn dat_reader(&mut self) -> Result<Box<dyn ReadSeek + '_>>;
+    /// The staged `.dat`, read by range from where it rests — what
+    /// [`crate::segments::admit`] reads one record at a time. Opening it
+    /// reads no record bytes: an arm whose medium is async (OPFS) serves each
+    /// range as its own read, so no arm ever holds the container.
+    async fn dat_reader(&mut self) -> Result<Self::DatReader<'_>>;
 
     /// A crash's leftover, for the conformance suite: close the slot as a
     /// dying process would — bytes on disk, no lock held, nothing adopted, no
@@ -386,16 +389,16 @@ pub trait StoreBackend {
     /// Drop, **locally**, every relay row in `scope` whose cleartext header
     /// names `generation`, whoever wrote it; returns how many went. The
     /// reclamation pass's sweep of a shredded generation's residue — rows no
-    /// key opens any more (`account-data-taxonomy.md` § The generation
-    /// machinery → *Fleet-scope reclamation*, clause (3)(h)).
+    /// key opens any more (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (3)(h)).
     async fn relay_forget_sealed_under(&self, scope: &str, generation: &[u8; 32]) -> Result<u64>;
 
     /// Every live relay row in `scope` whose cleartext header names
     /// `generation`, whoever wrote it, in no promised order — answered from
     /// the same index as [`Self::relay_generations`]. The let-go's read: a
     /// dead generation's rows are named and counted by their coordinates,
-    /// never opened (`account-data-taxonomy.md` § The generation machinery →
-    /// *Fleet-scope reclamation*, clause (3)(j)).
+    /// never opened (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (3)(j)).
     async fn relay_rows_sealed_under(
         &self,
         scope: &str,
@@ -461,6 +464,16 @@ pub trait StoreBackend {
     /// `through` — what a reader that read up to `through` clears, leaving an
     /// entry another process recorded since. Idempotent.
     async fn issued_retires_clear_through(&self, through: u64) -> Result<()>;
+
+    /// The custodied owner's recovery material
+    /// ([`CustodiedRecovery`]) — all three rows from one read; the default
+    /// (nothing held) on a store that never held any.
+    async fn custodied_recovery(&self) -> Result<CustodiedRecovery>;
+
+    /// Replace the custodied recovery material whole — the three rows in one
+    /// transaction, so a reader never sees a blob beside a chain it was not
+    /// kept under.
+    async fn custodied_recovery_put(&self, material: &CustodiedRecovery) -> Result<()>;
 
     /// Per writer, the highest `writer_seq` among `scope`'s live relay rows of
     /// `item_class`, unordered — what this store has **seen** of each writer,

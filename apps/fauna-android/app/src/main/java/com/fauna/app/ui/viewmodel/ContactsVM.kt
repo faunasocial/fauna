@@ -18,6 +18,7 @@ import com.fauna.app.core.foldContactAsked
 import com.fauna.app.core.foldKnockReply
 import com.fauna.app.core.ResolveService
 import com.fauna.app.core.SecureStorage
+import com.fauna.app.core.SuccessionAftermathHost
 import com.fauna.app.data.db.*
 import com.fauna.ffi.FfiAddressbookRow
 import com.fauna.ffi.FfiCardRow
@@ -40,6 +41,7 @@ class ContactsVM @Inject constructor(
     private val contactDao: ContactDao,
     private val knockDao: KnockDao,
     private val resolveService: ResolveService,
+    private val aftermath: SuccessionAftermathHost,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
 
@@ -83,10 +85,9 @@ class ContactsVM @Inject constructor(
      *  badge half of the review pair, second reading of the same shared
      *  projection the conversations screen's chip pair reads
      *  ([ConversationsVM.memberReviewRoster]). Refreshed alongside [refresh]
-     *  (mount + reconnect + knock push): this app drives no aftermath pump of
-     *  its own yet, so this page's own ordinary refresh cadence stands in for
-     *  "behind the aftermath's raise" the same way linux's contacts page
-     *  does. Best-effort — a roster read failure must never blank an
+     *  (mount + reconnect + knock push) and at the aftermath's
+     *  `config_stage_settled` ([SuccessionAftermathHost.configStageSettled]) —
+     *  the ratified "behind the aftermath's raise" point. Best-effort — a roster read failure must never blank an
      *  already-rendered mark or disrupt the contact list refresh beside it. */
     val memberReviewRoster = MutableStateFlow<List<com.fauna.ffi.FfiMemberReview>>(emptyList())
 
@@ -108,6 +109,11 @@ class ContactsVM @Inject constructor(
         // NestRpcClient.StartKnockPump is the reference shape).
         viewModelScope.launch {
             api.knockTick.collect { refresh() }
+        }
+        // The aftermath's raises have settled: re-read the roster behind the
+        // badge (`succession-aftermath.md` § Propagation).
+        viewModelScope.launch {
+            aftermath.configStageSettled.collect { refresh() }
         }
     }
 
@@ -236,18 +242,21 @@ class ContactsVM @Inject constructor(
     }
 
     /**
-     * `contacts-add-button` — knock [peerId] on this nest (a bare id / same-nest
-     * lookup names no foreign nest, so no route). The button reads "Sent" only
-     * once the nest accepted it; the TYPED guardian refusal re-enables it,
-     * reveals the ask, and stays on `error-message` (rules (a), (b)).
+     * `contacts-add-button` — knock [peerId]. [recipientNestUrl] is the lookup's
+     * own nest ([ResolveService.ResolvedRecipient.nestUrl]): the peer a foreign
+     * `user@domain` resolved on, so the home nest originates the federation
+     * delivery; `null` (a bare id / same-nest lookup) delivers on this nest.
+     * The button reads "Sent" only once the nest accepted it; the TYPED guardian
+     * refusal re-enables it, reveals the ask, and stays on `error-message`
+     * (rules (a), (b)).
      */
-    fun addContact(peerId: String) {
+    fun addContact(peerId: String, recipientNestUrl: String? = null) {
         val before = knockAsk.value
         if (before.peer == peerId && (before.knockSent || before.knockInFlight)) return
         val actorId = actorIdHex() ?: return
         if (before.peer == peerId) knockAsk.value = before.copy(knockInFlight = true)
         viewModelScope.launch {
-            val result = classifyKnock { api.sendKnock(actorId, peerId) }
+            val result = classifyKnock { api.sendKnock(actorId, peerId, recipientNestUrl) }
             val (next, effect) = foldKnockReply(knockAsk.value, peerId, result)
             knockAsk.value = next
             knockError.value = knockErrorText(effect)

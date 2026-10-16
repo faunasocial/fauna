@@ -217,6 +217,44 @@ pub struct EscrowStatusReply {
     pub extra: BTreeMap<String, Value>,
 }
 
+/// The kind name of [`EscrowPullRequest`], as a shared symbol — spelled in
+/// two crates (the nest registers it; the custody pump leg in
+/// `fauna_sync_engine::custody_leg` calls it), so a literal could drift into a
+/// silent `unknown_kind`.
+pub const ESCROW_PULL_KIND: &str = "fauna.recovery.escrow.pull";
+
+/// `fauna.recovery.escrow.pull` request — a CUSTODIAN fetches the custodied
+/// owner's seed-escrow blob (`identity-succession.md` § Seed escrow → *The
+/// custodian copy*, ruling 1).
+///
+/// **Custodian class, admitted as the custody read doors are:** the caller is
+/// the custody bearer, and a live `Account`-form custody capability row on
+/// this nest must name it as holder over `owner_actor_id`. The recovery
+/// material is of the account, not of a scope, so only the `Account` form
+/// covers it. Every refusal is the custody doors' one `permission_denied` — a
+/// refused custodian learns what a stranger learns.
+///
+/// The blob is the same ciphertext the home nest holds, sealed to a
+/// RecoveryKey the custodian never sees, so carrying it is keyless.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EscrowPullRequest {
+    /// The 32-byte custodied owner whose blob is pulled.
+    pub owner_actor_id: ByteBuf,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EscrowPullReply {
+    /// The opaque blob, byte-identical to what the owner put.
+    pub blob: ByteBuf,
+    /// Unix seconds the owner's nest recorded the blob at — the stamp the
+    /// custodied copy is replaced on (a newer stamp replaces, never an older).
+    pub updated_at: i64,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Seed-initiated replacement — the pending window
 // (`identity-succession.md:37`: 30 days, loudly notified, vetoable instantly)

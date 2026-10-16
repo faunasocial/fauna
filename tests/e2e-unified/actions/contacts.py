@@ -180,15 +180,22 @@ class ContactsActions:
         convention 7, the platform check lives in the action layer.
 
         tui shipped it as the lead app (`testing.md` § Default app and nest
-        mode: rust → nest → tui → batched trickle-down). The transport half is
-        already shared on all seven — every app's `fauna.inbox.send` binding
-        takes `recipient_nest_url`, and the decision + URL derivation are shared
-        Rust (`fauna_core::resolve::is_foreign_handle_domain`,
-        `fauna_provisioning::probe::peer_nest_url`) — so what the other six owe
-        is the page wiring, not a mechanism. Parity debt, hence `skip_unbuilt`
-        rather than `declared_absence`.
+        mode: rust → nest → tui → batched trickle-down); linux, web and android
+        followed over the shared `fauna_client_core::find_user::find_user_across_nests`. The
+        transport half is shared on all seven — every app's `fauna.inbox.send`
+        binding takes `recipient_nest_url`, and the decision + URL derivation are
+        shared Rust (`fauna_core::resolve::is_foreign_handle_domain`,
+        `fauna_provisioning::probe::peer_nest_url`, exported to the FFI/wasm apps
+        as `find_user` / `findUser`) — so what the rest owe is the page wiring,
+        not a mechanism. Parity debt, hence `skip_unbuilt` rather than
+        `declared_absence`.
         """
-        if not self.driver.is_tui():
+        if not (
+            self.driver.is_tui()
+            or self.driver.is_linux()
+            or self.driver.is_web()
+            or self.driver.is_android()
+        ):
             from helpers.app_surface import skip_unbuilt
 
             skip_unbuilt(
@@ -198,7 +205,7 @@ class ContactsActions:
                     "a typed foreign `user@domain` resolves against the peer "
                     "nest and the knock carries `recipient_nest_url`; tui "
                     "shipped it as the lead app over the shared decision + URL "
-                    "helpers, the other six still send null"
+                    "helpers, windows and apple still send null"
                 ),
                 tracked="contacts.md § Implementation status today; the batched per-app trickle-down",
             )
@@ -262,14 +269,15 @@ class ContactsActions:
 
         tui shipped it 2026-08-14 as the lead app; macOS + iOS (through the
         shared FaunaKit ``ContactAskRow``), linux and web lifted it 2026-09-26;
-        the remaining apps lift it (parity debt, hence skip_unbuilt rather than
-        declared_absence)."""
+        windows lifted it with the rest of the batch; the remaining apps lift it
+        (parity debt, hence skip_unbuilt rather than declared_absence)."""
         if not (
             self.driver.is_tui()
             or self.driver.is_macos()
             or self.driver.is_ios()
             or self.driver.is_linux()
             or self.driver.is_web()
+            or self.driver.is_windows()
         ):
             from helpers.app_surface import skip_unbuilt
 

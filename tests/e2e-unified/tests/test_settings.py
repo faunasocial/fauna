@@ -2,7 +2,7 @@ import uuid
 import pytest
 
 from common.launch_harness import reached_authenticated_app
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import declared_absence, skip_unbuilt
 from helpers.budgets import RPC_ROUNDTRIP_S
 from helpers.rpc_hold import (
     arm_rpc_hold,
@@ -512,6 +512,27 @@ def test_spam_preferences(logged_in_app):
     )
 
 
+@pytest.mark.feature("privacy-settings")
+def test_spam_threshold_reads_back_in_band_words(logged_in_app):
+    """The spam filter's strength reads back in words for the value you chose
+    (`docs/goal/ui/settings.md` § Spam threshold slider labels): 0.2 / 0.5 / 0.9
+    show the three shared `status.spam.*` words."""
+    settings = logged_in_app.settings
+    for value, want in (
+        ("0.2", S.status.spam.aggressive),
+        ("0.5", S.status.spam.moderate),
+        ("0.9", S.status.spam.permissive),
+    ):
+        settings.set_spam_threshold(value)
+        wait_until(
+            lambda: settings.get_spam_threshold_band() == want,
+            RPC_ROUNDTRIP_S,
+            diagnose=lambda: (
+                f"threshold {value}: band shows {settings.get_spam_threshold_band()!r}, want {want!r}"
+            ),
+        )
+
+
 @pytest.mark.web  # a witness that can drive only web is MARKED for it, never gated by
 # declared_absence on the others: an absence names a behaviour a platform lacks, a mark
 # names the apps a test can drive (feature-catalog.md § Cell semantics)
@@ -970,18 +991,6 @@ def test_status_copy_buttons_copy_your_identity_and_your_nests_address(
     definition), so it asserts that one button only.
     """
     app = logged_in_app
-    if not (
-        app.driver.is_tui() or app.driver.is_linux() or app.driver.is_web()
-        or app.driver.is_macos() or app.driver.is_ios() or app.driver.is_windows()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="the Status copy buttons' `copied` attribute",
-            detail="the buttons copy, but only tui, linux, web, macos, ios and "
-            "windows report the value they wrote, so a test cannot assert "
-            "what reached the clipboard",
-            tracked="",
-        )
     app.settings._navigate_subpage("status")
     actor_id = app.settings.actor_id()
     assert len(actor_id) == 64, f"the Status page shows no actor id: {actor_id!r}"
@@ -1049,7 +1058,10 @@ def _status_text_once_loaded(app, element_id: str, *, unloaded=("", "—", "--")
     """The Status page's ``element_id`` text once its async load has painted
     past the pre-load placeholder."""
     def _read():
-        if not app.driver.is_visible(element_id):
+        # Scrolled: the Node/Sync/Encryption/Build sections sit below the fold on
+        # a tall Status page, where windows' bare `is_visible` (UIA IsOffscreen)
+        # reads a rendered element as absent.
+        if not app.driver.is_visible_scrolled(element_id):
             return None
         text = (app.driver.get_text(element_id) or "").strip()
         return None if text in unloaded else text
@@ -1064,11 +1076,10 @@ def _status_text_once_loaded(app, element_id: str, *, unloaded=("", "—", "--")
     )
 
 
-# The Status page's sections 5–8 (`status.md` § Layout & flow) are built on a
-# subset of apps today — the per-app matrix is the table there. tui, the lead
-# app, renders all four from the shared snapshot (2026-09-27); macOS and iOS
-# followed (2026-09-29); linux, web, windows and android trickle down.
-_STATUS_DETAIL_TRACKED = ""
+# The Status page's sections 5–8 (`status.md` § Layout & flow) render from the
+# shared snapshot on every app (tui first, 2026-09-27; windows last). The sync
+# section is the one that is a declared absence where an app has no local agent.
+_STATUS_SYNC_ABSENCE_DOC = "ui/status.md § Layout & flow, footnotes ¹⁰ and ¹¹"
 
 
 @pytest.mark.feature("status-quotas-and-limits")
@@ -1077,18 +1088,6 @@ def test_status_names_your_nest_and_its_version(logged_in_app, nest_instance):
     and its version — the same values the nest itself publishes on
     ``fauna.nest.info``, not a placeholder."""
     app = logged_in_app
-    if not (
-        app.driver.is_linux()
-        or app.driver.is_macos()
-        or app.driver.is_ios()
-        or app.driver.is_tui()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="status-node-domain / status-node-version",
-            detail="the Status page's node-info section is built on linux, macos, ios and tui only",
-            tracked=_STATUS_DETAIL_TRACKED,
-        )
     from tests.api import ws_api
 
     info = ws_api.nest_info(nest_instance["port"])
@@ -1121,12 +1120,10 @@ def test_status_says_when_your_last_sync_pass_finished(logged_in_app):
         or app.driver.is_macos()
         or app.driver.is_tui()
     ):
-        skip_unbuilt(
+        declared_absence(
             app.driver,
-            surface="status-sync-last",
-            detail="the Status page's sync section is built on linux, windows, macos and tui only "
-            "(ios has no local sync agent)",
-            tracked=_STATUS_DETAIL_TRACKED,
+            capability="status-sync-last (no local sync agent)",
+            doc=_STATUS_SYNC_ABSENCE_DOC,
         )
     app.settings._navigate_subpage("status")
     last = _status_text_once_loaded(app, "status-sync-last", unloaded=("", "--"))
@@ -1144,13 +1141,16 @@ def test_status_shows_your_pending_sync_backlog(logged_in_app):
     ``files_pending``/``bytes_pending``, `sync-agent.md` § Local agent health).
     A fresh device has nothing pending."""
     app = logged_in_app
-    if not (app.driver.is_windows() or app.driver.is_macos() or app.driver.is_tui()):
-        skip_unbuilt(
+    if not (
+        app.driver.is_linux()
+        or app.driver.is_windows()
+        or app.driver.is_macos()
+        or app.driver.is_tui()
+    ):
+        declared_absence(
             app.driver,
-            surface="status-sync-pending",
-            detail="only windows, macos and tui read the local sync agent's backlog onto "
-            "their Status page (linux's sync rows are the nest-side summary)",
-            tracked=_STATUS_DETAIL_TRACKED,
+            capability="status-sync-pending (no local sync agent)",
+            doc=_STATUS_SYNC_ABSENCE_DOC,
         )
     app.settings._navigate_subpage("status")
     pending = _status_text_once_loaded(app, "status-sync-pending", unloaded=("",))
@@ -1165,17 +1165,6 @@ def test_status_shows_your_encryption_state_read_only(logged_in_app):
     MLS detail read-only — key packages published and secure channels open, as
     counts."""
     app = logged_in_app
-    # windows draws the two MLS rows (`KeyPackageCountText`/`DmChannelCountText`) but
-    # never fills them and carries no `status-mls-*` ids (`status.md` footnote ⁹) —
-    # unbuilt until the shared-snapshot lift, not built.
-    if not (app.driver.is_macos() or app.driver.is_ios() or app.driver.is_tui()):
-        skip_unbuilt(
-            app.driver,
-            surface="status-mls-key-packages / status-mls-channels",
-            detail="the Status page's read-only MLS detail is built on macos, ios and tui only "
-            "(windows' rows are unfilled placeholders)",
-            tracked=_STATUS_DETAIL_TRACKED,
-        )
     app.settings._navigate_subpage("status")
     packages = _status_text_once_loaded(app, "status-mls-key-packages")
     channels = _status_text_once_loaded(app, "status-mls-channels")
@@ -1193,18 +1182,6 @@ def test_status_names_the_build_you_are_running(logged_in_app):
     from pathlib import Path
 
     app = logged_in_app
-    if not (
-        app.driver.is_web()
-        or app.driver.is_macos()
-        or app.driver.is_ios()
-        or app.driver.is_tui()
-    ):
-        skip_unbuilt(
-            app.driver,
-            surface="status-build-sha",
-            detail="only web, macos, ios and tui name their build commit on the Status page",
-            tracked=_STATUS_DETAIL_TRACKED,
-        )
     app.settings._navigate_subpage("status")
     sha = _status_text_once_loaded(app, "status-build-sha")
     assert re.fullmatch(r"[0-9a-f]{12}", sha), (

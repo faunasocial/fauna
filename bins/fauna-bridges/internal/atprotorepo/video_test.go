@@ -431,3 +431,58 @@ func TestPickRenditionIgnoresDescriptorOrder(t *testing.T) {
 		t.Fatal("a rendition with no segments has nothing to assemble")
 	}
 }
+
+// The remux's ffmpeg runs as the uid that owns the PDS signing key, so it runs
+// under the nest's own `transcode` sandbox profile (deployment-threat-model.md
+// § Concern 1b, item 2). That the wrapper actually denies /data is the tier_4
+// probe's to prove in the shipped image (test_uid_isolation.py); this pins the
+// command the bridge builds: the wrapper first, the job directory its only
+// grant, nothing inherited from the bridge's environment, no non-file protocol.
+func TestRemuxCommandRunsFFmpegUnderTheTranscodeSandbox(t *testing.T) {
+	t.Setenv("FAUNA_ROUTER_PROXY_SECRET", "must-not-reach-ffmpeg")
+	dir := t.TempDir()
+
+	cmd := remuxCommand(context.Background(), dir, sandboxBin, "/usr/bin:/bin")
+
+	wantPrefix := []string{sandboxBin, "transcode", "--job-dir", dir, "--", "ffmpeg"}
+	if len(cmd.Args) < len(wantPrefix) || strings.Join(cmd.Args[:len(wantPrefix)], "\x00") != strings.Join(wantPrefix, "\x00") {
+		t.Fatalf("ffmpeg must be exec'd through the transcode profile; argv = %q", cmd.Args)
+	}
+	assertRemuxHardening(t, cmd, dir)
+
+	bare := remuxCommand(context.Background(), dir, "", "/usr/bin:/bin")
+	if bare.Args[0] != "ffmpeg" {
+		t.Fatalf("without the wrapper ffmpeg runs directly; argv = %q", bare.Args)
+	}
+	if strings.Join(bare.Args[1:], "\x00") != strings.Join(cmd.Args[len(wantPrefix):], "\x00") {
+		t.Fatalf("the wrapper must change nothing but the prefix:\n wrapped %q\n bare    %q", cmd.Args, bare.Args)
+	}
+	assertRemuxHardening(t, bare, dir)
+}
+
+func assertRemuxHardening(t *testing.T, cmd *exec.Cmd, dir string) {
+	t.Helper()
+	if cmd.Dir != dir {
+		t.Fatalf("ffmpeg must run from its job directory %q, ran from %q", dir, cmd.Dir)
+	}
+	if len(cmd.Env) != 1 || cmd.Env[0] != "PATH=/usr/bin:/bin" {
+		t.Fatalf("ffmpeg's environment must be PATH alone, got %q", cmd.Env)
+	}
+	argv := strings.Join(cmd.Args, " ")
+	for _, want := range []string{
+		"-nostdin",
+		"-protocol_whitelist file",
+		"-format_whitelist mpegts",
+		"-f mpegts -i " + remuxInput,
+		"-y " + remuxOutput,
+	} {
+		if !strings.Contains(argv, want) {
+			t.Fatalf("ffmpeg argv lacks %q: %q", want, cmd.Args)
+		}
+	}
+	for _, a := range cmd.Args {
+		if filepath.IsAbs(a) && a != dir && a != cmd.Args[0] {
+			t.Fatalf("no path but the job directory may reach ffmpeg's command line, found %q", a)
+		}
+	}
+}

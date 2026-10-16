@@ -147,6 +147,41 @@ pub fn version_retention_edit_from_bounds(
     fauna_folders_machine::version_retention_edit_from_bounds(max_versions_per_path, max_age_days)
 }
 
+/// Seed all six nest-place buffers from a folder row — [`nest_place_edit_from_row`]
+/// and [`version_retention_edit_from_bounds`] as one comparable value, the shape
+/// [`nest_place_reseed`] compares.
+#[uniffi::export]
+pub fn nest_place_form_from_row(
+    nest_snapshots: Option<bool>,
+    nest_snapshot_quiet_secs: Option<i64>,
+    retention_policy: Option<String>,
+    version_retention_max_versions: u32,
+    version_retention_max_age_days: u32,
+) -> fauna_folders_machine::NestPlaceForm {
+    fauna_folders_machine::nest_place_form_from_row(
+        nest_snapshots,
+        nest_snapshot_quiet_secs,
+        retention_policy,
+        version_retention_max_versions,
+        version_retention_max_age_days,
+    )
+}
+
+/// What a refreshed folder row does to the nest-place editor: `fresh` to paint
+/// (and record as the new seed), or `null`/`nil` — leave the boxes alone, the
+/// user has staged edits there. `seeded` is what the app last painted, `null`
+/// once the save released the boxes. An app that re-seeds on every refresh
+/// instead sends the OLD policy whenever its store moves between the typing and
+/// the save.
+#[uniffi::export]
+pub fn nest_place_reseed(
+    seeded: Option<fauna_folders_machine::NestPlaceForm>,
+    on_screen: fauna_folders_machine::NestPlaceForm,
+    fresh: fauna_folders_machine::NestPlaceForm,
+) -> Option<fauna_folders_machine::NestPlaceForm> {
+    fauna_folders_machine::nest_place_reseed(seeded.as_ref(), &on_screen, fresh)
+}
+
 /// Read the two version-retention boxes into the whole policy
 /// `DevicesMachine::set_folder_nest_place`'s `version_retention` arg takes.
 /// Blank boxes ⇒ the binds-nothing policy, which CLEARS (the nest rests

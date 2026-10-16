@@ -18,23 +18,31 @@ An isolated e2e launch derives its own per-launch path under a throwaway
 HOME/XDG_RUNTIME_DIR (see the macOS driver's ``app_support_dir`` property);
 callers resolve and pass in the path, this module never guesses one.
 
-Process safety: this module spawns nothing. All IPC is a client connect to
-an already-listening unix socket.
+Process safety: this module spawns nothing but a read-only `ps` (on a platform
+with no `/proc`) and signals nothing. All IPC is a client connect to an
+already-listening unix socket; even `shutdown_agent` stops the agent through
+the agent's own `Shutdown` verb.
 """
 
 from __future__ import annotations
 
+import os
 import socket
+from contextlib import contextmanager
 import struct
+import subprocess
+import sys
 import time
 
 import cbor2
 
 from helpers.sync_agent_ipc import (
+    _MAX_EVENTS_BEFORE_REPLY,
     encode_frame,
     get_service_status_request,
     get_sync_status_request,
     provision_capability_request,
+    reconcile_account_runtime_request,
     unwrap_ok,
 )
 
@@ -43,6 +51,14 @@ __all__ = [
     "send_request",
     "provision",
     "sync_status",
+    "reconcile_account_runtime",
+    "server_pid",
+    "process_has_exited",
+    "shutdown_agent",
+    "held_request",
+    "attach_once",
+    "attached_app",
+    "push_arm_tally",
     "SyncAgentClient",
 ]
 
@@ -84,6 +100,22 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
     return bytes(buf)
 
 
+def _read_reply(sock: socket.socket, socket_path: str) -> dict:
+    """Read frames off ``sock`` until the reply. The agent pushes its events to
+    every open connection, a request's own included, so an event frame can
+    precede the reply — the Windows transport's `_exchange` skips them the same
+    way, bounded."""
+    for _ in range(_MAX_EVENTS_BEFORE_REPLY):
+        resp_len = struct.unpack("<I", _recv_exact(sock, 4))[0]
+        decoded = cbor2.loads(_recv_exact(sock, resp_len))
+        if isinstance(decoded, dict) and "event" in decoded and "result" not in decoded:
+            continue
+        return decoded
+    raise OSError(
+        f"{socket_path!r} pushed {_MAX_EVENTS_BEFORE_REPLY} event frames and no reply"
+    )
+
+
 def send_request(socket_path: str, frame: bytes, timeout: float = 10.0) -> dict:
     """Send a framed request over the unix socket and return the decoded Response.
 
@@ -100,9 +132,24 @@ def send_request(socket_path: str, frame: bytes, timeout: float = 10.0) -> dict:
         sock.settimeout(timeout)
         sock.connect(socket_path)
         sock.sendall(frame)
-        resp_len = struct.unpack("<I", _recv_exact(sock, 4))[0]
-        payload = _recv_exact(sock, resp_len)
-    return cbor2.loads(payload)
+        return _read_reply(sock, socket_path)
+
+
+@contextmanager
+def held_request(socket_path: str, frame: bytes, timeout: float = 10.0):
+    """Send a framed request and keep its connection open past the reply — the
+    unix twin of ``sync_agent_ipc.held_request``.
+
+    Yields the decoded Response; the connection closes when the ``with`` body
+    ends. For a request whose effect lasts exactly as long as the connection
+    that carried it — ``AttachApp``'s lease, which the agent ends when the app's
+    connection closes (a crash included).
+    """
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)
+        sock.connect(socket_path)
+        sock.sendall(frame)
+        yield _read_reply(sock, socket_path)
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +190,125 @@ def sync_status(socket_path: str, req_id: int, *, timeout: float = 10.0) -> dict
     resp = send_request(socket_path, encode_frame(req), timeout=timeout)
     ok_payload = unwrap_ok(resp)
     return ok_payload["SyncStatus"]
+
+
+def reconcile_account_runtime(socket_path: str, req_id: int, *, timeout: float = 20.0) -> None:
+    """Send the account-pass nudge and wait for its reply — which the agent
+    sends once its `reconcile_now` finished, or after its 10 s cap
+    (`pipe_server.rs::RECONCILE_NUDGE_TIMEOUT`), hence the wider socket timeout.
+
+    Raises:
+        RuntimeError: If the agent returns an Err response.
+        AssertionError: If the Ok payload is not "Empty".
+    """
+    req = reconcile_account_runtime_request(req_id)
+    payload = unwrap_ok(send_request(socket_path, encode_frame(req), timeout=timeout))
+    if payload != "Empty":
+        raise AssertionError(
+            f"ReconcileAccountRuntime expected 'Empty' payload, got {payload!r}"
+        )
+
+
+def server_pid(socket_path: str, timeout: float = 10.0) -> int:
+    """The pid of the process serving ``socket_path``, asked of the kernel —
+    the unix twin of ``sync_agent_ipc.pipe_server_pid``.
+
+    Linux answers ``SO_PEERCRED`` (``struct ucred``: pid, uid, gid); macOS
+    answers ``LOCAL_PEERPID`` at level ``SOL_LOCAL``. Either way the answer is
+    the peer's credential at ``connect()`` — the agent's own pid, never a guess
+    from a process listing (which would also match a sibling launch's agent).
+    """
+    wait_for_socket(socket_path, timeout=timeout)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        s.connect(socket_path)
+        if sys.platform == "darwin":
+            sol_local, local_peerpid = 0, 0x002  # <sys/un.h>
+            return struct.unpack("i", s.getsockopt(sol_local, local_peerpid, 4))[0]
+        creds = s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        return struct.unpack("3i", creds)[0]
+
+
+def process_has_exited(pid: int) -> bool:
+    """Whether ``pid`` has exited — a zombie included: its descriptors (and so
+    every flock it held, ``agent.lock`` and ``engine.lock`` among them) are
+    closed once it is a zombie, whoever reaps it later.
+
+    Read from ``/proc/<pid>/stat`` where there is one, else ``ps``; never
+    ``os.kill(pid, 0)`` — a probe that spells a kill is one typo away from one,
+    against a process another session may own (the e2e process-safety rule).
+    """
+    stat = f"/proc/{pid}/stat"
+    if os.path.isdir("/proc/self"):
+        try:
+            with open(stat) as f:
+                # `pid (comm) state …` — comm may hold spaces and parens, so the
+                # state is the first field after the LAST ')'.
+                return f.read().rsplit(")", 1)[1].split()[0] in ("Z", "X")
+        except (OSError, IndexError):
+            return True
+    out = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+    ).stdout.strip()
+    return not out or out.startswith("Z")
+
+
+def shutdown_agent(socket_path: str, *, timeout: float = 60.0) -> int:
+    """Stop the agent serving ``socket_path`` through its own ``Shutdown``
+    request and wait until its PROCESS has exited — not merely until the socket
+    stops answering: a caller asserting what happens once the agent is GONE
+    (its kernel locks released) needs the process down. Returns the pid that
+    exited. The unix twin of ``windows_sync_agent.shutdown_agent``.
+
+    ⚠ It stops the agent; nothing here keeps it stopped. An app whose
+    provisioning loop finds the socket absent spawns a fresh agent on its next
+    convergence tick (``fauna_client_sync::agent::ensure_agent_running``) — a
+    caller that reads state after the stop must tell the two agents apart.
+    """
+    pid = server_pid(socket_path)
+    unwrap_ok(send_request(socket_path, encode_frame({"id": 1, "method": "Shutdown"})))
+    deadline = time.monotonic() + timeout
+    while not process_has_exited(pid):
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"the agent (pid {pid}) serving {socket_path} accepted Shutdown but "
+                f"was still running {timeout:.0f}s later"
+            )
+        time.sleep(0.2)  # sleep-ok: poll cadence of a deadline poll, not a settle wait
+    return pid
+
+
+def _attach_app_request(app: str) -> dict:
+    # No `notification_identity`: the linux sink needs none (`RequestMethod::AttachApp`).
+    return {"id": 1, "method": {"AttachApp": {"app": app}}}
+
+
+def attach_once(socket_path: str, app: str, *, timeout: float = 10.0) -> None:
+    """Attach as ``app`` (``"tui"``, ``"linux"``) and let go at once — the agent
+    keeps the app's name for a tapped banner; the lease ends as the connection
+    closes. The unix twin of ``windows_sync_agent.attach_once``."""
+    unwrap_ok(send_request(socket_path, encode_frame(_attach_app_request(app)), timeout=timeout))
+
+
+@contextmanager
+def attached_app(socket_path: str, app: str, *, timeout: float = 10.0):
+    """Hold ``app``'s attachment lease for the ``with`` body — an open app, as
+    the agent's push arm sees one (`RequestMethod::AttachApp`).
+
+    The agent takes the lease before it replies, so the body runs attached; the
+    lease ends when the connection closes on exit. The unix twin of
+    ``windows_sync_agent.attached_app``."""
+    frame = encode_frame(_attach_app_request(app))
+    with held_request(socket_path, frame, timeout=timeout) as reply:
+        unwrap_ok(reply)
+        yield
+
+
+def push_arm_tally(socket_path: str, *, timeout: float = 10.0) -> dict:
+    """The agent's push-arm decisions so far (test-only `GetPushArmTally`):
+    ``{attached_apps, withheld, no_sink, posted, failed}``."""
+    frame = encode_frame({"id": 1, "method": "GetPushArmTally"})
+    return unwrap_ok(send_request(socket_path, frame, timeout=timeout))["PushArmTally"]
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 //! Typed calls for the two USER-class kind families this page is the first
-//! app surface of: `fauna.principals.*` (the roster read and its one verb) and
+//! app surface of: `fauna.principals.*` (the roster read, the oracle record
+//! read and the one verb) and
 //! `fauna.oauth.consent.*` (the typed-code claim, the same-device handoff's
 //! open and the per-client block).
 //! Transport-agnostic over [`RpcRequester`], wasm-clean; errors propagate as the
@@ -11,7 +12,8 @@ use fauna_protocol::oauth_consent::{
     LookupConsentCodeReply, LookupConsentCodeRequest, OpenHandoffReply, OpenHandoffRequest,
 };
 use fauna_protocol::principals::{
-    ListPrincipalsReply, ListPrincipalsRequest, RevokePrincipalReply, RevokePrincipalRequest,
+    ListPrincipalOpsReply, ListPrincipalOpsRequest, ListPrincipalsReply, ListPrincipalsRequest,
+    RevokePrincipalReply, RevokePrincipalRequest,
 };
 
 pub struct ConnectedAppsClient<R: RpcRequester> {
@@ -40,6 +42,24 @@ impl<R: RpcRequester> ConnectedAppsClient<R> {
             .request(
                 "fauna.principals.revoke",
                 RevokePrincipalRequest {
+                    principal_id,
+                    extra: Default::default(),
+                },
+            )
+            .await
+    }
+
+    /// `fauna.principals.ops` — one principal's oracle record, newest first.
+    /// Empty for a principal no custodian has served, and for one that is not
+    /// the caller's.
+    pub async fn list_principal_ops(
+        &self,
+        principal_id: Vec<u8>,
+    ) -> Result<ListPrincipalOpsReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.principals.ops",
+                ListPrincipalOpsRequest {
                     principal_id,
                     extra: Default::default(),
                 },

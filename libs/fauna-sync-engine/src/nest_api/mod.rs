@@ -4,8 +4,8 @@
 //! ([`crate::nest_client::SyncClient`] — chunks, manifests, blobs, segments) and
 //! the crate's stateful-wiremock test modules already drive it end to end. The
 //! control plane is WS-RPC, a handful of kinds wide
-//! (`fauna.sync.conflicts.{report,resolve}`, `fauna.folders.update`,
-//! `fauna.web.files.prune_sealed`, `fauna.folders.deposits.{list,retire}`),
+//! (`fauna.sync.conflicts.{report,resolve}`, `fauna.folders.update`, the web
+//! plane's sealed-file prune, `fauna.folders.deposits.{list,retire}`),
 //! and until this
 //! seam existed had **no test double at all** — it went straight through the
 //! concrete `Arc<fauna_client::NestClient>` the engine holds.
@@ -53,7 +53,8 @@ pub use ws_rpc::WsRpcSyncControl;
 use async_trait::async_trait;
 use fauna_protocol::folders::{
     ConflictReportRequest, ConflictResolveRequest, FolderDepositsListReply,
-    FolderDepositsListRequest, FolderDepositsRetireRequest, FolderUpdateRequest,
+    FolderDepositsListRequest, FolderDepositsPartRequest, FolderDepositsRetireRequest,
+    FolderUpdateRequest,
 };
 use fauna_protocol::web::WebFilesPruneSealedRequest;
 
@@ -101,7 +102,7 @@ pub trait SyncControlApi: fauna_core::MaybeSendSync + std::fmt::Debug {
     /// site.
     async fn update_folder(&self, req: FolderUpdateRequest) -> Result<bool, SyncControlError>;
 
-    /// `fauna.web.files.prune_sealed` — declare one folder's **complete** live
+    /// The web plane's sealed-file prune — declare one folder's **complete** live
     /// website path set, so the nest drops the sealed `web_files` rows no longer
     /// in it.
     ///
@@ -123,6 +124,13 @@ pub trait SyncControlApi: fauna_core::MaybeSendSync + std::fmt::Debug {
         &self,
         req: FolderDepositsListRequest,
     ) -> Result<FolderDepositsListReply, SyncControlError>;
+
+    /// `fauna.folders.deposits.part` — one sealed part of a parked deposit
+    /// larger than one message. An `Err` defers that item to the next pass.
+    async fn fetch_deposit_part(
+        &self,
+        req: FolderDepositsPartRequest,
+    ) -> Result<Vec<u8>, SyncControlError>;
 
     /// `fauna.folders.deposits.retire` — drop one parked deposit once its
     /// adopted change row is durable. Returns the reply's `retired` flag

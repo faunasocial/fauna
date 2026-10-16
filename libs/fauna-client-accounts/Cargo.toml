@@ -17,7 +17,7 @@ uniffi = ["dep:uniffi", "fauna-core/uniffi"]
 ## (`web_mutation_lock.rs`, the Web Locks leg of `MutationLock`). Lives HERE -
 ## beside the registry whose keys it stores - so both wasm chunks share one
 ## store and take ONE lock. Enabled by fauna-wasm (switcher glue) and fauna-wasm-launch (launch).
-web-localstorage = ["dep:web-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys"]
+web-localstorage = ["dep:web-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "fauna-core/js"]
 
 [dependencies]
 fauna-core = { path = "../fauna-core", default-features = false }

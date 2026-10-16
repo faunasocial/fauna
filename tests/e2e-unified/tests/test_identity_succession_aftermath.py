@@ -418,6 +418,7 @@ def test_the_successor_can_still_read_the_config_it_inherited(
 
 
 @pytest.mark.tui
+@pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.feature("take-your-account-back")
 def test_the_successors_open_muted_words_page_paints_what_it_inherited(
@@ -432,10 +433,7 @@ def test_the_successors_open_muted_words_page_paints_what_it_inherited(
     an honest empty list — and the run that carried them must repaint it. The
     journey above proves the carry by re-visiting; this one never re-visits, so
     it is red on an app whose open page ignores the notice. Marked for the apps
-    that consume it AND run the ceremony end to end today (tui, web): linux
-    consumes the notice too, but its succession switch does not complete in this
-    harness (the journey above is red there at ``_run_succession``), so its leg
-    joins when that is green.
+    that consume it AND run the ceremony end to end today (tui, linux, web).
     """
     from helpers.fleet import poked_pass
     from helpers.waiting import account_pump_role
@@ -2383,6 +2381,88 @@ def test_the_successor_is_asked_to_confirm_its_npub(ungranted_app, nest_instance
     assert not app.nostr.is_npub_confirm_visible(), (
         "the confirmation must be nest-persisted: re-entering the page must "
         "not re-raise a banner the owner already answered"
+    )
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.web
+def test_the_successors_burned_signer_connection_reads_revoked(
+    ungranted_app, nest_instance
+):
+    """connect a Nostr signer → succeed → Connected apps lists it as revoked.
+
+    ``nostr.md`` § Key succession and rotation: the nest burns every bunker
+    connection at the succession and lists it to the successor, and the shared
+    machine composes it not connected with ``signer_burned`` set; the paint is
+    the mail row's — the ``revoked`` attribute and the revoked line under the
+    name. tui, linux, web and android; the Apple and windows apps ride the
+    trickle-down.
+
+    ⚠ **The pre-ceremony connection is the whole test.** A succession over an
+    account with no bunker connection lists nothing, so the post-ceremony
+    assertions would be vacuous; the zero revoked rows before the ceremony is
+    what makes the count after it mean something.
+    """
+    app = ungranted_app
+
+    app.nostr.navigate()
+    assert app.nostr.ensure_linked(), (
+        f"a linked custodial account owns the Connect an app section; error: "
+        f"{app.nostr.page_error_text()!r}"
+    )
+    assert app.nostr.wait_for_connect_section(), (
+        "the Connect an app section must render for a linked account; error: "
+        f"{app.nostr.page_error_text()!r}"
+    )
+    app.nostr.connect_app()
+    assert app.nostr.connect_string().startswith("bunker://"), (
+        "the invite must reveal its one-time connect string; error: "
+        f"{app.nostr.page_error_text()!r}"
+    )
+
+    assert app.connected_apps.visit(), (
+        f"Connected apps unreachable before the ceremony; error: {app.error_text()!r}"
+    )
+    assert app.connected_apps.item_count() >= 1, (
+        "the pending signer connection must be a roster row before the ceremony"
+    )
+    assert app.connected_apps.revoked_item_count() == 0, (
+        "no row may read revoked BEFORE the ceremony, or the count after it "
+        "proves nothing"
+    )
+
+    _run_succession(app)
+
+    wait_until(
+        lambda: app.connected_apps.visit()
+        and app.connected_apps.revoked_item_count() >= 1,
+        _MAIL_BURN_S,
+        diagnose=lambda: (
+            "the successor's Connected apps page must list the signer "
+            "connection the burn killed as revoked, but "
+            f"{app.connected_apps.revoked_item_count()} of "
+            f"{app.connected_apps.item_count()} rows read revoked; "
+            f"error={app.error_text()!r}"
+        ),
+    )
+    burned = next(
+        i
+        for i in range(app.connected_apps.item_count())
+        if app.connected_apps.driver.get_attr("connected-apps-item", "revoked", i)
+        == "true"
+    )
+    assert app.connected_apps.item_status(burned) == "not_connected", (
+        "a burned signer row is listed, not connected: "
+        f"{app.connected_apps.item_text(burned)!r}"
+    )
+    # The words, not just the count: the revoked line sits directly under the
+    # name (line 2 of the item's joined description).
+    lines = app.connected_apps.item_text(burned).split("\n")
+    assert len(lines) > 1 and lines[1] == S.connected_apps.signer_revoked, (
+        "a burned signer row carries the revoked line directly under its "
+        f"name: {lines!r}"
     )
 
 

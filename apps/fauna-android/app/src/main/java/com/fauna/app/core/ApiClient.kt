@@ -70,7 +70,7 @@ class ApiClient @Inject constructor(
     // The cross-page critical-alerts registry (critical-alerts.md § Mechanism)
     // — cleared here on every identity teardown. Leaf (no deps of its own), so
     // no Hilt cycle.
-    private val criticalAlertsHost: CriticalAlertsHost,
+    internal val criticalAlertsHost: CriticalAlertsHost,
     // This session's co-present offline-share ceremony (p2p.md § Offline share
     // initiation) — its seat is bound to the signed-in actor's key, so it is
     // reset on every identity teardown too. Leaf, so no Hilt cycle.
@@ -137,7 +137,6 @@ class ApiClient @Inject constructor(
     private var bridgesClient: FfiBridgesClient? = null
     private var emailClient: FfiEmailClient? = null
     private var adminClient: FfiAdminClient? = null
-    private var feedClient: FfiFeedClient? = null
     private var postsClient: FfiPostsClient? = null
     private var contactsClient: FfiContactsClient? = null
     private var notificationsClient: FfiNotificationsClient? = null
@@ -154,11 +153,11 @@ class ApiClient @Inject constructor(
     // analogue of caldavClient; both read the same encrypted DAV store over the
     // shared msek gate.
     private var carddavClient: FfiCarddavClient? = null
-    private var blueskyClient: FfiBlueskyClient? = null
     // fauna.features.* WS-RPC seam — the gated-feature plane's transparency
     // read (`feature-limits-section`, `dynamic-features.md` § Transparency &
     // auditability).
     private var featuresClient: FfiFeaturesClient? = null
+    private var statusClient: FfiStatusClient? = null
     // Per-session conversations-rail draft autosync (FfiDraftsSync over
     // fauna.drafts.{get,put}); handed to ConversationsManagerHost on connect for
     // the restore-on-launch + debounced save, and closed here on teardown.
@@ -189,8 +188,10 @@ class ApiClient @Inject constructor(
     // over the UniFFI `FfiSyncEngineHost` face) — android's deployment of the same
     // shared engine linux/apple/windows already run. A connection-bound singleton
     // like [feedManager]: built lazily by [syncEngineHost] and held for the whole
-    // session, because dropping it stops every resident + one-shot engine
-    // (`sync_engine_host.rs:139-146`). Closed here on teardown.
+    // session, because it carries the shared per-file state and ingress
+    // plumbing the construct-run-drop engine work reuses (it hosts no
+    // resident engine; residency is the external sync agent's). Closed here
+    // on teardown.
     private var syncEngineHost: com.fauna.ffi.FfiSyncEngineHost? = null
 
     /** Off-main scope for the fire-and-forget WS teardown in [clearAuth]. */
@@ -291,6 +292,23 @@ class ApiClient @Inject constructor(
     // contacts app's first sync is one push per card). Same replay-0 tick idiom.
     private val _addressBookChangedTick = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
     val addressBookChangedTick: SharedFlow<Unit> = _addressBookChangedTick.asSharedFlow()
+
+    // Bumped on every `fauna.bridges.push.spam_model_{updated,reset}` push — an
+    // undo or a reset of this actor's spam model on another device. MailSpamVM
+    // re-reads the training history on it; the VM lives only while the Spam
+    // page is on the back stack, which is the page gate
+    // (`StaleSurfaces::mail_spam`: a mail app's batch Junk move is one push per
+    // lesson). Same replay-0 tick idiom.
+    private val _mailSpamChangedTick = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
+    val mailSpamChangedTick: SharedFlow<Unit> = _mailSpamChangedTick.asSharedFlow()
+
+    // Bumped on every `fauna.bridges.push.export_{progress,error,complete}` push —
+    // an export started, finished, failed or dismissed on another device.
+    // MailExportVM re-reads the session on it; the VM lives only while the Export
+    // page is on the back stack, which is the page gate
+    // (`StaleSurfaces::mail_export`). Same replay-0 tick idiom.
+    private val _mailExportChangedTick = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
+    val mailExportChangedTick: SharedFlow<Unit> = _mailExportChangedTick.asSharedFlow()
 
     /** Long-lived scope hosting the reconnect-subscription pump. */
     internal val connectionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -422,12 +440,26 @@ class ApiClient @Inject constructor(
         }
     }
 
-    fun clearAuth() {
+    /**
+     * [identityEnds] is `false` only for a client rebuild that keeps the SAME
+     * identity (the e2e `session` patch re-establishing the signed-in actor):
+     * everything bound to the dying client still drops, but the identity's
+     * standing alerts and the sweep loop re-checking them survive, because the
+     * identity does (`critical-alerts.md` § Mechanism → *Lifetime*: "session"
+     * means identity, and a failed re-check never clears). Windows'
+     * `DropActorScopedState(identityEnds)` is the twin.
+     */
+    fun clearAuth(identityEnds: Boolean = true) {
         actorGeneration += 1
         token = null
         secret = null
         tokenExpiresAt = 0
         nodeUrl = ""
+
+        // The region plane is the device's and stays; only its refresh clock
+        // and the departing session's nest go, so the next login asks at once
+        // (region-blocking.md § How an app obtains its region's policy).
+        RegionPlaneHost.clearSession()
 
         // Identity is changing (sign-out, account switch, factory reset) — an
         // alert keyed to the departing identity's DID must not outlive it, or
@@ -435,7 +467,7 @@ class ApiClient @Inject constructor(
         // Mechanism → Lifetime). Every android identity teardown routes
         // through this one function, so one call here covers all of them
         // (unlike linux's six separate teardown paths).
-        criticalAlertsHost.clearAll()
+        if (identityEnds) criticalAlertsHost.clearAll()
         // The ward's own asks and refusals are one account's (family-safety.md
         // § Child-initiated contact requests / § Feed-source approvals) — an
         // incoming account must not inherit "asked — waiting".
@@ -475,7 +507,6 @@ class ApiClient @Inject constructor(
         val bridges = bridgesClient
         val email = emailClient
         val admin = adminClient
-        val feed = feedClient
         val posts = postsClient
         val contacts = contactsClient
         val notifications = notificationsClient
@@ -488,7 +519,6 @@ class ApiClient @Inject constructor(
         val snapshots = snapshotsClient
         val caldav = caldavClient
         val carddav = carddavClient
-        val bluesky = blueskyClient
         val drafts = draftsSync
         val postsDrafts = postsDraftsSync
         val eventDrafts = eventDraftsSync
@@ -519,7 +549,6 @@ class ApiClient @Inject constructor(
         bridgesClient = null
         emailClient = null
         adminClient = null
-        feedClient = null
         postsClient = null
         contactsClient = null
         notificationsClient = null
@@ -532,8 +561,8 @@ class ApiClient @Inject constructor(
         snapshotsClient = null
         caldavClient = null
         carddavClient = null
-        blueskyClient = null
         featuresClient = null
+        statusClient = null
         draftsSync = null
         postsDraftsSync = null
         eventDraftsSync = null
@@ -558,7 +587,6 @@ class ApiClient @Inject constructor(
                 bridges?.close()
                 email?.close()
                 admin?.close()
-                feed?.close()
                 posts?.close()
                 contacts?.close()
                 notifications?.close()
@@ -571,7 +599,6 @@ class ApiClient @Inject constructor(
                 snapshots?.close()
                 caldav?.close()
                 carddav?.close()
-                bluesky?.close()
                 drafts?.close()
                 postsDrafts?.close()
                 // The events rail's handle, alongside its two siblings. Nulling
@@ -619,7 +646,6 @@ class ApiClient @Inject constructor(
         bridgesClient = client.bridges()
         emailClient = client.email()
         adminClient = client.admin()
-        feedClient = client.feed()
         postsClient = client.posts()
         contactsClient = client.contacts()
         notificationsClient = client.notifications()
@@ -632,8 +658,8 @@ class ApiClient @Inject constructor(
         snapshotsClient = client.snapshots()
         caldavClient = client.caldav()
         carddavClient = client.carddav()
-        blueskyClient = client.bluesky()
         featuresClient = client.features()
+        statusClient = client.status()
         // Build the shared conversations receive session over this connection and
         // start its inbound-mail receive loop (mail-spam.md § Impl item 6;
         // conversations.md § Receiving into the conversations view). Placed BEFORE
@@ -667,7 +693,8 @@ class ApiClient @Inject constructor(
             // The recording device — the same id `serveSetFolder` passes its
             // walk — so the launch resume finishes an interrupted served-set
             // re-seal (`webdav-server.md` § Key model (c)).
-            sessionAccount.deviceId,
+            sessionAccount.resolveDeviceId(),
+            accountStores.accountRegistry,
         )
         // Draft-persistence v2 (file-sync.md § Drafts Sync): build the
         // conversations-rail drafts sync over this connection and hand it to the
@@ -706,6 +733,9 @@ class ApiClient @Inject constructor(
         // them all.
         ensureSameActor(mine)
         startReconnectPump(client)
+        // mail-credentials.md § Hard revoke rule (4): the shared connect-time
+        // epoch refresh, once now and after every reconnect of this client.
+        startMailEpochRefresh(client)
         startPushPump(client)
         startKnockPump(client)
         startConnectionStatePump(client)
@@ -769,7 +799,7 @@ class ApiClient @Inject constructor(
      */
     private suspend fun startAccountRuntime(client: FfiNestClient) {
         try {
-            val ownDeviceId = sessionAccount.deviceId?.let { HexUtil.hexToBytes(it) }
+            val ownDeviceId = sessionAccount.resolveDeviceId()?.let { HexUtil.hexToBytes(it) }
             // Before the start, so the runtime's first changed run is heard.
             // Idempotent: a re-register replaces the same listener.
             com.fauna.ffi.setStoreChangeListener(storeChangeListener)
@@ -914,6 +944,17 @@ class ApiClient @Inject constructor(
                     // (transport.md § Push events); ContactsVM page-gates it.
                     _addressBookChangedTick.tryEmit(Unit)
                 }
+                if (stale.mailSpam) {
+                    // The Spam page open here follows another device's undo or
+                    // reset (mail-spam.md § Undo step 4, § Reset step 6).
+                    _mailSpamChangedTick.tryEmit(Unit)
+                }
+                if (stale.mailExport) {
+                    // The Export page open here follows another device's export
+                    // (mail-export.md § A failed export is a record the wizard
+                    // shows until the user moves on).
+                    _mailExportChangedTick.tryEmit(Unit)
+                }
                 if (stale.media) {
                     // A record landed in a folder this actor participates in.
                     // DevicesVM (folders listing/membership) and MediaVM
@@ -966,6 +1007,9 @@ class ApiClient @Inject constructor(
             while (true) {
                 val state = try { sub.next() } catch (_: Exception) { null } ?: break
                 _connectionState.value = state
+                // Login and every reconnect: ask the relay for the declared
+                // region chain's policies now (and arm the minute tick).
+                if (state == FfiConnectionState.CONNECTED) RegionPlaneHost.refresh(client)
                 // Every value the indicator receives, repeats included — the
                 // StateFlow above conflates a repeat away, and the repeat is
                 // the stickiness proof (`connection_reports`; a no-op in every
@@ -1043,12 +1087,19 @@ class ApiClient @Inject constructor(
      * change. Returns null when not yet connected to a nest; the caller renders an
      * empty page and rebuilds once the socket is up (mirrors
      * [buildLinkedNestsMachine] / the Linux app's hydrate-retry). Each call
-     * builds a fresh machine bound to the current connection.
+     * builds a fresh machine bound to the current connection. The paired
+     * predecessor chain is handed in here, so every consumer's Folders page lists
+     * the sets a succession left sealed under a predecessor's owner root
+     * (`succession-aftermath.md` § Re-key scope); mirrors windows and Apple.
      */
     fun buildDevicesMachine(
         observer: uniffi.fauna_devices_machine.DevicesObserver,
     ): uniffi.fauna_devices_machine.DevicesMachine? =
-        nestClient?.let { com.fauna.ffi.buildDevicesMachine(it, observer) }
+        nestClient?.let { com.fauna.ffi.buildDevicesMachine(it, observer) }?.also { built ->
+            predecessorChain().takeIf { it.actorIds.isNotEmpty() }?.let {
+                built.setPredecessorChain(it.actorIds, it.keys)
+            }
+        }
 
     /**
      * Build the page-level Backups state machine (the snapshot half) over the
@@ -1152,8 +1203,8 @@ class ApiClient @Inject constructor(
      * a file to a temp path and call `ingestFile` on the returned handle.
      *
      * Unlike [buildMediaMachine]/[buildDevicesMachine] (fresh per call), this
-     * is built **once per session and held**: dropping the handle stops every
-     * resident + one-shot engine (`sync_engine_host.rs:139-146`), so the first
+     * is built **once per session and held**: the host is the construct-run-drop
+     * engine work's shared state (it hosts no resident engine), so the first
      * caller wins and every later caller shares the same handle. Closed in
      * [clearAuth]. [deviceIdHex] is hex-encoded exactly as
      * [buildTaskDelegationView] takes it; [stateDir] is where
@@ -1169,7 +1220,10 @@ class ApiClient @Inject constructor(
         val secretBytes = secret?.let { HexUtil.hexToBytes(it) } ?: return null
         val deviceIdBytes = runCatching { HexUtil.hexToBytes(deviceIdHex) }.getOrNull() ?: return null
         val host = runCatching {
-            client.syncEngineHost(secretBytes, deviceIdBytes, stateDir, "fauna-android")
+            client.syncEngineHost(
+                secretBytes, deviceIdBytes, stateDir, "fauna-android",
+                accountStores.accountRegistry,
+            )
         }.onFailure { ShellLog.w("ApiClient", "syncEngineHost build failed: ${it.message}") }.getOrNull()
             ?: return null
         syncEngineHost = host
@@ -1359,6 +1413,44 @@ class ApiClient @Inject constructor(
         )
 
     /**
+     * The confirm of `backup-audit-recover-button` (`docs/goal/ui/backups.md`
+     * § Audit-alert surface, the fifth reason): the shared recovery from one
+     * **nest** destination into the owner's own nest, over the UniFFI face.
+     * Which sets run and how the result reads are the shared driver's; this
+     * only hands it this device's sync id ([deviceIdHex]) and the same
+     * actor-scoped audit-state path [backupAuditRunPass] reads, whose notice
+     * the run clears. The caller re-runs the audit pass afterwards.
+     */
+    suspend fun backupRecoverFromDestination(
+        deviceIdHex: String,
+        destinationId: String,
+    ): com.fauna.ffi.FfiRecoveryResult =
+        com.fauna.ffi.backupRecoverFromDestination(
+            backupNest(),
+            backupSecret(),
+            deviceIdHex,
+            destinationId,
+            accountStores.backupAuditStatePath(),
+        )
+
+    /**
+     * The confirm of `backup-audit-recover-button` on **this device's own**
+     * custodian row (`docs/goal/ui/backups.md` § Audit-alert surface, the fifth
+     * reason's client-device arm): the shared recovery from this device's own
+     * store, **in this process** — a phone hosts its own store
+     * (`client-device-custodian.md` § Client-device custodian (pull) → *Restore*
+     * → *Recovery from this device's own store*), through the same shared face
+     * iOS calls. Nothing about the run's order is decided here; the caller
+     * re-runs the audit pass afterwards, whose store read shows the cleared
+     * notice. [deviceIdHex] is this device's stable sync id, [dataDir] the
+     * custodian store's base as for [reseedCustodianStore].
+     */
+    suspend fun recoverCustodianStore(deviceIdHex: String, dataDir: String): com.fauna.ffi.FfiRecoveryResult =
+        com.fauna.ffi.recoverCustodianStore(
+            backupNest(), backupSecret(), HexUtil.hexToBytes(deviceIdHex), dataDir,
+        )
+
+    /**
      * Feed the audit's observation high-water: "this client has displayed
      * activity stamped [lastActivityMs]" — the load-bearing half of the
      * audit-alert surface, not an afterthought. A shell that renders the two
@@ -1415,13 +1507,42 @@ class ApiClient @Inject constructor(
      * nest and this identity is an admin here, fetch the box's seed, refuse one
      * that does not derive to the bound id, and merge the entry. Run on every
      * connect; the account-runtime seat runs the same leg at its store-ready
-     * edge. The caller surfaces an unconfirmed outcome on the recovery-custody
-     * warning banner. `appDataDir` is unused by the FFI now (kept in its
+     * edge. Answers the shared warning the run owes the admin (`null` when
+     * nothing is owed) for the caller to render on the recovery-custody warning
+     * banner. A leg that could not even be reached (no connection, no secret)
+     * answers the shared "not attempted" warning, so the failure path renders
+     * Rust's text too. `appDataDir` is unused by the FFI now (kept in its
      * signature).
      */
-    suspend fun selfHealDeploymentSeedCustody(): com.fauna.ffi.FfiDeploymentSeedSelfHeal =
-        com.fauna.ffi.selfHealDeploymentSeedCustody(
-            backupNest(), backupSecret(), context.filesDir.absolutePath,
+    suspend fun selfHealDeploymentSeedCustody(): uniffi.fauna_core.LocalizedText? =
+        try {
+            com.fauna.ffi.selfHealDeploymentSeedCustody(
+                backupNest(), backupSecret(), context.filesDir.absolutePath,
+            )
+        } catch (e: Exception) {
+            ShellLog.w("DeploymentSeedGlue", "deployment-seed custody leg not attempted: ${e.message}")
+            com.fauna.ffi.deploymentSeedCustodyUnattemptedWarning()
+        }
+
+    /**
+     * Run the post-succession **aftermath** — legs 1, 2, 4, 7, 6, in the order
+     * and with the barriers the shared driver owns
+     * (`succession-aftermath.md` § Re-key scope's `BackupKey` corpus row). Thin
+     * accessor over the `runSuccessionAftermath` FFI export; the app supplies
+     * only what it alone holds — this session's secret, the account registry
+     * and the sink (the ceremony's raise context is parked in that registry by
+     * shared Rust and drained by the pass itself). `appDataDir` is unread by the
+     * FFI now (kept in its signature).
+     *
+     * Best-effort by contract — see `PostAuthGlueVM.runSuccessionAftermath`,
+     * the one caller.
+     */
+    suspend fun runSuccessionAftermath(
+        sink: com.fauna.ffi.FfiAftermathSink,
+    ): com.fauna.ffi.FfiAftermathOutcome =
+        com.fauna.ffi.runSuccessionAftermath(
+            nestRpc(), ownerSecretBytes(), context.filesDir.absolutePath,
+            accountStores.accountRegistry, sink,
         )
 
     /**
@@ -1541,6 +1662,26 @@ class ApiClient @Inject constructor(
      */
     suspend fun reclaimCustodianStore(dataDir: String): com.fauna.ffi.FfiCustodianReclaimOutcome =
         com.fauna.ffi.reclaimCustodianStore(backupSecret(), dataDir)
+
+    /**
+     * Restore the signed-in nest from this device's own sealed store — the
+     * confirmed `backup-destination-reseed-confirm-button` action
+     * (`backups.md` § Restore after losing the nest).
+     *
+     * A phone hosts its own store, so the ceremony runs **in this process**
+     * (`backup-destinations.md` § Re-seed → *Where the ceremony runs*), through
+     * the same shared face iOS calls: it pauses this process's custodian work,
+     * runs the shared ceremony, and re-enrolls this device when the outcome is
+     * whole. Nothing about that order is decided here. A stop comes back in
+     * the record's `stopped`, never as an exception.
+     *
+     * [deviceIdHex] is this device's stable sync id — the one its custodian
+     * row names — read by the caller from `SecureStorage`.
+     */
+    suspend fun reseedCustodianStore(deviceIdHex: String, dataDir: String): com.fauna.ffi.FfiReseedResult =
+        com.fauna.ffi.reseedCustodianStore(
+            backupNest(), backupSecret(), HexUtil.hexToBytes(deviceIdHex), dataDir,
+        )
 
     // ── Subscriptions — profile Tiers-tab author management (monetization.md ──
     // § Pillar 1 / profile.md). Slice A (SELF author mgmt): tier CRUD + pending-
@@ -1669,6 +1810,17 @@ class ApiClient @Inject constructor(
         nestRpc().folders().devices(name)
 
     /**
+     * The shared enrol (`FfiFoldersClient::ensure_place`): write `deviceIdHex`'s
+     * place on the OWN folder `name` at the default point iff it holds none;
+     * never rewrites a place the user chose. `true` = enrolled. The
+     * `folder-on-demand-toggle` ON gesture's nest leg on an owner row
+     * (`on-demand-files.md`, *Auto-appear default-ON*); mirrors apple
+     * `APIClient.ensureFolderPlace`.
+     */
+    suspend fun ensureFolderPlace(name: String, deviceIdHex: String): Boolean =
+        nestRpc().folders().ensurePlace(name, deviceIdHex)
+
+    /**
      * Share an owner-only set with a resolved recipient (hex actor-id): create the MLS
      * group admitting them → bind the genesis content key → deliver the Welcome. Reuses
      * the live conversations MlsEngine. `member_nest_url` is `null` (same-nest only;
@@ -1745,7 +1897,10 @@ class ApiClient @Inject constructor(
             // The session's sync device id: an enable also re-seals the set's
             // pre-serve files onto the served key, recorded under it
             // (`webdav-server.md` § Key model (c)).
-            sessionAccount.deviceId,
+            sessionAccount.resolveDeviceId(),
+            // The registry: Rust resolves the walk's attested predecessor ids
+            // off the owner's own actor (ruling (8)(b) source (ii)).
+            accountStores.accountRegistry,
         )
 
     /**
@@ -1819,7 +1974,7 @@ class ApiClient @Inject constructor(
     /** The live conversations session, or throw — the folder MLS ops require it. */
     private fun conversationsSessionOrThrow(): uniffi.fauna_conversations.ConversationsSession =
         conversationsManagerHost.session
-            ?: throw ApiException("Conversations session not active — cannot share folder")
+            ?: throw ApiException("Conversations session not active")
 
     // ── Cross-user folder sharing — recipient side (folders.md § Sharing, ──
     // Recipient side). Pure glue over shared Rust (priority #2); mirrors apple
@@ -1852,14 +2007,12 @@ class ApiClient @Inject constructor(
         com.fauna.ffi.foldersLeave(nestRpc(), conversationsSessionOrThrow(), groupIdHex)
     }
 
-    // ── T16 custody facet, owner side (devices.md § Custody facet, piece 2) ──
+    // ── T16 custody facet (devices.md § Custody facet, pieces 1–3 + the mint) ──
     //
-    // Pure glue over `libs/fauna-ffi/src/custody.rs`, which itself projects the
-    // shared fold — nothing here derives. The three calls are the whole surface
-    // that face exports: load, revoke, drive. The two store-writing gestures
-    // (budget / stop) and accept + mint are deliberately absent from the
-    // boundary because no UniFFI app reaches the W3 account store yet, which is
-    // why this app renders piece 2 only (see that module's docs).
+    // Pure glue over `libs/fauna-ffi/src/custody.rs`, which runs every act through
+    // the shared `fauna_client_custody::run_custody_act` against the hosted account
+    // runtime's store — nothing here derives. Each act answers with the re-folded
+    // facet and the error the page puts on `error-message`.
 
     /**
      * Fold the owner-side custody facet off `fauna.state.custody-ceremony` (`custody-holder-*`).
@@ -1898,6 +2051,70 @@ class ApiClient @Inject constructor(
         com.fauna.ffi.custodyRevoke(nestRpc(), ownerSecretBytes(), grantId, holder)
 
     /**
+     * Accept a custody offer (`custody-offer-accept-button`). `onNest` is the
+     * target select's answer — always `false` where [custodyOfferShowsTarget]
+     * keeps the select absent. The accept is recorded here and POSTED by the
+     * drive pass the act spawns over the conversations session, which is why a
+     * missing session is an error rather than a silent no-op.
+     */
+    suspend fun custodyAccept(grantId: ByteArray, onNest: Boolean): com.fauna.ffi.FfiCustodyActOutcome =
+        com.fauna.ffi.custodyAccept(nestRpc(), ownerSecretBytes(), conversationsSessionOrThrow(), grantId, onNest)
+
+    /** Decline a custody offer (`custody-offer-decline-button`). */
+    suspend fun custodyDecline(grantId: ByteArray): com.fauna.ffi.FfiCustodyActOutcome =
+        com.fauna.ffi.custodyDecline(nestRpc(), ownerSecretBytes(), grantId)
+
+    /**
+     * Change a held custody's budget (`custody-held-budget-input` commit). `cap`
+     * is already parsed by the shared `parseByteSize` — this never sees the text.
+     */
+    suspend fun custodySetBudget(grantId: ByteArray, cap: ULong): com.fauna.ffi.FfiCustodyActOutcome =
+        com.fauna.ffi.custodySetBudget(nestRpc(), ownerSecretBytes(), grantId, cap)
+
+    /** Stop holding (`custody-held-stop-button`) — pauses, KEEPS the bytes. */
+    suspend fun custodyStop(grantId: ByteArray): com.fauna.ffi.FfiCustodyActOutcome =
+        com.fauna.ffi.custodyStop(nestRpc(), ownerSecretBytes(), grantId)
+
+    /** Remove a held custody and free its space (`custody-held-remove-button`). */
+    suspend fun custodyRemove(grantId: ByteArray): com.fauna.ffi.FfiCustodyActOutcome =
+        com.fauna.ffi.custodyRemove(nestRpc(), ownerSecretBytes(), grantId)
+
+    /**
+     * Whether [offer]'s consent card renders `custody-offer-target-select` — the
+     * shared answer (a nest can hold the offer AND a pinned identity for the home
+     * nest is in hand; a local pin-store read). Absent otherwise, never disabled.
+     */
+    fun custodyOfferShowsTarget(offer: uniffi.fauna_client_capabilities.CustodyOfferRowView): Boolean =
+        runCatching { com.fauna.ffi.custodyOfferShowsTargetSelect(nestRpc(), offer) }.getOrDefault(false)
+
+    /**
+     * The mint flow's host options (`custody-mint-host-select`) — this account's
+     * 1:1 conversations. Empty with no conversations session yet: there is no
+     * channel to send the request over, which the caller answers with
+     * `devices.custody_mint_no_contacts` exactly as for no conversations.
+     */
+    fun custodyMintCandidates(): List<uniffi.fauna_client_capabilities.CustodyMintCandidateView> {
+        val session = conversationsManagerHost.session ?: return emptyList()
+        return com.fauna.ffi.custodyMintCandidates(ownerSecretBytes(), session)
+    }
+
+    /**
+     * Send a custody offer (`custody-mint-confirm-button`) over one
+     * [custodyMintCandidates] row's `host` + `channelHex`, passed back unchanged —
+     * the page picks a row, it never assembles a channel.
+     */
+    suspend fun custodyMint(host: ByteArray, channelHex: String): com.fauna.ffi.FfiCustodyActOutcome =
+        com.fauna.ffi.custodyMint(nestRpc(), ownerSecretBytes(), conversationsSessionOrThrow(), host, channelHex)
+
+    /**
+     * Piece 1 (`device-keyless-posture-badge`): for each roster row's enrolled
+     * `principal`, in order, whether the shared `keyless_posture` rule marks it
+     * relay-only. Every unknown answers `false`, so the marker never rests on a guess.
+     */
+    suspend fun devicesKeylessPosture(principals: List<String?>): List<Boolean> =
+        com.fauna.ffi.devicesKeylessPosture(principals)
+
+    /**
      * Fire one ceremony drive pass — the "act" half of the record-then-act loop,
      * and what makes owner-side receipt freshness real (it fetches the receipts
      * custodian nests deposited at this account's nest and folds each through the
@@ -1917,6 +2134,18 @@ class ApiClient @Inject constructor(
         val session = conversationsManagerHost.session ?: return
         runCatching { com.fauna.ffi.custodyDrive(nestRpc(), ownerSecretBytes(), session) }
             .onFailure { ShellLog.w("ApiClient", "custodyDrive failed: ${it.message}") }
+    }
+
+    /**
+     * Wire the B3 member-row join-filter into a freshly built [media] machine —
+     * the Media page's twin of [wireDevicesMlsQuery], over the same shared
+     * `SessionMlsQuery`. MUST run before the machine's first `refresh()`. A no-op
+     * when the conversations session isn't live yet (same guarded shape).
+     */
+    fun wireMediaMlsQuery(media: uniffi.fauna_media_machine.MediaMachine) {
+        conversationsManagerHost.session?.let { session ->
+            com.fauna.ffi.wireMediaMlsQuery(media, session)
+        }
     }
 
     /**
@@ -2072,9 +2301,6 @@ class ApiClient @Inject constructor(
     internal fun nestRpc(): FfiNestClient =
         nestClient ?: throw ApiException("Not connected to nest (WS-RPC)")
 
-    private fun feedRpc(): FfiFeedClient =
-        feedClient ?: throw ApiException("Not connected to nest (WS-RPC)")
-
     private fun postsRpc(): FfiPostsClient =
         postsClient ?: throw ApiException("Not connected to nest (WS-RPC)")
 
@@ -2099,11 +2325,11 @@ class ApiClient @Inject constructor(
     private fun carddavRpc(): FfiCarddavClient =
         carddavClient ?: throw ApiException("Not connected to nest (WS-RPC)")
 
-    private fun blueskyRpc(): FfiBlueskyClient =
-        blueskyClient ?: throw ApiException("Not connected to nest (WS-RPC)")
-
     private fun featuresRpc(): FfiFeaturesClient =
         featuresClient ?: throw ApiException("Not connected to nest (WS-RPC)")
+
+    private fun statusRpc(): FfiStatusClient =
+        statusClient ?: throw ApiException("Not connected to nest (WS-RPC)")
 
     private fun accountRpc(): FfiAccountClient =
         accountClient ?: throw ApiException("Not connected to nest (WS-RPC)")
@@ -2374,6 +2600,44 @@ class ApiClient @Inject constructor(
         return featuresRpc().rows()
     }
 
+    // The authoring half of the same plane (`dynamic-features.md` § Authoring
+    // surfaces): one tier's AUTHORED documents as host rows (`tier`: `admin` |
+    // `self`), and the shared `feature-policy-editor` opened over one member.
+    // The draft lives in the returned [FfiPolicyEditor] (shared Rust); the
+    // screens forward keystrokes and paint its `view()`.
+    suspend fun fetchAuthoredFeatureRows(tier: String): List<com.fauna.ffi.FfiAuthoredRow> {
+        ensureAuthenticated()
+        return featuresRpc().authoredRows(tier)
+    }
+
+    suspend fun openFeatureEditor(tier: String, feature: String): com.fauna.ffi.FfiPolicyEditor {
+        ensureAuthenticated()
+        return featuresRpc().openEditor(tier, feature)
+    }
+
+    // The guardian host (`family-policy-feature-limits-*`): the same rows and
+    // editor, keyed by the ward's actor id (as every `FfiFamilyClient` call is)
+    // because a guardian limit that names no ward binds nobody.
+    suspend fun fetchWardAuthoredFeatureRows(ward: ByteArray): List<com.fauna.ffi.FfiAuthoredRow> {
+        ensureAuthenticated()
+        return featuresRpc().wardAuthoredRows(ward)
+    }
+
+    suspend fun openFeatureEditorForWard(ward: ByteArray, feature: String): com.fauna.ffi.FfiPolicyEditor {
+        ensureAuthenticated()
+        return featuresRpc().openEditorForWard(ward, feature)
+    }
+
+    // -- Status page node leg --
+
+    // The Status snapshot's node leg (`ui/status.md` § State & data shape):
+    // `fauna.nest.info` narrowed to `{domain, version}` by the shared
+    // `StatusClient::node()` — the same read tui, linux, web and Apple make.
+    suspend fun fetchStatusNode(): FfiNodeLeg {
+        ensureAuthenticated()
+        return statusRpc().node()
+    }
+
     // fauna.account.get WS-RPC — the full account snapshot (actor id, handle,
     // tier, quota, …). Used by factory-reset to source the admin's handle
     // authoritatively from the still-live session before the wipe.
@@ -2470,27 +2734,6 @@ class ApiClient @Inject constructor(
     // HTTP twins are deleted nest-side (api-layers.md, Track A) and not called
     // from here.
 
-    // -- Feed (fauna.feed.* WS-RPC; the HTTP twins were deleted in the T4
-    // cutover). Rides the shared FfiFeedClient types directly — no per-app
-    // feed model — matching windows + linux app.rs. --
-
-    suspend fun listFeeds(): List<FfiFeedSummary> {
-        ensureAuthenticated()
-        return feedRpc().feedList()
-    }
-
-    suspend fun queryFeedPosts(feedId: String, cursor: Long? = null,
-                                limit: Long? = null): FfiFeedPostsReply {
-        ensureAuthenticated()
-        return feedRpc().feedPosts(feedId, cursor, limit, null, null, null, null)
-    }
-
-    suspend fun queryLocalFeed(cursor: Long? = null,
-                                limit: Long? = null): FfiFeedLocalPostsReply {
-        ensureAuthenticated()
-        return feedRpc().feedLocalPosts(cursor, limit, null)
-    }
-
     /** `fauna.posts.create` — [payload] is the embed-as-bytes signed-post wire
      *  (built by the shared FFI `buildPost*`). Returns the new post id (hex). */
     suspend fun createPost(payload: ByteArray): String {
@@ -2522,37 +2765,6 @@ class ApiClient @Inject constructor(
     suspend fun getPostDetail(postId: String, source: String = "fauna"): PostDetail {
         ensureAuthenticated()
         return decodePostFull(postsRpc().postsGet(postId)).toPostDetail(postId, source)
-    }
-
-    // -- Bluesky-native thread view (the one protocol-unique consume-side
-    // Bluesky surface) on the `bluesky.feed.thread` WS-RPC kind via
-    // FfiBlueskyClient, off the deleted GET /api/v1/bluesky/feed/thread/{uri}
-    // HTTP twin (api-layers.md § Bluesky; bridges.md § Bluesky-native thread
-    // view). The post-detail surface navigates from a crossposted *Fauna* post
-    // (FfiFeedPostItem.post_id is the hex [u8;32] Fauna id, NOT the AT-URI — so
-    // android, like linux, uses the PostId request variant; the handler
-    // hex-decodes + resolves the AT-URI via the bluesky_posts crosspost
-    // mapping). The kind returns a flat list (ancestors oldest-first, the focal
-    // post, then its direct replies); we split it into the (parent, focal,
-    // replies) shape PostDetailScreen renders. --
-
-    suspend fun blueskyGetThread(faunaPostIdHex: String): BlueskyThreadResponse {
-        ensureAuthenticated()
-        val reply = blueskyRpc().threadByPostId(faunaPostIdHex)
-        val posts = reply.posts
-        if (posts.isEmpty()) throw ApiException("Empty Bluesky thread")
-        // The nest names the focal post on the wire; the FFI seam passes it
-        // through as `FfiBlueskyThreadReply.focalIndex` — no per-app guess.
-        val focalIdx = reply.focalIndex.toInt()
-        // Carry the Fauna post id onto the focal so its like/repost/reply
-        // interactions ride fauna.posts.interact correctly (the wire id is the
-        // bridge-side opaque id, which posts.interact does not key on).
-        val focal = posts[focalIdx].toPostDetail().copy(postId = faunaPostIdHex)
-        // Ancestors are oldest-first on the wire; reverse so the single parent
-        // the UI shows (parents.firstOrNull) is the *direct* parent.
-        val parents = posts.subList(0, focalIdx).asReversed().map { it.toPostDetail() }
-        val replies = posts.subList(focalIdx + 1, posts.size).map { it.toPostDetail() }
-        return BlueskyThreadResponse(post = focal, parents = parents, replies = replies)
     }
 
     // -- Unified Notifications (fauna.notifications.* WS-RPC; the HTTP twins
@@ -2605,9 +2817,13 @@ class ApiClient @Inject constructor(
 
     /** Import `.ics` into the calendar's encrypted store. `mode` is ignored on the
      *  encrypted path (events are upserted by `uid_hash`). */
-    suspend fun importCalendar(calendarId: String, icsText: String, mode: String = "skip") {
+    suspend fun importCalendar(
+        calendarId: String,
+        icsText: String,
+        mode: String = "skip",
+    ): FfiIcsImportResult {
         ensureAuthenticated()
-        caldavRpc().importCalendarIcs(calendarId, icsText)
+        return caldavRpc().importCalendarIcs(calendarId, icsText)
     }
 
     suspend fun exportCalendar(calendarId: String): String {
@@ -2851,6 +3067,22 @@ class ApiClient @Inject constructor(
         emailRpc().filtersDelete(id)
     }
 
+    // -- Privacy: inherited-rule marks (succession-aftermath.md § Adjudicating
+    // what the aftermath carries across, the email-filter plane) — the fauna-ffi
+    // façade over the account store's succession ledger (`filter_marks.rs`),
+    // the same three doors windows and apple call. No nest round-trip: the
+    // marks live in this device's account store, raised by the shared driver.
+
+    /** The ids of every filter rule still awaiting the owner's verdict. */
+    suspend fun filterMarksList(): List<Long> = com.fauna.ffi.filterMarksList()
+
+    /** Record **Keep**; `true` when a mark was actually open. */
+    suspend fun filterMarkKeep(id: Long): Boolean = com.fauna.ffi.filterMarkKeep(id)
+
+    /** Record **Removed** — only AFTER [deleteEmailFilter] landed (the façade's
+     *  contract: `filter-delete` is the one removal mechanism). */
+    suspend fun filterMarkRemoved(id: Long): Boolean = com.fauna.ffi.filterMarkRemoved(id)
+
     // -- Privacy: Spam Preferences (fauna.spam.* WS-RPC) --
     // Migrated off the GET|PUT /api/v1/spam/preferences HTTP twin onto the
     // shared fauna.spam.{get,set}_preferences kinds via FfiSpamClient — the
@@ -3015,6 +3247,18 @@ class ApiClient @Inject constructor(
     }
 
     /**
+     * `fauna.moderation.appeal` — appeal the enforcement decision recorded against
+     * [contentId] (a moderation-queue server row's own id, captured when the form
+     * opened; `moderation.md` § Legal takedown — the transparency triple's second
+     * leg). Gate the dispatch through [com.fauna.ffi.appealFormView]; the caller
+     * renders [com.fauna.ffi.appealVerdict], the shared wording. Recorded for
+     * review, never granted — the reply's status is discarded.
+     */
+    suspend fun moderationAppeal(contentId: String, reason: String) {
+        moderationRpc().appeal(contentId, reason)
+    }
+
+    /**
      * `fauna.moderation.legal_takedown` — the Admin-only legal-compulsion
      * takedown/overturn (`moderation.md` § Legal takedown → Invocation
      * surface). `conversation` selects the
@@ -3063,6 +3307,10 @@ class ApiClient @Inject constructor(
     suspend fun spamThresholdOverrideSet(value: UInt?): UInt? =
         com.fauna.ffi.spamThresholdOverrideSet(nestRpc(), value)
 
+    // The per-account Forwarding calls (forwardAllTo*, forwardPerHour*) are mail
+    // bridge RPCs the kids `fauna-ffi` flavor does not export: they live in
+    // [KidsExcisedApi] (`src/noKids/`), called only from the mail-settings page.
+
     // ── Moderation-queue local detections (moderation.md § Layout & flow) ──
     //
     // The `moderation-queue` is the UNION of the server `fauna.moderation.actions`
@@ -3089,16 +3337,12 @@ class ApiClient @Inject constructor(
     fun moderationMessageBody(contentId: String): String? =
         conversationsManagerHost.session?.moderationMessageBody(contentId)
 
-    /** The plaintext body of one of the caller's own posts (`fauna.posts.get` →
-     *  shared `decodePostFull`), for the client-side sealed spam train on a **server**
-     *  queue row (mail-spam.md § Encrypted-mode interaction — the same read-authz gate
-     *  the server train enforces). Throws on an RPC/decode failure; the caller falls
-     *  through to `fauna.moderation.train`, mirroring linux `train_moderation_flow`'s
-     *  `if let Ok(reply)`. */
-    suspend fun postBodyText(contentId: String): String {
-        ensureAuthenticated()
-        return com.fauna.ffi.decodePostFull(postsRpc().postsGet(contentId)).body
-    }
+    /** The open refused scheduling changes (`ui/events.md` § Refused scheduling
+     *  changes) — a store read over the conversations manager (it names the
+     *  sender); the seam the Events view model re-reads on the store-change
+     *  notice. */
+    suspend fun refusedChangesOpen(): List<com.fauna.ffi.FfiRefusedChange> =
+        com.fauna.ffi.refusedChangesOpen(conversationsManagerHost.manager)
 
     // ── Muted keywords (moderation.md § Muted keywords / content-moderation § Q3) ──
     //
@@ -3170,6 +3414,25 @@ class ApiClient @Inject constructor(
             nestRpc(), ownerSecretBytes(), accountStores.accountRegistry, heldKitInput,
         )
 
+    // The let-go of a dead generation (`settings.md` § Recovery kit, the fifth
+    // act) — thin wrappers over `libs/fauna-ffi/src/generation_let_go.rs`, the
+    // door apple's `APIClient` and windows call. All three ride the account
+    // runtime this client already starts: no secret and no seat cross here.
+
+    /** The confirm word `recovery-kit-let-go-confirm-field` must hold — shared
+     *  Rust's one constant, never localized and never re-spelled here. */
+    fun recoveryLetGoConfirmWord(): String = com.fauna.ffi.recoveryLetGoConfirmWord()
+
+    /** The dead read the let-go trio renders from. Never throws: no runtime
+     *  yet, or a failed read, is the empty answer. */
+    suspend fun recoveryDeadGenerations(): com.fauna.ffi.FfiDeadGenerations =
+        com.fauna.ffi.recoveryDeadGenerations()
+
+    /** `recovery-kit-let-go-button` — let go of the ids the last dead read
+     *  listed; the outcome carries the refreshed read. */
+    suspend fun recoveryLetGo(generationIds: List<ByteArray>): com.fauna.ffi.FfiLetGoOutcome =
+        com.fauna.ffi.recoveryLetGo(generationIds)
+
     /** The `fauna://recovery` URI a minted kit's copy button and QR carry
      *  (`identity-succession.md` § The RecoveryKey, *Which encoding each
      *  affordance carries*) — a pure local build, no round trip. */
@@ -3205,6 +3468,43 @@ class ApiClient @Inject constructor(
             nestRpc(), nodeUrl, ownerSecretBytes(), heldKitInput,
             accountStores.accountRegistry, SuccessorStorePath(accountStores),
         )
+
+    // ── Sessions page (`ui/sessions.md` § Where logic lives) ──
+    //
+    // Thin over `libs/fauna-ffi/src/sessions.rs`: each act re-reads and re-folds
+    // in shared Rust and answers the page to paint beside whether the lock
+    // landed. `devices` names device-minted sessions; `ownDeviceId` is the
+    // This-device fallback; `previous` keeps the painted rows under a failed read.
+
+    suspend fun sessionsLoad(
+        devices: uniffi.fauna_devices_machine.DevicesMachine?,
+        ownDeviceId: String?,
+        previous: com.fauna.ffi.FfiSessionsSnapshot?,
+    ): com.fauna.ffi.FfiSessionsPage =
+        com.fauna.ffi.sessionsLoad(nestRpc(), devices, ownDeviceId, previous)
+
+    suspend fun sessionsRevoke(
+        devices: uniffi.fauna_devices_machine.DevicesMachine?,
+        ownDeviceId: String?,
+        previous: com.fauna.ffi.FfiSessionsSnapshot?,
+        tokenId: String,
+    ): com.fauna.ffi.FfiSessionsPage =
+        com.fauna.ffi.sessionsRevoke(nestRpc(), devices, ownDeviceId, previous, tokenId)
+
+    suspend fun sessionsRevokeOthers(
+        devices: uniffi.fauna_devices_machine.DevicesMachine?,
+        ownDeviceId: String?,
+        previous: com.fauna.ffi.FfiSessionsSnapshot?,
+    ): com.fauna.ffi.FfiSessionsPage =
+        com.fauna.ffi.sessionsRevokeOthers(nestRpc(), devices, ownDeviceId, previous)
+
+    suspend fun sessionsLockout(
+        devices: uniffi.fauna_devices_machine.DevicesMachine?,
+        ownDeviceId: String?,
+        previous: com.fauna.ffi.FfiSessionsSnapshot?,
+        confirmWord: String,
+    ): com.fauna.ffi.FfiSessionsPage =
+        com.fauna.ffi.sessionsLockout(nestRpc(), devices, ownDeviceId, previous, confirmWord)
 
     /**
      * `recovery-kit-sweep-retry-button` — finish a sweep the ceremony left
@@ -3380,12 +3680,28 @@ class ApiClient @Inject constructor(
 
     /** The actor id (lowercase hex) of the session this client authenticates
      *  as, derived from its own cached secret — never the registry's active
-     *  pointer, which a mid-switch transient can move first. */
-    private fun sessionActorHex(): String? = secret?.let {
+     *  pointer, which a mid-switch transient can move first. `internal` for the
+     *  debug test agent, which publishes it as the e2e state's
+     *  `session.actor_id`. */
+    internal fun sessionActorHex(): String? = secret?.let {
         runCatching {
             com.fauna.ffi.hexFull(com.fauna.ffi.actorIdFromSecret(HexUtil.hexToBytes(it)))
         }.getOrNull()
     }
+
+    /**
+     * What "the same identity" means to the critical-alert sweep: the actor AND
+     * the nest it signs in to (a re-point at another nest needs a loop sweeping
+     * that nest). `null` while no secret is held. The arguments default to this
+     * client's own state; the e2e `session` patch passes the INCOMING pair to
+     * ask whether it re-establishes the identity already signed in.
+     */
+    internal fun sweepIdentityKey(secretHex: String? = secret, url: String = nodeUrl): String? =
+        secretHex?.takeIf { it.isNotEmpty() }?.let { hex ->
+            runCatching {
+                com.fauna.ffi.hexFull(com.fauna.ffi.actorIdFromSecret(HexUtil.hexToBytes(hex)))
+            }.getOrNull()
+        }?.let { "$it@$url" }
 
     /** `fauna.family.policy.update` — replace a ward's reach policy (guardian-only). */
     suspend fun familyPolicyUpdate(supervisedActorId: ByteArray, policy: com.fauna.ffi.FfiReachPolicy) =
@@ -3519,7 +3835,12 @@ class ApiClient @Inject constructor(
      * the persistent WS-RPC connection (the deleted `GET /admin/api/stats` twin
      * was removed in the WS-RPC-everywhere rip-out).
      */
-    suspend fun fetchAdminStats(): FfiAdminStats = adminRpc().stats()
+    /** The admin dashboard's cards — the five reads folded by the shared
+     *  `admin_dashboard_snapshot` (admin.md § 1. Dashboard → *The card set*).
+     *  Never fails as a whole: a failed read drops its own cards and rides
+     *  `error`. Free function for the `adminRegionStatus` reason below. */
+    suspend fun adminDashboardSnapshot(): com.fauna.ffi.FfiAdminDashboardSnapshot =
+        com.fauna.ffi.adminDashboardSnapshot(nestRpc())
 
     // -- Admin user-administration hub (admin-users — admin.md § Users) --
     //
@@ -3548,8 +3869,12 @@ class ApiClient @Inject constructor(
      * duplicate actor or taken handle is `fauna.admin.conflict`, a
      * malformed/reserved handle `fauna.admin.invalid_params`.
      */
-    suspend fun adminUsersCreate(actorId: ByteArray, tier: String, handle: String?) =
-        adminRpc().usersCreate(actorId, tier, handle)
+    suspend fun adminUsersCreate(
+        actorId: ByteArray,
+        tier: String,
+        handle: String?,
+        guardianActor: ByteArray?,
+    ) = adminRpc().usersCreate(actorId, tier, handle, guardianActor, null) // no band from Admit
 
     /** `fauna.admin.users.update` — set a user's tier (= the quota) + label. */
     suspend fun adminUsersUpdate(actorId: ByteArray, tier: String, label: String) =
@@ -3597,6 +3922,23 @@ class ApiClient @Inject constructor(
     suspend fun adminAdminsRemove(actorId: ByteArray) = adminRpc().adminsRemove(actorId)
 
     /**
+     * `fauna.admin.pending_actions.list` narrowed to still-`pending` rows — the
+     * Users hub's `admin-users-pending-section` (admin.md § Pending admin
+     * actions). The wire reply carries ALL statuses; the console offers
+     * approve / cancel only on a live action (tui's `pending_section` filter).
+     */
+    suspend fun adminPendingActionsList(): List<FfiAdminPendingAction> =
+        adminRpc().pendingActionsList().filter { it.isPending }
+
+    /** `fauna.pending_actions.approve` — this admin's approval
+     *  (`admin-pending-action-approve-button`). */
+    suspend fun adminPendingActionApprove(id: Long) = adminRpc().pendingActionApprove(id)
+
+    /** `fauna.pending_actions.cancel` from the admin console
+     *  (`admin-pending-action-cancel-button`) — one click, no confirm. */
+    suspend fun adminPendingActionCancel(id: Long) = adminRpc().pendingActionCancel(id)
+
+    /**
      * `fauna.admin.set_registration_mode` — set the deployment's registration
      * posture + the orthogonal free-tier ceiling together, one call
      * (`admin-users-registration-save-button`; admin.md § 2 Users → *Section 2
@@ -3620,6 +3962,22 @@ class ApiClient @Inject constructor(
 
     /** `fauna.admin.tiers.list` — the quota tiers backing the tier pickers. */
     suspend fun adminTiersList(): List<FfiAdminTier> = adminRpc().tiersList()
+
+    /**
+     * `fauna.admin.tiers.create` — define a new tier (raw i64 caps, already
+     * validated by the caller through the shared `parse_cap`). An empty name is
+     * `fauna.admin.invalid_params`, a taken one `fauna.admin.conflict`. Backs the
+     * `admin-settings` add-a-tier form (admin.md § 3 → *Defining a new tier*),
+     * mirroring Linux `add_admin_tier`.
+     */
+    suspend fun adminTiersCreate(
+        name: String,
+        maxInboxBytes: Long,
+        maxStorageBytes: Long,
+        maxDevices: Long,
+        maxBlobSize: Long,
+        maxFeeds: Long,
+    ) = adminRpc().tiersCreate(name, maxInboxBytes, maxStorageBytes, maxDevices, maxBlobSize, maxFeeds)
 
     /**
      * `fauna.admin.tiers.update` — persist a tier definition's caps (raw i64:
@@ -3683,11 +4041,11 @@ class ApiClient @Inject constructor(
         adminRpc().factoryReset(newClaimCode)
 
     /**
-     * `fauna.setup.status` — the full deployment setup snapshot. The non-admin
-     * first-setup mail glue ([com.fauna.app.ui.viewmodel.MailEnableGlueVM]) reads
-     * `emailEnabled` + `autoEnableMailForNewUsers` (unset ⇒ true) to gate its
-     * auto-mint per the deployment policy (mail-credentials.md § Auto-enable for new
-     * users). Anonymous read over the live WS-RPC connection.
+     * `fauna.setup.status` — the full deployment setup snapshot (the admin pages
+     * read it; the non-admin first-setup auto-mint gate on `emailEnabled` +
+     * `autoEnableMailForNewUsers` lives in the shared post-claim serving-enablement
+     * step, mail-credentials.md § Auto-enable for new users). Anonymous read over
+     * the live WS-RPC connection.
      */
     suspend fun nestSetupStatus(): FfiSetupStatus = nestRpc().setupStatus()
 
@@ -3780,6 +4138,21 @@ class ApiClient @Inject constructor(
      *  did — the only path that can reach the wire. Re-declaring also
      *  retires the previous region's feature-policy document nest-side. */
     suspend fun adminSetRegion(region: String?) = com.fauna.ffi.adminSetRegion(nestRpc(), region)
+
+    /** `fauna.admin.web_app_origin.get` folded through the shared
+     *  `admin_web_app_origin_view` (admin.md § N Nest → Web-app origin) — the
+     *  one call `admin-nest-web-app-origin-section` needs; an older nest's
+     *  unknown-kind answer is the view's "predates the choice" state, not an
+     *  error. Free function for the same reason [adminRegionStatus] is one. */
+    suspend fun adminWebAppOriginStatus(): com.fauna.ffi.FfiAdminWebAppOriginView =
+        com.fauna.ffi.adminWebAppOriginStatus(nestRpc())
+
+    /** `fauna.admin.web_app_origin.set` — `admin-nest-web-app-origin-save-button`.
+     *  Answers the fold of the nest's own reply, so the save repaints with no
+     *  second read. */
+    suspend fun adminSetWebAppOrigin(
+        mode: com.fauna.ffi.FfiWebAppOrigin,
+    ): com.fauna.ffi.FfiAdminWebAppOriginView = com.fauna.ffi.adminSetWebAppOrigin(nestRpc(), mode)
 
     /** `fauna.oauth.issuer_key_status` folded through the shared
      *  `issuer_key_view` (authorization-server.md § The issuer) — the one read
@@ -3927,35 +4300,6 @@ class ApiClient @Inject constructor(
 
 class ApiException(message: String) : Exception(message)
 
-// ── Bluesky thread helpers ──────────────────────────────────────────────────
-
-/**
- * Project a wire [FfiBlueskyPost] (a flat display projection of the proto
- * `BlueskyPost`) onto the unified [PostDetail] the feed/post-detail UI renders.
- * `postId` carries the bridge-side opaque id by default; [blueskyGetThread]
- * overrides it with the navigated Fauna post id for the focal post.
- */
-private fun FfiBlueskyPost.toPostDetail(): PostDetail = PostDetail(
-    postId = id,
-    author = authorDisplayName?.takeIf { it.isNotBlank() } ?: authorHandle,
-    createdAt = parseIsoToEpochMillis(createdAt),
-    body = text,
-    tags = emptyList(),
-    hasMedia = hasMedia,
-    isReply = replyParent != null,
-    source = source.ifEmpty { "bluesky" },
-    likeCount = likeCount.toInt(),
-    repostCount = repostCount.toInt(),
-    replyCount = replyCount.toInt(),
-    isLiked = viewerLiked,
-    isReposted = viewerReposted,
-    replyToId = replyParent,
-    uri = atUri,
-    cid = cid,
-    rootUri = replyRoot,
-    rootCid = null,
-)
-
 /**
  * Project a native Fauna [DecodedPost] (from `fauna.posts.get` → [decodePostFull])
  * onto the unified [PostDetail] the feed/post-detail UI renders. [navPostId] is the
@@ -3978,9 +4322,3 @@ internal fun DecodedPost.toPostDetail(navPostId: String, source: String): PostDe
     replyToId = references.firstOrNull { it.refType == "reply" }?.postId,
 )
 
-/** Parse an ISO-8601 timestamp (with `Z` or an offset) to epoch millis; 0 on failure. */
-private fun parseIsoToEpochMillis(iso: String): Long = runCatching {
-    java.time.OffsetDateTime.parse(iso).toInstant().toEpochMilli()
-}.recoverCatching {
-    java.time.Instant.parse(iso).toEpochMilli()
-}.getOrDefault(0L)

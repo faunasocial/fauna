@@ -9,8 +9,8 @@ test sharing this module would flip these mock-inject tests to the real backend 
 
 The fork below stays honest without a real backend because a FaunaMls 1:1 fork is
 **snapshot-only** — it mints a fresh participant-keyed group and fires no rail
-backend op, so a non-Fauna-typed address (a Bluesky account DID, never an ``@``-shaped
-one — see the inline comment on the ``add_participant_to_thread`` call) is fine
+backend op, so a non-Fauna-typed address (an email address at a domain no nest
+serves — see the inline comment on the ``add_participant_to_thread`` call) is fine
 here in a way it is not for the in-place add.
 """
 
@@ -25,25 +25,16 @@ def test_add_to_oneonone_forks_new_group(logged_in_app):
     )
     before_ids = {t.thread_id for t in logged_in_app.conversations.list_threads()}
     logged_in_app.conversations.open_thread_by_id(thread_id)
-    # A Bluesky account DID, NOT an `@`-shaped address (`alice@self-nest.test` before
-    # 2026-09-07): ANY `localpart@domain` string — Fauna-shaped OR not —
-    # makes `resolve_recipient` try a real same-nest THEN foreign-nest RPC
-    # probe first (`FaunaMlsBackend::resolve_address`/`resolve_foreign`), and
-    # this module's mock-injected thread never runs the real login's
-    # `restore_and_wire` (`mark_conversations_loaded`), so
-    # `domain_evidence` stays `Unloaded` and ANY probe failure — same-nest OR
-    # foreign — is `Error`, never a safe Email downgrade
-    # (`federation.md` § Peer-auth model → Discovery-failure semantics,
-    # 2026-08-29). This broke `alice@self-nest.test` AND
-    # `alice@plain-email-host.test` alike (confirmed on windows; recorded
-    # `failed` on linux the day the ruling landed and never caught since —
-    # cross-app gap tracked). A DID has no `@` at all, so
-    # `parse_fauna_handle` rejects it before any RPC — `NotFound` — and the
-    # Bluesky rail's format-only parse claims it, matching
-    # `test_recipient_picker.py::test_rail_locks_after_first_chip`'s
-    # `did:plc:other` fixture. The type (Bluesky vs Email) is incidental to
-    # this test — only the FORK behavior is asserted.
-    logged_in_app.conversations.add_participant_to_thread("did:plc:alicemembershipfork")
+    # An email address at a domain no nest serves (`test_recipient_picker.py::
+    # test_resolves_email`'s fixture shape): it resolves by shape on the Smtp rail,
+    # which is all a snapshot-only fork needs — the type is incidental, only the
+    # FORK is asserted. Not a `*@self-nest.test` address: the injected thread's
+    # participant harvest makes that domain `KnownFauna` (bob-membership is its
+    # sender), so it probes the nest and fails here — the ruling that refused the
+    # "Unloaded domain_evidence" reading of this failure, 2026-09-07. Not a bare `did:plc:…` either (the fixture until 2026-10-13): it
+    # leaned on the Bluesky rail's format-only parse, retired 2026-10-03, and now
+    # reads `not-found`, so no chip commits and the fork never starts.
+    logged_in_app.conversations.add_participant_to_thread("alice-fork@plain-email-host.test")
     after = logged_in_app.conversations.list_threads()
     # Count only the fork this test made — a FaunaMls thread that was not there
     # before — never the whole list. The list is not otherwise still: the mail

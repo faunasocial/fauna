@@ -32,6 +32,16 @@
                     Style="{StaticResource AccentButtonStyle}"
                     Visibility="Collapsed"
                     Click="OnResetConfirmClick" />
+            <!-- The canonical `error-message` (convention 2): a refused
+                 start-over paints here and leaves the verdict text and the
+                 confirm exactly as they were (account-scoping.md § Concurrent
+                 instances → An erase refuses while a sibling serves the
+                 account). Collapsed until a refusal paints it. -->
+            <TextBlock x:Name="ErrorText"
+                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                       TextWrapping="Wrap"
+                       TextAlignment="Center"
+                       Visibility="Collapsed" />
         </StackPanel>
     </Grid>
 </Page>

@@ -10,25 +10,33 @@
 //! shared join (`fauna_account_seams::conversation_seams::wire_parts`), beside
 //! the room seams `with_conversations` already set.
 //!
-//! One runtime per tab at a time, held here the way `fauna-ffi` holds its
-//! seat's (`crate::account_runtime::handle()` there too): the SPA starts it
+//! One runtime per tab at a time, held in the same shared host every native
+//! seat holds its runtime in (`fauna_account_plane::account_driver::
+//! AccountRuntimeHost` — its claim and generation guard): the SPA starts it
 //! once its conversations manager exists, shuts it down before another
 //! account signs in, and every read — the devices page's cap notice and
-//! This-device row, the e2e state keys — goes through [`handle`]. A start that
-//! fails leaves the tab with no account store and says so in the log, the
-//! native degrade posture: every store-backed surface then fails its gesture.
+//! This-device row, the e2e state keys — goes through [`handle`]. A start
+//! claims its install before its first await, so a stop the SPA issues after
+//! it — an account switch landing mid-assembly — supersedes it, and the
+//! assembly shuts its own runtime down rather than installing the departing
+//! account's; a stop takes only what is installed or assembling when it
+//! runs, never a later start's runtime. A start that fails leaves the tab
+//! with no account store and says so in the log, the native degrade posture:
+//! every store-backed surface then fails its gesture.
 
-use std::cell::RefCell;
+use std::cell::OnceCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use fauna_account_plane::account_driver::{
-    ACCOUNT_RUNTIME_STOP_BUDGET, AccountStoreHandle, DEFAULT_BACKSTOP_INTERVAL, MembershipSource,
-    PumpCyclesView, RuntimePrincipal, SeedHolder, StopReason, stop_one,
+    ACCOUNT_RUNTIME_STOP_BUDGET, AccountRuntimeHost, AccountStoreHandle, DEFAULT_BACKSTOP_INTERVAL,
+    EnrollmentRetirement, InstallOutcome, MembershipSource, PumpCyclesView,
+    REMOVED_ACCOUNT_RETIRE_BUDGET, RuntimePrincipal, SeedHolder, StopReason, stop_one,
 };
 use fauna_account_plane::web_host::{self, WebRuntimeParams};
 use fauna_account_seams::spawner::LocalSpawner;
 use fauna_account_store::root::StoreRoot;
-use fauna_client_accounts::LocalStorageSecretStore;
+use fauna_client_accounts::{LocalStorageSecretStore, RemovedAccountCredentials};
 use fauna_client_core::nest_trust::{LocalStoragePinStore, NestIdentityPinStore};
 use fauna_client_recovery::LinkedNestDial;
 use fauna_core::identity::ActorKeypair;
@@ -41,30 +49,37 @@ pub(crate) type SeamParts = (
     Arc<fauna_conversations::backends::fauna_mls::FaunaMlsBackend>,
 );
 
-/// A running runtime and the account it serves.
+/// What this tab carries beside a runtime's handle — the host's payload,
+/// claimed with the install so a teardown landing mid-assembly drops it too.
 struct Running {
     /// The lowercase-hex actor id the runtime was started for.
     actor_id_hex: String,
-    handle: AccountStoreHandle,
     /// The Nests page's both-ends peer connect the runtime was started with —
     /// also the owner connection the seed-alone request opens at each linked
     /// nest ([`linked_nest_dial`]). `None` only in tests.
     peer_connect: Option<fauna_client_pair::PeerConnect>,
     /// The store-change notice as the counted level
-    /// [`account_store_changed_after`] answers from; dropping it with the
-    /// runtime ends its relay and settles every waiter. `None` only in tests.
-    store_changes: Option<fauna_account_seams::store_change::StoreChangeLevel>,
+    /// [`account_store_changed_after`] answers from, set once the store is
+    /// open; dropping it with the runtime ends its relay and settles every
+    /// waiter. Empty only in tests.
+    store_changes: Rc<OnceCell<fauna_account_seams::store_change::StoreChangeLevel>>,
 }
 
 thread_local! {
-    /// This tab's running runtime, if any. `thread_local` because the SPA is
-    /// one thread and the handle's future is `!Send` on wasm32.
-    static CURRENT: RefCell<Option<Running>> = const { RefCell::new(None) };
+    /// This tab's runtime host. `thread_local` because the SPA is one thread
+    /// and the payload is `!Send` on wasm32; leaked so `start` can hold it
+    /// across the install's await — one per tab, for the tab's life.
+    static HOST: &'static AccountRuntimeHost<Running> =
+        Box::leak(Box::new(AccountRuntimeHost::new()));
+}
+
+fn host() -> &'static AccountRuntimeHost<Running> {
+    HOST.with(|h| *h)
 }
 
 /// This tab's account runtime, when one is running.
 pub(crate) fn handle() -> Option<AccountStoreHandle> {
-    CURRENT.with(|c| c.borrow().as_ref().map(|r| r.handle.clone()))
+    host().handle()
 }
 
 /// [`handle`] as the source a store-backed surface waits on — what the
@@ -98,12 +113,13 @@ pub(crate) fn folder_key_store(
 }
 
 pub(crate) fn handle_for(actor_id_hex: &str) -> Option<AccountStoreHandle> {
-    CURRENT.with(|c| {
-        c.borrow()
-            .as_ref()
-            .filter(|r| r.actor_id_hex.eq_ignore_ascii_case(actor_id_hex))
-            .map(|r| r.handle.clone())
-    })
+    host()
+        .with_installed(|handle, r| {
+            r.actor_id_hex
+                .eq_ignore_ascii_case(actor_id_hex)
+                .then(|| handle.clone())
+        })
+        .flatten()
 }
 
 /// The period-key custody (`fauna.state.subscriptions`) of this tab's running
@@ -174,8 +190,16 @@ fn e2e_seeded_identity(nest_url: &str) -> Option<[u8; 32]> {
 
 /// Start this tab's account runtime for the signed-in account and register
 /// the account-plane conversations seams on `manager` at the store-ready
-/// edge. Any runtime already running is shut down first (an account switch
-/// whose teardown was missed must not leave two drivers in one tab).
+/// edge.
+///
+/// The install is CLAIMED before the first await (the shared host's
+/// `begin`), so the SPA's call order is the order the host sees: a stop
+/// issued after this start — an account switch landing mid-assembly —
+/// supersedes it, and the assembly then shuts its own runtime down instead of
+/// installing the departing account's. A runtime still installed when this
+/// one lands (an account switch whose teardown was missed) is shut down as
+/// this one replaces it, so a tab never keeps two drivers. Rejects when the
+/// store cannot assemble, or when a later stop or start superseded this one.
 pub(crate) async fn start(
     client: fauna_rpc_wasm::WsRpcClient,
     (conversations, fauna_mls): SeamParts,
@@ -183,9 +207,14 @@ pub(crate) async fn start(
     nest_url: &str,
     peer_connect: fauna_client_pair::PeerConnect,
 ) -> Result<(), JsValue> {
-    shutdown().await;
     let keypair = ActorKeypair::from_secret(self_secret);
     let actor_id_hex = keypair.actor_id_hex();
+    let store_changes = Rc::new(OnceCell::new());
+    let claim = host().begin(Running {
+        actor_id_hex: actor_id_hex.clone(),
+        peer_connect: Some(peer_connect.clone()),
+        store_changes: Rc::clone(&store_changes),
+    });
     let registry = crate::succession::account_registry();
     let enrollment_target_device_id = registry
         .device_id_for_actor(&LocalStorageSecretStore, &actor_id_hex)
@@ -202,7 +231,7 @@ pub(crate) async fn start(
     let principal = SeedHolder::from_registry(keypair, &registry);
     let road_seeds = fauna_account_plane::owed_delivery::PredecessorSeeds::of(&principal);
     let params = WebRuntimeParams {
-        store_root: StoreRoot::platform(),
+        store_root: StoreRoot::platform().map_err(|e| JsValue::from_str(&format!("{e:#}")))?,
         actor_id_hex: actor_id_hex.clone(),
         reconnects: client.subscribe_reconnects(),
         pushes: client.subscribe_pushes(),
@@ -241,29 +270,29 @@ pub(crate) async fn start(
         handle.clone(),
         &LocalSpawner,
     );
+    // The store-change notice, seeded here: whatever this runtime's pump
+    // changes from now on reaches the SPA's open pages. Set into the claimed
+    // payload before the install, so the first reader after it finds it.
+    let (level, relay) =
+        fauna_account_seams::store_change::StoreChangeLevel::new(handle.clone()).await;
+    wasm_bindgen_futures::spawn_local(relay);
+    let _ = store_changes.set(level);
+    drop(store_changes);
+    if host().finish(claim, handle.clone()).await == InstallOutcome::Superseded {
+        tracing::info!(
+            "account runtime: superseded while assembling — a later stop or start landed first; \
+             this runtime is shut down, not installed"
+        );
+        return Err(JsValue::from_str(
+            "account runtime: superseded while assembling",
+        ));
+    }
+    tracing::info!("account runtime: started for this tab");
     // The deployment-seed custody leg — one of its two edges;
     // `selfHealDeploymentSeedCustody` (the post-auth hook) is the other
     // (`crate::deployment_seed_custody`): runs now iff the hook already fired
     // for this account.
-    crate::deployment_seed_custody::spawn_at_store_ready(
-        custody_client,
-        handle.clone(),
-        &actor_id_hex,
-    );
-    // The store-change notice, seeded here: whatever this runtime's pump
-    // changes from now on reaches the SPA's open pages.
-    let (store_changes, relay) =
-        fauna_account_seams::store_change::StoreChangeLevel::new(handle.clone()).await;
-    wasm_bindgen_futures::spawn_local(relay);
-    CURRENT.with(|c| {
-        *c.borrow_mut() = Some(Running {
-            actor_id_hex,
-            handle,
-            peer_connect: Some(peer_connect),
-            store_changes: Some(store_changes),
-        })
-    });
-    tracing::info!("account runtime: started for this tab");
+    crate::deployment_seed_custody::spawn_at_store_ready(custody_client, handle, &actor_id_hex);
     // The succession ledger's post-store-ready pass — one of its two edges;
     // `runSuccessionAftermath` is the other (`succession::spawn_ledger_pass`).
     crate::succession::spawn_ledger_pass(ledger_client);
@@ -334,12 +363,14 @@ pub(crate) struct WasmLinkedNestDial {
 
 /// The dial for `actor_id_hex`'s gestures in this tab.
 pub(crate) fn linked_nest_dial(actor_id_hex: &str) -> WasmLinkedNestDial {
-    let peer_connect = CURRENT.with(|c| {
-        c.borrow()
-            .as_ref()
-            .filter(|r| r.actor_id_hex.eq_ignore_ascii_case(actor_id_hex))
-            .and_then(|r| r.peer_connect.clone())
-    });
+    let peer_connect = host()
+        .with_installed(|_, r| {
+            r.actor_id_hex
+                .eq_ignore_ascii_case(actor_id_hex)
+                .then(|| r.peer_connect.clone())
+                .flatten()
+        })
+        .flatten();
     WasmLinkedNestDial { peer_connect }
 }
 
@@ -440,18 +471,30 @@ fn owed_nest_deliverer(
 /// (`fauna_account_plane::account_driver::stop_one`): a sign-out retires the
 /// machine's enrollment before the store closes, anything else leaves it
 /// enrolled (`account-client-lifecycle.md` § The client-side lifecycle →
-/// *Ruling (4), the teardown rider*). Returns once the store task has dropped
-/// its store and its Web Lock. A tab with no runtime retires nothing — the
-/// native `NothingToStop` — and says so on a sign-out, where it means the
-/// enrollment stays until the user removes the device.
+/// *Ruling (4), the teardown rider*). Takes what is installed AND what is
+/// still assembling when it runs (the shared host's `take`), so an assembly
+/// in flight is waited out and stopped, never installed after it; returns
+/// once the store task has dropped its store and its Web Lock. A tab with no
+/// runtime retires nothing — the native `NothingToStop` — and says so on a
+/// sign-out, where it means the enrollment stays until the user removes the
+/// device.
 pub(crate) async fn stop(reason: StopReason) {
-    let current = CURRENT.with(|c| c.borrow_mut().take());
-    match current {
-        Some(running) => stop_one(&running.handle, reason).await,
-        None if reason == StopReason::SignOut => tracing::info!(
-            "[account-runtime] sign-out: no runtime in this tab — no enrollment retired"
-        ),
-        None => {}
+    let teardown = host().take(reason);
+    if teardown.is_empty() {
+        if reason == StopReason::SignOut {
+            tracing::info!(
+                "[account-runtime] sign-out: no runtime in this tab — no enrollment retired"
+            );
+        }
+        return;
+    }
+    if let Some(store) = teardown.settled {
+        stop_one(&store, reason).await;
+    }
+    if let Some(pending) = teardown.pending
+        && let Some(store) = pending.settled().await
+    {
+        stop_one(&store, reason).await;
     }
 }
 
@@ -459,6 +502,172 @@ pub(crate) async fn stop(reason: StopReason) {
 /// every stop that is not a sign-out ([`stop`]).
 pub(crate) async fn shutdown() {
     stop(StopReason::AccountSwitch).await;
+}
+
+/// A remove-account's nest half on web: retire this browser from the account
+/// `removed` holds the slots of, as a sign-out does (`account-scoping.md`
+/// § Erasure follows scope → *Removing an account retires this machine from
+/// it, as a sign-out does*, decisions 2 and 3) — the native
+/// `fauna_client_account_runtime::retire_removed_account`'s twin over the
+/// `web_host` runtime.
+///
+/// The removed account has no runtime in this tab (the other-tab refusal ran
+/// first, and the Settings page offers removal only on an account the tab does
+/// not serve), so this signs in as it over an anonymous socket with the
+/// snapshot's secret (`crate::succession::sign_in`, the road's sign-in),
+/// assembles the ordinary runtime over the snapshot and the account's
+/// still-present store, and stops it with `shutdown_for_sign_out` at once —
+/// within [`REMOVED_ACCOUNT_RETIRE_BUDGET`]. The tab's own runtime, for the
+/// account it serves, is never touched. The answer is logged here and never
+/// branched on: the removal's erase follows regardless.
+pub(crate) async fn retire_removed_account(
+    removed: Arc<RemovedAccountCredentials>,
+) -> EnrollmentRetirement {
+    let actor = removed.actor_id().to_owned();
+    let retirement = match StoreRoot::platform() {
+        Ok(root) => {
+            retire_removed_over(Arc::clone(&removed), &root, async {
+                sign_in_as_removed(&removed).await
+            })
+            .await
+        }
+        Err(e) => EnrollmentRetirement::Deferred(format!("{e:#}")),
+    };
+    tracing::info!(
+        actor = %actor,
+        ?retirement,
+        "[account-runtime] remove-account: the machine's enrollment retirement"
+    );
+    retirement
+}
+
+/// The sign-in as the removed account: an anonymous handshake with the
+/// snapshot's secret, then a one-shot bearer session on the nest it was bound
+/// to.
+async fn sign_in_as_removed(
+    removed: &RemovedAccountCredentials,
+) -> Result<fauna_rpc_wasm::TokenWsRpcClient, String> {
+    use fauna_client_core::succession_delivery::SignIn;
+    let secret = removed
+        .secret_hex()
+        .ok_or("the removal took no identity secret to sign in with")?;
+    let nest_url = removed
+        .nest_url()
+        .ok_or("the removed account was bound to no nest")?;
+    let keypair = ActorKeypair::from_secret_hex(&secret)
+        .map_err(|e| format!("the removed account's secret: {e}"))?;
+    match crate::succession::sign_in(&nest_url, &keypair).await {
+        SignIn::Connected(client) => Ok(client),
+        SignIn::NoAccount => Err("the nest holds no account for the removed identity".into()),
+        SignIn::Failed(e) => Err(format!("sign-in: {e}")),
+        SignIn::NoSeed => Err("sign-in: no seed".into()),
+    }
+}
+
+/// [`retire_removed_account`] over any session and store root — the seam a
+/// test drives with a fake nest. `connect` is the sign-in; it and the assembly
+/// share the retirement budget less the stop's own.
+async fn retire_removed_over<R, C>(
+    removed: Arc<RemovedAccountCredentials>,
+    root: &StoreRoot,
+    connect: C,
+) -> EnrollmentRetirement
+where
+    R: fauna_protocol::KeyedRpcRequester + Clone + 'static,
+    R::Error: fauna_protocol::RpcErrorClass,
+    C: std::future::Future<Output = Result<R, String>>,
+{
+    if !removed.holds_device_authorization() {
+        return EnrollmentRetirement::NotEnrolled;
+    }
+    let assembly_budget = REMOVED_ACCOUNT_RETIRE_BUDGET - ACCOUNT_RUNTIME_STOP_BUDGET;
+    let handle = match within(assembly_budget, assemble_removed(&removed, root, connect)).await {
+        Some(Ok(handle)) => handle,
+        Some(Err(e)) => return EnrollmentRetirement::Deferred(e),
+        None => {
+            return EnrollmentRetirement::Deferred(format!(
+                "the nest did not answer within {}s",
+                assembly_budget.as_secs()
+            ));
+        }
+    };
+    let retirement = within(ACCOUNT_RUNTIME_STOP_BUDGET, handle.shutdown_for_sign_out())
+        .await
+        // Dropping the handle below ends the runtime's store task all the same.
+        .unwrap_or_else(|| {
+            EnrollmentRetirement::Deferred(format!(
+                "the stop did not finish within {}s",
+                ACCOUNT_RUNTIME_STOP_BUDGET.as_secs()
+            ))
+        });
+    drop(handle);
+    retirement
+}
+
+/// The sign-in and the runtime over the snapshot: every slot the assembly
+/// reads or writes is the snapshot's, so nothing reaches the registry the
+/// removal just left (decision 1).
+async fn assemble_removed<R, C>(
+    removed: &Arc<RemovedAccountCredentials>,
+    root: &StoreRoot,
+    connect: C,
+) -> Result<AccountStoreHandle, String>
+where
+    R: fauna_protocol::KeyedRpcRequester + Clone + 'static,
+    R::Error: fauna_protocol::RpcErrorClass,
+    C: std::future::Future<Output = Result<R, String>>,
+{
+    let actor_id_hex = removed.actor_id().to_owned();
+    let secret = removed
+        .secret_hex()
+        .ok_or("the removal took no identity secret to sign in with")?;
+    let keypair = ActorKeypair::from_secret_hex(&secret)
+        .map_err(|e| format!("the removed account's secret: {e}"))?;
+    // The named row: the account's persisted id, carried in the snapshot, else
+    // the one derived from this browser's install secret — read through a
+    // registry over the snapshot, so a derived id is persisted into memory and
+    // never back into the registry.
+    let enrollment_target_device_id =
+        fauna_client_accounts::AccountRegistry::new(Arc::clone(removed) as _)
+            .device_id_for_actor(&LocalStorageSecretStore, &actor_id_hex)
+            .map_err(|e| format!("device id: {e}"))?;
+    let rpc = connect.await?;
+    let nest_url = removed.nest_url().unwrap_or_default();
+    let params = WebRuntimeParams {
+        store_root: root.clone(),
+        actor_id_hex,
+        rpc,
+        principal: RuntimePrincipal::SeedHolding(keypair.into()),
+        // Nothing this runtime does reads them: it is stopped as soon as it is
+        // ready, and its stop runs no pass to walk channels, carry
+        // predecessors, bind a linked nest or deliver a road.
+        memberships: None,
+        attested_predecessors: Default::default(),
+        trusted_escrow_holders: std::sync::Arc::new(move || trusted_escrow_holders(&nest_url)),
+        enrollment_target_device_id,
+        backstop_interval: DEFAULT_BACKSTOP_INTERVAL,
+        reconnects: None,
+        pushes: None,
+        linked_nests: None,
+        owed_nests: None,
+    };
+    web_host::start(params, Arc::clone(removed))
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// `fut`, or `None` once `budget` has passed — wasm has no `tokio::time`.
+async fn within<T>(
+    budget: std::time::Duration,
+    fut: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    use futures_util::future::{Either, select};
+    let fut = std::pin::pin!(fut);
+    let timer = std::pin::pin!(fauna_sleep::sleep(budget));
+    match select(fut, timer).await {
+        Either::Left((value, _)) => Some(value),
+        Either::Right(_) => None,
+    }
 }
 
 /// The succession-ledger seam every grant-minting machine this chunk builds
@@ -477,6 +686,22 @@ pub(crate) fn ledger_seam() -> std::sync::Arc<dyn fauna_client_config::Successio
 /// (`fauna_client_config::ResolvingLedgerStore`).
 pub(crate) fn backup_seam() -> std::sync::Arc<dyn fauna_client_config::BackupStateStore> {
     std::sync::Arc::new(fauna_client_config::ResolvingLedgerStore::new(handle))
+}
+
+/// Install `handle` as this tab's runtime for `actor_id_hex` through the
+/// host's own claim and install — what [`start`] does once a store is open —
+/// for tests that assemble the store themselves.
+#[cfg(test)]
+async fn install_for_test(actor_id_hex: String, handle: AccountStoreHandle) {
+    let claim = host().begin(Running {
+        actor_id_hex,
+        peer_connect: None,
+        store_changes: Rc::new(OnceCell::new()),
+    });
+    assert_eq!(
+        host().finish(claim, handle).await,
+        InstallOutcome::Installed
+    );
 }
 
 /// Shut this tab's account runtime down and leave the machine enrolled (an
@@ -576,12 +801,9 @@ pub fn account_enrolled_device_row() -> js_sys::Promise {
     unchecked_return_type = "Promise<number | undefined>"
 )]
 pub fn account_store_changed_after(seen: u32) -> js_sys::Promise {
-    let waiter = CURRENT.with(|c| {
-        c.borrow()
-            .as_ref()
-            .and_then(|r| r.store_changes.as_ref())
-            .map(|level| level.changed_after(seen))
-    });
+    let waiter = host()
+        .with_installed(|_, r| r.store_changes.get().map(|level| level.changed_after(seen)))
+        .flatten();
     wasm_bindgen_futures::future_to_promise(async move {
         Ok(match waiter {
             Some(waiter) => waiter.await.map_or(JsValue::UNDEFINED, JsValue::from),
@@ -613,6 +835,27 @@ pub fn account_device_set_state_json(device_id_hex: String) -> js_sys::Promise {
         let view = fauna_account_plane::account_driver::e2e_readers::device_set_state(
             handle().as_ref(),
             &device_id_hex,
+        )
+        .await;
+        Ok(JsValue::from_str(
+            &serde_json::to_string(&view).unwrap_or_else(|_| r#"{"found":false}"#.into()),
+        ))
+    })
+}
+
+/// e2e-only: the `read_marker_state` command's body — this browser's account
+/// store read marker for `channel_id_hex`, as the JSON every hosting app
+/// answers (`{"found": false}` with no runtime). The SAME reader the native
+/// dispatchers call
+/// (`fauna_account_plane::account_driver::e2e_readers::read_marker_state`),
+/// never a twin; gated like [`account_device_set_state_json`].
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = accountReadMarkerStateJsonForTest, unchecked_return_type = "Promise<string>")]
+pub fn account_read_marker_state_json(channel_id_hex: String) -> js_sys::Promise {
+    wasm_bindgen_futures::future_to_promise(async move {
+        let view = fauna_account_plane::account_driver::e2e_readers::read_marker_state(
+            handle().as_ref(),
+            &channel_id_hex,
         )
         .await;
         Ok(JsValue::from_str(
@@ -711,10 +954,18 @@ mod tests {
     /// holder answered stands on its local rows — so everything the test
     /// reads comes off the browser's own replica. Every kind asked for is
     /// noted, in order, so a test can see what a stop told the nest.
+    ///
+    /// [`Self::listing`] also answers the plane's walks with an empty page —
+    /// a nest holding none of the account's rows yet — so the replica has
+    /// listed and a save gated on that listing can be written.
     #[derive(Clone, Default)]
-    struct EscrowOnly(Arc<Mutex<Vec<&'static str>>>);
+    struct EscrowOnly(Arc<Mutex<Vec<&'static str>>>, bool);
 
     impl EscrowOnly {
+        fn listing() -> Self {
+            Self(Arc::default(), true)
+        }
+
         fn asked(&self) -> Vec<&'static str> {
             self.0.lock().unwrap().clone()
         }
@@ -758,6 +1009,9 @@ mod tests {
                             .into(),
                         extra: Default::default(),
                     })
+                }
+                "fauna.sync.changes.list" if self.1 => {
+                    encode_canonical(&fauna_protocol::sync::SyncChangesListReply::default())
                 }
                 _ => return Err(NoNest(kind)),
             };
@@ -1043,16 +1297,7 @@ mod tests {
 
         crate::logs::install_logging();
         let actor_id_hex = ActorKeypair::from_secret(SEED).actor_id_hex();
-        let install = |handle: AccountStoreHandle| {
-            CURRENT.with(|c| {
-                *c.borrow_mut() = Some(Running {
-                    actor_id_hex: actor_id_hex.clone(),
-                    handle,
-                    peer_connect: None,
-                    store_changes: None,
-                })
-            })
-        };
+        let install = |handle: AccountStoreHandle| install_for_test(actor_id_hex.clone(), handle);
         let mut nonce = [0u8; 8];
         getrandom::fill(&mut nonce).expect("randomness");
         let root = StoreRoot::at(format!("fauna-test-sign-out-{}", hex::encode(nonce)));
@@ -1066,7 +1311,8 @@ mod tests {
             web_host::start(params_over(&root, rpc.clone()), Arc::clone(&secrets))
                 .await
                 .expect("the runtime assembles over IndexedDB"),
-        );
+        )
+        .await;
         stop(StopReason::AccountSwitch).await;
         assert!(handle().is_none(), "the stop took the tab's runtime");
         assert!(
@@ -1080,7 +1326,8 @@ mod tests {
             web_host::start(params_over(&root, rpc.clone()), Arc::clone(&secrets))
                 .await
                 .expect("the runtime reassembles over the same store"),
-        );
+        )
+        .await;
         stop(StopReason::SignOut).await;
         assert!(handle().is_none(), "the stop took the tab's runtime");
         assert!(
@@ -1092,6 +1339,118 @@ mod tests {
         crate::account_scope::erase_actor_scope_under(&root, &actor_id_hex)
             .await
             .expect("the erase runs once the stop has closed the store");
+        let name = root.store_name(&actor_id_hex).expect("store name");
+        assert!(
+            IndexedDbBackend::open_existing(&name)
+                .await
+                .expect("probe the origin")
+                .is_none(),
+            "the erase left no account store behind"
+        );
+    }
+
+    /// **A remove-account retires this browser from the removed account**
+    /// (`account-scoping.md` § Erasure follows scope → *Removing an account
+    /// retires this machine from it, as a sign-out does*): the nest half rides
+    /// the registry removal's snapshot, assembles over the account's store
+    /// with none of this tab's runtime involved, and asks the nest for the
+    /// sign-out's `fauna.sync.device_grant.revoke` — while nothing it writes
+    /// reaches the registry the removal left, and the erase behind it leaves
+    /// no store. An account this browser never enrolled on dials nothing.
+    #[wasm_bindgen_test]
+    async fn a_removal_asks_the_nest_to_retire_the_removed_account_and_writes_nothing_back() {
+        use fauna_account_store::indexeddb::IndexedDbBackend;
+        use fauna_client_accounts::AccountRegistry;
+
+        const REVOKE: &str = "fauna.sync.device_grant.revoke";
+
+        crate::logs::install_logging();
+        shutdown().await;
+        let mut nonce = [0u8; 8];
+        getrandom::fill(&mut nonce).expect("randomness");
+        let root = StoreRoot::at(format!("fauna-test-removal-{}", hex::encode(nonce)));
+        let secrets = Arc::new(MemSecrets::default());
+        let registry = AccountRegistry::new(Arc::clone(&secrets) as _);
+        let actor_id_hex = registry
+            .add_account(
+                &hex::encode(SEED),
+                Some("https://removed.example"),
+                Some(&"cd".repeat(32)),
+            )
+            .expect("the account is added");
+
+        // Never enrolled: nothing to retire, nothing dialled.
+        let never = {
+            let other = AccountRegistry::new(Arc::new(MemSecrets::default()) as _);
+            let actor = other
+                .add_account(&"22".repeat(32), Some("https://never.example"), None)
+                .expect("the account is added");
+            Arc::new(
+                other
+                    .remove_with_snapshot(&actor)
+                    .expect("the registry removes it"),
+            )
+        };
+        let dialled = EscrowOnly::default();
+        assert_eq!(
+            retire_removed_over(Arc::clone(&never), &root, {
+                let dialled = dialled.clone();
+                async move { Ok(dialled) }
+            })
+            .await,
+            EnrollmentRetirement::NotEnrolled
+        );
+        assert!(
+            dialled.asked().is_empty(),
+            "an unenrolled removal dials nothing"
+        );
+
+        // Enrolled: the account ran a runtime of its own over the registry's
+        // slots, which minted its device authorization.
+        let enrolled = web_host::start(
+            params_over(&root, EscrowOnly::default()),
+            Arc::clone(&secrets),
+        )
+        .await
+        .expect("the account's runtime assembles over IndexedDB");
+        enrolled.shutdown().await;
+        drop(enrolled);
+        secrets.set(&format!("{actor_id_hex}/device-auth"), "an authorization");
+
+        let removed = Arc::new(
+            registry
+                .remove_with_snapshot(&actor_id_hex)
+                .expect("the registry removes it"),
+        );
+        assert!(removed.holds_device_authorization());
+        let rpc = EscrowOnly::default();
+        let _ = retire_removed_over(Arc::clone(&removed), &root, {
+            let rpc = rpc.clone();
+            async move { Ok(rpc) }
+        })
+        .await;
+        assert!(
+            rpc.asked().contains(&REVOKE),
+            "the removal's nest half asks the nest to retire the enrollment; it asked {:?}",
+            rpc.asked()
+        );
+        assert!(handle().is_none(), "the tab's own runtime is never touched");
+        let left: Vec<String> = secrets
+            .0
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|k| k.contains(&actor_id_hex))
+            .cloned()
+            .collect();
+        assert!(
+            left.is_empty(),
+            "the nest half wrote the removed account's slots back: {left:?}"
+        );
+
+        crate::account_scope::erase_actor_scope_under(&root, &actor_id_hex)
+            .await
+            .expect("the erase runs once the nest half has closed the store");
         let name = root.store_name(&actor_id_hex).expect("store name");
         assert!(
             IndexedDbBackend::open_existing(&name)
@@ -1147,14 +1506,7 @@ mod tests {
             .expect("the writer reads back")
             .verifying_key()
             .to_bytes();
-        CURRENT.with(|c| {
-            *c.borrow_mut() = Some(Running {
-                actor_id_hex,
-                handle,
-                peer_connect: None,
-                store_changes: None,
-            })
-        });
+        install_for_test(actor_id_hex, handle).await;
         me
     }
 
@@ -1206,6 +1558,89 @@ mod tests {
                 "no_such.door".into()
             ))
         );
+        shutdown().await;
+    }
+
+    /// **The private contact overlay on web** (`contacts.md` § The private
+    /// overlay → *Substrate*): the Profile's Save, through the wasm face over
+    /// the real web host, writes the nickname and label; the projection the
+    /// overlay seam feeds reads them back, and the face's names follow. A face
+    /// with no manager — a tab hosting no runtime — refuses the same Save.
+    #[wasm_bindgen_test]
+    async fn a_private_overlay_save_reads_back_through_the_projection() {
+        use crate::contact_overlays::WasmContactOverlays;
+
+        crate::logs::install_logging();
+        shutdown().await;
+        let mut nonce = [0u8; 8];
+        getrandom::fill(&mut nonce).expect("randomness");
+        let root = StoreRoot::at(format!("fauna-test-overlay-{}", hex::encode(nonce)));
+        let handle = web_host::start(
+            params_over(&root, EscrowOnly::listing()),
+            Arc::new(MemSecrets::default()),
+        )
+        .await
+        .expect("the runtime assembles over IndexedDB");
+        handle.reconcile_now().await.expect("the replica lists");
+        let manager = ConversationsManager::new();
+        let backend = Arc::new(FaunaMlsBackend::new_shared(
+            Arc::new(MlsEngine::new_in_memory(ActorKeypair::from_secret(SEED)).expect("engine")),
+            Arc::new(InertConversationsRpc),
+            SelfAddress::new(""),
+            ActorKeypair::from_secret(SEED).actor_id(),
+        ));
+        manager.register_backend(backend.clone());
+        fauna_account_seams::conversation_seams::wire_parts(
+            &manager,
+            &backend,
+            handle.clone(),
+            &LocalSpawner,
+        );
+        install_for_test(ActorKeypair::from_secret(SEED).actor_id_hex(), handle).await;
+
+        let mum = "ab".repeat(32);
+        let answer_kind = |answer: &JsValue| {
+            js_sys::Reflect::get(answer, &"kind".into())
+                .expect("an answer kind")
+                .as_string()
+                .expect("a string kind")
+        };
+
+        let homeless = WasmContactOverlays::without_runtime().editor(mum.clone());
+        homeless.set_nickname("Mum".into());
+        let refused = wasm_bindgen_futures::JsFuture::from(homeless.save())
+            .await
+            .expect("the save answers");
+        assert_eq!(answer_kind(&refused), "notReady");
+        assert!(
+            homeless.is_staged(),
+            "a refused save keeps the staged edits"
+        );
+
+        let face = WasmContactOverlays::over(Arc::clone(&manager));
+        let before = face.revision();
+        let editor = face.editor(mum.clone());
+        editor.set_nickname("Mum".into());
+        assert!(editor.add_label("Family").expect("staged").is_undefined());
+        let saved = wasm_bindgen_futures::JsFuture::from(editor.save())
+            .await
+            .expect("the save answers");
+        assert_eq!(answer_kind(&saved), "saved", "{saved:?}");
+        assert!(!editor.is_staged(), "a saved staging is dropped");
+
+        assert!(face.revision() > before, "the projection moved");
+        assert_eq!(face.labels_line(&mum).as_deref(), Some("Family"));
+        let label = face
+            .peer_label(None, Some("alice".into()), &mum)
+            .expect("a label");
+        let field = |name: &str| {
+            js_sys::Reflect::get(&label, &name.into())
+                .expect("a field")
+                .as_string()
+        };
+        assert_eq!(field("primary").as_deref(), Some("Mum"));
+        assert_eq!(field("public").as_deref(), Some("alice"));
+        assert!(face.matches_filter("fam", Some("alice".into()), None, &mum));
         shutdown().await;
     }
 }

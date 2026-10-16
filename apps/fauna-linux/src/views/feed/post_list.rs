@@ -14,6 +14,7 @@ use crate::media_loads::{self, Ask};
 use crate::nest_content_api::ApiError;
 use fauna_client::NestClient;
 use fauna_core::load_cache::Finished;
+use fauna_core::source_glyph::BridgeIdentitySnapshot;
 
 use super::post_detail::build_post_detail;
 #[cfg(feature = "payments")]
@@ -24,14 +25,14 @@ use crate::i18n::strings::{c2pa, common, composer, family, feed, web_publish};
 use crate::i18n::strings::subscriptions;
 use crate::views::document;
 use fauna_core::obligation::RenderVerdict;
-use fauna_core::render::{AuthoringOriginStatus, VerificationStatus};
+use fauna_core::render::{AuthoringOriginStatus, RenderBlock, VerificationStatus};
 #[cfg(feature = "payments")]
 use fauna_feed::SellComposeState;
 #[cfg(feature = "payments")]
 use fauna_feed::TipView;
 use fauna_feed::{
-    AttachedFile, FeedEmptyState, FeedSnapshot, FeedStatus, PostSummary, TrainVerb,
-    classify_sources,
+    AttachedFile, FeedEmptyState, FeedSnapshot, FeedStatus, PostSummary, ReplyAudience, ThreadPage,
+    TrainVerb, classify_sources,
 };
 
 /// The open detail's last-painted embed signature — see
@@ -254,11 +255,19 @@ thread_local! {
 /// policy; region-blocking.md § Where it composes), with the region scorers'
 /// factors joined to this post's labels. Both social surfaces (feed here,
 /// conversations in `message_bubble.rs`) call the one shared
-/// [`crate::region::verdict_for`] so they never drift.
+/// [`crate::region::verdict_for_item`] so they never drift. The verdict also
+/// carries the viewer's own reports (`moderation.md` § Corollary): a post they
+/// reported, or whose author they reported, blocks for them alone.
 fn composed_verdict(post: &PostSummary) -> fauna_core::obligation::ComposedVerdict {
-    crate::region::verdict_for(&post.post_id, &post.labels, || {
-        crate::region::post_input(post)
-    })
+    crate::region::verdict_for_item(
+        &post.post_id,
+        &post.labels,
+        crate::region::ReportKey {
+            item_id: &post.post_id,
+            author_id: Some(&post.author),
+        },
+        || crate::region::post_input(post),
+    )
 }
 
 /// The region placeholder a post paints in place of its body, when a region
@@ -337,6 +346,11 @@ pub struct PostListHandles {
     /// already-open detail once `resolve_post_tips` fills it in — the same
     /// class of gap the fourth element closed for the unlock flow.
     open_detail_sig: OpenDetailSig,
+    /// The thread page (`feed-thread-page`) as last painted — the shared
+    /// `snapshot.thread` and the error line it showed — so `render_posts`
+    /// rebuilds the "thread" stack page only when either changed
+    /// ([`render_thread`]).
+    painted_thread: RefCell<Option<(ThreadPage, Option<String>)>>,
     /// The composer's audience group (`compose-gate-tier-select` and its
     /// teaser + sale fields) — its option list is re-driven from
     /// `snapshot.own_tiers` + `snapshot.own_rooms`, and its answer painted from
@@ -604,6 +618,7 @@ pub fn build_post_list_wired(
         settled_selection: RefCell::new(None),
         open_detail_id,
         open_detail_sig,
+        painted_thread: RefCell::new(None),
         audience,
     };
     (outer, handles)
@@ -743,6 +758,7 @@ pub fn render_posts(
     for post in &snap.posts {
         list.append(&build_post_card(
             post,
+            &snap.bridge_roster,
             manager,
             client,
             rt,
@@ -865,6 +881,66 @@ pub fn render_posts(
                 }
             }
         }
+    }
+
+    render_thread(handles, snap, manager, keep_detail);
+}
+
+/// Paint the thread page (`feed-thread-page`) from the shared
+/// `snapshot.thread` (`bridges.md` § Bluesky-native thread view): the manager's
+/// `open_thread` opens it over the post detail, its `close_thread` (Back)
+/// returns to that detail. A page that belonged to a selection the reader has
+/// left goes with the detail it was opened from. Rebuilt only when the page or
+/// its error line changed; while it is open it stays the visible stack child,
+/// whatever an embed-driven detail repaint above made visible.
+fn render_thread(
+    handles: &PostListHandles,
+    snap: &FeedSnapshot,
+    manager: &Arc<LinuxFeedManager>,
+    keep_detail: bool,
+) {
+    let stack = &handles.content_stack;
+    if !keep_detail && snap.thread.is_some() {
+        manager.close_thread();
+    }
+    let page = snap.thread.as_ref().filter(|_| keep_detail);
+    // The thread's own reason leads, else the feed's (tui's `page_error`).
+    let painted = page.map(|page| {
+        let error = page
+            .error
+            .as_ref()
+            .or(snap.error.as_ref())
+            .map(|e| e.resolve(crate::i18n::strings::lookup));
+        (page.clone(), error)
+    });
+    if *handles.painted_thread.borrow() != painted {
+        let was_showing = stack.visible_child_name().as_deref() == Some("thread");
+        if let Some(old) = stack.child_by_name("thread") {
+            stack.remove(&old);
+        }
+        match &painted {
+            Some((page, error)) => {
+                let m = Arc::clone(manager);
+                let view =
+                    super::post_detail::build_thread_view(page, error.as_deref(), move || {
+                        m.close_thread()
+                    });
+                stack.add_named(&view, Some("thread"));
+            }
+            None if was_showing => {
+                let back = if stack.child_by_name("detail").is_some() {
+                    "detail"
+                } else {
+                    "list"
+                };
+                stack.set_visible_child_name(back);
+            }
+            None => {}
+        }
+        *handles.painted_thread.borrow_mut() = painted;
+    }
+    if handles.painted_thread.borrow().is_some() {
+        stack.set_visible_child_name("thread");
     }
 }
 
@@ -1574,8 +1650,13 @@ pub(crate) fn build_post_image(
 /// blob GET is the document walk's own seam ([`document::BlobSource`], which
 /// the og:image reads through too); this adds the C2PA check.
 pub(crate) trait PostMediaSource: document::BlobSource {
-    /// The `c2pa-badge` verdict for the blob.
-    fn fetch_has_c2pa(&self, hash: &str) -> async_channel::Receiver<Result<bool, ApiError>>;
+    /// The `c2pa-badge` verdict's two nest reads: the blob's `x-c2pa` hint as
+    /// a pre-filter (`None` when it says no), else the blob's bytes as
+    /// fetched, for the caller to correct the hint against.
+    fn fetch_c2pa_candidate_bytes(
+        &self,
+        hash: &str,
+    ) -> async_channel::Receiver<Result<Option<Vec<u8>>, ApiError>>;
 
     /// `GET <path>` on the reader's own nest — a bridged post's
     /// `ProxiedImage` (render-model.md § D6c), fetched exactly as a blob is.
@@ -1584,8 +1665,11 @@ pub(crate) trait PostMediaSource: document::BlobSource {
 }
 
 impl PostMediaSource for FaunaClient {
-    fn fetch_has_c2pa(&self, hash: &str) -> async_channel::Receiver<Result<bool, ApiError>> {
-        FaunaClient::fetch_has_c2pa(self, hash)
+    fn fetch_c2pa_candidate_bytes(
+        &self,
+        hash: &str,
+    ) -> async_channel::Receiver<Result<Option<Vec<u8>>, ApiError>> {
+        FaunaClient::fetch_c2pa_candidate_bytes(self, hash)
     }
 
     fn fetch_proxied_bytes(
@@ -1650,13 +1734,11 @@ fn build_post_image_from(
     // `true`, so it never flashes on speculatively; an errored or negative
     // check shows no badge (§ C2PA provenance). The verdict is cached per hash
     // beside the texture, so a rebuilt card reads it rather than asking again.
-    // Its value is still the blob's `x-c2pa` header alone (a HEAD via the same
-    // shared `head_has_c2pa` tui uses) — the uploader's hint, which `ui/media.md`
-    // § C2PA provenance requires the viewer to correct against the bytes
-    // (`fauna_media::process::detect_c2pa_in_bytes`, the header kept only as a
-    // pre-filter, tui's two-stage `Op::FetchC2pa`).
-    // That correction replaces what the `Ask::Start` arm below resolves, not
-    // the cache: the entry stays one `bool` per hash.
+    // Its value is the bytes' own verdict, in two stages like tui's
+    // `Op::FetchC2pa` (`ui/media.md` § C2PA provenance): the blob's `x-c2pa`
+    // header — the uploader's hint, never a security boundary — only decides
+    // whether the bytes are worth fetching; the badge paints on
+    // `fauna_media::process::detect_c2pa_in_bytes` over the opened bytes alone.
     let badge = gtk::Label::new(Some(c2pa::BADGE_LABEL));
     badge.add_css_class("dim-label");
     badge.set_halign(gtk::Align::Start);
@@ -1670,12 +1752,34 @@ fn build_post_image_from(
     match media_loads::ask_c2pa(manager, hash, &badge) {
         Ask::Ready(verdict) => badge.set_visible(verdict),
         Ask::Start => {
-            let rx = client.fetch_has_c2pa(hash);
+            let rx = client.fetch_c2pa_candidate_bytes(hash);
             let manager = Arc::clone(manager);
             let item_hash = hash.to_string();
             glib::spawn_future_local(async move {
                 let verdict = match rx.recv().await {
-                    Ok(Ok(verdict)) => Finished::Loaded(verdict),
+                    // The uploader's hint said no: nothing to verify.
+                    Ok(Ok(None)) => Finished::Loaded(false),
+                    // Ground truth over the bytes the nest serves. Bytes that
+                    // will not open paint no badge; a nest that could not
+                    // answer right now leaves the verdict unsettled (the next
+                    // rebuild asks again).
+                    Ok(Ok(Some(bytes))) => {
+                        match crate::feed::post_media::open_fetched_post_image(
+                            &manager,
+                            &item_hash,
+                            Ok(bytes),
+                        ) {
+                            Finished::Loaded(plain) => {
+                                Finished::Loaded(crate::main_loop_meter::dispatch(
+                                    "feed-c2pa-detect",
+                                    String::new,
+                                    || fauna_media::process::detect_c2pa_in_bytes(&plain),
+                                ))
+                            }
+                            Finished::Failed => Finished::Failed,
+                            Finished::Transient => Finished::Transient,
+                        }
+                    }
                     Ok(Err(e)) if e.is_transient() => Finished::Transient,
                     Ok(Err(_)) => Finished::Failed,
                     // The runtime torn down under the check.
@@ -1803,34 +1907,28 @@ fn build_post_proxied_image_from(
     outer
 }
 
-/// Build a `video-thumbnail` element for a video attachment's content hash
-/// (render-model.md § D6b). No poster frame exists to paint — `MediaItem`'s
-/// `thumbnail`/`dimensions` are `None` from every writer, deliberately (a
-/// poster field would be dead on arrival) — so this mirrors tui's play-glyph
-/// text rather than inventing one; a real decoded frame would need a
-/// GStreamer-backed `gtk::Video`, a dependency this app doesn't carry for one
-/// element. `first_video_hash()` is the exact twin of `first_image_hash()`
-/// this function's sibling `build_post_image` reads.
-///
-/// A bridged post's `ProxiedVideo` (render-model.md § D6c → *Proxied video*)
-/// paints here too, its nest-relative path in the hash's place
-/// ([`RenderDocument::proxied_post_video`](fauna_core::render::RenderDocument::proxied_post_video));
-/// nothing is fetched for either.
-pub(crate) fn build_post_video(hash: &str) -> gtk::Box {
-    let outer = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    outer.set_halign(gtk::Align::Start);
-    outer.set_margin_top(4);
-    crate::testid::set_test_id(&outer, ids::VIDEO_THUMBNAIL);
-
-    let icon = gtk::Image::from_icon_name("media-playback-start-symbolic");
-    outer.append(&icon);
-
-    let label = gtk::Label::new(Some(hash));
-    label.add_css_class("dim-label");
-    outer.append(&label);
-
-    outer
+/// The block a post's `video-thumbnail` plays — the document's `Video` by
+/// content hash, else a bridged post's `ProxiedVideo` (render-model.md § D6b,
+/// § D6c → *Proxied video*): the same slot pick `first_video_hash` /
+/// `proxied_post_video` make, as the block `playback_source` takes.
+pub(crate) fn post_video_block(
+    document: &fauna_core::render::RenderDocument,
+) -> Option<RenderBlock> {
+    if let Some(hash) = document.first_video_hash() {
+        return Some(RenderBlock::Video {
+            hash: hash.to_string(),
+            alt: String::new(),
+        });
+    }
+    document
+        .proxied_post_video()
+        .map(|path| RenderBlock::ProxiedVideo {
+            path: path.to_string(),
+            alt: String::new(),
+        })
 }
+
+pub(crate) use super::video_thumbnail::build_post_video;
 
 /// Build the source-protocol badges (`protocol-badge`) for a post's wire
 /// `source` field via the shared [`classify_sources`], painting each source's
@@ -1841,13 +1939,22 @@ pub(crate) fn build_post_video(hash: &str) -> gtk::Box {
 /// classified source; the tooltip carries the canonical `SourceKind::label`.
 /// (GTK's symbolic-icon theme has no fox / butterfly glyph, so the emoji family
 /// — not icon names — is the only one that can render the canonical concept.)
-pub fn build_protocol_badges(source: &str) -> Vec<gtk::Label> {
-    // No bridges roster yet (`ui/feed.md` § Implementation status today, `SourceKind::Bridged`).
-    classify_sources(source, &[])
+///
+/// `bridges` is the snapshot's `bridge_roster`: a token naming a listed bridge
+/// is that bridge's badge, which paints its declared label beside the glyph
+/// (`SourceKind::badge_paints_label`; `ui/feed.md` § Implementation status
+/// today, `SourceKind::Bridged`) — a first-party badge stays its glyph alone.
+pub fn build_protocol_badges(source: &str, bridges: &[BridgeIdentitySnapshot]) -> Vec<gtk::Label> {
+    classify_sources(source, bridges)
         .iter()
         .map(|kind| {
-            let label =
-                gtk::Label::new(Some(crate::source_glyph::source_glyph_emoji(kind.glyph())));
+            let glyph = crate::source_glyph::source_glyph_emoji(kind.glyph());
+            let text = if kind.badge_paints_label() {
+                format!("{glyph} {}", kind.label())
+            } else {
+                glyph.to_string()
+            };
+            let label = gtk::Label::new(Some(&text));
             label.add_css_class("dim-label");
             label.set_tooltip_text(Some(&kind.label()));
             crate::testid::set_test_id(&label, ids::PROTOCOL_BADGE);
@@ -2099,6 +2206,7 @@ fn show_tip_list_dialog(parent: Option<&gtk::Window>, post_tips: &TipView) {
 
 fn build_post_card(
     post: &PostSummary,
+    bridges: &[BridgeIdentitySnapshot],
     manager: &Arc<LinuxFeedManager>,
     client: &Rc<FaunaClient>,
     rt: &Handle,
@@ -2122,7 +2230,8 @@ fn build_post_card(
     // collapse, so a post that is both muted (revealable) and blocked can never be
     // revealed past the guardian's block. `collapse` is handled after the muted arm
     // (both are revealable collapses). Show/Badge/unsupervised → normal body below.
-    let content_verdict = composed_verdict(post).verdict;
+    let composed = composed_verdict(post);
+    let content_verdict = composed.verdict;
     // Guardian Notify (family-safety.md § Guardian Notify): count this post if the
     // guardian floor enforces on it — a no-op unless the ward's content_notify knob
     // is on. Deduped per post per local day; the app's flush tick reports the batch.
@@ -2155,6 +2264,7 @@ fn build_post_card(
                     ]);
                     row.set_child(Some(&build_post_card_body(
                         &post_c,
+                        &m.snapshot().bridge_roster,
                         &m,
                         &c,
                         &rt_c,
@@ -2166,11 +2276,12 @@ fn build_post_card(
         return row;
     }
     if content_verdict == RenderVerdict::Block {
+        let notice = block_notice(composed.reported());
         row.update_property(&[
             gtk::accessible::Property::Description("post-card"),
-            gtk::accessible::Property::Label(family::CONTENT_BLOCKED_NOTICE),
+            gtk::accessible::Property::Label(notice),
         ]);
-        row.set_child(Some(&build_content_block()));
+        row.set_child(Some(&build_content_block(composed.reported())));
         return row;
     }
 
@@ -2223,6 +2334,7 @@ fn build_post_card(
     ]);
     row.set_child(Some(&build_post_card_body(
         post,
+        bridges,
         manager,
         client,
         rt,
@@ -2231,24 +2343,33 @@ fn build_post_card(
     row
 }
 
+use crate::content_policy::block_notice;
+
 /// The content-policy **block** placeholder — a policy-naming notice in place of
 /// the body, **no reveal** (family-safety.md § Content policy; mirrors the
 /// legal-takedown tombstone shape). A `block` verdict is always a guardian floor
 /// (a viewer's own threshold only ever collapses). The `content-policy-blocked-notice`
 /// element is the one ui.yaml ID this pillar renders (indexed, per post-card).
-fn build_content_block() -> gtk::Box {
+///
+/// `reported` is the viewer's own report (`moderation.md` § Corollary): the same
+/// element reads "You reported this" and carries `source="reported"` — a
+/// personal filter, not a policy, so it names the viewer's own act.
+fn build_content_block(reported: bool) -> gtk::Box {
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 4);
     vbox.set_margin_top(12);
     vbox.set_margin_bottom(12);
     vbox.set_margin_start(12);
     vbox.set_margin_end(12);
 
-    let placeholder = gtk::Label::new(Some(family::CONTENT_BLOCKED_NOTICE));
+    let placeholder = gtk::Label::new(Some(block_notice(reported)));
     placeholder.add_css_class("dim-label");
     placeholder.set_halign(gtk::Align::Start);
     placeholder.set_wrap(true);
     placeholder.set_xalign(0.0);
     crate::testid::set_test_id(&placeholder, ids::CONTENT_POLICY_BLOCKED_NOTICE);
+    if reported {
+        crate::testid::set_test_attr(&placeholder, "source", "reported");
+    }
     vbox.append(&placeholder);
     vbox
 }
@@ -2299,6 +2420,7 @@ fn build_content_collapse(
                 ]);
                 row.set_child(Some(&build_post_card_body(
                     &post,
+                    &m.snapshot().bridge_roster,
                     &m,
                     &c,
                     &rt,
@@ -2357,6 +2479,7 @@ fn build_muted_collapse(
                 ]);
                 row.set_child(Some(&build_post_card_body(
                     &post,
+                    &m.snapshot().bridge_roster,
                     &m,
                     &c,
                     &rt,
@@ -2402,6 +2525,7 @@ fn author_label_with(
 /// `FeedManager::interact` so a tapped count moves at once.
 fn build_post_card_body(
     post: &PostSummary,
+    bridges: &[BridgeIdentitySnapshot],
     manager: &Arc<LinuxFeedManager>,
     client: &Rc<FaunaClient>,
     rt: &Handle,
@@ -2438,7 +2562,7 @@ fn build_post_card_body(
         top_line.append(&attribution);
     }
 
-    for badge in build_protocol_badges(&post.source) {
+    for badge in build_protocol_badges(&post.source, bridges) {
         top_line.append(&badge);
     }
 
@@ -2461,13 +2585,15 @@ fn build_post_card_body(
     // manager; the composer's own "Room: ‹label›" string), and the card's
     // detail-open is its "open"; a reader not in the room sees the reserved
     // tier (feed.md § Encryption at rest → *the app half*, the card).
-    if let Some(tier) = &post.gated_tier {
-        let (text, tooltip) = match &post.room_label {
+    // A repost row paints its TARGET's gate (`PostSummary::card_gate`, ruling 3:
+    // a repost renders as the target's own gated card, teaser and badge).
+    if let Some((tier, room_label)) = post.card_gate() {
+        let (text, tooltip) = match room_label {
             Some(label) => (
                 feed::post::gate_room(label),
                 feed::post::gated_badge_room_tooltip(label),
             ),
-            None => (tier.clone(), feed::post::gated_badge_tooltip(tier)),
+            None => (tier.to_string(), feed::post::gated_badge_tooltip(tier)),
         };
         let badge = gtk::Label::new(Some(&text));
         badge.add_css_class("caption");
@@ -2644,10 +2770,9 @@ fn build_post_card_body(
     }
     // `video-thumbnail` — the D6b `Video` sibling of `Image` (render-model.md
     // § D6b); mutually exclusive with the image branch above, same fold.
-    if let Some(hash) = post.document.first_video_hash() {
-        vbox.append(&build_post_video(hash));
-    } else if let Some(path) = post.document.proxied_post_video() {
-        vbox.append(&build_post_video(path));
+    // A tap plays it in place (§ D6c → *Inline playback*).
+    if let Some(block) = post_video_block(&post.document) {
+        vbox.append(&build_post_video(&post.post_id, block, manager, client));
     }
 
     // Link-preview cards (render-model.md § D4): one per Resolved `LinkPreview` block in
@@ -2965,6 +3090,24 @@ fn build_post_actions_button(
         menu.append(&del);
         menu.append(&prompt);
         menu.append(&confirm);
+    }
+
+    // Report someone else's post to the nest admins (`moderation.md`
+    // § User-initiated reporting → App surface), gated `!is_own` off the same
+    // author the delete verb reads. The sheet is the shared `crate::report`
+    // one; the verb only chooses its subject.
+    if client.actor_id().as_deref() != Some(post.author.as_str()) {
+        let report_btn = gtk::Button::with_label(feed::REPORT_POST);
+        report_btn.add_css_class("flat");
+        crate::testid::set_test_id(&report_btn, ids::FEED_POST_REPORT_BUTTON);
+        let post = post.clone();
+        let pop = popover.clone();
+        let c = Rc::clone(client);
+        report_btn.connect_clicked(move |b| {
+            pop.popdown();
+            crate::report::open_sheet(b, crate::report::post_target(&post), &c, None);
+        });
+        menu.append(&report_btn);
     }
 
     popover.set_child(Some(&menu));
@@ -3287,7 +3430,8 @@ fn dispatch_train(
 /// current feed's composition does not single out one trained topic. Lists the
 /// user's trained factors from the sealed registry — model strings are the
 /// stable `topic:<hex>` keys, the expression renders the user's chosen name
-/// (the feed-factor-select pattern) — and trains the picked one.
+/// (the feed-factor-select pattern) — and trains the picked one, or links out
+/// to the Personalization home to create a new one.
 fn open_train_target_sheet(
     anchor: &impl IsA<gtk::Widget>,
     manager: &Arc<LinuxFeedManager>,
@@ -3363,6 +3507,14 @@ fn open_train_target_sheet(
     }
 
     dialog.add_response("cancel", common::CANCEL);
+    // "New trained topic" links out to the Personalization home rather than
+    // duplicating the create form here — the existing-factors + "New trained
+    // topic…" sheet `topic-factors.md` § Authoring surface & picker ratifies,
+    // in the shape windows, android and web already give it.
+    dialog.add_response(
+        "new",
+        crate::i18n::strings::personalization::TRAINED_FACTOR_CREATE,
+    );
     dialog.add_response("train", common::SAVE);
     dialog.set_response_appearance("train", adw::ResponseAppearance::Suggested);
     dialog.set_default_response(Some("train"));
@@ -3372,12 +3524,15 @@ fn open_train_target_sheet(
         let m = Arc::clone(manager);
         let rt = rt.clone();
         let error_label = error_label.clone();
+        let anchor: gtk::Widget = anchor.as_ref().clone();
         dialog.connect_response(None, move |dlg, response| {
             if response == "train" {
                 let idx = dropdown.selected() as usize;
                 if let Some(factor) = factor_keys.borrow().get(idx).cloned() {
                     dispatch_train(&m, &rt, post_id.clone(), factor, verb, false, &error_label);
                 }
+            } else if response == "new" {
+                crate::app::navigate_to_settings_subpage(&anchor, "personalization");
             }
             dlg.close();
         });
@@ -3442,7 +3597,39 @@ pub fn build_reply_dialog(client: &Rc<FaunaClient>, post_id: &str) -> adw::Windo
     crate::testid::set_test_id(&reply_btn, ids::FEED_REPLY_SUBMIT_BUTTON);
     crate::offline_gate::declare_wire_kind(&reply_btn, "fauna.posts.interact");
 
+    // Under a restricted target the dialog STATES where the reply goes —
+    // `feed-reply-audience`, the manager's own per-post answer, never decided
+    // here — and offers the explicit-public answer (`feed-reply-public-confirm`)
+    // only where this reader cannot write for the audience
+    // (`goal/behavior/restricted-posts.md` § Encryption at rest → *Ruling 5's
+    // build — the shape*, (d) + (e)). A public target paints neither. The
+    // checkbox is born unchecked at every open and never remembered.
+    let target =
+        crate::feed::host::manager().and_then(|m| m.snapshot().find_post(post_id).cloned());
+    let audience = target.as_ref().and_then(|p| p.reply_audience);
+    if let (Some(target), Some(audience)) = (target.as_ref(), audience) {
+        let text = match audience {
+            ReplyAudience::SealedToRoom => {
+                feed::post::reply_audience_room(target.room_label.as_deref().unwrap_or_default())
+            }
+            ReplyAudience::SealedToTier => {
+                feed::post::reply_audience_tier(target.gated_tier.as_deref().unwrap_or_default())
+            }
+            ReplyAudience::PublicByConfirmation => feed::post::REPLY_AUDIENCE_PUBLIC.to_string(),
+        };
+        let label = gtk::Label::new(Some(&text));
+        label.set_wrap(true);
+        label.set_xalign(0.0);
+        crate::testid::set_test_id(&label, ids::FEED_REPLY_AUDIENCE);
+        vbox.append(&label);
+    }
     vbox.append(&scrolled);
+    let public_confirm = gtk::CheckButton::with_label(feed::post::REPLY_PUBLIC_CONFIRM);
+    public_confirm.set_active(false);
+    crate::testid::set_test_id(&public_confirm, ids::FEED_REPLY_PUBLIC_CONFIRM);
+    if audience == Some(ReplyAudience::PublicByConfirmation) {
+        vbox.append(&public_confirm);
+    }
     vbox.append(&reply_btn);
     dialog.set_content(Some(&vbox));
 
@@ -3451,13 +3638,16 @@ pub fn build_reply_dialog(client: &Rc<FaunaClient>, post_id: &str) -> adw::Windo
         let pid = post_id.to_string();
         let d = dialog.clone();
         let tv = text_view.clone();
+        let confirm = public_confirm.clone();
         reply_btn.connect_clicked(move |_| {
             let buffer = tv.buffer();
             let start = buffer.start_iter();
             let end = buffer.end_iter();
             let text = buffer.text(&start, &end, false).to_string();
             if !text.trim().is_empty() {
-                c.interact_with_post(&pid, "reply", Some(&text));
+                // `confirm` is only ever visible (hence only ever checkable)
+                // under *public by confirmation*.
+                c.reply_to_post(&pid, &text, confirm.is_active());
                 d.close();
             }
         });
@@ -3833,7 +4023,7 @@ mod tests {
     /// The reply end of one blob GET a card issued.
     type BlobReply = async_channel::Sender<Result<Vec<u8>, ApiError>>;
     /// The reply end of one C2PA check a card issued.
-    type CheckReply = async_channel::Sender<Result<bool, ApiError>>;
+    type CheckReply = async_channel::Sender<Result<Option<Vec<u8>>, ApiError>>;
 
     /// A fake nest for `build_post_image_from`: it records every blob GET and
     /// C2PA check a card issues and holds each reply until the test sends it.
@@ -3857,7 +4047,10 @@ mod tests {
     }
 
     impl PostMediaSource for CountingMedia {
-        fn fetch_has_c2pa(&self, _hash: &str) -> async_channel::Receiver<Result<bool, ApiError>> {
+        fn fetch_c2pa_candidate_bytes(
+            &self,
+            _hash: &str,
+        ) -> async_channel::Receiver<Result<Option<Vec<u8>>, ApiError>> {
             let (tx, rx) = async_channel::bounded(1);
             self.checks.borrow_mut().push(tx);
             rx
@@ -3879,15 +4072,22 @@ mod tests {
             (self.gets.borrow().len(), self.checks.borrow().len())
         }
 
-        /// Answer the `n`th GET and the `n`th check.
-        fn answer(&self, n: usize, bytes: &[u8], has_c2pa: bool) {
+        /// Answer the `n`th GET with the image `bytes` and the `n`th check with
+        /// what the badge's two stages read: `None` when the `x-c2pa` hint says
+        /// no, else the bytes the blob GET behind a `true` hint returned.
+        fn answer(&self, n: usize, bytes: &[u8], c2pa_candidate: Option<&[u8]>) {
             let _ = self.gets.borrow()[n].try_send(Ok(bytes.to_vec()));
-            let _ = self.checks.borrow()[n].try_send(Ok(has_c2pa));
+            let _ = self.checks.borrow()[n].try_send(Ok(c2pa_candidate.map(<[u8]>::to_vec)));
         }
     }
 
     fn png() -> Vec<u8> {
         fauna_media::test_fixtures::build_png(2, 2)
+    }
+
+    /// A PNG that really carries a C2PA manifest.
+    fn signed_png() -> Vec<u8> {
+        include_bytes!("../../../../../tests/fixtures/c2pa-signed.png").to_vec()
     }
 
     fn offline_manager() -> Arc<LinuxFeedManager> {
@@ -4045,7 +4245,8 @@ mod tests {
                 "a rebuild while the image loads must not start a second load"
             );
 
-            nest.answer(0, &png(), true);
+            let signed = signed_png();
+            nest.answer(0, &signed, Some(&signed));
             let (picture, badge) = image_parts(&rebuilt_while_loading);
             assert!(
                 pump_until(ctx, || picture.paintable().is_some() && badge.is_visible()),
@@ -4070,33 +4271,45 @@ mod tests {
         });
     }
 
-    /// A bridged post's `ProxiedVideo` (render-model.md § D6c → *Proxied
-    /// video*) paints `video-thumbnail` as the play glyph + its path — the slot
-    /// the shared `proxied_post_video` picks — and the builder takes no
-    /// client, so nothing is fetched for it.
+    /// The badge is the bytes' verdict, never the uploader's `x-c2pa` hint
+    /// (`ui/media.md` § C2PA provenance): two cards whose hint says `true`
+    /// differ only in their bytes. The genuinely signed one shows the badge
+    /// (asserted first, so the test cannot pass vacuously); the forged one —
+    /// plain PNG bytes behind a `true` hint — and one whose hint says `false`
+    /// stay hidden.
     #[test]
-    fn a_bridged_proxied_video_paints_its_path_in_video_thumbnail() {
-        crate::testid::run_on_gtk_thread(|| {
-            let path = "/api/v1/media/proxy?url=https%3A%2F%2Fcdn.bsky.app%2Fclip.mp4";
-            let doc = fauna_core::render::RenderDocument {
-                blocks: vec![fauna_core::render::RenderBlock::ProxiedVideo {
-                    path: path.into(),
-                    alt: String::new(),
-                }],
-            };
-            let slot = doc
-                .proxied_post_video()
-                .expect("a bridged video takes the slot");
-            let thumb = build_post_video(slot);
+    fn a_forged_c2pa_hint_over_unsigned_bytes_paints_no_badge() {
+        on_private_context(|ctx| {
+            let manager = offline_manager();
+            let nest = CountingMedia::default();
+            let signed_hash = hex::encode([0x01u8; 32]);
+            let forged_hash = hex::encode([0x02u8; 32]);
+            let unasserted_hash = hex::encode([0x03u8; 32]);
+
+            let signed_card = build_post_image_from(&signed_hash, &manager, &nest);
+            let forged_card = build_post_image_from(&forged_hash, &manager, &nest);
+            let unasserted_card = build_post_image_from(&unasserted_hash, &manager, &nest);
+
+            let signed = signed_png();
+            let plain = png();
+            nest.answer(0, &signed, Some(&signed));
+            nest.answer(1, &plain, Some(&plain));
+            nest.answer(2, &plain, None);
+
+            let (_, signed_badge) = image_parts(&signed_card);
             assert!(
-                thumb.first_child().and_downcast::<gtk::Image>().is_some(),
-                "the play glyph comes first"
+                pump_until(ctx, || signed_badge.is_visible()),
+                "a manifest-bearing blob must show the badge, or the absences below are vacuous"
             );
-            let label = thumb
-                .last_child()
-                .and_downcast::<gtk::Label>()
-                .expect("the path label follows the glyph");
-            assert_eq!(label.text(), path);
+            while ctx.iteration(false) {}
+            let (_, forged_badge) = image_parts(&forged_card);
+            let (_, unasserted_badge) = image_parts(&unasserted_card);
+            assert!(
+                !forged_badge.is_visible(),
+                "a `true` hint over bytes with no manifest must paint no badge"
+            );
+            assert!(!unasserted_badge.is_visible());
+            assert_eq!(nest.counts(), (3, 3), "the verdict adds no read of its own");
         });
     }
 
@@ -4172,7 +4385,7 @@ mod tests {
 
             let _ = build_post_image_from(&hash, &manager, &nest);
             let _ = nest.gets.borrow()[0].try_send(Err(ApiError::Transport("timed out".into())));
-            let _ = nest.checks.borrow()[0].try_send(Ok(false));
+            let _ = nest.checks.borrow()[0].try_send(Ok(None));
             while ctx.iteration(false) {}
 
             let retried = build_post_image_from(&hash, &manager, &nest);
@@ -4199,7 +4412,7 @@ mod tests {
                 code: 404,
                 message: "no such blob".into(),
             }));
-            let _ = nest.checks.borrow()[0].try_send(Ok(false));
+            let _ = nest.checks.borrow()[0].try_send(Ok(None));
             while ctx.iteration(false) {}
 
             let _ = build_post_image_from(&hash, &manager, &nest);
@@ -4219,7 +4432,7 @@ mod tests {
 
             let first_reader = offline_manager();
             let card = build_post_image_from(&hash, &first_reader, &nest);
-            nest.answer(0, &png(), true);
+            nest.answer(0, &png(), Some(&png()));
             let (picture, _) = image_parts(&card);
             assert!(pump_until(ctx, || picture.paintable().is_some()));
 
@@ -4246,7 +4459,7 @@ mod tests {
             let next_reader = offline_manager();
             let _ = build_post_image_from(&hash, &next_reader, &nest);
 
-            nest.answer(0, &png(), true);
+            nest.answer(0, &png(), Some(&png()));
             while ctx.iteration(false) {}
 
             let card = build_post_image_from(&hash, &next_reader, &nest);
@@ -4274,13 +4487,50 @@ mod tests {
             let hash = hex::encode([0x12u8; 32]);
 
             let card = build_post_image_from(&hash, &manager, &nest);
-            nest.answer(0, &png(), false);
+            nest.answer(0, &png(), None);
             let (picture, _) = image_parts(&card);
             assert!(pump_until(ctx, || picture.paintable().is_some()));
 
             crate::media_loads::clear_for_identity_change();
             let _ = build_post_image_from(&hash, &manager, &nest);
             assert_eq!(nest.counts(), (2, 2));
+        });
+    }
+
+    /// `ui/feed.md` § Implementation status today, `SourceKind::Bridged`: a
+    /// token naming a bridge on the snapshot's roster paints that bridge's
+    /// declared glyph with its label beside it; a first-party badge stays its
+    /// glyph alone, and with no roster entry the token is the unknown source.
+    #[test]
+    fn a_bridged_posts_badge_names_its_bridge_from_the_roster() {
+        use fauna_core::source_glyph::SourceGlyph;
+        crate::testid::run_on_gtk_thread(|| {
+            let roster = vec![BridgeIdentitySnapshot {
+                id: "matrix".into(),
+                label: "Matrix".into(),
+                glyph: SourceGlyph::Globe,
+            }];
+            let texts = |bridges: &[BridgeIdentitySnapshot]| -> Vec<String> {
+                build_protocol_badges("fauna, matrix", bridges)
+                    .iter()
+                    .map(|l| l.text().to_string())
+                    .collect()
+            };
+            assert_eq!(
+                texts(&roster),
+                vec![
+                    SourceGlyph::Fox.emoji().to_string(),
+                    format!("{} Matrix", SourceGlyph::Globe.emoji()),
+                ]
+            );
+            assert_eq!(
+                texts(&[]),
+                vec![
+                    SourceGlyph::Fox.emoji().to_string(),
+                    SourceGlyph::Unknown.emoji().to_string(),
+                ],
+                "an unlisted token stays an unknown source"
+            );
         });
     }
 }

@@ -171,6 +171,9 @@
     // Populated on the HOME row only — recovery is addressed to the owner's
     // own destinations (nests.md § Trust facet — generation recovery).
     trust_generations: TrustGenerationRow[];
+    // The nest's holder roster could not be read this refresh; the grants above
+    // are still the owner's whole log (nests.md § Trust facet — grants).
+    trust_holders_unreachable?: boolean;
     lens: TrustLens;
     // The per-nest blessing and the mint picker's default duration it implies
     // (`nests.md` § Expiry / renewal → Duration and blessing).
@@ -228,13 +231,17 @@
 
   let machine: Awaited<ReturnType<typeof linkedNestsMachineWithTrust>> | null = null;
 
-  function applySnapshot(): void {
+  /** Paint the machine's snapshot. `withError: false` is the store-change
+   *  re-read's: a notice is not the user acting, so it never puts the
+   *  machine's standing error back over a banner something else has since
+   *  cleared or written. */
+  function applySnapshot({ withError = true }: { withError?: boolean } = {}): void {
     const snap = (machine?.snapshot() ?? null) as NestsSnapshot | null;
     // The home nest sits first in the list, then the pairings (nests.md § Layout).
     rows = [...(snap?.home ? [snap.home] : []), ...(snap?.pairings ?? [])];
     restoreOutcome = snap?.restore_outcome ?? null;
     forwardView = forwardQueueView(snap?.forward_queue);
-    if (snap?.error) error = snap.error;
+    if (withError && snap?.error) error = snap.error;
   }
 
   // A grant's scope line, via the shared `fauna_client_pair::grant_scope_labels`
@@ -373,13 +380,13 @@
   // against a dead destination the read is a connect attempt, and restarting
   // it on every re-entry would never let it finish.
   let hydrating: Promise<void> | null = null;
-  function rehydrate(): Promise<void> {
+  function rehydrate({ withError = true }: { withError?: boolean } = {}): Promise<void> {
     if (!machine) return Promise.resolve();
     const m = machine;
     hydrating ??= (async () => {
       try {
         await m.hydrate();
-        applySnapshot();
+        applySnapshot({ withError });
       } finally {
         hydrating = null;
       }
@@ -395,9 +402,21 @@
 
   // The store-change notice (`$lib/store-change`): the custody facet folds
   // from the account store's records, so the open page re-folds it — a fold
-  // only (a null fold keeps the rows). The linked-nest rows are NOT joined:
-  // their hydrate is the machine's own nest round trip.
-  onDestroy(onStoreChange(() => void loadCustodyNests().catch(() => {})));
+  // only (a null fold keeps the rows). The linked rows re-run the visit's own
+  // hydrate (the trust facet, the blessings and the backup rows are
+  // account-plane rows), as tui and linux do. Level-safe: the hydrate is the
+  // machine's `refresh`, which leaves its standing error and restore outcome
+  // alone, so the re-paint carries the same caption; the add and mint forms
+  // are this page's own state (the mint forms keyed by nest id); a re-read
+  // already in flight is joined, never restarted (against a dead destination
+  // it is a connect attempt); and a failed one replaces nothing and writes no
+  // error.
+  onDestroy(
+    onStoreChange(() => {
+      void rehydrate({ withError: false }).catch(() => {});
+      void loadCustodyNests().catch(() => {});
+    }),
+  );
 
   onDestroy(() => {
     // Drop the hook with the page, so the command never pokes a torn-down

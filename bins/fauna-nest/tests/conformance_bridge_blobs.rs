@@ -351,16 +351,28 @@ async fn admin_list_revoke_dkim_round_trip() {
     .await
     .expect("admin list dkim ok");
     let listed: ListDkimSelectorsReply = decode(&reply_bytes).unwrap();
-    assert_eq!(listed.selectors.len(), 1, "exactly one selector");
-    let info = &listed.selectors[0];
-    assert!(
-        info.public_dns_value.starts_with("v=DKIM1; k=ed25519; p="),
-        "{}",
-        info.public_dns_value
+    assert_eq!(
+        listed
+            .selectors
+            .iter()
+            .map(|s| s.selector.as_str())
+            .collect::<Vec<_>>(),
+        ["s1-rsa", "s1-ed25519"],
+        "one label, its two algorithm selectors"
     );
-    assert!(info.created_at > 0, "created_at populated");
+    for (info, k) in listed.selectors.iter().zip(["rsa", "ed25519"]) {
+        assert!(
+            info.public_dns_value
+                .starts_with(&format!("v=DKIM1; k={k}; p=")),
+            "{}",
+            info.public_dns_value
+        );
+        assert!(info.created_at > 0, "created_at populated");
+    }
 
-    // Retire it; the list then empties.
+    // Retire one of them by name: the door takes its label, so both go and
+    // the list empties.
+    let info = &listed.selectors[0];
     let revoke_req = RevokeDkimBlobRequest {
         extra: Default::default(),
         domain: info.domain.clone(),
@@ -1248,6 +1260,53 @@ async fn webdav_quota_reports_the_meter_the_record_path_enforces() {
     // Non-MDA caller denied.
     let err = quota(user_actor).await.unwrap_err();
     assert_eq!(err.code, "fauna.bridges.permission_denied");
+}
+
+/// `webdav_quota` is bounded like every other Phase F kind: an actor serving no
+/// WebDAV set gets `set_not_served` (never its account-wide meter and tier
+/// ceiling), an actor with only an unflagged folder likewise, and the same
+/// actor answers once a set is served.
+#[tokio::test]
+async fn webdav_quota_is_refused_for_an_actor_serving_no_set() {
+    let (router, state) = router_with_state().await;
+    let user_actor = [42u8; 32];
+    let bridge_actor = [55u8; 32];
+    common::approve_mda(&state, bridge_actor).await;
+    state
+        .db
+        .create_user(&user_actor, "free", "a-user")
+        .await
+        .unwrap();
+
+    let quota = || {
+        dispatch(
+            &router,
+            state.clone(),
+            bridge_actor,
+            "fauna.bridges.webdav_quota",
+            encode_canonical(&WebdavQuotaRequest {
+                actor_id: user_actor.to_vec(),
+                extra: Default::default(),
+            })
+            .unwrap(),
+        )
+    };
+
+    let err = quota().await.unwrap_err();
+    assert_eq!(err.code, "fauna.bridges.set_not_served", "no folder at all");
+
+    // A folder that exists but is not flagged for WebDAV serves nothing.
+    state
+        .db
+        .create_folder_with_options("private", &user_actor, Default::default())
+        .await
+        .unwrap();
+    let err = quota().await.unwrap_err();
+    assert_eq!(err.code, "fauna.bridges.set_not_served", "unflagged folder");
+
+    serve_a_set(&state, user_actor, "photos").await;
+    let reply: WebdavQuotaReply = decode(&quota().await.expect("a serving actor answers")).unwrap();
+    assert_eq!(reply.storage_bytes_used, 0);
 }
 
 /// `webdav_record_change` enforces the WebDAV `If-Match` / `If-None-Match` ETag

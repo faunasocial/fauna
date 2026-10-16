@@ -24,9 +24,12 @@
 //!
 //! **Spawn gate** (`main.rs`, mirroring `floor_renew_task` + the mail-domain
 //! real-domain predicate): only when ACME HTTP-01 is **off** (an HTTP-01 box
-//! self-renews — a nudge there is wrong, the fix is server-side), a **real**
-//! public domain is configured (a localhost/IP/`.local` box is happy on the
-//! floor — never nag it), and a `PushService` + a served-cert resolver exist.
+//! self-renews — a nudge there is wrong, the fix is server-side) and a
+//! `PushService` + a served-cert resolver exist. The **real public domain**
+//! half (a localhost/IP/`.local` or domainless box is happy on the floor —
+//! never nag it) is read per tick from the live identity domain, never a
+//! boot-time seed: every real nest boots domainless and learns its domain at
+//! the claim.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -34,9 +37,12 @@ use std::time::Duration;
 
 use fauna_protocol::tls::CertHealthState;
 
+use futures_util::future::BoxFuture;
+
 use crate::acme::{ServedCertFacts, ServedCertSpki, cert_health_state};
-use crate::push::DevicePresence;
+use crate::push::{DevicePresence, DispatchOutcome, PushService};
 use crate::routes::AppState;
+use crate::ws::WsState;
 
 /// How often the task re-checks served-cert health, and the minimum spacing
 /// between two nudges to the same deployment. One nudge per day while a cert is
@@ -110,11 +116,57 @@ pub fn nudge_due(last_nudge_unix: i64, now_unix: i64) -> bool {
     now_unix - last_nudge_unix >= CERT_NUDGE_INTERVAL_SECS
 }
 
+/// What one tick decided — the loop discards it, the `test-hooks` tick seam
+/// (`cert_nudge_test_hook`) replies with it (`tls-certificates.md` § C → *No
+/// cadence knob — and one compile-gated tick seam for mitigation 4*).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TickOutcome {
+    /// The public apex the tick evaluated; `None` when the domain gate was
+    /// closed (no domain yet, or a localhost/IP/`.local` one) and nothing was.
+    pub apex: Option<String>,
+    /// The deployment domains whose served cert is not valid-trusted.
+    pub at_risk: Vec<String>,
+    /// Whether the tick reached at least one admin device and so recorded the
+    /// nudge (the de-dup stamp moved to this tick's `now`).
+    pub nudged: bool,
+    /// Push rows the tick's decisions dialled, summed over the admins.
+    pub dialled: u64,
+}
+
+/// The per-admin push operation [`tick_once`] runs in production: the actor,
+/// its live device presence and the at-risk set in; what the dispatch did out.
+pub type NudgePush = Box<
+    dyn Fn(Vec<u8>, DevicePresence, Vec<String>) -> BoxFuture<'static, DispatchOutcome>
+        + Send
+        + Sync,
+>;
+
+/// The production push operation — one constructor, shared by the loop and the
+/// `test-hooks` tick seam, so the seam dispatches exactly as the loop does.
+pub fn admin_nudge_push(push: Arc<PushService>, ws: Arc<WsState>) -> NudgePush {
+    Box::new(
+        move |actor: Vec<u8>, presence: DevicePresence, _at_risk: Vec<String>| {
+            let (push, ws) = (push.clone(), Arc::clone(&ws));
+            Box::pin(async move {
+                // The same per-device rule as every other push (`push.rs` §
+                // The per-device decision): a device of the admin's with the
+                // app open is not nudged (it shows the cert-status row, and a
+                // synced device can auto-issue — Slice C); their other, absent
+                // devices are. A failed dispatch reached nobody: it counts as
+                // nothing.
+                push.maybe_send_push(&ws, &presence, &actor, NUDGE_TITLE, NUDGE_BODY, NUDGE_URL)
+                    .await
+                    .unwrap_or_default()
+            })
+        },
+    )
+}
+
 /// Production entry point: run the at-risk nudge loop forever, pushing via the
 /// deployment's [`crate::push::PushService`]. No-op (logs + returns) if there is
 /// no served-cert resolver or no push service — the spawn gate in `main.rs`
 /// already excludes those, this is just defensive.
-pub async fn cert_at_risk_nudge_task(app_state: Arc<AppState>, apex: String, acme_dir: PathBuf) {
+pub async fn cert_at_risk_nudge_task(app_state: Arc<AppState>, acme_dir: PathBuf) {
     let Some(resolver) = app_state.served_cert_spki.clone() else {
         tracing::warn!("cert-nudge: no served-cert resolver — at-risk renewal push not started");
         return;
@@ -123,107 +175,29 @@ pub async fn cert_at_risk_nudge_task(app_state: Arc<AppState>, apex: String, acm
         tracing::warn!("cert-nudge: no push service — at-risk renewal push not started");
         return;
     };
-    tracing::info!("cert-nudge: at-risk renewal push task started for {apex}");
-    let ws = Arc::clone(&app_state.ws);
-    let push_op = move |actor: Vec<u8>, presence: DevicePresence, _at_risk: Vec<String>| {
-        let (push, ws) = (push.clone(), Arc::clone(&ws));
-        async move {
-            // The same per-device rule as every other push (`push.rs` § The
-            // per-device decision): a device of the admin's with the app open
-            // is not nudged (it shows the cert-status row, and a synced device
-            // can auto-issue — Slice C); their other, absent devices are.
-            let _ = push
-                .maybe_send_push(&ws, &presence, &actor, NUDGE_TITLE, NUDGE_BODY, NUDGE_URL)
-                .await;
-        }
-    };
-    cert_at_risk_nudge_loop(app_state, apex, resolver, acme_dir, push_op, None).await;
+    tracing::info!("cert-nudge: at-risk renewal push task started");
+    let push_op = admin_nudge_push(push, Arc::clone(&app_state.ws));
+    cert_at_risk_nudge_loop(app_state, resolver, acme_dir, push_op, None).await;
 }
 
-/// The loop body, parameterised over the push operation and an optional
-/// iteration cap (mirrors [`crate::acme_http01`]'s `cert_lifecycle_loop`):
-/// production passes the real per-actor push + `None` (forever); tests pass a
-/// recording closure + a small cap.
-///
-/// Each tick: derive the deployment's domains
-/// ([`crate::acme_http01::desired_san_domains`] over `list_active_mail_domains` —
-/// the same set the issuer covers), read what the listener serves for each, and
-/// if any is at-risk **and** a nudge is due, push every admin actor and persist
-/// the timestamp.
+/// The loop, parameterised over the push operation and an optional iteration
+/// cap (mirrors [`crate::acme_http01`]'s `cert_lifecycle_loop`): production
+/// passes the real per-actor push + `None` (forever); tests pass a recording
+/// closure + a small cap. Each iteration is one [`tick_once`] at the real clock.
 async fn cert_at_risk_nudge_loop<P, Fut>(
     app_state: Arc<AppState>,
-    apex: String,
     resolver: Arc<dyn ServedCertSpki>,
     acme_dir: PathBuf,
     push: P,
     max_iterations: Option<usize>,
 ) where
     P: Fn(Vec<u8>, DevicePresence, Vec<String>) -> Fut,
-    Fut: std::future::Future<Output = ()>,
+    Fut: std::future::Future<Output = DispatchOutcome>,
 {
     let mut iterations: usize = 0;
     loop {
         let now = crate::acme_http01::now_unix() as i64;
-
-        let mail_domain_names: Vec<String> = match app_state.db.list_active_mail_domains().await {
-            Ok(rows) => rows.into_iter().map(|d| d.domain_name).collect(),
-            Err(e) => {
-                tracing::warn!("cert-nudge: list_active_mail_domains failed: {e:#}");
-                Vec::new()
-            }
-        };
-        // Same SAN set the issuer covers — including the infra-subdomain hosts
-        // `relay.<apex>` / `pds.<apex>`, gated identically (`relay_san_included` /
-        // `pds_san_included` = the service being on AND the name resolving) AND the
-        // secondary mail domains, resolve-gated identically
-        // (`reachable_mail_domains`) — so the nudge's at-risk check matches what
-        // ACME actually orders. Sharing every gate is load-bearing: a flag-only or
-        // ungated check here would nudge forever, flagging a `relay.<apex>` /
-        // `pds.<apex>` / deferred-secondary SAN at-risk (served by the floor) while
-        // the resolve-gated issuer declines to add it.
-        let infra = crate::acme_http01::InfraSans {
-            relay: crate::acme_http01::relay_san_included(&app_state, &apex).await,
-            pds: crate::acme_http01::pds_san_included(&app_state, &apex).await,
-        };
-        // The apex's own SANs carry a gate too while a primary-domain rename is
-        // pre-flip (`apex_sans_for_cycle`): a dead old primary's `<apex>` /
-        // `mail.<apex>` drop out of the issuer's order, so nudging about them would
-        // be the same forever-nudge this shared-gate rule prevents — they are served
-        // by the floor precisely because the issuer declines to order them.
-        let reachable =
-            crate::acme_http01::reachable_mail_domains(&app_state, &apex, &mail_domain_names).await;
-        let apex_sans = crate::acme_http01::apex_sans_for_cycle(&app_state, &apex).await;
-        let domains = crate::acme_http01::desired_san_domains(&apex, &reachable, &infra, apex_sans);
-        let facts: Vec<(String, Option<ServedCertFacts>)> = domains
-            .into_iter()
-            .map(|d| {
-                let f = resolver.served_cert_facts(&d);
-                (d, f)
-            })
-            .collect();
-        let at_risk = at_risk_domains(&facts, now);
-
-        if !at_risk.is_empty() && nudge_due(NudgeState::load(&acme_dir).last_nudge_unix, now) {
-            match app_state.db.list_admin_actors().await {
-                Ok(admins) => {
-                    for (actor, _added_at) in admins {
-                        let presence = <[u8; 32]>::try_from(actor.as_slice())
-                            .map(|a| app_state.ws.device_presence(&a))
-                            .unwrap_or_default();
-                        push(actor, presence, at_risk.clone()).await;
-                    }
-                    NudgeState {
-                        last_nudge_unix: now,
-                    }
-                    .save(&acme_dir);
-                    tracing::info!(
-                        ?at_risk,
-                        "cert-nudge: pushed at-risk renewal reminder to admins"
-                    );
-                }
-                Err(e) => tracing::warn!("cert-nudge: list_admin_actors failed: {e:#}"),
-            }
-        }
+        tick_once(&app_state, resolver.as_ref(), &acme_dir, &push, now).await;
 
         iterations += 1;
         if let Some(max) = max_iterations
@@ -233,6 +207,134 @@ async fn cert_at_risk_nudge_loop<P, Fut>(
         }
         tokio::time::sleep(Duration::from_secs(CERT_NUDGE_INTERVAL_SECS as u64)).await;
     }
+}
+
+/// One whole production tick at `now` — the body the loop runs every
+/// [`CERT_NUDGE_INTERVAL_SECS`] and the `test-hooks` tick seam runs on demand
+/// (one body, never a second copy): the live-identity-domain gate, then
+/// [`nudge_tick`].
+pub async fn tick_once<P, Fut>(
+    app_state: &Arc<AppState>,
+    resolver: &dyn ServedCertSpki,
+    acme_dir: &Path,
+    push: &P,
+    now: i64,
+) -> TickOutcome
+where
+    P: Fn(Vec<u8>, DevicePresence, Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = DispatchOutcome>,
+{
+    // The apex is read per tick from the live identity domain, never a
+    // boot-time seed: every real nest boots domainless and learns its
+    // domain at the claim (`domains-and-tls-bootstrap.md` § TLS self-heals
+    // a claimed-post-boot domain — the ACME lifecycle loop does the same).
+    // No domain yet, or a localhost/IP/`.local` one, is happy on the floor:
+    // never nag it (the mail auto-domain net's predicate).
+    let apex = app_state
+        .handle_domain_if_set()
+        .filter(|d| fauna_provisioning::probe::resolve_handle_domain(d).is_public_dns_name);
+    match apex {
+        Some(apex) => nudge_tick(app_state, &apex, resolver, acme_dir, push, now).await,
+        None => TickOutcome::default(),
+    }
+}
+
+/// One tick for a known public `apex`: derive the deployment's domains
+/// ([`crate::acme_http01::desired_san_domains`] over `list_active_mail_domains`
+/// — the same set the issuer covers), read what the listener serves for each,
+/// and if any is at-risk **and** a nudge is due, push every admin actor. The
+/// de-dup records attention given, not a tick taken: the stamp persists only
+/// when the pushes dialled or delivered to at least one device, so an admin who
+/// registers a device later is reminded at the next tick instead of waiting out
+/// a day nobody was told about.
+async fn nudge_tick<P, Fut>(
+    app_state: &Arc<AppState>,
+    apex: &str,
+    resolver: &dyn ServedCertSpki,
+    acme_dir: &Path,
+    push: &P,
+    now: i64,
+) -> TickOutcome
+where
+    P: Fn(Vec<u8>, DevicePresence, Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = DispatchOutcome>,
+{
+    let mail_domain_names: Vec<String> = match app_state.db.list_active_mail_domains().await {
+        Ok(rows) => rows.into_iter().map(|d| d.domain_name).collect(),
+        Err(e) => {
+            tracing::warn!("cert-nudge: list_active_mail_domains failed: {e:#}");
+            Vec::new()
+        }
+    };
+    // Same SAN set the issuer covers — including the infra-subdomain hosts
+    // `relay.<apex>` / `pds.<apex>`, gated identically (`relay_san_included` /
+    // `pds_san_included` = the service being on AND the name resolving) AND the
+    // secondary mail domains, resolve-gated identically
+    // (`reachable_mail_domains`) — so the nudge's at-risk check matches what
+    // ACME actually orders. Sharing every gate is load-bearing: a flag-only or
+    // ungated check here would nudge forever, flagging a `relay.<apex>` /
+    // `pds.<apex>` / deferred-secondary SAN at-risk (served by the floor) while
+    // the resolve-gated issuer declines to add it.
+    let infra = crate::acme_http01::InfraSans {
+        relay: crate::acme_http01::relay_san_included(app_state, apex).await,
+        pds: crate::acme_http01::pds_san_included(app_state, apex).await,
+    };
+    // The apex's own SANs carry a gate too while a primary-domain rename is
+    // pre-flip (`apex_sans_for_cycle`): a dead old primary's `<apex>` /
+    // `mail.<apex>` drop out of the issuer's order, so nudging about them would
+    // be the same forever-nudge this shared-gate rule prevents — they are served
+    // by the floor precisely because the issuer declines to order them.
+    let reachable =
+        crate::acme_http01::reachable_mail_domains(app_state, apex, &mail_domain_names).await;
+    let apex_sans = crate::acme_http01::apex_sans_for_cycle(app_state, apex).await;
+    let domains = crate::acme_http01::desired_san_domains(apex, &reachable, &infra, apex_sans);
+    let facts: Vec<(String, Option<ServedCertFacts>)> = domains
+        .into_iter()
+        .map(|d| {
+            let f = resolver.served_cert_facts(&d);
+            (d, f)
+        })
+        .collect();
+    let at_risk = at_risk_domains(&facts, now);
+    let mut outcome = TickOutcome {
+        apex: Some(apex.to_string()),
+        at_risk,
+        ..TickOutcome::default()
+    };
+
+    if !outcome.at_risk.is_empty() && nudge_due(NudgeState::load(acme_dir).last_nudge_unix, now) {
+        match app_state.db.list_admin_actors().await {
+            Ok(admins) => {
+                let mut reached: u64 = 0;
+                for (actor, _added_at) in admins {
+                    let presence = <[u8; 32]>::try_from(actor.as_slice())
+                        .map(|a| app_state.ws.device_presence(&a))
+                        .unwrap_or_default();
+                    let dispatch = push(actor, presence, outcome.at_risk.clone()).await;
+                    outcome.dialled += dispatch.dialled;
+                    reached += dispatch.dialled + dispatch.delivered;
+                }
+                if reached > 0 {
+                    NudgeState {
+                        last_nudge_unix: now,
+                    }
+                    .save(acme_dir);
+                    outcome.nudged = true;
+                    tracing::info!(
+                        at_risk = ?outcome.at_risk,
+                        "cert-nudge: pushed at-risk renewal reminder to admins"
+                    );
+                } else {
+                    tracing::info!(
+                        at_risk = ?outcome.at_risk,
+                        "cert-nudge: no admin device to remind — the nudge stays due"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!("cert-nudge: list_admin_actors failed: {e:#}"),
+        }
+    }
+    outcome
 }
 
 #[cfg(test)]
@@ -353,15 +455,32 @@ mod tests {
 
     type Pushes = StdArc<StdMutex<Vec<(Vec<u8>, Vec<String>)>>>;
 
+    /// A push that "landed": one device of the admin's was dialled.
+    const LANDED: DispatchOutcome = DispatchOutcome {
+        dialled: 1,
+        delivered: 0,
+    };
+
     fn recorder() -> (
         Pushes,
-        impl Fn(Vec<u8>, DevicePresence, Vec<String>) -> std::future::Ready<()> + Clone,
+        impl Fn(Vec<u8>, DevicePresence, Vec<String>) -> std::future::Ready<DispatchOutcome> + Clone,
+    ) {
+        recorder_returning(LANDED)
+    }
+
+    /// A recorder whose every dispatch reports `outcome` — `default()` is an
+    /// admin with no device to dial or deliver to.
+    fn recorder_returning(
+        outcome: DispatchOutcome,
+    ) -> (
+        Pushes,
+        impl Fn(Vec<u8>, DevicePresence, Vec<String>) -> std::future::Ready<DispatchOutcome> + Clone,
     ) {
         let pushes: Pushes = StdArc::new(StdMutex::new(Vec::new()));
         let sink = pushes.clone();
         let push = move |actor: Vec<u8>, _presence: DevicePresence, at_risk: Vec<String>| {
             sink.lock().unwrap().push((actor, at_risk));
-            std::future::ready(())
+            std::future::ready(outcome)
         };
         (pushes, push)
     }
@@ -370,6 +489,80 @@ mod tests {
         let db = StdArc::new(crate::db::CacheDb::open_in_memory().expect("in-memory db"));
         db.add_admin_actor(admin).await.expect("seed admin");
         StdArc::new(AppState::for_test(db))
+    }
+
+    /// What the claim does to a domainless-booted box: the live identity
+    /// domain the loop reads each tick.
+    fn set_domain(state: &AppState, domain: &str) {
+        state
+            .identity_domain
+            .store(Some(StdArc::new(domain.to_string())));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn loop_learns_a_domain_claimed_after_boot() {
+        // Every real nest boots domainless and learns its domain at the claim
+        // (`domains-and-tls-bootstrap.md` § TLS self-heals a claimed-post-boot
+        // domain), so the reminder must read the live domain per tick — a
+        // boot-time seed would keep it silent on every real nest.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let apex = "nest.example.com";
+        let admin = [0xD4u8; 32];
+        let state = test_state_with_admin(&admin).await;
+        state.identity_domain.store(None);
+        let now = crate::acme_http01::now_unix() as i64;
+
+        let (pushes, push) = recorder();
+        cert_at_risk_nudge_loop(
+            state.clone(),
+            spki_for(apex, floor_facts(now)),
+            dir.path().to_path_buf(),
+            push,
+            Some(1),
+        )
+        .await;
+        assert!(
+            pushes.lock().unwrap().is_empty(),
+            "pre-claim (no domain) the box is happy on the floor — never nag it"
+        );
+
+        set_domain(&state, apex);
+        let (pushes, push) = recorder();
+        cert_at_risk_nudge_loop(
+            state,
+            spki_for(apex, floor_facts(now)),
+            dir.path().to_path_buf(),
+            push,
+            Some(1),
+        )
+        .await;
+        assert_eq!(
+            pushes.lock().unwrap().len(),
+            1,
+            "once the claim names a public domain on the floor, the admin is reminded"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn loop_never_nags_a_local_domain() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let admin = [0xE5u8; 32];
+        let state = test_state_with_admin(&admin).await;
+        set_domain(&state, "nest.local");
+        let now = crate::acme_http01::now_unix() as i64;
+        let (pushes, push) = recorder();
+        cert_at_risk_nudge_loop(
+            state,
+            spki_for("nest.local", floor_facts(now)),
+            dir.path().to_path_buf(),
+            push,
+            Some(1),
+        )
+        .await;
+        assert!(
+            pushes.lock().unwrap().is_empty(),
+            "a `.local` / IP / localhost box is happy on the floor"
+        );
     }
 
     fn spki_for(apex: &str, facts: ServedCertFacts) -> StdArc<dyn ServedCertSpki> {
@@ -387,9 +580,9 @@ mod tests {
         let now = crate::acme_http01::now_unix() as i64;
         let (pushes, push) = recorder();
 
+        set_domain(&state, apex);
         cert_at_risk_nudge_loop(
             state,
-            apex.to_string(),
             spki_for(apex, floor_facts(now)),
             dir.path().to_path_buf(),
             push,
@@ -413,6 +606,80 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_device_less_tick_persists_nothing_and_a_later_tick_nudges() {
+        // The de-dup records attention given, not a tick taken
+        // (`tls-certificates.md` § C → *No cadence knob*, decision 2): a tick
+        // that reached no admin device burns no day.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let apex = "nest.example.com";
+        let admin = [0xF6u8; 32];
+        let state = test_state_with_admin(&admin).await;
+        set_domain(&state, apex);
+        let now = crate::acme_http01::now_unix() as i64;
+        let spki = spki_for(apex, floor_facts(now));
+
+        let (pushes, push) = recorder_returning(DispatchOutcome::default());
+        let first = tick_once(&state, spki.as_ref(), dir.path(), &push, now).await;
+        assert_eq!(
+            pushes.lock().unwrap().len(),
+            1,
+            "the admin's push decision ran"
+        );
+        assert_eq!(
+            first,
+            TickOutcome {
+                apex: Some(apex.to_string()),
+                at_risk: vec![apex.to_string()],
+                nudged: false,
+                dialled: 0,
+            },
+            "nothing reached a device → not nudged"
+        );
+        assert_eq!(
+            NudgeState::load(dir.path()),
+            NudgeState::default(),
+            "a device-less tick persists no de-dup stamp"
+        );
+
+        // The admin registers a device; the next tick, still inside what would
+        // have been the de-dup window, reminds them.
+        let (pushes, push) = recorder();
+        let second = tick_once(&state, spki.as_ref(), dir.path(), &push, now + 60).await;
+        assert_eq!(pushes.lock().unwrap().len(), 1, "the admin is pushed");
+        assert!(second.nudged, "a push that landed is a nudge");
+        assert_eq!(second.dialled, 1);
+        assert_eq!(
+            NudgeState::load(dir.path()).last_nudge_unix,
+            now + 60,
+            "the nudge that reached a device is recorded at its tick's now"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_closed_domain_gate_evaluates_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let admin = [0x17u8; 32];
+        let state = test_state_with_admin(&admin).await;
+        state.identity_domain.store(None);
+        let now = crate::acme_http01::now_unix() as i64;
+        let (pushes, push) = recorder();
+        let outcome = tick_once(
+            &state,
+            spki_for("nest.example.com", floor_facts(now)).as_ref(),
+            dir.path(),
+            &push,
+            now,
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            TickOutcome::default(),
+            "apex null, nothing evaluated"
+        );
+        assert!(pushes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn loop_does_not_push_when_apex_trusted() {
         let dir = tempfile::tempdir().expect("tempdir");
         let apex = "nest.example.com";
@@ -421,9 +688,9 @@ mod tests {
         let now = crate::acme_http01::now_unix() as i64;
         let (pushes, push) = recorder();
 
+        set_domain(&state, apex);
         cert_at_risk_nudge_loop(
             state,
-            apex.to_string(),
             spki_for(apex, trusted_facts(now)),
             dir.path().to_path_buf(),
             push,
@@ -447,9 +714,9 @@ mod tests {
         // First "process": on-floor → nudges once, persists the timestamp.
         let state1 = test_state_with_admin(&admin).await;
         let (pushes1, push1) = recorder();
+        set_domain(&state1, apex);
         cert_at_risk_nudge_loop(
             state1,
-            apex.to_string(),
             spki_for(apex, floor_facts(now)),
             dir.path().to_path_buf(),
             push1,
@@ -462,9 +729,9 @@ mod tests {
         // window → the persisted timestamp suppresses a duplicate nudge.
         let state2 = test_state_with_admin(&admin).await;
         let (pushes2, push2) = recorder();
+        set_domain(&state2, apex);
         cert_at_risk_nudge_loop(
             state2,
-            apex.to_string(),
             spki_for(apex, floor_facts(now)),
             dir.path().to_path_buf(),
             push2,
@@ -483,9 +750,9 @@ mod tests {
         .save(dir.path());
         let state3 = test_state_with_admin(&admin).await;
         let (pushes3, push3) = recorder();
+        set_domain(&state3, apex);
         cert_at_risk_nudge_loop(
             state3,
-            apex.to_string(),
             spki_for(apex, floor_facts(now)),
             dir.path().to_path_buf(),
             push3,

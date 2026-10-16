@@ -21,6 +21,7 @@ import com.fauna.ffi.FfiTrainedTopicRow
 import com.fauna.ffi.FfiTrainedTopicsException
 import com.fauna.ffi.ngramDirectionLabel
 import com.fauna.ffi.ngramDocCountLabel
+import com.fauna.app.ui.util.firstListingRefusal
 import javax.inject.Inject
 
 /**
@@ -158,16 +159,31 @@ class TrainedTopicsVM @Inject constructor(
      *  (transport.md § Request lifecycle step 3's note). */
     fun load() {
         viewModelScope.launch {
+            var refusal: String? = null
             repeat(HYDRATE_ATTEMPTS) {
                 try {
                     _topics.value = api.trainedTopicsList()
+                    if (_errorMessage.value == refusalShown) _errorMessage.value = null
+                    refusalShown = null
                     return@launch
-                } catch (_: Exception) {
+                } catch (e: Exception) {
+                    refusal = e.firstListingRefusal()
                     delay(HYDRATE_RETRY_MS)
                 }
             }
+            // A background load is retried quietly — except the first-listing
+            // gate's refusal, which says why the page has not loaded
+            // (account-client-lifecycle.md § The first listing, clauses (4)/(5)).
+            refusal?.let {
+                refusalShown = it
+                _errorMessage.value = it
+            }
         }
     }
+
+    /** The refusal text this VM put on [errorMessage], so a later good load
+     *  clears exactly that and never a gesture's own failure. */
+    private var refusalShown: String? = null
 
     fun onTopicNameChange(name: String) {
         _topicName.value = name

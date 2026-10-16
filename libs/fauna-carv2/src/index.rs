@@ -68,6 +68,22 @@ pub fn write_index<W: Write>(w: &mut W, entries: &mut [IndexEntry]) -> Result<()
 /// codec marker, multihash code, and digest width match Fauna's profile
 /// (blake3-256, 32 bytes).
 pub fn read_index<R: Read>(r: &mut R) -> Result<Vec<IndexEntry>, Error> {
+    let count = read_index_prefix(r)?;
+    read_index_entries(r, count)
+}
+
+/// The most bytes [`read_index_prefix`] consumes: the codec varint, the bucket
+/// count, the multihash-code varint, the digest width and the entry count.
+pub const INDEX_PREFIX_MAX_LEN: u64 = 10 + 4 + 10 + 4 + 8;
+
+/// The bytes one index entry occupies: a blake3-256 digest and a u64 offset.
+pub const INDEX_ENTRY_LEN: u64 = BLAKE3_256_DIGEST_WIDTH as u64 + 8;
+
+/// Read and validate the index's prefix — everything before the entries — and
+/// return the entry count. [`read_index`] is this followed by
+/// [`read_index_entries`]; a reader that fetches by range reads the prefix
+/// first to learn how many entry bytes follow.
+pub fn read_index_prefix<R: Read>(r: &mut R) -> Result<u64, Error> {
     let codec = read_varint_u64(r)?;
     if codec != MULTIHASH_INDEX_SORTED_CODEC {
         return Err(Error::BadIndex(format!(
@@ -105,7 +121,12 @@ pub fn read_index<R: Read>(r: &mut R) -> Result<Vec<IndexEntry>, Error> {
     if count > 1 << 30 {
         return Err(Error::BadIndex(format!("absurd entry count: {count}")));
     }
+    Ok(count)
+}
 
+/// Read `count` index entries (after [`read_index_prefix`]) and verify the
+/// ascending-digest invariant.
+pub fn read_index_entries<R: Read>(r: &mut R, count: u64) -> Result<Vec<IndexEntry>, Error> {
     let mut entries = Vec::with_capacity(count as usize);
     for _ in 0..count {
         let mut digest = [0u8; 32];

@@ -112,6 +112,36 @@ async fn verify_inbound_message_without_auth_records_is_all_none() {
     assert_eq!(verdicts, AuthVerdicts::default(), "{verdicts:?}");
 }
 
+// The observation an outbound DMARC aggregate report is built from
+// (docs/goal/behavior/dmarc-reporting.md § Outbound aggregate-report sender):
+// the From and envelope domains, lowercased, and no aligned result where
+// nothing authenticated — beside the same verdicts `verify_inbound_with` gives.
+#[tokio::test]
+async fn verify_inbound_observed_reports_the_identifiers_and_alignment() {
+    let authenticator = hermetic_authenticator().await;
+    let out = fauna_mail::auth::verify_inbound_observed_with(
+        &authenticator,
+        NO_AUTH_EML,
+        "bounce@Lists.Example.ORG",
+        "192.0.2.1",
+        "mail.example.com",
+    )
+    .await
+    .expect("verify should not error");
+    assert_eq!(out.verdicts, AuthVerdicts::default());
+    assert_eq!(
+        out.observation,
+        fauna_mail::auth::DmarcObservation {
+            header_from_domain: "example.com".into(),
+            envelope_from_domain: "lists.example.org".into(),
+            dkim_aligned: false,
+            spf_aligned: false,
+            dkim_results: vec![],
+            spf_result: "none".into(),
+        }
+    );
+}
+
 // ── ONE definition, pinned by the type system ──────────
 //
 // The mail-auth verdict enums used to exist twice — hand-mirrored in

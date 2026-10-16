@@ -98,7 +98,9 @@ struct ContentView: View {
 private struct GlobalChrome: ViewModifier {
     @Environment(AppState.self) private var appState
     @Environment(FaunaClient.self) private var client: FaunaClient?
+    #if !FAUNA_KIDS
     @Environment(CriticalAlertsHost.self) private var criticalAlertsHost: CriticalAlertsHost?
+    #endif
 
     func body(content: Content) -> some View {
         content
@@ -122,7 +124,9 @@ private struct GlobalChrome: ViewModifier {
             VStack(spacing: 0) {
                 // Highest-severity global chrome — deliberately above every
                 // other banner (critical-alerts.md § Severity bar).
+                #if !FAUNA_KIDS
                 CriticalAlertsBanner(host: criticalAlertsHost)
+                #endif
                 // The off-box-recovery custody warning rides just above the connection bar —
                 // shown only when the launch glue couldn't confirm custody;
                 // tap-to-dismiss.
@@ -158,8 +162,10 @@ struct MainTabView: View {
     @Environment(FaunaClient.self) private var client: FaunaClient?
     // No `CriticalAlertsHost` here — the critical-alerts banner moved out with
     // the rest of the global chrome (see `GlobalChrome`).
+    #if !FAUNA_KIDS
     @State private var searchVM = SearchVM()
     @FocusState private var searchFieldFocused: Bool
+    #endif
 
     var body: some View {
         @Bindable var appState = appState
@@ -169,9 +175,11 @@ struct MainTabView: View {
             ConversationsListView(reloadToken: appState.navGeneration)
                 .tabItem { Label(L.conversations.list.title, systemImage: "bubble.left.and.bubble.right") }
                 .tag("conversations")
+            #if !FAUNA_KIDS
             FeedListView()
                 .tabItem { Label(L.common.feed, systemImage: "antenna.radiowaves.left.and.right") }
                 .tag("feed")
+            #endif
             ContactsView()
                 .tabItem { Label(L.common.contacts, systemImage: "person.2") }
                 .tag("contacts")
@@ -191,7 +199,9 @@ struct MainTabView: View {
         // Tests may still jump straight to a page via the state protocol
         // (applyNavPatch); these serve a journey that walks the page nav.
         .automationActivate(Ids.conversationsTab) { appState.selectedTab = "conversations" }
+        #if !FAUNA_KIDS
         .automationActivate(Ids.feedTab) { appState.selectedTab = "feed" }
+        #endif
         .automationActivate(Ids.contactsTab) { appState.selectedTab = "contacts" }
         .automationActivate(Ids.moreTab) { appState.selectedTab = "more" }
         // Each tab's NavigationStack lays out its large title against the safe
@@ -204,6 +214,7 @@ struct MainTabView: View {
         // tab's NavigationStack to redo that initial layout pass on the (rare,
         // typically once-per-session) transition.
         .id(appState.session.recoveryCustodyWarning != nil)
+        #if !FAUNA_KIDS
         .safeAreaInset(edge: .top) {
             if appState.showSearchBar {
                 HStack(spacing: 8) {
@@ -273,6 +284,7 @@ struct MainTabView: View {
                     .background(.background)
             }
         }
+        #endif
         // Keyed on the client INSTANCE (`SessionKey`), not `client != nil`: a bare
         // boolean is still right for "the authenticated client can be nil at first
         // appear" (the original reason for this key — a fresh in-process login
@@ -302,6 +314,7 @@ struct MainTabView: View {
             seedSupervisionSnapshot(
                 api: client?.api, familyStatus: appState.familyStatus,
                 contentPolicy: appState.contentPolicy, screenTime: appState.screenTime)
+            #if !FAUNA_KIDS
             if let client {
                 await searchVM.configure(api: client.api)
             } else {
@@ -317,6 +330,7 @@ struct MainTabView: View {
                 // same reset for uniformity.
                 searchVM.reset()
             }
+            #endif
             await refreshAdminStatus()
             await appState.familyStatus.refresh(api: client?.api)
             await appState.contentPolicy.refresh(api: client?.api)
@@ -334,7 +348,9 @@ struct MainTabView: View {
             await appState.contentPolicy.refresh(api: client?.api)
             await appState.region.refresh(api: client?.api)
             await appState.screenTime.refresh(api: client?.api)
+            #if !FAUNA_KIDS
             await searchVM.attachLocalIndexIfNeeded()
+            #endif
             await refreshUnreadNotificationCount()
         }
         // The app-global unread count follows every `fauna.notification` push
@@ -364,6 +380,7 @@ struct MainTabView: View {
         appState.isAdmin = await FaunaClient.refreshAdminStatus(client: client)
     }
 
+    #if !FAUNA_KIDS
     /// Real search-bar toggle, referenced by both the toolbar `Button` and its
     /// `automationActivate` so the two never diverge (apple-e2e-automation.md
     /// § Resolved design point). Pure view affordance — no search semantics
@@ -384,6 +401,7 @@ struct MainTabView: View {
         searchVM.cancel()
         appState.showSearchBar = false
     }
+    #endif
 }
 
 /// Hub for features beyond the main 4 tabs.
@@ -491,7 +509,9 @@ struct MoreView: View {
         // photo-backup controls moved to Settings → Folders (media.md).
         case "media": MediaView(reloadToken: appState.navGeneration)
         case "backups": SnapshotListView()
+        #if !FAUNA_KIDS
         case "bridges": BridgesView()
+        #endif
         case "notifications": NotificationsView()
         // Shared FaunaKit Moderation queue — same view, same IDs as macOS.
         case "moderation": ModerationQueueView().pageTitle(L.settings.moderationPage.title)

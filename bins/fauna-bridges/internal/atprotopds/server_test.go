@@ -66,10 +66,12 @@ type fakeNest struct {
 	// ingest answers fauna.bridges.atproto.ingest_external_write. Wired
 	// per-test (repo_write_test.go) so a test states exactly what the nest
 	// decided — round-trip, journal, or a sub-typed refusal.
-	ingest          func([]wsrpc.ExternalWrite) []wsrpc.ExternalWriteResult
-	ingestCalls     int
-	lastIngest      []wsrpc.ExternalWrite
-	lastIngestActor []byte
+	ingest      func([]wsrpc.ExternalWrite) []wsrpc.ExternalWriteResult
+	ingestCalls int
+	lastIngest  []wsrpc.ExternalWrite
+	// The session family the bridge forwarded (the oracle's live check).
+	lastIngestSession []byte
+	lastIngestActor   []byte
 
 	recordCalls    int
 	endCalls       int
@@ -171,12 +173,14 @@ func (f *fakeNest) Call(_ context.Context, method string, body any, reply any) e
 		return nil
 	case wsrpc.MethodAtprotoIngestExternalWrite:
 		var req struct {
-			ActorID []byte                `cbor:"actor_id"`
-			Writes  []wsrpc.ExternalWrite `cbor:"writes"`
+			ActorID   []byte                `cbor:"actor_id"`
+			Writes    []wsrpc.ExternalWrite `cbor:"writes"`
+			SessionID []byte                `cbor:"session_id"`
 		}
 		fakeReencode(body, &req)
 		f.ingestCalls++
 		f.lastIngestActor = req.ActorID
+		f.lastIngestSession = req.SessionID
 		f.lastIngest = req.Writes
 		if f.ingest == nil {
 			return fmt.Errorf("fakeNest: no ingest_external_write behavior wired")

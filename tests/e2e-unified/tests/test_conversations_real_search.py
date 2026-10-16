@@ -78,7 +78,7 @@ def test_search_filters_on_real_decrypted_snippet(real_faunamls_app, nest_instan
     # so alice can add him to a group — bob keeps the private half, which is
     # what lets him DECRYPT (and thus render + filter over) below.
     wait_until(
-        lambda: conv_api.keypackage_count(port, alice, bob_actor_id) > 0,
+        lambda: conv_api.keypackage_count(port, test_user, bob_actor_id) > 0,
         MLS_HANDSHAKE_S,
         diagnose=lambda: "waiting for bob's client to publish a key package",
     )

@@ -8,11 +8,14 @@
 //! `read_member` actually holds while reading it.
 //!
 //! Its own test binary for the same reason `thread_aggregate_bound.rs` is: a
-//! counting global allocator, one `#[test]` per binary so no sibling test's
-//! allocations land in the count.
+//! counting global allocator, so no other file's tests' allocations land in
+//! the count. The CRC test below shares this file's zip fixtures, so every
+//! test here takes [`SERIAL`] first — the harness runs tests in parallel, and
+//! a sibling allocating during the measured read inflates the peak.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::io::{Cursor, Write};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 use fauna_archive::reader::ArchiveReader;
@@ -24,6 +27,9 @@ struct Counting;
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
+
+/// Held by every test in this binary for its whole body (see the module doc).
+static SERIAL: Mutex<()> = Mutex::new(());
 
 fn grew(by: usize) {
     let now = LIVE.fetch_add(by, Relaxed) + by;
@@ -164,6 +170,7 @@ const TOLERANCE: usize = 64 * 1024;
 
 #[test]
 fn read_member_never_holds_more_than_the_declared_size_even_when_it_lies() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     // Compressible content (a repeated byte) — declared_size still forces a
     // real Deflate decode; the ratio is not the point, the POST-declared
     // byte's existence is.
@@ -194,6 +201,7 @@ fn read_member_never_holds_more_than_the_declared_size_even_when_it_lies() {
 
 #[test]
 fn read_member_refuses_a_well_formed_member_whose_crc_is_wrong() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     // NOT a lying declared size — the byte AFTER the declared size probe is
     // what must catch this: the compressed stream's own end-of-stream CRC
     // check moves to that probe read once the primary read is bounded to

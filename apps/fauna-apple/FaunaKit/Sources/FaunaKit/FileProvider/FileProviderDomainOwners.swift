@@ -7,7 +7,7 @@ import Foundation
 /// container is the sandboxed extension's domain and the app reaches in only to
 /// keep the extension's records (`SyncStateDir`'s two-domain doc).
 ///
-/// Why it exists (`on-demand-files.md` § Multi-account × File Provider,
+/// Why it exists (`on-demand-files-apple.md` § Multi-account × File Provider,
 /// consequences 2 + 3): the iOS upload-drain gate can leave a dirty domain
 /// **registered across a sign-out or account switch** (removal refuses while
 /// un-recorded edits exist, so the OS retry can drain them), and the capability

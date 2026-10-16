@@ -17,9 +17,9 @@ import requests
 pytestmark = pytest.mark.tier_1
 
 
-def test_fake_cloud_url_map_has_three_keys(fake_cloud) -> None:
+def test_fake_cloud_url_map_has_four_keys(fake_cloud) -> None:
     urls = fake_cloud.url_map()
-    assert set(urls.keys()) == {"vps", "dns", "nest"}
+    assert set(urls.keys()) == {"vps", "dns", "nest", "doh"}
     for key, url in urls.items():
         assert url.startswith("http://127.0.0.1:"), f"{key}: {url}"
 

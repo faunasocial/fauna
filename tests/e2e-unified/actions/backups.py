@@ -90,17 +90,10 @@ class BackupsActions:
         confirmed" claim was stale, blocked only by a fleet-wide FaunaKit
         Swift compile break (a UniFFI flat-module type collision) that
         predated this test ever getting a real build to run against on iOS.
-        android is the one app still owed this surface."""
-        if self.driver.is_android():
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="the Backups destination-management surface",
-                detail="the other 6 apps have landed it; android is the "
-                       "remaining client",
-                tracked="ui/backups.md § Implementation status today",
-            )
+        android landed it too (the destination add/edit/remove modals, the
+        per-destination status rows and the reclaim affordance, all in
+        `ui-actual-android.yaml` and driven by `BackupDestinationsContentTest`),
+        so every app renders it and this guard never skips."""
 
     def select_folder(self, name: str, timeout: float = FOLDER_SELECTABLE_WAIT_S) -> None:
         """Select the folder named `name` so its snapshots load below.
@@ -132,9 +125,16 @@ class BackupsActions:
                 # app crashed, which must surface.
                 last = e
                 time.sleep(0.5)
+        # Convention 6: a disabled selector has two causes that look alike from
+        # here (an op in flight, or a page whose refresh failed and so loaded no
+        # sets at all), and only the page can say which.
+        err = ""
+        if self.driver.is_visible("error-message"):
+            err = self.driver.get_text("error-message")
         raise TimeoutError(
             f"folder {name!r} not selectable on the dropdown within {timeout}s "
-            f"(last answer: {last!r})"
+            f"(last answer: {last!r}). error-message: {err!r} "
+            f"{self.driver.diagnose('backup-folder-selector')}"
         )
 
     def snapshot_count(self) -> int:
@@ -763,6 +763,10 @@ class BackupsActions:
         deadline = time.monotonic() + timeout
         last_size = -1
         while time.monotonic() < deadline:
+            # Re-read the dir every poll: android's is a host mirror of the
+            # device's, refreshed only by this call (`AndroidDriver.download_dir`);
+            # on the host-filesystem drivers the repeated call is free.
+            self.driver.download_dir()
             if os.path.exists(target):
                 size = os.path.getsize(target)
                 # Two consecutive polls at the same non-zero size = write done
@@ -890,7 +894,11 @@ class BackupsActions:
         self.driver.click("restore-confirm-button")
 
     def restore_progress_text(self) -> str:
-        if not self.driver.is_visible("restore-progress"):
+        # ``is_visible_scrolled``, not a bare ``is_visible``: the element sits low
+        # in the right column's ScrollViewer, and windows' ``is_visible`` reads UIA
+        # ``IsOffscreen`` — below the fold it reads "" even though the page painted
+        # the text (the trap ``is_visible_scrolled``'s docstring names).
+        if not self.driver.is_visible_scrolled("restore-progress"):
             return ""
         return self.driver.get_text("restore-progress")
 
@@ -898,7 +906,13 @@ class BackupsActions:
         """`restore-warning`'s text, or "" when it is absent — the element
         renders only after a restore whose reply said `config_present == false`
         (`ui/backups.md` § Restore from backup destination)."""
-        if not self.driver.is_visible("restore-warning"):
+        # Absent first (exact, no scroll, cheap on web), then the scrolled read:
+        # the warning sits below the progress line in the right column's
+        # ScrollViewer, so windows' bare ``is_visible`` (UIA ``IsOffscreen``)
+        # reads "" for a warning the page really painted.
+        if self.driver.is_absent("restore-warning"):
+            return ""
+        if not self.driver.is_visible_scrolled("restore-warning"):
             return ""
         return self.driver.get_text("restore-warning")
 
@@ -928,7 +942,15 @@ class BackupsActions:
     # --- Backup destinations (management) ---
 
     def destination_count(self) -> int:
-        """How many configured backup destinations are listed."""
+        """How many configured backup destinations are listed.
+
+        A non-zero count is the loaded list (rows render in one pass); a zero
+        read straight after `navigate()` proves nothing, because the list loads
+        asynchronously and no element marks it loaded. A test on the shared
+        `test_user` therefore never starts from a zero: it enrolls through
+        `helpers.backup_destinations.DestinationEnrollment`, whose own row is
+        the load proof.
+        """
         return self.driver.count("backup-destination-status-row")
 
     def open_add_destination(self) -> None:
@@ -1215,23 +1237,6 @@ class BackupsActions:
             self.driver.click("backup-destination-remove-reclaim-checkbox")
         self.driver.click("backup-destination-remove-confirm-button")
 
-    def remove_every_destination(self) -> None:
-        """Start from no configured destination: remove each one through the
-        page, one confirmed remove at a time.
-
-        For a test that counts destinations or addresses their rows by index on
-        the session-scoped `test_user`, where an earlier module's leftover
-        would otherwise be part of what it counts. Each remove is waited on
-        before the next, so a remove that does not take fails HERE, naming the
-        count it stuck at, instead of as a wrong count several steps later.
-        """
-        self.navigate()
-        remaining = self.destination_count()
-        while remaining:
-            self.remove_destination(0)
-            self.wait_for_destination_count(remaining - 1)
-            remaining -= 1
-
     def orphaned_store_visible(self) -> bool:
         """Whether `backup-orphaned-store-row` renders — this device is holding
         a sealed custodian store that NO destination row claims.
@@ -1272,22 +1277,13 @@ class BackupsActions:
         the shared `fauna_client_sync::reseed_wire::await_agent_reseed` +
         `fauna_client_config::reenroll_custodian_after_reseed`, macOS + iOS
         (2026-09-29, the shared FaunaKit view: macOS through the agent's FFI
-        face, iOS in-process), and windows (2026-09-30, through the same agent
-        FFI face as macOS). android owes its shell (the batched trickle-down).
+        face, iOS in-process), windows (2026-09-30, through the same agent
+        FFI face as macOS) and android (2026-10-08, in-process over the face
+        iOS uses). Every native app paints it, so nothing is skipped here.
         web is a declared absence, never marked: a browser cannot hold the
         sealed store (`behavior/backup-destinations.md` § Implementation status
         today).
         """
-        if self.driver.is_android():
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="backup-destination-reseed-button",
-                detail="tui, linux, apple and windows have landed the re-seed "
-                       "gesture; this app's shell is the batched trickle-down",
-                tracked="behavior/backup-destinations.md § Implementation status today",
-            )
 
     def reseed_from_orphaned_store(self) -> None:
         """Restore the signed-in nest from this device's copy: press
@@ -1332,6 +1328,67 @@ class BackupsActions:
         if self.driver.is_absent("backup-destination-reseed-result"):
             return ""
         return self.driver.get_text("backup-destination-reseed-result")
+
+    def require_recover_supported(self) -> None:
+        """Skip unless this app paints the recovery gesture on the fifth
+        audit-alert reason (`ui/backups.md` § Audit-alert surface) — e2e
+        convention 7. Built on tui, the lead app (2026-10-08), and on web
+        (2026-10-10, a nest destination's banner only — web is never a
+        custodian) and linux (2026-10-11, a nest destination's banner, and
+        this device's own custodian row through the sync agent's store leg);
+        the other four follow in their batched trickle-down lifts. (windows
+        built the nest-destination gesture 2026-10-13 but is not admitted until
+        the journey is green there.)"""
+        from helpers.app_surface import app_name, skip_unbuilt
+
+        if app_name(self.driver) not in ("tui", "web", "linux"):
+            skip_unbuilt(
+                self.driver,
+                surface="backup-audit-recover-button",
+                detail="tui leads the recovery gesture; this app has not lifted it",
+                tracked="ui/backups.md § Audit-alert surface",
+            )
+
+    def recover_button_in_banner(self) -> int | None:
+        """The index of the `backup-audit-alert` banner carrying
+        `backup-audit-recover-button`, or None when no banner carries one.
+
+        Every audit pass rebuilds the banners, so one counted here may be gone
+        by the scoped read: that banner offers nothing at this instant, and a
+        caller polling for the button reads again (`LookupError: not found` was
+        the linux back-in-time cell's intermittent red)."""
+        for i in range(self.driver.count("backup-audit-alert")):
+            try:
+                offered = not self.driver.is_absent(
+                    "backup-audit-recover-button", scope=f"backup-audit-alert[{i}]"
+                )
+            except LookupError:
+                return None
+            if offered:
+                return i
+        return None
+
+    def recover_from_banner(self, index: int) -> None:
+        """Press `backup-audit-recover-button` inside `backup-audit-alert[index]`
+        and confirm (`ui/backups.md` § Audit-alert surface). Returns once the
+        confirm is pressed; read the outcome with `recover_result_text`."""
+        self.driver.click(
+            "backup-audit-recover-button", scope=f"backup-audit-alert[{index}]"
+        )
+        self.driver.wait_for(
+            "backup-audit-recover-confirm-button", timeout=DESTINATION_DIALOG_WAIT_S
+        )
+        self.driver.click("backup-audit-recover-confirm-button")
+
+    def recover_result_text(self) -> str:
+        """`backup-audit-recover-result`'s text, or '' while it is absent (also
+        when it went between the presence read and the text read)."""
+        if self.driver.is_absent("backup-audit-recover-result"):
+            return ""
+        try:
+            return self.driver.get_text("backup-audit-recover-result")
+        except LookupError:
+            return ""
 
     def destination_text(self, index: int = 0) -> str:
         """Text of the destination status row at `index` (its display name)."""
@@ -1572,6 +1629,22 @@ class BackupsActions:
         it."""
         i = self.wait_for_folder_row(name)
         self.expand_folder(i)
+        return i
+
+    def open_folder(self, name: str, probe: str = "folder-location-path-input") -> int:
+        """Leave the row whose title contains `name` OPEN, whatever its prior
+        state, and return its index.
+
+        :meth:`find_and_expand_folder` TOGGLES, and whether a row is still open
+        after an earlier gesture differs by app: tui collapses the row a
+        binding save came from, linux keeps it open across that save's list
+        rebuild (`restore_expansion`) and across a ``navigate_folders()`` that
+        changes no nav state. So toggle once, and once more if `probe` — a body
+        widget every expanded owner row paints synchronously, never one an
+        async read fills — shows the first toggle shut it."""
+        i = self.find_and_expand_folder(name)
+        if not self.driver.is_visible(probe):
+            self.expand_folder(i)
         return i
 
     def find_and_expand_folder_until(
@@ -2016,6 +2089,37 @@ class BackupsActions:
             self.driver.select("folder-conflict-policy-select", policy, index=idx)
         time.sleep(1)
 
+    def open_conflict_policy_row(self, name: str, timeout: float = 15.0) -> int:
+        """Leave the row titled `name` open with ITS policy picker painted, and
+        return the row's current index — what a second pick after a write needs.
+
+        A write re-renders the list, and what survives that differs by app (tui
+        collapses the row, linux keeps it open across most rebuilds, an index can
+        shift), so neither the old index nor a GLOBAL picker count says whether
+        this row's picker is there: another row left open answers the count, and
+        the scoped pick then 404s (the 2026-10-12 sweep's round-trip red). The
+        check is scoped to this row everywhere but web, where at most one row is
+        ever open (:meth:`set_conflict_policy`'s carve-out)."""
+        deadline = time.monotonic() + timeout
+        while True:
+            i = self.wait_for_folder_row(name)
+            if self.driver.is_web():
+                shown = self.driver.is_visible("folder-conflict-policy-select")
+            else:
+                shown = self.driver.is_visible(
+                    "folder-conflict-policy-select", scope=f"folder-row[{i}]"
+                )
+            if shown:
+                return i
+            if time.monotonic() >= deadline:
+                self.driver.wait_for(
+                    "folder-conflict-policy-select",
+                    timeout=0.1,
+                    **({} if self.driver.is_web() else {"scope": f"folder-row[{i}]"}),
+                )
+                return i
+            self.expand_folder(i)
+
     def get_conflict_policy(self, index: int = 0, *, row: int | None = None) -> str:
         """Read back the per-set conflict policy. See the ``row``/``index`` and
         web-carve-out warnings on :meth:`set_conflict_policy`."""
@@ -2053,7 +2157,14 @@ class BackupsActions:
         face — then refreshes the snapshot so the toggle reflects the persisted
         nest ``folders.webdav_enabled`` flag. A single click flips based on the
         checkbox's current state. Async — callers poll the nest ground truth
-        (``fauna.folders.list``)."""
+        (``fauna.folders.list``).
+
+        Waits for the toggle to be ENABLED first: it is gated on the owner's
+        serve capability (the MSEK the first mail enable mints), which the page
+        reads asynchronously on every nav — so right after a mail enable the
+        toggle renders disabled for a moment, and a click then is one no user
+        could make (the 2026-10-12 grading run's 409 on linux)."""
+        self.driver.wait_until_enabled("folder-webdav-toggle", timeout=30.0)
         self.driver.click("folder-webdav-toggle")
         time.sleep(1)
 
@@ -2095,7 +2206,7 @@ class BackupsActions:
     # macos+ios `platform_elements` (ui.yaml § folders): apple's on-demand
     # affordance is SET-level, not location-level — an FP domain cannot take over
     # an arbitrary user directory, so there is exactly one local presence per set
-    # per device (on-demand-files.md § Apple File Provider binding). The other
+    # per device (on-demand-files-apple.md § Apple File Provider binding). The other
     # five apps render nothing here, which is why the covering test carries only
     # the macos/ios app markers rather than an app-gated skip.
 
@@ -2105,7 +2216,7 @@ class BackupsActions:
         Absent on a row whose set has a bound always-resident folder: the binding
         IS that set's one local presence, so the row renders the arbitration
         caption instead of the toggle (bound folder > FP domain,
-        `on-demand-files.md` § Apple File Provider binding). Also absent on the
+        `on-demand-files-apple.md` § Apple File Provider binding). Also absent on the
         five apps that declare the element off their surface, and on a non-Sync
         row.
         """
@@ -2408,6 +2519,14 @@ class BackupsActions:
         """The keeps-snapshots knob's current wire value."""
         return self.driver.get_text("folder-nest-snapshots-select")
 
+    def nest_quiet_value(self) -> str:
+        """What `folder-nest-quiet-input` holds on screen — staged or seeded."""
+        return self.driver.get_text("folder-nest-quiet-input")
+
+    def version_retention_count_value(self) -> str:
+        """What `folder-version-retention-count` holds on screen."""
+        return self.driver.get_text("folder-version-retention-count")
+
     # --- Content residency (folders re-model phase 5) ---
     #
     # The nest-place editor block's consent-gated sibling. Unlike the four knobs
@@ -2460,7 +2579,15 @@ class BackupsActions:
 
     def exclusive_editing_state(self) -> str | None:
         """``"on"`` / ``"off"`` — the expanded row's toggle as painted, which is
-        the nest's value (the toggle is non-optimistic). ``None`` when absent."""
+        the nest's value (the toggle is non-optimistic). ``None`` when absent.
+
+        Read over the uniform ``checked`` attribute (``"true"``/``"false"``;
+        tui, linux and web all answer it — GTK ``state`` is the same switch but
+        web has no ``state`` for a checkbox); tui's own ``on``/``off`` ``state``
+        is the fallback for an app that publishes only that."""
+        checked = self.driver.get_attr("folder-exclusive-editing-toggle", "checked")
+        if checked in ("true", "false"):
+            return "on" if checked == "true" else "off"
         return self.driver.get_attr("folder-exclusive-editing-toggle", "state")
 
     def toggle_exclusive_editing(self) -> None:
@@ -2579,6 +2706,7 @@ class BackupsActions:
         name: str,
         *,
         device_indices: list[int] | None = None,
+        await_row: bool = True,
     ) -> int:
         """Drive the folder wizard end-to-end and return the resulting count.
 
@@ -2597,6 +2725,11 @@ class BackupsActions:
         (phase 2 slice e, on every app since 2026-08-21) — the machine creates
         every folder ``sync``, and what a mode used to imply is the seats' place
         flags plus the row's nest-place policy, set after create.
+
+        ``await_row=False`` skips that wait, for a caller whose list already
+        carries a row named ``name`` — a folder shared with this user under the
+        same name — which would satisfy it at once; such a caller waits on its
+        own observable instead.
         """
         self.add_folder()
         self._wait_visible("wizard-name-input")
@@ -2615,6 +2748,8 @@ class BackupsActions:
         # used to sit here retired with phase 5.)
         self._wait_visible("wizard-create-button")
         self.wizard_create()
+        if not await_row:
+            return self.folder_count()
 
         try:
             self.wait_for_folder_row(name)

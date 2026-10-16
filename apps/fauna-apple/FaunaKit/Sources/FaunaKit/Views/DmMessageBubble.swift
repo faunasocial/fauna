@@ -509,12 +509,14 @@ public struct DmMessageBubble: View {
         // already shows). The og:image is reveal-gated: `linkPreviewImageURL` is consulted only when
         // `revealed`, so the bubble's `load-remote-content-button` above (now counting the un-revealed
         // og:image via the shared `hasBlockedRemoteImages`) reveals it — no new toggle.
+        #if !FAUNA_KIDS
         ForEach(Array(documentResolvedLinkPreviews(message.document).enumerated()), id: \.offset) { index, preview in
             LinkPreviewCard(
                 url: preview.url, title: preview.title, description: preview.description,
                 imageURL: (preview.revealed ? preview.imageHash : nil).flatMap { linkPreviewImageURL($0) },
                 index: index)
         }
+        #endif
 
         // Aggregated reactions under the bubble (conversations.md § Reactions &
         // message delete): one `dm-reaction-pill` per emoji group (emoji + count),
@@ -707,6 +709,7 @@ public struct DmMessageBubble: View {
                 }
             }
 
+            #if !FAUNA_KIDS
             if canMarkSpam {
                 // The live `Insert` consumer (mail-spam.md § Wire shapes) — trains the
                 // sealed tier-1 model over the retained decrypted body AND writes a
@@ -724,6 +727,7 @@ public struct DmMessageBubble: View {
                 .accessibilityIdentifier(Ids.dmMessageMarkAsSpamButton)
                 .automationActivate(Ids.dmMessageMarkAsSpamButton) { performMarkAsSpam() }
             }
+            #endif
 
             if canReport {
                 // Opens the shared report sheet (moderation.md § User-initiated

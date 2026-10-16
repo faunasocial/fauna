@@ -31,6 +31,7 @@ from common import create_actor_and_register, port_base_url
 from common.auth import PLACE_ORIGINATES_ONLY, add_folder_member, user_create_folder
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from fauna_ffi import open_device_label, seal_device_label
+from helpers.set_names import row_name_hash, set_name_hash
 
 pytestmark = pytest.mark.tier_3
 
@@ -139,4 +140,8 @@ def test_device_folder_role_appears_in_ws_rpc_list(two_nodes):
         "originates": True, "accepts": False, "applies_deletes": False,
     }, f"unexpected place flags: {folders!r}"
     assert "role" not in folders[0], f"the role contraction retired `role`: {folders!r}"
-    assert folders[0].get("name") == set_name, f"unexpected folder name: {folders!r}"
+    # A sealed set rests no plaintext name; its row is named by its hash
+    # (`path-sealing.md` § the set-name plane).
+    assert row_name_hash(folders[0]) == set_name_hash(set_name), (
+        f"unexpected folder: {folders!r}"
+    )

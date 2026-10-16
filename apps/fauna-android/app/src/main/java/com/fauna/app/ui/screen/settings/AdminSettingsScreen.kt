@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.settings
 
+import com.fauna.app.ui.navigation.exitAdminToPrimary
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -54,6 +55,7 @@ fun AdminSettingsScreen(
     val ownMembershipTierNames by vm.ownMembershipTierNames.collectAsState()
     val membershipTiers by vm.membershipTiers.collectAsState()
     val actionError by vm.actionError.collectAsState()
+    val tierAddGeneration by vm.tierAddGeneration.collectAsState()
 
     LaunchedEffect(Unit) { vm.refresh() }
 
@@ -67,8 +69,11 @@ fun AdminSettingsScreen(
         tiers = tiers,
         ownMembershipTierNames = ownMembershipTierNames,
         membershipTiers = membershipTiers,
-        onBack = { navController.popBackStack() },
+        onBack = { navController.exitAdminToPrimary() },
         onSaveTier = vm::saveTier,
+        onAddTier = vm::addTier,
+        addFormGeneration = tierAddGeneration,
+        onAddRefused = appMessages::showError,
         onSaveMembershipTier = vm::saveMembershipTier,
         onClearMembershipTier = vm::clearMembershipTier,
     )
@@ -82,6 +87,13 @@ fun AdminSettingsContent(
     membershipTiers: List<FfiAdminMembershipTier> = emptyList(),
     onBack: () -> Unit,
     onSaveTier: (String, Long, Long, Long, Long, Long) -> Unit,
+    // The add-a-tier form: `onAddTier` fires with the trimmed name + the five
+    // parsed caps; `onAddRefused` carries a local refusal's already-worded
+    // sentence to the banner; `addFormGeneration` bumps on a successful create
+    // so the drafts clear only then.
+    onAddTier: (String, Long, Long, Long, Long, Long) -> Unit = { _, _, _, _, _, _ -> },
+    addFormGeneration: Int = 0,
+    onAddRefused: (String) -> Unit = {},
     onSaveMembershipTier: (String, String, String) -> Unit = { _, _, _ -> },
     onClearMembershipTier: (String) -> Unit = {},
     // Tier-cap validation via the shared `fauna_core::format::parse_cap` (trim,
@@ -120,6 +132,7 @@ fun AdminSettingsContent(
         ) {
             // ── Tier definitions (in-place cap editing, admin.md § 3) ──
             TiersSection(tiers, onSaveTier, parseCap)
+            TierAddForm(onAddTier, addFormGeneration, onAddRefused, parseCap)
             // ── Membership designations (monetization.md § Pillar 4) ──
             MembershipSection(
                 quotaTierNames = tiers.map { it.name },
@@ -199,6 +212,66 @@ private fun TierRow(
                 modifier = Modifier.testTag(Ids.ADMIN_SETTINGS_TIER_SAVE_BUTTON),
             ) { Text(stringResource(R.string.admin_settings_page_save_tier)) }
             DisabledControlReasonText(saveTierGate.reason)
+        }
+    }
+}
+
+/**
+ * The add-a-tier form (`admin-settings-tier-add-section`, admin.md § 3 →
+ * *Defining a new tier*), a sibling of the tier rows so a fresh box with no
+ * tiers can still define one. The five cap fields reuse the row editor's ids,
+ * scoped under the section. An empty name or a cap that fails the shared
+ * `parse_cap` is refused locally with the shared strings; the drafts clear only
+ * when [generation] bumps (the nest accepted the create).
+ */
+@Composable
+private fun TierAddForm(
+    onAddTier: (String, Long, Long, Long, Long, Long) -> Unit,
+    generation: Int,
+    onAddRefused: (String) -> Unit,
+    parseCap: (String) -> Long?,
+) {
+    var name by remember(generation) { mutableStateOf("") }
+    var inbox by remember(generation) { mutableStateOf("") }
+    var storage by remember(generation) { mutableStateOf("") }
+    var devices by remember(generation) { mutableStateOf("") }
+    var blobSize by remember(generation) { mutableStateOf("") }
+    var feeds by remember(generation) { mutableStateOf("") }
+    val emptyNameMsg = stringResource(R.string.admin_settings_page_add_tier_error_empty_name)
+    val invalidCapMsg = stringResource(R.string.admin_settings_page_add_tier_error_invalid_cap)
+
+    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).testTag(Ids.ADMIN_SETTINGS_TIER_ADD_SECTION)) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(stringResource(R.string.admin_settings_page_add_tier_section), style = MaterialTheme.typography.titleSmall)
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text(stringResource(R.string.admin_settings_page_add_tier_name)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_SETTINGS_TIER_ADD_NAME_INPUT),
+            )
+            CapField(R.string.admin_settings_page_cap_inbox_bytes, "admin-settings-tier-cap-inbox", inbox) { inbox = it }
+            CapField(R.string.admin_settings_page_cap_storage_bytes, "admin-settings-tier-cap-storage", storage) { storage = it }
+            CapField(R.string.admin_settings_page_cap_devices, "admin-settings-tier-cap-devices", devices) { devices = it }
+            CapField(R.string.admin_settings_page_cap_blob_size, "admin-settings-tier-cap-blob-size", blobSize) { blobSize = it }
+            CapField(R.string.admin_settings_page_cap_feeds, "admin-settings-tier-cap-feeds", feeds) { feeds = it }
+            val addTierGate = faunaGate("fauna.admin.tiers.create")
+            Button(
+                onClick = {
+                    val trimmed = name.trim()
+                    val caps = listOf(inbox, storage, devices, blobSize, feeds).map(parseCap)
+                    when {
+                        trimmed.isEmpty() -> onAddRefused(emptyNameMsg)
+                        caps.any { it == null } -> onAddRefused(invalidCapMsg)
+                        else -> onAddTier(
+                            trimmed, caps[0]!!, caps[1]!!, caps[2]!!, caps[3]!!, caps[4]!!,
+                        )
+                    }
+                },
+                enabled = addTierGate.enabled,
+                modifier = Modifier.testTag(Ids.ADMIN_SETTINGS_TIER_ADD_BUTTON),
+            ) { Text(stringResource(R.string.admin_settings_page_add_tier)) }
+            DisabledControlReasonText(addTierGate.reason)
         }
     }
 }

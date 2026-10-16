@@ -16,10 +16,30 @@ use std::sync::{Arc, RwLock};
 use fauna_core::contact_overlay::{ContactOverlay, OverlayForm, label_vocabulary};
 use fauna_core::format::{PeerLabel, contact_matches_filter, peer_display_label};
 
+use crate::address::TypedAddress;
+
+/// One edge of the account's contact roster, as `fauna.contacts.list` answers
+/// it (`docs/goal/ui/contacts.md` § State & data shape) — what the recipient
+/// picker's completion offers beside correspondents
+/// (`docs/goal/ui/conversations.md` § Where logic lives → *Recipient
+/// suggestions*). Fed by the session that holds `ContactsClient`; this crate
+/// never reads the nest itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RosterEntry {
+    /// Lowercase hex actor id.
+    pub actor_id_hex: String,
+    pub handle: Option<String>,
+    pub domain: Option<String>,
+    /// The edge's status token (`accepted` / `confirmed` / `blocked` / …).
+    pub status: String,
+}
+
 #[derive(Default)]
 pub struct ContactsCache {
     overlays: RwLock<BTreeMap<String, ContactOverlay>>,
-    /// Bumped by every [`Self::replace`] that changed something.
+    roster: RwLock<Vec<RosterEntry>>,
+    /// Bumped by every [`Self::replace`] or [`Self::replace_roster`] that
+    /// changed something.
     revision: AtomicU64,
 }
 
@@ -162,6 +182,80 @@ impl ContactsCache {
     /// The derived label vocabulary — every live label across every person.
     pub fn vocabulary(&self) -> Vec<String> {
         label_vocabulary(self.overlays.read().unwrap().values())
+    }
+
+    /// Replace the contact roster with a fresh `fauna.contacts.list` load
+    /// (ids lowercased). Whether anything changed.
+    pub fn replace_roster(&self, roster: Vec<RosterEntry>) -> bool {
+        let roster: Vec<_> = roster
+            .into_iter()
+            .map(|e| RosterEntry {
+                actor_id_hex: e.actor_id_hex.to_ascii_lowercase(),
+                ..e
+            })
+            .collect();
+        let mut held = self.roster.write().unwrap();
+        if *held == roster {
+            return false;
+        }
+        *held = roster;
+        self.revision.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    /// Whether the roster holds a blocked edge to `actor_id_hex`.
+    pub fn is_blocked(&self, actor_id_hex: &str) -> bool {
+        self.roster
+            .read()
+            .unwrap()
+            .iter()
+            .any(|e| e.status == "blocked" && e.actor_id_hex.eq_ignore_ascii_case(actor_id_hex))
+    }
+
+    /// The roster's people whom `query` completes to, for the recipient
+    /// picker: [`Self::matches_filter`] over handle, domain, actor id, the
+    /// viewer's nickname and labels, plus the address spelling. Only accepted
+    /// and confirmed edges (a blocked or pending one is nobody to write to),
+    /// confirmed first, each in roster order; an empty query matches nobody
+    /// (the picker is a completion, not a browse list). Each person comes back
+    /// as their Fauna address (`handle@domain` when the nest knows a handle,
+    /// else no handle) and the label the roster row paints
+    /// ([`Self::peer_label`]).
+    pub fn people_matching(&self, query: &str) -> Vec<(TypedAddress, String)> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        let roster = self.roster.read().unwrap().clone();
+        let mut out = Vec::new();
+        for wanted in ["confirmed", "accepted"] {
+            for e in roster.iter().filter(|e| e.status == wanted) {
+                let Ok(actor_id) = fauna_core::identity::ActorId::from_hex(&e.actor_id_hex) else {
+                    continue;
+                };
+                let handle = match (e.handle.as_deref(), e.domain.as_deref()) {
+                    (Some(h), Some(d)) if !h.is_empty() && !d.is_empty() => format!("{h}@{d}"),
+                    (Some(h), _) => h.to_string(),
+                    _ => String::new(),
+                };
+                let address = TypedAddress::Fauna { handle, actor_id };
+                let spelled = address.display();
+                if !self.matches_filter(
+                    q,
+                    e.handle.as_deref(),
+                    e.domain.as_deref(),
+                    &e.actor_id_hex,
+                ) && !spelled.to_lowercase().contains(&q.to_lowercase())
+                {
+                    continue;
+                }
+                let label = self
+                    .peer_label(None, address.person_handle(), &e.actor_id_hex)
+                    .primary;
+                out.push((address, label));
+            }
+        }
+        out
     }
 }
 

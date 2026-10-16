@@ -864,6 +864,13 @@ pub enum FirstContactError {
     Transport,
     /// A binding arrived and failed verification.
     Binding(BindingError),
+    /// The nest refused this app's subprotocol — its 4426 close ended the
+    /// proof's request: the app is too old for the nest
+    /// (`version-compatibility.md` § Dimension 4, *The other direction*). A
+    /// verdict about the app, not the box: neither retryable like
+    /// [`Self::Transport`] nor an identity failure like the other two.
+    /// `reason` is the transport error's own (localized) text.
+    AppOutdated { reason: String },
 }
 
 impl std::fmt::Display for FirstContactError {
@@ -876,6 +883,7 @@ impl std::fmt::Display for FirstContactError {
                 write!(f, "first contact: transport fault before any proof")
             }
             FirstContactError::Binding(e) => write!(f, "first contact: {e}"),
+            FirstContactError::AppOutdated { reason } => f.write_str(reason),
         }
     }
 }
@@ -939,6 +947,13 @@ where
         Err(e) if fauna_protocol::RpcErrorClass::is_rejection(&e) => {
             return Err(FirstContactError::BindingRequired);
         }
+        // The nest's 4426 close ending this, the connection's first request:
+        // the app is too old for it, read through the typed predicate.
+        Err(e) if fauna_protocol::RpcErrorClass::is_subprotocol_mismatch(&e) => {
+            return Err(FirstContactError::AppOutdated {
+                reason: e.to_string(),
+            });
+        }
         Err(_) => return Err(FirstContactError::Transport),
     };
 
@@ -987,7 +1002,8 @@ impl<E: core::fmt::Display> core::fmt::Display for LoginBindingError<E> {
 /// **The one reader every login signer runs first** (`login.md` § Binding
 /// the nest): learn the identity of the box at the far end of this
 /// pre-identity connection, so the login signature about to be made —
-/// `fauna.auth.{handshake,verify,device_handshake,custody_handshake}` — names
+/// `fauna.auth.{handshake,verify,device_handshake,custody_handshake,
+/// custodied_fleet_handshake}` — names
 /// exactly the nest it is addressed to and verifies at no other — and the
 /// same reader the nest-bound `fauna.setup.nat_mode` commit binds with
 /// (`fauna-onboarding-machine`'s `submit_nat_mode`). A `fauna.auth.nest_handshake`
@@ -2332,6 +2348,10 @@ mod rotation_tests {
         /// Reject the kind outright (a MITM refusing it, or a box that does
         /// not route it).
         reject: bool,
+        /// End the request with the 4426 close: a nest too new for this app
+        /// refusing its subprotocol at the first request (the browser's
+        /// connect is synchronous, so this is where it meets the refusal).
+        close_4426: bool,
     }
 
     #[cfg(feature = "auth-ceremony")]
@@ -2343,34 +2363,44 @@ mod rotation_tests {
                 spki: [7u8; 32],
                 omit_binding: false,
                 reject: false,
+                close_4426: false,
             }
         }
     }
 
     #[cfg(feature = "auth-ceremony")]
     #[derive(Debug)]
-    struct Rejected;
+    enum HandshakeErr {
+        Rejected,
+        SubprotocolMismatch,
+    }
 
     #[cfg(feature = "auth-ceremony")]
-    impl std::fmt::Display for Rejected {
+    impl std::fmt::Display for HandshakeErr {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "rejected")
+            match self {
+                Self::Rejected => write!(f, "rejected"),
+                Self::SubprotocolMismatch => write!(f, "this app is out of date"),
+            }
         }
     }
 
     #[cfg(feature = "auth-ceremony")]
-    impl std::error::Error for Rejected {}
+    impl std::error::Error for HandshakeErr {}
 
     #[cfg(feature = "auth-ceremony")]
-    impl fauna_protocol::RpcErrorClass for Rejected {
+    impl fauna_protocol::RpcErrorClass for HandshakeErr {
         fn is_rejection(&self) -> bool {
-            true
+            matches!(self, Self::Rejected)
+        }
+        fn is_subprotocol_mismatch(&self) -> bool {
+            matches!(self, Self::SubprotocolMismatch)
         }
     }
 
     #[cfg(feature = "auth-ceremony")]
     impl fauna_protocol::RpcRequester for HandshakeNest {
-        type Error = Rejected;
+        type Error = HandshakeErr;
         async fn request<Req, Reply>(
             &self,
             kind: &'static str,
@@ -2383,7 +2413,10 @@ mod rotation_tests {
             use fauna_protocol::auth::{CertBinding, NestHandshakeReply, NestHandshakeRequest};
             assert_eq!(kind, fauna_protocol::auth::NEST_HANDSHAKE_KIND);
             if self.reject {
-                return Err(Rejected);
+                return Err(HandshakeErr::Rejected);
+            }
+            if self.close_4426 {
+                return Err(HandshakeErr::SubprotocolMismatch);
             }
             let req: NestHandshakeRequest =
                 serde_json::from_value(serde_json::to_value(payload).unwrap()).unwrap();
@@ -2472,6 +2505,26 @@ mod rotation_tests {
         );
     }
 
+    /// A nest too new for this app ends the proof's request with its 4426
+    /// close. That is the app being outdated — a verdict no retry clears
+    /// (`version-compatibility.md` § Dimension 4, *The other direction*) —
+    /// read through the typed predicate, never folded into the retryable
+    /// `Transport` a blip earns, and never into `BindingRequired`, which
+    /// would accuse the box of an identity failure it did not commit.
+    #[cfg(feature = "auth-ceremony")]
+    #[tokio::test]
+    async fn possession_proof_reports_a_4426_close_as_the_app_outdated() {
+        let nest = key(1);
+        let mut client = HandshakeNest::serving(nest.clone());
+        client.close_4426 = true;
+        assert_eq!(
+            prove_first_contact_identity_possession(&client, id(&nest)).await,
+            Err(FirstContactError::AppOutdated {
+                reason: "this app is out of date".into()
+            })
+        );
+    }
+
     // ---- read_login_binding: the one reader every signer binds with ----
 
     #[cfg(feature = "auth-ceremony")]
@@ -2534,7 +2587,7 @@ mod rotation_tests {
         client.reject = true;
         assert!(matches!(
             read_login_binding(&client, None).await,
-            Err(LoginBindingError::Refused(Rejected))
+            Err(LoginBindingError::Refused(HandshakeErr::Rejected))
         ));
 
         let mut client = HandshakeNest::serving(key(1));

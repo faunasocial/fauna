@@ -84,6 +84,7 @@ macro_rules! admin_bool_toggle_page {
                 S::ENABLED_SUBTITLE,
                 $toggle_id,
             );
+            crate::settings::mirror_on_off_state(&enabled_toggle);
             // tui's `admin::Action::Toggle*Enabled` (`account-data-plane.md`
             // § The offline-mutation contract — admin/provisioning is
             // OnlineOnly).

@@ -747,6 +747,27 @@ pub trait MailStore: MaybeSendSync {
         &self,
         generation: fauna_core::data::PriorMsekRetirement,
     ) -> Result<bool, StoreError>;
+    /// Publish this runtime's unsent mail rows to the bound nest and wait for
+    /// its acknowledgement — the account runtime's own publish step, run now
+    /// rather than at the local-write wake. `Ok(())` only when no mail row
+    /// this device wrote stays unsent; offline, a push the nest refused, or a
+    /// runtime that cannot publish answer [`StoreError::Save`]. The rotation
+    /// runs it before any nest write that leans on a custody row
+    /// (`mail-credentials.md` § Hard revoke → *Published before the nest
+    /// moves*): a replica that hydrates from the nest — a sibling, the same
+    /// device relaunched over a fresh store — must never meet the nest's
+    /// blobs ahead of the custody naming their key.
+    async fn publish(&self) -> Result<(), StoreError>;
+    /// Walk the mail rows' home scope from the bound nest now and return once
+    /// that walk has landed, so the next [`Self::load`] reads what the nest
+    /// holds at this call rather than what the replica listed last. A runtime
+    /// that cannot walk now — offline, or another process on this device holds
+    /// the engine role — answers an error and has walked nothing. The
+    /// connect-time refresh takes it before it re-seals under a custody the
+    /// nest's published recipient key says is behind (`mail-credentials.md`
+    /// § Hard revoke → *Published before the nest moves*, the stale-sibling
+    /// rule).
+    async fn walk(&self) -> Result<(), StoreError>;
 }
 
 /// The **kind-manifest** seam — `fauna.state.kind-manifest`, one row per

@@ -28,8 +28,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use fauna_conversations::backend::FolderCustodySink;
-use fauna_core::folder_keys::{FolderKeyResolver, ResolvedCustody, ResolvedFolderKeys};
+use fauna_conversations::backend::{FolderCustodySink, FolderEnvelopeOwner};
+use fauna_core::folder_keys::{FolderKeyResolver, FolderRef, ResolvedCustody, ResolvedFolderKeys};
 use fauna_core::identity::ActorKeypair;
 use fauna_mls::types::ChannelId;
 use fauna_protocol::folders::ContentKeyGetRequest;
@@ -83,6 +83,12 @@ struct RefetchCheck {
     /// nothing: a request older than this session was answered by the
     /// launch's own fetch.
     requests_seen: std::collections::HashMap<[u8; 32], Option<u64>>,
+    /// The digest of the envelope this session last fetched for each channel
+    /// ([`fauna_protocol::folder_envelope_sig::digest`]; ruling (7)(b)(ii)
+    /// rule (6)(a)) — what the nest's echo is compared against. A channel not
+    /// fetched yet this session owes nothing on its echo: the launch's own
+    /// fetch answers it.
+    fetched_digests: std::collections::HashMap<[u8; 32], [u8; 32]>,
 }
 
 /// The **custody-changed** edge — fired by [`NestFolderCustodySink`] whenever an
@@ -106,7 +112,7 @@ struct RefetchCheck {
 /// Deliberately the narrowest possible edge — "this set's custody moved", no key
 /// material, no custody handle. No app shell needs it to re-key a desktop sync
 /// agent any more: the custody write this edge follows is itself the `state-fleet`
-/// nudge the agent re-resolves on (`on-demand-files.md` § Shared sets on a
+/// nudge the agent re-resolves on (`on-demand-files-shared-sets.md` § Shared sets on a
 /// capability host → *One mechanism*). A client with no use for the edge
 /// registers none and is unaffected.
 ///
@@ -173,13 +179,22 @@ impl<R: RpcRequester + Clone> NestFolderCustodySink<R> {
     ///   nonce custody holds for its channel. The echo is only ever a reason
     ///   to fetch — the nonce itself still comes from the owner-signed
     ///   envelope. A row that echoes none asserts nothing.
-    /// - **a row was refused `signature_invalid`**: the engine host's request
-    ///   stamp for the channel ([`FolderKeyReader::request_refetch`]) moved
-    ///   since the last check that saw it. This is what reaches a foreign
-    ///   set, which has no roster row here to echo anything.
+    /// - **the envelope's digest echo moved** (ruling (7)(b)(ii) rule (6)(a)):
+    ///   a member row whose
+    ///   [`fauna_protocol::folders::FolderSummary::envelope_digest`] is not the
+    ///   digest of the envelope this session last fetched for its channel —
+    ///   an owner's re-publish that moved no nonce and advanced no epoch (a
+    ///   serve flip, a rotation's re-publish). Only ever a reason to fetch; a
+    ///   channel not fetched yet this session, or a row that echoes none,
+    ///   owes nothing.
+    /// - **a row was refused `signature_invalid`, or admitted under a
+    ///   generation custody lacks**: the engine host's request stamp for the
+    ///   channel ([`FolderKeyReader::request_refetch`]) moved since the last
+    ///   check that saw it. This is what reaches a foreign set, which has no
+    ///   roster row here to echo anything.
     ///
     /// Best-effort like every sink read: an unreadable custody finds nothing,
-    /// an unreadable roster leaves the echo arm for the next check.
+    /// an unreadable roster leaves the echo arms for the next check.
     async fn check_refetch_owed(&self) {
         let Ok(cfg) = self.custody.load().await else {
             return;
@@ -190,6 +205,7 @@ impl<R: RpcRequester + Clone> NestFolderCustodySink<R> {
         };
         let mut channels: Vec<[u8; 32]> = Vec::new();
         let mut moved: Vec<[u8; 32]> = Vec::new();
+        let mut digest_echoes: Vec<([u8; 32], [u8; 32])> = Vec::new();
         for row in &roster {
             // A set the caller owns takes its nonce from its own custody.
             if row.role.as_deref() != Some("member") {
@@ -213,6 +229,13 @@ impl<R: RpcRequester + Clone> NestFolderCustodySink<R> {
             {
                 moved.push(channel);
             }
+            if let Some(digest) = row
+                .envelope_digest
+                .as_ref()
+                .and_then(|d| <[u8; 32]>::try_from(d.as_slice()).ok())
+            {
+                digest_echoes.push((channel, digest));
+            }
         }
         channels.extend(custody::live_foreign_sets(&cfg).map(|f| f.channel_id));
         let mut requests = Vec::with_capacity(channels.len());
@@ -227,6 +250,15 @@ impl<R: RpcRequester + Clone> NestFolderCustodySink<R> {
         }
         let mut check = self.refetch.lock().unwrap_or_else(|e| e.into_inner());
         check.owed.extend(moved);
+        for (channel, digest) in digest_echoes {
+            if check
+                .fetched_digests
+                .get(&channel)
+                .is_some_and(|fetched| *fetched != digest)
+            {
+                check.owed.insert(channel);
+            }
+        }
         for (channel, at) in requests {
             if let Some(seen) = check.requests_seen.insert(channel, at)
                 && at > seen
@@ -246,7 +278,8 @@ impl<R: RpcRequester + Clone> NestFolderCustodySink<R> {
     }
 
     /// Resolve a joined folder channel back to its nest **address** — the
-    /// `(name, name_hash)` pair `content_key.get` takes. The member-visible
+    /// row's `(id, name, name_hash)` `content_key.get` takes, the row first
+    /// (`set-addressing.md` § The row form). The member-visible
     /// roster (`include_shared_with_me`) carries `(name_hash, mls_group_id)`;
     /// match the row whose derived `ChannelId` equals the target. `None` when
     /// the set is not (yet) in the roster — best-effort, retried next pass.
@@ -260,13 +293,16 @@ impl<R: RpcRequester + Clone> NestFolderCustodySink<R> {
     async fn resolve_address(
         &self,
         channel_id_hex: &str,
-    ) -> Option<(String, Option<fauna_protocol::ByteBuf>)> {
+    ) -> Option<(i64, String, Option<fauna_protocol::ByteBuf>)> {
         let reply = self.folders.list_owned_and_shared_wire().await.ok()?;
         reply.folders.into_iter().find_map(|s| {
             let group_hex = s.mls_group_id.as_ref()?;
             let raw = hex::decode(group_hex.trim()).ok()?;
-            (ChannelId::from_group_id(&raw).to_string() == channel_id_hex)
-                .then_some((s.name, s.name_hash))
+            (ChannelId::from_group_id(&raw).to_string() == channel_id_hex).then_some((
+                s.id,
+                s.name,
+                s.name_hash,
+            ))
         })
     }
 }
@@ -312,10 +348,16 @@ where
         // read, carried out so the refresh below can decide whether the home
         // nest's stamps actually CHANGED anything without a second config load.
         let mut foreign_ctx: Option<HeldForeignStamps> = None;
-        let request = if let Some((name, name_hash)) = self.resolve_address(channel_id_hex).await {
+        let request = if let Some((id, name, name_hash)) =
+            self.resolve_address(channel_id_hex).await
+        {
+            // The row the channel resolved to is the address
+            // (`set-addressing.md` § The row form): beside a same-named own
+            // set the name forms alone would answer the own set's envelope.
             ContentKeyGetRequest {
                 name,
                 name_hash,
+                folder_id: Some(id),
                 ..Default::default()
             }
         } else {
@@ -357,7 +399,7 @@ where
         // demotion is enforced fail-closed at the next mint/record. The same reply
         // refreshes the home-nest identity (byte-plane pin root), the owner's
         // cadence and the set's content-key floor (the member engine's pre-seal
-        // hold arms from it — `on-demand-files.md` § Shared sets on a capability
+        // hold arms from it — `on-demand-files-shared-sets.md` § Shared sets on a capability
         // host → *One mechanism*, question 2) — all carried by every federated
         // content-key read reply. Best-effort: a persist failure never fails the
         // envelope fetch the caller came for.
@@ -402,6 +444,19 @@ where
         }
         let blob = hex::decode(reply.sealed.trim()).ok()?;
         let channel_id: [u8; 32] = hex::decode(channel_id_hex.trim()).ok()?.try_into().ok()?;
+        // The envelope this session last fetched, as the nest's digest echo
+        // names it (ruling (7)(b)(ii) rule (6)(a)) — remembered at the fetch,
+        // whatever the open makes of it: a failed open clears the driver's
+        // mark and the next pass retries anyway. A foreign set's fetch records
+        // too, harmlessly — no row echoes for it.
+        self.refetch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .fetched_digests
+            .insert(
+                channel_id,
+                fauna_protocol::folder_envelope_sig::digest(&blob),
+            );
         // No envelope is ingested without a signature that verifies
         // (`writer-signed-change-records.md` ruling (11)(b)); who may move what
         // is the driver's call, against the owner its MLS state records.
@@ -555,9 +610,15 @@ where
         }
     }
 
-    async fn do_foreign_home_url(&self, channel_id: &[u8; 32]) -> Option<String> {
-        let cfg = self.custody.load().await.ok()?;
-        custody::find_foreign_set(&cfg, channel_id).map(|f| f.home_nest_url.clone())
+    /// Tri-state (see [`FolderCustodySink::foreign_home_url`]): an unreadable
+    /// custody record is `Err`, never `Ok(None)`.
+    async fn do_foreign_home_url(&self, channel_id: &[u8; 32]) -> Result<Option<String>, String> {
+        let cfg = self
+            .custody
+            .load()
+            .await
+            .map_err(|e| format!("foreign-set custody record unreadable: {e:#}"))?;
+        Ok(custody::find_foreign_set(&cfg, channel_id).map(|f| f.home_nest_url.clone()))
     }
 
     /// One custody read for the WHOLE foreign population — the launch
@@ -616,7 +677,7 @@ impl FolderCustodySink for NestFolderCustodySink<Arc<fauna_client::NestClient>> 
         self.do_forget_foreign_set(channel_id).await
     }
 
-    async fn foreign_home_url(&self, channel_id: &[u8; 32]) -> Option<String> {
+    async fn foreign_home_url(&self, channel_id: &[u8; 32]) -> Result<Option<String>, String> {
         self.do_foreign_home_url(channel_id).await
     }
 
@@ -669,7 +730,7 @@ impl FolderCustodySink for NestFolderCustodySink<fauna_rpc_wasm::WsRpcClient> {
         self.do_forget_foreign_set(channel_id).await
     }
 
-    async fn foreign_home_url(&self, channel_id: &[u8; 32]) -> Option<String> {
+    async fn foreign_home_url(&self, channel_id: &[u8; 32]) -> Result<Option<String>, String> {
         self.do_foreign_home_url(channel_id).await
     }
 
@@ -679,6 +740,62 @@ impl FolderCustodySink for NestFolderCustodySink<fauna_rpc_wasm::WsRpcClient> {
 
     async fn refetch_owed(&self, channel_id: &[u8; 32]) -> bool {
         self.do_refetch_owed(channel_id).await
+    }
+}
+
+/// The owner-side twin of the sink above — the seam the owner's folder commit
+/// walk asks to re-seal an envelope the group's epoch has moved past
+/// ([`FolderEnvelopeOwner`]; `mls-group-key-material.md` § Admitting a member,
+/// *Envelope ordering*): [`crate::orchestration::FoldersAuthor::converge_envelope`],
+/// with a fault logged and answered unsettled. Registered by the launch pass
+/// that builds the owner's author (`launch_resume.rs`, the web launch face) on
+/// an author built **without** the commit gate, which the converge never
+/// uses — the gate is the backend itself, and the backend holding an author
+/// that holds the backend would keep both alive past the session.
+async fn converge_owned_envelope<R, G>(
+    author: &crate::orchestration::FoldersAuthor<R, G>,
+    channel_id: &[u8; 32],
+) -> bool
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass + core::fmt::Display,
+    G: crate::orchestration::FolderGroupCrypto,
+    G::Error: core::fmt::Display,
+{
+    match author.converge_envelope(channel_id).await {
+        Ok(settled) => settled,
+        Err(e) => {
+            tracing::warn!(
+                "folders: the mid-session envelope re-seal failed (retried at the next walk): {e}"
+            );
+            false
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait]
+impl FolderEnvelopeOwner
+    for crate::orchestration::FoldersAuthor<
+        Arc<fauna_client::NestClient>,
+        Arc<fauna_mls::engine::MlsEngine>,
+    >
+{
+    async fn converge_envelope(&self, channel_id: &[u8; 32]) -> bool {
+        converge_owned_envelope(self, channel_id).await
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[async_trait(?Send)]
+impl FolderEnvelopeOwner
+    for crate::orchestration::FoldersAuthor<
+        fauna_rpc_wasm::WsRpcClient,
+        Arc<fauna_mls::engine::MlsEngine>,
+    >
+{
+    async fn converge_envelope(&self, channel_id: &[u8; 32]) -> bool {
+        converge_owned_envelope(self, channel_id).await
     }
 }
 
@@ -737,65 +854,112 @@ impl<R: RpcRequester + Clone> NestFolderKeyResolver<R> {
 ///
 /// Corollary (deliberate): an owned/member row
 /// **shadows** a same-named foreign record — the foreign set is unaddressable
-/// by this name until the collision dissolves. Addressing both is the
-/// channel-keyed custody direction (menu (c)), an S9-era change.
+/// by this name until the collision dissolves. A reader holding the set's row
+/// addresses it by identity instead — [`resolve_custody_by_ref`].
 pub(crate) fn resolve_custody_from(
     roster: &[fauna_protocol::folders::FolderSummary],
     cfg: &fauna_core::data::FoldersConfig,
     name_hash: &[u8; 32],
 ) -> anyhow::Result<ResolvedCustody> {
     if let Some(row) = custody::find_named_roster_row(roster, cfg, name_hash) {
-        let row = &row;
-        // The custody identity through the ONE shared resolution every
-        // consumer uses (`webdav-server.md` § Key model, the custody note):
-        // the derived `ChannelId` for a shared set, the serve pseudo-channel
-        // for a served-unshared one, `None` for a plain owner-only set. A
-        // bound row whose group id cannot be decoded is corrupt state, not
-        // "unbound": answering owner-only would license an owner-root seal
-        // for a set that IS bound. (No set name in the message — S7.)
-        let channel = crate::engine_binding::custody_channel_for(row, cfg)
-            .map_err(|_| anyhow::anyhow!("bound roster row carries an undecodable mls_group_id"))?;
-        let Some(channel) = channel else {
-            // Owned, unbound, unserved: positively owner-only — plus, for a
-            // set a since-unflagged serve window once sealed, that window's
-            // generations as READ candidates (`retired_serve_custody`, the
-            // read-side twin of the engine's `retired_content_keys`).
-            return Ok(ResolvedCustody::OwnerOnly {
-                retired_content_keys: crate::engine_binding::retired_serve_custody(cfg, row),
-            });
-        };
-        // The raw group id rides only when there IS a group: a served-unshared
-        // set is content-keyed with no group, and never fakes one.
-        let mls_group_id = row
-            .mls_group_id
-            .as_deref()
-            .map(hex::decode)
-            .transpose()
-            .map_err(|_| anyhow::anyhow!("bound roster row carries an undecodable mls_group_id"))?;
-        // Custody: the caller's content-key generations (member custody
-        // ingested at join/rotation, or the owner's own — for a served set, the
-        // serve-enable genesis at the pseudo-channel). Absent →
-        // content-keyed-but-unresolvable: the content-keyed-ness still rides,
-        // so seals fail closed and opens fail on their own — never the
-        // owner-key path (`EngineKeyBinding::{BoundKeysMissing,ServedKeysMissing}`'s
-        // read-side twins).
-        return Ok(ResolvedCustody::ContentKeyed(ResolvedFolderKeys {
-            content_keys: custody::content_keys(cfg, &channel),
-            mls_group_id,
-            home_nest_url: None,
-            home_nest_actor_id: None,
-        }));
+        return custody_of_roster_row(&row, cfg);
     }
     // No roster row — a FOREIGN (cross-nest) set resolves from the member's
     // own custody record instead (written at accept time; Phase 2 client
     // read-side): identity + the home-nest base URL the byte fetch must use. A
     // name-less foreign record (an unopenable seal) is unaddressable by
-    // name and stays owner-only — its custody-ingest reads still work by
-    // channel.
+    // name and stays owner-only — it resolves by channel through
+    // [`resolve_custody_by_ref`].
     let Some(foreign) = custody::find_foreign_set_by_hash(cfg, name_hash) else {
         return Ok(ResolvedCustody::owner_only());
     };
+    Ok(custody_of_foreign_set(foreign, cfg))
+}
+
+/// The custody of a set **by its identity** — the
+/// [`FolderKeyResolver::resolve_ref`] twin of [`resolve_custody_from`]
+/// (`mls-group-key-material.md` § M2 → *Resolving custody — by the set's
+/// identity, never by its name*). [`FolderRef::Local`] is the roster row with
+/// that `id` — no owner-first search, so a member row is reachable beside the
+/// reader's own same-named set — and [`FolderRef::Foreign`] the live foreign
+/// record at that channel. A ref naming neither is `Err`: a caller holding a
+/// set's identity asked about THAT set, and "no such set" is not the positive
+/// owner-only answer a by-name miss is. Everything after the pick is
+/// [`resolve_custody_from`]'s own arm, shared.
+pub(crate) fn resolve_custody_by_ref(
+    roster: &[fauna_protocol::folders::FolderSummary],
+    cfg: &fauna_core::data::FoldersConfig,
+    folder_ref: &FolderRef,
+) -> anyhow::Result<ResolvedCustody> {
+    match folder_ref {
+        FolderRef::Local(id) => {
+            // (No set name or id in the message — S7.)
+            let row = roster
+                .iter()
+                .find(|s| s.id == *id)
+                .ok_or_else(|| anyhow::anyhow!("no roster row with that id"))?;
+            custody_of_roster_row(&custody::named_roster_row(row.clone(), cfg), cfg)
+        }
+        FolderRef::Foreign(channel) => custody::find_foreign_set(cfg, channel)
+            .map(|foreign| custody_of_foreign_set(foreign, cfg))
+            .ok_or_else(|| anyhow::anyhow!("no live foreign set at that channel")),
+    }
+}
+
+/// The custody answer for a roster row already picked and named from custody
+/// ([`custody::named_roster_row`]) — the arm both resolution directions share.
+fn custody_of_roster_row(
+    row: &fauna_protocol::folders::FolderSummary,
+    cfg: &fauna_core::data::FoldersConfig,
+) -> anyhow::Result<ResolvedCustody> {
+    // The custody identity through the ONE shared resolution every
+    // consumer uses (`webdav-server.md` § Key model, the custody note):
+    // the derived `ChannelId` for a shared set, the serve pseudo-channel
+    // for a served-unshared one, `None` for a plain owner-only set. A
+    // bound row whose group id cannot be decoded is corrupt state, not
+    // "unbound": answering owner-only would license an owner-root seal
+    // for a set that IS bound. (No set name in the message — S7.)
+    let channel = crate::engine_binding::custody_channel_for(row, cfg)
+        .map_err(|_| anyhow::anyhow!("bound roster row carries an undecodable mls_group_id"))?;
+    let Some(channel) = channel else {
+        // Owned, unbound, unserved: positively owner-only — plus, for a
+        // set a since-unflagged serve window once sealed, that window's
+        // generations as READ candidates (`retired_serve_custody`, the
+        // read-side twin of the engine's `retired_content_keys`).
+        return Ok(ResolvedCustody::OwnerOnly {
+            retired_content_keys: crate::engine_binding::retired_serve_custody(cfg, row),
+        });
+    };
+    // The raw group id rides only when there IS a group: a served-unshared
+    // set is content-keyed with no group, and never fakes one.
+    let mls_group_id = row
+        .mls_group_id
+        .as_deref()
+        .map(hex::decode)
+        .transpose()
+        .map_err(|_| anyhow::anyhow!("bound roster row carries an undecodable mls_group_id"))?;
+    // Custody: the caller's content-key generations (member custody
+    // ingested at join/rotation, or the owner's own — for a served set, the
+    // serve-enable genesis at the pseudo-channel). Absent →
+    // content-keyed-but-unresolvable: the content-keyed-ness still rides,
+    // so seals fail closed and opens fail on their own — never the
+    // owner-key path (`EngineKeyBinding::{BoundKeysMissing,ServedKeysMissing}`'s
+    // read-side twins).
     Ok(ResolvedCustody::ContentKeyed(ResolvedFolderKeys {
+        content_keys: custody::content_keys(cfg, &channel),
+        mls_group_id,
+        home_nest_url: None,
+        home_nest_actor_id: None,
+    }))
+}
+
+/// The custody answer for a live foreign record already picked — the arm both
+/// resolution directions share.
+fn custody_of_foreign_set(
+    foreign: &fauna_core::data::ForeignFolder,
+    cfg: &fauna_core::data::FoldersConfig,
+) -> ResolvedCustody {
+    ResolvedCustody::ContentKeyed(ResolvedFolderKeys {
         mls_group_id: Some(foreign.mls_group_id.clone()),
         content_keys: custody::content_keys(cfg, &foreign.channel_id),
         home_nest_url: Some(foreign.home_nest_url.clone()),
@@ -803,7 +967,7 @@ pub(crate) fn resolve_custody_from(
         // (`refresh_foreign_set_from_reply` keeps it current from every
         // federated read reply).
         home_nest_actor_id: foreign.home_nest_actor_id.clone(),
-    }))
+    })
 }
 
 /// The [`fauna_client_sync::RecordSigning`] a seed-holding client's side
@@ -844,6 +1008,25 @@ pub(crate) fn resolve_set_nonce_from(
     custody::set_nonce_by_name(roster, cfg, folder)
 }
 
+/// [`resolve_set_nonce_from`] by the set's identity
+/// ([`FolderKeyResolver::set_nonce_ref`]): the roster row with that id —
+/// never the owner-first name search, so a member row answers its own nonce
+/// beside the caller's same-named set — or the foreign record at a channel.
+pub(crate) fn resolve_set_nonce_by_ref(
+    roster: &[fauna_protocol::folders::FolderSummary],
+    cfg: &fauna_core::data::FoldersConfig,
+    folder_ref: &FolderRef,
+) -> Option<[u8; 32]> {
+    match folder_ref {
+        FolderRef::Local(id) => {
+            let row = roster.iter().find(|s| s.id == *id)?;
+            custody::set_nonce_of_row(&custody::named_roster_row(row.clone(), cfg), cfg)
+        }
+        FolderRef::Foreign(channel) => custody::find_foreign_set(cfg, channel)
+            .and_then(|f| custody::set_nonce_for_channel(cfg, &f.channel_id)),
+    }
+}
+
 // Same shared-logic-once / per-target-trait-impl split as
 // `NestFolderCustodySink` above (see that module doc for why).
 impl<R: RpcRequester + Clone> NestFolderKeyResolver<R> {
@@ -859,6 +1042,21 @@ impl<R: RpcRequester + Clone> NestFolderKeyResolver<R> {
             .await
             .map_err(|e| e.context("custody read failed resolving a set nonce"))?;
         Ok(resolve_set_nonce_from(&reply.folders, &cfg, folder))
+    }
+
+    async fn do_set_nonce_ref(&self, folder_ref: &FolderRef) -> anyhow::Result<Option<[u8; 32]>> {
+        // The same two reads as `do_set_nonce`, with the same must-succeed rule.
+        let reply = self
+            .folders
+            .list_owned_and_shared_wire()
+            .await
+            .map_err(|e| anyhow::anyhow!("roster read failed resolving a set nonce: {e}"))?;
+        let cfg = self
+            .custody
+            .load()
+            .await
+            .map_err(|e| e.context("custody read failed resolving a set nonce"))?;
+        Ok(resolve_set_nonce_by_ref(&reply.folders, &cfg, folder_ref))
     }
 
     async fn do_set_lineage(
@@ -884,6 +1082,28 @@ impl<R: RpcRequester + Clone> NestFolderKeyResolver<R> {
         ))
     }
 
+    async fn do_set_lineage_ref(
+        &self,
+        folder_ref: &FolderRef,
+    ) -> anyhow::Result<Option<fauna_core::folder_keys::SetNonceLineage>> {
+        // The same two reads as `do_set_lineage`, with the same must-succeed rule.
+        let reply = self
+            .folders
+            .list_owned_and_shared_wire()
+            .await
+            .map_err(|e| anyhow::anyhow!("roster read failed resolving a set lineage: {e}"))?;
+        let cfg = self
+            .custody
+            .load()
+            .await
+            .map_err(|e| e.context("custody read failed resolving a set lineage"))?;
+        Ok(custody::set_lineage_by_ref(
+            &reply.folders,
+            &cfg,
+            folder_ref,
+        ))
+    }
+
     async fn do_resolve(&self, name_hash: &[u8; 32]) -> anyhow::Result<ResolvedCustody> {
         // Both reads must SUCCEED for any answer at all — a transport failure
         // is `Err` ("could not determine"), never `Ok(None)`: the old
@@ -902,6 +1122,21 @@ impl<R: RpcRequester + Clone> NestFolderKeyResolver<R> {
             .map_err(|e| e.context("custody read failed resolving set custody"))?;
         resolve_custody_from(&reply.folders, &cfg, name_hash)
     }
+
+    async fn do_resolve_ref(&self, folder_ref: &FolderRef) -> anyhow::Result<ResolvedCustody> {
+        // The same two reads as `do_resolve`, with the same must-succeed rule.
+        let reply = self
+            .folders
+            .list_owned_and_shared_wire()
+            .await
+            .map_err(|e| anyhow::anyhow!("roster read failed resolving set custody: {e}"))?;
+        let cfg = self
+            .custody
+            .load()
+            .await
+            .map_err(|e| e.context("custody read failed resolving set custody"))?;
+        resolve_custody_by_ref(&reply.folders, &cfg, folder_ref)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -911,8 +1146,16 @@ impl FolderKeyResolver for NestFolderKeyResolver<Arc<fauna_client::NestClient>> 
         self.do_resolve(name_hash).await
     }
 
+    async fn resolve_ref(&self, folder_ref: &FolderRef) -> anyhow::Result<ResolvedCustody> {
+        self.do_resolve_ref(folder_ref).await
+    }
+
     async fn set_nonce(&self, folder: &str) -> anyhow::Result<Option<[u8; 32]>> {
         self.do_set_nonce(folder).await
+    }
+
+    async fn set_nonce_ref(&self, folder_ref: &FolderRef) -> anyhow::Result<Option<[u8; 32]>> {
+        self.do_set_nonce_ref(folder_ref).await
     }
 
     async fn set_lineage(
@@ -921,6 +1164,13 @@ impl FolderKeyResolver for NestFolderKeyResolver<Arc<fauna_client::NestClient>> 
         name_hash: &[u8; 32],
     ) -> anyhow::Result<fauna_core::folder_keys::SetNonceLineage> {
         self.do_set_lineage(name_hash).await
+    }
+
+    async fn set_lineage_ref(
+        &self,
+        folder_ref: &FolderRef,
+    ) -> anyhow::Result<Option<fauna_core::folder_keys::SetNonceLineage>> {
+        self.do_set_lineage_ref(folder_ref).await
     }
 }
 
@@ -931,8 +1181,16 @@ impl FolderKeyResolver for NestFolderKeyResolver<fauna_rpc_wasm::WsRpcClient> {
         self.do_resolve(name_hash).await
     }
 
+    async fn resolve_ref(&self, folder_ref: &FolderRef) -> anyhow::Result<ResolvedCustody> {
+        self.do_resolve_ref(folder_ref).await
+    }
+
     async fn set_nonce(&self, folder: &str) -> anyhow::Result<Option<[u8; 32]>> {
         self.do_set_nonce(folder).await
+    }
+
+    async fn set_nonce_ref(&self, folder_ref: &FolderRef) -> anyhow::Result<Option<[u8; 32]>> {
+        self.do_set_nonce_ref(folder_ref).await
     }
 
     async fn set_lineage(
@@ -941,6 +1199,13 @@ impl FolderKeyResolver for NestFolderKeyResolver<fauna_rpc_wasm::WsRpcClient> {
         name_hash: &[u8; 32],
     ) -> anyhow::Result<fauna_core::folder_keys::SetNonceLineage> {
         self.do_set_lineage(name_hash).await
+    }
+
+    async fn set_lineage_ref(
+        &self,
+        folder_ref: &FolderRef,
+    ) -> anyhow::Result<Option<fauna_core::folder_keys::SetNonceLineage>> {
+        self.do_set_lineage_ref(folder_ref).await
     }
 }
 
@@ -958,11 +1223,15 @@ mod tests {
         FoldersConfig::default()
     }
 
-    /// Serves a configured roster to `fauna.folders.list` and counts the reads.
+    /// Serves a configured roster to `fauna.folders.list` and counts the reads;
+    /// serves `envelope` (hex, as the nest stores it) to `content_key.get`.
     #[derive(Default)]
     struct RosterNest {
         rows: std::sync::Mutex<Vec<FolderSummary>>,
         lists: std::sync::atomic::AtomicUsize,
+        envelope: std::sync::Mutex<String>,
+        /// Every `content_key.get` request this nest received, as sent.
+        key_gets: std::sync::Mutex<Vec<fauna_protocol::folders::ContentKeyGetRequest>>,
     }
 
     impl RosterNest {
@@ -977,12 +1246,27 @@ mod tests {
         async fn request<Req, Reply>(
             &self,
             kind: &'static str,
-            _payload: Req,
+            payload: Req,
         ) -> Result<Reply, Self::Error>
         where
             Req: serde::Serialize,
             Reply: serde::de::DeserializeOwned,
         {
+            if kind == fauna_protocol::folders::KIND_FOLDERS_CONTENT_KEY_GET {
+                let sent = fauna_protocol::encode_canonical(&payload).expect("encode request");
+                self.key_gets
+                    .lock()
+                    .unwrap()
+                    .push(fauna_protocol::decode_strict(&sent).expect("decode request"));
+                let reply = fauna_protocol::encode_canonical(
+                    &fauna_protocol::folders::ContentKeyGetReply {
+                        sealed: self.envelope.lock().unwrap().clone(),
+                        ..Default::default()
+                    },
+                )
+                .expect("encode reply");
+                return Ok(fauna_protocol::decode_strict(&reply).expect("decode reply"));
+            }
             assert_eq!(kind, fauna_protocol::folders::KIND_FOLDERS_LIST);
             self.lists.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let reply =
@@ -1022,6 +1306,47 @@ mod tests {
         c
     }
 
+    /// A custody whose every read fails — the own-nest link down at leave time.
+    struct UnreadableStore;
+
+    #[async_trait]
+    impl FolderKeyReader for UnreadableStore {
+        async fn load(&self) -> anyhow::Result<FoldersConfig> {
+            Err(anyhow::anyhow!("own nest unreachable"))
+        }
+    }
+
+    #[async_trait]
+    impl FolderKeyStore for UnreadableStore {
+        async fn merge(&self, _replica: FoldersConfig) -> anyhow::Result<FoldersConfig> {
+            Err(anyhow::anyhow!("own nest unreachable"))
+        }
+        async fn settle_removal(
+            &self,
+            _removal: fauna_core::data::FolderPendingRemoval,
+        ) -> anyhow::Result<FoldersConfig> {
+            Err(anyhow::anyhow!("own nest unreachable"))
+        }
+    }
+
+    ///: an unreadable custody is an UNKNOWN home, not a same-nest
+    /// set — a leave that took `None` for it would send a same-nest leave of a
+    /// foreign set (answered `left: false`) and then delete the one record a
+    /// retry needs. A readable custody still answers the tri-state's other two.
+    #[test]
+    fn an_unreadable_custody_is_an_unknown_home_not_a_same_nest_set() {
+        use fauna_client_testkit::block_on;
+        let channel = group_channel();
+        let nest = Arc::new(RosterNest::default());
+
+        let unreadable = NestFolderCustodySink::new(Arc::clone(&nest), Arc::new(UnreadableStore));
+        assert!(block_on(unreadable.do_foreign_home_url(&channel)).is_err());
+
+        let readable =
+            NestFolderCustodySink::new(nest, Arc::new(crate::MemoryFolderKeyStore::default()));
+        assert_eq!(block_on(readable.do_foreign_home_url(&channel)), Ok(None));
+    }
+
     /// A sink over `rows` and `store`, its re-fetch check throttled to
     /// `interval` microseconds.
     fn refetch_sink(
@@ -1036,6 +1361,39 @@ mod tests {
         let mut sink = NestFolderCustodySink::new(Arc::clone(&nest), store);
         sink.refetch_check_interval = interval;
         (sink, nest)
+    }
+
+    /// `set-addressing.md` § The row form → *Whoever holds the row sends it*:
+    /// the ingest resolves a same-nest set's address from the roster by its
+    /// channel and holds that row, so the `content_key.get` it sends names the
+    /// row — beside a same-named own set the name forms alone address the own
+    /// set and answer its envelope.
+    #[test]
+    fn the_same_nest_key_read_names_the_row_its_channel_resolved() {
+        use fauna_client_testkit::block_on;
+        let channel_hex = hex::encode(group_channel());
+        let own = FolderSummary {
+            id: 7,
+            ..row("photos", Some(hex::encode([0xA0, 0xA1])))
+        };
+        let shared = FolderSummary {
+            id: 9,
+            role: Some("member".into()),
+            ..row("photos", Some(hex::encode(GROUP)))
+        };
+        let store = Arc::new(crate::MemoryFolderKeyStore::default());
+        let (sink, nest) = refetch_sink(vec![own, shared], store, 0);
+
+        block_on(sink.do_fetch_sealed_envelope(&channel_hex));
+
+        let sent = nest.key_gets.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "one key read for the channel");
+        assert_eq!(
+            sent[0].folder_id,
+            Some(9),
+            "the shared set's row, not the own namesake's"
+        );
+        assert!(sent[0].nest_url.is_none(), "a same-nest read");
     }
 
     /// `writer-signed-change-records.md` ruling (11)(b), the pushed-nonce
@@ -1078,6 +1436,333 @@ mod tests {
         }))
         .unwrap();
         assert!(!block_on(sink.do_refetch_owed(&channel)));
+    }
+
+    /// `writer-signed-change-records.md` ruling (7)(b)(ii) rule (6)(a): an
+    /// owner's re-publish that moves no epoch and no nonce — a serve flip —
+    /// moves the nest's echo of the envelope's digest, and that owes the
+    /// member one fetch: owed until the fetch remembers the new digest, owed
+    /// nothing after. A first sighting, with nothing fetched this session,
+    /// owes nothing (the launch's own fetch answers it), and a row that echoes
+    /// no digest asserts nothing.
+    #[test]
+    fn a_moved_envelope_digest_echo_owes_one_refetch_and_a_first_sighting_owes_none() {
+        use fauna_client_testkit::block_on;
+        let channel = group_channel();
+        let channel_hex = hex::encode(channel);
+        let nonce = [0x0B; 32];
+        let echoing = |blob: &[u8]| FolderSummary {
+            envelope_digest: Some(
+                fauna_protocol::folder_envelope_sig::digest(blob)
+                    .to_vec()
+                    .into(),
+            ),
+            ..member_row(nonce)
+        };
+        let store = Arc::new(crate::MemoryFolderKeyStore::with(member_custody(nonce)));
+        let (sink, nest) = refetch_sink(vec![echoing(b"first")], Arc::clone(&store), 0);
+        *nest.envelope.lock().unwrap() = hex::encode(b"first");
+
+        assert!(
+            !block_on(sink.do_refetch_owed(&channel)),
+            "a first sighting with nothing fetched owes nothing"
+        );
+        block_on(sink.do_fetch_sealed_envelope(&channel_hex));
+        assert!(
+            !block_on(sink.do_refetch_owed(&channel)),
+            "the echo agrees with the envelope last fetched"
+        );
+
+        // The owner re-publishes with no commit: new bytes, same epoch, same
+        // nonce — only the digest echo moved.
+        *nest.rows.lock().unwrap() = vec![echoing(b"second")];
+        *nest.envelope.lock().unwrap() = hex::encode(b"second");
+        assert!(
+            block_on(sink.do_refetch_owed(&channel)),
+            "a moved digest echo owes the fetch"
+        );
+        block_on(sink.do_fetch_sealed_envelope(&channel_hex));
+        assert!(
+            !block_on(sink.do_refetch_owed(&channel)),
+            "one fetch answers it"
+        );
+
+        // A row echoing no digest asserts nothing, whatever was fetched.
+        *nest.rows.lock().unwrap() = vec![member_row(nonce)];
+        assert!(!block_on(sink.do_refetch_owed(&channel)));
+    }
+
+    /// A conversations nest whose folder channel carries no commit: the member's
+    /// polls are quiet. Every other method fails loud — the flow below must not
+    /// reach one.
+    struct QuietChannelNest;
+
+    #[async_trait::async_trait]
+    impl fauna_conversations::backend::ConversationsRpc for QuietChannelNest {
+        async fn channel_send(
+            &self,
+            _c: String,
+            _e: Vec<u8>,
+            _x: Option<i64>,
+            _a: Vec<String>,
+        ) -> Result<i64, fauna_conversations::backend::ConvRpcError> {
+            unreachable!("channel_send")
+        }
+        async fn channel_send_remote(
+            &self,
+            _c: String,
+            _u: String,
+            _e: Vec<u8>,
+            _x: Option<i64>,
+            _a: Vec<String>,
+        ) -> Result<i64, fauna_conversations::backend::ConvRpcError> {
+            unreachable!("channel_send_remote")
+        }
+        async fn channel_fetch(
+            &self,
+            _c: String,
+            _a: i64,
+            _l: i64,
+            _h: Option<String>,
+        ) -> Result<
+            Vec<fauna_conversations::backend::FetchedRecord>,
+            fauna_conversations::backend::ConvRpcError,
+        > {
+            Ok(vec![])
+        }
+        async fn keypackage_count(
+            &self,
+            _a: String,
+        ) -> Result<u64, fauna_conversations::backend::ConvRpcError> {
+            unreachable!("keypackage_count")
+        }
+        async fn keypackage_addressable(
+            &self,
+            _a: String,
+        ) -> Result<bool, fauna_conversations::backend::ConvRpcError> {
+            unreachable!("keypackage_addressable")
+        }
+        async fn actor_by_handle(
+            &self,
+            _h: String,
+        ) -> Result<
+            Option<fauna_conversations::backend::ResolvedHandle>,
+            fauna_conversations::backend::ConvRpcError,
+        > {
+            unreachable!("actor_by_handle")
+        }
+        async fn actor_by_handle_remote(
+            &self,
+            _d: String,
+            _l: String,
+        ) -> Result<
+            Option<fauna_conversations::backend::ResolvedHandle>,
+            fauna_conversations::backend::ConvRpcError,
+        > {
+            unreachable!("actor_by_handle_remote")
+        }
+        async fn keypackage_fetch(
+            &self,
+            _a: String,
+            _p: Option<String>,
+        ) -> Result<Option<Vec<u8>>, fauna_conversations::backend::ConvRpcError> {
+            unreachable!("keypackage_fetch")
+        }
+        async fn keypackage_upload(
+            &self,
+            _p: Vec<Vec<u8>>,
+            _l: bool,
+        ) -> Result<u64, fauna_conversations::backend::ConvRpcError> {
+            unreachable!("keypackage_upload")
+        }
+        async fn welcome_deliver(
+            &self,
+            _r: String,
+            _c: String,
+            _w: Vec<u8>,
+            _k: fauna_conversations::backend::WelcomeChannelKind,
+            _p: Option<String>,
+        ) -> Result<(), fauna_conversations::backend::ConvRpcError> {
+            unreachable!("welcome_deliver")
+        }
+        async fn blob_put(
+            &self,
+            _c: String,
+            _h: Option<String>,
+            _s: String,
+            _b: Vec<u8>,
+        ) -> Result<(), fauna_conversations::backend::ConvRpcError> {
+            unreachable!("blob_put")
+        }
+        async fn blob_get(
+            &self,
+            _c: String,
+            _h: Option<String>,
+            _s: String,
+        ) -> Result<Option<Vec<u8>>, fauna_conversations::backend::ConvRpcError> {
+            unreachable!("blob_get")
+        }
+    }
+
+    /// The test nest's twin of the per-target trait impls above, so the
+    /// member's MLS driver can run this sink's real logic.
+    #[async_trait]
+    impl FolderCustodySink for NestFolderCustodySink<Arc<RosterNest>> {
+        async fn fetch_sealed_envelope(
+            &self,
+            channel_id_hex: &str,
+        ) -> Option<fauna_conversations::backend::FetchedEnvelope> {
+            self.do_fetch_sealed_envelope(channel_id_hex).await
+        }
+        async fn merge_and_persist(
+            &self,
+            channel_id: &[u8; 32],
+            payload: fauna_core::folder_keys::ContentKeyEnvelopePayload,
+            may_move: bool,
+        ) -> bool {
+            self.do_merge_and_persist(channel_id, payload, may_move)
+                .await
+        }
+        async fn record_foreign_set(&self, record: fauna_core::data::ForeignFolder) -> bool {
+            self.do_record_foreign_set(record).await
+        }
+        async fn name_foreign_set_from_seal(
+            &self,
+            channel_id: &[u8; 32],
+            sealed: &[u8],
+            name_hash: &[u8],
+        ) -> bool {
+            self.do_name_foreign_set_from_seal(channel_id, sealed, name_hash)
+                .await
+        }
+        async fn forget_foreign_set(&self, channel_id: &[u8; 32]) -> bool {
+            self.do_forget_foreign_set(channel_id).await
+        }
+        async fn foreign_home_url(&self, channel_id: &[u8; 32]) -> Result<Option<String>, String> {
+            self.do_foreign_home_url(channel_id).await
+        }
+        async fn foreign_homes(&self) -> Vec<([u8; 32], String)> {
+            self.do_foreign_homes().await
+        }
+        async fn refetch_owed(&self, channel_id: &[u8; 32]) -> bool {
+            self.do_refetch_owed(channel_id).await
+        }
+    }
+
+    /// `writer-signed-change-records.md` ruling (7)(b)(ii) rule (6), end to
+    /// end over this sink and the member's MLS driver: an owner's serve flip
+    /// re-publishes the envelope at the current epoch and posts no commit, and
+    /// it still reaches the member on a quiet poll — the serve-on stamp, then
+    /// serve-off's rotated generation and stamp — through the nest's digest
+    /// echo alone. No commit reaches the channel, the nonce never moves, and no
+    /// row is refused: before rule (6) neither re-publish reached the member.
+    #[test]
+    fn a_serve_flips_no_commit_re_publish_reaches_a_member_on_a_quiet_poll() {
+        use fauna_client_testkit::block_on;
+        use fauna_conversations::backends::fauna_mls::{
+            FaunaMlsBackend, join_folder_welcome, poll_inbound_folder,
+        };
+        use fauna_core::folder_keys::ContentKeyEnvelopePayload;
+        use fauna_core::identity::ActorKeypair;
+        use fauna_mls::engine::MlsEngine;
+
+        let owner_key = ActorKeypair::from_secret([0xA1; 32]);
+        let owner = MlsEngine::new_in_memory(ActorKeypair::from_secret([0xA1; 32])).unwrap();
+        let member = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+        let (ch, welcome) = owner
+            .create_group(&member.generate_key_packages(1).unwrap())
+            .unwrap();
+        let raw_group = owner.group_id_bytes(&ch).unwrap();
+        let nonce = [0x0B; 32];
+
+        let store = Arc::new(crate::MemoryFolderKeyStore::with(cfg()));
+        let (sink, nest) = refetch_sink(Vec::new(), Arc::clone(&store), 0);
+        // The owner's `content_key.put`: the nest stores the signed blob and
+        // its list row echoes the blob's digest — nothing else moves.
+        let publish = |payload: &ContentKeyEnvelopePayload| {
+            let sealed = owner
+                .seal_content_key_envelope_payload(&ch, payload)
+                .unwrap()
+                .sealed;
+            let blob = fauna_protocol::folder_envelope_sig::sign(&owner_key, &ch.0, &sealed);
+            *nest.envelope.lock().unwrap() = hex::encode(&blob);
+            *nest.rows.lock().unwrap() = vec![FolderSummary {
+                role: Some("member".into()),
+                set_nonce: Some(nonce.to_vec().into()),
+                envelope_digest: Some(
+                    fauna_protocol::folder_envelope_sig::digest(&blob)
+                        .to_vec()
+                        .into(),
+                ),
+                ..row("docs", Some(hex::encode(&raw_group)))
+            }];
+        };
+        let held = || block_on(store.load()).unwrap();
+
+        let gen1 = FolderContentKeys::genesis([1; 32], 1_000);
+        let mut unserved = ContentKeyEnvelopePayload {
+            keys: gen1.clone(),
+            set_nonce: Some(nonce),
+            minted_by: None,
+            retired_set_nonces: Vec::new(),
+            served_at: None,
+            unserved_at: None,
+        };
+        publish(&unserved);
+        let backend = FaunaMlsBackend::new(
+            Arc::clone(&member),
+            Arc::new(QuietChannelNest),
+            "member",
+            member.identity_actor_id(),
+        );
+        backend.set_folder_custody_sink(Arc::new(sink));
+        block_on(join_folder_welcome(
+            &backend,
+            &ch.to_string(),
+            &welcome.to_bytes().unwrap(),
+            "",
+            &fauna_conversations::session::FolderWelcomeContext::default(),
+        ))
+        .expect("the member joins the shared set");
+        assert!(
+            custody::content_keys(&held(), &ch.0).is_some(),
+            "the join ingest"
+        );
+        assert!(!custody::channel_served(&held(), &ch.0));
+
+        // Serve-on: the same keys at the same epoch, now stamped served.
+        let served = ContentKeyEnvelopePayload {
+            served_at: Some(2_000),
+            ..unserved.clone()
+        };
+        publish(&served);
+        let mut cursor = 0i64;
+        let outcome = block_on(poll_inbound_folder(&backend, &ch, &mut cursor, 0)).unwrap();
+        assert_eq!(outcome.applied, 0, "no commit reached the channel");
+        assert!(
+            custody::channel_served(&held(), &ch.0),
+            "the serve-on stamp reached the member with no commit"
+        );
+
+        // Serve-off: the owner rotates and re-publishes, again with no commit.
+        let mut gen2 = gen1;
+        gen2.rotate([2; 32], 3_000);
+        unserved = ContentKeyEnvelopePayload {
+            keys: gen2,
+            unserved_at: Some(3_000),
+            ..served
+        };
+        publish(&unserved);
+        block_on(poll_inbound_folder(&backend, &ch, &mut cursor, 0)).unwrap();
+        let after = held();
+        assert!(
+            custody::content_keys(&after, &ch.0).is_some_and(|k| k.key_for(2).is_some()),
+            "the rotated generation reached the member"
+        );
+        assert!(
+            !custody::channel_served(&after, &ch.0),
+            "and the serve-off stamp"
+        );
     }
 
     /// A row the caller OWNS is never the member trigger's: the owner's nonce
@@ -1223,6 +1908,65 @@ mod tests {
         custody::record_received_set_nonce(&mut c, &foreign.channel_id, [0x0F; 32], NOW);
         assert_eq!(resolve_set_nonce_from(&[], &c, "away"), Some([0x0F; 32]));
         assert_eq!(resolve_set_nonce_from(&[], &c, "nowhere"), None);
+    }
+
+    /// A record that names its row binds the nonce of THAT row, never the one
+    /// a name lookup picks: a writer member who also owns a set of the same
+    /// name signs an upload into the shared one under the shared set's nonce —
+    /// the one the nest verifies the row under (`set-addressing.md` § The row
+    /// form; `writer-signed-change-records.md` ruling (2)).
+    #[test]
+    fn the_set_nonce_by_row_tells_a_same_named_pair_apart() {
+        let mut c = cfg();
+        custody::record_created_set(&mut c, "docs", [0x01; 32], None, 10);
+        let own = FolderSummary {
+            id: 7,
+            ..row("docs", None)
+        };
+        let raw = vec![0xB0, 0xB1];
+        let channel = ChannelId::from_group_id(&raw).0;
+        custody::merge_received_keys(&mut c, channel, FolderContentKeys::genesis([5; 32], 1));
+        custody::record_received_set_nonce(&mut c, &channel, [0x0B; 32], NOW);
+        let shared = FolderSummary {
+            id: 9,
+            role: Some("member".into()),
+            ..row("docs", Some(hex::encode(&raw)))
+        };
+        let roster = vec![own, shared];
+        assert_eq!(
+            resolve_set_nonce_by_ref(&roster, &c, &FolderRef::Local(9)),
+            Some([0x0B; 32]),
+            "the shared row's nonce"
+        );
+        assert_eq!(
+            resolve_set_nonce_by_ref(&roster, &c, &FolderRef::Local(7)),
+            Some([0x01; 32]),
+            "the own row's nonce"
+        );
+        assert_eq!(
+            resolve_set_nonce_by_ref(&roster, &c, &FolderRef::Local(8)),
+            None
+        );
+
+        // The reader's half: the lineage a projected row is judged under. By
+        // hash the pair answers the OWN set's; by row, each its own.
+        let lineage_at =
+            |id| custody::set_lineage_by_ref(&roster, &c, &FolderRef::Local(id)).map(|l| l.live);
+        assert_eq!(
+            custody::set_lineage_by_hash(&roster, &c, &set_name_hash("docs")).live,
+            Some([0x01; 32])
+        );
+        assert_eq!(
+            lineage_at(9),
+            Some(Some([0x0B; 32])),
+            "the shared row's lineage"
+        );
+        assert_eq!(
+            lineage_at(7),
+            Some(Some([0x01; 32])),
+            "the own row's lineage"
+        );
+        assert_eq!(lineage_at(8), None, "no such row: no by-row answer");
     }
 
     /// The probe, inverted into a pin: an owned row named `photos`
@@ -1572,5 +2316,116 @@ mod tests {
             "the OWN group, not the stranger's"
         );
         assert!(got.home_nest_url.is_none(), "and no foreign byte route");
+    }
+
+    /// A reader's own UNBOUND `photos` (id 7) listed before a member row of
+    /// someone else's `photos` (id 9) whose group keys custody holds.
+    fn shadowed_member_roster() -> (Vec<FolderSummary>, FoldersConfig) {
+        let own = FolderSummary {
+            id: 7,
+            ..row("photos", None)
+        };
+        let member = FolderSummary {
+            id: 9,
+            role: Some("member".into()),
+            ..row("photos", Some(hex::encode(GROUP)))
+        };
+        let mut c = cfg();
+        custody::merge_received_keys(
+            &mut c,
+            group_channel(),
+            FolderContentKeys::genesis([5; 32], 1),
+        );
+        (vec![own, member], c)
+    }
+
+    /// The by-identity resolution (`mls-group-key-material.md` § M2 →
+    /// *Resolving custody — by the set's identity, never by its name*): the
+    /// member row the reader's own same-named set shadows BY NAME resolves by
+    /// its id to its group's keys, while the by-name resolution still answers
+    /// the shadowing owner-only set.
+    #[test]
+    fn a_local_ref_resolves_the_row_with_that_id_past_a_same_named_own_set() {
+        let (roster, c) = shadowed_member_roster();
+
+        let got = content_keyed(resolve_custody_by_ref(&roster, &c, &FolderRef::Local(9)).unwrap());
+        assert_eq!(got.mls_group_id.as_deref(), Some(&GROUP[..]));
+        assert_eq!(
+            got.content_keys,
+            custody::content_keys(&c, &group_channel()),
+            "the member row's own group keys"
+        );
+        assert!(got.content_keys.is_some());
+        assert!(got.home_nest_url.is_none());
+
+        // The by-name shadow the doc declares: the owner-first pick.
+        assert!(is_plain_owner_only(
+            &resolve_custody_from(&roster, &c, &set_name_hash("photos")).unwrap()
+        ));
+        // And the own row by ITS id answers what the name does.
+        assert!(is_plain_owner_only(
+            &resolve_custody_by_ref(&roster, &c, &FolderRef::Local(7)).unwrap()
+        ));
+    }
+
+    /// A local ref naming no roster row is "could not determine", never the
+    /// positive owner-only answer a by-name miss gives.
+    #[test]
+    fn a_local_ref_naming_no_row_is_an_error_not_owner_only() {
+        let (roster, c) = shadowed_member_roster();
+        assert!(resolve_custody_by_ref(&roster, &c, &FolderRef::Local(11)).is_err());
+    }
+
+    /// A sealed own row (its name scrubbed) resolves by id through the same
+    /// custody naming the by-name pick applies: its serve custody, at the
+    /// pseudo-channel of the name custody holds.
+    #[test]
+    fn a_sealed_own_rows_ref_resolves_under_the_name_custody_holds() {
+        let mut c = cfg();
+        custody::record_created_set(&mut c, "photos", [0x11; 32], None, 500);
+        let serve = serve_custody_channel_id("photos");
+        custody::key_named_set(&mut c, "photos", serve, [0x42; 32], 1_000);
+        custody::serve_on(&mut c, &serve, 2_000);
+        let sealed = FolderSummary {
+            id: 4,
+            name: String::new(),
+            name_hash: Some(fauna_protocol::ByteBuf::from(
+                set_name_hash("photos").to_vec(),
+            )),
+            ..row("", None)
+        };
+
+        let got =
+            content_keyed(resolve_custody_by_ref(&[sealed], &c, &FolderRef::Local(4)).unwrap());
+        assert_eq!(got.content_keys, custody::content_keys(&c, &serve));
+        assert!(got.content_keys.is_some(), "the serve custody");
+        assert!(got.mls_group_id.is_none(), "served-unshared: no group");
+    }
+
+    /// A foreign ref resolves the live record at that channel — home route
+    /// included, whatever its name — and a channel with no live record is an
+    /// error.
+    #[test]
+    fn a_foreign_ref_resolves_the_record_at_that_channel_and_no_other() {
+        let (roster, mut c) = shadowed_member_roster();
+        // Named `photos` too: the by-name pick can never reach it.
+        custody::record_foreign_set(&mut c, foreign_record("photos"), NOW);
+        custody::merge_received_keys(
+            &mut c,
+            [0xAA; 32],
+            FolderContentKeys::genesis([0x42; 32], 1_000),
+        );
+
+        let got = content_keyed(
+            resolve_custody_by_ref(&roster, &c, &FolderRef::Foreign([0xAA; 32])).unwrap(),
+        );
+        assert_eq!(got.mls_group_id, Some(vec![0xAA, 0xAA, 0xAA]));
+        assert_eq!(
+            got.home_nest_url.as_deref(),
+            Some("https://stranger.example")
+        );
+        assert!(got.content_keys.is_some());
+
+        assert!(resolve_custody_by_ref(&roster, &c, &FolderRef::Foreign([0xBB; 32])).is_err());
     }
 }

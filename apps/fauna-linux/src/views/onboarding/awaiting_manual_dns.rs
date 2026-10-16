@@ -20,7 +20,8 @@
 //! other app all show the user the same instruction.
 //!
 //! ui.yaml IDs: `page-heading`, `awaiting-dns-records`, `awaiting-dns-status`,
-//! `awaiting-dns-recheck-button`, `awaiting-dns-copy-button`. (`error-message`
+//! `awaiting-dns-recheck-button`, `awaiting-dns-copy-button`,
+//! `awaiting-dns-fallthrough-button`. (`error-message`
 //! is the wizard's window-level label, shared by every page.)
 
 use fauna_ui_ids as ids;
@@ -110,12 +111,25 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
     }
     root.append(&recheck_btn);
 
+    // The exit for a box that never answers (`onboarding-provisioning.md`
+    // § "Almost ready" surface → *Exit*): borrows the launch surface's label.
+    // One call — the machine clears the slot through its own injected store and
+    // re-lands at `handle_entry`; its notification repaints the wizard.
+    let fallthrough_btn = Button::with_label(&resolve("onboarding.launch.use_different_nest"));
+    set_test_id(&fallthrough_btn, ids::AWAITING_DNS_FALLTHROUGH_BUTTON);
+    {
+        let m = m.clone();
+        fallthrough_btn.connect_clicked(move |_| m.abandon_awaiting_manual_dns());
+    }
+    root.append(&fallthrough_btn);
+
     let refresh: Rc<dyn Fn()> = Rc::new({
         let m = m.clone();
         let records_view = records_view.clone();
         let status = status.clone();
         let recheck_btn = recheck_btn.clone();
         let copy_btn = copy_btn.clone();
+        let fallthrough_btn = fallthrough_btn.clone();
         let current_text = current_text.clone();
         move || {
             let snap = m.awaiting_manual_dns_snapshot();
@@ -136,6 +150,10 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
             // Records-less resumed runs have nothing to copy; disabled, never
             // hidden — ui.yaml scopes this ID to the page's required elements.
             copy_btn.set_sensitive(m.awaiting_dns_copy_enabled());
+
+            // The machine's answer — off only under a claim, deliberately NOT
+            // the recheck button's rule (a bare probe must not hide the exit).
+            fallthrough_btn.set_sensitive(m.awaiting_dns_fallthrough_enabled());
         }
     });
 
@@ -170,6 +188,7 @@ mod tests {
                 "awaiting-dns-status",
                 "awaiting-dns-recheck-button",
                 "awaiting-dns-copy-button",
+                "awaiting-dns-fallthrough-button",
             ] {
                 assert!(
                     names.iter().any(|n| n == id),

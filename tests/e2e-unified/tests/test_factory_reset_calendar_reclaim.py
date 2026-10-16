@@ -3,7 +3,7 @@ encrypted-calendar cycle — the first local e2e that re-claims after a wipe.
 
 Why this exists
 ---------------
-The live CalDAV roundtrip (the CalDAV live e2e vs example.com) hit a bug NO local e2e
+The live CalDAV roundtrip (the CalDAV live e2e vs the live nest) hit a bug NO local e2e
 caught: after ``factory_reset → re-claim (same identity) → enable-mail`` the linux
 Events page failed at ``create_event`` ("Event did not appear", actions/events.py:68)
 with ``CalendarsLoaded: 0``. The local suite never re-claimed (``test_events.py``

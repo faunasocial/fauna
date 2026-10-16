@@ -365,10 +365,10 @@ pub(crate) fn reset_session_seat() {
 /// second listener on the same NodeId.
 ///
 /// The transport is built from the **actor** secret (PT-1b), a different
-/// endpoint from the same-account peer-sync leg's device-principal one. No
-/// relay URL today — by ruling, until the nest's relay serves address
-/// discovery; the ceremony's dials never attach one either way (`p2p.md`
-/// § The relay → *The cross-user seat and the relay*).
+/// endpoint from the same-account peer-sync leg's device-principal one. The
+/// seat takes the relay URL from the same live `fauna.nest.info` read as the
+/// brake; the ceremony's dials never attach it (`p2p.md` § The relay → *The
+/// cross-user seat and the relay*).
 #[fauna_uniffi_async::export]
 pub async fn offline_share_bind_seat(
     nest: Arc<FfiNestClient>,

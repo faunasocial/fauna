@@ -94,7 +94,7 @@ def test_post_image_click_opens_lightbox(logged_in_app):
         f"lightbox bug — see this file's docstring): error={app.error_text()!r}"
     )
 
-    app.driver.click("post-image", index=0)
+    app.feed.click_post_image_by_text(text)
     # Generous, deadline-polled — a native modal (e.g. WinUI ContentDialog.ShowAsync)
     # can take a beat past the click's own round trip to actually present; the loop
     # exits the moment it settles, so a fast platform pays none of the budget

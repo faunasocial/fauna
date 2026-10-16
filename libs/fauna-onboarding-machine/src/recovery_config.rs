@@ -127,7 +127,17 @@ pub(crate) trait RecoveryConfigReader: Send + Sync + std::fmt::Debug {
 
 /// The per-target production reader over `root` — [`StoreRoot::platform`]
 /// from `OnboardingMachine::new`, a phone's container once the shell names it.
-pub(crate) fn production_reader(root: StoreRoot) -> Arc<dyn RecoveryConfigReader> {
+/// A root that did not resolve (the shared no-home refusal) yields a reader
+/// that fails closed: every resolve answers [`RecoveryConfigError::Failed`]
+/// with the refusal, logged once here.
+pub(crate) fn production_reader(root: Result<StoreRoot, String>) -> Arc<dyn RecoveryConfigReader> {
+    let root = match root {
+        Ok(root) => root,
+        Err(refusal) => {
+            tracing::error!("recovery-mode custody read: no store root: {refusal}");
+            return Arc::new(RefusedRecoveryConfigReader { refusal });
+        }
+    };
     #[cfg(target_arch = "wasm32")]
     {
         Arc::new(WasmRecoveryConfigReader { root })
@@ -135,6 +145,26 @@ pub(crate) fn production_reader(root: StoreRoot) -> Arc<dyn RecoveryConfigReader
     #[cfg(not(target_arch = "wasm32"))]
     {
         Arc::new(NativeRecoveryConfigReader { root })
+    }
+}
+
+/// The reader over a store root that could not be resolved: it reads nothing
+/// and answers every resolve with the refusal, so the surface shows why.
+#[derive(Debug)]
+struct RefusedRecoveryConfigReader {
+    refusal: String,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl RecoveryConfigReader for RefusedRecoveryConfigReader {
+    async fn resolve(
+        &self,
+        _nest_url: Option<&str>,
+        _owner_secret_hex: &str,
+        _nest_actor_id_hex: &str,
+    ) -> Result<RecoveryProvisionInput, RecoveryConfigError> {
+        Err(RecoveryConfigError::Failed(self.refusal.clone()))
     }
 }
 
@@ -227,7 +257,7 @@ impl WasmRecoveryConfigReader {
             SilentChallengeOutcome::Transient { error } => {
                 return Err(format!("transient: {error}"));
             }
-            SilentChallengeOutcome::NeedsUpdate { message } => return Err(message),
+            SilentChallengeOutcome::NeedsUpdate { message, .. } => return Err(message),
             SilentChallengeOutcome::SecretInvalid { error } => return Err(error),
             // The owner identity was succeeded, so it no longer owns the account
             // this read authenticates as. Terminal for the reason no retry can

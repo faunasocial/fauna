@@ -96,6 +96,7 @@ class WebSettingsVM @Inject constructor(
      *  Request lifecycle step 3). */
     private fun hydrate() {
         val w = web ?: return
+        val mine = webPublishStore.captureGeneration()
         viewModelScope.launch {
             handle = bareHandle()
             domain = runCatching { w.servingDomain() }
@@ -108,7 +109,10 @@ class WebSettingsVM @Inject constructor(
                 posts.value = site?.posts ?: emptyList()
                 renderedPagesDown.value = site?.renderedPagesDown ?: false
                 hydrated.value = true
-                webPublishStore.applyWebPage(domainRows, enabled, handle, domain)
+                // The VM outlives an account switch (the NavHost's back stack
+                // is not torn down), so the store lands only while it is still
+                // the actor this read was computed for.
+                webPublishStore.landWebPage(mine, domainRows, enabled, handle, domain)
                 render(enabled)
             } catch (_: Exception) {
                 // One attempt: the transport already waits out a socket that
@@ -120,11 +124,12 @@ class WebSettingsVM @Inject constructor(
     /** Flip the opt-in, then re-render from the nest's echoed state (non-optimistic). */
     fun setEnabled(enabled: Boolean) {
         val w = web ?: return
+        val mine = webPublishStore.captureGeneration()
         viewModelScope.launch {
             try {
                 val echoed = w.setSubdomainEnabled(enabled)
                 render(echoed)
-                webPublishStore.applyWebPage(domainRows, echoed, handle, domain)
+                webPublishStore.landWebPage(mine, domainRows, echoed, handle, domain)
             } catch (e: Exception) {
                 errorMessage.value = e.message
             }

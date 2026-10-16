@@ -42,6 +42,32 @@ internal sealed class ContentPolicyPreloader
 
     public async Task RunAsync()
     {
+        await RefreshOwnThresholdsAsync().ConfigureAwait(false);
+
+        // The third input: what the owner's own reports hid (moderation.md §
+        // Corollary — block also hides; `load_hidden_content`). Independent of the
+        // two reads above — a failure here leaves only this half absent, which
+        // under-enforces (a reported item paints again), never wrongly hides.
+        // Fired from the same fire-and-forget site, so no surface awaits it on its
+        // mount path (web's first run hung the feed behind exactly that await).
+        await RefreshHiddenContentAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// (Re-)read the viewer's own spam/phishing thresholds into
+    /// <see cref="ContentPolicyCache"/> — fired at cold launch (<see cref="RunAsync"/>)
+    /// AND on every WS reconnect (<c>MainPage.OnRpcReconnected</c>;
+    /// family-client-enforcement.md § Content policy, the own-threshold bullet), so
+    /// a login read that lost the socket cannot leave the own-threshold collapse
+    /// off for the session. A failed read keeps the loaded thresholds (nothing is
+    /// cleared); a reply that lands after the signed-in identity changed is
+    /// dropped, never written over the next identity's cache — the
+    /// <see cref="ActorScope"/> generation token taken before the read is the
+    /// identity stamp. Never throws.
+    /// </summary>
+    internal async Task RefreshOwnThresholdsAsync()
+    {
+        using var scope = ActorScope.BeginBackgroundLoop();
         try
         {
             // ConfigureAwait(false) is legal here and deliberate: this is a
@@ -51,6 +77,13 @@ internal sealed class ContentPolicyPreloader
             // SupervisedIndicatorButton after its await and would throw
             // COMException off the UI thread.
             var prefs = await _rpc.SpamGetPreferencesAsync().ConfigureAwait(false);
+            if (scope.Token.IsCancellationRequested)
+            {
+                ShellLog.Warn(
+                    "ContentPolicyPreloader",
+                    "own thresholds reply dropped: signed-in identity changed during the read");
+                return;
+            }
             // Both thresholds or neither — one read, one tuple (see
             // ContentPolicyCache.SetOwnThresholds for why the pair is a type).
             ContentPolicyCache.SetOwnThresholds((prefs.spamThreshold, prefs.phishingThreshold));
@@ -61,17 +94,23 @@ internal sealed class ContentPolicyPreloader
                 "ContentPolicyPreloader",
                 $"own thresholds skipped: {ex.GetType().Name}: {ex.Message}");
         }
+    }
 
-        // The third input: what the owner's own reports hid (moderation.md §
-        // Corollary — block also hides; `load_hidden_content`). Independent of the
-        // two reads above — a failure here leaves only this half absent, which
-        // under-enforces (a reported item paints again), never wrongly hides.
-        // Fired from the same fire-and-forget site, so no surface awaits it on its
-        // mount path (web's first run hung the feed behind exactly that await).
+    /// <summary>
+    /// Re-read the owner's hide list into <see cref="ContentPolicyCache"/> — the
+    /// store-change notice's app-wide arm (<c>account-runtime.md</c> § A runtime's
+    /// own pump is a source of the notice too, part 4): the list is a render
+    /// source for every surface, not one page's, so it re-reads on every notice
+    /// whatever page is open. A failure keeps the cached list (under-enforces, never
+    /// wrongly hides); an unchanged answer rewrites nothing. Never throws.
+    /// </summary>
+    internal async Task RefreshHiddenContentAsync()
+    {
         try
         {
-            ContentPolicyCache.SetHiddenContent(
-                await _rpc.LoadHiddenContentAsync().ConfigureAwait(false));
+            var hidden = await _rpc.LoadHiddenContentAsync().ConfigureAwait(false);
+            if (!ContentPolicyCache.HiddenContentEquals(hidden))
+                ContentPolicyCache.SetHiddenContent(hidden);
         }
         catch (Exception ex)
         {

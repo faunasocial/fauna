@@ -1,6 +1,5 @@
 package com.fauna.app.ui.screen.events
 
-import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -27,9 +26,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
+import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.ffi.FfiCalendarViewMode
 import com.fauna.ffi.FfiEventDrafts
+import com.fauna.ffi.FfiRefusedChange
 import com.fauna.ffi.calendarViewModes
 import uniffi.fauna_core.RsvpResponse
 import com.fauna.app.data.api.CreateEventRequest
@@ -38,9 +39,16 @@ import com.fauna.app.data.api.FaunaCalendar
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
+import java.time.Instant
+import java.time.ZoneId
+import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.shareFile
+import com.fauna.app.core.downloadsDir
+import java.io.File
 import com.fauna.app.ui.viewmodel.EventsVM
 import kotlinx.coroutines.launch
 import social.fauna.generated.Ids
@@ -50,6 +58,18 @@ import social.fauna.generated.Ids
  * is `YYYY-MM-DDTHH:MM`); `normalizeEventDatetimeInput` pads it to seconds on
  * submit, so a prefill and a hand-typed value travel the identical path.
  */
+/**
+ * The first `calendar.ics` / `calendar-N.ics` in [dir] that does not exist yet,
+ * so a second export never overwrites the first.
+ */
+private fun unusedExportFile(dir: File): File {
+    val first = File(dir, "calendar.ics")
+    if (!first.exists()) return first
+    var n = 1
+    while (File(dir, "calendar-$n.ics").exists()) n++
+    return File(dir, "calendar-$n.ics")
+}
+
 private val FORM_DATETIME = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm")
 
 /**
@@ -71,23 +91,23 @@ fun EventsScreen(navController: NavController, vm: EventsVM = hiltViewModel()) {
     val selectedDate by vm.selectedDate.collectAsState()
     val visibleEvents by vm.visibleEvents.collectAsState()
     val draft = vm.draft.collectAsState()
+    val refusedChanges by vm.refusedChanges.collectAsState()
     val appMessages = LocalAppMessages.current
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    // The picker only FILLS the choice (`calendar-import-file`); Import is its own
+    // button, so pressing it with nothing chosen can say so (events.md § Import /
+    // Export).
+    var pickedIcsUri by remember { mutableStateOf<android.net.Uri?>(null) }
+    // One staging for the picker callback and the e2e pick seam
+    // (`TestAgent.calendarImportPick`, registered by the import row).
+    val stagePicked: (android.net.Uri?) -> Unit = remember { { uri -> if (uri != null) pickedIcsUri = uri } }
     val icsPickerLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.GetContent()
-    ) { uri ->
-        uri ?: return@rememberLauncherForActivityResult
-        val calId = selectedCalendar?.id ?: return@rememberLauncherForActivityResult
-        scope.launch {
-            val icsText = context.contentResolver.openInputStream(uri)?.bufferedReader()?.readText()
-            if (icsText != null) {
-                vm.importCalendar(calId, icsText)
-            }
-        }
-    }
+        ActivityResultContracts.GetContent(),
+        stagePicked,
+    )
 
     LaunchedEffect(Unit) {
         // Render the no-selection union on entry (every owned calendar's events)
@@ -111,22 +131,58 @@ fun EventsScreen(navController: NavController, vm: EventsVM = hiltViewModel()) {
         calendarView = calendarView,
         selectedDate = selectedDate,
         onRefresh = { vm.load() },
+        refusedChanges = refusedChanges,
+        onDismissRefusedChange = vm::dismissRefusedChange,
         onSelectCalendar = vm::selectCalendar,
         onToggleCalendarVisibility = vm::toggleCalendarVisibility,
         onSelectView = vm::selectView,
         onSelectDate = vm::selectDate,
         onOpenEvent = { id -> navController.navigate("event/$id") },
-        onImportIcs = { icsPickerLauncher.launch("text/calendar") },
+        pickedIcsName = pickedIcsUri?.lastPathSegment,
+        onPickIcs = { icsPickerLauncher.launch("text/calendar") },
+        onIcsPicked = stagePicked,
+        onImportIcs = {
+            val uri = pickedIcsUri
+            if (uri == null) {
+                appMessages.showError(context.getString(R.string.events_ics_file_required))
+            } else {
+                scope.launch {
+                    val calId = selectedCalendar?.id ?: return@launch
+                    val icsText = readIcsText(context.contentResolver, uri)
+                    if (icsText == null) {
+                        appMessages.showError(context.getString(R.string.events_ics_unreadable))
+                    } else {
+                        vm.importCalendar(calId, icsText)?.let { outcome ->
+                            appMessages.showInfo(
+                                context.getString(R.string.events_import_result)
+                                    .replace("{imported}", outcome.imported.toString())
+                                    .replace("{skipped}", outcome.skipped.toString())
+                                    .replace("{total}", (outcome.imported + outcome.skipped).toString())
+                            )
+                        }
+                    }
+                }
+            }
+        },
         onExportIcs = {
             scope.launch {
                 val calId = selectedCalendar?.id ?: return@launch
                 val icsText = vm.exportCalendar(calId)
                 if (icsText != null) {
-                    val intent = Intent(Intent.ACTION_SEND).apply {
-                        type = "text/calendar"
-                        putExtra(Intent.EXTRA_TEXT, icsText)
+                    // One `.ics` in the downloads location, never over an
+                    // earlier export, then the share sheet (the `shareFile`
+                    // precedent every android download surface follows).
+                    val out = unusedExportFile(context.downloadsDir())
+                    try {
+                        out.writeText(icsText)
+                        appMessages.showInfo(
+                            context.getString(R.string.events_calendar_exported)
+                                .replace("{path}", out.absolutePath)
+                        )
+                        context.shareFile(out, "text/calendar", out.name)
+                    } catch (e: Exception) {
+                        appMessages.showError(e.message)
                     }
-                    context.startActivity(Intent.createChooser(intent, "Export Calendar"))
                 }
             }
         },
@@ -138,6 +194,21 @@ fun EventsScreen(navController: NavController, vm: EventsVM = hiltViewModel()) {
         onStartFreshDraft = vm::clearDraft,
     )
 }
+
+/**
+ * The picked `.ics` text, or null when the provider cannot serve it (a stale
+ * grant, a missing file, a null stream) — the caller then says so on
+ * `error-message` rather than dropping the import (e2e convention 11). Reads
+ * `file://` and `content://` Uris alike.
+ */
+internal fun readIcsText(resolver: android.content.ContentResolver, uri: android.net.Uri): String? =
+    try {
+        resolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+    } catch (_: java.io.IOException) {
+        null
+    } catch (_: SecurityException) {
+        null
+    }
 
 /**
  * The whole `events` surface, stateless.
@@ -187,6 +258,14 @@ fun EventsContent(
     onOpenEvent: (String) -> Unit,
     onImportIcs: () -> Unit,
     onExportIcs: () -> Unit,
+    // `calendar-import-file`: the picker that fills the choice, and the name of
+    // what it picked (null until one is).
+    pickedIcsName: String? = null,
+    onPickIcs: () -> Unit = {},
+    // The picked file becomes the page's choice — the picker's result, and the
+    // e2e pick seam's staged file (`TestAgent.calendarImportPick`, registered by
+    // the import row below).
+    onIcsPicked: (android.net.Uri?) -> Unit = {},
     onRsvp: (eventId: String, response: RsvpResponse) -> Unit,
     onCreateCalendar: (name: String) -> Unit,
     onCreateEvent: (CreateEventRequest) -> Unit,
@@ -202,6 +281,10 @@ fun EventsContent(
         summary: String, dtstart: String, dtend: String, description: String, location: String,
     ) -> Unit = { _, _, _, _, _ -> },
     onStartFreshDraft: () -> Unit = {},
+    // The refused-change list (`ui/events.md` § Refused scheduling changes):
+    // absent unless non-empty; dismiss is its only control.
+    refusedChanges: List<FfiRefusedChange> = emptyList(),
+    onDismissRefusedChange: (String) -> Unit = {},
 ) {
     var showCreateCalendar by remember { mutableStateOf(false) }
     var showEventForm by remember { mutableStateOf(false) }
@@ -247,6 +330,15 @@ fun EventsContent(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(vertical = 8.dp)
             ) {
+                // Refused scheduling changes: someone tried to change an event
+                // here and the shared apply refused them. Painted only when
+                // there is something to report; no "apply anyway" by ruling.
+                if (refusedChanges.isNotEmpty()) {
+                    item {
+                        RefusedChangeList(refusedChanges, onDismissRefusedChange)
+                    }
+                }
+
                 // Calendar picker
                 item {
                     LazyRow(
@@ -331,11 +423,61 @@ fun EventsContent(
                             // reads. So they sit side by side with opposite
                             // verdicts, which is the pairing the gate test reads.
                             val importGate = faunaGate("fauna.bridges.put_event_ciphertext")
+                            // The OS picker gives UiAutomator nothing to drive, so
+                            // while this row is shown it registers the picker's own
+                            // staging on `TestAgent.calendarImportPick`, where the
+                            // `compose.file`[calendar-import-file] arm stands in for
+                            // the picker's result. Keyed to the row: no selected
+                            // calendar removes it, and with it the handler.
+                            // `BuildConfig.DEBUG`-gated so the release shrinker folds
+                            // it away (convention 15).
+                            if (BuildConfig.DEBUG) {
+                                val stagePath: (String) -> Unit = remember(onIcsPicked) {
+                                    { path -> onIcsPicked(android.net.Uri.fromFile(java.io.File(path))) }
+                                }
+                                DisposableEffect(stagePath) {
+                                    com.fauna.app.testing.TestAgent.calendarImportPick = stagePath
+                                    onDispose {
+                                        if (com.fauna.app.testing.TestAgent.calendarImportPick === stagePath) {
+                                            com.fauna.app.testing.TestAgent.calendarImportPick = null
+                                        }
+                                    }
+                                }
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                IconButton(
+                                    onClick = onPickIcs,
+                                    modifier = Modifier.testTag(Ids.CALENDAR_IMPORT_FILE),
+                                ) {
+                                    Icon(
+                                        Icons.Default.AttachFile,
+                                        contentDescription = stringResource(R.string.events_import_ics_tooltip),
+                                    )
+                                }
+                                Text(
+                                    pickedIcsName ?: stringResource(R.string.media_choose_file),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 1,
+                                )
+                            }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                TextButton(onClick = onImportIcs, enabled = importGate.enabled) {
+                                // Always enabled apart from the offline gate:
+                                // pressed with nothing chosen, the screen says
+                                // `events.ics_file_required`.
+                                TextButton(
+                                    onClick = onImportIcs,
+                                    enabled = importGate.enabled,
+                                    modifier = Modifier.testTag(Ids.CALENDAR_IMPORT_BUTTON),
+                                ) {
                                     Text(stringResource(R.string.events_import_ics))
                                 }
-                                TextButton(onClick = onExportIcs) {
+                                TextButton(
+                                    onClick = onExportIcs,
+                                    modifier = Modifier.testTag(Ids.CALENDAR_EXPORT_BUTTON),
+                                ) {
                                     Text(stringResource(R.string.events_export_ics))
                                 }
                             }
@@ -526,6 +668,9 @@ fun EventsContent(
             resumableDraft = if (newEventSlot == null) draft else null,
             onFieldsChanged = onDraftEdited,
             onDismiss = { showEventForm = false },
+            // The one close that forgets (`event-form-discard`): the rail is emptied
+            // the way a day-cell start empties it, then the sheet closes.
+            onDiscard = { onStartFreshDraft(); showEventForm = false },
             onCreate = { request ->
                 onCreateEvent(request)
                 showEventForm = false
@@ -593,6 +738,7 @@ fun EventFormSheet(
     calendarId: String,
     onDismiss: () -> Unit,
     onCreate: (CreateEventRequest) -> Unit,
+    onDiscard: () -> Unit = {},
     initialDtstart: String = "",
     initialDtend: String = "",
     // Draft-persistence v2, events rail. `null` (a day-cell fresh start) means
@@ -735,7 +881,78 @@ fun EventFormSheet(
                 Text(stringResource(R.string.events_create_event))
             }
             DisabledControlReasonText(gate.reason)
+            TextButton(
+                onClick = onDiscard,
+                modifier = Modifier.fillMaxWidth().testTag(Ids.EVENT_FORM_DISCARD)
+            ) {
+                Text(stringResource(R.string.events_discard_event))
+            }
             Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+/**
+ * The `refused-change-list` and its rows. Every row's wording is the shared
+ * `refused_change_view` (resolved through the resource table); the repeat
+ * count rides the reason line, and the date is this platform's own format.
+ */
+@Composable
+private fun RefusedChangeList(
+    changes: List<FfiRefusedChange>,
+    onDismiss: (String) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .testTag(Ids.REFUSED_CHANGE_LIST),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            stringResource(R.string.events_refused_changes_title),
+            style = MaterialTheme.typography.titleSmall,
+        )
+        changes.forEach { change ->
+            val reason = listOfNotNull(localized(change.reason), localized(change.attempts))
+                .joinToString(" ")
+            val time = Instant.ofEpochSecond(change.lastRefusedAt)
+                .atZone(ZoneId.systemDefault())
+                .toLocalDate()
+                .format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM))
+            Card(modifier = Modifier.fillMaxWidth().testTag(Ids.REFUSED_CHANGE_ITEM)) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            localized(change.headline).orEmpty(),
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier.testTag(Ids.REFUSED_CHANGE_TITLE),
+                        )
+                        Text(
+                            localized(change.author).orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.testTag(Ids.REFUSED_CHANGE_AUTHOR),
+                        )
+                        Text(
+                            reason,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.testTag(Ids.REFUSED_CHANGE_REASON),
+                        )
+                        Text(
+                            time,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.testTag(Ids.REFUSED_CHANGE_TIME),
+                        )
+                    }
+                    TextButton(
+                        onClick = { onDismiss(change.key) },
+                        modifier = Modifier.testTag(Ids.REFUSED_CHANGE_DISMISS),
+                    ) { Text(stringResource(R.string.events_refused_changes_dismiss)) }
+                }
+            }
         }
     }
 }

@@ -88,6 +88,7 @@ public final class ProfileOffersVM {
         offerStatus(tierName: tier, statusTier: statusTier, pending: pendingTiers.contains(tier))
     }
 
+#if !FAUNA_KIDS
     /// Subscribe to `tier`: plaintext + auto-approve grants inline → status flips
     /// to active; encrypted mode enqueues → pending. Re-reads to confirm.
     public func subscribe(_ tier: String) async {
@@ -107,7 +108,9 @@ public final class ProfileOffersVM {
             errorMessage = DisplayError.message(error)
         }
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Follow = subscribe to the free "followers" tier (the header button).
     /// ⚠ Nest-gated until the nest auto-provisions the "followers" tier
     /// (`monetization.md` § Pillar 1 — currently returns `tier_not_found`); wired
@@ -118,4 +121,5 @@ public final class ProfileOffersVM {
         // clears `errorMessage` on success and sets it on failure.
         if errorMessage == nil { isFollowing = true }
     }
+#endif
 }

@@ -67,12 +67,12 @@ wire grown.
 
 ⚠ **One thing this journey does NOT cover, deliberately.**
 
-*The `NoOldState` arm* — a device holding no conversation store for the retired
-identity answers in a sentence rather than sweeping. Its natural home is **web**,
-where that is the permanent answer on every press (no browser can hold the
-retired identity's MLS state — ``libs/fauna-wasm/src/succession.rs``
-``succession_sweep_retry``), not a staged accident. Do not "cover" it here by
-asserting an error string this journey's arm never produces.
+*The `NoOldState` arm* — a device holding no conversation state for the
+retired identity (no predecessor seed, no store, nothing parked) answers in a
+sentence rather than sweeping. Every app here runs the press on the ceremony's
+own device, which holds that state, so this journey never reaches the arm. Do
+not "cover" it here by asserting an error string this journey's arm never
+produces.
 
 tier_3: needs a real ``fauna-nest`` binary built with ``test-hooks`` (the e2e
 default — ``tests/common/nest.py::build_node``). tui led; **linux joined
@@ -81,7 +81,10 @@ Rust-native and drive the shared ceremony in-process. **windows joined
 2026-09-20** as the third, through the ``succession_retry_group_sweep`` UniFFI
 face rather than in-process, which reaches the same shared ceremony; **macos and
 ios joined 2026-09-21** through that same face, one shared FaunaKit leg serving
-both apple targets, and web can only ever answer in words.
+both apple targets; **web joined 2026-10-12**, the one app with no local MLS
+store: its ceremony parks the ratcheted retired leaf in the successor's own
+replica plane, and its press sweeps from that parked snapshot
+(``libs/fauna-wasm/src/succession.rs`` ``retry_sweep_as_successor_web``).
 """
 from __future__ import annotations
 
@@ -120,8 +123,15 @@ from helpers.waiting import wait_until
 # UniFFI face over the pure retired-store resolver `RetiredIdentityStorePath`
 # (`Core/SuccessorStorePath.swift`), so the finishing arm is reachable on apple
 # too; the report the gate reads is serialized as `data.succession_sweep` by
-# `Testing/AppStateObservables.swift`. Not a declared absence for the rest: web
-# joins as its leg lands, and the file's ⚠ note above says which arm it covers.
+# `Testing/AppStateObservables.swift`. **web joined 2026-10-12** — it has no
+# local MLS store, so its ceremony (`sweep_as_successor_web`) parks the
+# ratcheted retired leaf at `retired/<old>/provider` in the successor's own
+# replica plane before the switch, and the press
+# (`retry_sweep_as_successor_web`) rebuilds the retired engine from that parked
+# snapshot and sweeps over the live successor engine — the same finishing arm,
+# over the parked resolver arm rather than a store path (`succession-
+# propagation.md` § Propagation → *Own device fleet*, the retired-leaf
+# sub-bullet).
 pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.tui,
@@ -129,6 +139,7 @@ pytestmark = [
     pytest.mark.windows,
     pytest.mark.macos,
     pytest.mark.ios,
+    pytest.mark.web,
 ]
 
 _SECRET_HEX_LEN = 64

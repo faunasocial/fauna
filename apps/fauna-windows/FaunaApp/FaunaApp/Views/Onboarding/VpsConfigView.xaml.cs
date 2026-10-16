@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Windows.System;
+using UpdateChannel = uniffi.fauna_provisioning.UpdateChannel;
 using S = FaunaApp.Core.Services.Strings;
 using FieldMetaPlain = uniffi.fauna_onboarding_machine.FieldMetaPlain;
 using FieldTypePlain = uniffi.fauna_onboarding_machine.FieldTypePlain;
@@ -67,6 +68,7 @@ public sealed partial class VpsConfigView : UserControl
         ViewModel = vm;
         DataContext = vm;
         BuildVpsProviderRow();
+        BuildUpdateChannelRows();
 
         // Same x:Bind refresh pattern as DnsConfigView: the VM raises
         // PropertyChanged with empty PropertyName on every observer tick,
@@ -78,6 +80,7 @@ public sealed partial class VpsConfigView : UserControl
             Bindings.Update();
             UpdateProviderSectionContent();
             SyncMailModeCheck();
+            SyncUpdateChannelRadios();
             // hosted-auth field button's label/pressability (onboarding.md
             // § 4) — CredsForm owns no tick of its own, matches DnsConfigView.
             CredsForm.RefreshHostedAuthButtons();
@@ -85,6 +88,7 @@ public sealed partial class VpsConfigView : UserControl
 
         UpdateProviderSectionContent();
         SyncMailModeCheck();
+        SyncUpdateChannelRadios();
     }
 
     /// <summary>
@@ -227,6 +231,92 @@ public sealed partial class VpsConfigView : UserControl
     {
         if (_syncingMailMode) return;
         ViewModel.SetProvisionMailMode(MailModeCheck.IsChecked == true);
+    }
+
+    /// <summary>
+    /// The update channels in the shared <c>UpdateChannel::ALL</c> order, with
+    /// the id each radio is keyed by and the resw key of its label.
+    /// </summary>
+    private static readonly (UpdateChannel Channel, string Id, string LabelKey)[] UpdateChannels =
+    {
+        (UpdateChannel.Stable, "stable", "onboarding/vps_config/update_channel_stable_label"),
+        (UpdateChannel.Test,   "test",   "onboarding/vps_config/update_channel_test_label"),
+        (UpdateChannel.Dev,    "dev",    "onboarding/vps_config/update_channel_dev_label"),
+    };
+
+    private readonly List<(UpdateChannel Channel, RadioButton Radio)> _updateChannelRadios = new();
+
+    /// <summary>
+    /// Suppresses <c>OnUpdateChannelChecked</c> while
+    /// <see cref="SyncUpdateChannelRadios"/> programmatically moves the
+    /// selection — otherwise the sync would re-fire <c>SetProvisionUpdateChannel</c>.
+    /// </summary>
+    private bool _syncingUpdateChannel;
+
+    /// <summary>
+    /// Populate <c>UpdateChannelRow</c> with one RadioButton per channel,
+    /// <c>vps-config-update-channel-row[&lt;id&gt;]</c>, each showing its label
+    /// and one-line description. The description is looked up by the key the
+    /// shared <c>UpdateChannelDescriptionKey</c> hands back (the compat-line
+    /// wording while the product major is 0) — never a per-channel constant.
+    /// Mirrors <c>apps/fauna-linux/src/views/onboarding/vps_config.rs</c>.
+    /// </summary>
+    private void BuildUpdateChannelRows()
+    {
+        foreach (var (channel, id, labelKey) in UpdateChannels)
+        {
+            var label = S.Get(labelKey);
+            var descDotted = OnboardingViewModel.UpdateChannelDescriptionKey(channel);
+            var descSlashed = descDotted.Replace('.', '/');
+            var descResolved = S.Get(descSlashed);
+            var desc = descResolved == descSlashed ? descDotted : descResolved;
+
+            var content = new StackPanel { Spacing = 2 };
+            content.Children.Add(new TextBlock { Text = label });
+            content.Children.Add(new TextBlock
+            {
+                Text = desc,
+                TextWrapping = TextWrapping.Wrap,
+                Opacity = 0.7,
+                FontSize = 12,
+            });
+
+            var radio = new RadioButton { Content = content, GroupName = "VpsUpdateChannel" };
+            radio.SetValue(AutomationProperties.AutomationIdProperty, $"vps-config-update-channel-row[{id}]");
+            radio.SetValue(AutomationProperties.NameProperty, label);
+            var c = channel;
+            radio.Checked += (_, _) => OnUpdateChannelChecked(c);
+            UpdateChannelRow.Children.Add(radio);
+            _updateChannelRadios.Add((channel, radio));
+        }
+    }
+
+    /// <summary>Radio selection → the shared setter (guarded against the tick re-sync).</summary>
+    private void OnUpdateChannelChecked(UpdateChannel channel)
+    {
+        if (_syncingUpdateChannel) return;
+        ViewModel.SetProvisionUpdateChannel(channel);
+    }
+
+    /// <summary>
+    /// Repaint the radios from the shared getter (the only source; nothing is
+    /// cached here) and publish each row's on/off word in HelpText, which the
+    /// e2e bridge reads as the <c>state</c> attribute.
+    /// </summary>
+    private void SyncUpdateChannelRadios()
+    {
+        var selected = ViewModel.ProvisionUpdateChannel;
+        _syncingUpdateChannel = true;
+        try
+        {
+            foreach (var (channel, radio) in _updateChannelRadios)
+            {
+                var on = channel == selected;
+                if (radio.IsChecked != on) radio.IsChecked = on;
+                radio.SetValue(AutomationProperties.HelpTextProperty, on ? "on" : "off");
+            }
+        }
+        finally { _syncingUpdateChannel = false; }
     }
 
     /// <summary>

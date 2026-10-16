@@ -40,23 +40,23 @@ pub use fauna_client_mail_settings::{
     BridgeApprovalAction, BridgeApprovalMachine, BridgeApprovalSnapshot, BridgeApprovalStatus,
     CaldavPolicyAction, CaldavPolicyMachine, CaldavPolicySnapshot, CaldavPolicyStatus,
     CarddavPolicyAction, CarddavPolicyMachine, CarddavPolicySnapshot, CarddavPolicyStatus,
-    CredentialKind, DispatchError, ExportFormat, ExportScope, ExportSessionState,
-    ExportSessionView, ExportStatus, ExportStep, ForwarderAction, ForwarderMachine,
-    ForwarderStatus, ForwarderView, ForwardersSnapshot, ImapPolicyView, ImportResult,
-    ImportSessionState, ImportSourceKind, ImportStatus, ImportStep, ImportTlsMode, ListDraft,
-    ListMembers, ListView, ListsStatus, LocalDomainAction, LocalDomainMachine, LocalDomainStatus,
-    LocalDomainView, LocalDomainsSnapshot, MailAliasesAction, MailAliasesMachine,
-    MailAliasesSnapshot, MailCredentialSummary, MailExportAction, MailExportMachine,
-    MailExportSnapshot, MailImportAction, MailImportMachine, MailImportSnapshot,
-    MailListMembersAction, MailListMembersMachine, MailListMembersSnapshot, MailListsAction,
-    MailListsMachine, MailListsSnapshot, MailPolicyAction, MailPolicyMachine, MailPolicySnapshot,
-    MailPolicyStatus, MailSettingsAction, MailSettingsMachine, MailSettingsSnapshot,
-    MailSpamAction, MailSpamMachine, MailSpamSnapshot, MailboxOption, MailboxProgressView,
-    MemberStatus, MemberView, MuaInstructions, NestError, OutboundPolicyView, PendingBridgeView,
-    PendingRotationStatus, PrimaryDomainRenameView, SettingsStatus, SourceMailboxOption,
-    SpamHistory, SpamPolicyView, SpamStatus, SpamTrainingView, SubmissionPolicyView, TrainingLabel,
-    TrainingSource, WebdavPolicyAction, WebdavPolicyMachine, WebdavPolicySnapshot,
-    WebdavPolicyStatus,
+    CredentialKind, DispatchError, DmarcForensicMode, DmarcPolicyView, ExportFormat, ExportScope,
+    ExportSessionState, ExportSessionView, ExportStatus, ExportStep, ForwarderAction,
+    ForwarderMachine, ForwarderStatus, ForwarderView, ForwardersSnapshot, ImapPolicyView,
+    ImportResult, ImportSessionState, ImportSourceKind, ImportStatus, ImportStep, ImportTlsMode,
+    ImportTotals, ListDraft, ListMembers, ListView, ListsStatus, LocalDomainAction,
+    LocalDomainMachine, LocalDomainStatus, LocalDomainView, LocalDomainsSnapshot,
+    MailAliasesAction, MailAliasesMachine, MailAliasesSnapshot, MailCredentialSummary,
+    MailExportAction, MailExportMachine, MailExportSnapshot, MailImportAction, MailImportMachine,
+    MailImportSnapshot, MailListMembersAction, MailListMembersMachine, MailListMembersSnapshot,
+    MailListsAction, MailListsMachine, MailListsSnapshot, MailPolicyAction, MailPolicyMachine,
+    MailPolicySnapshot, MailPolicyStatus, MailSettingsAction, MailSettingsMachine,
+    MailSettingsSnapshot, MailSpamAction, MailSpamMachine, MailSpamSnapshot, MailboxOption,
+    MailboxProgressView, MemberStatus, MemberView, MuaInstructions, NestError, OutboundPolicyView,
+    PendingBridgeView, PendingRotationStatus, PrimaryDomainRenameView, SettingsStatus,
+    SourceMailboxOption, SpamHistory, SpamPolicyView, SpamStatus, SpamTrainingView,
+    SubmissionPolicyView, TrainingLabel, TrainingSource, WebdavPolicyAction, WebdavPolicyMachine,
+    WebdavPolicySnapshot, WebdavPolicyStatus,
 };
 
 use crate::{FfiError, FfiNestClient, general_err};
@@ -97,6 +97,35 @@ pub fn build_dns_management_machine_with_credentials(
             Arc::new(crate::account_runtime::handle),
         ),
     ))
+}
+
+/// Seal the DNS-provider credential the onboarding wizard captured
+/// (`OnboardingMachine::captured_dns_credential`) into the admin's
+/// `fauna.state.dns` — the ONE call an app's `LoggedIn` hand-off makes
+/// (`onboarding-provisioning.md` § 4. DNS configuration), the UniFFI face of
+/// `fauna_client_dns::dispatch_seal_captured_dns_credential` so apple and
+/// android are call sites rather than a fourth and fifth dialect of the
+/// build-machine → map-fields → dispatch body. Best-effort and log-only: it
+/// resolves once the dispatch has answered and errs only on an undecodable
+/// `secret`; a seal failure is logged and the credential stays re-enterable
+/// from the admin DNS page.
+#[fauna_uniffi_async::export]
+pub async fn seal_captured_dns_credential(
+    nest: Arc<FfiNestClient>,
+    secret: Vec<u8>,
+    credential: fauna_onboarding_machine::CapturedDnsCredential,
+) -> Result<(), FfiError> {
+    let keypair = crate::keypair_from_bytes(&secret)?;
+    fauna_client_dns::dispatch_seal_captured_dns_credential(
+        nest.nest_arc(),
+        keypair,
+        Arc::new(crate::account_runtime::handle),
+        credential.provider_id,
+        credential.fields,
+        credential.label,
+    )
+    .await;
+    Ok(())
 }
 
 /// Build a [`LocalDomainMachine`] for the `admin-dns` page over `nest`'s
@@ -196,6 +225,25 @@ pub fn build_mail_settings_machine(
             ))),
         ),
     ))
+}
+
+/// Start the mail connect-time refresh on `nest`'s connection: once now and
+/// again after every reconnect of it, for the client's life
+/// (`mail-credentials.md` § Hard revoke → *Published before the nest moves*,
+/// rule (4)) — the shared
+/// `fauna_client_mail_settings::rpc_glue::refresh_epoch_schedule_on_every_connect`
+/// tui and linux spawn too. Call it ONCE per signed-in client, at the
+/// post-auth edge; it replaces an app's own connect and reconnect legs. Returns
+/// at once (the loop runs on a runtime worker and ends when the client drops);
+/// best-effort and log-only.
+#[fauna_uniffi_async::export]
+pub async fn start_mail_epoch_refresh_on_every_connect(nest: Arc<FfiNestClient>) {
+    tokio::spawn(
+        fauna_client_mail_settings::rpc_glue::refresh_epoch_schedule_on_every_connect(
+            &nest.nest_arc(),
+            crate::account_runtime::mail_store(),
+        ),
+    );
 }
 
 /// The post-claim serving enablement (`onboarding.md` § 3b *Mechanism*) — the

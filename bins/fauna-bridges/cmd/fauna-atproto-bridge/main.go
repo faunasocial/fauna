@@ -50,6 +50,7 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/atprotocrawl"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/atprotofirehose"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/atprotoid"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/atprotopds"
@@ -586,9 +587,23 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		// fans frames out to subscribed relays. SetOnCommit wakes it the instant
 		// a commit lands; its own poll tick is the backstop.
 		firehose := atprotofirehose.New(store, logger)
-		funnel.SetOnCommit(firehose.Notify)
+		// The relay announce (atproto-pds-bridge.md § Goal): requestCrawl for
+		// this PDS's own host after a commit lands. Every commit has passed the
+		// first-emit gate, so the host is announced only once an identity it
+		// serves resolves network-side. A domainless listener has no public host
+		// to announce, so it gets no relays.
+		var relays []string
+		if snapshot.PrimaryDomain != "" {
+			relays = crawlRelays()
+		}
+		announcer := atprotocrawl.New(pdsHost, relays, nil, logger)
+		funnel.SetOnCommit(func() {
+			firehose.Notify()
+			announcer.Notify()
+		})
 		atprotofirehose.Register(xrpcServer, firehose, logger)
 		go firehose.Run(ctx)
+		go announcer.Run(ctx)
 
 		// Boot self-check: reload every persisted repo through indigo's own
 		// loader before serving it, so storage that no longer parses is a loud
@@ -598,6 +613,12 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if repos, lerr := store.ListRepos(ctx); lerr != nil {
 			logger.Warn("atproto self-check: cannot list repos", "err", lerr)
 		} else {
+			// A store that already serves repos has been announced before, but a
+			// relay may have dropped a host that was down: say "still here" once
+			// per boot.
+			if len(repos) > 0 {
+				announcer.Notify()
+			}
 			for _, rp := range repos {
 				if verr := store.VerifyRepo(ctx, rp.DID, nil); verr != nil {
 					logger.Error("atproto self-check FAILED: persisted repo does not reload",
@@ -656,6 +677,33 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 					return
 				}
 				pds.HandlePermissionSetRequested(ctx, push.RequestID, push.NSID)
+			case "fauna.bridges.atproto.service_auth_requested":
+				// The oracle's atproto.service_auth class: the nest's door
+				// decided, and asks this bridge — the repo signing key's only
+				// holder — to mint (key-material-hierarchy.md § The oracle →
+				// *The bridge-held custodian*). A REQUEST, answered over
+				// deliver_service_auth off this read loop; the nest's own
+				// deadline is the fallback for a push that never lands.
+				var push struct {
+					RequestID []byte `cbor:"request_id"`
+					ActorID   []byte `cbor:"actor_id"`
+					DID       string `cbor:"did"`
+					Aud       string `cbor:"aud"`
+					Lxm       string `cbor:"lxm"`
+					Exp       int64  `cbor:"exp"`
+				}
+				if err := cbor.Unmarshal(payload, &push); err != nil {
+					logger.Warn("service_auth_requested push: undecodable payload", "err", err)
+					return
+				}
+				pds.HandleServiceAuthRequested(ctx, atprotopds.ServiceAuthPush{
+					RequestID: push.RequestID,
+					ActorID:   push.ActorID,
+					DID:       push.DID,
+					Aud:       push.Aud,
+					Lxm:       push.Lxm,
+					Exp:       push.Exp,
+				})
 			}
 		})
 
@@ -698,10 +746,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		}
 		refreshCancel()
 		tlsProvider.Start(ctx)
-		tlsConfig := &tls.Config{
-			GetCertificate: tlsProvider.GetCertificate,
-			MinVersion:     tls.VersionTLS12,
-		}
+		tlsConfig := bridgetls.HardenedServerConfig(tlsProvider.GetCertificate)
 
 		// Layering, innermost → outermost: proxyproto → TLS. proxyproto is
 		// INNERMOST — the PROXY-v2 header the SNI router prepends arrives on the

@@ -2,9 +2,9 @@
 driving the whole thing through the client UI** — the trusted-cert path for a
 nest that cannot use HTTP-01 (`tls-certificates.md` § B tier 2).
 
-This is the test that fixes example.com, and it is written to fix *any* nest whose
+This is the test that fixes the live nest, and it is written to fix *any* nest whose
 domain sits in the Hetzner account the token belongs to: nothing here is
-example.com-specific. Point `FAUNA_LIVE_NEST_URL` / `FAUNA_LIVE_MAIL_ADDRESS` at
+box-specific. Point `FAUNA_LIVE_NEST_URL` / `FAUNA_LIVE_MAIL_ADDRESS` at
 another deployment and the same run renews that one.
 
 **Why DNS-01 rather than the nest's own HTTP-01.** HTTP-01 needs inbound :80 at
@@ -51,7 +51,7 @@ Gating — all four are required, and the test skips loudly without them:
                               `i18n/providers.yaml` hetzner `api-token`).
   * ``FAUNA_E2E_LIVE=1``    — explicit opt-in. This spends real Let's Encrypt
                               issuance budget against a real domain.
-  * ``FAUNA_LIVE_NEST_URL`` — e.g. https://example.com
+  * ``FAUNA_LIVE_NEST_URL`` — e.g. https://dev.fauna.build
   * ``FAUNA_LIVE_MAIL_ADDRESS`` — the nest's admin handle (not derivable here:
                               `test_live_handle_derivation.py` classifies why).
                               The admin identity SEED is required too —
@@ -72,13 +72,15 @@ ceiling; a healthy run is minutes.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
-import time
+import ssl
 
 import pytest
 
 from helpers import live_box_door
+from helpers.waiting import wait_until
 from helpers.live_provision import skip_unless_live_drive_app
 
 _REQUIRED = (
@@ -150,6 +152,17 @@ def _badge_for(app, domain: str) -> str:
     return app.admin.cert_statuses()[_domain_index(app, domain)]
 
 
+def _served_cert_fingerprint(domain: str) -> str | None:
+    """SHA-256 of the certificate the nest serves for ``domain`` on :443, or
+    ``None`` when it cannot be fetched. Read without verification: the floor case
+    serves a self-signed cert, and *which* cert is served is the question."""
+    try:
+        pem = ssl.get_server_certificate((domain, 443), timeout=20)
+    except Exception:  # noqa: BLE001 — an unreachable :443 reads as "no cert"
+        return None
+    return hashlib.sha256(ssl.PEM_cert_to_DER_cert(pem)).hexdigest()
+
+
 def _wait_cert_status_loaded(app, domain: str, timeout: float = 120.0) -> str:
     """Wait until `domain`'s cert-status badge leaves the transient 'Checking…'
     loading state and reflects the actually-served certificate, then return it.
@@ -169,29 +182,30 @@ def _wait_cert_status_loaded(app, domain: str, timeout: float = 120.0) -> str:
     returns as soon as the badge is no longer loading, preserving the intended
     `before_expiry is None` floor case.
     """
-    deadline = time.monotonic() + timeout
-    last = _badge_for(app, domain)
-    while time.monotonic() < deadline:
-        last = _badge_for(app, domain)
-        if _badge_expiry(last) is not None or "checking" not in last.lower():
-            return last
+    def _loaded() -> str | None:
+        badge = _badge_for(app, domain)
+        if _badge_expiry(badge) is not None or "checking" not in badge.lower():
+            return badge
         app.admin.refresh_dns()
-        time.sleep(3.0)
-    return last
+        return None
+
+    return wait_until(
+        _loaded,
+        timeout,
+        interval=3.0,
+        diagnose=lambda: f"{domain}'s cert-status badge stayed loading: {_badge_for(app, domain)!r}",
+    )
 
 
 def _open_dns_page(app, timeout: float = 90.0) -> None:
     """Navigate to `admin-dns` and wait for the domain matrix to render (the nav
     kicks async `list_records` + `cert_status` + `verify_records` round trips)."""
     app.admin.navigate_dns()
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if any(d.strip() for d in app.admin.dns_domain_names()):
-            return
-        time.sleep(2.0)
-    pytest.fail(
-        f"admin-dns never rendered a domain row within {timeout:.0f}s; "
-        f"error={app.error_text()!r}"
+    wait_until(
+        lambda: any(d.strip() for d in app.admin.dns_domain_names()),
+        timeout,
+        interval=2.0,
+        diagnose=lambda: f"admin-dns never rendered a domain row; error={app.error_text()!r}",
     )
 
 
@@ -206,10 +220,9 @@ def _sign_in_as_admin(app, timeout: float = 180.0) -> None:
     ob.run_handle_check(timeout=60)
     ob.submit_handle()
 
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    def _signed_in() -> bool:
         if app.driver.is_visible("feed-view") or app.driver.is_visible("feed-tab"):
-            return
+            return True
         if app.driver.is_visible("claim-code-input"):
             pytest.fail(
                 f"the nest at {ADDRESS!r} is UNCLAIMED — claim it from a client first. "
@@ -220,9 +233,13 @@ def _sign_in_as_admin(app, timeout: float = 180.0) -> None:
                 app.driver.click("launch-retry-button")
             except Exception:
                 pass
-        time.sleep(2.0)
-    pytest.fail(
-        f"sign-in never reached the feed within {timeout:.0f}s; error={app.error_text()!r}"
+        return False
+
+    wait_until(
+        _signed_in,
+        timeout,
+        interval=2.0,
+        diagnose=lambda: f"sign-in never reached the feed; error={app.error_text()!r}",
     )
 
 
@@ -247,7 +264,10 @@ def test_dns01_reissues_the_nest_certificate_through_the_client_ui(app):
     The assertion is deliberately a *strict* advance rather than "a trusted cert
     is served": the nest already serves a trusted cert on the day this runs, so
     `valid-trusted` would pass without anything having happened. Only a later
-    `notAfter` distinguishes a real re-issue from a no-op.
+    `notAfter` distinguishes a real re-issue from a no-op. When the badge showed
+    no date before (the self-signed floor withholds one), there is no earlier
+    date to beat, so the certificate served on :443 must itself have changed —
+    a date merely appearing is not proof that anything was issued.
     """
     skip_unless_live_drive_app(
         app.driver, surface="the live DNS-01 cert-renewal drive (native order core)"
@@ -269,7 +289,8 @@ def test_dns01_reissues_the_nest_certificate_through_the_client_ui(app):
     # assertion below (the 2026-07-23 false-green). See `_wait_cert_status_loaded`.
     before_badge = _wait_cert_status_loaded(app, TARGET_DOMAIN)
     before_expiry = _badge_expiry(before_badge)
-    print(f"[dns01] before: {before_badge!r} (expiry {before_expiry})")
+    before_served = _served_cert_fingerprint(TARGET_DOMAIN)
+    print(f"[dns01] before: {before_badge!r} (expiry {before_expiry}; served {before_served})")
 
     # Precondition, asserted not assumed: the client holds NO DNS credential, so
     # this run genuinely exercises "admin supplies the token for the first time".
@@ -284,12 +305,14 @@ def test_dns01_reissues_the_nest_certificate_through_the_client_ui(app):
         # bad token never lands — and the zone list that comes back is what
         # decides which domains are manageable.
         app.admin.add_dns_credential("hetzner", {"api-token": token})
-        deadline = time.monotonic() + 60.0
-        while time.monotonic() < deadline and app.admin.dns_credential_count() < 1:
-            time.sleep(2.0)
-        assert app.admin.dns_credential_count() >= 1, (
-            "the Hetzner credential was not stored — verify() failed against the "
-            f"provider API. error={app.error_text()!r}"
+        wait_until(
+            lambda: app.admin.dns_credential_count() >= 1,
+            60.0,
+            interval=2.0,
+            diagnose=lambda: (
+                "the Hetzner credential was not stored — verify() failed against the "
+                f"provider API. error={app.error_text()!r}"
+            ),
         )
         assert "hetzner" in " ".join(app.admin.dns_credential_providers()).lower(), (
             f"expected a hetzner credential row; got {app.admin.dns_credential_providers()!r}"
@@ -309,17 +332,19 @@ def test_dns01_reissues_the_nest_certificate_through_the_client_ui(app):
         if app.admin.dns_domain_modes()[idx].strip().lower() != "fauna-managed":
             app.admin.toggle_domain_mode(idx)
             flipped_mode = True
-            deadline = time.monotonic() + 60.0
-            while time.monotonic() < deadline:
-                idx = _domain_index(app, TARGET_DOMAIN)
-                if app.admin.dns_domain_modes()[idx].strip().lower() == "fauna-managed":
-                    break
-                time.sleep(2.0)
-        idx = _domain_index(app, TARGET_DOMAIN)
-        assert app.admin.dns_domain_modes()[idx].strip().lower() == "fauna-managed", (
-            f"{TARGET_DOMAIN} did not switch to Fauna-managed; "
-            f"modes={app.admin.dns_domain_modes()!r} error={app.error_text()!r}"
+        wait_until(
+            lambda: app.admin.dns_domain_modes()[_domain_index(app, TARGET_DOMAIN)]
+            .strip()
+            .lower()
+            == "fauna-managed",
+            60.0,
+            interval=2.0,
+            diagnose=lambda: (
+                f"{TARGET_DOMAIN} did not switch to Fauna-managed; "
+                f"modes={app.admin.dns_domain_modes()!r} error={app.error_text()!r}"
+            ),
         )
+        idx = _domain_index(app, TARGET_DOMAIN)
 
         # ── 3. Click get/renew certificate ────────────────────────────────────
         # One dispatch runs the whole order client-side: create/reuse the ACME
@@ -337,31 +362,36 @@ def test_dns01_reissues_the_nest_certificate_through_the_client_ui(app):
         # move only after that. Deadline-poll: a fast provider run pays none of
         # this. Stays under the live conftest's 5400 s per-test cap with room
         # for sign-in + validation + install.
-        deadline = time.monotonic() + 3000.0
-        after_expiry = None
-        last_badge = ""
-        while time.monotonic() < deadline:
-            time.sleep(15.0)
+        seen = {"badge": "", "expiry": None, "served": before_served}
+
+        def _reissued() -> bool:
             app.admin.refresh_dns()  # re-runs list_records + cert_status + verify
-            last_badge = _badge_for(app, TARGET_DOMAIN)
-            after_expiry = _badge_expiry(last_badge)
-            if after_expiry and (before_expiry is None or after_expiry > before_expiry):
-                break
+            seen["badge"] = _badge_for(app, TARGET_DOMAIN)
+            seen["expiry"] = _badge_expiry(seen["badge"])
             err = app.error_text()
             if err:
                 print(f"[dns01] page error while polling: {err!r}")
+            if not seen["expiry"]:
+                return False
+            if before_expiry is not None:
+                return seen["expiry"] > before_expiry
+            # No earlier date to beat: the served certificate itself must change.
+            seen["served"] = _served_cert_fingerprint(TARGET_DOMAIN)
+            return seen["served"] is not None and seen["served"] != before_served
 
-        assert after_expiry, (
-            f"the cert-status badge never showed an expiry date for {TARGET_DOMAIN}; "
-            f"badge={last_badge!r} error={app.error_text()!r}"
+        wait_until(
+            _reissued,
+            3000.0,
+            interval=15.0,
+            diagnose=lambda: (
+                f"the served certificate did not change: {TARGET_DOMAIN}'s badge reads "
+                f"{seen['badge']!r} (expiry {seen['expiry']}, was {before_expiry}; served "
+                f"{seen['served']}, was {before_served}). The ACME order, the "
+                f"_acme-challenge publish, the seal-to-nest delivery, or the nest-side "
+                f"install did not complete. error={app.error_text()!r}"
+            ),
         )
-        assert before_expiry is None or after_expiry > before_expiry, (
-            f"the served certificate did not change: {TARGET_DOMAIN} still expires "
-            f"{after_expiry} (was {before_expiry}). The ACME order, the "
-            f"_acme-challenge publish, the seal-to-nest delivery, or the nest-side "
-            f"install did not complete. badge={last_badge!r} error={app.error_text()!r}"
-        )
-        print(f"[dns01] after: {last_badge!r} — expiry {before_expiry} → {after_expiry}")
+        print(f"[dns01] after: {seen['badge']!r} — expiry {before_expiry} → {seen['expiry']}")
 
     finally:
         # ── 5. Leave no durable trace but the new certificate ─────────────────

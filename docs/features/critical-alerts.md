@@ -41,7 +41,7 @@ Stamped 2026-09-19 at 8ac16765e4.
    - `tests/e2e-unified/tests/test_domain_expiry_alert_e2e.py::test_a_lapsing_registration_reaches_the_every_page_banner_and_a_renewal_clears_it`
    - `tests/e2e-unified/tests/test_domain_expiry_alert_e2e.py::test_an_admin_is_warned_with_the_remedy_that_is_theirs`
 9. [app] A member whose account is being evicted is told on every page when they will lose access and when their data will be deleted, for as long as the eviction stands — `docs/goal/behavior/critical-alerts.md` § Feeders
-   - (none)
+   - `tests/e2e-unified/tests/test_eviction_warning_alert_e2e.py::test_an_evicted_member_is_warned_with_both_dates_and_a_cancel_clears_it`
 
 ## Status
 
@@ -54,7 +54,7 @@ Stamped 2026-09-19 at 8ac16765e4.
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |
+| tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -72,5 +72,5 @@ Stamped 2026-09-19 at 8ac16765e4.
 | 7 | app | `tests/e2e-unified/tests/test_audit_floor_nest_silence.py::test_the_audit_floor_outlives_the_nests_silence` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_domain_expiry_alert_e2e.py::test_a_lapsing_registration_reaches_the_every_page_banner_and_a_renewal_clears_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_domain_expiry_alert_e2e.py::test_an_admin_is_warned_with_the_remedy_that_is_theirs` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 9 | app | (none) | — |
+| 9 | app | `tests/e2e-unified/tests/test_eviction_warning_alert_e2e.py::test_an_evicted_member_is_warned_with_both_dates_and_a_cancel_clears_it` | linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

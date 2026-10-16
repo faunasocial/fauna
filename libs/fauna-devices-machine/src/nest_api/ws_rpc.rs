@@ -37,6 +37,10 @@ pub struct WsRpcDevicesNest<R: RpcRequester> {
     nest: R,
     folders: FoldersClient<R>,
     sync: SyncClient<R>,
+    /// The web plane's client — only the website toggle's subdomain read
+    /// rides it, so it exists only with the `web` feature (a build that
+    /// excises web publishing carries no web-plane sender).
+    #[cfg(feature = "web")]
     web: fauna_client_web::WebClient<R>,
     /// The account's folder-key custody (`fauna.state.folder-keys`) — the
     /// delete helper retires the set's custody there before the nest delete
@@ -78,6 +82,7 @@ where
         Self {
             folders: FoldersClient::new(nest.clone()),
             sync: SyncClient::new(nest.clone()),
+            #[cfg(feature = "web")]
             web: fauna_client_web::WebClient::new(nest.clone()),
             signer: identity
                 .as_ref()
@@ -103,6 +108,7 @@ where
             .collect()
     }
 
+    #[cfg(feature = "web")]
     async fn do_web_subdomain_enabled(&self) -> Option<bool> {
         // Best-effort by the trait's contract: any failure (a transport
         // fault) is `None`, and the website hint degrades
@@ -268,7 +274,9 @@ where
         let hash = fauna_core::sync::path_hash(path);
         let listing = self
             .sync
-            .versions_list_judged(hash, folder, true, &seat)
+            // The review list's conflict row names its set by name alone
+            // (`SyncConflict.folder`); no row is held here.
+            .versions_list_judged(hash, folder, true, &seat, None)
             .await
             .map_err(map_err)?;
         Ok(fauna_client_sync::restore_branch::JudgedCandidate::find(
@@ -385,6 +393,17 @@ where
             .map_err(map_err)
     }
 
+    async fn do_set_folder_exclusive_editing(
+        &self,
+        name: &str,
+        on: bool,
+    ) -> Result<(), DevicesApiError> {
+        self.folders
+            .set_exclusive_editing(name, on)
+            .await
+            .map_err(map_err)
+    }
+
     async fn do_set_folder_place(
         &self,
         name: &str,
@@ -479,6 +498,8 @@ where
                 size_bytes,
                 content_key_version,
                 path_sealed,
+                // The review list names its set by name; no row is held here.
+                None,
             )
             .await
             .map(|_| ())
@@ -536,6 +557,16 @@ fauna_core::map_rpc_error! {
 // `StoreFollowedFoldersSource` has one impl per target (the transport types and
 // the `Send` bound differ), so what they share is written once here and each
 // impl only wires it.
+
+/// The key of a remembered availability verdict: the follow's full identity,
+/// `(home_nest_url, folder_id)` (`ui/media.md` § Followed public folders).
+/// `folder_id` alone is a per-nest AUTOINCREMENT, so two follows on different
+/// home nests can share it and would otherwise read one another's verdict.
+type AvailabilityKey = (String, i64);
+
+fn availability_key(home_nest_url: &str, folder_id: i64) -> AvailabilityKey {
+    (home_nest_url.to_owned(), folder_id)
+}
 
 /// One followed row from its stored record and its verdict — the projection
 /// both targets make. The owner label is precomputed here, once, so no app
@@ -616,6 +647,7 @@ mod native {
         async fn webdav_served(&self, rows: &[WireFolderSummary]) -> Vec<bool> {
             self.do_webdav_served(rows).await
         }
+        #[cfg(feature = "web")]
         async fn web_subdomain_enabled(&self) -> Option<bool> {
             self.do_web_subdomain_enabled().await
         }
@@ -689,6 +721,13 @@ mod native {
             residency: &str,
         ) -> Result<(), DevicesApiError> {
             self.do_set_folder_residency(name, residency).await
+        }
+        async fn set_folder_exclusive_editing(
+            &self,
+            name: &str,
+            on: bool,
+        ) -> Result<(), DevicesApiError> {
+            self.do_set_folder_exclusive_editing(name, on).await
         }
         async fn set_folder_place(
             &self,
@@ -794,7 +833,8 @@ mod native {
         store: Arc<dyn fauna_client_config::FollowsStore>,
         /// The connection the availability probe and the browse fetch ride.
         nest: Arc<NestClient>,
-        /// Remembered availability verdicts, keyed by `folder_id`.
+        /// Remembered availability verdicts, keyed by the follow's full identity
+        /// `(home_nest_url, folder_id)` ([`super::AvailabilityKey`]).
         ///
         /// Lives here because the machine holds this source for its own lifetime
         /// (`set_followed_folders_source` is called once), so the budget spans
@@ -802,7 +842,10 @@ mod native {
         /// ever per follow, while the devices page refreshes on every nav edge.
         /// Locked only around the read and the write-back, never across an await.
         seen: std::sync::Mutex<
-            std::collections::HashMap<i64, fauna_client_folders::public_follow::CachedAvailability>,
+            std::collections::HashMap<
+                super::AvailabilityKey,
+                fauna_client_folders::public_follow::CachedAvailability,
+            >,
         >,
         /// The rows the last successful read answered — what a refresh shows
         /// while the records cannot be read ([`super::rows_when_unreadable`]).
@@ -863,7 +906,10 @@ mod native {
                     .expect("followed-availability cache poisoned");
                 records
                     .iter()
-                    .map(|r| seen.get(&r.folder_id).cloned())
+                    .map(|r| {
+                        seen.get(&super::availability_key(&r.home_nest_url, r.folder_id))
+                            .cloned()
+                    })
                     .collect()
             };
 
@@ -882,11 +928,18 @@ mod native {
                     .lock()
                     .expect("followed-availability cache poisoned");
                 for (record, verdict) in records.iter().zip(&verdicts) {
-                    seen.insert(record.folder_id, verdict.clone());
+                    seen.insert(
+                        super::availability_key(&record.home_nest_url, record.folder_id),
+                        verdict.clone(),
+                    );
                 }
                 // Drop entries for follows the user has since removed, so the map
                 // tracks the follows rather than growing without bound.
-                seen.retain(|id, _| records.iter().any(|r| r.folder_id == *id));
+                seen.retain(|key, _| {
+                    records
+                        .iter()
+                        .any(|r| super::availability_key(&r.home_nest_url, r.folder_id) == *key)
+                });
             }
 
             let rows: Vec<(Option<String>, crate::snapshots::FollowedFolderSummary)> = records
@@ -978,8 +1031,9 @@ mod native {
                     .seen
                     .lock()
                     .expect("followed-availability cache poisoned");
-                let verdict = browse_verdict(&record, seen.get(&folder_id), fetched, now_ms);
-                seen.insert(folder_id, verdict);
+                let key = super::availability_key(&record.home_nest_url, record.folder_id);
+                let verdict = browse_verdict(&record, seen.get(&key), fetched, now_ms);
+                seen.insert(key, verdict);
             }
 
             match listing {
@@ -1017,6 +1071,7 @@ mod wasm {
         async fn webdav_served(&self, rows: &[WireFolderSummary]) -> Vec<bool> {
             self.do_webdav_served(rows).await
         }
+        #[cfg(feature = "web")]
         async fn web_subdomain_enabled(&self) -> Option<bool> {
             self.do_web_subdomain_enabled().await
         }
@@ -1090,6 +1145,13 @@ mod wasm {
             residency: &str,
         ) -> Result<(), DevicesApiError> {
             self.do_set_folder_residency(name, residency).await
+        }
+        async fn set_folder_exclusive_editing(
+            &self,
+            name: &str,
+            on: bool,
+        ) -> Result<(), DevicesApiError> {
+            self.do_set_folder_exclusive_editing(name, on).await
         }
         async fn set_folder_place(
             &self,
@@ -1206,7 +1268,8 @@ mod wasm {
         store: Arc<dyn fauna_client_config::FollowsStore>,
         /// The connection the availability probe and the browse fetch ride.
         nest: WsRpcClient,
-        /// Remembered availability verdicts, keyed by `folder_id`.
+        /// Remembered availability verdicts, keyed by the follow's full identity
+        /// `(home_nest_url, folder_id)` ([`super::AvailabilityKey`]).
         ///
         /// Lives here because the machine holds this source for its own lifetime
         /// (`set_followed_folders_source` is called once), so the budget spans
@@ -1214,7 +1277,10 @@ mod wasm {
         /// ever per follow, while the devices page refreshes on every nav edge.
         /// Locked only around the read and the write-back, never across an await.
         seen: std::sync::Mutex<
-            std::collections::HashMap<i64, fauna_client_folders::public_follow::CachedAvailability>,
+            std::collections::HashMap<
+                super::AvailabilityKey,
+                fauna_client_folders::public_follow::CachedAvailability,
+            >,
         >,
         /// The rows the last successful read answered — what a refresh shows
         /// while the records cannot be read ([`super::rows_when_unreadable`]).
@@ -1272,7 +1338,10 @@ mod wasm {
                     .expect("followed-availability cache poisoned");
                 records
                     .iter()
-                    .map(|r| seen.get(&r.folder_id).cloned())
+                    .map(|r| {
+                        seen.get(&super::availability_key(&r.home_nest_url, r.folder_id))
+                            .cloned()
+                    })
                     .collect()
             };
 
@@ -1291,11 +1360,18 @@ mod wasm {
                     .lock()
                     .expect("followed-availability cache poisoned");
                 for (record, verdict) in records.iter().zip(&verdicts) {
-                    seen.insert(record.folder_id, verdict.clone());
+                    seen.insert(
+                        super::availability_key(&record.home_nest_url, record.folder_id),
+                        verdict.clone(),
+                    );
                 }
                 // Drop entries for follows the user has since removed, so the map
                 // tracks the follows rather than growing without bound.
-                seen.retain(|id, _| records.iter().any(|r| r.folder_id == *id));
+                seen.retain(|key, _| {
+                    records
+                        .iter()
+                        .any(|r| super::availability_key(&r.home_nest_url, r.folder_id) == *key)
+                });
             }
 
             let rows: Vec<(Option<String>, crate::snapshots::FollowedFolderSummary)> = records
@@ -1384,8 +1460,9 @@ mod wasm {
                     .seen
                     .lock()
                     .expect("followed-availability cache poisoned");
-                let verdict = browse_verdict(&record, seen.get(&folder_id), fetched, now_ms);
-                seen.insert(folder_id, verdict);
+                let key = super::availability_key(&record.home_nest_url, record.folder_id);
+                let verdict = browse_verdict(&record, seen.get(&key), fetched, now_ms);
+                seen.insert(key, verdict);
             }
 
             match listing {

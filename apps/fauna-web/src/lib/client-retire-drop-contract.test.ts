@@ -151,3 +151,81 @@ Deno.test("the drop is ordered after the retire, not before it", () => {
     );
   }
 });
+
+/** An exported function's body, from its declaration to the next top-level
+ *  declaration — the same crude slice as `getClientBody`. */
+function exportedBody(src: string, name: string): string {
+  const start = src.indexOf(`export function ${name}(`);
+  if (start < 0) {
+    throw new Error(
+      `rpc.ts no longer exports \`${name}\` — the singleton's key-independent ` +
+        `teardown door (the onboarding LoggedIn terminal's retire). If it moved, ` +
+        `re-point this contract rather than deleting it.`,
+    );
+  }
+  const rest = src.slice(start + 1);
+  const end = rest.search(/\n(?:export )?(?:async )?function /);
+  return end < 0 ? rest : rest.slice(0, end);
+}
+
+// The second teardown door: `retireRpcClient` drops the singleton whatever its
+// key, for a client that died for a reason the key never sees (a pre-account
+// `not_registered` stop, which a claim does not change the key of). It owes the
+// same drop as the key change, for the same reason — and it is the door every
+// further teardown (sign-out) shares, so it may not grow a list of its own.
+Deno.test("the key-independent retire runs the canonical drop", () => {
+  const body = exportedBody(rpcSource(), "retireRpcClient");
+  if (!body.includes("retireClient(")) {
+    throw new Error("retireRpcClient no longer retires the client it drops");
+  }
+  if (!body.includes(`${DROP}()`)) {
+    throw new Error(
+      `retireRpcClient drops the singleton but never calls ${DROP}(): every ` +
+        `manager built over the retired client keeps its dead transport, and ` +
+        `getFeedManager() vends it forever.`,
+    );
+  }
+});
+
+// The third teardown door's caller: sign-out. `identity.logout()` once cleared
+// the token cache and the identity and never closed the singleton, so the
+// signed-out actor's client kept reconnecting with its secret until a reload.
+// The retire is ordered after the awaited runtime stop (and so after the
+// fire-and-forget push-row drop has taken the live client — retiring first
+// would let that drop's `getClient` rebuild a client for the signed-out actor)
+// and before the identity is cleared.
+Deno.test("sign-out retires the rpc singleton, after the runtime stop", () => {
+  const store = stripComments(
+    Deno.readTextFileSync(new URL("./store.ts", import.meta.url)),
+  );
+  const start = store.indexOf("async logout()");
+  if (start < 0) throw new Error("store.ts no longer declares `async logout()`");
+  const rest = store.slice(start);
+  const end = rest.search(/\n {4}\},?\n/);
+  const body = end < 0 ? rest : rest.slice(0, end);
+  const retire = body.indexOf("retireRpcClient()");
+  if (retire < 0) {
+    throw new Error(
+      "logout() never calls retireRpcClient(): the signed-out actor's WS-RPC " +
+        "client keeps reconnecting with its secret until the next sign-in or reload.",
+    );
+  }
+  if (!/import\(\s*'\.\/rpc'\s*\)/.test(body)) {
+    throw new Error(
+      "logout() must reach rpc.ts through a dynamic import('./rpc') — " +
+        "rpc.ts → store.ts is a static cycle.",
+    );
+  }
+  const stop = body.indexOf("stopAccountRuntime(");
+  if (stop < 0 || retire < stop) {
+    throw new Error(
+      "retireRpcClient() must run AFTER the awaited stopAccountRuntime(): the " +
+        "push-row drop's getClient would otherwise rebuild a client for the " +
+        "signed-out actor.",
+    );
+  }
+  const clear = body.indexOf("set(null)");
+  if (clear >= 0 && clear < retire) {
+    throw new Error("retireRpcClient() must run before the identity is cleared");
+  }
+});

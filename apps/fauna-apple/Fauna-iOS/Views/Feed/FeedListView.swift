@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 import FaunaKit
 
@@ -716,3 +719,4 @@ struct FeedListView: View {
         FaunaKit.openPostCard(post, vm: vm, selectedPost: &selectedPost)
     }
 }
+#endif // !FAUNA_KIDS

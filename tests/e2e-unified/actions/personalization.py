@@ -10,7 +10,7 @@ import time
 
 from drivers.base import PlatformDriver
 from helpers import budgets
-from helpers.waiting import wait_until
+from helpers.waiting import account_pump_role, await_account_runtime_assembled, wait_until
 
 
 class PersonalizationActions:
@@ -29,7 +29,20 @@ class PersonalizationActions:
     # ── trained-topics facet ─────────────────────────────────────────────
 
     def create_topic(self, name: str) -> None:
-        """Create a trained topic via the inline add row."""
+        """Create a trained topic via the inline add row.
+
+        The registry rests in the account store, and a gesture made before
+        this app's account runtime has assembled waits for it inside the
+        store seam (up to ``ACCOUNT_HANDLE_WAIT``, 60 s) — longer than the
+        caller's round-trip budget. Right after a per-module relaunch the
+        assembly can still be running (on web it follows the conversations
+        manager's build), and a create then simply had not returned yet when
+        the caller gave up: no row, no error. So the first write waits for the
+        runtime's own role, the state the seam waits on — the barrier
+        ``atproto_hosted_logged_in_app`` takes for the same reason. An app that
+        publishes no role key offers no such barrier (convention 11)."""
+        if account_pump_role(self.driver) is not None:
+            await_account_runtime_assembled(self.driver)
         self.driver.wait_for("personalization-trained-factor-name-input")
         self.driver.clear_and_type("personalization-trained-factor-name-input", name)
         self.driver.click("personalization-trained-factor-create-button")
@@ -46,6 +59,40 @@ class PersonalizationActions:
             time.sleep(0.2)
             count = self.topic_count()
         return count
+
+    def wait_for_topic_reopening(self, name: str, predicate=None,
+                                 timeout: float = budgets.ACCOUNT_RUNTIME_ASSEMBLY_S) -> int:
+        """Re-open the page until it lists the topic ``name`` (and, if given,
+        ``predicate(index)`` holds for its row); return the row's index — for a
+        seat whose topics arrive from ANOTHER device.
+
+        The registry rides the account-state plane: another device's write
+        reaches this one only once that device's pump has published it and
+        this one's has walked it, and the page reads it at page open
+        (`topic-factors.md` § Wire & registry, § Placement). Until then the
+        page may list an OLDER registry, so the wait keys on the name, never a
+        count. Each try is a page open, the goal doc's own fetch point, and the
+        poll is for the state, never for time passing (convention 14)."""
+        found = {}
+
+        def listed():
+            self.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+            self.navigate()
+            self.wait_for_topic_count(1, timeout=3.0)
+            names = self.topic_names()
+            found["names"] = names
+            index = next((i for i, n in enumerate(names) if name in n), None)
+            if index is None or (predicate is not None and not predicate(index)):
+                return False
+            found["index"] = index
+            return True
+
+        wait_until(
+            listed,
+            timeout,
+            diagnose=lambda: f"{name!r} never listed as wanted; the page lists {found.get('names')!r}",
+        )
+        return found["index"]
 
     def topic_name(self, index: int = 0) -> str:
         return self.driver.get_text("personalization-trained-factor-name", index=index) or ""
@@ -77,7 +124,18 @@ class PersonalizationActions:
                 error = self.driver.get_text("error-message")
             except Exception as exc:  # the page may not be mounted at all
                 error = f"<unreadable: {exc}>"
-            return f"rows={self.topic_names()!r}; error={error!r}"
+            try:
+                # The create button is disabled while a gesture is in flight:
+                # a red with no rows and no error then names a gesture that
+                # never returned, not one that never ran.
+                in_flight = not self.driver.is_enabled("personalization-trained-factor-create-button")
+            except Exception as exc:
+                in_flight = f"<unreadable: {exc}>"
+            return (
+                f"rows={self.topic_names()!r}; error={error!r}; "
+                f"gesture_in_flight={in_flight!r}; "
+                f"account_runtime(up, holder)={account_pump_role(self.driver)!r}"
+            )
 
         wait_until(
             lambda: any(name in shown for shown in self.topic_names()),
@@ -111,16 +169,17 @@ class PersonalizationActions:
             or ""
         )
 
-    def topic_factor_key(self) -> str:
-        """The FIRST row's minted stable composition key (``topic:<hex>``).
+    def topic_factor_key(self, index: int = 0) -> str:
+        """Row ``index``'s minted stable composition key (``topic:<hex>``).
 
         Read from the row's ``factor`` test-attr (hex only — a CSS class can't
         carry ``:``): the registry is sealed under the user's BackupKey, so no
         wire read can answer, and ``feed-factor-select``'s ``select()`` needs
-        the stable key. Indexed reads can ride a scoped ``get_attr`` when a
-        multi-topic test needs them.
+        the stable key.
         """
-        hexpart = self.driver.get_attr("personalization-trained-factor-item", "factor")
+        hexpart = self.driver.get_attr(
+            "personalization-trained-factor-item", "factor", index=index
+        )
         assert hexpart, "trained-factor row exposes no `factor` test-attr"
         return f"topic:{hexpart}"
 
@@ -344,6 +403,21 @@ class PersonalizationActions:
     def type_publish_name(self, name: str) -> None:
         self.driver.clear_and_type(
             "personalization-trained-factor-publish-name-input", name
+        )
+
+    def publish_name_text(self) -> str:
+        """What the public-name input currently holds — blank on every open,
+        never the sealed registry name (topic-factors.md § Publishing)."""
+        return (
+            self.driver.get_text("personalization-trained-factor-publish-name-input")
+            or ""
+        )
+
+    def publish_ngram_refusal_text(self) -> str:
+        """The refusal state's copy — it says what would change the answer."""
+        return (
+            self.driver.get_text("personalization-trained-factor-publish-ngram-empty")
+            or ""
         )
 
     def publish_submit_enabled(self) -> bool:

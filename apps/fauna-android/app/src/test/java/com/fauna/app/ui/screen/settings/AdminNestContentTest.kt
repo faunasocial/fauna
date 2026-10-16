@@ -136,6 +136,7 @@ class AdminNestContentTest {
             )
         },
         onFactoryReset: () -> Unit = {},
+        onRetire: () -> Unit = {},
         reports: AdminNestVM.ReportsState = AdminNestVM.ReportsState(),
         takedownPrefill: com.fauna.ffi.FfiTakedownPrefill? = null,
         onResolveReport: (com.fauna.ffi.FfiReportQueueRow, Boolean) -> Unit = { _, _ -> },
@@ -187,6 +188,7 @@ class AdminNestContentTest {
                 onCancelOauthForced = onCancelOauthForced,
                 onConfirmOauthForced = onConfirmOauthForced,
                 onFactoryReset = onFactoryReset,
+                onRetire = onRetire,
                 // FFI-free stub of the shared `parse_port` (range logic is unit-tested
                 // in shared Rust); keeps the serving-port save path off the native FFI.
                 parsePort = { it.toIntOrNull()?.takeIf { p -> p in 1..65535 } },
@@ -298,6 +300,20 @@ class AdminNestContentTest {
     fun pairingToggleDisabledWhileWorking() {
         render(working = true)
         composeTestRule.onNodeWithTag("admin-service-pairing-toggle").assertIsNotEnabled()
+    }
+
+    /**
+     * `nest-retirement.md` § Layout & flow: the retire section sits beside
+     * Factory reset (its own section and button ids) and its button opens the
+     * `nest_retire` page — it needs only a cloud token, so nothing gates it.
+     */
+    @Test
+    fun retireEntryIsPaintedAndOpensThePage() {
+        var opened = 0
+        render(onRetire = { opened++ })
+        composeTestRule.onNodeWithTag("admin-nest-retire-section").performScrollTo().assertExists()
+        composeTestRule.onNodeWithTag("admin-nest-retire-button").performScrollTo().performClick()
+        assertEquals(1, opened)
     }
 
     @Test

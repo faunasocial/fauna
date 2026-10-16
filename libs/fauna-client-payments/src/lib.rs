@@ -24,11 +24,15 @@ use fauna_core::data::Timestamp;
 use fauna_protocol::RpcRequester;
 use fauna_protocol::payments::{
     ClaimItem, ClaimMintReply, ClaimMintRequest, ClaimRedeemReply, ClaimRedeemRequest,
-    ClaimsListReply, ClaimsListRequest, ProviderItem, ProviderRemoveReply, ProviderRemoveRequest,
-    ProviderSetReply, ProviderSetRequest, ProvidersListReply, ProvidersListRequest,
+    ClaimVoidReply, ClaimVoidRequest, ClaimsListReply, ClaimsListRequest, ProviderItem,
+    ProviderRemoveReply, ProviderRemoveRequest, ProviderSetReply, ProviderSetRequest,
+    ProvidersListReply, ProvidersListRequest,
 };
 
 pub use fauna_payments::known_kinds;
+/// The visitor return door's creator-facing URL (the post-checkout redirect
+/// pasted into the provider's settings), re-exported for the same reason.
+pub use fauna_payments::{RETURN_PATH_PREFIX, return_url};
 /// Re-exported so a client builds the creator-facing webhook URL from the
 /// same constant the nest registers its ingress route from, rather than
 /// hand-assembling the path (priority #2 — same reasoning as
@@ -42,11 +46,13 @@ pub use fauna_protocol::tips;
 use fauna_protocol::tips::{TipsListReply, TipsListRequest};
 
 /// Typed `fauna.payments.*` call surface, generic over the WS-RPC transport
-/// (`R: RpcRequester`). Every kind is registered with `forbid_replay: false`
-/// server-side (see `register_payment_handlers`), so the auto-retry path may
-/// safely re-issue any of these — set is an upsert, remove is idempotent,
-/// and redeem keys off server-enforced claim state (a retried redeem by the
-/// same actor returns the already-bound entitlement).
+/// (`R: RpcRequester`). Every kind but `claims.mint` is registered with
+/// `forbid_replay: false` server-side (see `register_payment_handlers`), so
+/// the auto-retry path may safely re-issue them — set is an upsert, remove
+/// and void are idempotent, and redeem keys off server-enforced claim state
+/// (a retried redeem by the same actor returns the already-bound
+/// entitlement). A mint allocates a fresh code per call, so it is never
+/// replayed.
 pub struct PaymentsClient<R: RpcRequester> {
     nest: R,
 }
@@ -167,6 +173,27 @@ impl<R: RpcRequester> PaymentsClient<R> {
             .request("fauna.payments.claims.list", ClaimsListRequest::default())
             .await?;
         Ok(reply.claims)
+    }
+
+    /// `fauna.payments.claims.void` — the author withdraws one of their own
+    /// claim codes (monetization.md § Pillar 3 → *Buyer↔actor binding*): an
+    /// unredeemed code stops redeeming (in the app and on the web); a
+    /// redeemed one also ends the redeemer's entitlement to its tier, as a
+    /// refund does. Idempotent — a repeat answers the first void's stamp.
+    /// Typed error: `fauna.payments.claim_not_found` for an unknown code or
+    /// one the caller did not mint. Returns when the code was voided.
+    pub async fn claims_void(&self, code: impl Into<String>) -> Result<Timestamp, R::Error> {
+        let reply: ClaimVoidReply = self
+            .nest
+            .request(
+                "fauna.payments.claims.void",
+                ClaimVoidRequest {
+                    code: code.into(),
+                    extra: Default::default(),
+                },
+            )
+            .await?;
+        Ok(reply.voided_at)
     }
 }
 
@@ -298,6 +325,10 @@ mod tests {
                 }],
                 extra: Default::default(),
             }),
+            "fauna.payments.claims.void" => fauna_protocol::encode_canonical(&ClaimVoidReply {
+                voided_at: Timestamp(1_700_000_001_000_000),
+                extra: Default::default(),
+            }),
             "fauna.tips.list" => fauna_protocol::encode_canonical(&tips::TipsListReply {
                 total_msats: 2_100_000,
                 tip_count: 1,
@@ -395,6 +426,18 @@ mod tests {
         assert_eq!(rows[0].tier, "gold");
         assert_eq!(rows[0].provider, "manual");
         assert!(rows[0].redeemed_by.is_none());
+    }
+
+    #[test]
+    fn claims_void_composes_kind_and_returns_the_stamp() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = PaymentsClient::new(rec.clone());
+        let voided_at = block_on(client.claims_void("ABCD-1234")).expect("infallible mock");
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.payments.claims.void");
+        let req: ClaimVoidRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(req.code, "ABCD-1234");
+        assert_eq!(voided_at, Timestamp(1_700_000_001_000_000));
     }
 
     #[test]

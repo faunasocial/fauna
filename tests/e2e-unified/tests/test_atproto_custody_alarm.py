@@ -51,19 +51,15 @@ precisely the seam no in-process test can reach.
 """
 
 import contextlib
-import os
 import subprocess
 import time
 
 import pytest
 
-from actions import ActionLayer
-from conftest import _seeded_environment, get_available_apps
-from helpers.bridge_enrollment import approve_bridge
+from conftest import get_available_apps
 from drivers import create_driver
 from helpers.app_surface import skip_unbuilt
-from helpers.atproto_fakes import FakePlcDirectory
-from helpers.waiting import await_account_runtime_assembled
+from helpers.atproto_hosted_world import hosted_world
 from i18n.strings import S
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.linux, pytest.mark.tui, pytest.mark.web, pytest.mark.android, pytest.mark.windows, pytest.mark.macos, pytest.mark.ios]
@@ -81,7 +77,6 @@ def _apps(*want: str) -> list[str]:
     available = get_available_apps()
     return [a for a in want if a in available]
 
-HANDLE_DOMAIN = "fauna.test"
 # The tampered "senior" key: a syntactically-valid K-256 did:key that no client
 # in this test holds (the S0 probe's spec-vector shape, not a real secret).
 EVIL_SENIOR = "did:key:zQ3shokFTS3brHcDQrn82RUDfCZESWL1ZdCEJwekUDPQiYBme"  # gitleaks:allow
@@ -200,201 +195,28 @@ def _minted_identity(custody_app, request, nest_binary, atproto_bridge_e2e_binar
     """Bring the whole S4-C world up and mint through the UI, then hand the
     caller ``(app, directory, did, user_key, tail, seize, integration_status)``.
 
-    Shared by both tests in this file because the bring-up — nest, real Go
-    bridge, admin approval, a real client pointed at the fake directory, and a
-    mint driven through the depth selector — is identical for detecting a
-    custody violation and for undoing one, and it is the expensive part.
+    Shared by every test in this file because the bring-up — nest, real Go
+    bridge, admin approval, a real client pointed at the fake directory
+    (``helpers.atproto_hosted_world.hosted_world``), and a mint driven through
+    the depth selector — is identical for detecting a custody violation and for
+    undoing one, and it is the expensive part.
 
     ``seize(did_key)`` signs a **real** hostile rotation with the bridge's own
     listed junior key and returns the submitted op's CID — the compromised-box
     half of the recovery-fork contest, which no fixture can fake (the fake
-    directory holds no key the genesis lists).
+    directory holds no key the genesis lists). It runs the SAME e2e-flavor
+    binary (`-tags fauna_e2e_seize`) as the long-lived bridge, so the process
+    that signs the seizure is by construction the one that minted the genesis.
     """
     from clients.ws_rpc_admin_client import WsRpcAdminClient
-    from common.auth import register_handled_actor
-    from conftest import _make_nest, _repo_root
-    from drivers.port_util import track_process, untrack_process
+    from conftest import _repo_root
 
-    # The e2e FLAVOR of the bridge (`-tags fauna_e2e_seize`): the same binary
-    # plus the one-shot hostile-rotation seam, at its own path so it can never
-    # stand in for the production artifact (convention 15 — the production
-    # recipe asserts its own build carries no trace of the seam). It runs BOTH
-    # roles here, the long-lived bridge and the seizure, so the process that
-    # signs the seizure is by construction the one that minted the genesis.
-    # Built by the `atproto_bridge_e2e_binary` fixture at COLLECTION time — a
-    # DISTINCT memo key from the production `atproto_bridge_binary`, never a
-    # collapse onto it (conftest.py's `_ensure_atproto_bridge_e2e_built`);
-    # outside the per-test timeout budget the same way the production flavor's
-    # in-body build used to blow through it under fleet contention.
-    atproto_bin = atproto_bridge_e2e_binary
-
-    directory = FakePlcDirectory()
-    nest, nest_cleanup = _make_nest(
-        nest_binary, tmp_path_factory, "atproto-custody-nest",
-        # The domained claim, which is also this nest's ONLY registration of
-        # HANDLE_DOMAIN — the `add_local_domain` that used to sit further down
-        # is gone, because two doors onto one domain means the loser's
-        # arguments are silently discarded (`add_local_domain` is idempotent by
-        # domain NAME). The claim's own cert mode is `expand_primary` where that
-        # call asked for `per_host`, and the difference is inert here: nothing
-        # in the DNS matrix or the `_atproto` TXT row reads
-        # `mta_sts_cert_mode`, and a plain-HTTP test nest arms no ACME at all
-        # (`testing.md` § Default app and nest mode, ruling (3)).
-        claim_domain=HANDLE_DOMAIN,
-    )
-    from common.auth import open_registration
-    open_registration(nest)
-    proc = None
-    log_fh = None
-    driver = None
-    spa_proxy_server = None
-    try:
-        admin = nest["admin"]
-        alice = register_handled_actor(
-            nest["port"], handle="alice", domain=HANDLE_DOMAIN, base_url=nest["url"]
-        )
-
-        # ── Bridge cold boot against the fake directory + admin approval
-        # (the test_atproto_identity_mint boot sequence). ──
-        tmp = tmp_path_factory.mktemp("atproto-custody-bridge")
-        keyfile_path = tmp / "atproto.pds.key"
-        minted = subprocess.run(
-            [atproto_bin, f"--keypair-file={keyfile_path}", "--print-pubkey"],
-            cwd=_repo_root, capture_output=True, text=True, check=True,
-        )
-        pubkey_hex = minted.stdout.strip()
-        env = os.environ.copy()
-        env["FAUNA_ATPROTO_PLC_DIRECTORY_URL"] = directory.url
-        log_path = tmp / "bridge.log"
-        log_fh = open(log_path, "wb")
-        from drivers.port_util import popen_group_kwargs, reap_descendants_of
-
-        proc = subprocess.Popen(
-            [
-                atproto_bin,
-                f"--keypair-file={keyfile_path}",
-                f"--nest-endpoint={nest['url']}",
-                f"--data-dir={tmp.as_posix()}",
-                "--log-level=debug",
-            ],
-            stdout=log_fh, stderr=subprocess.STDOUT, env=env,
-            **popen_group_kwargs(),
-        )
-        # Windows half of the die-with-the-run guarantee — no-op off Windows.
-        reap_descendants_of(proc.pid)
-        track_process(proc)
-
-        # Written by the app itself only on windows (see the `environment`
-        # block below); absent elsewhere, which `_tail` handles by omission.
-        app_trace_path = tmp / "app-shell.log"
-
-        def _tail() -> str:
-            out = log_path.read_text(errors="replace")[-4000:]
-            if app_trace_path.exists():
-                out += (
-                    "\n── app shell log (windows, FAUNA_E2E_AGENT_LOG) ──\n"
-                    + app_trace_path.read_text(errors="replace")[-4000:]
-                )
-            return out
-
-        admin_ws = WsRpcAdminClient(
-            nest["url"],
-            actor_id=bytes(admin["signing_key"].verify_key),
-            signing_key=bytes(admin["signing_key"]),
-        )
-        with admin_ws:
-            # No `add_local_domain`: the claim carried HANDLE_DOMAIN as its
-            # `mail_domain`, so the primary row already exists — one door onto
-            # the domain rather than two.
-            deadline = time.monotonic() + 30
-            while time.monotonic() < deadline:
-                rows = admin_ws.call(
-                    "fauna.bridges.list_service_users", {"status": "pending"}
-                )["service_users"]
-                if any(
-                    bytes(r["ed25519_pubkey"]).hex() == pubkey_hex for r in rows
-                ):
-                    break
-                assert proc.poll() is None, "bridge exited pre-enroll; log:\n" + _tail()
-                time.sleep(0.5)
-            approve_bridge(
-                nest["url"], admin["signing_key"], bytes.fromhex(pubkey_hex), "atproto.pds",
-            )
-
-        # ── A real client, pointed at the fake directory (the client's OWN read
-        # path — the whole point is that it never asks the nest). ──
-        if custody_app == "web":
-            # web has no process env (no `app_path`, no `environment` — see
-            # drivers/web.py::launch): the SPA proxy targets THIS test's own
-            # ad-hoc nest (`_build_app_config`'s `spa_url` fixture proxies
-            # the shared session nest instead, which this test deliberately
-            # doesn't use — mirrors `atproto_hosted_spa_url`'s per-nest-proxy
-            # shape), and the directory override rides the JS hook below
-            # instead of an env var.
-            from conftest import _serve_spa_proxy
-            static_dir = request.getfixturevalue("static_dir")
-            spa_url, spa_proxy_server = _serve_spa_proxy(static_dir, nest["url"])
-            driver = create_driver("web")
-            driver.launch({"url": spa_url.rstrip("/") + "/app/"})
-        else:
-            environment = {
-                **_seeded_environment(request, nest),
-                "FAUNA_ATPROTO_PLC_DIRECTORY_URL": directory.url,
-                "FAUNA_DNS_PROVIDER_FAKE": "1",
-            }
-            if custody_app == "linux":
-                environment["GTK_A11Y"] = "none"
-            if custody_app == "windows":
-                # The windows shell's own log, teed into one thread-tagged file
-                # (FaunaApp.Core/Logs/E2eTrace.cs). `_tail` folds it into every
-                # failure message below: on windows the app's OWN log is the
-                # diagnosis, and the S4-C chain crosses the C# shell twice
-                # (AtprotoViewModel.LoadAsync → the machine, and
-                # CriticalAlertsHost → MainViewModel) with no Rust tracing on
-                # either hop. A prior pass learned the same lesson one layer down —
-                # a separate-process seat's log IS the diagnosis, and what it
-                # does NOT say is the finding.
-                environment["FAUNA_E2E_AGENT_LOG"] = str(app_trace_path)
-            driver = create_driver(custody_app)
-            launch_config = {"url": nest["url"], "environment": environment}
-            if custody_app == "ios":
-                # No bare `ios_app_path` fixture exists — iOS's direct-launch
-                # fixture (`ios_setup`) returns `{"udid", "app_path"}` together,
-                # because `drivers/ios.py`'s `launch()` requires both. Same
-                # branch as `test_nest_identity_pin.py`'s `pin_env`.
-                ios_setup = request.getfixturevalue("ios_setup")
-                launch_config["app_path"] = ios_setup["app_path"]
-                launch_config["udid"] = ios_setup["udid"]
-            else:
-                launch_config["app_path"] = request.getfixturevalue(f"{custody_app}_app_path")
-            driver.launch(launch_config)
-        try:
-            driver.wait_for_state(lambda s: s is not None, timeout=30)
-        except (TimeoutError, Exception):
-            pass
-        # No-op on native (the env var above already covers it); web has no
-        # env path, so its wasm-side check needs the explicit JS hook.
-        driver.enable_fake_plc_directory(directory.url)
-        driver.set_state({
-            "session": {
-                "authenticated": True,
-                "node_url": nest["url"],
-                "secret_hex": alice["signing_key"].encode().hex(),
-                "handle": f"alice@{HANDLE_DOMAIN}",
-                "actor_id": alice["actor_id_bytes"].hex(),
-                "device_id": "custody-e2e",
-            },
-            "nav": {"stack": [{"view": "feed"}]},
-        })
-        # The senior rotation key is minted into the account plane's
-        # `fauna.state.atproto-identity` rows, whose door refuses while no
-        # account runtime runs — and the runtime assembles OFF the login path
-        # (on web, only once the conversations manager is built). So the mint
-        # below waits for it, as every plane-reading journey does
-        # (`test_contact_overlay.py`).
-        await_account_runtime_assembled(driver)
-        app = ActionLayer(driver)
+    with hosted_world(
+        custody_app, request, nest_binary, atproto_bridge_e2e_binary, tmp_path_factory
+    ) as world:
+        app, directory, alice, nest = world.app, world.directory, world.alice, world.nest
         bs = app.atproto_settings
+        _tail = world.tail
 
         # ── 1. Mint through the UI: the machine generates the senior rotation
         # key on THIS client and sends only its pubkey. ──
@@ -411,21 +233,7 @@ def _minted_identity(custody_app, request, nest_binary, atproto_bridge_e2e_binar
             f"confirm failed: level={bs.depth_level()!r} err={bs.page_error_text()!r}"
         )
 
-        # The bridge's mint loop picks up the pending identity and submits the
-        # genesis op to the fake directory.
-        deadline = time.monotonic() + 60
-        while time.monotonic() < deadline and not directory.snapshot():
-            assert proc.poll() is None, "bridge died before minting; log:\n" + _tail()
-            time.sleep(0.5)
-        submissions = directory.snapshot()
-        assert submissions, "the bridge never submitted a genesis op; log:\n" + _tail()
-        did, op = submissions[0]
-        assert op["rotationKeys"], "genesis op carries rotation keys"
-        user_key = op["rotationKeys"][0]
-        assert user_key.startswith("did:key:zDn"), (
-            "the client-minted P-256 senior key leads the genesis op "
-            f"(custody split); got {op['rotationKeys']!r}"
-        )
+        did, user_key = world.await_genesis()
 
         def _seize(did_key: str) -> str:
             """Drive the bridge's own signing key against the identity it minted.
@@ -443,14 +251,14 @@ def _minted_identity(custody_app, request, nest_binary, atproto_bridge_e2e_binar
             """
             run = subprocess.run(
                 [
-                    atproto_bin,
-                    f"--keypair-file={keyfile_path}",
+                    world.atproto_bin,
+                    f"--keypair-file={world.keyfile_path}",
                     f"--nest-endpoint={nest['url']}",
                     f"--seize-did={did}",
                     f"--seize-rotation-key={did_key}",
                     "--log-level=warn",
                 ],
-                cwd=_repo_root, capture_output=True, text=True, env=env,
+                cwd=_repo_root, capture_output=True, text=True, env=world.env,
             )
             assert run.returncode == 0, (
                 "the bridge failed to sign the seizure "
@@ -471,26 +279,6 @@ def _minted_identity(custody_app, request, nest_binary, atproto_bridge_e2e_binar
                 return alice_ws.call("fauna.bridges.atproto.get_integration_status", {})
 
         yield app, directory, did, user_key, _tail, _seize, _integration_status
-    finally:
-        if driver is not None:
-            try:
-                driver.teardown()
-            except Exception:
-                pass
-        if spa_proxy_server is not None:
-            spa_proxy_server.shutdown()
-        if proc is not None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=10)
-            untrack_process(proc)
-        if log_fh is not None:
-            log_fh.close()
-        nest_cleanup()
-        directory.close()
 
 
 @pytest.mark.parametrize("custody_app", _apps(*CUSTODY_APPS))
@@ -775,10 +563,72 @@ def test_recovery_fork_contest_end_to_end(
         )
 
 
+@pytest.mark.parametrize("custody_app", _apps(*CONTEST_APPS))
+@pytest.mark.feature("atproto")
+def test_a_seizure_past_its_window_says_so_and_offers_no_button(
+    custody_app, request, nest_binary, atproto_bridge_e2e_binary, tmp_path_factory
+):
+    """When an attempt to take the identity can no longer be undone, the page
+    says so plainly instead of offering a button that does nothing
+    (`atproto-identity-custody.md` § The 72 h recovery-fork contest; catalog
+    `atproto` 36).
+
+    The seizure is the same real bridge-signed rotation the contest test drives;
+    the fake directory then serves its `createdAt` 73 h in the past
+    (`FakePlcDirectory.backdate`), the shape PLC itself would refuse a fork
+    over. The card must render the `window-closed` state with its explanation,
+    and the `atproto-contest` button must be absent — a live button there would
+    sign a fork the directory is bound to reject. Nothing is submitted.
+
+    tui first, the lead app; the other apps gain their parametrization in the
+    cross-app lift (the ceremony itself is on all seven, `CONTEST_APPS`)."""
+    with _minted_identity(
+        custody_app, request, nest_binary, atproto_bridge_e2e_binary, tmp_path_factory
+    ) as (
+        app,
+        directory,
+        did,
+        _user_key,
+        _tail,
+        seize,
+        _status,
+    ):
+        bs = app.atproto_settings
+        hostile_cid = seize(EVIL_SENIOR)
+        directory.backdate(did, hostile_cid, 73 * 60 * 60)
+        assert _poll_alarm_state(app, want_visible=True), (
+            "a seized identity must raise the custody alarm; log:\n" + _tail()
+        )
+        assert _poll_contest_card_visible(app, bs), (
+            "the contest card must render on a standing custody violation, "
+            f"even one past its window; page error={bs.page_error_text()!r}"
+        )
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and bs.contest_state() != "window-closed":
+            time.sleep(0.5)  # sleep-ok: pacing between poll iterations
+            bs.navigate()
+        assert bs.contest_state() == "window-closed", (
+            "a seizure older than PLC's 72 h recovery window is honestly "
+            f"window-closed; state={bs.contest_state()!r} "
+            f"detail={bs.contest_detail()!r}"
+        )
+        assert bs.contest_detail().strip(), (
+            "the closed window must be explained in words, not a bare state"
+        )
+        assert app.driver.is_absent("atproto-contest"), (
+            "no contest button may be offered once the window has closed: "
+            f"{app.driver.diagnose('atproto-contest')}"
+        )
+        assert not directory.forks, (
+            f"nothing may be submitted over a closed window: {directory.forks!r}"
+        )
+
+
 # The apps that render `atproto-delete-tombstone` today: tui leads (2026-09-26),
-# macos + ios follow through the shared FaunaKit `AtprotoSettingsView`; the other
-# four land in a batched trickle-down.
-RETIRE_APPS = ("tui", "macos", "ios")
+# macos + ios follow through the shared FaunaKit `AtprotoSettingsView`; linux,
+# web and android landed in the batched trickle-down, and windows is the last
+# app, so all seven render it.
+RETIRE_APPS = ("tui", "macos", "ios", "linux", "web", "android", "windows")
 
 
 @pytest.mark.parametrize("custody_app", _apps(*CUSTODY_APPS))
@@ -809,7 +659,7 @@ def test_retire_identity_opt_in_rides_the_delete_ceremony(
         skip_unbuilt(
             driver,
             surface="atproto-delete-tombstone",
-            detail="the retire opt-in landed on tui (lead app) 2026-09-26, then macos + ios",
+            detail="the retire opt-in landed on tui (lead app) 2026-09-26, then macos + ios, linux, web and android",
             tracked="ui/atproto.md § Implementation status today; ",
         )
 

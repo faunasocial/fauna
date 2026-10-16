@@ -20,6 +20,7 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -30,7 +31,7 @@ import org.robolectric.annotation.Config
 /**
  *  `AccountSettingsVM.removeAccount` (`AccountSettingsVM.kt:182-196`)
  * is offered only for a non-active account, and calls
- * `AccountStores.eraseAccount` (`AccountStores.kt:604-617`), whose first
+ * `AccountStores.removeAccount` (formerly `eraseAccount`), whose first
  * statement used to be an unconditional `closeOpenStores()` — which runs EVERY
  * registered identity closer, not just the erased actor's. `ContentPolicyStore`,
  * `ScreenTimeStore` and `SupervisedIndicatorVM` each guard their re-seed on
@@ -58,7 +59,7 @@ import org.robolectric.annotation.Config
  * away and drive the captured closer lambda directly. `ApiClient` stays a
  * mock — no wire traffic. `accountStores.database()` is never called, so no
  * Room `SQLiteDatabase` is ever opened: `AccountStores.closeOpenStores`'s
- * `db?.close()` is a no-op against a null handle, `eraseAccount`'s FFI erase
+ * `db?.close()` is a no-op against a null handle, `removeAccount`'s FFI gesture
  * call is plain file-system work, and the supervision snapshot round trip is
  * the `SecretStore` seam, not SQLite — Robolectric's real-SQLite ARM64 gap
  * ([AccountStoresEraseTest.anEraseYieldsAFreshHandleAndRepointsTheStaticAccessor])
@@ -151,8 +152,13 @@ class EraseNonActiveAccountKeepsActiveWardEnforcedTest {
             supervisedIndicatorVM.supervisedByHandle.value,
         )
 
-        // The finding: erasing the OTHER, non-active account.
-        accountStores.eraseAccount(nonActiveActor)
+        // The finding: removing the OTHER, non-active account — the whole
+        // gesture, which never enrolled here, so its nest half dials nothing.
+        assertNull(
+            "removing a non-active account is not refused",
+            accountStores.removeAccount(nonActiveActor),
+        )
+        assertEquals(listOf(activeActor), registry.list().map { it.actorId })
 
         assertNotNull(
             "erasing a non-active account must not blank the ACTIVE ward's " +

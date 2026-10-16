@@ -21,6 +21,8 @@
     type SubscriptionMine,
   } from '$lib/rpc';
   import { ensureWasm } from '$lib/wasm';
+  import { contactOverlays, contactsRevision } from '$lib/conversations';
+  import { hexToBytes } from '$lib/hex';
   import { onMount } from 'svelte';
   import { t } from '$lib/i18n/strings';
   import ClaimRedeem from './payments/ClaimRedeem.svelte';
@@ -30,6 +32,22 @@
   let { error = $bindable('') } = $props();
 
   let subscriptions = $state<SubscriptionMine[]>([]);
+
+  // Each row's creator label through the private overlay face — the viewer's
+  // nickname, else the handle, else the hex id (value-formatting.md
+  // § Subscription author label); re-read when the overlay moves.
+  let authorLabels = $derived.by(() => {
+    void $contactsRevision;
+    // Rows exist only once wasm is up (`onMount`), which the face needs.
+    if (subscriptions.length === 0) return new Map<string, string>();
+    const overlays = contactOverlays();
+    return new Map(
+      subscriptions.map((sub) => [
+        sub.author_id,
+        overlays.subscriptionAuthorLabel(sub.handle, hexToBytes(sub.author_id)),
+      ]),
+    );
+  });
 
   // (Claim redemption moved to `payments/ClaimRedeem.svelte` — the money gesture
   // excises with the web `payments` flavor while this Pillar-1 list stays in
@@ -76,7 +94,7 @@
   <div class="list">
     {#each subscriptions as sub (sub.author_id + ':' + sub.tier)}
       <div class="row" data-testid={IDS.SUBSCRIPTION_MINE_ROW}>
-        <span class="grow author" data-testid={IDS.SUBSCRIPTION_MINE_AUTHOR}>{sub.author_display}</span>
+        <span class="grow author" data-testid={IDS.SUBSCRIPTION_MINE_AUTHOR}>{authorLabels.get(sub.author_id) ?? ''}</span>
         <span data-testid={IDS.SUBSCRIPTION_MINE_TIER}>{sub.tier}</span>
         <span class="status" data-testid={IDS.SUBSCRIPTION_MINE_STATUS}>{sub.status}</span>
         <button

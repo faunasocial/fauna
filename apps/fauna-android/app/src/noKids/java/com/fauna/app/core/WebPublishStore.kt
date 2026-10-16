@@ -5,6 +5,7 @@ import com.fauna.ffi.webSiteLinkView
 import com.fauna.ffi.webTokenedUrl
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -98,17 +99,43 @@ class WebPublishStore @Inject constructor(
         _disabledReason.value = link?.disabledReason
     }
 
+    /** The actor identity a detached writer captures BEFORE its first await
+     *  and hands back to [landWebPage] — the same [generation] [ensureOrigin]
+     *  captures. */
+    fun captureGeneration(): Long = generation
+
+    /** [applyWebPage] for a result computed as an earlier actor: lands only
+     *  while [token] (from [captureGeneration]) is still the current
+     *  generation, else the departing actor's origin would paint the incoming
+     *  actor's store and [ensureOrigin] would then short-circuit on it
+     *  (`account-scoping.md` § The scoping taxonomy → the in-memory
+     *  corollary; the `WebSettingsVM` hydrate / toggle-echo landings).
+     *  Returns whether it landed. */
+    fun landWebPage(
+        token: Long,
+        domains: List<WebDomainRow>,
+        subdomainEnabled: Boolean,
+        handle: String?,
+        servingDomain: String,
+    ): Boolean {
+        if (generation != token) return false
+        applyWebPage(domains, subdomainEnabled, handle, servingDomain)
+        return true
+    }
+
     /** Ensure [origin] is resolved, for a viewer who opens an own post's ⋯
      *  menu without ever having visited Settings → Web this session. No-op
      *  once resolved or already in flight (mirrors linux/web's lazy hydrate
      *  guard) — fire-and-forget, since the caller repaints off [origin]
-     *  itself once it lands. */
-    fun ensureOrigin() {
-        if (_origin.value != null || hydrating) return
-        val w = api.webClient() ?: return
+     *  itself once it lands. Returns the in-flight read's [Job] (`null` when
+     *  it was a no-op) so a test can `join` the landing instead of polling
+     *  wall-clock time for its absence. */
+    fun ensureOrigin(): Job? {
+        if (_origin.value != null || hydrating) return null
+        val w = api.webClient() ?: return null
         hydrating = true
         val mine = generation
-        scope.launch {
+        return scope.launch {
             runCatching {
                 val handle = secureStorage.handle?.substringBefore("@")?.ifBlank { null }
                 val servingDomain = w.servingDomain()

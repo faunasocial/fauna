@@ -2,6 +2,7 @@ package wsrpc
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -83,9 +84,14 @@ func TestDial_StillRefusedFreshBearerFailsWithoutLooping(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if c, err := Dial(ctx, ClientConfig{NestEndpoint: srv.URL, AuthClient: auth}); err == nil {
+	c, err := Dial(ctx, ClientConfig{NestEndpoint: srv.URL, AuthClient: auth})
+	if err == nil {
 		_ = c.Close()
 		t.Fatal("Dial succeeded against a nest that refuses every bearer")
+	}
+	// The reconnect loop keys its revoked-standing check on this sentinel.
+	if !errors.Is(err, ErrUpgradeRefused) {
+		t.Errorf("err = %v, want it to wrap ErrUpgradeRefused", err)
 	}
 
 	if got := mints.Load(); got != 2 {

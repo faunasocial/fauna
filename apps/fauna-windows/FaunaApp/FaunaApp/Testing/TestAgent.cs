@@ -472,6 +472,16 @@ public class TestAgent
         return JsonSerializer.Deserialize<Dictionary<string, object?>>(json);
     }
 
+    /// <summary>Push state now, off the calling thread, for a state field that changed
+    /// outside any command and that a driver reads without waiting (the page-level
+    /// <c>messages.error</c> mirror — <c>App.CurrentErrorMessage</c>). No-op until
+    /// <see cref="Configure"/> has run.</summary>
+    internal void RequestPush()
+    {
+        if (!_running) return;
+        _ = Task.Run(PushStateAsync);
+    }
+
     private async Task PushStateAsync()
     {
         if (_stateProvider == null) return;
@@ -1135,8 +1145,8 @@ public class TestAgent
                 FaunaApp.App.AccountPumpNowForTest();
                 return () => Task.CompletedTask;
             case "device_set_state":
-                // The fleet-removal convergence reader (account-data-taxonomy.md § The
-                // generation machinery → Fleet-scope reclamation, clause (4)): whether
+                // The fleet-removal convergence reader (fleet-scope-reclamation.md
+                // § Fleet-scope reclamation, clause (4)): whether
                 // `device_id_hex`'s `fauna.state.device-set` row reads Removed/Enrolled from
                 // THIS app's own account runtime, stashed as App.MachineMethodResult — the
                 // windows twin of tui's, linux's, android's and apple's arms.
@@ -1180,6 +1190,46 @@ public class TestAgent
                         {
                             FaunaApp.App.MachineMethodResult = null;
                             var msg = $"[TestAgent] device_set_state threw: {ex.GetType().Name}: {ex.Message}";
+                            StampAgentFailure(msg);
+                        }
+                    };
+                }
+            case "read_marker_state":
+                // The read-state relaunch witness's durability barrier
+                // (conversation-read-state.md § The read-marker record): this app's
+                // own account-store read marker for `channel_id_hex`, stashed as
+                // App.MachineMethodResult — the windows twin of tui's, linux's,
+                // android's and apple's arms, in `device_set_state`'s shape above:
+                // ANY non-null answer means "the reader is built", a missing id is a
+                // LOUD refusal (convention 11), no connected client a quiet
+                // not-found REPORT. Payload: {channel_id_hex}.
+                {
+                    string? channelIdHex = null;
+                    if (command.TryGetValue("channel_id_hex", out var chanEl)
+                        && chanEl is JsonElement che && che.ValueKind == JsonValueKind.String)
+                    {
+                        channelIdHex = che.GetString();
+                    }
+                    if (channelIdHex is null)
+                    {
+                        FaunaApp.App.MachineMethodResult = null;
+                        StampAgentFailure("[TestAgent] read_marker_state: needs a `channel_id_hex` string");
+                        return null;
+                    }
+                    string channelId = channelIdHex;
+                    return async () =>
+                    {
+                        try
+                        {
+                            var markerJson = await FaunaApp.App.ReadMarkerStateForTest(channelId)
+                                ?? "{\"found\":false}";
+                            using var markerDoc = JsonDocument.Parse(markerJson);
+                            FaunaApp.App.MachineMethodResult = markerDoc.RootElement.Clone();
+                        }
+                        catch (Exception ex)
+                        {
+                            FaunaApp.App.MachineMethodResult = null;
+                            var msg = $"[TestAgent] read_marker_state threw: {ex.GetType().Name}: {ex.Message}";
                             StampAgentFailure(msg);
                         }
                     };
@@ -1301,6 +1351,12 @@ public class TestAgent
                             ReportRefusedCommand(
                                 "conversations_accept_recipient", AcceptRecipientNoChipReason);
                         }
+                        else
+                        {
+                            // The user path refreshes the list-send texts after a chip
+                            // commits (ConversationsPage NewThreadPicker.AcceptRequested).
+                            await m.RefreshListSend(null);
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -1318,7 +1374,7 @@ public class TestAgent
                 // picker can't be driven) by swapping the page VM onto an in-memory pipe
                 // fake. Expects {folders:[{path, folder?, mode?}]}. Inject precedes the
                 // test's navigate, so the fresh page reads TestPipeOverride in Page_Loaded.
-                // See actions/sync_locations.py / file-sync.md § On-Demand Files.
+                // See actions/sync_locations.py / on-demand-files.md § On-Demand Files.
                 //
                 // The binding moved onto FoldersPage by the 2026-06-28 unification
                 // (the standalone SyncFoldersPage was retired).
@@ -1669,6 +1725,33 @@ public class TestAgent
                         await rehydrate();
                     };
                 }
+            // Moves the Nests trust facet's RENDER clock — the `now` a grant's
+            // liveness (active → expiring → paused) and a custody receipt's
+            // freshness are judged against (`fauna_client_capabilities::
+            // trust_clock`; never the mint/renew clock). A journey can only
+            // witness "a lapsing grant reads expiring, then paused, and renew
+            // recovers it" by moving the clock — convention 14's fake clock,
+            // never a sleep. `now_offset_secs: 0` resets it; the offset is
+            // process-wide and nothing auto-resets it. The clock is read on the
+            // Nests page's nav-edge hydrate, so this command owes no rehydrate:
+            // the next navigate paints the moved state. tui's `automation.rs` /
+            // linux's `main.rs` carry this arm's full rationale.
+            case "trust_facet_advance_clock":
+                {
+                    var offsetSecs = CommandLong(command, "now_offset_secs");
+                    try
+                    {
+                        uniffi.fauna_ffi.FaunaFfiMethods.SetTrustClockOffsetSecs(offsetSecs);
+                    }
+                    catch (Exception ex)
+                    {
+                        // Convention 11: never a silent drop. A build whose FFI
+                        // lacks the test-helpers setter must say so on
+                        // error-message rather than ack a clock that never moved.
+                        ReportCommandFailure(action, $"{ex.GetType().Name}: {ex.Message}");
+                    }
+                    return null;
+                }
             // Moves the co-present ceremony's ADMISSION clock — the `now` a
             // receive-act expectation is minted and judged against
             // (`fauna_sync_engine::ceremony_clock`, read per call by the seat's
@@ -1716,14 +1799,100 @@ public class TestAgent
             // this arm's full rationale.
             case "offline_share_drop_connections":
                 FaunaApp.App.MachineMethodResult = null;
-                if (FaunaApp.App.CurrentOfflineShareSeat is not { } offlineShareSeat)
                 {
-                    ReportCommandFailure(action, "no ceremony seat is bound");
+                    // The FFI's process-wide session-seat slot, NOT the panel's seat: the share
+                    // plane's listener (the one a peer pull rides) is bound there, and a panel
+                    // seat may not exist at all (macOS/iOS route the same way).
+                    var dropSecret = FaunaApp.App.CurrentCryptoSecretForTest;
+                    if (dropSecret is null)
+                    {
+                        ReportCommandFailure(action, "no signed-in session to read the ceremony seat from");
+                        return null;
+                    }
+                    try
+                    {
+                        FaunaApp.App.MachineMethodResult = JsonSerializer.SerializeToElement(
+                            uniffi.fauna_ffi.FaunaFfiMethods.OfflineShareDropConnectionsForTest(dropSecret));
+                    }
+                    catch (Exception ex)
+                    {
+                        ReportCommandFailure(action, $"{ex.GetType().Name}: {ex.Message}");
+                    }
                     return null;
                 }
-                FaunaApp.App.MachineMethodResult =
-                    JsonSerializer.SerializeToElement(offlineShareSeat.DropConnectionsForTest());
+            // Turns the share plane's SERVE hold on or off — while it is on, the next
+            // manifest a peer asks this seat for parks unanswered and `share_serve_tally`'s
+            // `parked` count says so, which makes "part-way through a transfer" a state a
+            // journey can wait for (convention 14), cut with
+            // offline_share_drop_connections, and release. Process-wide; nothing
+            // auto-resets it, so a journey lifts it ({"hold": false}) before asserting
+            // arrival. tui's `automation.rs` carries this arm's full rationale.
+            case "offline_share_hold_serves":
+                try
+                {
+                    uniffi.fauna_ffi.FaunaFfiMethods.OfflineShareHoldServes(
+                        CommandBool(command, "hold", false));
+                }
+                catch (Exception ex)
+                {
+                    ReportCommandFailure(action, $"{ex.GetType().Name}: {ex.Message}");
+                }
                 return null;
+            // Reads one shared set straight off another seat's share plane, as THIS seat's
+            // identity, and reports what came back (the admission verdict, the rows, every
+            // manifest asked for) — the witness that "a person the folder was never shared
+            // with gets nothing readable from your device" (p2p.md § Cross-user shared-set
+            // transfer). Needs the ceremony seat bound (either panel opens it); fails
+            // loudly without one (convention 11). Genuinely async (a UniFFI async export).
+            case "offline_share_probe_set":
+                {
+                    FaunaApp.App.MachineMethodResult = null;
+                    var hashes = new List<string>();
+                    if (command.TryGetValue("manifest_hashes", out var hashesRaw)
+                        && hashesRaw is JsonElement { ValueKind: JsonValueKind.Array } hashesEl)
+                    {
+                        foreach (var h in hashesEl.EnumerateArray())
+                        {
+                            if (h.ValueKind == JsonValueKind.String && h.GetString() is { } hs) hashes.Add(hs);
+                        }
+                    }
+                    var peerCode = CommandString(command, "peer_code");
+                    var groupIdHex = CommandString(command, "group_id_hex");
+                    var secret = FaunaApp.App.CurrentCryptoSecretForTest;
+                    // The FFI probes off the process-wide session seat (the share plane's, or the
+                    // panel's) and fails loudly itself when none is bound — no C# panel-seat gate.
+                    if (secret is null)
+                    {
+                        ReportCommandFailure(action, "no signed-in session to probe from");
+                        return null;
+                    }
+                    return async () =>
+                    {
+                        try
+                        {
+                            var report = await uniffi.fauna_ffi.FaunaFfiMethods.OfflineShareProbeSet(
+                                secret, peerCode, groupIdHex, hashes.ToArray());
+                            FaunaApp.App.MachineMethodResult = JsonSerializer.SerializeToElement(new
+                            {
+                                dialed = report.dialed,
+                                dial_error = report.dialError,
+                                admitted = report.admitted,
+                                admit_error = report.admitError,
+                                rows = report.rows,
+                                paths = report.paths,
+                                rows_error = report.rowsError,
+                                manifest_hashes = report.manifestHashes,
+                                manifests = report.manifests,
+                                manifest_errors = report.manifestErrors,
+                            });
+                        }
+                        catch (Exception ex)
+                        {
+                            FaunaApp.App.MachineMethodResult = null;
+                            ReportCommandFailure(action, $"{ex.GetType().Name}: {ex.Message}");
+                        }
+                    };
+                }
 #endif
             case "feed_seed_cue_rollup_for_test":
                 // Seed a real `cues:v1` nest row (a real network round trip, unlike

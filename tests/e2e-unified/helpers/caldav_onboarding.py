@@ -558,7 +558,7 @@ def onboard_and_enable(
             # credential_id from the display name, so "Mua" → "mua".
             app.mail_settings.navigate()
             app.mail_settings.add_credential_plain(_MUA_CRED_NAME, _MUA_PASSWORD)
-            assert app.mail_settings.wait_for_credential_count_at_least(2, timeout=15.0), (
+            assert app.mail_settings.wait_for_credential_count_at_least(2, timeout=app.mail_settings.ENABLE_SETTLE_S), (
                 "adding the MUA PLAIN credential must grow the credential list to 2 "
                 f"(default + mua), but it never reached 2 (error: {app.error_text()!r})"
             )
@@ -591,6 +591,24 @@ def onboard_and_enable(
                     "enable_mail_plain must mint the first credential, but the "
                     f"list never reached 1 (error: {app.error_text()!r})"
                 )
+                # The row is NOT the enable having finished. First-enable runs as
+                # a degenerate rotation (`mail-credentials.md` § Partial-state-
+                # during-minting): the credential row lands in custody — and on
+                # the page — BEFORE its wrapped-MSEK blob, the submission token
+                # and the mail-subsystem flip, and the page reads "rotation in
+                # progress" until the sentinel clears. Authenticating a MUA in
+                # that window is a 401 (`davauth: authentication failed`, both
+                # domainless mail cells of the 2026-10-12 linux sweep). "All up
+                # to date" is the status the cleared sentinel derives, so it is
+                # the enable's own completion observable (convention 14).
+                assert app.mail_settings.wait_for_enabled_status(
+                    timeout=app.mail_settings.ENABLE_SETTLE_S
+                ), (
+                    "the first mail enable never finished: the page still reads "
+                    f"{app.mail_settings.status_text()!r}, not "
+                    f"{app.mail_settings.STATUS_ENABLED!r} "
+                    f"(error: {app.mail_settings.page_error_text(timeout=2.0)!r})"
+                )
                 # `enable_dav_mailbox`'s idempotency gate (machine.rs) makes this
                 # a same-MSEK flag-flip, not a second mint, whenever an MSEK
                 # already exists — safe to call unconditionally.
@@ -602,12 +620,8 @@ def onboard_and_enable(
                 # credential_id is "default", not "mua".
                 mua_credential_id = "default"
             if enable_caldav:
-                from helpers.mail_dedicated_nest import (
-                    mint_caldav_mailbox,
-                    require_caldav_mailbox_mint_supported,
-                )
+                from helpers.mail_dedicated_nest import mint_caldav_mailbox
 
-                require_caldav_mailbox_mint_supported(app.driver)
                 mint_caldav_mailbox(app.driver, password=_MUA_PASSWORD)
         password = _MUA_PASSWORD
         # The MUA username carries the credential_id as an RFC-5233 +suffix so the

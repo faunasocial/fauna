@@ -20,7 +20,8 @@ import com.fauna.ffi.FfiCloudBackupExclusion
  *
  * `CustodianStore::ensure_root` takes no default and no "unknown" arm: a glue
  * author wiring a platform must say which arm is true. Android's is
- * **declarative** — `android:allowBackup="false"` in the manifest, which no
+ * **declarative** — `android:allowBackup="false"` plus `android:dataExtractionRules`
+ * in the manifest, which no
  * runtime call can substitute for (Google device backup is decided by the OS
  * from the manifest, before any app code runs). [DECLARATION] names the file and
  * the rule so a reviewer can *check* the claim rather than take it, and
@@ -39,10 +40,17 @@ import com.fauna.ffi.FfiCloudBackupExclusion
 object CloudBackupPosture {
 
     /**
-     * The manifest rule that excludes this app's private storage from Google
-     * device backup — file plus attribute, in the form a reviewer greps for.
+     * The manifest rules that exclude this app's private storage from Google
+     * device backup and from a device-to-device transfer — file plus attributes,
+     * in the form a reviewer greps for. `allowBackup="false"` rules cloud backup
+     * (and devices below API 31); for an app targeting API 31+ the transfer is
+     * ruled separately, by `android:dataExtractionRules` pointing at
+     * `res/xml/data_extraction_rules.xml` (both `<cloud-backup>` and
+     * `<device-transfer>` exclude every domain).
      */
-    const val DECLARATION = "AndroidManifest.xml android:allowBackup=\"false\""
+    const val DECLARATION =
+        "AndroidManifest.xml android:allowBackup=\"false\" + " +
+            "android:dataExtractionRules=\"@xml/data_extraction_rules\""
 
     /** Android's arm of the shared exclusion enum. */
     fun exclusion(): FfiCloudBackupExclusion =

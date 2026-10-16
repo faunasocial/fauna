@@ -374,10 +374,8 @@ impl StintMount for Mounted {
         let Mounted {
             handle,
             device,
-            push_arm,
             presence,
         } = self;
-        push_arm.abort();
         // Deterministic teardown, never a drop: `shutdown` drains the pump's
         // in-flight pass before the store closes, which is what keeps a
         // mid-pass exit from leaving the outbox half-drained.
@@ -439,9 +437,6 @@ struct Mounted {
     /// `None` when the writer key would not resolve — the runtime then rides the
     /// capability bearer and this stint minted no client of its own.
     device: Option<DeviceLeg>,
-    /// The `ws-device` push arm posting this account's banners
-    /// ([`crate::push_arm`]); aborted with the stint.
-    push_arm: tokio::task::JoinHandle<()>,
     /// The agent presence lock on this account's store dir, taken before the
     /// runtime started and dropped after it shut down — what makes an app beside
     /// this stint hand it the engine role (module docs). `None` after a degraded
@@ -454,6 +449,47 @@ struct Mounted {
 struct DeviceLeg {
     client: Arc<fauna_client::NestClient>,
     retry: tokio::task::JoinHandle<()>,
+}
+
+/// The device-principal leg's client, unconnected. The nest registers it under
+/// the account's actor like any other of its connections, so it **announces the
+/// capability's device as a wake stand-in** from its first connect — one that
+/// announced nothing would be the compatibility rider's trigger and silence the
+/// user's `web-push`/`apns` rows (`common.md` § Push Notifications →
+/// *Transports*, ruled 2026-10-09). The announce and the arm themselves stay
+/// the capability connection's: nothing listens for frames on this leg.
+fn device_leg_client(
+    state: &SyncServiceState,
+    inputs: &HostInputs,
+    writer_key: impl Into<fauna_client::ws_device_handshake_bearer::PrincipalKeySource>,
+) -> Arc<fauna_client::NestClient> {
+    let client = fauna_client::ws_device_handshake_bearer::device_principal_nest_client(
+        &inputs.nest_url,
+        inputs.actor_id,
+        writer_key,
+        // Seedless: it cannot register itself, so the void latch waits for a
+        // signed-in app's owner-session pass — the seed pass of the app beside
+        // this agent. And the leg signs with the key the renewal loop renews
+        // with, so its refusal is the renewal's own answer heard early: report
+        // it, and the loop asks the nest at once instead of at the slot
+        // bearer's lead — the one door into the terminal state
+        // (`sync-agent-credentials.md` § Credential model → *A rejected
+        // credential asks at once*).
+        Some({
+            let void_latch = fauna_sync_engine::principal_bundle::not_registered_voids_latch(
+                &inputs.actor_id_hex,
+            );
+            let slot = Arc::clone(&state.capability);
+            Arc::new(move || {
+                void_latch();
+                slot.report_principal_refused();
+            })
+        }),
+    );
+    if inputs.sync_device_id.is_empty() {
+        return client;
+    }
+    client.announcing_stand_in(inputs.sync_device_id.clone())
 }
 
 /// Build the params and start the runtime.
@@ -476,7 +512,7 @@ async fn assemble(state: &SyncServiceState, inputs: &HostInputs) -> anyhow::Resu
         .await
         .map_err(|e| anyhow::anyhow!("account host: nest client: {e}"))?;
 
-    let store_root = StoreRoot::platform();
+    let store_root = StoreRoot::platform()?;
     let credentials = production_credential_store();
 
     // The data path authenticates as the machine's STORE PRINCIPAL, not as the
@@ -494,34 +530,19 @@ async fn assemble(state: &SyncServiceState, inputs: &HostInputs) -> anyhow::Resu
     // machine yet, and minting here would create a writer identity no nest has
     // a grant for (`principal_bundle::load_writer_key`'s own doc).
     let device = match device_leg_key(&credentials, inputs) {
-        Some(writer_key) => {
-            let device_client =
-                fauna_client::ws_device_handshake_bearer::device_principal_nest_client(
-                    &inputs.nest_url,
-                    inputs.actor_id,
-                    writer_key,
-                    // Seedless: it cannot register itself, so the void latch
-                    // waits for a signed-in app's owner-session pass — the
-                    // seed pass of the app beside this agent. And the leg
-                    // signs with the key the renewal loop renews with, so
-                    // its refusal is the renewal's own answer heard early:
-                    // report it, and the loop asks the nest at once instead
-                    // of at the slot bearer's lead — the one door into the
-                    // terminal state (`sync-agent-credentials.md`
-                    // § Credential model → *A rejected credential asks at
-                    // once*).
-                    Some({
-                        let void_latch =
-                            fauna_sync_engine::principal_bundle::not_registered_voids_latch(
-                                &inputs.actor_id_hex,
-                            );
-                        let slot = Arc::clone(&state.capability);
-                        Arc::new(move || {
-                            void_latch();
-                            slot.report_principal_refused();
-                        })
-                    }),
-                );
+        Some(_) => {
+            // The key is read off the slot at every mint, as the renewal loop
+            // reads it at every renewal: an app's assembly that rotates the
+            // writer under this stint registers the successor's grant, and a
+            // captured key would sign the retired one for the stint's life.
+            let writer_key = {
+                let slot = production_credential_store();
+                let actor_id_hex = inputs.actor_id_hex.clone();
+                fauna_client::ws_device_handshake_bearer::PrincipalKeySource::reading(move || {
+                    load_writer_key(&slot, &actor_id_hex)
+                })
+            };
+            let device_client = device_leg_client(state, inputs, writer_key);
             // Kept, not discarded: the stint closes this leg on teardown,
             // and the retry task has to be stopped before the client is
             // disconnected or it can bring a fresh connection up behind us.
@@ -571,25 +592,16 @@ async fn assemble(state: &SyncServiceState, inputs: &HostInputs) -> anyhow::Resu
         Some(state.peer_files.binding()),
     );
 
+    // The push announce and the banner arm are not the mount's: they ride the
+    // capability connection `rpc` itself, from provision on, whether or not
+    // this mount ever assembles (`common.md` § Push Notifications →
+    // *Transports*, ruled 2026-10-09; `SyncServiceState::nest_rpc_client`,
+    // `crate::push_arm::host`).
     let handle = AccountStoreRuntime::start(params).await?;
 
-    // The desktop's push wake stand-in (`common.md` § Push Notifications →
-    // *Transports*): this account connection announces the machine's device
-    // id — the capability's `device_id`, the same id the app subscribes its
-    // `ws-device` row under — and the arm posts the frames that arrive for it
-    // while no app is attached. Announced on every reconnect by the client.
-    if !inputs.sync_device_id.is_empty() {
-        rpc.set_push_presence(inputs.sync_device_id.clone()).await;
-    }
-    let push_arm = tokio::spawn(crate::push_arm::run(
-        rpc.subscribe_pushes(),
-        Arc::clone(&state.attached_apps),
-        Arc::clone(&state.notification_sink),
-    ));
     Ok(Mounted {
         handle,
         device,
-        push_arm,
         presence,
     })
 }
@@ -744,6 +756,37 @@ mod tests {
         }
     }
 
+    /// The device-principal leg is a connection of the account's actor (the
+    /// nest registers it under the actor like any other), so it announces the
+    /// capability's device as a wake stand-in from its first connect — an
+    /// unannounced one would trip the compatibility rider (`common.md` § Push
+    /// Notifications → *Transports*, ruled 2026-10-09).
+    #[tokio::test]
+    async fn the_device_leg_announces_the_device_as_a_stand_in() {
+        let (shutdown_tx, _rx) = tokio::sync::watch::channel(false);
+        let (event_tx, _) = tokio::sync::broadcast::channel(16);
+        let state = SyncServiceState::new(
+            crate::config::SyncConfig::default(),
+            shutdown_tx,
+            event_tx,
+            crate::config::SyncPaths::new(None).expect("this box has an absolute home"),
+        );
+        let client = device_leg_client(
+            &state,
+            &test_inputs(),
+            ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]),
+        );
+        assert_eq!(
+            client.push_presence(),
+            Some(fauna_protocol::push::PresenceRequest {
+                device_id: TEST_DEVICE_ID.to_string(),
+                stand_in: true,
+                ..Default::default()
+            }),
+            "the device-principal leg must announce the capability's device as a stand-in"
+        );
+    }
+
     /// **The leg follows the refusal, not the slot**
     /// (`sync-agent-credentials.md` § Credential model → *A rejected
     /// credential asks at once*). A refused slot mounts nothing; once an app
@@ -760,7 +803,7 @@ mod tests {
             crate::config::SyncConfig::default(),
             shutdown_tx,
             event_tx,
-            crate::config::SyncPaths::new(None),
+            crate::config::SyncPaths::new(None).expect("this box has an absolute home"),
         );
         let actor = [7u8; 32];
         *state.capability.write().await = Some(fauna_ipc::sync::SyncCapability::new(
@@ -870,7 +913,7 @@ mod tests {
             crate::config::SyncConfig::default(),
             shutdown_tx,
             event_tx,
-            crate::config::SyncPaths::new(None),
+            crate::config::SyncPaths::new(None).expect("this box has an absolute home"),
         );
         rt.block_on(async {
             *state.capability.write().await = Some(cap);
@@ -1001,7 +1044,7 @@ mod tests {
             crate::config::SyncConfig::default(),
             shutdown_tx,
             event_tx,
-            crate::config::SyncPaths::new(None),
+            crate::config::SyncPaths::new(None).expect("this box has an absolute home"),
         )
     }
 

@@ -186,6 +186,16 @@ pub struct PostSummary {
     pub timestamp: i64,
     pub tags: Vec<String>,
     pub has_media: bool,
+    /// Whether this post is **playable media** — the engagement-cue subject's
+    /// `is_media` (`engagement-cues.md` § Cue vocabulary & derivation): a post
+    /// whose `watch-complete` is its played fraction, not its dwell. Every
+    /// capture shell reads THIS for `CueRow::is_media`, never
+    /// [`has_media`](Self::has_media), which is true for a still image too.
+    /// Derived at every snapshot read by [`PostSummary::derive_plays_media`].
+    /// Additive.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub plays_media: bool,
     pub is_reply: bool,
     /// Comma-separated protocol list → `classify_sources()` for badges.
     pub source: String,
@@ -292,6 +302,33 @@ pub struct PostSummary {
     /// card. Additive.
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     pub room_label: Option<String>,
+    /// On a **repost row** ([`reposted_post_id`](Self::reposted_post_id)
+    /// `Some`), the repost TARGET's tier (`FeedPostItem.reposted_gated_tier`,
+    /// the nest's projection of the target's `content_meta.gated_tier`), so
+    /// the repost card paints the target's `gated-post-badge` over the
+    /// target's teaser (`behavior/restricted-posts.md` § Encryption at rest,
+    /// ruling 3). Deliberately apart from [`gated_tier`](Self::gated_tier),
+    /// which stays the repost post's own — `None`, a repost is public and
+    /// wordless — so the reply audience, the detail unseal and the own-post
+    /// web verbs keep reading the repost row as public. The card's badge tier
+    /// is `gated_tier` or, failing it, this. Additive.
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub reposted_gated_tier: Option<String>,
+    /// On a repost row, the hex channel id of the room the repost TARGET
+    /// addresses (`FeedPostItem.reposted_gated_room`) — the
+    /// [`gated_room`](Self::gated_room) twin of
+    /// [`reposted_gated_tier`](Self::reposted_gated_tier). Additive.
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub reposted_gated_room: Option<String>,
+    /// The repost target's room label as this reader's own conversation list
+    /// reads it — [`room_label`](Self::room_label)'s rule applied to
+    /// [`reposted_gated_room`](Self::reposted_gated_room): `Some` exactly when
+    /// the reader sits on that room's floor, derived at every snapshot read.
+    /// A member's repost card names the room by it exactly as the target's
+    /// own card does; `None` on a room target → the reserved tier, the
+    /// outsider's card. Additive.
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub reposted_room_label: Option<String>,
     /// Where this reader's reply to — or quote of — this post would go, `Some`
     /// exactly when the post is restricted ([`ReplyAudience`]). Derived at
     /// every snapshot read beside [`room_label`](Self::room_label), so it
@@ -399,9 +436,62 @@ pub struct PostSummary {
     )]
     #[cfg_attr(feature = "payments", doc = " (IDs user-approved 2026-08-11).")]
     pub tips: Option<TipView>,
+    /// `true` once this actor has bought this sold post and the author's
+    /// grant is still on its way (`monetization.md` § Per-post pay-to-unlock →
+    /// *A completed buy must not be re-offered*). Set by
+    /// [`crate::FeedManager::buy_unlock_offer`] in the same write that clears
+    /// [`unlock_offer`](Self::unlock_offer), and re-set by every later
+    /// [`crate::FeedManager::resolve_post_unlock_offer`] pass that the
+    /// purchase guard declines — a reload rebuilds this record with `false`,
+    /// so the marker reappearing is the positive trace that a later pass ran
+    /// and did not re-offer. Never set while [`gated_unlocked`](Self::gated_unlocked)
+    /// is. In-memory like the guard it mirrors: a restart re-offers, by design.
+    /// Additive.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub unlock_purchase_pending: bool,
 }
 
 impl PostSummary {
+    /// Whether this post is playable media for engagement-cue derivation —
+    /// what [`plays_media`](Self::plays_media) carries. A video
+    /// ([`RenderBlock::Video`](fauna_core::render::RenderBlock::Video) /
+    /// [`ProxiedVideo`](fauna_core::render::RenderBlock::ProxiedVideo)) plays; a
+    /// still image, like a text post, does not: it is a non-media post whose
+    /// `watch-complete` is its dwell (`engagement-cues.md` § Cue vocabulary &
+    /// derivation). A `has_media` post whose media has not resolved yet
+    /// (`media_hash` unset — the feed-index item says only "has an attachment")
+    /// reads as playable: a video must never dwell-complete on a guess, and the
+    /// `CueTracker` takes the latest reading, so an image post's exposure moves
+    /// to the dwell arm once its media resolves.
+    pub fn derive_plays_media(&self) -> bool {
+        use fauna_core::render::RenderBlock;
+        (self.has_media && self.media_hash.is_none())
+            || self.document.blocks.iter().any(|b| {
+                matches!(
+                    b,
+                    RenderBlock::Video { .. } | RenderBlock::ProxiedVideo { .. }
+                )
+            })
+    }
+
+    /// The gate the card's `gated-post-badge` paints — `(tier, room label)`:
+    /// the row's own [`gated_tier`](Self::gated_tier) /
+    /// [`room_label`](Self::room_label), or, on a repost row of a restricted
+    /// target, the target's [`reposted_gated_tier`](Self::reposted_gated_tier)
+    /// / [`reposted_room_label`](Self::reposted_room_label)
+    /// (`behavior/restricted-posts.md` § Encryption at rest, ruling 3: a
+    /// repost renders as the target's own gated card, teaser and badge).
+    /// `None` = paint no badge. For the BADGE only — whether the row itself
+    /// is sealed (reply audience, unseal, web verbs) is `gated_tier` alone.
+    pub fn card_gate(&self) -> Option<(&str, Option<&str>)> {
+        match (&self.gated_tier, &self.reposted_gated_tier) {
+            (Some(tier), _) => Some((tier, self.room_label.as_deref())),
+            (None, Some(tier)) => Some((tier, self.reposted_room_label.as_deref())),
+            (None, None) => None,
+        }
+    }
+
     /// The projection of a **legally taken-down** post — everything the nest
     /// will tell any viewer about it (`moderation.md` § Categories & enforcement
     /// item 1).
@@ -761,6 +851,14 @@ pub struct FeedSnapshot {
     pub bridge_form: BridgeFormState,
     /// Page-level error → `error-message`.
     pub error: Option<LocalizedText>,
+    /// The Bluesky thread page (`feed-thread-page`), open from
+    /// [`crate::FeedManager::open_thread`] until
+    /// [`crate::FeedManager::close_thread`]; `None` while no thread is open.
+    /// Its own `error` is the page's — a failed thread fetch never touches
+    /// the feed's [`error`](Self::error).
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub thread: Option<crate::thread::ThreadPage>,
 }
 
 impl FeedSnapshot {
@@ -808,6 +906,28 @@ impl FeedSnapshot {
     }
 }
 
+/// What a card's `gated-post-badge` paints — [`PostSummary::card_gate`] as an
+/// owned record, so native (UniFFI) apps can read the one pick.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct CardGate {
+    /// The tier the badge names (the reserved tier when `room_label` is `None`).
+    pub tier: String,
+    /// The reader's own label for the room, when the reader sits in it.
+    pub room_label: Option<String>,
+}
+
+/// [`PostSummary::card_gate`] for native (UniFFI) apps — a `uniffi::Record`
+/// can't carry exported methods (the [`post_offers_thread_view`](crate::post_offers_thread_view)
+/// posture). Web reads the same pick through `fauna_wasm::postCardGate`.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn post_card_gate(post: PostSummary) -> Option<CardGate> {
+    post.card_gate().map(|(tier, room_label)| CardGate {
+        tier: tier.to_string(),
+        room_label: room_label.map(str::to_string),
+    })
+}
+
 /// [`FeedSnapshot::empty_state`] for native (UniFFI) apps. A `uniffi::Record`
 /// can't carry exported methods, so this free function is how Swift/Kotlin/C#
 /// reach the one empty-state decision instead of re-deriving it from `status`,
@@ -833,6 +953,37 @@ mod tests {
             search_query: search.map(str::to_owned),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn post_card_gate_picks_the_rows_own_gate_else_the_reposts_target() {
+        let own = PostSummary {
+            gated_tier: Some("Inner".into()),
+            room_label: Some("Book club".into()),
+            reposted_gated_tier: Some("Other".into()),
+            reposted_room_label: Some("Elsewhere".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            post_card_gate(own),
+            Some(CardGate {
+                tier: "Inner".into(),
+                room_label: Some("Book club".into())
+            })
+        );
+        let repost = PostSummary {
+            reposted_gated_tier: Some("Room".into()),
+            reposted_room_label: Some("Book club".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            post_card_gate(repost),
+            Some(CardGate {
+                tier: "Room".into(),
+                room_label: Some("Book club".into())
+            })
+        );
+        assert_eq!(post_card_gate(PostSummary::default()), None);
     }
 
     #[test]

@@ -69,6 +69,16 @@ public class RecoveryKitViewModelTests : IDisposable
                 "Couldn't confirm whether your account was recovered ({cause}), and this device couldn't save your new identity. Write down this secret key now and import it — it is the only way back into your account: {secret}. Details: {reported}",
             ["settings/recovery_kit/stolen_landed_for_another"] =
                 "Your account has already been moved to a different identity ({actor}) — another device with the same recovery kit got there first. Import that identity to get back into your account.",
+            // The let-go (settings.md § Recovery kit, the fifth act) — the real
+            // templates, so the {rows}/{retired}/{message} substitutions are
+            // exercised rather than the key fallback.
+            ["settings/recovery_kit/unreadable_status_undated"] =
+                "{rows} items of your account data cannot be read by any device signed in to your account.",
+            ["settings/recovery_kit/let_go_confirm_placeholder"] = "Type LET GO to confirm",
+            ["settings/recovery_kit/let_go_done"] = "{retired} unreadable items were let go.",
+            ["settings/recovery_kit/let_go_kept"] =
+                "Some of this data became readable again and was kept.",
+            ["settings/recovery_kit/let_go_failed"] = "Couldn't let the data go: {message}",
         }));
     }
 
@@ -222,6 +232,44 @@ public class RecoveryKitViewModelTests : IDisposable
         // …and there is deliberately no path that shows it again.
         vm.ClearHeldSecrets();
         Assert.Null(vm.MintedSecretHex);
+    }
+
+    [Fact]
+    public async Task Create_BuildsTheDisplayUriOnce_AndClearingDropsIt()
+    {
+        var secret = new string('d', 64);
+        var rpc = new MockNestRpcClient
+        {
+            NextMintedKit = new uniffi.fauna_ffi.FfiMintedKit(secret, true, null),
+            NextKitDisplayUri = "fauna://recovery?secret=" + secret + "&actor=aa&handle=me@nest.example",
+        };
+        var vm = new RecoveryKitViewModel(rpc);
+
+        await vm.CreateOrReplaceKitAsync(usingHeldPhrase: false);
+
+        Assert.Equal(rpc.NextKitDisplayUri, vm.MintedKitUri);
+        Assert.Equal(secret, vm.MintedSecretHex);
+        Assert.Single(rpc.Calls, "RecoveryKitDisplayUri");
+
+        vm.ClearHeldSecrets();
+        Assert.Null(vm.MintedKitUri);
+    }
+
+    [Fact]
+    public async Task Create_ARefusedUri_KeepsTheKitOnScreenWithNoUri()
+    {
+        var secret = new string('c', 64);
+        var rpc = new MockNestRpcClient
+        {
+            NextMintedKit = new uniffi.fauna_ffi.FfiMintedKit(secret, true, null),
+            NextKitDisplayUri = null, // the mock throws, like a refusing builder
+        };
+        var vm = new RecoveryKitViewModel(rpc);
+
+        await vm.CreateOrReplaceKitAsync(usingHeldPhrase: false);
+
+        Assert.Equal(secret, vm.MintedSecretHex);
+        Assert.Null(vm.MintedKitUri);
     }
 
     [Fact]
@@ -812,7 +860,7 @@ public class RecoveryKitViewModelTests : IDisposable
     public void SweepCopy_AllRemoved_SelectsTheAllRemovedKey_NoUnattestedLine()
     {
         var copy = uniffi.fauna_ffi.FaunaFfiMethods.SweepCopy(
-            MakeSweepView(groups: 3, groupsOldLeafRemoved: 3), rendersRetry: true);
+            MakeSweepView(groups: 3, groupsOldLeafRemoved: 3));
         Assert.Equal("settings.recovery_kit.sweep_all_removed", copy.outcome?.key);
         Assert.Equal("3", copy.outcome?.args["groups"]);
         Assert.Null(copy.unattested);
@@ -822,8 +870,7 @@ public class RecoveryKitViewModelTests : IDisposable
     public void SweepCopy_Partial_SelectsThePartialKey_PlusItsOwnUnattestedLine()
     {
         var copy = uniffi.fauna_ffi.FaunaFfiMethods.SweepCopy(
-            MakeSweepView(groups: 3, groupsOldLeafRemoved: 1, unattestedMembers: 2, owesWork: true),
-            rendersRetry: true);
+            MakeSweepView(groups: 3, groupsOldLeafRemoved: 1, unattestedMembers: 2, owesWork: true));
         Assert.Equal("settings.recovery_kit.sweep_partial", copy.outcome?.key);
         Assert.Equal("1", copy.outcome?.args["removed"]);
         Assert.Equal("3", copy.outcome?.args["groups"]);
@@ -838,7 +885,7 @@ public class RecoveryKitViewModelTests : IDisposable
     public void SweepCopy_ZeroGroups_IsSilent()
     {
         var copy = uniffi.fauna_ffi.FaunaFfiMethods.SweepCopy(
-            MakeSweepView(groups: 0, groupsOldLeafRemoved: 0), rendersRetry: true);
+            MakeSweepView(groups: 0, groupsOldLeafRemoved: 0));
         Assert.Null(copy.outcome);
         Assert.Null(copy.unattested);
     }
@@ -1071,5 +1118,210 @@ public class RecoveryKitViewModelTests : IDisposable
         await vm.RetrySweepAsync();
 
         Assert.DoesNotContain("SuccessionRetryGroupSweep", rpc.Calls);
+    }
+
+    // ── The let-go (settings.md § Recovery kit, the fifth act) ────────────
+
+    private static readonly byte[] DeadA = Filled(1);
+    private static readonly byte[] DeadB = Filled(2);
+
+    private static byte[] Filled(byte value)
+    {
+        var id = new byte[32];
+        Array.Fill(id, value);
+        return id;
+    }
+
+    /// <summary>A dead read the shared projection answered — 11 items, no
+    /// readable mint date, so the undated copy.</summary>
+    private static uniffi.fauna_ffi.FfiDeadGenerations SomethingDead() =>
+        new(new[] { DeadA, DeadB },
+            new uniffi.fauna_core.LocalizedText(
+                "settings.recovery_kit.unreadable_status_undated",
+                new System.Collections.Generic.Dictionary<string, string> { ["rows"] = "11" }));
+
+    private static uniffi.fauna_ffi.FfiDeadGenerations NothingDead() =>
+        new(Array.Empty<byte[]>(), null);
+
+    /// <summary>
+    /// The trio's render gate is the SHARED projection's line: absent before the
+    /// read lands, absent while nothing is dead, and the resolved line once
+    /// something is — never re-derived here from the id list.
+    /// </summary>
+    [Fact]
+    public async Task TheLetGoRendersOnlyWhileTheDeadReadAnswers()
+    {
+        var rpc = new MockNestRpcClient { NextDeadGenerations = NothingDead() };
+        var vm = new RecoveryKitViewModel(rpc);
+
+        Assert.Null(vm.LetGoStatus);
+        Assert.False(vm.LetGoVisible);
+
+        await vm.LoadDeadGenerationsAsync();
+        Assert.Contains("RecoveryDeadGenerations", rpc.Calls);
+        Assert.Null(vm.LetGoStatus);
+        Assert.False(vm.LetGoVisible);
+
+        rpc.NextDeadGenerations = SomethingDead();
+        await vm.LoadDeadGenerationsAsync();
+        Assert.Equal(
+            "11 items of your account data cannot be read by any device signed in to your account.",
+            vm.LetGoStatus);
+        Assert.True(vm.LetGoVisible);
+    }
+
+    /// <summary>
+    /// The button arms on the shared confirm word alone — exact, case- and
+    /// space-sensitive, never localized — and never while a ceremony is in flight.
+    /// </summary>
+    [Fact]
+    public async Task TheLetGoButtonArmsOnTheConfirmWordAlone()
+    {
+        var rpc = new MockNestRpcClient { NextDeadGenerations = SomethingDead() };
+        var vm = new RecoveryKitViewModel(rpc);
+        await vm.LoadDeadGenerationsAsync();
+
+        // The shared constant, read through the door — not a second spelling.
+        Assert.Equal("LET GO", RecoveryKitViewModel.LetGoConfirmWord);
+
+        Assert.False(vm.LetGoArmed);
+        foreach (var near in new[] { "let go", "LET GO ", "LETGO", "LET" })
+        {
+            vm.LetGoConfirmInput = near;
+            Assert.False(vm.LetGoArmed);
+        }
+
+        vm.LetGoConfirmInput = RecoveryKitViewModel.LetGoConfirmWord;
+        Assert.True(vm.LetGoArmed);
+
+        vm.Busy = true;
+        Assert.False(vm.LetGoArmed);
+    }
+
+    /// <summary>
+    /// The word is re-checked when the act fires, not only in the render: a test
+    /// agent driving the id reaches the handler, and the data cannot be brought
+    /// back. Without it the door is never called and the prompt says why.
+    /// </summary>
+    [Fact]
+    public async Task LetGo_WithoutTheWord_RefusesOutLoud_AndNeverCallsTheDoor()
+    {
+        var rpc = new MockNestRpcClient { NextDeadGenerations = SomethingDead() };
+        var vm = new RecoveryKitViewModel(rpc);
+        await vm.LoadDeadGenerationsAsync();
+        vm.LetGoConfirmInput = "let go";
+
+        await vm.LetGoAsync();
+
+        Assert.DoesNotContain("RecoveryLetGo", rpc.Calls);
+        Assert.Equal("Type LET GO to confirm", vm.ErrorMessage);
+        Assert.True(vm.LetGoVisible);
+    }
+
+    /// <summary>
+    /// The press hands back exactly the ids the last read listed, and the
+    /// outcome's refreshed dead read REPLACES the list — so the trio leaves the
+    /// screen once nothing is dead — and what the act did is said on
+    /// <c>error-message</c>.
+    /// </summary>
+    [Fact]
+    public async Task LetGo_HandsBackTheReadsIds_AndTheOutcomeReplacesTheDeadRead()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextDeadGenerations = SomethingDead(),
+            NextLetGoOutcome = new uniffi.fauna_ffi.FfiLetGoOutcome(11, false, NothingDead()),
+        };
+        var vm = new RecoveryKitViewModel(rpc);
+        await vm.LoadDeadGenerationsAsync();
+        vm.LetGoConfirmInput = RecoveryKitViewModel.LetGoConfirmWord;
+
+        await vm.LetGoAsync();
+
+        Assert.Contains("RecoveryLetGo", rpc.Calls);
+        Assert.NotNull(rpc.LastLetGoGenerationIds);
+        Assert.Equal(new[] { DeadA, DeadB }, rpc.LastLetGoGenerationIds!);
+        Assert.Null(vm.LetGoStatus);
+        Assert.False(vm.LetGoVisible);
+        Assert.Equal(string.Empty, vm.LetGoConfirmInput);
+        Assert.Equal("11 unreadable items were let go.", vm.ErrorMessage);
+        Assert.False(vm.Busy);
+    }
+
+    /// <summary>A generation that became readable again since the render is named
+    /// as kept, never silently skipped — and a still-dead remainder keeps the trio
+    /// on screen.</summary>
+    [Fact]
+    public async Task LetGo_NamesDataThatWasKept()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextDeadGenerations = SomethingDead(),
+            NextLetGoOutcome = new uniffi.fauna_ffi.FfiLetGoOutcome(3, true, SomethingDead()),
+        };
+        var vm = new RecoveryKitViewModel(rpc);
+        await vm.LoadDeadGenerationsAsync();
+        vm.LetGoConfirmInput = RecoveryKitViewModel.LetGoConfirmWord;
+
+        await vm.LetGoAsync();
+
+        Assert.Equal(
+            "3 unreadable items were let go. Some of this data became readable again and was kept.",
+            vm.ErrorMessage);
+        Assert.True(vm.LetGoVisible);
+    }
+
+    /// <summary>A failed act says why through <c>let_go_failed</c>, disarms the
+    /// gate, and leaves the list it could not act on.</summary>
+    [Fact]
+    public async Task LetGo_WhenTheActFails_SaysWhy_AndKeepsTheList()
+    {
+        var rpc = new MockNestRpcClient { NextDeadGenerations = SomethingDead() };
+        var vm = new RecoveryKitViewModel(rpc);
+        await vm.LoadDeadGenerationsAsync();
+        vm.LetGoConfirmInput = RecoveryKitViewModel.LetGoConfirmWord;
+        rpc.NextError = "the account store is not ready yet";
+
+        await vm.LetGoAsync();
+
+        Assert.Equal("Couldn't let the data go: the account store is not ready yet", vm.ErrorMessage);
+        Assert.Equal(string.Empty, vm.LetGoConfirmInput);
+        Assert.True(vm.LetGoVisible);
+        Assert.False(vm.Busy);
+    }
+
+    /// <summary>Busy guards the let-go exactly like every other ceremony.</summary>
+    [Fact]
+    public async Task LetGo_RefusesWhileBusy()
+    {
+        var rpc = new MockNestRpcClient { NextDeadGenerations = SomethingDead() };
+        var vm = new RecoveryKitViewModel(rpc);
+        await vm.LoadDeadGenerationsAsync();
+        vm.LetGoConfirmInput = RecoveryKitViewModel.LetGoConfirmWord;
+        vm.Busy = true;
+
+        await vm.LetGoAsync();
+
+        Assert.DoesNotContain("RecoveryLetGo", rpc.Calls);
+    }
+
+    /// <summary>An armed gate must not survive a page leave, and the previous
+    /// account's dead read lists ITS generations — the let-go is not offered to
+    /// the next account until that account's own read lands.</summary>
+    [Fact]
+    public async Task LeavingThePage_Disarms_AndAnIdentityChange_DropsTheDeadRead()
+    {
+        var rpc = new MockNestRpcClient { NextDeadGenerations = SomethingDead() };
+        var vm = new RecoveryKitViewModel(rpc);
+        await vm.LoadDeadGenerationsAsync();
+        vm.LetGoConfirmInput = RecoveryKitViewModel.LetGoConfirmWord;
+
+        vm.ClearHeldSecrets();
+        Assert.Equal(string.Empty, vm.LetGoConfirmInput);
+        Assert.True(vm.LetGoVisible);
+
+        vm.ResetForIdentityChange();
+        Assert.False(vm.LetGoVisible);
+        Assert.Null(vm.LetGoStatus);
     }
 }

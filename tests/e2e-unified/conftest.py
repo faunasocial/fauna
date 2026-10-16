@@ -728,6 +728,52 @@ def _ensure_sync_agent_built() -> str:
     return _memoized_build("sync-agent-binary", build)
 
 
+def _ensure_recovery_fixture_built() -> str:
+    """The test-only `recovery_fixture` example, once per session.
+
+    `helpers/succession.py::recovery_fixture_binary` is a HELPER call, not a
+    declared fixture, so no name in an item's closure leads here:
+    `_prebuild_binaries` keys the job on the test modules that import the
+    helper (`_item_reaches_recovery_fixture`). Without it the cold cargo build
+    of `fauna-client-recovery` (74 min on a saturated Windows host, 2026-09-26) ran
+    inside the first caller's 900 s budget and `os._exit`ed the whole pytest
+    process. `common.nest.build_recovery_fixture` is stamp-gated and
+    slot-wrapped, so a warm tree takes neither cargo nor a slot here.
+    """
+
+    def build():
+        from common.nest import build_recovery_fixture
+
+        return build_recovery_fixture()
+
+    return _memoized_build("recovery-fixture-binary", build)
+
+
+def _ensure_render_cloud_init_built() -> str:
+    """The test-only `render_cloud_init` example (`libs/fauna-provisioning`),
+    once per session — `render_cloud_init_binary`'s builder, hoisted by
+    `_PREBUILD_BY_FIXTURE` so a cold cargo build never runs inside the
+    requesting test's budget. Stamp-gated and slot-wrapped
+    (`common.nest.build_render_cloud_init`)."""
+
+    def build():
+        from common.nest import build_render_cloud_init
+
+        return build_render_cloud_init()
+
+    return _memoized_build("render-cloud-init-binary", build)
+
+
+@pytest.fixture(scope="session")
+def render_cloud_init_binary():
+    """Path to the test-only binary that prints the cloud-init user-data
+    `fauna_provisioning::cloud_init::build_cloud_init` renders — how a tier_4
+    witness reaches the host-side artifacts a provisioned box receives
+    (`installers/vps.md` § Host OS Maintenance). Normally a memo replay of the
+    collection-time prebuild."""
+    return _ensure_render_cloud_init_built()
+
+
 def _ensure_fauna_ffi_loaded() -> None:
     """Load `fauna_ffi`'s cdylib once per session — building it if absent.
 
@@ -759,14 +805,22 @@ def _ensure_fauna_ffi_built() -> None:
     inside the hold is a stamp read. Run through `just` rather than by
     importing `fauna_ffi`, whose import IS the load — the one-shot side effect
     the warm pass must leave to the hold. The profile is the loader's
-    `_E2E_FFI_PROFILE` (pinned by `test_e2e_binary_prebuild.py`). Windows is
-    skipped like the loader: `just windows-ffi` builds there, not this recipe.
+    `_E2E_FFI_PROFILE` (pinned by `test_e2e_binary_prebuild.py`). Windows runs
+    the loader's own windows recipe instead — `just windows-ffi-test dev`, for
+    the host's RID (`fauna_ffi._build_via_just_windows_ffi_test`, its profile
+    and x64 triple pinned by the same test file): skipping it there left the
+    in-hold load to compile under the refuse mode, which refuses it, and the
+    run lost the cdylib for the session.
     """
     if _IS_WINDOWS:
-        return
+        cmd = ["just", "windows-ffi-test", "dev"]
+        if platform.machine().lower() not in ("arm64", "aarch64"):
+            cmd.append("x86_64-pc-windows-msvc")
+    else:
+        cmd = ["just", "e2e-ffi", "release"]
 
     def build():
-        subprocess.run(["just", "e2e-ffi", "release"], cwd=_repo_root, check=True)
+        subprocess.run(cmd, cwd=_repo_root, check=True)
 
     _memoized_build("fauna-ffi-cdylib-build", build)
 
@@ -850,6 +904,16 @@ def bluesky_nest_binary(_generated_files_fresh):
     two binaries independent of fixture ordering.
     """
     return _ensure_bluesky_nest_built()
+
+
+@pytest.fixture(scope="module")
+def consent_nest_binary(nest_binary):
+    """The binary `helpers/atproto_consent.py`'s `consent_nest` runs — the
+    default build. Defined HERE rather than beside `consent_nest` so every
+    module adopting that fixture sees it without importing it; a module whose
+    tests make repo WRITES through the PDS overrides it with
+    `bluesky_nest_binary` (the write kind is `bluesky`-gated)."""
+    return nest_binary
 
 
 @pytest.fixture(scope="session")
@@ -1379,10 +1443,11 @@ def _docker_run_network() -> str:
 #: configuration-file theatre the invariant bans, and it would arrive here
 #: disguised as test convenience.
 #:
-#: **Why these three.** `FAUNA_DEPLOYMENT_SEED` and `FAUNA_LOG_LEVEL` are
-#: artifact-set IPC in `installers/docker.md` § Environment Variables, and a
-#: test pinning one is asking the deployment for the same value cloud-init would
-#: write. `RUST_LOG` is deliberately NOT in that catalogue and is not an
+#: **Why these four.** `FAUNA_DEPLOYMENT_SEED` and `FAUNA_LOG_LEVEL` are
+#: artifact-set IPC in `installers/docker.md` § Environment Variables, and
+#: `FAUNA_IMAGE_TAG` is the update-channel seed catalogued there — a test pinning
+#: one is asking the deployment for the same value cloud-init would write.
+#: `RUST_LOG` is deliberately NOT in that catalogue and is not an
 #: oversight there: it is the nest's own diagnostic level, not a deployment
 #: input, which is why it is admitted here by the ratified paragraph's own words
 #: ("the log level for the crash beacon") rather than by an appeal to a table it
@@ -1395,6 +1460,7 @@ def _docker_run_network() -> str:
 #: survives a later name being added to either side.
 _DOCKER_EXTRA_ENV = frozenset({
     "FAUNA_DEPLOYMENT_SEED",
+    "FAUNA_IMAGE_TAG",
     "FAUNA_LOG_LEVEL",
     "RUST_LOG",
 })
@@ -1733,8 +1799,8 @@ class _DockerProvider(_OptionAwareProvider):
     **This provider never builds the image, by design.** Building the nest image
     on a dev VM is forbidden — every dev VM shares one physical host, so the
     build starves its siblings; the sanctioned path is the
-    `build-nest-image.yml` dispatch on the self-hosted runner
-    (`build-system.md` § Image tags & channels). So the image must already be
+    `build-nest-image.yml` dispatch on GitHub-hosted runners
+    (`image-pipeline.md` § Image tags & channels). So the image must already be
     present, and an absent one is a loud refusal naming both remedies rather
     than a 20-minute surprise build. `--nest docker:<ref>` picks the image
     explicitly, which is how a session runs this mode against an already-pulled
@@ -1840,7 +1906,7 @@ class _DockerProvider(_OptionAwareProvider):
                 f"present on this machine. This provider deliberately does NOT "
                 f"build it: building the nest image on a dev VM is forbidden — "
                 f"the dev VMs share one physical host and the build starves "
-                f"them (build-system.md § Image tags & channels). Either\n"
+                f"them (image-pipeline.md § Image tags & channels). Either\n"
                 f"  • run against an already-published image: "
                 f"--nest docker:ghcr.io/faunasocial/nest:latest "
                 f"(docker pull it first), or\n"
@@ -2575,7 +2641,7 @@ class _DockerProvider(_OptionAwareProvider):
 
 
 class _LiveProvider(_OptionAwareProvider):
-    """Mode 3: an already-deployed real box (default example.com).
+    """Mode 3: an already-deployed real box (default the dev nest).
 
     What this mode buys over the other two is everything a fresh private nest
     cannot have: real DNS, a real CA-issued cert, a real network path, and —
@@ -2881,7 +2947,10 @@ def nest_instance(request, nest_mode, tmp_path_factory):
     # session `mail_bridge_mta`, say) must meet the shared-identity fences too.
     from helpers import shared_identity
 
-    shared_identity.remember_shared_actor((nest.get("admin") or {}).get("actor_id_hex"))
+    admin = nest.get("admin") or {}
+    shared_identity.remember_shared_actor(
+        admin.get("actor_id_hex"), nest_url=nest.get("url"), signing_key=admin.get("signing_key")
+    )
     yield nest
     cleanup()
 
@@ -3230,17 +3299,34 @@ def _run_seal_helper(seal_helper_bin: str, subcommand: str, params: dict) -> byt
     return _b64.b64decode(proc.stdout.strip())
 
 
-def _published_dkim_record(nest_instance, domain: str, selector: str = "default") -> str:
-    """The DKIM TXT value (``v=DKIM1; k=ed25519; p=…``) the nest publishes for
-    ``<selector>._domainkey.<domain>``.
+def _published_dkim_records(
+    nest_instance, domain: str, label: str = "default"
+) -> dict[str, str]:
+    """The two DKIM TXT values the nest publishes for selector ``label`` of
+    ``domain``: ``{"<label>-rsa": "v=DKIM1; k=rsa; p=…", "<label>-ed25519":
+    "v=DKIM1; k=ed25519; p=…"}``, in signing order.
 
-    The nest holds each mail domain's DKIM key — minted when the domain is added
-    — and signs at the outbound hand-out (`mail-bridge-lifecycle.md` § DKIM
-    provisioning (automatic)). A fixture reads the record back here, the value an
-    admin would put in DNS, for a test's dkimpy ``dnsfunc``. A missing record
-    fails here, loudly, rather than as an unverifiable signature in whichever
-    test runs first.
+    The nest holds each mail domain's two DKIM keys — RSA-2048 and Ed25519,
+    minted when the domain is added — and signs every hand-out with both
+    (`mail-multidomain.md` § Per-domain DKIM → *Key shape*;
+    `mail-bridge-lifecycle.md` § DKIM provisioning (automatic)). A fixture reads
+    the records back here, the values an admin would put in DNS, for a test's
+    ``helpers.mail_wire.verify_each_dkim_signature``. A missing record fails
+    here, loudly, rather than as an unverifiable signature in whichever test
+    runs first.
     """
+    from helpers.mail_wire import dkim_selector_pair
+
+    return {
+        selector: _published_dkim_record(nest_instance, domain, selector)
+        for selector in dkim_selector_pair(label)
+    }
+
+
+def _published_dkim_record(nest_instance, domain: str, selector: str) -> str:
+    """The DKIM TXT value (``v=DKIM1; k=…; p=…``) the nest publishes for
+    ``<selector>._domainkey.<domain>`` — one of a label's two
+    ([`_published_dkim_records`])."""
     from clients.ws_rpc_admin_client import WsRpcAdminClient
 
     admin = nest_instance["admin"]
@@ -3288,12 +3374,19 @@ WEB_HOSTING_DOMAIN = "web.test"
 # § Signing-key selection at outbound time). Non-primary, so it never disturbs
 # the primary's EHLO/MX/TLS/DMARC-alignment behaviour the other tests assert.
 MAIL_SECOND_DOMAIN = "second.test"
+# The lifetime a fixture-minted SMTP submission token is signed for. The nest
+# judges a token's expiry by its mail clock (`mail_submitter_proof.rs`,
+# `outbound_now`), which the session's tests move forward by days and weeks and
+# never back (`helpers/mail_health_seeds.py::advance_mail_clock`); a token
+# signed for one wall-clock day read as expired to every submission after the
+# first such jump.
+SUBMISSION_TOKEN_LIFETIME_S = 3650 * 86400
 
 
 def _live_nest_session(request) -> bool:
     """True when EVERY selected test carries the ``live_nest`` marker — a
     session whose every nest interaction targets a LIVE remote nest (signed
-    into through the UI via DoH discovery, e.g. example.com).
+    into through the UI via DoH discovery, e.g. the dev nest).
 
     **This is the marker path, and `--nest live` is deliberately NOT it.** The
     two look alike and are not: a marker session bypasses ``nest_instance``
@@ -3674,11 +3767,11 @@ class MailBridgeMTAHandle:
         nest_url=None,
         tls_stub_mx=None,
         dane_domain=None,
-        dkim_selector=None,
-        dkim_public_dns_value=None,
+        dkim_records=None,
         second_domain=None,
-        second_dkim_selector=None,
-        second_dkim_public_dns_value=None,
+        second_dkim_records=None,
+        v6_stub_mx=None,
+        v6_domain=None,
     ):
         self.proc = proc
         self.mx_port = mx_port
@@ -3728,25 +3821,33 @@ class MailBridgeMTAHandle:
         # into the published TLSA record.
         self.tls_stub_mx = tls_stub_mx
         self.dane_domain = dane_domain
-        # DKIM selector + the unsealed public-key TXT value (`v=DKIM1; …`)
-        # for `<selector>._domainkey.<domain>`, read back from the nest (which
-        # holds the key and signs at the outbound hand-out); lets a test verify
-        # the delivered message's DKIM-Signature against this exact published
-        # value via a dkimpy `dnsfunc` — see `test_submission_dkim_signature_
-        # verifies`. `None` on a handle whose fixture did not read the record.
-        self.dkim_selector = dkim_selector
-        self.dkim_public_dns_value = dkim_public_dns_value
-        # A SECOND (non-primary) local domain with its OWN nest-held DKIM key
-        # + selector + published TXT value. Lets the per-domain From-domain
+        # A stub external MX listening on IPv6 loopback ONLY (`::1`) and the
+        # recipient domain routed at it (`v6only.test`): the one outbound
+        # target the bridge can reach only over IPv6, so the admin's IPv6-off
+        # switch (`OutboundPolicy.ipv6_enabled`) is observable as a delivery
+        # that stops. `None` on a box with no IPv6 loopback, and on bridges
+        # provisioned without it.
+        self.v6_stub_mx = v6_stub_mx
+        self.v6_domain = v6_domain
+        # The domain's two DKIM selectors → the unsealed public-key TXT value
+        # (`v=DKIM1; …`) each publishes at `<selector>._domainkey.<domain>`
+        # (`_published_dkim_records`: `default-rsa`, `default-ed25519`), read
+        # back from the nest (which holds the keys and signs every hand-out
+        # twice); lets a test verify each delivered DKIM-Signature against
+        # its exact published value — `helpers.mail_wire.
+        # verify_each_dkim_signature`. `None` on a handle whose fixture did
+        # not read the records.
+        self.dkim_records = dkim_records
+        # A SECOND (non-primary) local domain with its OWN nest-held DKIM keys
+        # + published TXT values. Lets the per-domain From-domain
         # DKIM-selection tier_3 test (test_submission_dkim_per_domain_*) submit
-        # From: this domain and dkimpy-verify the signature carries THIS
-        # domain's d=/s= — proving each local domain is signed with its own
-        # key, not the primary's (mail-multidomain.md § Signing-key selection
+        # From: this domain and dkimpy-verify the signatures carry THIS
+        # domain's d= — proving each local domain is signed with its own
+        # keys, not the primary's (mail-multidomain.md § Signing-key selection
         # at outbound time). `None` when the fixture read only the primary's
-        # record.
+        # records.
         self.second_domain = second_domain
-        self.second_dkim_selector = second_dkim_selector
-        self.second_dkim_public_dns_value = second_dkim_public_dns_value
+        self.second_dkim_records = second_dkim_records
 
     def kill(self):
         """Terminate the bridge process with a 5s grace window then SIGKILL."""
@@ -3840,7 +3941,23 @@ def live_admin_token(nest: dict) -> str | None:
     return mint_token_via_handshake(nest["url"], admin["signing_key"])
 
 
-def _bridge_admin_post(nest_url: str, admin_token: str, path: str, body: dict) -> dict:
+def live_user_token(nest: dict, user: dict) -> str:
+    """A bearer valid **right now** for ``user`` on ``nest`` — the user-side
+    twin of :func:`live_admin_token`, for the same one-hour TTL.
+
+    ``test_user`` is session-scoped, so its cached ``"token"`` is dead for any
+    test that runs past the hour mark of a sweep: a raw HTTP call bearing it
+    answers 401 (the 2026-10-12 sweep's forged-C2PA upload, 1 h in). WS-RPC
+    callers need none of this — ``ApiActor`` handshakes with the signing key
+    per call — so only a direct ``Authorization: Bearer`` use re-mints here.
+    """
+    from common.auth import mint_token_via_handshake
+
+    return mint_token_via_handshake(nest["url"], user["signing_key"])
+
+
+def _bridge_admin_post(nest_url: str, admin_token: str, path: str, body: dict,
+                       timeout: float = 5.0) -> dict:
     """POST a JSON body to one of nest's HTTP routes as the admin — in practice
     the `/api/v1/test/*` hooks, which have no WS-RPC twin. Bridge enrollment is
     WS-RPC only: `helpers/bridge_enrollment.py`.
@@ -3864,7 +3981,7 @@ def _bridge_admin_post(nest_url: str, admin_token: str, path: str, body: dict) -
         },
         method="POST",
     )
-    resp = urllib.request.urlopen(req, timeout=5.0, context=ctx)
+    resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)
     raw = resp.read()
     return json.loads(raw) if raw else {"_status": resp.status}
 
@@ -4307,6 +4424,76 @@ def _spawn_mta_bridge(
     )
 
 
+# The spam-group posture `mail_bridge_mta` puts on the shared nest (why each
+# field: the fixture's own comment at its `put_spam_policy`). `put_spam_policy`
+# replaces the whole group, so a test that changes one spam knob puts this back
+# — merged with nothing — when it is done.
+MTA_FIXTURE_SPAM_POSTURE = {
+    "dnsbl_servers": [],
+    "greylist_enabled": False,
+    "greylist_delay_secs": 0,
+    "fcrdns_mode": "off",
+    "max_conn_per_min": 1000,
+    "baseline_standing_publish": False,
+}
+
+
+#: The session-scoped mail bridges (`mail_bridge_mta`, `mail_bridge_mda`), each
+#: as (the respawnable `_SpawnedBridge`, the handle tests hold). Registered by
+#: those fixtures; read only by `_session_mail_bridges_supervised`.
+_SESSION_MAIL_BRIDGES: list[tuple["_SpawnedBridge", object]] = []
+
+
+def _supervise_session_mail_bridges() -> None:
+    """Play s6 for the session's shared bridges: relaunch any that exited 0.
+
+    A bridge exits 0 for rebind whenever a `config_changed` moves its listener
+    gating (`mda.go`, "exiting for s6 rebind") — any test that flips the
+    session nest's mail or DAV switch does that, restore included. Production's
+    supervisor relaunches it; without this the session bridge stayed down for
+    the rest of the run, and every later mail/CalDAV/CardDAV module failed on
+    a dead endpoint (a 2026-10-12 whole-suite sweep: `test_admin_mail_health`'s
+    mail-off case, then `test_caldav_nest_outcomes` ×13 at "never served").
+    A non-zero exit is a crash and is left for the test that meets it.
+    """
+    for spawned, handle in _SESSION_MAIL_BRIDGES:
+        if spawned.proc.poll() == 0:
+            spawned.respawn(wait_for_serving=True)
+            handle.proc = spawned.proc
+
+
+@pytest.fixture
+def session_mail_bridges_down():
+    """Stop every session mail bridge for this one test, then relaunch each.
+
+    For a test whose precondition is that no mail helper holds a live
+    connection (the nest folds `bridge_down`): without it that precondition
+    held only while an earlier test had left the session bridges dead, so the
+    test passed or failed by run order. A no-op when no session bridge was
+    ever spawned."""
+    stopped = []
+    for spawned, handle in list(_SESSION_MAIL_BRIDGES):
+        if spawned.proc.poll() is None:
+            spawned.proc.terminate()
+            spawned.proc.wait(timeout=30)
+            stopped.append((spawned, handle))
+    yield
+    for spawned, handle in stopped:
+        if spawned.proc.poll() is not None:
+            spawned.respawn(wait_for_serving=True)
+            handle.proc = spawned.proc
+
+
+@pytest.fixture(autouse=True)
+def _session_mail_bridges_supervised():
+    """Before and after every test, relaunch a session bridge that exited for
+    rebind (`_supervise_session_mail_bridges`). Before catches an exit the
+    config push delivered only after the previous test had finished."""
+    _supervise_session_mail_bridges()
+    yield
+    _supervise_session_mail_bridges()
+
+
 @pytest.fixture(scope="session")
 def mail_bridge_mta(mail_bridge_binary, seal_helper_binary, nest_instance, tmp_path_factory):
     """Spawn fauna-mail-bridge in MTA role against `nest_instance`.
@@ -4346,13 +4533,12 @@ def mail_bridge_mta(mail_bridge_binary, seal_helper_binary, nest_instance, tmp_p
     domain = MAIL_PRIMARY_DOMAIN
     # A second non-primary local domain with its own DKIM key, for the
     # per-domain From-domain DKIM-selection tier_3 test. Claimed below, which
-    # is what mints its nest-held key. The selector is
-    # "default" (the conventional first selector): a row's `dkim_selector` is
-    # NULL until a rotation sets it, so nest projects "default" for every
-    # domain — the per-domain distinction proven here is the KEY (a distinct
-    # `default._domainkey.second.test` record), not the selector label.
+    # is what mints its nest-held keys. Its selector label is "default" (a
+    # row's `dkim_selector` is NULL until a rotation sets it), as the
+    # primary's is — the per-domain distinction proven here is the KEYS (the
+    # distinct `default-rsa` / `default-ed25519._domainkey.second.test`
+    # records), not the selector names.
     second_domain = MAIL_SECOND_DOMAIN
-    second_dkim_selector = "default"
     recipient_local_part = "recipient"
 
     nest_port = nest_instance["port"]
@@ -4446,7 +4632,7 @@ def mail_bridge_mta(mail_bridge_binary, seal_helper_binary, nest_instance, tmp_p
         "credential_kind": "plain",
         "credential_b64": _b64.b64encode(submission_credential).decode(),
         "issued_at": _now,
-        "expires_at": _now + 86400,
+        "expires_at": _now + SUBMISSION_TOKEN_LIFETIME_S,
         "max_recipients": 100,
         "max_messages_per_day": 1000,
     })
@@ -4513,17 +4699,7 @@ def mail_bridge_mta(mail_bridge_binary, seal_helper_binary, nest_instance, tmp_p
         #     the limiter and a downstream test gets a spurious `421`. Lift it
         #     out of the way (the limiter itself is asserted by
         #     `api/test_smtp_policy_enforcement.py` against its own fixture).
-        admin_ws.call(
-            "fauna.bridges.put_spam_policy",
-            {
-                "dnsbl_servers": [],
-                "greylist_enabled": False,
-                "greylist_delay_secs": 0,
-                "fcrdns_mode": "off",
-                "max_conn_per_min": 1000,
-                "baseline_standing_publish": False,
-            },
-        )
+        admin_ws.call("fauna.bridges.put_spam_policy", dict(MTA_FIXTURE_SPAM_POSTURE))
         # Sender alias so the AUTH username `sender@domain` resolves via
         # validate_recipient (same account_aliases path as the recipient).
         add_exact_alias(nest_url, sender["signing_key"], domain, submission_sender_local)
@@ -4536,6 +4712,13 @@ def mail_bridge_mta(mail_bridge_binary, seal_helper_binary, nest_instance, tmp_p
         add_exact_alias(
             nest_url, sender["signing_key"], domain, submission_sender_owned_alias_local
         )
+        # The login local-part on the SECOND domain too. The sender actor has no
+        # handle — `sender` is an exact alias on the primary only — and an alias
+        # is owned on the one domain it names, so without this the nest's own
+        # From: check at the enqueue door refuses `sender@<second domain>` with
+        # `550 5.7.1` (mail-multidomain.md § From: header ownership). The
+        # per-domain DKIM test submits From that address.
+        add_exact_alias(nest_url, sender["signing_key"], second_domain, submission_sender_local)
         # Sender's seal key — the bridge seals the sender's "Sent" copy
         # to it on submission (550 5.1.1 otherwise).
         provision_recipient_seal_key(
@@ -4578,6 +4761,13 @@ def mail_bridge_mta(mail_bridge_binary, seal_helper_binary, nest_instance, tmp_p
         tls_stub_mx = StubMX(bind_host="127.0.0.2", enable_starttls=True).start()
     except OSError:
         tls_stub_mx = StubMX(bind_host="127.0.0.1", enable_starttls=True).start()
+    # A third stub on IPv6 loopback only, routed as `v6only.test`: the target
+    # the IPv6-off outbound witness needs, reachable over IPv6 and never over
+    # IPv4. A box without `::1` gets no route and the witness skips.
+    try:
+        v6_stub_mx = StubMX(bind_host="::1").start()
+    except OSError:
+        v6_stub_mx = None
 
     # Fake clamd + rspamd for the T1.4 content-scan gate. Started before the operator-hatch is written so their
     # ephemeral ports wire into `clamd_addr` / `rspamd_url`. They behave like
@@ -4601,6 +4791,7 @@ def mail_bridge_mta(mail_bridge_binary, seal_helper_binary, nest_instance, tmp_p
     #     (Local recipients resolve at RCPT TO via the MDA, so this route is
     #     inert for the existing inbound tests.)
     #   - `dane.test` → the TLS-capable stub (outbound DANE tests).
+    #   - `v6only.test` → the IPv6-only stub (the IPv6-off outbound witness).
     op_hatch_extra = (
         f'clamd_addr = "{fake_clamd.addr}"\n'
         f'rspamd_url = "{fake_rspamd.url}"\n'
@@ -4609,6 +4800,8 @@ def mail_bridge_mta(mail_bridge_binary, seal_helper_binary, nest_instance, tmp_p
         f'"{domain}" = "{stub_mx.target}"\n'
         f'"dane.test" = "{tls_stub_mx.target}"\n'
     )
+    if v6_stub_mx is not None:
+        op_hatch_extra += f'"v6only.test" = "{v6_stub_mx.target}"\n'
     spawned = _spawn_mta_bridge(
         mail_bridge_binary=mail_bridge_binary,
         seal_helper_binary=seal_helper_binary,
@@ -4624,13 +4817,9 @@ def mail_bridge_mta(mail_bridge_binary, seal_helper_binary, nest_instance, tmp_p
         # hand-out, so the fixture seals nothing to the bridge. It reads back
         # the record the nest publishes for each domain for the tests' dkimpy
         # `dnsfunc`.
-        dkim_selector = "default"
         published_dkim = {
-            dkim_domain: _published_dkim_record(nest_instance, dkim_domain, selector)
-            for dkim_domain, selector in (
-                (domain, dkim_selector),
-                (second_domain, second_dkim_selector),
-            )
+            dkim_domain: _published_dkim_records(nest_instance, dkim_domain)
+            for dkim_domain in (domain, second_domain)
         }
 
         handle = MailBridgeMTAHandle(
@@ -4657,26 +4846,27 @@ def mail_bridge_mta(mail_bridge_binary, seal_helper_binary, nest_instance, tmp_p
             nest_url=nest_url,
             tls_stub_mx=tls_stub_mx,
             dane_domain="dane.test",
-            dkim_selector=dkim_selector,
-            dkim_public_dns_value=published_dkim[domain],
+            dkim_records=published_dkim[domain],
             second_domain=second_domain,
-            second_dkim_selector=second_dkim_selector,
-            second_dkim_public_dns_value=published_dkim[second_domain],
+            second_dkim_records=published_dkim[second_domain],
+            v6_stub_mx=v6_stub_mx,
+            v6_domain="v6only.test" if v6_stub_mx is not None else None,
         )
+        _SESSION_MAIL_BRIDGES.append((spawned, handle))
         yield handle
     finally:
+        _SESSION_MAIL_BRIDGES[:] = [p for p in _SESSION_MAIL_BRIDGES if p[0] is not spawned]
         spawned.cleanup()
         stub_mx.stop()
         tls_stub_mx.stop()
+        if v6_stub_mx is not None:
+            v6_stub_mx.stop()
         fake_clamd.stop()
         fake_rspamd.stop()
 
 
 @pytest.fixture
-def disposable_mta_bridge(
-    mail_bridge_mta, mail_bridge_binary, seal_helper_binary, nest_instance,
-    tmp_path_factory,
-):
+def disposable_mta_bridge(disposable_mta_bridge_factory):
     """A throwaway MTA bridge for *destructive* tests (e.g. the graceful-
     shutdown SIGTERM drain), so a test can kill a bridge without stranding
     the session-scoped one every other test in the file shares.
@@ -4694,19 +4884,42 @@ def disposable_mta_bridge(
     DATA or outbound delivery. The session handle is reused only for its
     read-only nest-global fields (domain, recipient, submission identity).
     """
+    return disposable_mta_bridge_factory()
+
+
+@pytest.fixture
+def disposable_mta_bridge_factory(
+    mail_bridge_mta, mail_bridge_binary, seal_helper_binary, nest_instance,
+    tmp_path_factory,
+):
+    """`disposable_mta_bridge`, spawned when the TEST says so: a callable
+    `spawn(operator_hatch_extra="") -> MailBridgeMTAHandle`.
+
+    For a test whose bridge must boot on nest state the test itself sets first
+    (a bridge's connection-rate limiter starts fresh from its boot snapshot) or
+    on a deployment topology of its own (an unreachable scanner). Every bridge
+    spawned is torn down at teardown.
+    """
     session = mail_bridge_mta
-    tmp = tmp_path_factory.mktemp("mail-bridge-mta-disposable")
-    spawned = _spawn_mta_bridge(
-        mail_bridge_binary=mail_bridge_binary,
-        seal_helper_binary=seal_helper_binary,
-        nest_instance=nest_instance,
-        tmp=tmp,
-        bridge_id=f"test-mta-disposable-{uuid.uuid4().hex[:12]}",
-        domain=session.domain,
-        operator_hatch_extra="",
-    )
-    try:
-        handle = MailBridgeMTAHandle(
+    spawned_all = []
+
+    # Not named `spawn`: kind_reach merges public functions by bare name, and a
+    # nested `spawn` reaching the enrollment kinds joins `ConPtyBackend.spawn`'s
+    # callers to them — every driver-launching fixture then reads as
+    # global-admin and the live mode axis collapses.
+    def spawn_disposable_mta(operator_hatch_extra: str = "") -> "MailBridgeMTAHandle":
+        tmp = tmp_path_factory.mktemp("mail-bridge-mta-disposable")
+        spawned = _spawn_mta_bridge(
+            mail_bridge_binary=mail_bridge_binary,
+            seal_helper_binary=seal_helper_binary,
+            nest_instance=nest_instance,
+            tmp=tmp,
+            bridge_id=f"test-mta-disposable-{uuid.uuid4().hex[:12]}",
+            domain=session.domain,
+            operator_hatch_extra=operator_hatch_extra,
+        )
+        spawned_all.append(spawned)
+        return MailBridgeMTAHandle(
             proc=spawned.proc,
             mx_port=spawned.mx_port,
             submission_port_465=spawned.submission_port_465,
@@ -4729,9 +4942,12 @@ def disposable_mta_bridge(
             tls_stub_mx=session.tls_stub_mx,
             dane_domain=session.dane_domain,
         )
-        yield handle
+
+    try:
+        yield spawn_disposable_mta
     finally:
-        spawned.cleanup()
+        for spawned in spawned_all:
+            spawned.cleanup()
 
 
 class MailBridgeMDAHandle:
@@ -4881,6 +5097,7 @@ def _spawn_mda_bridge(
     wait_for_serving=True,
     pin_caldav_hatch=True,
     operator_hatch_extra="",
+    imap_bind_host="127.0.0.1",
 ):
     """Spawn one MDA-role `fauna-mail-bridge` process against `nest_instance`.
 
@@ -4937,6 +5154,13 @@ def _spawn_mda_bridge(
     authoritative and `respawn()` re-binds it after a port change. With `False`
     the returned `caldav_port` is `None` (the bound port is the caller's admin
     value, unknown here).
+
+    `imap_bind_host` (default loopback) is the address the two IMAP listeners
+    bind. The per-IP connection cap witness passes this box's own non-loopback
+    interface address, because the bridge counts a loopback source against its
+    fixed loopback ceiling instead of the admin's cap
+    (`internal/connlimit/perip.go`), so the cap is observable only from a
+    non-loopback source.
 
     Returns a `_SpawnedMdaBridge`; the caller wraps it in a
     `MailBridgeMDAHandle` and calls `.cleanup()` on teardown.
@@ -5084,8 +5308,8 @@ def _spawn_mda_bridge(
     )
     op_hatch_path.write_text(
         f'data_dir = "{tmp.as_posix()}"\n'
-        f'imap_listen_implicit_tls = "127.0.0.1:{imaps_port}"\n'
-        f'imap_listen_starttls = "127.0.0.1:{imap_starttls_port}"\n'
+        f'imap_listen_implicit_tls = "{imap_bind_host}:{imaps_port}"\n'
+        f'imap_listen_starttls = "{imap_bind_host}:{imap_starttls_port}"\n'
         f'{caldav_hatch_line}'
         f'metrics_bind_addr = "127.0.0.1:{metrics_port}"\n'
         f'{operator_hatch_extra}'
@@ -6030,8 +6254,10 @@ def mail_bridge_mda(mail_bridge_binary, seal_helper_binary, nest_instance, tmp_p
             x25519_pubkey=spawned.x25519_pubkey,
             x25519_secret=spawned.x25519_secret,
         )
+        _SESSION_MAIL_BRIDGES.append((spawned, handle))
         yield handle
     finally:
+        _SESSION_MAIL_BRIDGES[:] = [p for p in _SESSION_MAIL_BRIDGES if p[0] is not spawned]
         spawned.cleanup()
         fake_clamd.stop()
         fake_rspamd.stop()
@@ -6412,6 +6638,195 @@ def restartable_mda_nest(
         nest_cleanup()
 
 
+class RestartableMtaVenue:
+    """What `restartable_mta_nest` hands a test: a nest of its own (the `nest`
+    dict `common.nest.stop_nest`/`restart_nest`/`start_nest_in_place` operate on),
+    its claimed `domain`, the `stub_mx` outside mail is routed to, one MTA
+    (`mta`, a `_SpawnedMtaBridge`) and a submission sender — the
+    `submission_sender_local` / `submission_credential` pair
+    `helpers.mail_wire.submit_one_message` reads, as on `mail_bridge_mta`."""
+
+    def __init__(self, *, nest, domain, stub_mx, mta, submission_sender_local,
+                 submission_credential):
+        self.nest = nest
+        self.nest_url = nest["url"]
+        self.domain = domain
+        self.stub_mx = stub_mx
+        self.mta = mta
+        self.mx_port = mta.mx_port
+        self.submission_port_465 = mta.submission_port_465
+        self.submission_port_587 = mta.submission_port_587
+        self.log_file = mta.log_file_path
+        self.submission_sender_local = submission_sender_local
+        self.submission_credential = submission_credential
+
+
+@pytest.fixture(scope="function")
+def restartable_mta_nest(
+    mail_bridge_binary, seal_helper_binary, nest_binary, tmp_path_factory,
+):
+    """A DEDICATED nest + one MTA + a submission sender — for the tier_3 witnesses
+    that must stop or restart the nest under a running MTA.
+
+    The MTA counterpart of `restartable_mda_nest`, and dedicated for the same
+    reason: stopping or restarting a nest must never land on the shared session
+    `nest_instance` every other mail test depends on. The bridge itself is never
+    signalled by the test: across a nest stop it stays up and reconnects on its
+    own (`mail-bridge-lifecycle.md` § Reconnecting), which is what these
+    witnesses observe.
+
+    Standalone-only, like `restartable_mda_nest`: it spawns its own binaries.
+
+    Process safety: owns its nest, bridge and stub MX; tears them down in reverse
+    order, never pkill/killall.
+    """
+    with _restartable_mta_venue(
+        mail_bridge_binary, seal_helper_binary, nest_binary, tmp_path_factory,
+        label="restartable-mta",
+    ) as venue:
+        yield venue
+
+
+@pytest.fixture(scope="function")
+def certless_mta_nest(
+    mail_bridge_binary, seal_helper_binary, nest_binary, tmp_path_factory,
+):
+    """`restartable_mta_nest` whose MTA boots WITHOUT a certificate — for the
+    witness that a bridge started before its cert is ready begins offering
+    encryption with no restart (`mail-bridge-lifecycle.md` § Implementation
+    status today, the `config_changed` bullet).
+
+    No honest path boots a test MTA cert-less: the nest's floor cert is always
+    on disk and the bridge's first fetch seals it. So the nest's test-only
+    `tls-cert-withhold` seam (`tls_cert_withhold_test_hook.rs`) is armed for
+    `("mta", <bridge_id>)` BEFORE the bridge spawns — armed from the test body
+    it would be too late, the first fetch having already succeeded. The test
+    clears it with `tls_cert_withhold(..., withhold=False)`; the dedicated nest
+    dies with the fixture either way.
+    """
+    with _restartable_mta_venue(
+        mail_bridge_binary, seal_helper_binary, nest_binary, tmp_path_factory,
+        label="certless-mta",
+        before_mta_spawn=lambda nest, bridge_id: tls_cert_withhold(
+            nest, "mta", bridge_id, withhold=True,
+        ),
+    ) as venue:
+        yield venue
+
+
+def tls_cert_withhold(nest, role: str, bridge_id: str, *, withhold: bool) -> None:
+    """Make the nest answer (or stop answering) `(role, bridge_id)`'s
+    `fetch_tls_cert_blob` with no blob — the test-only seam
+    `POST /api/v1/test/tls-cert-withhold/{role}/{bridge_id}[/clear]`."""
+    import urllib.request
+
+    suffix = "" if withhold else "/clear"
+    req = urllib.request.Request(
+        f"{nest['url']}/api/v1/test/tls-cert-withhold/{role}/{bridge_id}{suffix}",
+        data=b"",
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10.0) as resp:
+        assert resp.status == 200, f"tls-cert-withhold returned {resp.status}"
+
+
+@contextlib.contextmanager
+def _restartable_mta_venue(
+    mail_bridge_binary, seal_helper_binary, nest_binary, tmp_path_factory,
+    *, label, before_mta_spawn=None,
+):
+    """The body of `restartable_mta_nest` and `certless_mta_nest`: a dedicated
+    nest, its domain + spam posture + submission sender, a stub MX and one MTA
+    (bridge id `f"{label}-mta"`). `before_mta_spawn(nest, bridge_id)`, when
+    given, runs after the nest is provisioned and before the MTA process
+    starts — the only point a seam on the bridge's first nest fetch can be
+    armed."""
+    import base64 as _b64
+    import secrets as _secrets
+    import time as _time
+
+    from clients.ws_rpc_admin_client import WsRpcAdminClient as _WsRpcAdminClient
+    from common.auth import create_actor_and_register as _create_actor
+    from helpers.mail_aliases import add_exact_alias
+    from helpers.recipient_seal_key import provision_recipient_seal_key
+    from helpers.stub_mx import StubMX
+
+    teardown = []
+
+    try:
+        nest, nest_cleanup = _make_nest(nest_binary, tmp_path_factory, label)
+        teardown.append(nest_cleanup)
+        domain = MAIL_PRIMARY_DOMAIN
+        admin = nest["admin"]
+        sender = _create_actor(nest["port"], admin_signing_key=admin["signing_key"])
+        sender_local = "sender"
+        credential = f"restartable-{_secrets.token_hex(6)}".encode()
+
+        def _seal(subcommand, params):
+            return _run_seal_helper(seal_helper_binary, subcommand, params)
+
+        with _WsRpcAdminClient(
+            nest["url"],
+            actor_id=bytes(admin["signing_key"].verify_key),
+            signing_key=bytes(admin["signing_key"]),
+        ) as admin_ws:
+            admin_ws.call("fauna.bridges.set_mail_enabled", {"enabled": True})
+            admin_ws.call(
+                "fauna.bridges.add_local_domain",
+                {"domain": domain, "mta_sts_cert_mode": "per_host"},
+            )
+            admin_ws.call("fauna.bridges.put_spam_policy", dict(MTA_FIXTURE_SPAM_POSTURE))
+            add_exact_alias(nest["url"], sender["signing_key"], domain, sender_local)
+            provision_recipient_seal_key(admin_ws, sender["actor_id_bytes"], run_seal_helper=_seal)
+
+        now = int(_time.time())
+        token_blob = _seal("seal-submission-token", {
+            "signing_seed_b64": _b64.b64encode(bytes(sender["signing_key"])).decode(),
+            "credential_id": "default",
+            "credential_kind": "plain",
+            "credential_b64": _b64.b64encode(credential).decode(),
+            "issued_at": now,
+            "expires_at": now + SUBMISSION_TOKEN_LIFETIME_S,
+            "max_recipients": 100,
+            "max_messages_per_day": 1000,
+        })
+        with _WsRpcAdminClient(
+            nest["url"],
+            actor_id=sender["actor_id_bytes"],
+            signing_key=bytes(sender["signing_key"]),
+        ) as sender_ws:
+            sender_ws.provision_wrapped_submission_token(token_blob)
+
+        stub_mx = StubMX().start()
+        teardown.append(stub_mx.stop)
+        bridge_id = f"{label}-mta"
+        if before_mta_spawn is not None:
+            before_mta_spawn(nest, bridge_id)
+        mta = _spawn_mta_bridge(
+            mail_bridge_binary=mail_bridge_binary,
+            seal_helper_binary=seal_helper_binary,
+            nest_instance=nest,
+            tmp=tmp_path_factory.mktemp(f"{label}-bridge"),
+            bridge_id=bridge_id,
+            domain=domain,
+            operator_hatch_extra=(
+                f'\n[mta_mx_override]\n"external.test" = "{stub_mx.target}"\n'
+            ),
+        )
+        teardown.append(mta.cleanup)
+        yield RestartableMtaVenue(
+            nest=nest,
+            domain=domain,
+            stub_mx=stub_mx,
+            mta=mta,
+            submission_sender_local=sender_local,
+            submission_credential=credential,
+        )
+    finally:
+        for cleanup in reversed(teardown):
+            cleanup()
+
+
 @pytest.fixture(scope="function")
 def dav_toggle_venue(nest_binary, mail_bridge_binary, seal_helper_binary, tmp_path_factory):
     """Factory: a dedicated nest + one DAV user + one MDA, with the deployment's
@@ -6422,8 +6837,8 @@ def dav_toggle_venue(nest_binary, mail_bridge_binary, seal_helper_binary, tmp_pa
     ``None`` is left unset — the "follows mail" state
     (`carddav-server.md` § Independent enablement). The toggles are set before
     the spawn because the MDA binds its listener set once, from its first
-    ``fetch_config``; flipping one later would make it exit for a rebind no
-    supervisor is here to answer.
+    ``fetch_config``; flipping one later makes it exit for a rebind, which the
+    test answers by playing supervisor with ``handle.rebind()``.
 
     For the enablement witnesses that must not flip the shared session nest's
     toggles under every other mail test: contacts served with mail off, and
@@ -6511,6 +6926,10 @@ def dav_toggle_venue(nest_binary, mail_bridge_binary, seal_helper_binary, tmp_pa
             x25519_secret=spawned.x25519_secret,
         )
         handle.nest_instance = nest
+        # The supervisor act for a test that flips a toggle AFTER boot: wait for
+        # the MDA's exit-for-rebind, relaunch it with the same argv, wait until
+        # it serves. `handle.proc` names the first process only.
+        handle.rebind = spawned.rebind
         return handle
 
     try:
@@ -6627,8 +7046,13 @@ class MailBridgeInboundToImapHandle(MailVenueBridges):
     def __init__(
         self, *, mx_port, imaps_port, domain, recipient_username,
         recipient_password, mta_proc, mta_log_file, mda, recipient=None,
+        submission_port_465=None, submission_port_587=None,
     ):
         self.mx_port = mx_port
+        # The MTA's authenticated-submission listeners (a mail app's send door), so a test
+        # can SUBMIT mail on this seam and read the Sent copy back over the MDA's IMAP.
+        self.submission_port_465 = submission_port_465
+        self.submission_port_587 = submission_port_587
         self.imaps_port = imaps_port
         self.domain = domain
         self.recipient_username = recipient_username
@@ -6708,17 +7132,7 @@ def mail_bridge_inbound_to_imap(
         signing_key=bytes(admin["signing_key"]),
     )
     with admin_ws:
-        admin_ws.call(
-            "fauna.bridges.put_spam_policy",
-            {
-                "dnsbl_servers": [],
-                "greylist_enabled": False,
-                "greylist_delay_secs": 0,
-                "fcrdns_mode": "off",
-                "max_conn_per_min": 1000,
-                "baseline_standing_publish": False,
-            },
-        )
+        admin_ws.call("fauna.bridges.put_spam_policy", dict(MTA_FIXTURE_SPAM_POSTURE))
 
     # Fake clamd + rspamd (benign verdicts) wired onto the MTA via the
     # operator-hatch — same posture as `mail_bridge_mta`. No `[mta_mx_override]`:
@@ -6751,6 +7165,8 @@ def mail_bridge_inbound_to_imap(
             mta_log_file=spawned.log_file_path,
             mda=mail_bridge_mda,
             recipient=recipient,
+            submission_port_465=spawned.submission_port_465,
+            submission_port_587=spawned.submission_port_587,
         )
         yield handle
     finally:
@@ -6863,8 +7279,9 @@ class DedicatedMailNestHandle(MailVenueHandle):
     port-25) + MDA `imaps_port`, and the submission machinery for the outbound
     leg: `submission_port_465` / `submission_port_587`, the in-process `stub_mx`
     the bridge relays external mail to (via the operator-hatch `mta_mx_override`),
-    and the nest-published DKIM record `dkim_public_dns_value` / `dkim_selector`
-    so an outbound-submission test can verify the relayed message's signature.
+    and the nest-published DKIM records `dkim_records` (selector → TXT value,
+    both of the domain's) so an outbound-submission test can verify each of the
+    relayed message's two signatures.
     """
 
     def __init__(
@@ -6878,8 +7295,7 @@ class DedicatedMailNestHandle(MailVenueHandle):
         submission_port_465,
         submission_port_587,
         stub_mx,
-        dkim_public_dns_value,
-        dkim_selector,
+        dkim_records,
         mta_proc,
         mta_log_file,
         mda_log_file=None,
@@ -6891,7 +7307,7 @@ class DedicatedMailNestHandle(MailVenueHandle):
         self.mx_port = mx_port
         self.imaps_port = imaps_port
         # MDA CalDAV HTTPS listener (self-signed local cert). Connect with
-        # `verify=False`; the live example.com deployment serves a real ACME cert.
+        # `verify=False`; the live nest serves a real ACME cert.
         # On the admin-port variant (`caldav_admin_port`) this is the admin-set
         # port the MDA binds via nest config (no hatch), not an ephemeral hatch port.
         self.caldav_port = caldav_port
@@ -6902,8 +7318,7 @@ class DedicatedMailNestHandle(MailVenueHandle):
         self.submission_port_465 = submission_port_465
         self.submission_port_587 = submission_port_587
         self.stub_mx = stub_mx
-        self.dkim_public_dns_value = dkim_public_dns_value
-        self.dkim_selector = dkim_selector
+        self.dkim_records = dkim_records
         self.mta_log_file = mta_log_file
         # The MDA bridge's log (CalDAV REPORT / query_events / decrypt traces).
         self.mda_log_file = mda_log_file
@@ -6987,8 +7402,8 @@ class DockerMailVenueHandle(MailVenueHandle):
     consumers read: `stub_mx` (an in-process SMTP sink the harness spawns and the
     operator-hatch `mta_mx_override` routes to — the image's bridges read their
     own config, so the docker answer is a fake-DNS sidecar, a different mechanism
-    rather than a different value) and the DKIM pair `dkim_selector` /
-    `dkim_public_dns_value` (the standalone fixture reads them from the nest).
+    rather than a different value) and the DKIM records `dkim_records` (the
+    standalone fixture reads them from the nest).
     None of them is *silently* absent: they are simply not attributes here, so a
     test reading one gets an `AttributeError` naming this class — and, before it
     could ever get that far, a collection-time exclusion, since the four test
@@ -7361,17 +7776,7 @@ def _dedicated_mail_nest_impl(
             "fauna.bridges.add_local_domain",
             {"domain": domain, "mta_sts_cert_mode": "per_host"},
         )
-        admin_ws.call(
-            "fauna.bridges.put_spam_policy",
-            {
-                "dnsbl_servers": [],
-                "greylist_enabled": False,
-                "greylist_delay_secs": 0,
-                "fcrdns_mode": "off",
-                "max_conn_per_min": 1000,
-                "baseline_standing_publish": False,
-            },
-        )
+        admin_ws.call("fauna.bridges.put_spam_policy", dict(MTA_FIXTURE_SPAM_POSTURE))
         if caldav_only:
             # CalDAV-ONLY deployment: set the deployment toggles BEFORE the MDA
             # boots — CalDAV ON, email explicitly OFF. Post-Stage-5 an *unset*
@@ -7469,8 +7874,7 @@ def _dedicated_mail_nest_impl(
             stub_mx=stub_mx,
             # The nest minted the domain's DKIM key at `add_local_domain`
             # above; this is the record it publishes for it.
-            dkim_public_dns_value=_published_dkim_record(nest, domain) if mta else None,
-            dkim_selector="default" if mta else None,
+            dkim_records=_published_dkim_records(nest, domain) if mta else None,
             mta_proc=mta.proc if mta else None,
             mta_log_file=mta.log_file_path if mta else None,
             mda_log_file=mda.log_file_path,
@@ -8227,19 +8631,60 @@ def cross_nest_foreign(request, nest_mode, tmp_path_factory):
     dial ``wss://`` here. A plain-HTTP foreign nest fails that handshake and
     silently falls through to the SMTP rail — the e2e twin of the in-process fix. ``nest["url"]`` is therefore ``https://…``.
     """
-    from common.auth import open_registration
-    from common.nest import OWN_DIAL_AUTHORITY
-
-    nest, cleanup = _start_dedicated_nest(
-        request, nest_mode, tmp_path_factory, "nest-foreign",
-        handle_domain_seed=OWN_DIAL_AUTHORITY, serve_tls=True,
-    )
-    open_registration(nest)
-    nest["authority"] = nest["handle_domain_seed"]
+    nest, cleanup = _start_handled_tls_nest(
+        request, nest_mode, tmp_path_factory, "nest-foreign")
     try:
         yield nest
     finally:
         cleanup()
+
+
+@pytest.fixture(scope="session")
+def report_origin_nest(request, nest_mode, tmp_path_factory):
+    """A second *handled*, TLS-serving nest — the REPORTER's nest of the
+    abuse-report federation triad, with ``cross_nest_foreign`` as the
+    reported author's home (`moderation.md` § User-initiated reporting →
+    *Routing*).
+
+    Same shape as ``cross_nest_foreign``, for the reason the triad needs both
+    ends handled: the home nest returns the outcome (and so names the reporter
+    nest at all) only through the ``origin_nest_url`` the origin declares,
+    which a nest declares only when it has a handle domain
+    (``abuse_report_federation.rs``, ``handle_domain_if_set``), and the home
+    dials it over ``wss://``. The shared ``nest_instance`` has neither, so a
+    report filed there forwards but its outcome never comes back.
+
+    One fixture for every test that needs that origin — the tui journey in
+    ``test_abuse_reporting.py`` and the api-tier witnesses of the same
+    triad — never a second copy of this start.
+    """
+    nest, cleanup = _start_handled_tls_nest(
+        request, nest_mode, tmp_path_factory, "nest-report-origin")
+    try:
+        yield nest
+    finally:
+        cleanup()
+
+
+def _start_handled_tls_nest(request, nest_mode, tmp_path_factory, label):
+    """Start a dedicated nest whose handle domain is its own loopback authority,
+    serving TLS, with self-service registration open — the shape
+    ``cross_nest_foreign`` documents. Returns ``(nest, cleanup)``; the nest
+    carries the bare ``host:port`` under ``authority``."""
+    from common.auth import open_registration
+    from common.nest import OWN_DIAL_AUTHORITY
+
+    nest, cleanup = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, label,
+        handle_domain_seed=OWN_DIAL_AUTHORITY, serve_tls=True,
+    )
+    try:
+        open_registration(nest)
+    except BaseException:
+        cleanup()
+        raise
+    nest["authority"] = nest["handle_domain_seed"]
+    return nest, cleanup
 
 
 @pytest.fixture(scope="function")
@@ -8506,7 +8951,8 @@ def _activate_real_faunamls(app, *, context):
 
 
 def _launch_second_real_faunamls_app(
-    request, real_faunamls_app, nest_instance, test_user, *, suppress_push, fixture_name
+    request, real_faunamls_app, nest_instance, test_user, *, suppress_push, fixture_name,
+    bob=None,
 ):
     """Shared body behind ``second_real_faunamls_app`` /
     ``second_real_faunamls_app_push_only`` — everything except the one env var
@@ -8514,6 +8960,12 @@ def _launch_second_real_faunamls_app(
     own docstrings for the property each combination proves; this helper only
     carries what does not vary: bob's registration/reachability, his ticker
     mute, his login, and his real-engine activation.
+
+    ``nest_instance`` is BOB's nest. It is alice's too unless ``bob`` is
+    passed: a caller that registered bob itself — on a nest of his own, as
+    ``two_nest_custody_rig`` does — hands him in, and this helper then logs
+    him in where he lives (with his real handle) and still owes his
+    reachability, the accept toward alice, on that nest.
 
     ``fixture_name`` is the caller's own name, and it exists for ONE reason: it
     goes into the real-rail witness's ``context`` below, so a red names the
@@ -8564,10 +9016,15 @@ def _launch_second_real_faunamls_app(
     # unhelpfully — the refusal renders as the generic "Something went wrong
     # talking to the nest", so it presented as a missing Welcome two
     # assertions later.
-    admin_sk = nest_instance["admin"]["signing_key"]
-    bob = create_actor_and_register(
-        nest_instance["port"], admin_signing_key=admin_sk
-    )
+    # A bob the caller registered logs in under his real handle (his kit, his
+    # cross-nest address); the helper's own bob keeps the fixed session handle
+    # every existing consumer was written against.
+    session_handle = bob["handle"] if bob is not None else "bob-e2e"
+    if bob is None:
+        admin_sk = nest_instance["admin"]["signing_key"]
+        bob = create_actor_and_register(
+            nest_instance["port"], admin_signing_key=admin_sk
+        )
     from tests.api import conv_api
 
     conv_api.accept_contact(nest_instance["port"], bob, test_user["actor_id_hex"])
@@ -8617,7 +9074,7 @@ def _launch_second_real_faunamls_app(
                 "authenticated": True,
                 "node_url": nest_instance["url"],
                 "secret_hex": secret_hex,
-                "handle": "bob-e2e",
+                "handle": session_handle,
                 "actor_id": bob["actor_id_hex"],
                 "device_id": "test-device-bob",
             },
@@ -8808,6 +9265,105 @@ def domainless_second_real_faunamls_app(
 
 
 @pytest.fixture
+def two_nest_custody_rig(request, app, nest_mode, tmp_path_factory):
+    """Two accounts on two nests, each a real-engine app, able to custody each
+    other — the rig a NEST-anchored custody needs to reach the custodied arm
+    of anything (``identity-succession.md`` § Seed escrow → *The custodian
+    copy*; ``account-replica-posture.md`` § Replica posture → *The custody
+    grant + ceremony*).
+
+    ``domainless_nest``'s rig puts both accounts on ONE nest, where the owner
+    is resident and every custodied door answers from the resident tables
+    instead. Here:
+
+    * **nest A** (``home``) is alice's home and **stoppable mid-test**
+      (``home["stop"]()``, the ``cross_nest_foreign_ephemeral`` shape — the
+      fixture's own teardown applied early, idempotent after).
+    * **nest B** (``custodian``) is bob's — the nest that will hold alice's
+      copy.
+
+    Both are handled TLS nests (``_start_handled_tls_nest``): a cross-nest MLS
+    carrier needs ``wss://`` relays both ways (``cross_nest_foreign``'s
+    docstring), and a handle domain that is an IP literal keeps each nest a
+    PRIVATE deployment (``state.rs::is_public_deployment``), so B's custody
+    pump may dial alice's loopback nest URL — the reason the one-nest rig
+    needed ``domainless_nest`` does not bite here.
+
+    alice is the app under test (``app``), a fresh handled actor on A logged in
+    with her real handle — the kit's ``handle=`` and a restore's account field
+    both need one. bob is a fresh handled actor on B, a second app of the same
+    client launched by ``_launch_second_real_faunamls_app``, who accepts alice
+    across the nests (his reachability — the reach policy is HIS nest's). Both
+    are on the real engine. B's periodic custody pump is HELD
+    (``custody_hosting/hold``): every pass a consumer sees is its own
+    ``run-now`` poke (convention 14).
+
+    Function-scoped throughout: A dies in the test that uses it, and a
+    custody's owner-side state outlives the test that made it.
+
+    Yields a dict: ``home``, ``custodian`` (the two nest dicts, each with
+    ``authority``), ``alice`` (her actor dict, ``handle`` bare), ``alice_app``,
+    ``bob``, ``bob_app``.
+    """
+    import secrets
+
+    import requests
+
+    from common.auth import register_handled_actor
+
+    home, home_cleanup = _start_handled_tls_nest(
+        request, nest_mode, tmp_path_factory, "custody-home")
+    stopped = False
+
+    def stop_home() -> None:
+        nonlocal stopped
+        if stopped:
+            return
+        stopped = True
+        home_cleanup()
+
+    home["stop"] = stop_home
+    try:
+        custodian, custodian_cleanup = _start_handled_tls_nest(
+            request, nest_mode, tmp_path_factory, "custody-custodian")
+        try:
+            hold = f"{custodian['url']}/api/v1/test/custody_hosting/hold"
+            resp = requests.post(hold, json={"held": True}, timeout=30, verify=False)
+            assert resp.status_code == 200, (
+                f"custody_hosting hold returned {resp.status_code}: {resp.text}"
+            )
+            alice = register_handled_actor(
+                home["port"], handle=f"alice{secrets.token_hex(4)}",
+                domain=home["authority"], base_url=home["url"],
+            )
+            bob = register_handled_actor(
+                custodian["port"], handle=f"bob{secrets.token_hex(4)}",
+                domain=custodian["authority"], base_url=custodian["url"],
+            )
+            _login_app_as(app, request, home, alice, verify_live_actor=True)
+            for alice_app in _activate_real_faunamls(
+                app, context="the `two_nest_custody_rig` fixture (alice)"
+            ):
+                for bob_app, bob in _launch_second_real_faunamls_app(
+                    request, alice_app, custodian, alice,
+                    suppress_push=True, fixture_name="two_nest_custody_rig",
+                    bob=bob,
+                ):
+                    yield {
+                        "home": home,
+                        "custodian": custodian,
+                        "alice": alice,
+                        "alice_app": alice_app,
+                        "bob": bob,
+                        "bob_app": bob_app,
+                    }
+        finally:
+            custodian_cleanup()
+    finally:
+        stop_home()
+
+
+@pytest.fixture
 def succession_member_app(request, succeedable_app, nest_instance):
     """bob — a second real-engine native GUI app who is a genuine **member**
     of a group owned by a **succeedable** alice: the member-side half of an
@@ -8843,9 +9399,11 @@ def succession_member_app(request, succeedable_app, nest_instance):
     Runs on linux + tui (the two direct-Rust clients that wire the in-process
     ``ConversationsSession``), on **web**, whose member seat is a twin PAGE
     in its own ``BrowserContext`` (``alice_second_web_device``'s idiom) over
-    the wasm ``WebSuccessionChainSource`` dial, and on **macos**, whose
-    member seat is a second launch with bob's own real-rail witness; every
-    other ``app`` param is declared unbuilt below until its own run is green.
+    the wasm ``WebSuccessionChainSource`` dial, on **macos**, whose member
+    seat is a second launch with bob's own real-rail witness, and on
+    **windows**, whose member seat is a second launch on its own agent pipe;
+    every other ``app`` param is declared unbuilt below until its own run is
+    green.
     """
     from helpers.app_surface import skip_unbuilt
 
@@ -8867,6 +9425,13 @@ def succession_member_app(request, succeedable_app, nest_instance):
         # `_launch_second_real_faunamls_app` already proves.
         # Widened 2026-10-08 on its own green run.
         app_name = "macos"
+    elif alice_app.driver.is_windows():
+        # windows' per-launch isolation (FAUNA_E2E_CREDENTIAL_DIR +
+        # FAUNA_E2E_DATA_DIR, `drivers/windows.py`) gives bob a second,
+        # independently-authenticated process — the shape
+        # `_launch_second_real_faunamls_app` already proves. The
+        # agent pipe is the one axis that launch does not move; it moves below.
+        app_name = "windows"
     else:
         # Convention 7: unbuilt debt, declared as such rather than skipped
         # silently — a member seat here could not re-point whatever the harness
@@ -8890,9 +9455,9 @@ def succession_member_app(request, succeedable_app, nest_instance):
                    "ChainWitness + NativeSuccessionChainSource + peer-anchor "
                    "sweep in fauna-client-recovery. What is unbuilt here is a "
                    "member seat this fixture can drive — only linux, tui, "
-                   "web and macOS have one",
-            tracked="succession-aftermath.md § Implementation status today — "
-                    "the ✅ witness bullet",
+                   "web, macOS and windows have one",
+            tracked="succession-propagation.md § Implementation status "
+                    "today — the witness/anchor entries",
         )
 
     admin_sk = nest_instance["admin"]["signing_key"]
@@ -8913,6 +9478,11 @@ def succession_member_app(request, succeedable_app, nest_instance):
         node_url = request.getfixturevalue("spa_url")
     else:
         config = _build_app_config(app_name, nest_instance, request)
+        # windows: bob's login would otherwise re-provision ALICE's session-wide
+        # agent with his identity (the last login wins the shared pipe) — the
+        # collision `_own_windows_share_seat_agent`'s docstring measured. A no-op
+        # on every other app, whose private HOME already isolates the agent.
+        _own_windows_share_seat_agent(app_name, config, request)
         driver = create_driver(app_name)
         driver.launch(config)
         node_url = nest_instance["url"]
@@ -9174,23 +9744,31 @@ def alice_builder_seats(request, test_user, nest_instance):
     builder is a seat of the account the phone is actually running; both default
     to alice on the session nest.
 
-    iOS pairs with macOS, the desktop app on the machine the simulator runs on.
-    Any other app under test skips — android's pair would be a desktop seat on
-    the emulator's host, which no fixture launches yet."""
+    iOS pairs with macOS, the desktop app on the machine the simulator runs on;
+    android pairs with tui, the desktop-class app the Linux harness (which drives
+    the emulator over the tunnel) launches headless beside it. Any other app
+    under test skips."""
     app = request.getfixturevalue("app")
-    if not app.driver.is_ios():
+    is_ios = app.driver.is_ios()
+    if not (is_ios or app.driver.is_android()):
         pytest.skip(
             "the desktop builder seat pairs with a phone under test; iOS pairs "
-            "with macOS — android's pairing is not built"
+            "with macOS, android with tui"
         )
     live: list = []  # (generator, seat), in launch order
     launched: list = []  # every seat ever launched, for the on-failure log
 
     def launch(tag="alice-builder-seat", *, user=None, nest=None):
-        gen = _alice_extra_seat(
-            "macos", request, user or test_user, nest or nest_instance,
-            screenshot_tag=tag,
-        )
+        if is_ios:
+            gen = _alice_extra_seat(
+                "macos", request, user or test_user, nest or nest_instance,
+                screenshot_tag=tag,
+            )
+        else:
+            gen = _alice_extra_seat(
+                "tui", request, user or test_user, nest or nest_instance,
+                screenshot_tag=tag,
+            )
         seat = next(gen)
         live.append((gen, seat))
         launched.append(seat)
@@ -9211,6 +9789,45 @@ def alice_builder_seats(request, test_user, nest_instance):
         while live:
             gen, _ = live.pop()
             gen.close()
+
+
+def _alice_web_twin_seat(driver, request, test_user, *, screenshot_tag):
+    """One MORE **web** seat of ``test_user`` beside the page ``driver`` drives —
+    a twin page in its own ``BrowserContext`` (``WebBridgeDriver.open_twin_page``),
+    the web analogue of ``_alice_extra_seat``'s fresh-state-root native launch.
+    Yields ``(seat_app, twin_driver)``. The body of ``alice_second_web_device``
+    (whose docstring owns the isolation mechanics), shared with journeys that
+    need a second device of a dedicated actor."""
+    secret_hex = test_user["signing_key"].encode().hex()
+    twin_driver = driver.open_twin_page()
+    try:
+        twin_driver.set_state({
+            "session": {
+                "authenticated": True,
+                # The SPA proxy URL, as in `_login_app_as` for web (the browser
+                # fetches relative to it).
+                "node_url": request.getfixturevalue("spa_url"),
+                "secret_hex": secret_hex,
+                # The same actor's REAL nest handle as device A (see
+                # `_login_app_as`) — a second device of one identity must not
+                # report a different one.
+                "handle": test_user.get("handle") or "e2e-user",
+                "actor_id": test_user["actor_id_hex"],
+                # A DISTINCT device id from device A's `_E2E_LOGIN_DEVICE_ID`:
+                # same identity, different device (mirrors alice_second_device).
+                "device_id": "fedcba9876543210" * 4,
+            },
+            "nav": {"stack": [{"view": "feed"}]},
+        })
+        device_b = ActionLayer(twin_driver)
+        device_b.conversations.enable_real_faunamls()
+        yield device_b, twin_driver
+    finally:
+        try:
+            twin_driver.screenshot(f"teardown-{screenshot_tag}")
+        except Exception:
+            pass
+        twin_driver.teardown()
 
 
 @pytest.fixture
@@ -9238,36 +9855,9 @@ def alice_second_web_device(request, test_user, nest_instance):
             "alice_second_device"
         )
 
-    secret_hex = test_user["signing_key"].encode().hex()
-    twin_driver = app.driver.open_twin_page()
-    try:
-        twin_driver.set_state({
-            "session": {
-                "authenticated": True,
-                # The SPA proxy URL, as in `_login_app_as` for web (the browser
-                # fetches relative to it).
-                "node_url": request.getfixturevalue("spa_url"),
-                "secret_hex": secret_hex,
-                # The same actor's REAL nest handle as device A (see
-                # `_login_app_as`) — a second device of one identity must not
-                # report a different one.
-                "handle": test_user.get("handle") or "e2e-user",
-                "actor_id": test_user["actor_id_hex"],
-                # A DISTINCT device id from device A's `_E2E_LOGIN_DEVICE_ID`:
-                # same identity, different device (mirrors alice_second_device).
-                "device_id": "fedcba9876543210" * 4,
-            },
-            "nav": {"stack": [{"view": "feed"}]},
-        })
-        device_b = ActionLayer(twin_driver)
-        device_b.conversations.enable_real_faunamls()
-        yield device_b, twin_driver
-    finally:
-        try:
-            twin_driver.screenshot("teardown-alice-second-web-device")
-        except Exception:
-            pass
-        twin_driver.teardown()
+    yield from _alice_web_twin_seat(
+        app.driver, request, test_user, screenshot_tag="alice-second-web-device",
+    )
 
 
 @pytest.fixture
@@ -9294,10 +9884,23 @@ def caldav_mailbox_less_attendee_app(request, app, dedicated_caldav_only_nest):
     materializes on her Events page — the GUI mirror of the conformance twin's
     drain+apply half.
 
-    Native-only: the web SPA has no mailbox-less rail yet, and android has no
-    second-seat harness here — any other selected app skips. Builds a fresh
-    driver **directly** (NOT the session ``_driver_cache``, which is the
-    organizer ``app``), logs carol in via ``set_state`` (mirroring
+    **android inverts the seats, by name, never by reinterpreting ``app``.** The
+    android venue provisions ONE emulator (`testing.md` § Default app and nest
+    mode → *Android's run venue*), and a second concurrently-live android app on
+    it is not available (one package per device), so carol — the asserted seat,
+    the one that must be android on the android column — takes the session
+    android ``app`` itself, re-pointed at the CalDAV-only nest
+    (``_relaunch_trusting_nest`` opens its ``adb reverse`` and seeds its trust
+    first). The organizer, whose only acts are the admin login and the CalDAV
+    mint, moves to a tui desktop seat beside the phone — the
+    phone-plus-desktop-seat pairing ``alice_builder_seats`` already uses for
+    android. Tests therefore never drive the organizer through ``app``: they
+    take :func:`caldav_mailbox_less_organizer_app`, which IS ``app`` on every
+    other column and that tui seat on android.
+
+    Every other app builds a fresh driver **directly** (NOT the session
+    ``_driver_cache``, which is the organizer ``app``), logs carol in via
+    ``set_state`` (mirroring
     ``second_real_faunamls_app``), then activates her real engine (on tui the
     call is a readiness probe — ``conv_backend.rs`` builds the real session
     unconditionally at login, the ``tui_member`` shape; windows is likewise a
@@ -9336,11 +9939,15 @@ def caldav_mailbox_less_attendee_app(request, app, dedicated_caldav_only_nest):
         # the mailbox-less rail (`caldav-server.md` § Server-side auto-schedule,
         # Half-1), which is what this arm exists to witness.
         app_name = "web"
+    elif app.driver.is_android():
+        # row 234: carol IS the session android app (the docstring's seat
+        # inversion); the organizer is `caldav_mailbox_less_organizer_app`'s
+        # tui seat.
+        app_name = "android"
     else:
         pytest.skip(
-            "the mailbox-less attendee seat runs on the direct-Rust clients "
-            "(linux + tui), apple (macos + ios), windows and web; android has "
-            "no second-seat harness here"
+            "the mailbox-less attendee seat runs on linux, tui, macos, ios, "
+            "windows, web and android; this app has no arm here"
         )
 
     handle = dedicated_caldav_only_nest
@@ -9359,6 +9966,13 @@ def caldav_mailbox_less_attendee_app(request, app, dedicated_caldav_only_nest):
         # to tear down but the page itself (handled below).
         driver = app.driver.open_twin_page()
         node_url = request.getfixturevalue("spa_proxy_for")(nest["url"])
+    elif app_name == "android":
+        # The session-cached driver: re-pointed, never launched or torn down
+        # here (the `_driver_cache` owns its life). The relaunch seam opens the
+        # device's reverse to this nest and trusts it — before `set_state`.
+        driver = app.driver
+        _relaunch_trusting_nest(driver, nest)
+        node_url = nest["url"]
     else:
         config = _build_app_config(app_name, nest, request)
         if app_name == "ios":
@@ -9396,6 +10010,31 @@ def caldav_mailbox_less_attendee_app(request, app, dedicated_caldav_only_nest):
     finally:
         try:
             driver.screenshot("teardown-caldav-mailbox-less-carol")
+        except Exception:
+            pass
+        if app_name != "android":
+            driver.teardown()
+
+
+@pytest.fixture
+def caldav_mailbox_less_organizer_app(request, app, dedicated_caldav_only_nest):
+    """The seat the mailbox-less journeys' ORGANIZER (the CalDAV-only nest's
+    claimed admin) logs in and mints its CalDAV credential on — ``app`` itself on
+    every column but android, where ``app`` is carol's seat and the organizer is a
+    tui desktop seat beside the phone (the seat inversion
+    :func:`caldav_mailbox_less_attendee_app`'s docstring rules). The organizer's
+    acts (``login_as_nest_admin``, the ``enable_caldav_mailbox`` mint) are no
+    witness for any column, so its seat's app is free to differ from the asserted
+    one. Yields an ``ActionLayer``."""
+    if not app.driver.is_android():
+        yield app
+        return
+    driver = _launch_fresh_share_driver("tui", dedicated_caldav_only_nest.nest, request)
+    try:
+        yield ActionLayer(driver)
+    finally:
+        try:
+            driver.screenshot("teardown-caldav-mailbox-less-organizer")
         except Exception:
             pass
         driver.teardown()
@@ -9621,8 +10260,8 @@ class MediaMemberSeat:
 def media_member(request):
     """The member seat of the Media read witnesses, over ``request.param`` —
     any app, each reading through the ``media-item-detail-download-button``
-    download (android's seat launches, but its driver has no download
-    read-back yet). A test
+    download (android's ``download_dir()`` is a host mirror of the device's,
+    refreshed on each call). A test
     parametrizes it INDIRECTLY, each arm carrying its app mark
     (``pytest.param("web", marks=pytest.mark.web)``), so the run's app axis
     selects arms exactly as it does for ``folder_share_owner_app``; it is in
@@ -9741,22 +10380,34 @@ def folder_share_owner_app(request, handled_nest):
     ran and the row did not repaint", and on at least one app its own
     ``error-message`` stays empty across that whole fork.
     """
+    for owner_app, owner in _folder_share_owner_seat(request.param, handled_nest, request):
+        yield owner_app, handled_nest, owner
+
+
+def _folder_share_owner_seat(app_name: str, nest: dict, request, *, owner: dict | None = None):
+    """:func:`folder_share_owner_app`'s body over any ``nest``, whose docstring
+    holds the whole story. ``owner`` signs in an actor the caller already
+    registered — the consent nest's ``alice``, the one account that nest's
+    connected-app ceremony approves for (``test_folder_deposit_adoption.py``) —
+    else a fresh handled owner is registered on ``nest``'s
+    ``MAIL_PRIMARY_DOMAIN``. A generator, not a fixture, like
+    :func:`_folder_share_recipient_seat`. Yields ``(owner_app, owner)``."""
     import secrets
 
     from common.auth import register_handled_actor
 
-    app_name = request.param
-    owner = register_handled_actor(
-        handled_nest["port"], handle="owner" + secrets.token_hex(3),
-        domain=MAIL_PRIMARY_DOMAIN,
-    )
-    driver = _launch_fresh_share_driver(app_name, handled_nest, request)
+    if owner is None:
+        owner = register_handled_actor(
+            nest["port"], handle="owner" + secrets.token_hex(3),
+            domain=MAIL_PRIMARY_DOMAIN,
+        )
+    driver = _launch_fresh_share_driver(app_name, nest, request)
     try:
-        secret_hex = owner["signing_key"].encode().hex()
+        secret_hex = bytes(owner["signing_key"]).hex()
         driver.set_state({
             "session": {
                 "authenticated": True,
-                "node_url": handled_nest["url"],
+                "node_url": nest["url"],
                 "secret_hex": secret_hex,
                 "handle": owner["handle"],
                 "actor_id": owner["actor_id_hex"],
@@ -9792,7 +10443,7 @@ def folder_share_owner_app(request, handled_nest):
             # mock→real flip — so the call means the same thing it does on linux
             # ("block until the engine is live") and needs no new agent command.
             owner_app.conversations.enable_real_faunamls()
-        yield owner_app, handled_nest, owner
+        yield owner_app, owner
     finally:
         try:
             driver.screenshot("teardown-folder-share-owner")
@@ -9819,6 +10470,7 @@ def _folder_share_recipient_seat(
     *,
     handle_prefix: str = "recip",
     screenshot: str = "teardown-folder-share-recipient",
+    domain: str = MAIL_PRIMARY_DOMAIN,
 ):
     """A FRESH GUI app (linux / macOS / iOS / web / tui / windows / android, per ``app_name``) logged in as
     a handled RECIPIENT on ``handled_nest``, with a LIVE conversations session (real
@@ -9849,6 +10501,10 @@ def _folder_share_recipient_seat(
     ``Fauna-iOS/App/FaunaApp.swift``), both of which build the identical
     ``ConversationsSession`` and call the identical ``startReceiveLoop()``.
 
+    ``domain`` is the nest's handle domain the recipient registers under —
+    ``MAIL_PRIMARY_DOMAIN`` on ``handled_nest``; a nest claimed for another
+    domain (the consent nest's ``HANDLE_DOMAIN``) passes its own.
+
     Yields ``(recipient_app, recipient)`` where ``recipient`` is the
     ``register_handled_actor`` dict (its ``actor_id_hex`` is the KeyPackage-fetch
     target the headless sharer addresses). A generator, not a fixture: the
@@ -9862,7 +10518,7 @@ def _folder_share_recipient_seat(
 
     recipient = register_handled_actor(
         handled_nest["port"], handle=handle_prefix + secrets.token_hex(3),
-        domain=MAIL_PRIMARY_DOMAIN,
+        domain=domain, base_url=handled_nest["url"],
     )
     driver = _launch_fresh_share_driver(app_name, handled_nest, request)
     try:
@@ -10038,7 +10694,7 @@ def real_faunamls_linux_sender(request, logged_in_app, nest_instance):
         driver.teardown()
 
 
-def _serve_spa_proxy(static_dir, nest_url, abort_once_paths=None):
+def _serve_spa_proxy(static_dir, nest_url, abort_once_paths=None, bind_host="127.0.0.1"):
     """Serve the built Svelte SPA on a local HTTP port, proxying ``/api/`` +
     ``/admin/`` (HTTP and the WebSocket upgrade) to ``nest_url``.
 
@@ -10059,6 +10715,18 @@ def _serve_spa_proxy(static_dir, nest_url, abort_once_paths=None):
     a fetch cancelled by a page navigation racing an in-flight request. Every
     subsequent GET for that path serves normally, proving a retry succeeds.
 
+    ``bind_host`` is the interface the proxy listens on and the host of the URL it
+    returns — the address the browser's ``node_url`` names, so the one the app's
+    own dial-host classification reads. Loopback by default; a test whose subject
+    IS the app's reading of a LAN dial passes ``common.nest.lan_ipv4()`` (the
+    upstream hop to ``nest_url`` is independent of it). A non-loopback bind is
+    served over **TLS** on a throwaway harness leaf for that address: web honours a
+    stored nest URL only when it is ``https:`` or ``http:`` to loopback
+    (``apps/fauna-web/src/lib/safe-url.ts`` ``isSafeNodeUrl``), so a plain-http LAN
+    proxy would be ignored and the SPA would dial its own origin instead — and the
+    browser contexts already carry ``ignore_https_errors``
+    (``web-bridge/server.py``), as for any self-signed LAN nest.
+
     **An ``https://`` ``nest_url`` is fine, and both hops carry the same posture.**
     The HTTP hop rides the process-global ``_FloorCertHTTPSHandler`` opener
     ``tests/common/auth.py`` installs (unverified for a marked loopback nest, real
@@ -10075,7 +10743,9 @@ def _serve_spa_proxy(static_dir, nest_url, abort_once_paths=None):
 
     What this does NOT change: the two nests that exist to exercise a *client's own*
     cert-trust decision (``self_signed_nest``, ``spki_pinned_nest``) still have no
-    proxy twin and their web legs stay declared absent — web makes no such decision
+    proxy twin for their cert-trust journeys and those web legs stay declared
+    absent (the one ``spki_pinned_nest`` proxy, in
+    ``test_admin_dns_host_address_lan.py``, serves a test asserting no trust) — web makes no such decision
     (``_declare_no_web_cert_trust``), so a green leg there would witness the
     proxy's trust and not the product's. An ordinary journey against
     a TLS nest asserts nothing about trust; the proxy is the CORS shim the harness
@@ -10300,10 +10970,29 @@ def _serve_spa_proxy(static_dir, nest_url, abort_once_paths=None):
     # ThreadingHTTPServer: a spliced WebSocket (the WS-RPC connection) stays
     # open for the whole session, so a single-threaded server would wedge —
     # every concurrent HTTP API proxy call needs its own thread.
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", spa_port), SPAHandler)
+    server = http.server.ThreadingHTTPServer((bind_host, spa_port), SPAHandler)
+    scheme = "http"
+    from common.auth import _is_loopback_host
+    if not _is_loopback_host(bind_host):
+        import ssl
+        import tempfile
+
+        from helpers.ephemeral_ca import EphemeralCA
+
+        cert_path, key_path = EphemeralCA().issue(bind_host).write(
+            tempfile.mkdtemp(prefix="spa-proxy-tls-"), "leaf"
+        )
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cert_path, key_path)
+        # The handshake runs on the handler's first read, in its own thread —
+        # never in the accept loop, where one idle preconnect would stall it.
+        server.socket = ctx.wrap_socket(
+            server.socket, server_side=True, do_handshake_on_connect=False
+        )
+        scheme = "https"
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    return f"http://127.0.0.1:{spa_port}", server
+    return f"{scheme}://{bind_host}:{spa_port}", server
 
 
 @pytest.fixture(scope="session")
@@ -10378,16 +11067,21 @@ def spa_proxy_for(static_dir):
     ``alice_second_web_device`` shares ``spa_url`` with device A. Per-seat isolation
     comes from the browser context — a twin page has its own localStorage — never
     from handing each seat its own origin. Every server started is shut down at
-    teardown."""
-    servers = []
-    by_nest_url: dict[str, str] = {}
+    teardown.
 
-    def make(nest_url: str) -> str:
-        if nest_url not in by_nest_url:
-            url, server = _serve_spa_proxy(static_dir, nest_url)
+    ``bind_host`` (default loopback) is ``_serve_spa_proxy``'s: the address the
+    browser dials, part of the memo key so a LAN-bound proxy never aliases a
+    loopback one."""
+    servers = []
+    by_key: dict[tuple[str, str], str] = {}
+
+    def make(nest_url: str, bind_host: str = "127.0.0.1") -> str:
+        key = (nest_url, bind_host)
+        if key not in by_key:
+            url, server = _serve_spa_proxy(static_dir, nest_url, bind_host=bind_host)
             servers.append(server)
-            by_nest_url[nest_url] = url
-        return by_nest_url[nest_url]
+            by_key[key] = url
+        return by_key[key]
 
     yield make
     for server in servers:
@@ -10401,6 +11095,16 @@ def dedicated_mail_spa_url(spa_proxy_for, dedicated_mail_nest):
     implementation, priority #2) kept for its direct callers; a new nest wants the
     factory rather than an Nth copy of this."""
     return spa_proxy_for(dedicated_mail_nest.nest["url"])
+
+
+@pytest.fixture
+def dedicated_mail_handle_domain_spa_url(spa_proxy_for, dedicated_mail_nest_handle_domain):
+    """Function-scoped SPA proxy → ``dedicated_mail_nest_handle_domain``, the name
+    ``_login_app_as(..., spa_url_fixture=...)`` takes for a web seat signing in to
+    a fresh actor on that nest. Without it the browser stays on the session
+    ``spa_url`` and every RPC fails ``fauna.auth.not_registered``. Same alias
+    shape as ``dedicated_mail_spa_url``."""
+    return spa_proxy_for(dedicated_mail_nest_handle_domain.nest["url"])
 
 
 @pytest.fixture
@@ -10504,9 +11208,13 @@ def test_user(nest_instance):
                 )
     from helpers import shared_identity
 
-    shared_identity.remember_shared_actor(user["actor_id_hex"])
     shared_identity.remember_shared_actor(
-        (nest_instance.get("admin") or {}).get("actor_id_hex")
+        user["actor_id_hex"], nest_url=nest_instance["url"], signing_key=user["signing_key"]
+    )
+    admin = nest_instance.get("admin") or {}
+    shared_identity.remember_shared_actor(
+        admin.get("actor_id_hex"), nest_url=nest_instance["url"],
+        signing_key=admin.get("signing_key"),
     )
     return user
 
@@ -11441,6 +12149,48 @@ def _web_onboarding_routed_to(driver, spa_url: str):
             pass
 
 
+def _apply_acme_pebble_env(env: dict, request) -> None:
+    """Point the app's manual DNS-01 certificate order at the harness's pebble CA.
+
+    `e2e-automation-surface-gating.md` § The ACME directory seed owns the
+    contract. The certificate authority is a constant no human chooses
+    (`tls-certificates.md` § ACME settings), so a walk that opens a real manual
+    order from an app reaches a CA only through this compile-gated seed:
+    `FAUNA_E2E_ACME_DIRECTORY_URL` / `FAUNA_E2E_ACME_CA_PEM` /
+    `FAUNA_E2E_ACME_NAMESERVER`, read by `fauna_client_dns::e2e_acme_seam` and
+    installed by the shared native admin-dns machine builder — so every native
+    app honours it with no per-app glue. The CA PEM is trusted by the ACME
+    client alone, never added to the app's general trust.
+
+    **Marker-gated** (`acme_pebble`), for the mail-import seed's reason: only a
+    walk that opens an order means anything by it, and a session without one
+    keeps production's constant (and no docker containers). Session-wide, like
+    every launch-environment seed: the native app drivers are session-scoped
+    (`_driver_cache`), so the seed must be in the launch environment before the
+    first launch. The stack itself is the session fixture `acme_pebble`, started
+    here on demand.
+
+    One declared absence: **web** runs its order in wasm (`acme_pure`) and has
+    no `std::env::var` to read.
+    """
+    if not any(item.get_closest_marker("acme_pebble") for item in request.session.items):
+        return
+    env.update(request.getfixturevalue("acme_pebble").env())
+
+
+@pytest.fixture(scope="session")
+def acme_pebble():
+    """The pebble ACME CA + fake name server stack (`helpers/acme_pebble.py`),
+    for the session. Requested by `_apply_acme_pebble_env` when a selected test
+    carries the `acme_pebble` marker, and by that test to publish the challenge
+    TXT the admin would paste."""
+    from helpers.acme_pebble import AcmePebble
+
+    stack = AcmePebble().start()
+    yield stack
+    stack.stop()
+
+
 def _apply_release_feed_env(env: dict, request) -> None:
     """Point the app's newer-version check at the harness's stub release feed.
 
@@ -11820,11 +12570,13 @@ def _apply_drafts_autosave_window_env(env: dict, request) -> None:
     production 1.5 s it only trades a false green for a load-dependent false red
     (measured pass/fail/pass/fail over four runs before this seam existed).
 
-    Scope: the three apps whose launch takes an env dict (ios via simctl
+    Scope: every app whose launch takes an env dict — ios via simctl
     `SIMCTL_CHILD_*`, macos via the binary's env, windows via the FlaUI bridge's
-    `/session` body). linux and tui read their own process environment, so a
-    future leg of theirs would want the value exported around the launch instead
-    — they need none today, their doors being real exits. web cannot be reached
+    `/session` body, and linux and tui via `config["environment"]`, which their
+    drivers merge into the launched process's env. linux and tui joined for the
+    sign-out door (`test_drafts_sign_out_flush.py`): signing out leaves the
+    process RUNNING, exactly like iOS's background door, so the process-death
+    argument their quit legs rest on does not reach it. web cannot be reached
     this way at all: `wasm32-unknown-unknown` has no process environment (see
     `fauna-wasm`'s `autosaveDebounceMs`).
 
@@ -12162,13 +12914,14 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
         # never sets it; transparent for non-sentinel creds. The
         # real_conversations marker adds FAUNA_E2E_REAL_CONVERSATIONS (+ poll knob),
         # mirroring windows/macos.
-        env = {"FAUNA_DNS_PROVIDER_FAKE": "1"}
+        env = {"FAUNA_DNS_PROVIDER_FAKE": "1", "FAUNA_DNS_RECHECK_SECS": "3"}
         _apply_real_conversations_env(env, request)
         _apply_actuation_mode_env(env, request)
         _apply_drafts_autosave_window_env(env, request)
         _apply_r14_trust_env(env, nest_instance, request)
         _apply_mail_import_source_trust_env(env, request)
         _apply_release_feed_env(env, request)
+        _apply_acme_pebble_env(env, request)
         return {
             "url": nest_instance["url"],
             "app_path": ios_setup["app_path"],
@@ -12229,7 +12982,7 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
         # reads it. Production never sets it; transparent for non-sentinel creds.
         # The real_conversations marker adds FAUNA_E2E_REAL_CONVERSATIONS (+ poll
         # knob), mirroring windows/ios.
-        env = {"FAUNA_DNS_PROVIDER_FAKE": "1"}
+        env = {"FAUNA_DNS_PROVIDER_FAKE": "1", "FAUNA_DNS_RECHECK_SECS": "3"}
         _apply_real_conversations_env(env, request)
         _apply_actuation_mode_env(env, request)
         _apply_drafts_autosave_window_env(env, request)
@@ -12244,6 +12997,7 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
         _apply_r14_trust_env(env, nest_instance, request)
         _apply_mail_import_source_trust_env(env, request)
         _apply_release_feed_env(env, request)
+        _apply_acme_pebble_env(env, request)
         # Pin the child to the freshly-built agent (the harness's second half —
         # see `_apply_macos_sync_agent_bin`, which is also what the modules
         # that hand-build a launch config call).
@@ -12280,7 +13034,9 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
         # The escrow-trust seed, like every native launch's: web's driver
         # writes it into the origin's localStorage (`drivers/web.py::launch`),
         # which its account runtime reads under `test-helpers`.
-        env: dict = {}
+        # The admin DNS page's compressed clocks (`FAUNA_DNS_RECHECK_SECS`, the
+        # tui block's below) take the same localStorage door.
+        env: dict = {"FAUNA_DNS_RECHECK_SECS": "3"}
         _apply_r14_trust_env(env, nest_instance, request)
         return {"url": spa + "/app/", "environment": env}
     else:
@@ -12323,6 +13079,7 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
             # run is a cheap price for that.
             config["environment"] = {
                 "FAUNA_DNS_PROVIDER_FAKE": "1",
+                "FAUNA_DNS_RECHECK_SECS": "3",
                 "FAUNA_CONV_POLL_SECS": "2",
                 "RUST_LOG": "info,fauna_conversations=debug",
             }
@@ -12339,6 +13096,8 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
             _apply_r14_trust_env(config["environment"], nest_instance, request)
             _apply_mail_import_source_trust_env(config["environment"], request)
             _apply_release_feed_env(config["environment"], request)
+            _apply_acme_pebble_env(config["environment"], request)
+            _apply_drafts_autosave_window_env(config["environment"], request)
         elif app_name == "windows":
             config["app_path"] = _installed_windows_app_override(request) or str(
                 _build_windows_app()
@@ -12350,7 +13109,7 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
             # FaunaApp child process, where the in-process Rust FFI
             # (build_dns_management_machine_with_credentials) reads it. Production
             # never sets this; transparent for non-sentinel credentials.
-            env = {"FAUNA_DNS_PROVIDER_FAKE": "1"}
+            env = {"FAUNA_DNS_PROVIDER_FAKE": "1", "FAUNA_DNS_RECHECK_SECS": "3"}
             # Real-conversations harness (the `real_conversations` marker): launch
             # with FAUNA_E2E_REAL_CONVERSATIONS=1 so App.xaml.cs's set_state login
             # path builds the real ConversationsSession + receive loop instead of the
@@ -12390,6 +13149,7 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
             _apply_r14_trust_env(env, nest_instance, request)
             _apply_mail_import_source_trust_env(env, request)
             _apply_release_feed_env(env, request)
+            _apply_acme_pebble_env(env, request)
             config["environment"] = env
         elif app_name == "tui":
             # The installed-product journey drives what the archive's
@@ -12414,9 +13174,18 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
             # launch env (`drivers/tui.py`), so nothing else is needed. Production
             # never sets it, and the decorator is transparent for non-sentinel
             # credentials.
+            #
+            # FAUNA_DNS_RECHECK_SECS compresses the admin DNS page's two slow
+            # clocks — the background re-check and the managed re-publish
+            # interval (`fauna_client_dns::record_recheck_secs`, read only by a
+            # debug / test-helpers build) — so test_admin_dns.py can see the page
+            # re-check and re-publish by itself without waiting production's
+            # minutes. The journeys poll for the app's own log lines, never a
+            # fixed delay (convention 14).
             config["environment"] = {
                 "FAUNA_CONV_POLL_SECS": "2",
                 "FAUNA_DNS_PROVIDER_FAKE": "1",
+                "FAUNA_DNS_RECHECK_SECS": "3",
             }
             # The share plane's knobs — tui leads the plane. These lived inline
             # here until 2026-08-21; they are shared now because the journey is
@@ -12437,6 +13206,8 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
             _apply_r14_trust_env(config["environment"], nest_instance, request)
             _apply_mail_import_source_trust_env(config["environment"], request)
             _apply_release_feed_env(config["environment"], request)
+            _apply_acme_pebble_env(config["environment"], request)
+            _apply_drafts_autosave_window_env(config["environment"], request)
         elif app_name == "android":
             config["app_path"] = str(_repo_root / APP_PATHS["android"])
             # The bridge APK and the run's device (`--device-serial` /
@@ -12468,11 +13239,17 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
             # receive loop still works, just on the 30s production poll
             # instead of the 2s test cadence. Untested empirically (no android
             # e2e has ever run against a real device); verify on the emulator host.
-            env = {}
+            # FAUNA_DNS_PROVIDER_FAKE / FAUNA_DNS_RECHECK_SECS (the admin DNS
+            # page's fake provider and compressed re-check clock, as ios/macos
+            # above) ARE forwarded: BridgeHttpServer's DNS_E2E_ENV_KEYS puts
+            # them on the intent and MainActivity's Os.setenv door re-exports
+            # them (pinned by test_android_launch_harness.py).
+            env = {"FAUNA_DNS_PROVIDER_FAKE": "1", "FAUNA_DNS_RECHECK_SECS": "3"}
             _apply_real_conversations_env(env, request)
             _apply_r14_trust_env(env, nest_instance, request)
             _apply_mail_import_source_trust_env(env, request)
             _apply_release_feed_env(env, request)
+            _apply_acme_pebble_env(env, request)
             config["environment"] = env
             # Nest ports the driver opens an `adb reverse` for, so the device's
             # own 127.0.0.1:<port> IS the nest (testing.md § Default app and nest
@@ -12480,8 +13257,20 @@ def _build_app_config(app_name: str, nest_instance: dict, request) -> dict:
             # the driver itself; this list is for the ADDITIONAL nests of a
             # multi-nest run that are known at launch time. A nest started after
             # the app launched takes `AndroidBridgeDriver.ensure_reverse`.
+            # Pebble's ACME directory rides the same list: the app's order
+            # reaches it only as the device's own loopback, and in a venue run
+            # its port is a lease on the tunnelled range like a nest's
+            # (`helpers/acme_pebble.lease_directory_port`). The seed's fake name
+            # server rides it too: it is published to loopback on a lease of
+            # its own (`lease_name_server_port`), and the propagation probe's
+            # TCP retry is what crosses the TCP-only reverse
+            # (`e2e-automation-surface-gating.md` § The ACME directory seed →
+            # *The name server's reach*).
+            from helpers.acme_pebble import directory_port, name_server_port
+
             config["nest_ports"] = [
-                p for p in (nest_instance.get("port"),) if p is not None
+                p for p in (nest_instance.get("port"), directory_port(env), name_server_port(env))
+                if p is not None
             ]
         return config
 
@@ -13500,6 +14289,122 @@ def spki_pinned_nest(request, nest_mode, tmp_path_factory):
     cleanup()
 
 
+@pytest.fixture
+def webpki_lan_nest(request, nest_mode, tmp_path_factory):
+    """``spki_pinned_nest``'s publicly-trusted twin: a LAN-dialled nest serving a
+    leaf from a harness CA, for the one journey that walks the app's
+    ``webpki_valid == true`` branch (``e2e-automation-surface-gating.md`` § The
+    nest-leg trust seed; ``security.md`` § The login's pin, rule (1)).
+
+    **The nest needs no seam.** The leaf + key are written as
+    ``<tmp_dir>/acme/fullchain.pem`` + ``privkey.pem`` — the ACME finish's own
+    production path (the e2e config loader points ``[acme].dir`` there, and
+    docker's ``/data`` is the same directory): the boot floor is write-if-absent,
+    ``acme::cert_watcher_task`` hot-reloads the pair, and the login binding signs
+    the live resolver's SPKI. The leaf's SAN is the LAN IP the app dials; a
+    loopback dial would pass the FFI apps' cert callbacks on their loopback
+    carve-out and prove nothing when the journey trickles down.
+
+    **The app trusts the CA only through ``FAUNA_E2E_NEST_EXTRA_CA_PEM``, set by
+    the journey on its own launch** — never here and never session-wide (the
+    ruling's term 4): every other nest in the run stays on the self-signed branch.
+    The CA PEM rides back as ``nest["ca_pem"]``, the CA as ``nest["ca"]``, and
+    ``nest["install_leaf"](other_nest)`` puts a same-CA leaf for the same IP on a
+    second nest (the impostor half).
+
+    **Term 5's guard:** ``install_leaf`` returns only once a harness TLS handshake
+    with the CA as its ONLY trust anchor verifies the served chain for the dialled
+    IP, so the fixture can never hand back a nest still serving its floor.
+
+    Indirect param ``"self_signed_control"`` yields the same LAN nest with NO leaf
+    installed and ``ca_pem`` None — the control that must show no difference
+    between a pre-rule and a current build — and asserts the opposite guard (the
+    CA-only handshake fails), so the control is self-checking too.
+    """
+    from common.nest import lan_ipv4
+    from helpers.ephemeral_ca import EphemeralCA
+
+    posture = getattr(request, "param", "webpki")
+    assert posture in ("webpki", "self_signed_control"), posture
+    nest, cleanup = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "webpki-lan-nest",
+        serve_tls=True, dial_host=lan_ipv4(),
+    )
+    try:
+        _assert_pin_branch_authority(nest["url"])
+        _skip_if_lan_self_dial_is_broken(nest["url"])
+        ca = EphemeralCA()
+
+        def install_leaf(target):
+            _install_harness_ca_leaf(target, ca)
+
+        if posture == "webpki":
+            install_leaf(nest)
+            nest["ca"] = ca
+            nest["ca_pem"] = ca.cert_pem.decode("ascii")
+        else:
+            assert not _served_chain_verifies_against(nest["url"], ca.cert_pem), (
+                "the self-signed control's floor verified against a fresh harness "
+                "CA — the control would not be walking the self-signed branch"
+            )
+            nest["ca"] = None
+            nest["ca_pem"] = None
+        nest["install_leaf"] = install_leaf
+        nest["posture"] = posture
+        nest["user"] = _make_user(nest)
+        yield nest
+    finally:
+        cleanup()
+
+
+def _served_chain_verifies_against(url: str, ca_pem: bytes) -> bool:
+    """Does a TLS handshake to ``url`` verify against ``ca_pem`` ALONE, hostname
+    (the dialled IP) included? The harness's half of term 5: no system roots,
+    no fallback — only the anchor the app is about to be seeded with."""
+    import socket
+    import ssl
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.load_verify_locations(cadata=ca_pem.decode("ascii"))
+    try:
+        with socket.create_connection((parsed.hostname, parsed.port), timeout=5) as sock:
+            with ctx.wrap_socket(sock, server_hostname=parsed.hostname):
+                return True
+    except (ssl.SSLError, ssl.CertificateError, OSError):
+        return False
+
+
+def _install_harness_ca_leaf(nest, ca) -> None:
+    """Write a ``ca``-issued leaf for ``nest``'s dial host into its ACME dir — the
+    production install path — and return once the served chain verifies against
+    ``ca`` alone (the watcher's reload is the wait, polled, never slept on)."""
+    from urllib.parse import urlparse
+
+    from helpers.waiting import wait_until
+
+    host = urlparse(nest["url"]).hostname
+    leaf = ca.issue(host)
+    acme = Path(nest["tmp_dir"]) / "acme"
+    acme.mkdir(parents=True, exist_ok=True)
+    # Key first, then the chain: the watcher keys on the pair, and a chain
+    # landing beside the floor's key would be a mismatched pair for one tick.
+    (acme / "privkey.pem").write_bytes(leaf.key_pem)
+    (acme / "fullchain.pem").write_bytes(leaf.cert_pem)
+    wait_until(
+        lambda: _served_chain_verifies_against(nest["url"], ca.cert_pem),
+        30,
+        diagnose=lambda: (
+            f"{nest['url']} never served the harness-CA leaf written to {acme} — "
+            "the nest's cert watcher did not reload the pair, so the journey would "
+            "walk the self-signed branch and witness nothing"
+        ),
+    )
+
+
 def _skip_if_lan_self_dial_is_broken(url: str) -> None:
     """Preflight the box's ability to complete a TLS handshake against its own
     LAN IP before trusting any test result built on ``spki_pinned_nest``.
@@ -13610,7 +14515,7 @@ _E2E_SHARE_STRANGER_DEVICE_ID = "13579bdf02468ace" * 4
 
 
 def _login_app_as(app, request, nest_instance, user, spa_url_fixture="spa_url",
-                  *, verify_live_actor=False, device_id=None):
+                  *, verify_live_actor=False, device_id=None, spa_url=None):
     """Log ``app`` in as ``user`` (a ``_make_user`` dict — the shared session
     ``test_user`` or a dedicated seeded actor). Uses ``set_state()`` for
     bridge-backed drivers with a test agent, UI login otherwise. For web the
@@ -13620,8 +14525,10 @@ def _login_app_as(app, request, nest_instance, user, spa_url_fixture="spa_url",
     nest MUST pass that nest's own proxy fixture (e.g. ``dedicated_no_mail_spa_url``)
     — otherwise the browser talks to the shared nest, where the dedicated actor is
     unregistered, and every RPC fails ``fauna.auth.not_registered`` (WS-RPC never
-    connects). Native drivers point straight at ``nest_instance['url']`` and ignore
-    ``spa_url_fixture``. Extracted from ``logged_in_app`` so seeded-actor fixtures
+    connects). A nest a test starts itself, with no fixture to name, passes its own
+    proxy's URL as ``spa_url`` instead (``_serve_spa_proxy``; it wins over
+    ``spa_url_fixture``). Native drivers point straight at ``nest_instance['url']``
+    and ignore both. Extracted from ``logged_in_app`` so seeded-actor fixtures
     reuse one login path (priority #2).
 
     An ``https://`` nest (docker mode, always) needs nothing special here: the
@@ -13653,7 +14560,7 @@ def _login_app_as(app, request, nest_instance, user, spa_url_fixture="spa_url",
         # launch (`_relaunch_trusting_nest` — a no-op for the launch nest).
         _relaunch_trusting_nest(app.driver, nest_instance)
         if app.driver.is_web():
-            node_url = request.getfixturevalue(spa_url_fixture)
+            node_url = spa_url or request.getfixturevalue(spa_url_fixture)
         else:
             node_url = nest_instance["url"]
         app.driver.set_state({
@@ -14497,7 +15404,7 @@ def pytest_addoption(parser):
                           "seconds to start, fresh private state, the red-green inner loop), "
                           "docker[:IMAGE] (the real image + docker/ sidecars under s6 — the "
                           "deployment artifact, provable before a production release), or "
-                          "live[:URL] (an already-deployed real box, default example.com — "
+                          "live[:URL] (an already-deployed real box, default the dev nest — "
                           "shared and STATEFUL, the only mode that catches works-on-fresh-only "
                           "bugs). Run-level and single-valued: multi-mode coverage composes as "
                           "separate pytest invocations via `just` recipes, never as an "
@@ -14512,8 +15419,8 @@ def pytest_addoption(parser):
                           "disposable (nobody is signed in and the run may wipe it, so "
                           "class (3) is off for the run — the CD gate's case; `just "
                           "e2e-cd-gate` passes it). Accepted only beside `--nest live` and "
-                          "only for a staging box the tree names (dev.example.com, "
-                          "test.example.com); refused for example.com or any other box. "
+                          "only for a staging box the tree names (the dev and test "
+                          "nests); refused for the acceptance nest or any other box. "
                           "Run-level, and deliberately WITHOUT an env equivalent: a "
                           "declaration that makes a run destructive sits in the invocation "
                           "someone reads, never in an ambient export. See testing.md § The "
@@ -14590,6 +15497,12 @@ def pytest_addoption(parser):
                           "candidate preconditions itself — clean tree, HEAD equal to "
                           "the image's FAUNA_BUILD_COMMIT, a registry digest — so the "
                           "recipe is the convenient door and this is the gate.")
+    parser.addoption("--public-clone", action="store", default=None,
+                     help="The clone of the PUBLIC repository whose `Sync-Point:` "
+                          "trailers pair a public nest build with the private HEAD a "
+                          "--release-candidate run is keyed on (default: the standing "
+                          "mirror, `<dev-parent>/fauna`; feature-catalog.md § Tag gate "
+                          "and release table).")
     parser.addoption("--nest-gates-json", action="store", default=None,
                      help="Write this run's nest-mode gate tally to this JSON path at "
                           "session end — the machine-readable twin of the "
@@ -15027,7 +15940,7 @@ def _feature_ledger_note(report, outcome):
     if outcome == "skipped" and skip_class is None:
         return  # an undeclared skip is not a witness of anything either
 
-    apps = feature_ledger.apps_this_test() or {feature_ledger.NEST}
+    apps = feature_ledger.attributed_apps()
     node_id = _feature_run["node_ids"].get(report.nodeid) or report.nodeid
     for app in sorted(apps):
         for slug in slugs:
@@ -15089,6 +16002,9 @@ def pytest_runtest_setup(item):
     from helpers.fixture_closure import real_fixture_closure
 
     feature_ledger.reset_test_state()
+    # A helper seat is not an app under test (feature-catalog.md § The marker): the
+    # item's own parametrization, when it has one, decides the attribution.
+    feature_ledger.note_param_apps(_item_param_apps(item, set(get_available_apps())))
     closure = real_fixture_closure(item)
     feature_ledger.note_closure(closure)
     own_image = nest_surface.OWN_IMAGE_FIXTURES.intersection(closure)
@@ -15246,7 +16162,8 @@ def _write_feature_ledger(session):
     try:
         path = feature_ledger.record_release(
             version=_feature_run["version"], commit=_feature_run["commit"],
-            image_digest=_feature_run["image_digest"], image=_feature_run.get("image"))
+            image_digest=_feature_run["image_digest"], image=_feature_run.get("image"),
+            public_commit=_feature_run.get("public_commit"))
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"\nrelease table: NOT written ({exc}) — `just release-tag` will refuse "
               f"until this run is recorded")
@@ -15426,7 +16343,9 @@ def _refuse_drafts_window_collision(session) -> None:
         "the session, but this selection also contains tests that need the "
         "production window to fire:\n  "
         + "\n  ".join(clashing)
-        + "\nRun the re-timed test in its own invocation."
+        + "\nRun the re-timed test in its own invocation. A whole-suite sweep "
+        "splits in two: add `-m \"not drafts_autosave_window_ms\"` to the sweep, "
+        "then run `-m drafts_autosave_window_ms` on its own."
     )
 
 
@@ -15894,6 +16813,7 @@ _PREBUILD_BY_FIXTURE = (
     ("atproto_bridge_binary", "_ensure_atproto_bridge_built", ()),
     ("atproto_bridge_e2e_binary", "_ensure_atproto_bridge_e2e_built", ()),
     ("seal_helper_binary", "_ensure_seal_helper_built", ()),
+    ("render_cloud_init_binary", "_ensure_render_cloud_init_built", ()),
     ("sync_agent_binary", "_ensure_sync_agent_built", ()),
     ("macos_app_path", "_ensure_app_built", ("macos",)),
     ("windows_app_path", "_ensure_app_built", ("windows",)),
@@ -15961,9 +16881,14 @@ _CROSS_APP_FIXTURE_APPS = {
     # A real-engine linux GUI sender driving a web (or other) receiver.
     "real_faunamls_linux_sender": "linux",
     # The desktop seat(s) that build the index a phone under test queries. The
-    # fixture launches on demand, through `_alice_extra_seat("macos", …)`; the
-    # pin follows the literal one call up.
-    "alice_builder_seats": "macos",
+    # fixture launches on demand, through `_alice_extra_seat("macos" | "tui",
+    # …)`; the pin follows the literals one call up. A dict value maps the
+    # phone under test to its seat app, so a run names only its own seat.
+    "alice_builder_seats": {"ios": "macos", "android": "tui"},
+    # The mailbox-less journeys' organizer seat, launched only on the android
+    # column (`_launch_fresh_share_driver("tui", …)`; every other column's
+    # organizer is the item's own app).
+    "caldav_mailbox_less_organizer_app": {"android": "tui"},
     # The user's other computer on a viewer column (web and the mobiles make no
     # index pin and never build): `test_task_delegation.py::_Seats` launches tui.
     "delegation_seats": "tui",
@@ -15988,6 +16913,34 @@ def _item_param_apps(item, available: set) -> set:
             if name in available:
                 apps.add(name)
     return apps
+
+
+#: A test module that imports `helpers.succession` (not its siblings
+#: `succession_ceremony` / `succession_retry`, which never build the example).
+_RECOVERY_FIXTURE_IMPORT = re.compile(
+    r"^\s*(?:from\s+helpers\.succession\s+import|from\s+helpers\s+import\s+[^\n]*\bsuccession\b(?!_)"
+    r"|import\s+helpers\.succession\b(?!_))",
+    re.MULTILINE,
+)
+_RECOVERY_FIXTURE_USERS: dict = {}
+
+
+def _item_reaches_recovery_fixture(item) -> bool:
+    """Does the item's test module import `helpers.succession`? The helper
+    builds `recovery_fixture` on its first call, from inside a test body, so
+    the closure scan cannot see it; the module's import is the signal (every
+    caller imports it, at module level or inside the test). Per-file memo."""
+    path = getattr(item, "path", None)
+    if path is None:
+        return False
+    key = str(path)
+    if key not in _RECOVERY_FIXTURE_USERS:
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        _RECOVERY_FIXTURE_USERS[key] = bool(_RECOVERY_FIXTURE_IMPORT.search(text))
+    return _RECOVERY_FIXTURE_USERS[key]
 
 
 def _prebuild_app_set(session, requested: set) -> set:
@@ -16025,9 +16978,16 @@ def _prebuild_app_set(session, requested: set) -> set:
     # that matters — never build linux on macOS — without re-introducing the
     # inversion.
     machine_apps = set(sweep_apps())
+    param_apps = set(apps)
     for fixture_name, implied in _CROSS_APP_FIXTURE_APPS.items():
-        if fixture_name in requested and implied in machine_apps:
-            apps.add(implied)
+        if fixture_name not in requested:
+            continue
+        if isinstance(implied, dict):
+            # Per-phone seat apps: only the seat of an app the run names.
+            seats = {seat for phone, seat in implied.items() if phone in param_apps}
+        else:
+            seats = {implied}
+        apps.update(seats & machine_apps)
     # The installer full-journey suite drives the MSI-INSTALLED app — never
     # prebuild the dev app it won't launch (mirrors _build_app_config).
     if "windows" in apps and any(
@@ -16154,6 +17114,13 @@ def _prebuild_binaries(session, *, prewarm: bool = False):
         # the cdylib queued for `build` inside every hold.
         jobs.append(("fauna-ffi cdylib (build)", "_ensure_fauna_ffi_built", ()))
         jobs.append(("fauna-ffi cdylib", "_ensure_fauna_ffi_loaded", ()))
+    # `recovery_fixture` is reached through a helper call (see
+    # `_ensure_recovery_fixture_built`), so it is keyed on the items' modules,
+    # and only in a mode that runs a local nest (the fixture signs for it).
+    if nest_mode_mod.builds_local_nest(nest_mode_mod.run_mode()) and any(
+        _item_reaches_recovery_fixture(item) for item in session.items
+    ):
+        jobs.append(("recovery_fixture", "_ensure_recovery_fixture_built", ()))
     jobs.extend(
         (f"app[{name}]", "_ensure_app_built", (name,)) for name in sorted(apps)
     )
@@ -16449,10 +17416,11 @@ def crowded_nest(request, nest_mode, tmp_path_factory):
     actor picker offers every account on the nest, not just the newest page
     (``admin.md`` § 2 → *What identifies a user in an admin picker*).
 
-    Why not the shared ``nest_instance``: pushing its admin off the first page
-    would push it off the Users hub's first page too, and every hub test that
-    finds the admin's row there (``actions/admin.py::user_row_index``) would fail
-    for a reason unrelated to its own. Function scope, because the picker tests
+    Why not the shared ``nest_instance``: it reaches that state only part-way
+    through a whole-suite run, so a picker test on it would prove the claim only
+    when it happened to run late. (The Users hub's own tests page through the list
+    to the admin's row, ``actions/admin.py::user_row_index``, so they hold either
+    way.) Function scope, because the picker tests
     persist designations (front page, catch-all, role address, a guardian code)
     that a later app parametrization must not inherit.
 
@@ -16635,6 +17603,7 @@ _CLIENT_INDEPENDENT_FILES = {
     "test_fauna_ffi_finder.py",  # tier_1 pins of the win cdylib finder against a fake checkout — no driver/app
     "test_harness_self_termination.py",  # harness-of-the-harness: wedge/reap/timeout drills, no app
     "test_imap_fetch_latency_bench.py",  # tier_3 Phase-3 perf gate — nest+MDA only, no client driver
+    "test_nest_data_upgrade.py",  # tier_3 pinned nest → HEAD nest on one data dir — no client driver
     "test_tui_driver_env.py",  # tier_1 unit test of drivers/tui env logic — no driver/app
     "test_tui_pty_backend.py",  # tier_1 unit test of the pty backend seam — trivial helper, no driver/app
     "test_linux_bridge_env.py",  # tier_1 unit test of drivers/linux env logic — no driver/app
@@ -16939,8 +17908,10 @@ def _apply_feature_axis(config, items) -> None:
 
     mode = nest_mode_mod.run_mode()
     candidate = bool(config.getoption("release_candidate"))
+    public_commit = None
     if candidate:
-        refusal = feature_ledger.release_candidate_refusal(mode)
+        refusal, public_commit = feature_ledger.release_candidate_verdict(
+            mode, public_clone=config.getoption("public_clone", default=None))
         if refusal:
             raise pytest.UsageError(
                 "--release-candidate refused: " + refusal
@@ -16977,6 +17948,9 @@ def _apply_feature_axis(config, items) -> None:
         # run, which always names an explicit `--nest docker:<ref>` argument.
         "image": feature_ledger.resolved_image_ref(mode) or getattr(mode, "argument", None),
         "candidate": candidate,
+        # A public build's own commit, recorded beside the digest; the row stays
+        # keyed on `commit`, the private HEAD its Sync-Point names.
+        "public_commit": public_commit,
         "dirt": dirt,
         "dirty": dirty,
         "stamp": feature_ledger.stamp(version, commit, str(mode),

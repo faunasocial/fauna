@@ -8,95 +8,50 @@ using uniffi.fauna_ffi;
 namespace FaunaApp.Core.Helpers;
 
 /// <summary>
-/// User-facing result of the deployment-seed custody leg. The shared leg
-/// (<c>self_heal_deployment_seed_custody</c>) already does the work (the BR-2
-/// mismatch refusal, the bounded fetch retry, the account-plane merge); this glue
-/// only decides whether to raise a user-visible "recovery not protected" warning.
-/// <see cref="Ok"/> shows nothing (custodied, not an admin, the expected multi-nest
-/// no-op); the two <c>NotProtected*</c> cases warrant a warning banner.
-/// </summary>
-internal enum RecoveryCustodyOutcome
-{
-    /// <summary>Custodied, not owed, or the expected multi-nest no-op — no warning.</summary>
-    Ok,
-    /// <summary>BR-2: the box handed off a seed that does not derive to its pinned identity.</summary>
-    NotProtectedMismatch,
-    /// <summary>Custody is owed but is unconfirmed this connect (the fetch or the store failed, or the leg threw).</summary>
-    NotProtectedFailed,
-}
-
-/// <summary>
 /// Deployment-seed custody glue — the windows leg of box-recovery.md § The
 /// plane-era recovery floor, <i>(c) The writes</i>. The custody leg is the ONLY
 /// capture: the fauna-ffi account-runtime seat runs it at store-ready, and
 /// <see cref="SelfHealAsync"/> is its post-auth entry, called on every connect
 /// from <c>App.StartMainAppAsync</c>'s universal hook. There is no per-app retry,
-/// BR-2 or claim-time latch logic here — this glue only maps the leg's outcome to
-/// a user surface (the windows idiom of android's
-/// <c>MailEnableGlueVM.recoveryCustodyOutcomeOf</c>) and reads the recovery box
-/// list for the launch-retry entry.
+/// BR-2, claim-time latch or warning-selection logic here — the leg answers the
+/// warning it owes as the shared <c>LocalizedText</c>
+/// (<c>fauna_client_config::custody_leg_warning</c>), which the caller renders
+/// through <c>Strings.Resolve</c> — and this glue reads the recovery box list for
+/// the launch-retry entry.
 /// </summary>
 internal static class DeploymentSeedCustody
 {
     /// <summary>
-    /// Map the custody leg's outcome to the user-facing surface.
-    /// <see cref="FfiDeploymentSeedSelfHeal.AlreadyCustodied"/> /
-    /// <see cref="FfiDeploymentSeedSelfHeal.NotAdmin"/> and a captured
-    /// <see cref="FfiDeploymentSeedCapture.Wrote"/> /
-    /// <see cref="FfiDeploymentSeedCapture.AlreadyHeldSame"/> /
-    /// <see cref="FfiDeploymentSeedCapture.RefusedDiffering"/> (the EXPECTED
-    /// multi-nest no-op, BR-1: a log, never an alarm) are silent success;
-    /// <see cref="FfiDeploymentSeedSelfHeal.HandoffUnavailable"/> /
-    /// <see cref="FfiDeploymentSeedSelfHeal.NestHoldsNoSeed"/> are an unconfirmed
-    /// custody ("recovery not protected", retried at the next connect); a captured
-    /// <see cref="FfiDeploymentSeedCapture.RefusedMismatch"/> (BR-2 — the box
-    /// handed off a seed that does not derive to its pinned identity) is the loud
-    /// mismatch warning.
-    /// </summary>
-    internal static RecoveryCustodyOutcome MapOutcome(FfiDeploymentSeedSelfHeal outcome) => outcome switch
-    {
-        FfiDeploymentSeedSelfHeal.AlreadyCustodied
-            or FfiDeploymentSeedSelfHeal.NotAdmin => RecoveryCustodyOutcome.Ok,
-        FfiDeploymentSeedSelfHeal.HandoffUnavailable
-            or FfiDeploymentSeedSelfHeal.NestHoldsNoSeed => RecoveryCustodyOutcome.NotProtectedFailed,
-        FfiDeploymentSeedSelfHeal.Captured { v1: FfiDeploymentSeedCapture.RefusedMismatch } =>
-            RecoveryCustodyOutcome.NotProtectedMismatch,
-        _ => RecoveryCustodyOutcome.Ok,
-    };
-
-    /// <summary>
     /// Run the custody leg for THIS connection's nest — the post-auth entry
     /// (box-recovery.md § The plane-era recovery floor, <i>(c) The writes</i>) —
-    /// and map the outcome. The leg is self-healing rather than event-driven: a
-    /// live plane entry answers with no round trip, otherwise it checks roster
-    /// membership, fetches the seed and merges it, so a claim, a co-admin granted
-    /// later and a late-added device all converge the same way on their next
-    /// connect. A thrown call is an unconfirmed custody
-    /// (<see cref="RecoveryCustodyOutcome.NotProtectedFailed"/>), never a silent
-    /// drop — android's precedent. Never throws.
+    /// and answer the warning it owes the admin, or <c>null</c> when nothing is
+    /// owed. The leg is self-healing rather than event-driven: a live plane entry
+    /// answers with no round trip, otherwise it checks roster membership, fetches
+    /// the seed and merges it, so a claim, a co-admin granted later and a
+    /// late-added device all converge the same way on their next connect. A call
+    /// that could not even reach the leg (no connection) answers the shared
+    /// "not attempted" warning, never a silent drop and never a key chosen here.
+    /// Never throws.
     /// <para>No <c>ConfigureAwait(false)</c> — invoked from the UI-thread launch
     /// glue, continuations stay on the captured context per the WinUI
     /// off-thread-COMException rule.</para>
     /// </summary>
-    internal static async Task<RecoveryCustodyOutcome> SelfHealAsync(INestRpcClient rpc)
+    internal static async Task<uniffi.fauna_core.LocalizedText?> SelfHealAsync(INestRpcClient rpc)
     {
         try
         {
-            var outcome = await rpc.SelfHealDeploymentSeedCustodyAsync();
-            ShellLog.Info("DeploymentSeedCustody", $"custody leg: {outcome}");
-            var mapped = MapOutcome(outcome);
-            if (mapped == RecoveryCustodyOutcome.NotProtectedMismatch)
+            var warning = await rpc.SelfHealDeploymentSeedCustodyAsync();
+            if (warning is not null)
             {
-                ShellLog.Error("DeploymentSeedCustody",
-                    "deployment-seed custody refused: seed does not derive to this nest (BR-2); recovery not protected");
+                ShellLog.Warn("DeploymentSeedCustody", $"custody leg: custody unconfirmed ({warning.@key})");
             }
-            return mapped;
+            return warning;
         }
         catch (Exception ex)
         {
             ShellLog.Warn("DeploymentSeedCustody",
-                $"custody leg failed, recovery not confirmed protected: {ex.GetType().Name}: {ex.Message}");
-            return RecoveryCustodyOutcome.NotProtectedFailed;
+                $"custody leg not attempted, recovery not confirmed protected: {ex.GetType().Name}: {ex.Message}");
+            return FaunaFfiMethods.DeploymentSeedCustodyUnattemptedWarning();
         }
     }
 

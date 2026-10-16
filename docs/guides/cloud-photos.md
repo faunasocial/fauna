@@ -68,6 +68,12 @@ toggle, sorting by name/size/date, and a per-set filter. Thumbnails are
 generated on your devices and stored encrypted like everything else, so
 browsing is fast *and* the nest still can't see your pictures.
 
+A folder someone has shared with you shows up in that filter too, with its
+owner's name beside it — so a shared "Photos" and your own "Photos" are two
+separate choices, never mixed together. Pick the shared one and you can upload
+straight into it when its owner has let you add files; if they shared it for
+reading only, the app tells you so instead of uploading.
+
 Honest scoping, because photo apps are a high bar: this is a fast, private
 **file-first browser** — think "your library, everywhere" — not a
 Google-Photos-style product with face recognition, semantic search, memories,

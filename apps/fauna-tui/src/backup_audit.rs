@@ -85,6 +85,22 @@ pub fn store(actor_id_hex: &str) -> FileAuditStateStore {
 /// in-process account switch re-seed instead of inheriting (module docs).
 static OBSERVED: Mutex<Option<(String, i64)>> = Mutex::new(None);
 
+#[cfg(test)]
+thread_local! {
+    /// The actor this thread's last [`observe_thread_activity`] call was handed.
+    /// Thread-local, unlike [`OBSERVED`], so parallel tests never overwrite each
+    /// other's reading — a pin can ask "which actor did the sink actually
+    /// receive?" instead of re-deriving it from the sink's echoed return.
+    static LAST_FORWARDED_ACTOR: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The actor the calling thread last forwarded to [`observe_thread_activity`].
+#[cfg(test)]
+pub(crate) fn last_forwarded_actor() -> Option<String> {
+    LAST_FORWARDED_ACTOR.with(|a| a.borrow().clone())
+}
+
 /// Record that `actor_id_hex`'s client has displayed conversation activity
 /// stamped `last_activity_ms` (epoch **milliseconds**, as `ThreadSummary` carries
 /// it).
@@ -97,9 +113,10 @@ static OBSERVED: Mutex<Option<(String, i64)>> = Mutex::new(None);
 /// idiom, and the [`OBSERVED`] cache the module docs explain.
 ///
 /// Returns the `(actor, last_activity_ms)` pair this call actually consumed —
-/// built from its own parameters, never a binding a caller held separately —
-/// so a caller that starts forwarding a *different* freshly-resolved actor here
-/// shows up in what comes back. Kept in
+/// built from its own parameters, never a binding a caller held separately.
+/// That echo cannot by itself tell a caller's forwarded value from a binding it
+/// held elsewhere; the test-only [`last_forwarded_actor`] records what the sink
+/// was really handed. Kept in
 /// **milliseconds**, the caller's own unit: the store's committed high-water is
 /// in **seconds** and is a monotonic, process-wide value shared across every
 /// call for an actor, so pinning it here would make a caller's return
@@ -110,6 +127,8 @@ static OBSERVED: Mutex<Option<(String, i64)>> = Mutex::new(None);
 /// weaker freshness comparison until the next render, and there is nothing a user
 /// could do about it.
 pub fn observe_thread_activity(actor_id_hex: &str, last_activity_ms: i64) -> Option<(String, i64)> {
+    #[cfg(test)]
+    LAST_FORWARDED_ACTOR.with(|a| *a.borrow_mut() = Some(actor_id_hex.to_string()));
     let secs = audit::activity_secs(last_activity_ms);
     let mut observed = match OBSERVED.lock() {
         Ok(o) => o,

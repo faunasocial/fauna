@@ -214,7 +214,7 @@ async fn resolve_device_principal(secret: [u8; 32]) -> Result<[u8; 32], String> 
     tokio::task::spawn_blocking(move || {
         let creds = fauna_sync_engine::account_runtime::production_credential_store();
         fauna_sync_engine::account_runtime::resolve_writer_key_serialized(
-            &fauna_sync_engine::account_runtime::StoreRoot::platform(),
+            &fauna_sync_engine::account_runtime::StoreRoot::platform()?,
             &actor_hex,
             &creds,
         )
@@ -471,7 +471,7 @@ async fn put_runtime_row_update(
     ctx: &CustodyCtx,
     records: &impl CeremonyRecords,
     grant_id: &[u8],
-    edit: impl Fn(&mut u64, &mut bool) + Copy,
+    edit: impl FnOnce(&mut u64, &mut bool) + Send,
 ) -> Option<String> {
     use fauna_client_capabilities::custody_ceremony as ceremony;
     // The ceremony record decides the row's home.
@@ -497,15 +497,17 @@ async fn put_runtime_row_update(
             Ok(row) => row,
             Err(e) => return Some(e),
         };
-        let (mut cap, mut stopped) = if record.host_knobs.is_some() {
-            ceremony::runtime_knobs(record, &accept)
-        } else {
-            (row.retained_bytes_cap, row.stopped)
+        let (cap, stopped) = match apply_knobs(
+            records,
+            grant_id,
+            (row.retained_bytes_cap, row.stopped),
+            edit,
+        )
+        .await
+        {
+            Ok(k) => k,
+            Err(e) => return Some(e),
         };
-        edit(&mut cap, &mut stopped);
-        if let Some(e) = record_knobs(records, grant_id, cap, stopped).await {
-            return Some(e);
-        }
         row.retained_bytes_cap = cap;
         row.stopped = stopped;
         return put_held_row(ctx, row).await;
@@ -527,8 +529,9 @@ async fn put_runtime_row_update(
     let hosting = fauna_client_capabilities::custody_hosting::CustodyHostingClient::new(
         Arc::clone(&ctx.nest),
     );
-    let (mut cap, mut stopped) = if record.host_knobs.is_some() {
-        ceremony::runtime_knobs(record, &accept)
+    let current = if record.host_knobs.is_some() {
+        // The record's knobs win; `current` is only the pre-knob fallback.
+        (accept.retained_bytes_cap, false)
     } else {
         match hosting.list().await {
             Ok(reply) => reply
@@ -540,10 +543,10 @@ async fn put_runtime_row_update(
             Err(e) => return Some(format!("{e:#}")),
         }
     };
-    edit(&mut cap, &mut stopped);
-    if let Some(e) = record_knobs(records, grant_id, cap, stopped).await {
-        return Some(e);
-    }
+    let (cap, stopped) = match apply_knobs(records, grant_id, current, edit).await {
+        Ok(k) => k,
+        Err(e) => return Some(e),
+    };
     let witness = match fauna_core::encoding::canonical_encode(&deliver.witness) {
         Ok(w) => w.to_vec(),
         Err(e) => return Some(format!("{e}")),
@@ -631,25 +634,25 @@ async fn remove_held_custody(
     None
 }
 
-/// The knob write's "record" half ([`ceremony::record_host_knobs`]), stamped
-/// now — run before the runtime row is touched.
+/// The knob write: [`ceremony::apply_host_knob_edit`] inside the records'
+/// `update`, so the `(cap, stopped)` the runtime row carries comes only from
+/// the call that stamped the ceremony record (record-then-row is structural).
 ///
-/// [`ceremony::record_host_knobs`]: fauna_client_capabilities::custody_ceremony::record_host_knobs
-async fn record_knobs(
+/// [`ceremony::apply_host_knob_edit`]: fauna_client_capabilities::custody_ceremony::apply_host_knob_edit
+async fn apply_knobs(
     records: &impl CeremonyRecords,
     grant_id: &[u8],
-    cap: u64,
-    stopped: bool,
-) -> Option<String> {
+    current: (u64, bool),
+    edit: impl FnOnce(&mut u64, &mut bool) + Send,
+) -> Result<(u64, bool), String> {
     use fauna_client_capabilities::custody_ceremony as ceremony;
     let now = Timestamp::now();
+    let grant_id = grant_id.to_vec();
     records
-        .update(|cfg| {
-            ceremony::record_host_knobs(cfg, grant_id, cap, stopped, now);
-        })
+        .update(move |cfg| ceremony::apply_host_knob_edit(cfg, &grant_id, current, edit, now))
         .await
-        .err()
-        .map(|e| e.to_string())
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no ceremony record for this custody".to_string())
 }
 
 async fn put_held_row_update(
@@ -825,6 +828,39 @@ pub fn spawn_drive(
             // failing record stays owed — so it is worth a line at the default
             // level, not a debug one nobody reads.
             Err(e) => tracing::warn!("custody ceremony drive aborted: {e}"),
+        }
+    });
+}
+
+/// The owner sends again — spawn one
+/// [`fauna_client_capabilities::custody_ceremony::resend_owner_ceremonies`]
+/// pass over this session's channels: the shared body behind the
+/// `fauna_e2e_agent::CUSTODY_OWNER_RESEND_NOW` poke, which owns the contract.
+/// Fire-and-forget like [`spawn_drive`]; no session or store yet is a quiet
+/// no-op. Compiled out of release artifacts (convention 15).
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+pub fn spawn_owner_resend(
+    secret: [u8; 32],
+    session: Option<Arc<ConversationsSession>>,
+    store: Option<AccountStoreHandle>,
+) {
+    let owner = ActorKeypair::from_secret(secret);
+    let Some(session) = session else { return };
+    let Some(store) = store else { return };
+    tokio::spawn(async move {
+        let poster = SessionCustodyPoster(session);
+        match fauna_client_capabilities::custody_ceremony::resend_owner_ceremonies(
+            &store, &store, &owner, &poster, &store,
+        )
+        .await
+        {
+            Ok(r) => tracing::info!(
+                offers = r.offers,
+                delivers = r.delivers,
+                failed = r.failed,
+                "custody owner re-send"
+            ),
+            Err(e) => tracing::warn!("custody owner re-send aborted: {e}"),
         }
     });
 }

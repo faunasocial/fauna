@@ -489,6 +489,9 @@ fn control_plane() -> (StdArc<RpcRouter>, StdArc<AppState>) {
         // stages a recipient's knock. The decline pin peeks it for the `inbox_id`
         // and the shared decline recipe acks through it.
         fauna_nest::inbox_handlers::register_inbox_handlers(&mut b);
+        // The recovery kinds (`fauna.recovery.{registration,succession}.submit`)
+        // — the succession rotation pin lands a real succession through them.
+        fauna_nest::recovery_handlers::register_recovery_handlers(&mut b);
         b.build()
     });
     (router, state)
@@ -724,6 +727,7 @@ async fn removed_member_reads_pre_removal_but_fails_closed_post_removal_real_nes
             Some(b"e2e-synthetic-seal".to_vec()),
             None,
             None,
+            None,
         )
         .await
         .expect("record gen-1 change");
@@ -731,7 +735,7 @@ async fn removed_member_reads_pre_removal_but_fails_closed_post_removal_real_nes
     // ── B (a member) discovers gen-1 through the REAL changes.list + reads it ───
     let b_sync = CtlSyncClient::new(requester(&router, &state, b_actor));
     let listed = b_sync
-        .changes_list(Some("shared".into()), None, 0)
+        .changes_list(Some("shared".into()), None, 0, None)
         .await
         .expect("B lists");
     assert_eq!(listed.changes.len(), 1, "the member sees the gen-1 change");
@@ -853,13 +857,16 @@ async fn removed_member_reads_pre_removal_but_fails_closed_post_removal_real_nes
             Some(b"e2e-synthetic-seal".to_vec()),
             None,
             None,
+            None,
         )
         .await
         .expect("record gen-2 change");
     assert!(rec2.seq > 0);
 
     // ── (metadata layer) B is evicted → the discovery path is now DENIED ────────
-    let b_list_post = b_sync.changes_list(Some("shared".into()), None, 0).await;
+    let b_list_post = b_sync
+        .changes_list(Some("shared".into()), None, 0, None)
+        .await;
     assert!(
         b_list_post.is_err(),
         "an evicted member cannot list the shared set"
@@ -1029,6 +1036,9 @@ impl ConversationsRpc for LoopbackConvRpc {
     }
 
     async fn keypackage_count(&self, _a: String) -> Result<u64, ConvRpcError> {
+        unreachable!("not used by the folder commit poll")
+    }
+    async fn keypackage_addressable(&self, _a: String) -> Result<bool, ConvRpcError> {
         unreachable!("not used by the folder commit poll")
     }
     async fn actor_by_handle(&self, _h: String) -> Result<Option<ResolvedHandle>, ConvRpcError> {
@@ -1853,6 +1863,357 @@ async fn launch_recipe_resumes_staged_removal_over_backend_engine_real_nest() {
     // The rotation the crashed drive staged is now published — forward secrecy
     // completes, which is the whole point of the launch-time resume.
     assert_rotation_landed(&w, &gen1).await;
+}
+
+/// The successor of the succession pin below.
+const S_SECRET: [u8; 32] = [0x5C; 32];
+/// The successor's write-capable sync device.
+const DEVICE_S: [u8; 32] = [0x5D; 32];
+
+/// **The succession's content-key rotation over the real chain**
+/// (`succession-aftermath.md` § Re-key scope, the MLS groups row: *a bound
+/// folder set's content key rotates behind remove-old*).
+///
+/// The author-level pins run over in-memory group and nest fakes, which cannot
+/// see the joins this drives for real: the predecessor creates and binds the
+/// set the production way (its custody names it the nonce's minter), a real
+/// succession lands on the nest, the real `sweep_groups` runs add-successor /
+/// remove-old over the two real engines, and the successor's author runs its
+/// launch pass — whose set-custody reconcile makes the real cut, so the lineage
+/// the rotation reads is the one the cut wrote, and whose remove-old guard is
+/// the real engine's `contains_member`. Then: the rotated envelope is sealed at
+/// the post-remove epoch and signed by the successor; the remaining member,
+/// having processed the sweep's commits, opens it and reads a file the
+/// successor uploads afterwards; the predecessor's engine and the custody its
+/// seed held at the ceremony open neither; a second launch rotates nothing.
+#[tokio::test]
+async fn a_succession_rotates_the_inherited_sets_content_key_over_the_real_sweep_real_nest() {
+    let (router, state) = control_plane();
+    let server = MockServer::start().await;
+    let store = MockNest::new().mount(&server).await;
+    let chunk_url = server.uri();
+    let p_actor = actor_of(A_SECRET);
+    let m_actor = actor_of(B_SECRET);
+    let s_actor = actor_of(S_SECRET);
+
+    // The predecessor's RecoveryKey, registered before anything else touches
+    // its account (the registration helper creates the handled user row).
+    let recovery = fauna_core::recovery::RecoveryKey::generate();
+    common::register_recovery_key(
+        &router,
+        &state,
+        ActorKeypair::from_secret(A_SECRET).signing_key(),
+        p_actor,
+        &recovery,
+        None,
+        1,
+    )
+    .await;
+
+    // ── The predecessor P and member M share a real two-member group ─────────
+    let p_engine =
+        StdArc::new(MlsEngine::new_in_memory(ActorKeypair::from_secret(A_SECRET)).unwrap());
+    let m_engine =
+        StdArc::new(MlsEngine::new_in_memory(ActorKeypair::from_secret(B_SECRET)).unwrap());
+    let created: CreatedGroup = FolderGroupCrypto::create_group(
+        &p_engine,
+        &m_engine.generate_key_packages_bytes(1).unwrap(),
+    )
+    .unwrap();
+    let channel_id = created.channel_id;
+    let channel = ChannelId(channel_id);
+    assert_eq!(
+        m_engine
+            .join_from_welcome_bytes(&created.welcome)
+            .unwrap()
+            .0,
+        channel_id
+    );
+
+    // P creates the set the production way — its nonce minted into custody
+    // under P's name (ruling (11)(a)) — then shares, binds and invites M.
+    let p_custody = StdArc::new(MemoryFolderKeyStore::default().serving(ActorId(p_actor)));
+    let p_files = FoldersClient::new(requester(&router, &state, p_actor));
+    fauna_client_folders::set_lifecycle::create_set(
+        &p_files,
+        p_custody.as_ref(),
+        fauna_protocol::folders::FolderCreateRequest {
+            name: "shared".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("the predecessor creates the set");
+    p_files
+        .share(FolderShareRequest {
+            name: "shared".into(),
+            group_id: hex::encode(&created.raw_group_id),
+            ..Default::default()
+        })
+        .await
+        .expect("share ok");
+    FoldersAuthor::new(
+        FoldersClient::new(requester(&router, &state, p_actor)),
+        ActorKeypair::from_secret(A_SECRET),
+        p_custody.clone(),
+        Arc::new(fauna_client_config::test_helpers::FakeMailStore::empty()),
+        p_engine.clone(),
+    )
+    .bind_set("shared", channel_id)
+    .await
+    .expect("bind_set");
+    state.db.set_inbox_mode(&m_actor, "open").await.unwrap();
+    dispatch(
+        router.as_ref(),
+        state.clone(),
+        p_actor,
+        "fauna.conversations.welcome.deliver",
+        enc(&WelcomeDeliverRequest {
+            recipient_actor_id: hex::encode(m_actor),
+            channel_id: hex::encode(channel_id),
+            welcome_bytes: created.welcome.clone(),
+            kind: WelcomeKind::Group {
+                group_id: hex::encode(&created.raw_group_id),
+            },
+            nest_url: None,
+            extra: Default::default(),
+        }),
+    )
+    .await
+    .expect("welcome deliver ok");
+    let m_files = FoldersClient::new(requester(&router, &state, m_actor));
+    let gen1 = open_envelope(&m_files, &m_engine, channel_id).await;
+    assert_eq!(gen1.current_version(), 1, "the predecessor's genesis");
+    let epoch_before = p_engine.current_epoch(&channel).unwrap();
+
+    // What the retired seed's custody holds: the set as the ceremony found it.
+    let retired_custody = p_custody.snapshot();
+
+    // ── The succession lands, then the real sweep runs over both engines ─────
+    let bytes = common::succession_bytes(
+        &recovery,
+        p_actor,
+        ActorKeypair::from_secret(S_SECRET).signing_key(),
+        None,
+        2,
+    );
+    common::submit_succession(&router, &state, bytes.clone())
+        .await
+        .expect("the succession lands");
+    let statement: fauna_core::recovery::SignedIdentitySuccession =
+        decode(&bytes).expect("the landed statement decodes");
+    let s_engine =
+        StdArc::new(MlsEngine::new_in_memory(ActorKeypair::from_secret(S_SECRET)).unwrap());
+    let report = fauna_client_recovery::sweep_groups(
+        &fauna_client_recovery::RecoveryClient::new(requester(&router, &state, s_actor)),
+        &p_engine,
+        &s_engine,
+        &statement,
+    )
+    .await;
+    assert!(
+        report.old_leaf_removed_everywhere(),
+        "remove-old landed: {report:?}"
+    );
+    let post_remove_epoch = s_engine.current_epoch(&channel).unwrap();
+    assert_eq!(
+        post_remove_epoch,
+        epoch_before + 2,
+        "add-successor then remove-old"
+    );
+
+    // ── The successor's launch pass: the cut, then the rotation ─────────────
+    // The successor's seat reads the account's custody, which the re-pointed
+    // account carries over from the predecessor.
+    let s_custody =
+        StdArc::new(MemoryFolderKeyStore::with(p_custody.snapshot()).serving(ActorId(s_actor)));
+    let s_author = FoldersAuthor::new(
+        FoldersClient::new(requester(&router, &state, s_actor)),
+        ActorKeypair::from_secret(S_SECRET),
+        s_custody.clone(),
+        Arc::new(fauna_client_config::test_helpers::FakeMailStore::empty()),
+        s_engine.clone(),
+    );
+    s_author
+        .resume_pending_removals()
+        .await
+        .expect("the successor's launch pass");
+
+    // (a) Custody advanced by one generation; the nest's envelope carries it,
+    // sealed at the post-remove epoch and signed by the successor.
+    let s_cfg = s_custody.snapshot();
+    let s_keys = custody::content_keys(&s_cfg, &channel_id).expect("the successor's keys");
+    assert_eq!(
+        s_keys.current_version(),
+        2,
+        "one generation past the genesis"
+    );
+    assert_eq!(
+        s_keys.key_for(1),
+        gen1.key_for(1),
+        "the predecessor's generation is history, kept"
+    );
+    let stored = m_files
+        .content_key_get(ContentKeyGetRequest {
+            name: "shared".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("the member fetches the envelope");
+    assert_eq!(
+        stored.epoch, post_remove_epoch as i64,
+        "sealed at the post-remove epoch"
+    );
+    let blob = hex::decode(stored.sealed.trim()).unwrap();
+    let verified = fauna_protocol::folder_envelope_sig::verify(&blob, &channel_id)
+        .expect("the stored envelope is signed");
+    assert_eq!(verified.signer, ActorId(s_actor), "signed by the successor");
+
+    // (b) The member processes the sweep's commits, opens the rotated
+    // envelope, and reads a file the successor uploads afterwards.
+    let m_backend = FaunaMlsBackend::new(
+        m_engine.clone(),
+        StdArc::new(LoopbackConvRpc(requester(&router, &state, m_actor)))
+            as StdArc<dyn ConversationsRpc>,
+        "member",
+        ActorId(m_actor),
+    );
+    let mut cursor = 0i64;
+    let polled = poll_inbound_folder(&m_backend, &channel, &mut cursor, 0)
+        .await
+        .expect("the member's folder commit poll");
+    assert!(!polled.stalled);
+    assert_eq!(
+        m_engine.current_epoch(&channel).unwrap(),
+        post_remove_epoch,
+        "the member reached the post-remove epoch"
+    );
+    let m_keys = open_envelope(&m_files, &m_engine, channel_id).await;
+    assert_eq!(m_keys, s_keys, "the member holds the rotated generation");
+
+    let live_nonce = custody::live_set_nonce(&s_cfg, "shared").expect("the successor's live nonce");
+    let s_sync = CtlSyncClient::new(requester(&router, &state, s_actor)).with_record_signing(
+        fauna_client_sync::RecordSigning {
+            signer: common::direct_signer(&ActorKeypair::from_secret(S_SECRET)),
+            set_nonce: fauna_client_sync::SetNonceSource::Fixed(live_nonce),
+        },
+    );
+    s_sync
+        .register(hex::encode(DEVICE_S), "laptop", None)
+        .await
+        .expect("register the successor's device");
+    let bytes_gen2 = payload(31);
+    let watch_s = tempfile::tempdir().unwrap();
+    write_file(watch_s.path(), "after.bin", &bytes_gen2);
+    build_bound_engine(
+        &chunk_url,
+        S_SECRET,
+        DEVICE_S,
+        watch_s.path(),
+        created.raw_group_id.clone(),
+        s_keys.clone(),
+    )
+    .upload_file("after.bin")
+    .await
+    .expect("the successor uploads under the rotated generation");
+    let manifest = store
+        .last_manifest_hash
+        .lock()
+        .unwrap()
+        .expect("manifest posted");
+    s_sync
+        .changes_record(
+            "shared",
+            hex::encode(DEVICE_S),
+            "after.bin",
+            Some(hex::encode(manifest.digest())),
+            bytes_gen2.len() as i64,
+            "Created",
+            Some(2),
+            None,
+            Some(b"e2e-synthetic-seal".to_vec()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("the successor records the upload");
+    let listed = CtlSyncClient::new(requester(&router, &state, m_actor))
+        .changes_list(Some("shared".into()), None, 0, None)
+        .await
+        .expect("the member lists");
+    let change = listed
+        .changes
+        .iter()
+        .find(|c| c.manifest_hash.as_deref() == Some(hex::encode(manifest.digest()).as_str()))
+        .expect("the member sees the successor's upload");
+    assert_eq!(change.content_key_version, Some(2));
+    let watch_m = tempfile::tempdir().unwrap();
+    let read = build_bound_engine(
+        &chunk_url,
+        B_SECRET,
+        [0x0B; 32],
+        watch_m.path(),
+        created.raw_group_id.clone(),
+        m_keys,
+    )
+    .download_file_bytes_by_manifest(manifest, change.content_key_version, "after.bin")
+    .await
+    .expect("the member reads the successor's upload");
+    assert_eq!(read, bytes_gen2);
+
+    // (c) The predecessor's engine and its custody at the ceremony open
+    // neither the rotated envelope nor the file sealed under it.
+    assert!(
+        p_engine
+            .open_content_key_envelope(&channel, &verified.sealed)
+            .is_err(),
+        "the retired leaf never reached the post-remove epoch"
+    );
+    let retired_keys =
+        custody::content_keys(&retired_custody, &channel_id).expect("the retired custody");
+    assert!(
+        retired_keys
+            .generations()
+            .all(|g| g.version != 2 && g.key != s_keys.current.key),
+        "the retired custody holds no generation the successor minted"
+    );
+    let watch_p = tempfile::tempdir().unwrap();
+    assert!(
+        build_bound_engine(
+            &chunk_url,
+            A_SECRET,
+            DEVICE_A,
+            watch_p.path(),
+            created.raw_group_id.clone(),
+            retired_keys,
+        )
+        .download_file_bytes_by_manifest(manifest, Some(2), "after.bin")
+        .await
+        .is_err(),
+        "the retired custody fails closed on the post-succession file"
+    );
+
+    // (d) A second launch pass rotates nothing.
+    s_author
+        .resume_pending_removals()
+        .await
+        .expect("the next launch");
+    assert_eq!(
+        custody::content_keys(&s_custody.snapshot(), &channel_id)
+            .unwrap()
+            .current_version(),
+        2,
+        "rotated once per succession"
+    );
+    let again = m_files
+        .content_key_get(ContentKeyGetRequest {
+            name: "shared".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("envelope fetch");
+    assert_eq!(again.sealed, stored.sealed, "no further publish");
 }
 
 // ── Multi-writer Phase 1: the same-nest read-write plane over the REAL router ──
@@ -2740,6 +3101,7 @@ async fn writer_member_and_owner_round_trip_edits_both_ways_two_engines() {
             Some(b"e2e-synthetic-seal".to_vec()),
             None,
             None,
+            None,
         )
         .await
         .expect("WRITER records — the writable_folder gate admits B");
@@ -2751,7 +3113,7 @@ async fn writer_member_and_owner_round_trip_edits_both_ways_two_engines() {
 
     // A reads B's file back — sealed by B, opened by A under the shared content key.
     let a_listed = a_sync
-        .changes_list(Some("shared".into()), None, 0)
+        .changes_list(Some("shared".into()), None, 0, None)
         .await
         .expect("A lists");
     let b_change = a_listed
@@ -2807,11 +3169,12 @@ async fn writer_member_and_owner_round_trip_edits_both_ways_two_engines() {
             Some(b"e2e-synthetic-seal".to_vec()),
             None,
             None,
+            None,
         )
         .await
         .expect("owner records");
     let b_listed = b_sync
-        .changes_list(Some("shared".into()), None, 0)
+        .changes_list(Some("shared".into()), None, 0, None)
         .await
         .expect("B lists");
     let a_change = b_listed
@@ -2866,6 +3229,7 @@ async fn served_control_plane() -> (StdArc<RpcRouter>, StdArc<AppState>, String)
         fauna_nest::discovery_handlers::register_discovery_handlers(&mut b);
         sync_handlers::register_sync_handlers(&mut b);
         folder_handlers::register_folders_handlers(&mut b);
+        fauna_nest::files_handlers::register_files_handlers(&mut b);
         conversations_handlers::register_conversations_handlers(&mut b);
         fauna_nest::mls_replica_handlers::register_mls_replica_handlers(&mut b);
         b.build()
@@ -3181,7 +3545,7 @@ async fn writer_drain_across_rotation_tolerates_owner_only_supersede_refusal_two
     // refused-and-tolerated, not skipped). Owner-authored read confirms it.
     let a_sync = CtlSyncClient::new(requester(&w.router, &w.state, w.a_actor));
     let listed = a_sync
-        .changes_list(Some("shared".into()), None, 0)
+        .changes_list(Some("shared".into()), None, 0, None)
         .await
         .expect("owner lists");
     let rec = listed
@@ -3309,7 +3673,7 @@ async fn writer_below_floor_record_refused_then_heals_after_reingest_two_plane()
     // The healed record landed at the advanced current, meeting the floor.
     let a_sync = CtlSyncClient::new(requester(&w.router, &w.state, w.a_actor));
     let listed = a_sync
-        .changes_list(Some("shared".into()), None, 0)
+        .changes_list(Some("shared".into()), None, 0, None)
         .await
         .expect("owner lists");
     let rec = listed
@@ -3460,7 +3824,7 @@ async fn public_audience_exempts_a_member_unstamped_record_from_the_content_key_
     // It rests as the public shape: plaintext path, no content-key stamp.
     let a_sync = CtlSyncClient::new(requester(&w.router, &w.state, w.a_actor));
     let listed = a_sync
-        .changes_list(Some("shared".into()), None, 0)
+        .changes_list(Some("shared".into()), None, 0, None)
         .await
         .expect("owner lists");
     let rec = listed
@@ -3628,7 +3992,7 @@ async fn public_folder_member_declassify_converges_and_then_steadies() {
     // by the member — the record the floor used to refuse.
     let a_sync = CtlSyncClient::new(requester(&w.router, &w.state, w.a_actor));
     let listed = a_sync
-        .changes_list(Some("shared".into()), None, 0)
+        .changes_list(Some("shared".into()), None, 0, None)
         .await
         .expect("owner lists");
     let rec = listed
@@ -3686,6 +4050,173 @@ async fn public_folder_member_declassify_converges_and_then_steadies() {
         engine.converge_corpus_to_audience().await.unwrap(),
         0,
         "a converged corpus costs one meta-row read"
+    );
+}
+
+/// The pre-bind re-seal pass on an ANCHOR-LESS writer member seat, over a head
+/// the OWNER declassified (`encryption-at-rest.md` § Readable classes → *Who
+/// may move a plaintext head*, ruled 2026-10-13: a plaintext head is moved
+/// only under a verdict, and a seat with no anchor has none — it moves only a
+/// head it authored itself; the 2026-10-04 ruling behind it: opening a public
+/// folder's corpus and re-sealing it at the flip-back are the owner's seats'
+/// work alone).
+///
+/// The sync agent builds a member seat with `EngineParams { mls: None, … }`, so
+/// it holds no declassification anchor and is never public-armed — its
+/// `prebind_reseal_target` public guard never fires. Here the member's engine
+/// is exactly that: connected, keyed, signing, and `is_public_audience()` false.
+/// It pulls the owner's plaintext head (a materialized `Synced` row with no
+/// generation), then runs the pre-bind pass every engine start runs. Against a
+/// real nest, so the head verdict (`prebind_heads`) is the genuine one — the
+/// sync-engine crate's own harness admits every head under `cfg(test)`.
+///
+/// The target: the head still names the owner's plaintext manifest. Seen red
+/// (2026-10-13, before the ruling): the member re-sealed it under its
+/// generation and recorded the sealed head over the owner's, which the owner's
+/// converged corpus stamp never re-opened — a public website partly dark until
+/// the owner flipped the audience twice. Green since the gate in
+/// `SyncEngine::prebind_owed_rows` landed with the ruling;
+/// the tier-1 twins in `fauna-sync-engine` `download_file_bytes_test` pin the
+/// gate's two arms (anchor-less leaves; anchored moves).
+#[tokio::test]
+async fn an_anchorless_writer_members_prebind_pass_leaves_an_owner_declassified_head_plaintext() {
+    let w = served_writer_plane().await;
+    let rel = "index.html";
+    let original: Vec<u8> = (0..40_000u32)
+        .map(|i| (i.wrapping_mul(29) % 251) as u8)
+        .collect();
+
+    // ── The OWNER's seat: uploads sealed, then declassifies its corpus ─────────
+    let a_watch = tempfile::tempdir().unwrap();
+    let a_nest = common::connected_client(&w.base, ActorKeypair::from_secret(A_SECRET)).await;
+    let owner = build_writer_engine_connected(
+        &w.chunk_url,
+        a_nest,
+        A_SECRET,
+        DEVICE_A,
+        a_watch.path(),
+        w.raw_group_id.clone(),
+        // The owner seals from the same gen-1 source its member ingested.
+        w.b_keys.clone(),
+    );
+    owner.set_reader_binding(fauna_protocol::sync_row_verify::ReaderBinding {
+        set_nonce: Some(common::SET_NONCE),
+        owner: Some(w.a_actor),
+        ..Default::default()
+    });
+    write_file(a_watch.path(), rel, &original);
+    owner
+        .upload_file(rel)
+        .await
+        .expect("the owner's sealed upload records under gen-1");
+
+    dispatch(
+        w.router.as_ref(),
+        w.state.clone(),
+        w.a_actor,
+        "fauna.folders.update",
+        enc(&fauna_protocol::folders::addressed(
+            fauna_protocol::folders::FolderUpdateRequest {
+                name: "shared".into(),
+                audience: Some("public".into()),
+                ..Default::default()
+            },
+        )),
+    )
+    .await
+    .expect("owner declassifies the bound folder");
+    let owner = owner.with_public_audience(true);
+    assert_eq!(
+        owner
+            .converge_corpus_to_audience()
+            .await
+            .expect("the owner's declassify converges"),
+        1
+    );
+    assert_eq!(
+        owner.db().corpus_audience().unwrap().as_deref(),
+        Some("plaintext"),
+        "the owner's stamp says converged — its seats do no further work"
+    );
+
+    let head = |listed: &[fauna_protocol::sync::SyncChange]| {
+        listed
+            .iter()
+            .filter(|c| c.path_hash == hex::encode(fauna_core::sync::path_hash(rel)))
+            .max_by_key(|c| c.seq)
+            .cloned()
+            .expect("the path has a head")
+    };
+    let a_sync = CtlSyncClient::new(requester(&w.router, &w.state, w.a_actor));
+    let list = || async {
+        a_sync
+            .changes_list(Some("shared".into()), None, 0, None)
+            .await
+            .expect("owner lists")
+            .changes
+    };
+    let declassified = head(&list().await);
+    assert_eq!(declassified.content_key_version, None, "plaintext at rest");
+    assert_eq!(
+        declassified.author_actor_id.as_deref(),
+        Some(hex::encode(w.a_actor).as_str()),
+        "the owner authored the plaintext head"
+    );
+
+    // ── The WRITER MEMBER's seat, as the sync agent builds it ──────────────────
+    let b_watch = tempfile::tempdir().unwrap();
+    let b_nest = common::connected_client(&w.base, ActorKeypair::from_secret(B_SECRET)).await;
+    let member = build_writer_engine_connected(
+        &w.chunk_url,
+        b_nest,
+        B_SECRET,
+        w.dev_b,
+        b_watch.path(),
+        w.raw_group_id.clone(),
+        w.b_keys.clone(),
+    );
+    // No trusted owner: a bearer-only host holds no MLS-recorded owner, so the
+    // reader reads the owner off the roster and the seat never arms public.
+    member.set_reader_binding(fauna_protocol::sync_row_verify::ReaderBinding {
+        set_nonce: Some(common::SET_NONCE),
+        owner: None,
+        ..Default::default()
+    });
+    assert!(
+        !member.is_public_audience(),
+        "an anchor-less seat never arms"
+    );
+    member
+        .pull_remote_changes()
+        .await
+        .expect("the member pulls the owner's plaintext head");
+    let row = member
+        .db()
+        .get_entry(rel)
+        .unwrap()
+        .expect("the member materialized the owner's file");
+    assert_eq!(
+        (row.state, row.content_key_version),
+        (fauna_sync_engine::db::SyncState::Synced, None),
+        "a materialized copy of a plaintext head, no generation"
+    );
+
+    // ── The member's engine start: the ungated pre-bind pass ──────────────────
+    let moved = member
+        .reseal_pending_under_current()
+        .await
+        .expect("the pre-bind pass runs");
+    let after = head(&list().await);
+    assert_eq!(
+        (
+            moved,
+            after.content_key_version,
+            after.manifest_hash.clone()
+        ),
+        (0, None, declassified.manifest_hash.clone()),
+        "the owner's public head is left plaintext — the member re-sealed nothing \
+         (author now {:?})",
+        after.author_actor_id
     );
 }
 
@@ -4101,6 +4632,7 @@ async fn content_uploaded_before_a_second_share_stays_readable_after_it_real_nes
             Some(1),
             None,
             Some(b"e2e-synthetic-seal".to_vec()),
+            None,
             None,
             None,
         )
@@ -4829,5 +5361,718 @@ async fn member_custody_ingest_notifies_the_observer_only_when_custody_actually_
         "THE R3 EDGE: an owner rotation ingested by a MEMBER must notify the app, \
          or the member's engine keeps its build-time generation and every later \
          owner upload fails closed until an app restart"
+    );
+}
+
+/// The write names the row (`media.md` § Encryption at rest → *The filter and
+/// the upload target address the row*, (e)): writer B also owns a set named
+/// `shared`, so both name forms resolve B's own row — the shadow, pinned here
+/// as the name arm's behaviour. The same record carrying `folder_id` = A's
+/// row lands in A's shared set; after B's grant is edited back to `reader`
+/// the ref is `not_found`, as is a ref to an absent row — never a fall-through
+/// to the name forms.
+#[tokio::test]
+async fn record_by_folder_id_reaches_the_shared_set_a_same_named_own_set_shadows() {
+    let w = served_writer_plane().await;
+    let b_key = ActorKeypair::from_secret(B_SECRET);
+    // B's own owner-only set of the same name (with a set nonce, so its
+    // signed records verify).
+    w.state
+        .db
+        .create_folder_with_options("shared", &w.b_actor, shared_set_options())
+        .await
+        .unwrap();
+    // A's bound row (looked up by binding, not by plaintext name).
+    let shared_id = w
+        .state
+        .db
+        .get_folders_for_actor_full(&w.a_actor)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.mls_group_id.as_deref() == Some(w.raw_group_id.as_slice()))
+        .expect("A's bound shared row")
+        .id;
+
+    let record = |path: &str, folder_id: Option<i64>, version: Option<u64>| {
+        enc(&fauna_protocol::folders::addressed(common::signed_record(
+            fauna_protocol::sync::SyncChangeRecordRequest {
+                path_sealed: Some(fauna_protocol::ByteBuf::from(
+                    b"e2e-synthetic-seal".to_vec(),
+                )),
+                folder: "shared".into(),
+                folder_id,
+                device_id: hex::encode(w.dev_b),
+                path: path.into(),
+                change_type: "create".into(),
+                size_bytes: 100,
+                manifest_hash: Some(hex::encode([0xD2u8; 32])),
+                content_key_version: version,
+                ..Default::default()
+            },
+            &b_key,
+        )))
+    };
+    let path_hash = |p: &str| hex::encode(fauna_core::sync::path_hash(p));
+    let a_sync = CtlSyncClient::new(requester(&w.router, &w.state, w.a_actor));
+    let b_sync = CtlSyncClient::new(requester(&w.router, &w.state, w.b_actor));
+
+    // By name: lands in B's OWN "shared", never A's.
+    dispatch(
+        w.router.as_ref(),
+        w.state.clone(),
+        w.b_actor,
+        "fauna.sync.changes.record",
+        record("by-name.bin", None, None),
+    )
+    .await
+    .expect("by-name record lands");
+    let own = b_sync
+        .changes_list(Some("shared".into()), None, 0, None)
+        .await
+        .expect("B lists its own set");
+    assert!(
+        own.changes
+            .iter()
+            .any(|c| c.path_hash == path_hash("by-name.bin"))
+    );
+    let a_list = a_sync
+        .changes_list(Some("shared".into()), None, 0, None)
+        .await
+        .expect("A lists the shared set");
+    assert!(
+        !a_list
+            .changes
+            .iter()
+            .any(|c| c.path_hash == path_hash("by-name.bin")),
+        "the name arm resolves B's own row (owner wins the collision)"
+    );
+
+    // By ref: lands in A's shared set.
+    dispatch(
+        w.router.as_ref(),
+        w.state.clone(),
+        w.b_actor,
+        "fauna.sync.changes.record",
+        record("by-ref.bin", Some(shared_id), Some(1)),
+    )
+    .await
+    .expect("by-ref record lands");
+    let a_list = a_sync
+        .changes_list(Some("shared".into()), None, 0, None)
+        .await
+        .expect("A lists the shared set");
+    let rec = a_list
+        .changes
+        .iter()
+        .find(|c| c.path_hash == path_hash("by-ref.bin"))
+        .expect("the ref reached A's shared row");
+    assert_eq!(
+        rec.author_actor_id.as_deref(),
+        Some(hex::encode(w.b_actor).as_str())
+    );
+    let own = b_sync
+        .changes_list(Some("shared".into()), None, 0, None)
+        .await
+        .expect("B lists its own set");
+    assert!(
+        !own.changes
+            .iter()
+            .any(|c| c.path_hash == path_hash("by-ref.bin"))
+    );
+
+    // An absent row: not_found, no name fall-through.
+    let err = dispatch(
+        w.router.as_ref(),
+        w.state.clone(),
+        w.b_actor,
+        "fauna.sync.changes.record",
+        record("absent.bin", Some(424_242), Some(1)),
+    )
+    .await
+    .expect_err("absent row refused");
+    assert_eq!(err.code, "fauna.sync.not_found");
+
+    // B demoted to reader: the ref no longer admits, and does not fall through
+    // to B's own same-named row.
+    let channel_id = fauna_mls::types::ChannelId::from_group_id(&w.raw_group_id).0;
+    w.state
+        .db
+        .set_folder_member_access(&channel_id, &w.b_actor, "reader", None)
+        .await
+        .unwrap();
+    let err = dispatch(
+        w.router.as_ref(),
+        w.state.clone(),
+        w.b_actor,
+        "fauna.sync.changes.record",
+        record("reader.bin", Some(shared_id), Some(1)),
+    )
+    .await
+    .expect_err("reader member refused");
+    assert_eq!(err.code, "fauna.sync.not_found");
+    let own = b_sync
+        .changes_list(Some("shared".into()), None, 0, None)
+        .await
+        .expect("B lists its own set");
+    assert!(
+        !own.changes
+            .iter()
+            .any(|c| c.path_hash == path_hash("reader.bin"))
+    );
+}
+
+/// Every version names its set's row (`media.md` § Encryption at rest → *A
+/// set is addressed by its row*; `file-versions.md` § File Versions): writer B
+/// owns a `shared` and writes A's `shared`, one version of `same.bin` in each.
+/// B's by-name versions listing spans both readable rows of that name, so the
+/// two versions interleave in one reply — each must carry its own row's
+/// `folder_id`, or a reader cannot tell whose custody a version rests under.
+#[tokio::test]
+async fn every_version_names_its_sets_row() {
+    use fauna_protocol::files::{FilesVersionsListReply, FilesVersionsListRequest};
+
+    let w = served_writer_plane().await;
+    let b_key = ActorKeypair::from_secret(B_SECRET);
+    let own_id = w
+        .state
+        .db
+        .create_folder_with_options("shared", &w.b_actor, shared_set_options())
+        .await
+        .unwrap();
+    let shared_id = w
+        .state
+        .db
+        .get_folders_for_actor_full(&w.a_actor)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.mls_group_id.as_deref() == Some(w.raw_group_id.as_slice()))
+        .expect("A's bound shared row")
+        .id;
+    assert_ne!(own_id, shared_id);
+
+    let record = |folder_id: Option<i64>, version: Option<u64>, manifest: u8| {
+        enc(&fauna_protocol::folders::addressed(common::signed_record(
+            fauna_protocol::sync::SyncChangeRecordRequest {
+                path_sealed: Some(fauna_protocol::ByteBuf::from(
+                    b"e2e-synthetic-seal".to_vec(),
+                )),
+                folder: "shared".into(),
+                folder_id,
+                device_id: hex::encode(w.dev_b),
+                path: "same.bin".into(),
+                change_type: "create".into(),
+                size_bytes: 100,
+                manifest_hash: Some(hex::encode([manifest; 32])),
+                content_key_version: version,
+                ..Default::default()
+            },
+            &b_key,
+        )))
+    };
+    // One version in B's own row (by name: owner-first), one in A's (by row).
+    for (folder_id, version, manifest) in [(None, None, 0xA1u8), (Some(shared_id), Some(1), 0xB2)] {
+        dispatch(
+            w.router.as_ref(),
+            w.state.clone(),
+            w.b_actor,
+            "fauna.sync.changes.record",
+            record(folder_id, version, manifest),
+        )
+        .await
+        .expect("record lands");
+    }
+
+    let reply = dispatch(
+        w.router.as_ref(),
+        w.state.clone(),
+        w.b_actor,
+        "fauna.files.versions.list",
+        enc(&fauna_protocol::folders::addressed(
+            FilesVersionsListRequest {
+                path_hash: fauna_protocol::ByteBuf::from(
+                    fauna_core::sync::path_hash("same.bin").to_vec(),
+                ),
+                folder: Some("shared".into()),
+                ..Default::default()
+            },
+        )),
+    )
+    .await
+    .expect("B lists the versions by name");
+    let reply: FilesVersionsListReply = decode(&reply).unwrap();
+    let row_of = |manifest: u8| {
+        reply
+            .versions
+            .iter()
+            .find(|v| v.manifest_hash.as_ref() == [manifest; 32])
+            .unwrap_or_else(|| panic!("the {manifest:#x} version is listed"))
+            .folder_id
+    };
+    assert_eq!(
+        reply.versions.len(),
+        2,
+        "the by-name listing spans both rows"
+    );
+    assert_eq!(row_of(0xA1), Some(own_id), "B's own version names B's row");
+    assert_eq!(
+        row_of(0xB2),
+        Some(shared_id),
+        "the shared version names A's row"
+    );
+}
+
+/// The two-plane capstone of the row form (`set-addressing.md` § Tests): the
+/// writer's REAL engine, bound to the owner's `shared` while the writer owns a
+/// `shared` of its own, stamps its row on what it sends — so its upload's
+/// record lands in the owner's set and round-trips into the owner's replica,
+/// and the writer's own set's change log stays empty. Before the engine
+/// stamped its row, its by-name record found the writer's own row first (the
+/// shadow `record_by_folder_id_reaches_the_shared_set_a_same_named_own_set_shadows`
+/// pins as the rowless behaviour) and the edit never reached the owner.
+#[tokio::test]
+async fn a_bound_writer_engine_records_into_the_shared_row_beside_an_own_namesake_two_plane() {
+    use fauna_core::folder_keys::FolderRef;
+    let w = served_writer_plane().await;
+    w.state
+        .db
+        .create_folder_with_options("shared", &w.b_actor, shared_set_options())
+        .await
+        .unwrap();
+    let a_rows = w
+        .state
+        .db
+        .get_folders_for_actor_full(&w.a_actor)
+        .await
+        .unwrap();
+    let shared_id = a_rows
+        .iter()
+        .find(|r| r.mls_group_id.as_deref() == Some(w.raw_group_id.as_slice()))
+        .expect("A's bound shared row")
+        .id;
+    let own_id = w
+        .state
+        .db
+        .get_folders_for_actor_full(&w.b_actor)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.name == "shared" && r.id != shared_id)
+        .expect("B's own same-named row")
+        .id;
+    assert_ne!(own_id, shared_id);
+
+    // The writer's engine, bound to A's row the way the lifecycle binds it.
+    let watch_b = tempfile::tempdir().unwrap();
+    let b_nest = common::connected_client(&w.base, ActorKeypair::from_secret(B_SECRET)).await;
+    let engine = build_writer_engine_connected(
+        &w.chunk_url,
+        b_nest,
+        B_SECRET,
+        w.dev_b,
+        watch_b.path(),
+        w.raw_group_id.clone(),
+        w.b_keys.clone(),
+    )
+    .with_folder_ref(FolderRef::Local(shared_id));
+    let rel = "from-the-writer.bin";
+    let bytes = payload(67);
+    write_file(watch_b.path(), rel, &bytes);
+    engine
+        .upload_file(rel)
+        .await
+        .expect("the bound writer uploads and records");
+    let manifest = w
+        .store
+        .last_manifest_hash
+        .lock()
+        .unwrap()
+        .expect("the writer's manifest posted");
+
+    let path_hash = hex::encode(fauna_core::sync::path_hash(rel));
+    let a_sync = CtlSyncClient::new(requester(&w.router, &w.state, w.a_actor));
+    let b_sync = CtlSyncClient::new(requester(&w.router, &w.state, w.b_actor));
+    let in_shared = a_sync
+        .changes_list(
+            Some("shared".into()),
+            None,
+            0,
+            Some(FolderRef::Local(shared_id)),
+        )
+        .await
+        .expect("A lists its shared set");
+    let change = in_shared
+        .changes
+        .iter()
+        .find(|c| c.path_hash == path_hash)
+        .expect("the writer's record landed in A's shared row");
+    assert_eq!(
+        change.author_actor_id.as_deref(),
+        Some(hex::encode(w.b_actor).as_str())
+    );
+    let in_own = b_sync
+        .changes_list(
+            Some("shared".into()),
+            None,
+            0,
+            Some(FolderRef::Local(own_id)),
+        )
+        .await
+        .expect("B lists its own set by its row");
+    assert!(
+        in_own.changes.is_empty(),
+        "the writer's own namesake stays untouched; got {:?}",
+        in_own.changes
+    );
+
+    // The owner opens the writer's bytes under the shared content key.
+    let watch_a = tempfile::tempdir().unwrap();
+    let a_reader = build_bound_engine(
+        &w.chunk_url,
+        A_SECRET,
+        DEVICE_A,
+        watch_a.path(),
+        w.raw_group_id.clone(),
+        w.b_keys.clone(),
+    );
+    let read = a_reader
+        .download_file_bytes_by_manifest(manifest, change.content_key_version, rel)
+        .await
+        .expect("owner reads the writer's content");
+    assert_eq!(read, bytes, "the edit round-trips into the owner's replica");
+}
+
+/// Every per-set kind reads the row (`set-addressing.md` § The row form and
+/// § Tests): writer B owns its own `shared` and writes A's `shared`. By name,
+/// B's record lands in its own row — the shadow, pinned as the behaviour of a
+/// rowless request. With A's row as `folder_id`: the record lands there and
+/// `changes.list` by that row returns it for A and for B while B's own row
+/// does not; `lease.acquire` leases A's row (its `FolderSummary.lease` names
+/// B's device, B's own row stays unleased); `conflicts.report` files on A's
+/// row (A's `conflicts.list` shows it); `changes.supersede` from B is refused
+/// owner-only as today. A reader member on each write kind, a stranger, and an
+/// absent row all answer `not_found` — never a fall-through to the name forms.
+#[tokio::test]
+async fn every_set_kind_resolves_the_row_a_same_named_own_set_shadows() {
+    use fauna_protocol::folders::{
+        ConflictReportRequest, ConflictsListReply, ConflictsListRequest, LeaseAcquireReply,
+        LeaseAcquireRequest,
+    };
+    use fauna_protocol::sync::{
+        SyncChangeRecordRequest, SyncChangesListReply, SyncChangesListRequest,
+        SyncChangesSupersedeRequest,
+    };
+
+    let w = served_writer_plane().await;
+    let b_key = ActorKeypair::from_secret(B_SECRET);
+    w.state
+        .db
+        .create_folder_with_options("shared", &w.b_actor, shared_set_options())
+        .await
+        .unwrap();
+    let shared_id = w
+        .state
+        .db
+        .get_folders_for_actor_full(&w.a_actor)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.mls_group_id.as_deref() == Some(w.raw_group_id.as_slice()))
+        .expect("A's bound shared row")
+        .id;
+    let own_id = w
+        .state
+        .db
+        .get_folder_for_actor("shared", &w.b_actor)
+        .await
+        .unwrap()
+        .expect("B's own row")
+        .id;
+    assert_ne!(own_id, shared_id);
+
+    // A reader member R (on the roster, `reader` grant) and a stranger S, each
+    // with a registered write-capable device.
+    let channel_id = ChannelId::from_group_id(&w.raw_group_id).0;
+    let (r_actor, s_actor) = ([0xC3u8; 32], [0xC4u8; 32]);
+    let (dev_r, dev_s) = ([0x0Cu8; 32], [0x0Du8; 32]);
+    for (actor, dev, label) in [(r_actor, dev_r, "reader"), (s_actor, dev_s, "stranger")] {
+        w.state.db.create_user(&actor, "free", label).await.unwrap();
+        register_device(w.router.as_ref(), &w.state, actor, dev).await;
+    }
+    w.state
+        .db
+        .register_actor_channel(&r_actor, &channel_id)
+        .await
+        .unwrap();
+    w.state
+        .db
+        .set_folder_member_access(&channel_id, &r_actor, "reader", None)
+        .await
+        .unwrap();
+
+    let call = |actor: [u8; 32], kind: &'static str, payload: Bytes| {
+        let w = &w;
+        async move { dispatch(w.router.as_ref(), w.state.clone(), actor, kind, payload).await }
+    };
+    let record = |dev: [u8; 32], path: &str, folder_id: Option<i64>, version: Option<u64>| {
+        enc(&fauna_protocol::folders::addressed(common::signed_record(
+            SyncChangeRecordRequest {
+                path_sealed: Some(fauna_protocol::ByteBuf::from(
+                    b"e2e-synthetic-seal".to_vec(),
+                )),
+                folder: "shared".into(),
+                folder_id,
+                device_id: hex::encode(dev),
+                path: path.into(),
+                change_type: "create".into(),
+                size_bytes: 100,
+                manifest_hash: Some(hex::encode([0xD3u8; 32])),
+                content_key_version: version,
+                ..Default::default()
+            },
+            &b_key,
+        )))
+    };
+    let list = |actor: [u8; 32], folder_id: i64| {
+        let call = &call;
+        async move {
+            let reply: SyncChangesListReply = decode(
+                &call(
+                    actor,
+                    "fauna.sync.changes.list",
+                    enc(&SyncChangesListRequest {
+                        folder_id: Some(folder_id),
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .expect("changes.list by row"),
+            )
+            .unwrap();
+            reply.changes
+        }
+    };
+    let path_hash = |p: &str| hex::encode(fauna_core::sync::path_hash(p));
+    let lease = |dev: [u8; 32], folder_id: i64| {
+        enc(&fauna_protocol::folders::addressed(LeaseAcquireRequest {
+            name: "shared".into(),
+            folder_id: Some(folder_id),
+            device_id: hex::encode(dev),
+            ..Default::default()
+        }))
+    };
+    let conflict = |dev: [u8; 32], path: &str, folder_id: i64| {
+        enc(&fauna_protocol::folders::addressed(ConflictReportRequest {
+            path_sealed: Some(fauna_protocol::ByteBuf::from(
+                b"e2e-synthetic-seal".to_vec(),
+            )),
+            folder: "shared".into(),
+            folder_id: Some(folder_id),
+            device_id: hex::encode(dev),
+            path: path.into(),
+            conflict_type: "concurrent_edit".into(),
+            ..Default::default()
+        }))
+    };
+
+    // By name: B's record lands in its own row — the shadow.
+    call(
+        w.b_actor,
+        "fauna.sync.changes.record",
+        record(w.dev_b, "by-name.bin", None, None),
+    )
+    .await
+    .expect("by-name record lands");
+    assert!(
+        list(w.b_actor, own_id)
+            .await
+            .iter()
+            .any(|c| c.path_hash == path_hash("by-name.bin")),
+        "a rowless request resolves owner-first"
+    );
+
+    // By row: the record lands in A's row, listed by that row for A and B.
+    call(
+        w.b_actor,
+        "fauna.sync.changes.record",
+        record(w.dev_b, "by-row.bin", Some(shared_id), Some(1)),
+    )
+    .await
+    .expect("by-row record lands");
+    for who in [w.a_actor, w.b_actor] {
+        assert!(
+            list(who, shared_id)
+                .await
+                .iter()
+                .any(|c| c.path_hash == path_hash("by-row.bin")),
+            "changes.list by A's row returns the record"
+        );
+    }
+    assert!(
+        !list(w.b_actor, own_id)
+            .await
+            .iter()
+            .any(|c| c.path_hash == path_hash("by-row.bin")),
+        "B's own row does not hold it"
+    );
+
+    // lease.acquire by row leases A's row, B's own stays unleased.
+    let acq: LeaseAcquireReply = decode(
+        &call(
+            w.b_actor,
+            "fauna.folders.lease.acquire",
+            lease(w.dev_b, shared_id),
+        )
+        .await
+        .expect("lease by row"),
+    )
+    .unwrap();
+    assert!(acq.acquired);
+    let lease_of = |actor: [u8; 32], id: i64| {
+        let call = &call;
+        async move {
+            let reply: fauna_protocol::folders::FoldersListReply = decode(
+                &call(
+                    actor,
+                    "fauna.folders.list",
+                    enc(&fauna_protocol::folders::FoldersListRequest {
+                        include_shared_with_me: Some(true),
+                        extra: Default::default(),
+                    }),
+                )
+                .await
+                .expect("folders.list"),
+            )
+            .unwrap();
+            reply
+                .folders
+                .into_iter()
+                .find(|f| f.id == id)
+                .expect("row listed")
+                .lease
+        }
+    };
+    // The holder reads its own device id; every other reader sees the lease
+    // held, the device id withheld.
+    assert_eq!(
+        lease_of(w.b_actor, shared_id).await.map(|l| l.device_id),
+        Some(hex::encode(w.dev_b)),
+        "A's row is leased to B's device"
+    );
+    assert!(
+        lease_of(w.a_actor, shared_id).await.is_some(),
+        "A sees its row leased"
+    );
+    assert!(
+        lease_of(w.b_actor, own_id).await.is_none(),
+        "B's own row stays unleased"
+    );
+
+    // conflicts.report by row files on A's row.
+    let filed: fauna_protocol::folders::ConflictReportReply = decode(
+        &call(
+            w.b_actor,
+            "fauna.sync.conflicts.report",
+            conflict(w.dev_b, "/shared/clash.txt", shared_id),
+        )
+        .await
+        .expect("conflict by row"),
+    )
+    .unwrap();
+    let conflicts_of = |actor: [u8; 32]| {
+        let call = &call;
+        async move {
+            let reply: ConflictsListReply = decode(
+                &call(
+                    actor,
+                    "fauna.sync.conflicts.list",
+                    enc(&ConflictsListRequest::default()),
+                )
+                .await
+                .expect("conflicts.list"),
+            )
+            .unwrap();
+            reply.conflicts
+        }
+    };
+    // (The conflict's plaintext path rests empty — it is addressed by id.)
+    assert!(
+        conflicts_of(w.a_actor)
+            .await
+            .iter()
+            .any(|c| c.id == filed.id),
+        "A's conflicts.list shows the conflict filed on its row"
+    );
+    assert!(
+        !conflicts_of(w.b_actor)
+            .await
+            .iter()
+            .any(|c| c.id == filed.id),
+        "B's own sets hold no such conflict"
+    );
+
+    // changes.supersede stays owner-only: refused for B by row.
+    let supersede = enc(&fauna_protocol::folders::addressed(
+        SyncChangesSupersedeRequest {
+            folder: "shared".into(),
+            folder_id: Some(shared_id),
+            device_id: hex::encode(w.dev_b),
+            path: "by-row.bin".into(),
+            manifest_hash: hex::encode([0xD3u8; 32]),
+            ..Default::default()
+        },
+    ));
+    let err = call(w.b_actor, "fauna.sync.changes.supersede", supersede)
+        .await
+        .expect_err("supersede is owner-only");
+    assert_eq!(err.code, "fauna.sync.not_found");
+
+    // A reader member on each write kind, a stranger, and an absent row:
+    // `not_found`, never a fall-through to the name forms.
+    for (actor, dev, folder_id, who) in [
+        (r_actor, dev_r, shared_id, "reader member"),
+        (s_actor, dev_s, shared_id, "stranger"),
+        (w.b_actor, w.dev_b, 424_242, "absent row"),
+    ] {
+        let err = call(
+            actor,
+            "fauna.sync.changes.record",
+            record(dev, "refused.bin", Some(folder_id), Some(1)),
+        )
+        .await
+        .expect_err(who);
+        assert_eq!(err.code, "fauna.sync.not_found", "record: {who}");
+        let err = call(actor, "fauna.folders.lease.acquire", lease(dev, folder_id))
+            .await
+            .expect_err(who);
+        assert_eq!(err.code, "fauna.folders.not_found", "lease: {who}");
+        let err = call(
+            actor,
+            "fauna.sync.conflicts.report",
+            conflict(dev, "/shared/refused.txt", folder_id),
+        )
+        .await
+        .expect_err(who);
+        assert_eq!(err.code, "fauna.sync.not_found", "conflict: {who}");
+    }
+    // The stranger cannot read the row either.
+    let err = call(
+        s_actor,
+        "fauna.sync.changes.list",
+        enc(&SyncChangesListRequest {
+            folder_id: Some(shared_id),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect_err("stranger list refused");
+    assert_eq!(err.code, "fauna.sync.not_found");
+    // Nothing the refused writes named landed in B's own same-named row.
+    assert!(
+        !list(w.b_actor, own_id)
+            .await
+            .iter()
+            .any(|c| c.path_hash == path_hash("refused.bin"))
     );
 }

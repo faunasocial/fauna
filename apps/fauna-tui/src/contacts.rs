@@ -34,8 +34,9 @@
 //! into `fauna.inbox.send`'s `recipient_nest_url`, so the home nest originates
 //! `fauna.federation.inbox.deliver` and the knock lands in the peer's queue.
 //!
-//! This is the conversations recipient picker's mechanism, not linux's
-//! `resolve_nest` → `resolve_handle_on_remote` chain: the nest-proxied
+//! This is the conversations recipient picker's mechanism, not the older
+//! nest-proxied `resolve_nest` → `resolve_handle` chain (which linux has since
+//! left for the shared `find_user_across_nests`): the nest-proxied
 //! `fauna.nest.resolve` refuses loopback / IP-literal / `.local` authorities by
 //! design (`discovery_core.rs`), so dialing the typed authority directly is
 //! both the richer pattern (priority #4) and the only one a two-nest test
@@ -853,8 +854,8 @@ impl Op {
 /// (`fauna_client_conversations`): `peer_nest_url` derives the base URL, and
 /// `fauna.actor.by_handle` runs there pre-identity. The home nest is not in the
 /// path — deliberately. The nest-proxied `fauna.nest.resolve` kind, which
-/// linux's older `resolve_nest` → `resolve_handle_on_remote` chain goes
-/// through, **refuses** loopback, IP-literal and `.local` authorities by design
+/// the older `resolve_nest` → `resolve_handle` chain went through, **refuses**
+/// loopback, IP-literal and `.local` authorities by design
 /// (`bins/fauna-nest/src/discovery_core.rs`), so it can neither reach a peer on
 /// a LAN address nor be witnessed by a two-nest test topology. Dialing the
 /// authority directly is both the richer existing pattern (priority #4) and the

@@ -99,6 +99,15 @@ shows when it last synced and how much is still queued.
 What travels is **ciphertext, sealed on your device** with a key derived from
 your identity — the destination stores opaque chunks it cannot open, ever.
 
+A destination keeps your account's backup from **one box at a time**. If you
+try to add a destination that already keeps your backup from another of your
+boxes, the add stops and says so, and nothing is added. And if a destination
+stops accepting this box — you froze its backup there from the Nests page, or
+it keeps your backup from another box now — its row says **Not accepted**
+instead of showing a queue, so a destination that turns your box away never
+looks like one that is merely busy. Once the destination accepts this box
+again, the row goes back to showing what is queued.
+
 Remove a destination and your nest tells it so on its next pass, and the space
 your backup was using there is released. That release is deliberately not
 instant: for about a month afterwards the destination still holds what it had,
@@ -176,13 +185,32 @@ the copy holds nothing your nest lacks. Until then, the copy is the one place
 the lost data still exists — if whoever restored your nest has a newer copy,
 now is the time to ask for it.
 
+**Getting it back.** When the destination is another nest, the banner carries
+a **Recover what your nest lost** button. After a plain confirm, your app copies
+everything the backup holds that your nest no longer has back into your nest —
+as new items, each where it was: a lost message returns to its folder with its
+flags, a lost post, event or contact comes back as it was. Nothing is deleted on
+either side, and anything you changed or deleted since the rollback stays the
+way you left it — a message you deleted afterwards is not brought back. The
+result lists what came back for each kind of data, and anything that could not
+be put back (an event or contact with no record of where it belonged). Running
+it again is always safe: it only fetches what is still missing and never brings
+anything back twice. Once it is complete the banner goes away. Mail apps see
+the recovered messages as new ones.
+
 One of your own devices keeping a copy says so too. A device you set up as a
 backup destination fetches from your nest by itself, and if it finds your nest
 has gone backwards it stops fetching rather than throw away what it holds — for
 a nest rebuilt after a total loss, that device may hold the only copy left. The
 same banner then appears on that device's Backups page, naming the device and
-saying its copy is held until it is recovered, and it goes away by itself once
-your nest has caught back up.
+saying its copy is held until it is recovered. The device then carries on
+backing up whatever your nest writes from now on, while keeping everything your
+nest lost. On that device the banner carries the same **Recover what your nest
+lost** button, with the same confirm and the same result: the device copies what
+your nest no longer has back into it from its own copy, each item where it was.
+Only the device that holds the copy offers the button — another of your devices
+shows the banner without it. The banner goes away once the recovery is complete,
+or by itself if your nest gets everything back some other way.
 
 Three shapes today, one more ratified for later:
 
@@ -301,9 +329,7 @@ either as its own destination row or as a row saying how much the device is
 holding, and next to it is **Restore my data to this nest**. Confirm once and
 the device sends its copy to the new nest, which makes it live again. Your
 mail comes back into the folders it was in, with its read and flagged marks.
-A copy made before backups kept track of your folders brings its mail back
-into your Inbox instead, marked unread, and the result says so. Nothing is
-deleted along the way,
+Nothing is deleted along the way,
 either on the device or on the nest. If the nest already holds your data, it
 stops rather than mixing the two. When the copy has arrived in full, the device
 signs up again as that nest's backup, so you keep an offline copy from then on.
@@ -311,7 +337,10 @@ signs up again as that nest's backup, so you keep an offline copy from then on.
 If something is missing, for example the copy ran into the new nest's storage
 limit or part of it had not finished backing up, the Backups page lists what
 did not come back and what to do about it. Running the restore again picks up
-where it left off.
+where it left off. That holds even if the restore was cut off halfway, say the
+nest restarted, and new mail arrived before you ran it again: the restore
+finishes, and the new mail stays in the folder it arrived in, beside the mail
+that came back.
 
 Two honest notes on today's state. Restoring from a copy held by *another nest*
 is still landing; the button above covers a copy on your own device. And
@@ -347,7 +376,7 @@ the holes attackers use. Possession of the key is the account.
 | Your app's own check of each destination ("Last checked", plus a banner when one falls behind) | **Available** |
 | Continuous encrypted upload to destinations | **Available** — your nest keeps the uploads flowing on its own, even with every app closed; mail, calendar, contacts and posts go through the pipe (see the mirroring row below) |
 | Friend-hosted storage (storage-only guest + quota, unreadable by host) | **Available** (nest + enrollment landed) |
-| Restore onto a fresh nest from a copy on your own device | **Available**: **Restore my data to this nest** on the Backups page brings your mail, calendar, contacts and posts back onto the nest, the mail into the folders it was in (or into your Inbox, from a copy made before backups kept track of folders) |
+| Restore onto a fresh nest from a copy on your own device | **Available**: **Restore my data to this nest** on the Backups page brings your mail, calendar, contacts and posts back onto the nest, the mail into the folders it was in |
 | Restore onto a fresh nest from a copy held by another nest | **Landing** |
 | Snapshot coverage on your own nest: files/photos/mail/conversations/calendar | **Available**; posts **landing** |
 | Destination mirroring, by data type | Mail, calendar, contacts and posts **available**; conversations, files and photos **landing** |

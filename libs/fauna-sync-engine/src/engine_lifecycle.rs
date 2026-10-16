@@ -9,7 +9,7 @@
 //!   already built: the initial convergence pass, the owner-only re-seal, and the
 //!   watch/debounce/rescan loop (the per-user `fauna-sync-agent` drives it).
 //! - **this module** — *building* one engine, **the one builder**
-//!   (`on-demand-files.md` § Shared sets on a capability host → *One
+//!   (`on-demand-files-shared-sets.md` § Shared sets on a capability host → *One
 //!   mechanism*, question 2): the in-process hosts in `fauna-ffi` (the
 //!   apple/android `FfiSyncEngineHost`'s construct-run-drop library ingress, the
 //!   File Provider host) and every engine the desktop sync agent runs.
@@ -32,7 +32,7 @@
 //! with what the engine was built on ([`edge_verdict`]), and rebuilds over the
 //! same state DB when the binding, the caller's access or the content-key floor
 //! moved, or the floor is still ahead of the generation it holds
-//! (`docs/goal/behavior/on-demand-files.md` § Shared sets on a capability host,
+//! (`docs/goal/behavior/on-demand-files-shared-sets.md` § Shared sets on a capability host,
 //! decision 2).
 //!
 //! The in-process **resident** drive (a watcher-driven engine per device-local
@@ -115,17 +115,44 @@ pub const INSTALL_DEVICE_SECRET_FILE: &str = "install-device-secret";
 
 /// Read (or mint + persist) this install's device secret under `install_dir`.
 ///
-/// App and co-located agent may both arrive first, so the mint is a
-/// `create_new`: the loser of that race reads the winner's bytes instead of
-/// overwriting them — two processes deriving from two secrets would register
-/// two rows.
+/// App and co-located agent may both arrive first, so the secret is published
+/// atomically: the 32 bytes are written and synced to a private temp file, then
+/// `hard_link`ed to the final name, which fails with `AlreadyExists` if another
+/// process won — the loser reads the winner's bytes instead of overwriting
+/// them (two processes deriving from two secrets would register two rows). A
+/// published file is therefore always whole; a file that is not 32 bytes is a
+/// crash artefact of the older `create_new`-then-write shape, no id was ever
+/// derived from it (every read of it failed), and it is replaced by renaming a
+/// fresh temp file over it. (`atomic_write`'s rename must not do the publish:
+/// overwriting would let a race loser replace a secret already derived from.)
 pub fn load_or_create_install_device_secret(
     install_dir: &std::path::Path,
 ) -> Result<[u8; fauna_core::device_id::INSTALL_DEVICE_SECRET_LEN]> {
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
     std::fs::create_dir_all(install_dir)?;
     let path = install_dir.join(INSTALL_DEVICE_SECRET_FILE);
+    let read_whole =
+        || -> Result<Option<[u8; fauna_core::device_id::INSTALL_DEVICE_SECRET_LEN]>> {
+            match std::fs::read(&path) {
+                Ok(bytes) => Ok(bytes.try_into().ok()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        };
+    if let Some(secret) = read_whole()? {
+        return Ok(secret);
+    }
+
+    let secret = fauna_core::device_id::mint_install_device_secret();
+    let temp = install_dir.join(format!(
+        ".{INSTALL_DEVICE_SECRET_FILE}.{}.{}.tmp",
+        std::process::id(),
+        TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -133,18 +160,28 @@ pub fn load_or_create_install_device_secret(
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    match options.open(&path) {
-        Ok(mut file) => {
-            let secret = fauna_core::device_id::mint_install_device_secret();
-            file.write_all(&secret)?;
-            file.sync_all()?;
-            Ok(secret)
+    let published = (|| -> Result<[u8; fauna_core::device_id::INSTALL_DEVICE_SECRET_LEN]> {
+        let mut file = options.open(&temp)?;
+        file.write_all(&secret)?;
+        file.sync_all()?;
+        drop(file);
+        match std::fs::hard_link(&temp, &path) {
+            Ok(()) => Ok(secret),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // A winner published a whole file, or a torn one from the old shape.
+                if let Some(winner) = read_whole()? {
+                    return Ok(winner);
+                }
+                tracing::warn!("the install device secret was torn; replacing it");
+                std::fs::rename(&temp, &path)?;
+                Ok(secret)
+            }
+            Err(e) => Err(e.into()),
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => std::fs::read(&path)?
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("the install device secret is not 32 bytes")),
-        Err(e) => Err(e.into()),
-    }
+    })();
+    // Best effort: after a rename the temp is already gone.
+    let _ = std::fs::remove_file(&temp);
+    published
 }
 
 /// Read (or derive + persist) the sync device id `actor_id` registers under
@@ -214,7 +251,7 @@ pub enum EngineCredential {
     /// apple File Provider extension, android's provider). Decrypts owner-only
     /// content directly; a bound or served set's content keys come from
     /// [`EngineParams::folder_keys`] instead — the `BackupKey` alone suffices
-    /// (`on-demand-files.md` § Shared sets on a capability host, decision 1).
+    /// (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 1).
     BackupKey(BackupKey),
 }
 
@@ -315,7 +352,7 @@ pub struct EngineParams {
     /// The account's folder-key custody (`fauna.state.folder-keys`) — a bound,
     /// served or cross-nest set's keys and every set's nonce. The seat's store
     /// on a runtime-hosting process, the capability host's cold fleet replica
-    /// on one that hosts none (`on-demand-files.md` § Shared sets on a
+    /// on one that hosts none (`on-demand-files-shared-sets.md` § Shared sets on a
     /// capability host, decision 1′). Read-only by type: an engine host never
     /// writes custody.
     pub folder_keys: Arc<dyn FolderKeyReader>,
@@ -340,7 +377,7 @@ pub enum ReaderHosting {
     /// Provider extension, android's documents provider) has no such
     /// directory — the OS or the provider owns the tree and only ever *calls*
     /// — so a reader's engine pulls, lists and opens, and the provider face
-    /// refuses every write on it (`on-demand-files.md` § Shared sets on a
+    /// refuses every write on it (`on-demand-files-shared-sets.md` § Shared sets on a
     /// capability host, decision 3).
     ReadOnly,
 }
@@ -413,6 +450,23 @@ impl BuiltEngine {
     #[must_use]
     pub fn publish_hold(&self) -> Option<SealHold> {
         self.engine.publish_hold()
+    }
+
+    /// The home nest the relay seat announces this engine's folder by
+    /// ([`RelaySeat::register`]): a folder homed on another nest is announced
+    /// by its home nest — the engine's byte plane, where its answers go — and
+    /// only by a writer's engine: a reader's seat wrote nothing that only it
+    /// holds and has no credential on that byte plane to answer with
+    /// (`file-sync.md` § Relay serving → *A member on another nest*). `None`
+    /// for a folder of the host's own nest and for a reader's engine.
+    ///
+    /// [`RelaySeat::register`]: crate::relay_seat::RelaySeat::register
+    #[must_use]
+    pub fn serve_home_nest_url(&self) -> Option<String> {
+        self.engine
+            .foreign_routing()
+            .filter(|_| !self.read_only)
+            .map(|(home_nest_url, _)| home_nest_url)
     }
 }
 
@@ -766,7 +820,7 @@ pub struct ForeignTransport {
 /// Build one engine for `params`: register the device, resolve the set's
 /// binding **fail-closed**, and assemble the [`SyncEngine`] ([`assemble_engine`]).
 ///
-/// **The one builder** (`on-demand-files.md` § Shared sets on a capability host →
+/// **The one builder** (`on-demand-files-shared-sets.md` § Shared sets on a capability host →
 /// *One mechanism*, question 2): the in-process hosts and the desktop sync agent
 /// all build through it — a same-nest set off this nest's list, a cross-nest set
 /// off its holder's custody record (custody is the row).
@@ -900,7 +954,7 @@ async fn resolve_local_binding(params: &EngineParams) -> Option<ResolvedBinding>
     // (`webdav-server.md` § Key model, Revocation).
     // Custody is read through the host's reader on every credential — the
     // seat's account store, or on a capability host the throwaway fleet replica
-    // keyed by the machine principal's wraps (`on-demand-files.md` § Shared sets
+    // keyed by the machine principal's wraps (`on-demand-files-shared-sets.md` § Shared sets
     // on a capability host, decision 1′). The keys are held in memory for the
     // engine's life, never written anywhere. Retired serve custody rides the
     // same load, so a seed-less build re-seals a once-served set's
@@ -1114,7 +1168,7 @@ fn summary_lineage(
 /// `None` = refused. The set has no row on this nest; every input its
 /// transport needs is the `ForeignFolder` record the member's app wrote at
 /// share-accept and refreshes on every federated read reply
-/// (`on-demand-files.md` § Shared sets on a capability host → *One mechanism*,
+/// (`on-demand-files-shared-sets.md` § Shared sets on a capability host → *One mechanism*,
 /// question 2).
 async fn resolve_foreign_binding(
     params: &EngineParams,
@@ -1446,7 +1500,13 @@ pub fn assemble_engine(params: EngineParams, binding: ResolvedBinding) -> Result
     .with_public_audience(public_audience)
     .with_residency_reading(metadata_only_residency)
     .with_seal_floor(seal_floor)
-    .with_read_only(read_only);
+    .with_read_only(read_only)
+    // The byte client reads for exactly this row: the hint's ref form, which
+    // the nest prefers over the name (a member owning a same-named set
+    // would otherwise read its own; `file-sync.md` § Relay serving, step (4)).
+    // A foreign ref addresses the home nest by the channel the byte-plane
+    // token is minted for.
+    .with_folder_ref(folder_ref);
     engine.set_retired_content_keys(retired_content_keys);
     engine.set_served_era_hold(served_era_hold);
     engine.set_change_signer(change_signer, set_nonce);
@@ -1565,6 +1625,7 @@ pub fn build_restore_engine(
     nest_rpc: Arc<NestClient>,
     device_id: [u8; 32],
     secret_hex: &str,
+    snapshot_nonces: Option<fauna_client_sync::SetNonceSource>,
 ) -> SyncEngine {
     let db = SyncDb::open_in_memory().expect("in-memory SyncDb");
     let client = SyncClient::new(auth, &device_id);
@@ -1574,7 +1635,7 @@ pub fn build_restore_engine(
         .ok()
         .map(|secret| fauna_core::crypto::BackupKey::derive(&secret));
 
-    SyncEngine::new(
+    let mut engine = SyncEngine::new(
         // No watch dir — the restore method writes to the caller's output dir
         // directly; the engine's `watch_dir` is never read by the download walk.
         PathBuf::new(),
@@ -1598,7 +1659,12 @@ pub fn build_restore_engine(
         // no delete arm at all. The delete-applying default is the honest value
         // for an engine that applies nothing.
         crate::config::SyncMode::Sync,
-    )
+    );
+    // The snapshot reader's nonce source: the host's custody resolver, so the
+    // version-history rows that license a plaintext snapshot entry verify
+    // under each set's nonce (`SyncEngine::download_snapshot_entry_bytes`).
+    engine.set_snapshot_nonces(snapshot_nonces);
+    engine
 }
 
 #[cfg(test)]
@@ -1660,6 +1726,57 @@ mod tests {
         let second = load_or_create_install_device_secret(tmp.path()).unwrap();
         assert_eq!(first, second);
         assert_ne!(first, [0u8; 32]);
+    }
+
+    /// A crash between the old `create_new` and its `sync_all` left a short
+    /// file that every later call refused for good; it is healed now.
+    #[test]
+    fn a_torn_install_device_secret_is_healed_not_refused_for_ever() {
+        for torn_len in [0usize, 7] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join(INSTALL_DEVICE_SECRET_FILE);
+            std::fs::write(&path, vec![0x5au8; torn_len]).unwrap();
+
+            let secret = load_or_create_install_device_secret(tmp.path())
+                .unwrap_or_else(|e| panic!("a {torn_len}-byte file must heal: {e}"));
+
+            assert_eq!(std::fs::read(&path).unwrap(), secret.to_vec());
+            assert_eq!(
+                load_or_create_install_device_secret(tmp.path()).unwrap(),
+                secret
+            );
+        }
+    }
+
+    /// App and co-located agent arriving together must read ONE secret, with
+    /// no transient error for the loser of the race.
+    #[test]
+    fn concurrent_first_mints_agree_on_one_secret() {
+        for _ in 0..50 {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().to_path_buf();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let dir = dir.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        load_or_create_install_device_secret(&dir)
+                    })
+                })
+                .collect();
+            let secrets: Vec<_> = handles
+                .into_iter()
+                .map(|h| h.join().unwrap().expect("no racer may see an error"))
+                .collect();
+            assert!(secrets.iter().all(|s| *s == secrets[0]));
+            let leftovers: Vec<_> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            assert_eq!(leftovers.len(), 1, "temp files leaked: {leftovers:?}");
+        }
     }
 
     #[test]
@@ -2023,7 +2140,7 @@ mod tests {
 
     #[test]
     fn binding_bound_with_custody_runs_content_keyed_under_the_current_generation() {
-        // The arm a capability host now reaches (on-demand-files.md § Shared sets
+        // The arm a capability host now reaches (on-demand-files-shared-sets.md § Shared sets
         // on a capability host, decision 1): custody read under the host's own
         // wraps holds the set's generations → the engine runs bound AND keyed,
         // sealing under the current generation. Custody is credential-blind —
@@ -2062,7 +2179,7 @@ mod tests {
         }
     }
 
-    // ── Re-resolve edges (on-demand-files.md § Shared sets on a capability
+    // ── Re-resolve edges (on-demand-files-shared-sets.md § Shared sets on a capability
     //    host, decision 2) ──
 
     #[test]
@@ -2548,5 +2665,32 @@ mod tests {
             decide(true, Some(&s), None, None, AttestationMemory::default()),
             EngineContentDecision::Refuse
         );
+    }
+
+    /// The relay seat announces a writer's engine of a folder homed on another
+    /// nest by its home nest, and neither a same-nest folder nor a reader's
+    /// engine by one (`file-sync.md` § Relay serving → *A member on another
+    /// nest*).
+    #[tokio::test]
+    async fn only_a_writers_engine_of_a_foreign_folder_names_a_serve_home_nest() {
+        let dir = tempfile::tempdir().unwrap();
+        let built = |foreign: bool, read_only: bool| {
+            let engine = crate::pull_remote_changes_test::test_engine(dir.path().to_path_buf());
+            if foreign {
+                engine.set_foreign_routing("https://home.example".into(), "cd".repeat(32));
+            }
+            BuiltEngine {
+                engine,
+                basis: BindingBasis::default(),
+                held_version: None,
+                read_only,
+            }
+        };
+        assert_eq!(
+            built(true, false).serve_home_nest_url().as_deref(),
+            Some("https://home.example")
+        );
+        assert_eq!(built(true, true).serve_home_nest_url(), None);
+        assert_eq!(built(false, false).serve_home_nest_url(), None);
     }
 }

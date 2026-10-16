@@ -75,6 +75,8 @@ class BackupDestinationsContentTest {
         capState = capState,
         auditState = auditState,
         lastAuditPassedAt = lastAuditPassedAt,
+        // `null` is "no writer verdict yet" — the backlog reads as queued.
+        writerState = null,
     )
 
     /** A client-device row — the third destination kind, on this very device. */
@@ -99,6 +101,7 @@ class BackupDestinationsContentTest {
         lastPassedAt = lastPassedAt,
         alertReason = null,
         alertReasons = emptyList(),
+        recoverOffered = false,
     )
 
     private fun render(
@@ -150,6 +153,13 @@ class BackupDestinationsContentTest {
         orphanedStoreBytes: ULong? = null,
         orphanedStoreText: (ULong) -> String = { held -> "holding $held" },
         onReclaimStore: () -> Unit = {},
+        // ── Restore after losing the nest ──
+        // Placement already decided by the shared `backupReseedRows`: `null` is
+        // the orphaned-store row, an id a destination row.
+        reseedRows: List<String?> = emptyList(),
+        reseedRunning: Boolean = false,
+        reseedResultText: String? = null,
+        onReseed: () -> Unit = {},
     ) {
         composeTestRule.setContent {
             // Scrollable, because production mounts this section as a header item
@@ -182,6 +192,10 @@ class BackupDestinationsContentTest {
                 orphanedStoreBytes = orphanedStoreBytes,
                 orphanedStoreText = orphanedStoreText,
                 onReclaimStore = onReclaimStore,
+                reseedRows = reseedRows,
+                reseedRunning = reseedRunning,
+                reseedResultText = reseedResultText,
+                onReseed = onReseed,
             )
             }
         }
@@ -578,6 +592,116 @@ class BackupDestinationsContentTest {
         node("backup-destination-remove-reclaim-checkbox").performClick()
         node("backup-destination-remove-confirm-button").performClick()
         assertEquals("id-a" to true, removed)
+    }
+
+    // ── Restore after losing the nest (backups.md § Restore after losing the nest) ──
+
+    /**
+     * The button paints exactly where the shared placement says — and nowhere
+     * else: never on a row the list omits (another device's copy, a nest row),
+     * and not at all while the list is empty.
+     */
+    @Test
+    fun reseedButton_paintsOnlyWhereTheSharedRowsSay() {
+        render(
+            destinations = listOf(custodian(id = "id-mine"), dest(id = "id-nest", kind = "nest")),
+            orphanedStoreBytes = 4096uL,
+            reseedRows = emptyList(),
+        )
+        composeTestRule.onAllNodesWithTag("backup-destination-reseed-button").assertCountEquals(0)
+    }
+
+    @Test
+    fun reseedButton_sitsOnTheOrphanedStoreRow_aheadOfTheReclaim() {
+        render(orphanedStoreBytes = 4096uL, reseedRows = listOf(null))
+        composeTestRule.onAllNodes(
+            hasTestTag("backup-destination-reseed-button") and
+                hasAnyAncestor(hasTestTag("backup-orphaned-store-row")),
+        ).assertCountEquals(1)
+        val reseedTop = composeTestRule.onNodeWithTag("backup-destination-reseed-button")
+            .fetchSemanticsNode().boundsInRoot.top
+        val reclaimTop = composeTestRule.onNodeWithTag("backup-destination-reclaim-button")
+            .fetchSemanticsNode().boundsInRoot.top
+        assert(reseedTop < reclaimTop) { "the restore must sit ahead of the reclaim" }
+    }
+
+    @Test
+    fun reseedButton_sitsOnThisDevicesOwnCustodianRowOnly() {
+        render(
+            destinations = listOf(
+                custodian(id = "id-mine"),
+                dest(id = "id-theirs", kind = CLIENT_DEVICE),
+                dest(id = "id-nest", kind = "nest"),
+            ),
+            reseedRows = listOf("id-mine"),
+        )
+        composeTestRule.onAllNodesWithTag("backup-destination-reseed-button").assertCountEquals(1)
+        // On the row whose label is this device's own custodian's, not another's.
+        composeTestRule.onAllNodes(
+            hasTestTag("backup-destination-reseed-button") and
+                hasAnyAncestor(hasTestTag("backup-destination-status-row") and hasAnyDescendant(hasText("This phone"))),
+        ).assertCountEquals(1)
+        composeTestRule.onAllNodesWithTag("backup-orphaned-store-row").assertCountEquals(0)
+    }
+
+    /**
+     * The confirm is PLAIN — no re-type: the ceremony deletes nothing and
+     * refuses a lived-in target by itself. Only the confirm runs it.
+     */
+    @Test
+    fun reseedButton_opensAPlainConfirm_andOnlyTheConfirmRunsIt() {
+        var runs = 0
+        render(destinations = listOf(custodian()), reseedRows = listOf("id-mine"), onReseed = { runs++ })
+
+        node("backup-destination-reseed-button").performClick()
+        node("backup-destination-reseed-confirm-modal").assertIsDisplayed()
+        composeTestRule.onAllNodesWithTag("restore-confirm-input").assertCountEquals(0)
+        assertEquals(0, runs)
+
+        node("backup-destination-reseed-confirm-button").performClick()
+        assertEquals(1, runs)
+        composeTestRule.onAllNodesWithTag("backup-destination-reseed-confirm-modal").assertCountEquals(0)
+    }
+
+    @Test
+    fun reseedConfirm_cancelRunsNothing() {
+        var runs = 0
+        render(orphanedStoreBytes = 4096uL, reseedRows = listOf(null), onReseed = { runs++ })
+        node("backup-destination-reseed-button").performClick()
+        node("backup-destination-reseed-cancel-button").performClick()
+        assertEquals(0, runs)
+        composeTestRule.onAllNodesWithTag("backup-destination-reseed-confirm-modal").assertCountEquals(0)
+    }
+
+    /** While a restore runs, every restore button is disarmed — one tap, one ceremony. */
+    @Test
+    fun reseedButton_isDisarmedWhileARestoreRuns() {
+        render(
+            destinations = listOf(custodian()),
+            orphanedStoreBytes = 4096uL,
+            reseedRows = listOf(null, "id-mine"),
+            reseedRunning = true,
+        )
+        composeTestRule.onAllNodesWithTag("backup-destination-reseed-button")
+            .assertCountEquals(2)
+            .assertAll(isNotEnabled())
+    }
+
+    /**
+     * `backup-destination-reseed-result` is absent before a run and paints the
+     * caller's lines, verbatim, after one.
+     */
+    @Test
+    fun reseedResult_isAbsentBeforeARun() {
+        render(destinations = listOf(custodian()), reseedRows = listOf("id-mine"))
+        composeTestRule.onAllNodesWithTag("backup-destination-reseed-result").assertCountEquals(0)
+    }
+
+    @Test
+    fun reseedResult_paintsTheLinesItIsGiven() {
+        render(reseedResultText = "Your data is back on this nest.\nMail: 3 restored")
+        node("backup-destination-reseed-result")
+            .assertTextEquals("Your data is back on this nest.\nMail: 3 restored")
     }
 
     private companion object {

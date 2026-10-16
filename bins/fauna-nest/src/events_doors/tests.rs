@@ -85,6 +85,7 @@ async fn principal(
         account: ACCOUNT,
         principal_id,
         token_scopes: token_scopes.iter().map(|s| s.to_string()).collect(),
+        family_id: None,
     }
 }
 
@@ -270,6 +271,7 @@ async fn the_push_reaches_only_a_subscribed_session_for_its_own_scope() {
     let (_a_conn, mut a_rx) = state.ws.subscribe_principal(a.clone());
     let unsubscribed = PrincipalBinding {
         token_scopes: vec![A_RECORDS.into()],
+        family_id: None,
         ..a.clone()
     };
     let (_u_conn, mut u_rx) = state.ws.subscribe_principal(unsubscribed);
@@ -301,6 +303,114 @@ async fn the_external_apps_switch_off_silences_the_push() {
         .unwrap();
     crate::events_doors::on_scope_changed(&state, &ACCOUNT, A_NOTES).await;
     assert!(pushed(&mut rx).is_empty());
+}
+
+const PERSONALIZATION: &str = "fauna:personalization:rw";
+const STATE: &str = fauna_protocol::account_state::ACCOUNT_STATE_SCOPE;
+const OWNER_DEVICE: [u8; 32] = [0x5A; 32];
+
+/// The filter's own spelling of the fifth arm's scope is the plane's.
+#[test]
+fn the_filter_names_the_planes_delegable_scope() {
+    assert_eq!(
+        fauna_bridge_atproto::fauna_scope::PERSONALIZATION_LIST_SCOPE,
+        STATE
+    );
+}
+
+/// The owner's own device puts one row on the delegable `state` scope — the
+/// actor-side put, nudge included — and returns the row's `seq`.
+async fn owner_state_put(state: &Arc<AppState>, writer_seq: i64) -> i64 {
+    let req = fauna_protocol::account_state::AccountStatePutRequest {
+        scope: STATE.into(),
+        writer_id: hex::encode(OWNER_DEVICE),
+        writer_seq,
+        item_key: fauna_protocol::ByteBuf::from(vec![0x22; 32]),
+        op: fauna_protocol::account_state::OP_STATE_PUT.into(),
+        entry: fauna_protocol::ByteBuf::from({
+            let mut envelope = vec![fauna_core::account_entry_crypto::SEALED_ENTRY_V1];
+            envelope.extend_from_slice(&[0x5e; 12 + 16 + 8]);
+            envelope
+        }),
+        ..Default::default()
+    };
+    let reply = crate::sync_handlers::put_state_entry(state, &ACCOUNT, &req)
+        .await
+        .expect("the owner's put");
+    let reply: fauna_protocol::account_state::AccountStatePutReply =
+        fauna_protocol::decode_strict(&reply).unwrap();
+    reply.seq
+}
+
+/// The fifth arm's scope through all three doors: an owner's `state` put
+/// reaches a session holding `fauna:personalization:rw` beside the events arm
+/// — pushed, named by the poll, selecting its webhook, whose cursor reaches
+/// the put — and no records-only or records-and-events session.
+#[tokio::test]
+async fn a_state_put_reaches_only_a_personalization_session() {
+    let (state, a, b) = fixture(&[A_RECORDS, EVENTS]).await;
+    let p = principal(
+        &state,
+        "tune.example",
+        0x73,
+        [0x59; 32],
+        &format!("{PERSONALIZATION} {EVENTS}"),
+        &[PERSONALIZATION, EVENTS],
+        Some("https://tune.example/fauna/events"),
+    )
+    .await;
+    let (_p_conn, mut p_rx) = state.ws.subscribe_principal(p.clone());
+    let (_a_conn, mut a_rx) = state.ws.subscribe_principal(a.clone());
+    let (_b_conn, mut b_rx) = state.ws.subscribe_principal(b.clone());
+
+    let head = owner_state_put(&state, 1).await;
+
+    // Push.
+    assert_eq!(
+        pushed(&mut p_rx),
+        vec![SyncChangedPayload::scope_nudge(STATE)]
+    );
+    assert!(
+        pushed(&mut a_rx).is_empty(),
+        "records + events lists no state"
+    );
+    assert!(pushed(&mut b_rx).is_empty(), "records only");
+
+    // Poll: P is named `state` with the cursor at the put; A is named nothing
+    // but walks past it.
+    let p_poll = poll(&state, &p, None).await.unwrap();
+    assert_eq!(scopes(&p_poll), vec![STATE]);
+    assert_eq!(p_poll.cursor, head);
+    let a_poll = poll(&state, &a, None).await.unwrap();
+    assert!(a_poll.frames.is_empty());
+    assert_eq!(a_poll.cursor, head);
+
+    // Webhook: the walk selects P alone, and its token's cursor reaches the
+    // `state` head.
+    let reached = crate::events_webhook::targets(&state.db, &ACCOUNT, STATE)
+        .await
+        .unwrap();
+    assert_eq!(
+        reached
+            .iter()
+            .map(|t| t.hook.events_uri.as_str())
+            .collect::<Vec<_>>(),
+        ["https://tune.example/fauna/events"]
+    );
+    assert_eq!(
+        crate::events_webhook::cursor_for(&state.db, &ACCOUNT, &reached[0].scopes)
+            .await
+            .unwrap(),
+        head
+    );
+    // A's cursor is the head of what A may hear — nothing yet.
+    let a_scopes = vec![A_RECORDS.to_string(), EVENTS.to_string()];
+    assert_eq!(
+        crate::events_webhook::cursor_for(&state.db, &ACCOUNT, &a_scopes)
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[test]

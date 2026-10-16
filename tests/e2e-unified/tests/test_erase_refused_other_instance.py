@@ -422,6 +422,119 @@ def test_sign_out_refuses_while_another_instance_serves_the_account(
             first.teardown()
 
 
+# ── cross-app: a SIBLING APP's serving lock refuses a sign-out ───────────────
+
+
+def _cross_app_pairs():
+    """(serving app, erasing app) in both directions, only when this run
+    selects both — otherwise the empty set, which the app-axis hook deselects
+    (a tuple value is not an app name, so the hook's per-client filter leaves
+    the pair's availability to this list)."""
+    available = get_available_apps()
+    if not all(a in available for a in _SUPPORTED_APPS):
+        return []
+    return [
+        pytest.param(("tui", "linux"), id="tui-serves-linux-erases"),
+        pytest.param(("linux", "tui"), id="linux-serves-tui-erases"),
+    ]
+
+
+@pytest.fixture(params=_cross_app_pairs())
+def cross_app_pair(request):
+    return request.param
+
+
+def _cross_app_world(serving, erasing):
+    """One OS login for two DIFFERENT apps: a shared ``xdg_base`` (so both
+    resolve one ``StoreRoot::platform()`` = ``<xdg>/fauna/sync``, where the
+    serving lock lives) but each app's own credential namespace, as in
+    production, where the two never share a keyring item."""
+    base = tempfile.mkdtemp(prefix=f"fauna-e2e-{serving}-{erasing}-erase-world-")
+    suffix = os.path.basename(base)
+    shared = {"xdg_base": os.path.join(base, "xdg")}
+    return {
+        app: {
+            **shared,
+            "credential_dir": os.path.join(base, f"credentials-{app}"),
+            "keyring_app": f"fauna-e2e-{app}-cross-erase-{suffix}",
+        }
+        for app in (serving, erasing)
+    }
+
+
+@pytest.mark.feature("account")
+def test_sign_out_refuses_while_a_sibling_app_serves_the_account(
+    cross_app_pair, request, nest_instance, tui_app_path, linux_app_path
+):
+    """The serving lock is at the store root every app shares, not per app:
+    ``docs/goal/architecture/apps/account-scoping.md`` § Concurrent instances →
+    *An erase refuses while a sibling serves the account* ("the guard sees
+    every app"). One account U, seeded into BOTH apps' own credential
+    namespaces under one ``xdg_base``. The serving app signs in as U; the other
+    app, signed in as U too, presses sign-out and is REFUSED — the shared
+    ``settings.sign_out_blocked_other_window`` line, still signed in, secret
+    kept. With the serving app gone, the same press signs out. Run in both
+    directions, so each seat's ``store_root`` half of ``with_serving_bases``
+    is witnessed: a seat that declared no presence at the shared root would be
+    invisible to the other app's erase."""
+    serving, erasing = cross_app_pair
+    paths = {"tui": tui_app_path, "linux": linux_app_path}
+    u = _account(nest_instance, "u")
+    u_actor = u[0]
+    worlds = _cross_app_world(serving, erasing)
+
+    def launch(app):
+        return _launch(app, paths[app], nest_instance, request, worlds[app],
+                       seed=_seed(nest_instance, {"u": u}, active=u_actor))
+
+    first = launch(serving)
+    second = None
+    try:
+        _wait_serving(first, u_actor)
+        second = launch(erasing)
+        _wait_serving(second, u_actor)
+        settings = ActionLayer(second).settings
+
+        # ── refused while the other app serves U ────────────────────────────
+        _assert_sibling_serving(first, u_actor, "before the refused sign-out")
+        settings.press_sign_out()
+        _wait_error(second, S.settings.sign_out_blocked_other_window,
+                    f"{erasing} sign-out under a live {serving} instance")
+        session = (second.get_state() or {}).get("session") or {}
+        assert session.get("actor_id") == u_actor and session.get("authenticated"), (
+            f"a refused sign-out must stay signed in; got {session!r}"
+        )
+        assert second.is_absent(CREATE_IDENTITY), (
+            "a refused sign-out must not land on onboarding"
+        )
+        assert _registry_actors(second) == [u_actor], (
+            f"a refused sign-out erases nothing; registry {read_registry_index(second)!r}"
+        )
+        assert read_store_slot(second, f"fauna/{u_actor}/secret") == u[1], (
+            "a refused sign-out must leave the secret slot in place"
+        )
+        _assert_sibling_serving(first, u_actor, "after the refused sign-out")
+
+        # ── goes through once the other app is gone ─────────────────────────
+        first.teardown()
+        first = None
+        _press_until_through(
+            second,
+            settings.press_sign_out,
+            lambda: second.is_visible(CREATE_IDENTITY),
+            f"with no {serving} instance serving, the {erasing} sign-out must "
+            f"go through",
+        )
+        assert read_store_slot(second, f"fauna/{u_actor}/secret") is None, (
+            "sign-out must erase the account's secret"
+        )
+    finally:
+        if second is not None:
+            second.teardown()
+        if first is not None:
+            first.teardown()
+
+
 # ── the unreadable-index floor's start-over (tui M6, linux M7) ───────────────
 
 

@@ -27,6 +27,7 @@ import pytest
 import requests
 
 from common.auth import register_user
+from helpers.backup_destinations import DestinationEnrollment
 from i18n.strings import S
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
@@ -203,7 +204,7 @@ def test_nest_trust_mint_paywalled_posts_grant(app, trust_mint_nest):
 
 @pytest.mark.feature("nests-and-trust")
 def test_backup_trust_rows_render_and_revoke_lands_at_the_destination(
-    logged_in_app, second_nest, test_user
+    logged_in_app, nest_instance, second_nest, test_user, request
 ):
     """Enrolling a backup destination surfaces BOTH backup trust rows on the
     home nest's row, and the writer row's revoke is spoken to the DESTINATION.
@@ -242,14 +243,14 @@ def test_backup_trust_rows_render_and_revoke_lands_at_the_destination(
     except Exception:
         pass  # already registered (the session-scoped nest persists across reruns)
 
-    # Start from no destination: every count and row index below is this
+    # Enroll alone, and leave nothing: every count and row index below is this
     # test's own enrollment, and `test_user` is session-scoped — a destination
     # an earlier module left behind made the wait below read
-    # 2.
-    app.backups.remove_every_destination()
-    # Enroll through the Backups page UI — this is what mints both grants.
-    app.backups.add_destination(second_nest["url"], name="Offsite")
-    app.backups.wait_for_destination_count(1)
+    # 2. Enrolling through the Backups page UI is what
+    # mints both grants.
+    dest = DestinationEnrollment(app, nest_instance, test_user)
+    request.addfinalizer(dest.leave_none)
+    dest.add_destination(second_nest["url"], "Offsite")
 
     # Now the Nests page must show both rows on the home nest's row.
     app.linked_nests.navigate()
@@ -348,7 +349,7 @@ def test_backup_trust_rows_render_and_revoke_lands_at_the_destination(
 
 @pytest.mark.feature("nests-and-trust")
 def test_retained_generations_render_and_restore_lands_at_the_destination(
-    logged_in_app, nest_instance, second_nest, test_user
+    logged_in_app, nest_instance, second_nest, test_user, request
 ):
     """A superseded backup generation is listed on the trust facet, and its
     restore is spoken to the DESTINATION — the recovery half of the
@@ -429,18 +430,19 @@ def test_retained_generations_render_and_restore_lands_at_the_destination(
 
     _seed_one_mail_segment(app, nest_instance, test_user)
 
-    # Start from no destination, for the same reason as the test above.
-    app.backups.remove_every_destination()
-    app.backups.add_destination(second_nest["url"], name="Recovery")
-    app.backups.wait_for_destination_count(1)
+    # Enroll alone, and leave nothing, for the same reason as the test above.
+    dest = DestinationEnrollment(app, nest_instance, test_user)
+    request.addfinalizer(dest.leave_none)
+    dest.add_destination(second_nest["url"], "Recovery")
 
     # Sweep #1 puts the segment at the destination and records its custody.
     sweep()
-    # Growing the SAME segment is what makes the second sweep a supersede
-    # rather than a fresh path: the custody row for `<scope>/seg-00000000.dat`
-    # is re-recorded with a new manifest hash, and on a reserved (`__mail`) set
-    # a supersede RETAINS the displaced generation instead of forgetting it
-    # (`message-segment-store.md` § Custody grace window (T)).
+    # The second seed lands in a NEW segment (a finalized `.dat` is immutable),
+    # so what the second sweep supersedes is each family's `manifest.<kind>`
+    # ledger: re-uploaded at the same path with a new manifest hash, and on a
+    # reserved (`__mail`) set a supersede RETAINS the displaced generation
+    # instead of forgetting it (`segment-backup-protocol.md` § Custody grace
+    # window (T)).
     _seed_one_mail_segment(app, nest_instance, test_user)
     sweep()
 

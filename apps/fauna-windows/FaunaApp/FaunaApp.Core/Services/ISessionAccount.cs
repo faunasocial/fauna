@@ -23,11 +23,15 @@ namespace FaunaApp.Core.Services;
 /// "Session identity resolves through the session's account"). The shell's
 /// implementation says how it resolves that.</para>
 ///
-/// <para>Read-only by design. Every write goes through a shared moment on the
-/// registry — <c>ConfirmIdentity</c>, <c>PersistLoggedIn</c>,
-/// <c>PersistAwaitingDns</c>, <c>PersistPendingInvite</c>, the launch
-/// persistence's <c>SaveAuthenticated</c> — so no app-side write path can
-/// diverge from the other six apps'.</para>
+/// <para>Read-only by design, so every PROPERTY is a pure read. Every write goes
+/// through a shared moment on the registry — <c>ConfirmIdentity</c>,
+/// <c>PersistLoggedIn</c>, <c>PersistAwaitingDns</c>, <c>PersistPendingInvite</c>,
+/// the launch persistence's <c>SaveAuthenticated</c> — so no app-side write path
+/// can diverge from the other six apps'. The one member that may write is a
+/// METHOD, <see cref="ResolveDeviceId"/>, so a read can never reach it by
+/// accident: it once sat behind a property, the e2e state snapshot polled that
+/// property through a wizard run, and an identity the user had abandoned kept a
+/// device-id slot that made it a ghost switcher row.</para>
 /// </summary>
 internal interface ISessionAccount
 {
@@ -37,8 +41,19 @@ internal interface ISessionAccount
     /// <summary>The account's home nest, or null before its <c>LoggedIn</c> terminal recorded one.</summary>
     string? NestUrl { get; }
 
-    /// <summary>The sync device id this account registers under on this install (its per-actor slot).</summary>
-    string? DeviceId { get; }
+    /// <summary>The account's per-actor device-id slot as it stands — null until
+    /// something minted one, and not necessarily a sync id. For observers; a
+    /// consumer that registers or enrolls under the id calls
+    /// <see cref="ResolveDeviceId"/>.</summary>
+    string? StoredDeviceId { get; }
+
+    /// <summary>The sync device id this account registers under on this install,
+    /// through the shared get-or-create (<c>SessionDeviceId.Resolve</c>) — which
+    /// PERSISTS a derived id into the account's own slot. Call it only where the id
+    /// is about to be used, never from an observer: a slot written on an identity
+    /// the wizard has not finished keeps it from being retired (<c>long-term-store.md</c>
+    /// § Eager vs. lazy migration at native boot).</summary>
+    string? ResolveDeviceId();
 
     /// <summary>Server-data cache (the index entry): the account's handle.</summary>
     string? Handle { get; }

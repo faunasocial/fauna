@@ -19,7 +19,8 @@ use fauna_protocol::atproto::IntegrationLevel;
 use fauna_protocol::atproto_pds::{
     AppCredentialInfo, AppCredentialVerifierRow, AtprotoConsentRequestedPush, AtprotoGrantInfo,
     AtprotoIdentitySummary, AtprotoSessionInfo, DeletePresenceReply, DeletePresenceRequest,
-    DeliverPermissionSetReply, DeliverPermissionSetRequest, EndSessionReply, EndSessionRequest,
+    DeliverPermissionSetReply, DeliverPermissionSetRequest, DeliverServiceAuthReply,
+    DeliverServiceAuthRequest, EndSessionReply, EndSessionRequest,
     FetchAppCredentialVerifiersReply, FetchAppCredentialVerifiersRequest,
     FetchAuthoringDelegationReply, FetchAuthoringDelegationRequest, FetchAuthoringKeyReply,
     FetchAuthoringKeyRequest, FetchPreferencesReply, FetchPreferencesRequest,
@@ -38,7 +39,8 @@ use fauna_protocol::atproto_pds::{
 };
 #[cfg(feature = "bluesky")]
 use fauna_protocol::atproto_pds::{
-    EXTERNAL_WRITE_BATCH_MAX, EXTERNAL_WRITE_RECORD_MAX_BYTES, ExternalWrite, ExternalWriteRefusal,
+    EXTERNAL_WRITE_BATCH_MAX, EXTERNAL_WRITE_RECORD_MAX_BYTES, EXTERNAL_WRITE_REFUSAL_RATE_LIMITED,
+    EXTERNAL_WRITE_REFUSAL_SESSION_REVOKED, ExternalWrite, ExternalWriteRefusal,
     ExternalWriteResult, IngestExternalWriteReply, IngestExternalWriteRequest,
     external_write_action,
 };
@@ -92,6 +94,17 @@ fn credential_exists() -> RpcError {
         "error.bridges.atproto.credential_exists",
     )
     .with_details_text("an app credential with that id already exists")
+}
+
+/// A climb into a hosted level on a box whose identity domain is not a public
+/// DNS name — ATProto presence is impossible there (`atproto-pds-bridge.md`
+/// § Enable UX, the real-domain gate).
+fn domain_not_public() -> RpcError {
+    RpcError::new(
+        "fauna.bridges.atproto.domain_not_public",
+        "error.bridges.atproto.domain_not_public",
+    )
+    .with_details_text("this nest has no public domain, so it cannot host an AT Protocol identity")
 }
 
 fn parse_actor_id(bytes: &[u8]) -> Result<[u8; 32], RpcError> {
@@ -726,6 +739,7 @@ fn list_sessions_handler() -> RpcHandler {
                     created_at: s.created_at,
                     last_refreshed_at: s.last_refreshed_at,
                     expires_at: s.expires_at,
+                    oracle: s.oracle,
                     extra: Default::default(),
                 })
                 .collect();
@@ -788,6 +802,12 @@ fn revoke_session_handler() -> RpcHandler {
                 .await
                 .map_err(internal)?;
             if revoked {
+                // Door (c), after the commit: the principal sessions this
+                // family's tokens opened close 4401 now, not at their tokens'
+                // `exp` — the user revoked and watched the row vanish
+                // (`transport-connection.md` § *The principal session* →
+                // *Revocation — three doors*).
+                state.ws.disconnect_grant_family(&actor_id, &req.session_id);
                 notify_atproto_sessions_changed(&state, &actor_id, None).await;
             }
             encode_reply(&RevokeSessionReply {
@@ -880,15 +900,25 @@ pub(crate) fn pending_consent_row(row: &ConsentRequestRow) -> PendingConsentRow 
     }
 }
 
-/// [`pending_consent_row`], with an install card's install section filled
-/// from the verified install the plugin runner holds for it
-/// (`crate::plugin_runner::PendingInstall`) — the projection every surface
-/// that shows a card to an app goes through.
-pub(crate) fn project_consent_row(state: &AppState, row: &ConsentRequestRow) -> PendingConsentRow {
+/// [`pending_consent_row`], with a plugin card's install section filled —
+/// the projection every surface that shows a card to an app goes through.
+/// An install card's comes from the verified install the plugin runner holds
+/// for it (`crate::plugin_runner::PendingInstall`); a bind card's is rebuilt
+/// from the installed plugin's persisted rows, so it survives a restart and
+/// shows exactly what the admin approved.
+pub(crate) async fn project_consent_row(
+    state: &AppState,
+    row: &ConsentRequestRow,
+) -> PendingConsentRow {
     let mut out = pending_consent_row(row);
-    if row.start == ConsentStartKind::Install {
-        out.install = state.plugins.pending_info(&row.consent_id).map(Box::new);
+    out.install = match row.start {
+        ConsentStartKind::Install => state.plugins.pending_info(&row.consent_id),
+        ConsentStartKind::PluginBind => {
+            crate::plugins_handlers::installed_info(state, &row.client_id).await
+        }
+        _ => None,
     }
+    .map(Box::new);
     out
 }
 
@@ -994,6 +1024,10 @@ pub(crate) async fn open_consent_request(
         // plugin runner only once this row's id exists, so
         // `fauna.plugins.install` pushes the card itself after holding it.
         ConsentStart::Install { admin } => (ConsentStartKind::Install, Some(admin), false),
+        // The user asked for this card from the plugin's settings card, so
+        // it reaches the user's other devices as a handoff does; TP9's push
+        // rules do not apply.
+        ConsentStart::PluginBind { actor } => (ConsentStartKind::PluginBind, Some(actor), true),
     };
     let row = state
         .db
@@ -1013,7 +1047,7 @@ pub(crate) async fn open_consent_request(
         state.ws.notify_push(
             &actor,
             fauna_protocol::PushEvent::AtprotoConsentRequested(AtprotoConsentRequestedPush {
-                consent: project_consent_row(state, &row),
+                consent: project_consent_row(state, &row).await,
                 extra: Default::default(),
             }),
         );
@@ -1042,6 +1076,10 @@ pub(crate) enum ConsentStart<'a> {
     /// `fauna.plugins.install`, by the admin that called it — the card is
     /// theirs to answer, and nobody else's.
     Install { admin: [u8; 32] },
+    /// `fauna.plugins.bind`, by the user that called it from the plugin's
+    /// settings card — the card is theirs, and its approval binds their own
+    /// account.
+    PluginBind { actor: [u8; 32] },
 }
 
 /// How a consent request stands right now — **the one owner of that reading**,
@@ -1140,6 +1178,37 @@ fn deliver_permission_set_handler() -> RpcHandler {
                 .permission_sets
                 .deliver(&req.request_id, req.record.map(ByteBuf::into_vec));
             encode_reply(&DeliverPermissionSetReply {
+                accepted,
+                extra: Default::default(),
+            })
+        })
+    })
+}
+
+/// `fauna.bridges.atproto.deliver_service_auth` — BRIDGE class. The
+/// bridge→nest half of the oracle's `atproto.service_auth` class
+/// ([`crate::atproto_oracle`]): the token the PDS bridge minted for one
+/// `service_auth_requested` push — or `None`, it could not — handed to the
+/// door waiting under its `request_id`.
+///
+/// Bridge-only because the door hands the token on as the custodian's own:
+/// only the attested PDS host holds the repo signing key. An answer nobody
+/// waits for is `accepted: false`, a log line for the bridge and never an
+/// error.
+pub(crate) fn deliver_service_auth_handler() -> RpcHandler {
+    Box::new(|state, bridge_actor, payload| {
+        Box::pin(async move {
+            require_class(
+                &state,
+                &bridge_actor,
+                "fauna.bridges.atproto.deliver_service_auth",
+            )
+            .await?;
+            let req: DeliverServiceAuthRequest = decode(&payload).map_err(malformed)?;
+            let accepted = state
+                .atproto_service_auth
+                .deliver(&req.request_id, req.token);
+            encode_reply(&DeliverServiceAuthReply {
                 accepted,
                 extra: Default::default(),
             })
@@ -1270,6 +1339,9 @@ pub(crate) async fn rotate_session(
         {
             RefreshOutcome::Rotated => refresh_status::ROTATED,
             RefreshOutcome::ReuseDetected => {
+                // Door (c): a replayed refresh token is a theft signal, and the
+                // session live under the killed family may be the thief's.
+                state.ws.disconnect_grant_family(actor, session_id);
                 notify_atproto_sessions_changed(state, actor, None).await;
                 refresh_status::REUSE_DETECTED
             }
@@ -1300,6 +1372,10 @@ pub(crate) async fn end_oauth_session(
 ) -> anyhow::Result<bool> {
     let ended = state.db.revoke_atproto_session(actor, session_id).await?;
     if ended {
+        // Door (c), after the commit: the family's principal sessions close
+        // 4401 — here, at the one owner, so `/oauth/revoke` and the
+        // bridge-class `end_session` cannot come to disagree about it.
+        state.ws.disconnect_grant_family(actor, session_id);
         notify_atproto_sessions_changed(state, actor, None).await;
     }
     Ok(ended)
@@ -1344,6 +1420,11 @@ pub(crate) async fn end_nest_issued_oauth_sessions(state: &Arc<AppState>) -> any
     // `revoke_session_row`/`revoke_grant_row` pair `revoke_atproto_session`
     // does, so this is one act's bulk selection rather than a second spelling.
     let ended = state.db.end_nest_minted_oauth_grants().await?;
+    // Door (c)'s forced arm, after the transaction: every principal session
+    // was opened under a nest-minted family, and every one of those just
+    // ended, so every principal session closes 4401 — a compromise response
+    // that left live sockets for their tokens' `exp` would be half done.
+    state.ws.disconnect_all_principals("session secret rotated");
     // One push per actor, after the endings rather than between them: a surface
     // refreshed mid-sweep would show a half-ended list, and an account holding
     // several grants would be pushed at once per grant — the nudge names an
@@ -1372,11 +1453,12 @@ fn list_pending_consents_handler() -> RpcHandler {
                 .list_pending_atproto_consent_requests(&actor_id)
                 .await
                 .map_err(internal)?;
+            let mut consents = Vec::with_capacity(rows.len());
+            for row in &rows {
+                consents.push(project_consent_row(&state, row).await);
+            }
             encode_reply(&ListPendingConsentsReply {
-                consents: rows
-                    .iter()
-                    .map(|row| project_consent_row(&state, row))
-                    .collect(),
+                consents,
                 extra: Default::default(),
             })
         })
@@ -1455,6 +1537,12 @@ fn resolve_consent_handler() -> RpcHandler {
                 )
                 .await
                 .map_err(internal)?;
+            if let Some(row) = &resolved
+                && row.start == ConsentStartKind::PluginBind
+                && req.approved
+            {
+                bind_plugin(&state, &actor_id, row).await?;
+            }
             if resolved.is_some() {
                 // Wake the nest's own `/oauth/authorize` long-poll holding on
                 // this ceremony. Best-effort: a lost wake costs one fallback
@@ -1522,6 +1610,40 @@ async fn resolve_install(
         resolved: true,
         extra: Default::default(),
     })
+}
+
+/// The approval of a user's bind card (`third-party.md` § The principal
+/// model → *Hosted principals*): the row is already resolved to the caller,
+/// with any bare folder scope qualified by the card's choice, so the binding
+/// takes exactly the scopes the user approved. The approving app minted the
+/// capability grant to the plugin's key before it resolved
+/// (`third-party-kinds.md` § The record doors); this mints the binding row
+/// that grant's holder is named by. A plugin uninstalled while its card was
+/// open binds nothing and refuses, and the grant minted to the card's key
+/// ends with the refusal (`CacheDb::bind_account_to_plugin`).
+async fn bind_plugin(
+    state: &Arc<AppState>,
+    actor_id: &[u8; 32],
+    row: &ConsentRequestRow,
+) -> Result<(), RpcError> {
+    state
+        .db
+        .bind_account_to_plugin(
+            actor_id,
+            &row.client_id,
+            &row.scopes,
+            row.client_name.as_deref(),
+            row.binding.attested.holder_x25519.as_ref(),
+        )
+        .await
+        .map_err(
+            |e| match e.downcast_ref::<crate::db::third_party_principals::BindRefused>() {
+                Some(refused) => crate::rpc_errors::conflict_ns("plugins", refused),
+                None => internal(e),
+            },
+        )?;
+    notify_atproto_sessions_changed(state, actor_id, None).await;
+    Ok(())
 }
 
 // ── Authoring delegation (D10) ──────────────────────────────────
@@ -1728,6 +1850,25 @@ fn set_integration_level_handler() -> RpcHandler {
                 .get_atproto_integration_level(&actor_id)
                 .await
                 .map_err(internal)?;
+
+            // The real-domain gate (`atproto-pds-bridge.md` § Enable UX), with
+            // the predicate `get_integration_status` reports as
+            // `hosted_allowed`, so the greyed rung and this refusal can never
+            // disagree. The app's greying is not the enforcement point: an
+            // older or third-party client, or a card staged before the box
+            // lost its public domain, reaches here too. Only a CLIMB into or
+            // up the hosted rungs is gated — re-confirming the current level
+            // and every step down stay open (`ui/atproto.md` § Reveal/greying
+            // rules), so a user is never trapped at a level the box can no
+            // longer support. Refused before any effect runs.
+            if target.is_hosted()
+                && target > current
+                && !fauna_provisioning::probe::resolve_handle_domain(&state.handle_domain())
+                    .is_public_dns_name
+            {
+                return Err(domain_not_public());
+            }
+
             let identity = state
                 .db
                 .get_atproto_identity(&actor_id)
@@ -2288,12 +2429,21 @@ fn get_integration_status_handler() -> RpcHandler {
                 identity
             };
 
+            // The history opt-in's consent names this number (§ Projection &
+            // backfill) — the posts the stream would serve from genesis.
+            let public_post_count = state
+                .db
+                .count_public_projection_posts(&actor_id)
+                .await
+                .map_err(internal)?;
+
             encode_reply(&GetIntegrationStatusReply {
                 level: level.as_str().into(),
                 hosted_allowed,
                 handle_domain: domain,
                 handle_preview,
                 identity,
+                public_post_count,
                 extra: Default::default(),
             })
         })
@@ -2472,6 +2622,17 @@ fn refused(sub_type: &str, message: impl Into<String>) -> ExternalWriteResult {
     }
 }
 
+/// A reply refusing every row of a batch with one whole-batch sub-type — the
+/// oracle's session and ceiling refusals, which are about the caller, not any
+/// one write. Nothing was applied.
+#[cfg(feature = "bluesky")]
+fn whole_batch_refused(writes: usize, sub_type: &str, message: &str) -> IngestExternalWriteReply {
+    IngestExternalWriteReply {
+        results: (0..writes).map(|_| refused(sub_type, message)).collect(),
+        extra: Default::default(),
+    }
+}
+
 /// `fauna.bridges.atproto.ingest_external_write` — one XRPC write batch
 /// (`atproto-pds-full.md` § F2 detail).
 ///
@@ -2540,6 +2701,37 @@ fn ingest_external_write_handler() -> RpcHandler {
                 .map_err(internal)?
             {
                 return Err(external_apps_disabled());
+            }
+
+            // THE ORACLE'S LIVE CHECK (`key-material-hierarchy.md` § *The
+            // oracle* → *The ATProto classes ride the protocol's own door*).
+            // An access token is registry-checked only at refresh, a 60-minute
+            // bound that is wrong for a key operation; this round trip is the
+            // per-write moment, so a revoked or expired session — or, on the
+            // OAuth plane, a revoked grant — refuses the whole batch here,
+            // before anything is applied. An older bridge sends no session and
+            // keeps the old behaviour.
+            let session = req.session_id.as_deref();
+            if let Some(session) = session {
+                if session.is_empty() || session.len() > crate::db::atproto_pds::MAX_SESSION_ID_LEN
+                {
+                    return Err(malformed(format!(
+                        "session_id length {} out of range",
+                        session.len()
+                    )));
+                }
+                if !state
+                    .db
+                    .atproto_session_may_write(&actor, session)
+                    .await
+                    .map_err(internal)?
+                {
+                    return encode_reply(&whole_batch_refused(
+                        req.writes.len(),
+                        EXTERNAL_WRITE_REFUSAL_SESSION_REVOKED,
+                        "this session has been revoked or has expired; sign in again",
+                    ));
+                }
             }
 
             // Every reply row needs `at://<did>/…`, so resolve the DID once.
@@ -2765,6 +2957,28 @@ fn ingest_external_write_handler() -> RpcHandler {
                 });
             }
 
+            // THE ORACLE'S CEILING — `RateWindow` per session, one operation per
+            // write, admitted here: after every refusal is decided (a batch
+            // refused on its own merits applies nothing and so consumes no
+            // window) and before the first Fauna-side effect. All or nothing
+            // like the batch itself. The per-(bridge, account) window above
+            // bounds calls; this bounds what one session writes.
+            if let Some(session) = session {
+                let now_secs = fauna_core::data::Timestamp::now().0 / 1_000_000;
+                if !state
+                    .db
+                    .admit_atproto_session_writes(&actor, session, req.writes.len(), now_secs)
+                    .await
+                    .map_err(internal)?
+                {
+                    return encode_reply(&whole_batch_refused(
+                        req.writes.len(),
+                        EXTERNAL_WRITE_REFUSAL_RATE_LIMITED,
+                        "this session has made too many writes; try again in a minute",
+                    ));
+                }
+            }
+
             // `referenced_at` is already stamped — `preflight_blob_refs` above
             // does it per ref, immediately BEFORE resolving that ref, and this
             // loop used to repeat the walk here instead. Merging the two is not
@@ -2833,6 +3047,42 @@ fn ingest_external_write_handler() -> RpcHandler {
                         journal_write(&state, &actor, &did, i, w, action).await?
                     }
                 });
+            }
+
+            // THE ORACLE'S PER-OPERATION RECORD: one row per applied write,
+            // against the session that made it. Written after the batch
+            // applied, so it records what happened; a failure is LOGGED, never
+            // propagated, for the `last_used_at` reason below — the writes have
+            // landed, and answering a successful batch as failed is the worse
+            // lie.
+            if let Some(session) = session {
+                let ops: Vec<(&str, &str, &str)> = req
+                    .writes
+                    .iter()
+                    .zip(&results)
+                    .map(|(w, r)| {
+                        (
+                            w.action.as_str(),
+                            w.collection.as_str(),
+                            r.rkey.as_deref().or(w.rkey.as_deref()).unwrap_or(""),
+                        )
+                    })
+                    .collect();
+                if let Err(e) = state
+                    .db
+                    .record_atproto_external_writes(
+                        &actor,
+                        session,
+                        crate::db::now_epoch_millis(),
+                        &ops,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "atproto: the per-operation record failed after a successful \
+                         batch (the writes DID apply): {e}"
+                    );
+                }
             }
 
             // The delegation row's ADVISORY `last_used_at` (D10 § Audit,
@@ -3138,6 +3388,20 @@ fn refuse_unuploaded_blob(cid: &str) -> ExternalWriteResult {
     )
 }
 
+/// The refusal for a record naming more distinct blobs than the walk's cap
+/// ([`fauna_bridge_atproto::record_refs::MAX_RECORD_BLOB_REFS`]).
+#[cfg(feature = "bluesky")]
+fn refuse_too_many_blob_refs() -> ExternalWriteResult {
+    refused(
+        "policy",
+        format!(
+            "record references more than {} distinct blobs; a record may carry at most {}",
+            fauna_bridge_atproto::record_refs::MAX_RECORD_BLOB_REFS,
+            fauna_bridge_atproto::record_refs::MAX_RECORD_BLOB_REFS
+        ),
+    )
+}
+
 /// Resolve one blob CID a record references to the Fauna media it landed as —
 /// the ONE owner of "is this ref resolvable", asked by the pre-flight for the
 /// verdict and by the media arm for the value.
@@ -3304,6 +3568,7 @@ async fn media_items_for_post(
         if let (Some(width), Some(height)) = (img.width, img.height) {
             item.dimensions = Some(fauna_core::data::Dimensions { width, height });
         }
+        item.alt = fauna_core::data::media_alt(Some(&img.alt));
         items.push(item);
     }
     Ok(Ok(items))
@@ -3346,7 +3611,13 @@ async fn preflight_blob_refs(
         return Ok(None); // the input-shape pass already raised the malformed error
     };
 
-    for cid in fauna_bridge_atproto::record_refs::external_record_blob_refs(record) {
+    // A record past the walk's cap REFUSES: a truncated list would leave
+    // the refs past it unchecked and unstamped, and the sweep would delete their
+    // media. Nothing has been stamped yet, so the refusal costs nothing.
+    let Ok(cids) = fauna_bridge_atproto::record_refs::external_record_blob_refs(record) else {
+        return Ok(Some(refuse_too_many_blob_refs()));
+    };
+    for cid in cids {
         // STAMP, THEN RESOLVE — the order is load-bearing, and it is what makes
         // the F2.4 GC unable to race this write (the constraint slice 2 left for
         // slice 4). The stamp is the row's **immunity token**: the sweep deletes
@@ -3497,7 +3768,9 @@ async fn round_trip_post_create(
             facets: parsed.facets,
         }
     } else if parsed.text.is_empty() {
-        // Alt text crosses on the first image only — the exact inverse of
+        // Each image's own alt already rests on its `MediaItem` (see
+        // `media_items_for_post`); the FIRST image's alt additionally becomes
+        // the set-level `alt_text` — the inverse of the `alt_text` rule in
         // `outbound::extract_projection_media`, so a media post that leaves
         // Fauna and comes back keeps its alt stable.
         PostBody::Media {
@@ -4051,6 +4324,14 @@ pub fn register_bridge_atproto_handlers(b: &mut RpcRouterBuilder) {
             forbid_replay: false,
             default_deadline: fetch,
             handler: deliver_permission_set_handler(),
+        },
+    );
+    b.add(
+        "fauna.bridges.atproto.deliver_service_auth",
+        RpcKindMeta {
+            forbid_replay: false,
+            default_deadline: fetch,
+            handler: deliver_service_auth_handler(),
         },
     );
     b.add(
@@ -5608,6 +5889,67 @@ mod tests {
         (post_id, bytes)
     }
 
+    /// The enable panel's read counts exactly the posts a history backfill
+    /// would publish (`atproto-pds-bridge.md` § Projection & backfill: "Also
+    /// publish my N existing public posts") — the projection stream's own
+    /// servability predicate, so a deleted or taken-down post is not part of
+    /// the number the user consents to.
+    #[tokio::test]
+    async fn integration_status_counts_the_posts_a_backfill_would_publish() {
+        let state = fixture_state().await;
+        seed_user_and_bridge(&state).await;
+        let status = |state: Arc<AppState>| async move {
+            let h = get_integration_status_handler();
+            let reply: GetIntegrationStatusReply = decode(
+                &h(state, USER, enc(&GetIntegrationStatusRequest::default()))
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            reply.public_post_count
+        };
+        assert_eq!(status(state.clone()).await, 0, "no posts yet");
+
+        seed_public_post(&state, "kept one", 1_000_000).await;
+        seed_public_post(&state, "kept two", 1_100_000).await;
+        let (deleted_id, _) = seed_public_post(&state, "deleted", 1_200_000).await;
+        let (taken_id, _) = seed_public_post(&state, "taken down", 1_300_000).await;
+
+        let tombstone = fauna_core::data::Tombstone {
+            author: fauna_core::identity::ActorId(USER),
+            post_id: fauna_core::data::PostId::from_digest_dag_cbor(deleted_id),
+            created_at: fauna_core::data::Timestamp(2_000_000),
+        };
+        match crate::routes::delete_post_core(
+            &state,
+            USER,
+            &tombstone,
+            deleted_id,
+            crate::routes::RenderSite::Now,
+        )
+        .await
+        {
+            Ok(crate::routes::PostDeleteOutcome::Deleted) => {}
+            Ok(crate::routes::PostDeleteOutcome::AlreadyGone) => panic!("post existed"),
+            Err(_) => panic!("delete failed"),
+        }
+        state
+            .db
+            .post_legal_takedown_txn(
+                &taken_id,
+                &hex::encode(taken_id),
+                Some("court-order-1"),
+                &USER,
+                &BRIDGE[..],
+                "test takedown",
+                2_100_000,
+            )
+            .await
+            .expect("takedown applied");
+
+        assert_eq!(status(state.clone()).await, 2);
+    }
+
     /// A legally taken-down post never crosses the wire the bridge reads.
     ///
     /// The DAO-level pins live in `db::atproto_projection`; this one asserts
@@ -6298,7 +6640,7 @@ mod tests {
             let req = IngestExternalWriteRequest {
                 actor_id: USER.to_vec(),
                 writes,
-                extra: Default::default(),
+                ..Default::default()
             };
             let bytes = ingest_external_write_handler()(state.clone(), BRIDGE, enc(&req)).await?;
             Ok(decode(&bytes).unwrap())
@@ -6441,6 +6783,303 @@ mod tests {
                 refusal.message
             );
             assert!(reply.results[0].rkey.is_none());
+        }
+
+        // ── The oracle at the `atproto.commit` door ─────────────────
+        //
+        // `key-material-hierarchy.md` § *The oracle* → *The ATProto classes
+        // ride the protocol's own door*: the live check, the ceiling and the
+        // record, each keyed on the session the bridge forwards.
+
+        const SESSION: &[u8] = b"session-family-1";
+
+        async fn ingest_in_session(
+            state: &Arc<AppState>,
+            session: &[u8],
+            writes: Vec<ExternalWrite>,
+        ) -> IngestExternalWriteReply {
+            let req = IngestExternalWriteRequest {
+                actor_id: USER.to_vec(),
+                writes,
+                session_id: Some(session.to_vec()),
+                ..Default::default()
+            };
+            let bytes = ingest_external_write_handler()(state.clone(), BRIDGE, enc(&req))
+                .await
+                .expect("ingest");
+            decode(&bytes).unwrap()
+        }
+
+        /// An app-credential session, live for an hour.
+        async fn with_session(state: &Arc<AppState>) {
+            let far = crate::db::now_epoch_millis() + 3_600_000;
+            state
+                .db
+                .insert_atproto_session(&USER, SESSION, "app_credential", Some("c1"), None, far)
+                .await
+                .unwrap();
+        }
+
+        fn lists(n: usize, prefix: &str) -> Vec<ExternalWrite> {
+            (0..n)
+                .map(|i| {
+                    write(
+                        "app.bsky.graph.list",
+                        "create",
+                        Some(&format!("{prefix}{i}")),
+                    )
+                })
+                .collect()
+        }
+
+        fn all_refused_as(reply: &IngestExternalWriteReply, sub_type: &str) -> bool {
+            reply
+                .results
+                .iter()
+                .all(|r| r.refusal.as_ref().is_some_and(|x| x.sub_type == sub_type))
+        }
+
+        async fn op_count(state: &Arc<AppState>) -> i64 {
+            state
+                .db
+                .conn()
+                .await
+                .query_row("SELECT COUNT(*) FROM atproto_external_write_ops", [], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        }
+
+        /// The additive pin: an older bridge sends no session, and the nest
+        /// keeps today's behaviour — the write lands, nothing is checked,
+        /// windowed or recorded.
+        #[tokio::test]
+        async fn an_omitted_session_keeps_todays_behaviour() {
+            let state = seeded().await;
+            let reply = ingest(&state, lists(1, "3old")).await.expect("ingest");
+            assert!(reply.results[0].refusal.is_none(), "{:?}", reply.results[0]);
+            assert_eq!(op_count(&state).await, 0, "no session, no record");
+        }
+
+        /// A write under a live session lands and is recorded against it, one
+        /// row per write, with the key it landed at.
+        #[tokio::test]
+        async fn a_write_under_a_live_session_lands_and_is_recorded() {
+            let state = seeded().await;
+            with_session(&state).await;
+            let reply = ingest_in_session(&state, SESSION, lists(2, "3rec")).await;
+            assert!(
+                reply.results.iter().all(|r| r.refusal.is_none()),
+                "{reply:?}"
+            );
+            let ops = state
+                .db
+                .list_atproto_external_writes(&USER, SESSION)
+                .await
+                .unwrap();
+            let shape: Vec<_> = ops
+                .iter()
+                .map(|o| (o.action.as_str(), o.collection.as_str(), o.rkey.as_str()))
+                .collect();
+            assert_eq!(
+                shape,
+                [
+                    ("create", "app.bsky.graph.list", "3rec1"),
+                    ("create", "app.bsky.graph.list", "3rec0"),
+                ]
+            );
+        }
+
+        /// The live check: a revoke bites at the very next write, whatever the
+        /// access token's remaining lifetime — and the whole batch refuses,
+        /// with nothing applied.
+        #[tokio::test]
+        async fn a_revoked_session_refuses_the_whole_next_batch() {
+            let state = seeded().await;
+            with_session(&state).await;
+            assert!(
+                state
+                    .db
+                    .revoke_atproto_session(&USER, SESSION)
+                    .await
+                    .unwrap()
+            );
+            let reply = ingest_in_session(&state, SESSION, lists(2, "3dead")).await;
+            assert!(
+                all_refused_as(&reply, EXTERNAL_WRITE_REFUSAL_SESSION_REVOKED),
+                "{reply:?}"
+            );
+            assert!(
+                state
+                    .db
+                    .get_atproto_native_record(&USER, "app.bsky.graph.list", "3dead0")
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "nothing applies under a revoked session"
+            );
+            assert_eq!(op_count(&state).await, 0);
+        }
+
+        /// An unknown session and an expired one refuse the same way.
+        #[tokio::test]
+        async fn an_unknown_or_expired_session_refuses() {
+            let state = seeded().await;
+            let reply = ingest_in_session(&state, b"never-minted", lists(1, "3u")).await;
+            assert!(all_refused_as(
+                &reply,
+                EXTERNAL_WRITE_REFUSAL_SESSION_REVOKED
+            ));
+
+            let past = crate::db::now_epoch_millis() - 1;
+            state
+                .db
+                .insert_atproto_session(&USER, b"expired", "app_credential", Some("c1"), None, past)
+                .await
+                .unwrap();
+            let reply = ingest_in_session(&state, b"expired", lists(1, "3e")).await;
+            assert!(all_refused_as(
+                &reply,
+                EXTERNAL_WRITE_REFUSAL_SESSION_REVOKED
+            ));
+        }
+
+        /// The OAuth plane's grant row is read too: a session whose grant was
+        /// revoked on its own refuses, though the session row is still live.
+        #[tokio::test]
+        async fn an_oauth_session_whose_grant_is_revoked_refuses() {
+            let state = seeded().await;
+            let far = crate::db::now_epoch_millis() + 3_600_000;
+            state
+                .db
+                .insert_atproto_session(&USER, SESSION, "oauth", None, Some("App"), far)
+                .await
+                .unwrap();
+            // No grant row at all is no live grant.
+            let reply = ingest_in_session(&state, SESSION, lists(1, "3g")).await;
+            assert!(all_refused_as(
+                &reply,
+                EXTERNAL_WRITE_REFUSAL_SESSION_REVOKED
+            ));
+
+            {
+                let conn = state.db.conn().await;
+                conn.execute(
+                    "INSERT INTO atproto_oauth_grants
+                        (actor_id, grant_id, client_id, scopes, created_at, issuer)
+                     VALUES (?1, ?2, 'https://app.example/client.json', 'atproto', 0, 'nest')",
+                    rusqlite::params![&USER[..], SESSION],
+                )
+                .unwrap();
+            }
+            let reply = ingest_in_session(&state, SESSION, lists(1, "3g")).await;
+            assert!(reply.results[0].refusal.is_none(), "{reply:?}");
+
+            state
+                .db
+                .conn()
+                .await
+                .execute(
+                    "UPDATE atproto_oauth_grants SET revoked_at = 1 WHERE grant_id = ?1",
+                    rusqlite::params![SESSION],
+                )
+                .unwrap();
+            let reply = ingest_in_session(&state, SESSION, lists(1, "3h")).await;
+            assert!(all_refused_as(
+                &reply,
+                EXTERNAL_WRITE_REFUSAL_SESSION_REVOKED
+            ));
+        }
+
+        /// The ceiling: 60 writes per 60 s per session. The 60th lands, the
+        /// 61st refuses as `rate_limited` and consumes nothing; a batch that
+        /// would cross the ceiling refuses whole.
+        #[tokio::test]
+        async fn the_sixty_first_write_in_a_window_is_rate_limited() {
+            let state = seeded().await;
+            with_session(&state).await;
+            let reply = ingest_in_session(&state, SESSION, lists(59, "3a")).await;
+            assert!(reply.results.iter().all(|r| r.refusal.is_none()));
+            // Two more would cross: the batch refuses whole, nothing applies.
+            let reply = ingest_in_session(&state, SESSION, lists(2, "3b")).await;
+            assert!(
+                all_refused_as(&reply, EXTERNAL_WRITE_REFUSAL_RATE_LIMITED),
+                "{reply:?}"
+            );
+            // The 60th still fits — the refusal consumed nothing.
+            let reply = ingest_in_session(&state, SESSION, lists(1, "3c")).await;
+            assert!(reply.results[0].refusal.is_none(), "{reply:?}");
+            let reply = ingest_in_session(&state, SESSION, lists(1, "3d")).await;
+            assert!(all_refused_as(&reply, EXTERNAL_WRITE_REFUSAL_RATE_LIMITED));
+            assert_eq!(op_count(&state).await, 60);
+        }
+
+        /// A batch refused on its own merits (here a post with no delegation)
+        /// consumes no window: the ceiling admits only what would apply.
+        #[tokio::test]
+        async fn a_refused_batch_consumes_no_window() {
+            let state = seeded().await;
+            with_session(&state).await;
+            let reply = ingest_in_session(
+                &state,
+                SESSION,
+                vec![write("app.bsky.feed.post", "create", None)],
+            )
+            .await;
+            assert_eq!(
+                reply.results[0]
+                    .refusal
+                    .as_ref()
+                    .map(|r| r.sub_type.as_str()),
+                Some("fauna_surface")
+            );
+            let count: u32 = state
+                .db
+                .conn()
+                .await
+                .query_row(
+                    "SELECT write_window_count FROM atproto_sessions WHERE session_id = ?1",
+                    rusqlite::params![SESSION],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+
+        /// The record keeps the newest 256 writes per session.
+        #[tokio::test]
+        async fn the_record_keeps_the_newest_256_per_session() {
+            let state = seeded().await;
+            with_session(&state).await;
+            let ops: Vec<(String, String, String)> = (0..300)
+                .map(|i| {
+                    (
+                        "create".into(),
+                        "app.bsky.graph.list".into(),
+                        format!("3k{i}"),
+                    )
+                })
+                .collect();
+            let refs: Vec<(&str, &str, &str)> = ops
+                .iter()
+                .map(|(a, c, r)| (a.as_str(), c.as_str(), r.as_str()))
+                .collect();
+            state
+                .db
+                .record_atproto_external_writes(&USER, SESSION, 1, &refs)
+                .await
+                .unwrap();
+            let kept = state
+                .db
+                .list_atproto_external_writes(&USER, SESSION)
+                .await
+                .unwrap();
+            assert_eq!(
+                kept.len() as i64,
+                crate::db::atproto_pds::EXTERNAL_WRITE_OPS_KEPT_PER_SESSION
+            );
+            assert_eq!(kept[0].rkey, "3k299");
+            assert_eq!(kept.last().unwrap().rkey, "3k44");
         }
 
         // ── F2.2 slice 3: the delegated round-trip arm ──────────────
@@ -6594,7 +7233,7 @@ mod tests {
             let req = IngestExternalWriteRequest {
                 actor_id: actor.to_vec(),
                 writes,
-                extra: Default::default(),
+                ..Default::default()
             };
             let bytes = ingest_external_write_handler()(state.clone(), BRIDGE, enc(&req)).await?;
             Ok(decode(&bytes).unwrap())
@@ -7646,7 +8285,7 @@ mod tests {
             let req = IngestExternalWriteRequest {
                 actor_id: USER.to_vec(),
                 writes: vec![write("app.bsky.graph.list", "create", Some("3x"))],
-                extra: Default::default(),
+                ..Default::default()
             };
             // The account's own user actor is NOT allowed to drive this kind:
             // a Fauna app writes through its identity-signed post kinds.
@@ -8227,6 +8866,11 @@ mod tests {
                 })
             );
             assert_eq!(alt_text.as_deref(), Some("a red bird"));
+            assert_eq!(
+                items[0].alt.as_deref(),
+                Some("a red bird"),
+                "the image's own alt rests on its MediaItem too"
+            );
 
             let row = state
                 .db
@@ -8252,7 +8896,10 @@ mod tests {
                 user,
                 vec![post_write(
                     "create",
-                    Some(images_post(POST_TEXT, vec![image_entry(&cid, "", None)])),
+                    Some(images_post(
+                        POST_TEXT,
+                        vec![image_entry(&cid, "a quiet lake", None)],
+                    )),
                 )],
             )
             .await
@@ -8266,6 +8913,11 @@ mod tests {
             assert_eq!(content, POST_TEXT);
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].media_type, "image/webp");
+            assert_eq!(
+                items[0].alt.as_deref(),
+                Some("a quiet lake"),
+                "a per-image alt on a text post rests on its item, no longer dropped"
+            );
             assert_eq!(
                 items[0].dimensions, None,
                 "no declared aspectRatio must not invent dimensions"
@@ -8389,6 +9041,60 @@ mod tests {
                 refusal.message.contains("uploadBlob"),
                 "{}",
                 refusal.message
+            );
+        }
+
+        /// **The blob walk's cap refuses; it never truncates.** A journal
+        /// record naming 17 distinct, fully-uploaded blobs would, under the old
+        /// truncating walk, commit with ref 17 unchecked and unstamped — GC bait.
+        /// It must refuse before anything applies, and stamp nothing.
+        #[tokio::test]
+        async fn a_record_with_more_blob_refs_than_the_cap_refuses_before_anything_applies() {
+            let (state, user, _) = seeded_with_delegation().await;
+            let mut blobs = Vec::new();
+            for seed in
+                120..(120 + fauna_bridge_atproto::record_refs::MAX_RECORD_BLOB_REFS as u8 + 1)
+            {
+                let (cid, _) = seed_uploaded_blob(&state, &user, seed, "image/png", 10).await;
+                blobs.push(serde_json::json!({
+                    "$type": "blob",
+                    "ref": { "/": cid },
+                    "mimeType": "image/png",
+                    "size": 10,
+                }));
+            }
+            let record = record_bytes_with_links(serde_json::json!({
+                "$type": "app.bsky.graph.list",
+                "name": "too many",
+                "pins": blobs,
+            }));
+
+            let reply = ingest_as(
+                &state,
+                user,
+                vec![ExternalWrite {
+                    record: Some(record),
+                    ..write("app.bsky.graph.list", "create", Some("3toomany"))
+                }],
+            )
+            .await
+            .expect("a refusal is per-row data, not a failed call");
+
+            let refusal = reply.results[0].refusal.as_ref().expect("refused");
+            assert_eq!(refusal.sub_type, "policy");
+            assert!(
+                refusal.message.contains("at most"),
+                "the refusal names the cap, got: {}",
+                refusal.message
+            );
+            assert!(
+                state
+                    .db
+                    .get_atproto_native_record(&user, "app.bsky.graph.list", "3toomany")
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "the refused record must not journal"
             );
         }
 

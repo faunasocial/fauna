@@ -80,6 +80,37 @@ class ScreenTimeStoreTest {
         return registerCall.arguments[1] as () -> Unit
     }
 
+    /**
+     * The twin of `advancing_the_test_clock_moves_the_window_verdict_too`
+     * (`fauna_core::screen_time`): the e2e fake clock must move the WINDOW
+     * verdict, not only the budget one. The allowed window opens 30 minutes
+     * from the real now, so the ward starts locked; advancing the test clock
+     * 60 minutes lands inside it. A store reading a fresh OS clock for the
+     * window would stay locked. (Margins of 30 minutes keep this independent
+     * of the minute the test happens to run in.)
+     */
+    @Test
+    fun `advancing the test clock past the window opening unlocks the ward`() {
+        val nowLocal = java.time.LocalTime.now()
+        val nowMinutes = nowLocal.hour * 60 + nowLocal.minute
+        val policy = FfiScreenTimePolicy(
+            windowStart = ((nowMinutes + 30) % 1440).toUShort(),
+            windowEnd = ((nowMinutes + 240) % 1440).toUShort(),
+            dailyMinutes = null,
+        )
+        val (store, _, _) = makeStore(initialActor = "actor-a", initialSnapshot = null)
+        store.setWardScreenTime(policy, "guardian-a", null)
+        assertNotNull("outside the allowed window the ward starts locked", store.lockMessage.value)
+
+        kotlinx.coroutines.runBlocking { store.advanceTestClockAndTick(60) }
+
+        assertNull(
+            "the fake clock must move the window verdict: 60 minutes on is " +
+                "inside the allowed window",
+            store.lockMessage.value,
+        )
+    }
+
     @Test
     fun `an offline switch re-seeds the incoming actor's restored window`() {
         val (store, state, accountStores) = makeStore(initialActor = "actor-a", initialSnapshot = null)

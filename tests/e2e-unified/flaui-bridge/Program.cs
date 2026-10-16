@@ -260,6 +260,11 @@ class Program
             Environment.Exit(SelfTest.PortRetryChecks());
             return;
         }
+        if (args.Length > 0 && args[0] == "--self-test-packed-attr")
+        {
+            Environment.Exit(SelfTest.PackedAttrChecks());
+            return;
+        }
         // Retry on a bind conflict rather than the old one-shot draw+Start:
         // any two bridges racing the same 18000-19000 draw — or a plain-socket holder
         // sharing the range, like the web bridge — could otherwise die at startup.

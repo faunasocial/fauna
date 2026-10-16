@@ -9,6 +9,7 @@ import com.fauna.app.core.SessionAccount
 import com.fauna.app.core.HexUtil
 import com.fauna.app.core.LaunchObserverImpl
 import com.fauna.app.core.OnboardingHost
+import com.fauna.app.core.RecoverableBoxes
 import com.fauna.app.core.SecureStorage
 import com.fauna.app.core.SignOutCredentialEraser
 import com.fauna.app.core.ShellLog
@@ -256,6 +257,11 @@ class AppLaunchVM @Inject constructor(
             )
             actorScope.dropActorScopedState()
             true
+        } catch (e: com.fauna.ffi.FfiException.AccountLocked) {
+            // Locked while signed in (`devices.md` § The locked state) — the
+            // fourth escalating verdict, tui's `SilentSignInVerdict::Locked` arm.
+            escalateAccountLocked()
+            true
         } catch (e: Exception) {
             // Reachability / classification noise — best-effort, never escalate.
             false
@@ -283,6 +289,120 @@ class AppLaunchVM @Inject constructor(
     fun escalateSessionEnding(verdict: com.fauna.ffi.FfiSessionEndingVerdict) {
         ShellLog.w("AppLaunchVM", "[post-auth] session-ending verdict $verdict — re-entering launch")
         actorScope.dropActorScopedState()
+    }
+
+    /**
+     * The account was locked while this app was signed in — by this app's own
+     * Sessions page, or met on the post-auth silent challenge. The lock revoked
+     * every bearer and the nest mints no new one, so the session is already
+     * dead: tear it down WITHOUT erasing credentials (the stolen-identity
+     * ceremony on the locked surface needs the seed), after which the caller
+     * re-enters launch, whose re-run machine meets `fauna.auth.account_locked`
+     * and paints the locked notice on a live machine. Twin of linux's
+     * `escalate_to_launch("account-locked")` and web's `escalateAccountLocked`.
+     */
+    fun escalateAccountLocked() {
+        ShellLog.w("AppLaunchVM", "[post-auth] this account is locked — re-entering launch")
+        actorScope.dropActorScopedState()
+    }
+
+    /**
+     * Whether the locked notice for [shownLockedUntilSecs] still stands on
+     * [snapshot] — the shared `LaunchSnapshot::lock_notice_holds` rule, so the
+     * notice follows the machine out with no timer of this app's own: true
+     * while the machine stays parked on that lock or is mid-flight (its own
+     * refresh at the unlock time), false on any other settled snapshot.
+     */
+    fun lockNoticeHolds(snapshot: LaunchSnapshot, shownLockedUntilSecs: ULong): Boolean =
+        uniffi.fauna_launch_machine.launchLockNoticeHolds(snapshot, shownLockedUntilSecs)
+
+    /**
+     * What the launch surface paints given the machine's [target], once a
+     * locked notice has been shown for [shownLock]: the notice keeps standing
+     * while [lockNoticeHolds] says so — and unconditionally while the user is
+     * on `identity_stolen_entry` ([inStolenEntry]), mid-ceremony; its Back
+     * re-reads the machine through this same function. Twin of tui's
+     * `locked::follow_snapshot` and linux's `follow_lock_snapshot`.
+     */
+    fun followLock(
+        target: NavTarget?,
+        snapshot: LaunchSnapshot,
+        shownLock: ULong?,
+        inStolenEntry: Boolean,
+        holds: (LaunchSnapshot, ULong) -> Boolean = ::lockNoticeHolds,
+    ): NavTarget? {
+        if (target is NavTarget.AccountLocked || shownLock == null) return target
+        return if (inStolenEntry || holds(snapshot, shownLock)) NavTarget.AccountLocked(shownLock) else target
+    }
+
+    /**
+     * `identity-stolen-button` on the locked surface's `identity_stolen_entry`
+     * step — the stolen-identity ceremony with NO session (`devices.md`
+     * § The two panic buttons, point 5: reachable from a locked-out app, over an
+     * anonymous connection). The whole ceremony is shared Rust
+     * (`succession_succeed_stolen_locked`); android passes its sandboxed store
+     * container so the predecessor's departed fleet is read from its store at
+     * rest. The `SUCCEED` gate is re-checked here, in the action arm.
+     *
+     * On the persisted landed arm the succession is recorded BEFORE the switch
+     * ([SuccessionHandoff.record]), the successor is activated and this same
+     * machine re-runs, landing the successor signed in — tui's and linux's
+     * locked-surface switch. Every other arm answers a sentence for
+     * `error-message` and switches nothing (the persist-failure arm carries the
+     * only copy of the successor's key, so it is put on screen, never dropped).
+     */
+    suspend fun succeedStolenLocked(phrase: String, confirm: String): LockedCeremonyResult {
+        if (confirm != RecoveryKitVM.STOLEN_CONFIRM_WORD) return LockedCeremonyResult.NotArmed
+        if (phrase.isEmpty()) return LockedCeremonyResult.NoPhrase
+        val secretHex = sessionAccount.secretHex?.ifBlank { null }
+        val nestUrl = sessionAccount.nestUrl?.ifBlank { null }
+        if (secretHex == null || nestUrl == null) return LockedCeremonyResult.Failed(null)
+        val predecessor = runCatching { registry.active() }.getOrNull()
+        val outcome = try {
+            succeedLocked(nestUrl, HexUtil.hexToBytes(secretHex), phrase)
+        } catch (e: Exception) {
+            // Only a failure BEFORE the ceremony could start (unparseable
+            // secret bytes) — every ceremony that ran is an outcome.
+            ShellLog.w("AppLaunchVM", "[locked] the ceremony could not start: ${e.message}")
+            return LockedCeremonyResult.Failed(e.message)
+        }
+        val landed = outcome.landed ?: return LockedCeremonyResult.Refused(outcome)
+        SuccessionHandoff.record(landed, predecessor)
+        if (!landed.persisted) return LockedCeremonyResult.PersistFailed(landed.successorSecretHex)
+        try {
+            registry.setActive(landed.newActorIdHex)
+        } catch (e: Exception) {
+            ShellLog.e("AppLaunchVM", "[locked] activating the successor failed: ${e.message}")
+            return LockedCeremonyResult.Failed(e.message)
+        }
+        actorScope.dropActorScopedState()
+        machine.start()
+        return LockedCeremonyResult.SignedIn
+    }
+
+    /** The ceremony call — a seam only so the tests need no live nest. */
+    internal var succeedLocked: suspend (String, ByteArray, String) -> com.fauna.ffi.FfiStolenOutcome =
+        { nestUrl, secret, phrase ->
+            com.fauna.ffi.successionSucceedStolenLocked(
+                nestUrl, secret, phrase, registry, com.fauna.app.core.SuccessorStorePath(accountStores),
+                accountStores.accountStoreContainerDir(),
+            )
+        }
+
+    /** What [succeedStolenLocked] answers the `identity_stolen_entry` step. */
+    sealed class LockedCeremonyResult {
+        /** Landed and persisted: the successor is active and the machine re-runs. */
+        data object SignedIn : LockedCeremonyResult()
+        /** `identity-stolen-confirm-field` is not the literal `SUCCEED`. */
+        data object NotArmed : LockedCeremonyResult()
+        /** No kit typed into `recovery-entry-phrase-field`. */
+        data object NoPhrase : LockedCeremonyResult()
+        /** A refused or failed arm — its shared sentence is [outcome]`.message`. */
+        data class Refused(val outcome: com.fauna.ffi.FfiStolenOutcome) : LockedCeremonyResult()
+        /** Landed, but this device could not keep the successor's key: show it. */
+        data class PersistFailed(val successorSecretHex: String) : LockedCeremonyResult()
+        /** The ceremony could not start at all. */
+        data class Failed(val detail: String?) : LockedCeremonyResult()
     }
 
     /** Whether the active account is a succession's successor still owed its
@@ -322,6 +442,40 @@ class AppLaunchVM @Inject constructor(
         val secret = sessionAccount.secretHex ?: return "onboarding/identity-choice"
         host.machine.seedIdentity(secret)
         return "onboarding/handle-entry"
+    }
+
+    /**
+     * The launch-retry surface's box read (`box-recovery.md` § Recovery UI,
+     * surviving-device entry): the served account's custodied boxes, off the
+     * saved nest when it answers and off this device's own store when it does
+     * not — so a dead saved nest still offers recovery
+     * ([RecoverableBoxes.load], the twin of apple's `RecoverableBoxes.load`).
+     * Empty with no served account.
+     */
+    suspend fun loadRecoverableBoxes(): List<String> {
+        val secretHex = sessionAccount.secretHex?.ifBlank { null } ?: return emptyList()
+        val ownerSecret = try {
+            HexUtil.hexToBytes(secretHex)
+        } catch (e: Exception) {
+            ShellLog.w("AppLaunchVM", "[launch] recoverable boxes: bad secret: ${e.message}")
+            return emptyList()
+        }
+        return RecoverableBoxes.load(
+            sessionAccount.nestUrl.orEmpty(), ownerSecret, accountStores.accountStoreContainerDir(),
+        )
+    }
+
+    /**
+     * `launch-recover-button`: seed the wizard straight into `nest_recovery`
+     * with the already-read box list (the shared machine entry, as
+     * tui/linux/windows/macos). Returns the route to navigate to.
+     */
+    fun seedForRecovery(boxes: List<String>): String {
+        val secret = sessionAccount.secretHex ?: return "onboarding/identity-choice"
+        host.machine.reset()
+        host.machine.seedIdentityForRecovery(secret)
+        host.machine.setRecoveryBoxes(boxes)
+        return "onboarding/nest-recovery"
     }
 
     /**
@@ -470,9 +624,29 @@ class AppLaunchVM @Inject constructor(
         accountIndexRefusal: AccountIndexRefusal? = null,
         signInRefused: Boolean = false,
         supersededSuccessor: String? = null,
+        identityFork: Boolean = false,
+        lockedUntilSecs: ULong? = null,
     ): NavTarget? {
         if (accountIndexRefusal != null) {
             return NavTarget.AccountIndexUnreadable(accountIndexRefusal)
+        }
+        // The account is locked (`devices.md` § The locked state): the machine
+        // parks on `Offline { transient: false }` with the unlock time on the
+        // `locked_until_secs` side channel and runs the one refresh at that time
+        // itself. Checked BEFORE the generic `Offline` arms, which would paint a
+        // dead-end NeedsUpdate over it — the order tui's `route()` and linux's
+        // `handle_launch_phase` take.
+        if (lockedUntilSecs != null && phase is LaunchPhase.Offline) {
+            return NavTarget.AccountLocked(lockedUntilSecs)
+        }
+        // Rotation-chain fork evidence (`box-recovery.md` § Client acceptance):
+        // the hard warning naming both heads, no re-trust. `identityFork` is
+        // only the snapshot's bool, so the heads come from the phase — as tui's
+        // `LaunchSurface::IdentityForked` reads them. A fork always carries a
+        // seen head (only the Withdrawn arm leaves it null), so the empty
+        // fallback is unreachable in practice and still never re-trustable.
+        if (identityFork && phase is LaunchPhase.IdentityChanged) {
+            return NavTarget.IdentityForked(phase.pinnedHex, phase.seenHex.orEmpty())
         }
         if (supersededSuccessor != null && phase is LaunchPhase.Offline) {
             return NavTarget.Superseded(supersededSuccessor)
@@ -661,6 +835,11 @@ class AppLaunchVM @Inject constructor(
          *  different nest". */
         data object SignInRefused : NavTarget()
 
+        /** The account is locked until [lockedUntilSecs] (`LaunchSnapshot.lockedUntilSecs`).
+         *  The `launch_account_locked` surface: the standing notice and its one
+         *  action, the stolen-identity ceremony — no Retry, no fallthrough. */
+        data class AccountLocked(val lockedUntilSecs: ULong) : NavTarget()
+
         /** The nest refused this identity because it was succeeded
          *  (`LaunchSnapshot.supersededSuccessor`, the CLAIMED successor). The
          *  import flow, its reason set by [routeSupersededRefusal]. */
@@ -670,6 +849,12 @@ class AppLaunchVM @Inject constructor(
          *  A non-retry warning surface — "trust this nest" (trustIdentity()) or
          *  "use a different nest", never a silent re-pin. */
         data object IdentityChanged : NavTarget()
+
+        /** The fork variant of [IdentityChanged]: rotation-chain fork evidence
+         *  (`LaunchSnapshot.identityFork`) — two competing heads. The warning
+         *  names both; the fallthrough is the only way out, NO trust button
+         *  (the machine refuses the re-trust on a fork). */
+        data class IdentityForked(val pinnedHex: String, val seenHex: String) : NavTarget()
 
         /** The saved account index is present and this build cannot use it
          *  (`version-compatibility.md` § 5 item 9). Never a retry or

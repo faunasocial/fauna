@@ -1,0 +1,37 @@
+[package]
+name = "fauna-updater"
+description = "The Fauna updater: follows a box's update channel and re-creates its labelled containers on a newer build, never an older one"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# A second binary of the nest image, run as its own container holding only the
+# Docker socket (`docs/goal/architecture/nest/update-channel.md` § The updater).
+# The `Dockerfile` builds it in its OWN `cargo build` invocation, never beside
+# fauna-nest, so a dependency only the updater needs cannot feature-unify into
+# the nest.
+
+[dependencies]
+anyhow.workspace = true
+# The Docker Engine API client over the Unix socket. Exactly the shape bump
+# round 9 approved: 0.21.1, default features (`http` + `pipe`, no TLS).
+bollard = "0.21.1"
+# The never-downgrade decision, the channel and the registry read — one home,
+# shared with the nest's `channel_head_version`.
+fauna-provisioning = { path = "../../libs/fauna-provisioning" }
+futures-util.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "time", "signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
+
+[features]
+# The e2e build only (e2e conventions point 15 — never in a shipped artifact):
+# reads the harness registry `FAUNA_E2E_UPDATE_REGISTRY_ORIGIN` names in place
+# of ghcr.io, and manages that registry's `faunasocial/nest`. The `Dockerfile`
+# builds the updater without it.
+test-hooks = []

@@ -6,6 +6,8 @@
 //! (M0) + in-process e2e automation agent (M1) are built; login (M2) and the
 //! pages follow in later milestones (tracked internally).
 
+#[cfg(test)]
+mod account_registry_census_test;
 mod account_scope;
 mod address_book;
 mod admin;
@@ -32,9 +34,11 @@ mod graphics;
 mod image_cache;
 mod launch;
 mod locked;
+mod loop_wake;
 mod mail_glue;
 mod media;
 mod media_handoff;
+mod mls_query;
 mod moderation;
 mod nostr;
 mod notifications;
@@ -277,6 +281,16 @@ async fn run(
         fauna_client_capabilities::view_model::AUTO_RENEW_CHECK_SECS,
     ));
     nests_renew_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The admin DNS page's background re-check (`admin::dns_recheck_op`):
+    // page-scoped, and its first fire is a full period out — entering the page
+    // already verifies once.
+    let dns_recheck_period =
+        std::time::Duration::from_secs(fauna_client_dns::record_recheck_secs());
+    let mut dns_recheck_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + dns_recheck_period,
+        dns_recheck_period,
+    );
+    dns_recheck_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // A command whose apply started a teardown (`reset`, `logout`, a `session`
     // patch that signs out or switches): its ack waits here until the stop and
     // everything queued behind it have run (`App::teardown_pending`), so the
@@ -521,6 +535,17 @@ async fn run(
                     crate::settings::spawn_nests_auto_renew(machine, &tx, app.session_generation);
                 }
             }
+            // The admin DNS page's background re-check — spawned, so a slow
+            // nest or provider never stalls a redraw.
+            _ = periodic_tick(
+                &mut dns_recheck_tick,
+                app.page == crate::pages::Page::Admin
+                    && crate::admin::dns_page_open(&app.admin),
+            ) => {
+                if let Some(op) = crate::admin::dns_recheck_op(&app.admin) {
+                    app.spawn_page_op(app::PageOp::Admin(op));
+                }
+            }
             // The archive-import Progress screen's live-refresh poll — the arm
             // directly above, over the archive wizard's own machine.
             _ = periodic_tick(
@@ -656,35 +681,12 @@ async fn run(
 /// immediate save of every rail's current compose, bypassing the debounce,
 /// right before the process exits. tui runs natively inside the tokio
 /// runtime for its whole life, so this is a direct `.await` — no
-/// thread-spinning the way linux's GTK main thread needs
-/// (`blocking_flush`-equivalent has no reason to exist here).
-///
-/// Each rail is independently bounded: a slow/unreachable nest must not hang
-/// quitting the app, and one rail's timeout must not cost another rail its
-/// own flush.
+/// thread-spinning the way linux's GTK main thread needs. The body is the one
+/// the sign-out door runs too ([`drafts_autosave::LeaveFlush`]), each rail
+/// bounded on its own so a slow nest hangs neither door.
 async fn flush_drafts_on_quit(app: &App) {
-    const LEAVE_FLUSH_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
-
-    if let (Some(manager), Some(sync)) =
-        (&app.conversations.manager, &app.conversations.drafts_sync)
-    {
-        let _ = tokio::time::timeout(
-            LEAVE_FLUSH_BUDGET,
-            drafts_autosave::flush_now(manager.as_ref(), sync, "drafts"),
-        )
-        .await;
-    }
-    if let (Some(manager), Some(sync)) = (&app.feed.manager, &app.feed.drafts_sync) {
-        let _ = tokio::time::timeout(
-            LEAVE_FLUSH_BUDGET,
-            drafts_autosave::flush_now(manager.as_ref(), sync, "feed drafts"),
-        )
-        .await;
-    }
-    if let Some(sync) = &app.events.drafts_sync {
-        let draft = app.events.event_draft();
-        let _ =
-            tokio::time::timeout(LEAVE_FLUSH_BUDGET, events::drafts::flush_now(sync, &draft)).await;
+    if let Some(flush) = drafts_autosave::LeaveFlush::capture(app) {
+        flush.run().await;
     }
 }
 

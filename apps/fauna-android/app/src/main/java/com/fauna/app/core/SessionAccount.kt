@@ -14,12 +14,17 @@ package com.fauna.app.core
  * sign-in, a switch or a silent-sign-in cache refresh sees the account as it
  * stands now.
  *
- * Read-only by design. Every write goes through a shared moment on the registry
- * — `confirmIdentity`, `persistLoggedIn`, `persistAwaitingDns`,
- * `persistPendingInvite`, `updateCache`, the launch persistence's
- * `saveAuthenticated` — so no app-side write path can diverge from the other six
- * apps'. The wizard-resume rows are read through the same `LaunchPersistence`
- * the launch machine routes on, never here.
+ * Read-only by design, so every PROPERTY is a pure read. Every write goes
+ * through a shared moment on the registry — `confirmIdentity`,
+ * `persistLoggedIn`, `persistAwaitingDns`, `persistPendingInvite`,
+ * `updateCache`, the launch persistence's `saveAuthenticated` — so no app-side
+ * write path can diverge from the other six apps'. The members that may write
+ * are METHODS, [resolveDeviceId] and [deviceIdFor], so a read can never reach
+ * them by accident: the device id once resolved inside a property getter, the
+ * e2e state snapshot polled it through a wizard run, and an identity the user
+ * had abandoned kept a device-id slot that made it a ghost switcher row (the
+ * same shape, and the same fix, as windows'). The wizard-resume rows are read
+ * through the same `LaunchPersistence` the launch machine routes on, never here.
  */
 interface SessionAccount {
     /** The account's identity secret (64-hex), or null when no account is in session. */
@@ -29,11 +34,22 @@ interface SessionAccount {
     val nestUrl: String?
 
     /**
-     * The sync device id the session account registers under on this install —
-     * its persisted per-account id, else derived and persisted through the
-     * shared get-or-create ([deviceIdFor]).
+     * The session account's per-actor device-id slot as it stands — null until
+     * something minted one, and not necessarily a sync id. For observers; a
+     * consumer that registers or enrolls under the id calls [resolveDeviceId].
      */
-    val deviceId: String?
+    val storedDeviceId: String?
+
+    /**
+     * The sync device id the session account registers under on this install —
+     * its persisted per-account id, else derived through the shared
+     * get-or-create ([deviceIdFor]), which PERSISTS it into the account's own
+     * slot. Call it only where the id is about to be used, never from an
+     * observer: a slot written on an identity the wizard has not finished keeps
+     * it from being retired (`long-term-store.md` § Eager vs. lazy migration at
+     * native boot).
+     */
+    fun resolveDeviceId(): String?
 
     /**
      * The sync device id the identity [secretHex] registers under — per

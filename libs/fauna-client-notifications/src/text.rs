@@ -80,11 +80,36 @@ pub fn knock_push_text(push: &KnockPayload) -> NotificationText {
     ))
 }
 
+/// Args the nest sends as Unix seconds (`security_notify.rs`: a pending
+/// action's `execute_after`, a recovery replacement's `lands_at`). They stay raw
+/// seconds on the wire; a native app reads them as the reader's local date and
+/// time (`behavior/value-formatting.md` § Absolute local timestamp display).
+#[cfg(feature = "local-clock")]
+const DEADLINE_ARGS: [&str; 2] = ["execute_after", "lands_at"];
+
 fn localized(body: &fauna_protocol::LocalizedText) -> NotificationText {
     NotificationText::Localized(LocalizedText::key_args(
         body.key.clone(),
-        body.args.iter().map(|(k, v)| (k.clone(), v.clone())),
+        body.args
+            .iter()
+            .map(|(k, v)| (k.clone(), display_arg(k, v))),
     ))
+}
+
+/// One arg as the reader sees it: a [`DEADLINE_ARGS`] value becomes local
+/// wall-clock time. Native only (`local-clock`): the web leg has no OS timezone
+/// database in wasm, so there the value passes through and the SPA formats it.
+#[cfg(feature = "local-clock")]
+fn display_arg(name: &str, value: &str) -> String {
+    match value.parse::<i64>() {
+        Ok(secs) if DEADLINE_ARGS.contains(&name) => fauna_core::format::format_unix_local(secs),
+        _ => value.to_string(),
+    }
+}
+
+#[cfg(not(feature = "local-clock"))]
+fn display_arg(_name: &str, value: &str) -> String {
+    value.to_string()
 }
 
 /// [`localized`] for a body whose args a stranger chose: every arg is reduced to
@@ -144,6 +169,51 @@ mod tests {
             text.resolve(fauna_i18n::strings::lookup),
             "alice liked your post"
         );
+    }
+
+    /// The nest sends a deadline as raw Unix seconds; a native app's row says
+    /// the reader's local date and time, not "runs at 1700000000".
+    #[cfg(feature = "local-clock")]
+    #[test]
+    fn a_deadline_arg_reads_as_local_time() {
+        let item = row(
+            "",
+            Some(
+                WireText::new("notifications.row_security_pending_action_queued")
+                    .with_arg("action_type", "delete_account")
+                    .with_arg("action_id", "7")
+                    .with_arg("execute_after", "1700000000"),
+            ),
+        );
+        let NotificationText::Localized(text) = notification_text(&item) else {
+            panic!("a catalog key must localize");
+        };
+        let when = fauna_core::format::format_unix_local(1_700_000_000);
+        assert_eq!(text.args["execute_after"], when);
+        assert_eq!(text.args["action_id"], "7", "only deadlines are rewritten");
+        assert!(
+            !text
+                .resolve(fauna_i18n::strings::lookup)
+                .contains("1700000000")
+        );
+    }
+
+    /// A deadline this build cannot read stays as sent — never invented.
+    #[cfg(feature = "local-clock")]
+    #[test]
+    fn a_non_numeric_deadline_arg_passes_through() {
+        let item = row(
+            "",
+            Some(
+                WireText::new("notifications.row_security_recovery_replacement_pending")
+                    .with_arg("new_key", "ab12")
+                    .with_arg("lands_at", "soon"),
+            ),
+        );
+        let NotificationText::Localized(text) = notification_text(&item) else {
+            panic!("a catalog key must localize");
+        };
+        assert_eq!(text.args["lands_at"], "soon");
     }
 
     /// The still-newer-nest row of the compat table: never the raw key.

@@ -12,17 +12,20 @@
 //!
 //! Defaults match `docs/goal/behavior/dmarc-reporting.md` § Record shape:
 //! `v=DMARC1; p=reject; sp=reject; pct=100; adkim=s; aspf=s;
-//! rua=mailto:dmarc-report@<primary>; ri=86400`. The deployment-wide
-//! `mail.dmarc.*` catalog write-path is not built yet, so today's caller passes
-//! [`DmarcPublishPolicy::default`] as the base; when the catalog lands it feeds
-//! a catalog-derived base into the same assembler (no rework).
+//! rua=mailto:dmarc-report@<primary>; ri=86400` — one copy of the literals,
+//! [`DmarcReportingPolicy::default`] in `fauna-protocol`, which
+//! [`DmarcPublishPolicy::default`] derives from. The nest's base is the
+//! deployment-wide `mail.dmarc.*` catalog overlaid onto that default (the
+//! admin's `fauna.bridges.put_dmarc_policy` writes); the onboarding provisioner,
+//! which runs before any nest exists to hold a catalog, passes the default.
 
-/// The DMARC tag values and the per-domain override partial-record — defined
-/// beside the admin-mail wire row that carries them
-/// (`fauna_protocol::bridge_routing`, `dmarc-reporting.md` § Multi-domain
-/// deployments) and re-exported here, where the published record is assembled.
+/// The DMARC tag values, the per-domain override partial-record and the
+/// effective deployment-wide policy — defined beside the admin-mail wire rows
+/// that carry them (`fauna_protocol::bridge_routing`, `dmarc-reporting.md`
+/// § Multi-domain deployments / § Record shape) and re-exported here, where the
+/// published record is assembled.
 pub use fauna_protocol::bridge_routing::{
-    DmarcAlignment, DmarcForensicOptions, DmarcMode, DmarcOverrides,
+    DmarcAlignment, DmarcForensicOptions, DmarcMode, DmarcOverrides, DmarcReportingPolicy,
 };
 
 /// The fully-resolved DMARC policy for one domain — the deployment-wide defaults
@@ -50,19 +53,28 @@ pub struct DmarcPublishPolicy {
 
 impl Default for DmarcPublishPolicy {
     /// `docs/goal/behavior/dmarc-reporting.md` § Record shape default-strict
-    /// shipped policy.
+    /// shipped policy — [`DmarcReportingPolicy::default`]'s record tags, the one copy.
     fn default() -> Self {
+        DmarcReportingPolicy::default().into()
+    }
+}
+
+impl From<DmarcReportingPolicy> for DmarcPublishPolicy {
+    /// The record tags of an effective deployment-wide policy (the nest's
+    /// catalog-derived base; its two retention fields are the prunes', not the
+    /// record's).
+    fn from(p: DmarcReportingPolicy) -> Self {
         DmarcPublishPolicy {
-            policy_mode: DmarcMode::Reject,
-            subdomain_policy_mode: DmarcMode::Reject,
-            pct: 100,
-            adkim: DmarcAlignment::Strict,
-            aspf: DmarcAlignment::Strict,
-            rua_destination: None,
-            ruf_publish: false,
-            ruf_destination: None,
-            fo: DmarcForensicOptions::AnyFailure,
-            ri_seconds: 86_400,
+            policy_mode: p.policy_mode,
+            subdomain_policy_mode: p.subdomain_policy_mode,
+            pct: p.pct,
+            adkim: p.adkim_mode,
+            aspf: p.aspf_mode,
+            rua_destination: p.rua_destination,
+            ruf_publish: p.ruf_publish,
+            ruf_destination: p.ruf_destination,
+            fo: p.fo_mode,
+            ri_seconds: p.ri_seconds,
         }
     }
 }

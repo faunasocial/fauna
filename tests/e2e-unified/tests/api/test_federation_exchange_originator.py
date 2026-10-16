@@ -28,11 +28,10 @@ import pytest
 
 from common.auth import (
     create_actor_and_register,
-    mint_token_via_handshake,
-    port_base_url,
-    register_user,
+    register_same_actor_on,
 )
 from tests.api import ws_api
+from helpers.waiting import wait_until
 from tests.api.bare import sign_and_encode_post
 
 pytestmark = pytest.mark.tier_3
@@ -55,19 +54,6 @@ def two_report_nests(request, nest_mode, tmp_path_factory):
             cleanup_b()
     finally:
         cleanup_a()
-
-
-def _same_actor_on(port: int, actor: dict, admin_signing_key) -> dict:
-    """Register ``actor``'s EXISTING keypair on another nest and mint a token
-    there — the same identity on both nests, so the identical signed post
-    bytes yield the identical content-addressed post id."""
-    register_user(
-        port,
-        actor["actor_id_hex"],
-        admin_signing_key=admin_signing_key,
-    )
-    token = mint_token_via_handshake(port_base_url(port), actor["signing_key"])
-    return {**actor, "token": token}
 
 
 def _query_one(db_path: str, sql: str, params: tuple):
@@ -94,9 +80,11 @@ def test_exchange_originator_moves_k3_aggregate_to_peer_unprompted(two_report_ne
     # bytes -> the identical content-addressed post id (a post's id IS its
     # report-hash), so B's import can attach the bus row to a resident item.
     author = create_actor_and_register(port_a, admin_signing_key=nest_a["admin"]["signing_key"])
-    author_b = _same_actor_on(port_b, author, nest_b["admin"]["signing_key"])
+    author_b = register_same_actor_on(
+        port_b, author, admin_signing_key=nest_b["admin"]["signing_key"]
+    )
     now_us = int(time.time() * 1_000_000)
-    body = "Limited offer!!! Click http://campaign.example.test to claim your prize."
+    body ="Limited offer!!! Click http://campaign.example.test to claim your prize."
     post_bytes = sign_and_encode_post(author["signing_key"], now_us, body, tags=[])
     post_id = ws_api.create_post(port_a, author, post_bytes)
     post_id_b = ws_api.create_post(port_b, author_b, post_bytes)
@@ -172,3 +160,94 @@ def test_exchange_originator_moves_k3_aggregate_to_peer_unprompted(two_report_ne
         (b_url,),
     )
     assert partner is not None, "successful exchange records the partner"
+
+
+@pytest.mark.feature("learn-from-my-activity")
+def test_a_shared_verdict_enough_people_agree_on_reaches_the_peer_nest_as_a_count(
+    two_report_nests,
+):
+    """`learn-from-my-activity` outcome 11: once enough people on your nest share
+    the same verdict on a public post, that anonymous count also reaches other
+    nests (`engagement-cues.md` § Layer B — signal aggregates ride the
+    report-sharing federation export unchanged).
+
+    The report journey above, re-run for an activity verdict: three opted-in
+    people on nest A each find the same public post worth watching to the end,
+    and with no federation call from the test, nest B holds the count — keyed
+    on A, carrying no one's identity. One fewer than enough is published
+    nowhere, so it is checked before the third verdict.
+    """
+    nest_a, nest_b = two_report_nests
+    port_a, port_b = nest_a["port"], nest_b["port"]
+    admin_a = nest_a["admin"]["signing_key"]
+    nest_a_id = bytes.fromhex(ws_api.nest_info(port_a)["nest_id"])
+    b_url = nest_b["peer_url"]
+    factor = "signal:watch-complete"
+
+    author = create_actor_and_register(port_a, admin_signing_key=admin_a)
+    author_b = register_same_actor_on(
+        port_b, author, admin_signing_key=nest_b["admin"]["signing_key"]
+    )
+    now_us = int(time.time() * 1_000_000)
+    post_bytes =sign_and_encode_post(
+        author["signing_key"], now_us, "A cat video everyone watches to the end.", tags=[]
+    )
+    post_id = ws_api.create_post(port_a, author, post_bytes)
+    assert ws_api.create_post(port_b, author_b, post_bytes) == post_id
+
+    def published(port, actor):
+        return [
+            e for e in ws_api.signal_share_status(port, actor)["published"]
+            if e["content_hash"] == post_id and e["factor"] == factor
+        ]
+
+    people = [create_actor_and_register(port_a, admin_signing_key=admin_a) for _ in range(3)]
+    for i, person in enumerate(people):
+        assert ws_api.signal_share_set(port_a, person, True)["share"] is True
+        if i == len(people) - 1:
+            assert published(port_a, author) == [], (
+                "two verdicts are not enough — nothing may be published yet"
+            )
+        ws_api.signal_contribute(port_a, person, post_id, "watch-complete")
+    assert [e["count"] for e in published(port_a, author)] == [3]
+
+    # The peering event (a user on A seeds a discovery feed at B); from here the
+    # test makes no mutation — A's exchange originator moves the count itself.
+    ws_api.create_feed(
+        port_a,
+        author,
+        "cross-nest discovery",
+        rules=[{"BodyContains": {"terms": ["cat"]}}],
+        scope="discovery",
+        contributor_seeds=[b_url],
+    )
+
+    # Budget: transition debounce (10 s) + one possible min-peer-interval
+    # backoff (60 s) + slack — the report journey's.
+    peer_row = wait_until(
+        lambda: _query_one(
+            nest_b["db_path"],
+            "SELECT claimed_count, peer_nest_id FROM peer_content_reports "
+            "WHERE content_hash = ? AND factor = ?",
+            (bytes.fromhex(post_id), factor),
+        ),
+        120.0,
+        interval=1.0,
+        diagnose=lambda: (
+            "nest B never received the shared verdict's count — signal aggregates "
+            "must ride the report exchange"
+        ),
+    )
+    claimed_count, peer_nest_id = peer_row
+    assert claimed_count == 3, "the count A's own people reached crossed, nothing more"
+    assert bytes(peer_nest_id) == nest_a_id, "keyed on A's channel-verified nest id"
+    # Anonymous: what B holds about the verdict is the count from A, never who.
+    local_rows = _query_one(
+        nest_b["db_path"],
+        "SELECT COUNT(*) FROM content_reports WHERE content_hash = ? AND factor = ?",
+        (bytes.fromhex(post_id), factor),
+    )
+    assert local_rows == (0,), (
+        "nest B holds per-person verdict rows for A's people — the count must arrive "
+        "anonymous"
+    )

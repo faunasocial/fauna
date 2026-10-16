@@ -390,10 +390,18 @@ pub async fn subscribe_labeler_core(
     // so a registration would owe drain work that can never be done), and no
     // grant (the client scores only content it already reads — a grant would be
     // capability nothing will ever fetch).
-    if rec.artifact_kind == artifact_kind::TEXT_MODEL {
+    //
+    // A `post`-kind `wasm` labeler takes the same posture (frame § Tier-3 →
+    // *Where it runs*, position (1) and invariant (f), ruled 2026-10-09): it
+    // runs at the subscriber's app in the feed seam, so the nest keeps the row
+    // and scores nothing for it. Only a `mail`-kind module — over content at
+    // rest, under the holder's grant — registers for the drain below.
+    let client_evaluated = rec.artifact_kind == artifact_kind::TEXT_MODEL
+        || (rec.artifact_kind == artifact_kind::WASM && rec.content_kind == "post");
+    if client_evaluated {
         if grant_id.is_some() {
             return Err(malformed(
-                "a text-model labeler is client-evaluated; subscribe carries no grant_id",
+                "a post labeler is evaluated in the subscriber's app; subscribe carries no grant_id",
             ));
         }
         db.put_subscription(owner, labeler_id, None, rec.version)
@@ -549,6 +557,7 @@ fn inspect_labeler_handler() -> RpcHandler {
                 metadata_blob: ByteBuf::from(rec.metadata_blob),
                 wasm_bytes: ByteBuf::from(rec.wasm_bytes),
                 artifact_kind: rec.artifact_kind,
+                content_kind: rec.content_kind,
                 extra: Default::default(),
             })
         })

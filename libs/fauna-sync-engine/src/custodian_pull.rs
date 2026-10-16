@@ -33,17 +33,18 @@
 //! [`PullReport::cap_state`] is the plan's state **widened** by whether this pass
 //! actually refused to pull, and that is what the check-in carries.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use fauna_client_backup::BackupClient;
 use fauna_client_backup::audit::{AUDIT_MIN_INTERVAL_SECS, AUDIT_SAMPLE_K};
-use fauna_client_backup::custodian::{CapState, ReclaimPlan, plan_reclaim};
+use fauna_client_backup::custodian::{CapState, HeldGeneration, ReclaimPlan, plan_reclaim};
 use fauna_core::crypto::OwnerSealKey;
-use fauna_core::data::ContentHash;
+use fauna_core::data::{ContentHash, parse_folder_backup_set_name};
 use fauna_core::file_download::FileDownloadKeys;
 use fauna_protocol::backup::CoveredFolder;
+use fauna_protocol::nest_rotation::verify_chain;
 use fauna_protocol::{RpcError, RpcErrorClass, RpcRequester};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -143,6 +144,21 @@ struct PreparedKind {
     regressed: Option<SourceRegressed>,
 }
 
+/// One standing source regression, resolved to the set and family its ledger
+/// covers — what the pass's compacted-out step, reclaim and standing rule judge
+/// rows under ([`CustodianPull::holds`]).
+#[derive(Debug, Clone)]
+struct Hold {
+    set: String,
+    family: SegmentFamily,
+    /// The ledger's held path — the entry's key.
+    ledger: String,
+    /// The entry's held generation: segment ids below it are the lost copy's.
+    held: u32,
+    /// The entry's first sighting: what was live then is what it holds up.
+    observed_at: i64,
+}
+
 /// What one pass did for ONE family of a backed-up kind — the per-segment half
 /// of a [`PullReport`]. The content family's is spread over the report's own
 /// fields; the journal's rides in [`PullReport::placement`].
@@ -236,6 +252,14 @@ pub struct CustodianPull<'a, S: SegmentSource, R: RpcRequester> {
     /// (the mobile construct-run-drop shells) and for tests that do not
     /// exercise the refusal.
     pub not_assigned: Option<&'a Notify>,
+    /// The identity this device is bound to at the source — the login's pin,
+    /// else a possession proof over this connection, never the box's own
+    /// claim (`fauna_client::trust::connection_bound_identity`). What a held
+    /// covered-folder mirror set re-keys onto when the source rotates
+    /// ([`Self::rekey_rotated_folder_sets`]). `None` — a host that could not
+    /// prove it, or a test that does not exercise a rotation — re-keys
+    /// nothing.
+    pub bound_source: Option<[u8; 32]>,
 }
 
 impl<S: SegmentSource, R: RpcRequester> CustodianPull<'_, S, R>
@@ -464,19 +488,203 @@ where
             }
         };
         let served = listing.next_segment_id;
-        if served < held {
-            self.store
-                .record_source_regression(&ledger, held, served, now)
-                .await?;
-            Ok(Some(SourceRegressed {
-                family,
-                held,
-                served,
-            }))
-        } else {
-            self.store.clear_source_regression(&ledger).await?;
-            Ok(None)
+        if served >= held {
+            // Admitted. A standing entry is NOT cleared here: the counter is
+            // back above the held generation once the floor landed — or once
+            // the source wrote as many segments as it lost — and neither says
+            // the lost copy came back. The pass re-judges it after step 5
+            // ([`Self::rejudge_regression`]).
+            return Ok(None);
         }
+        self.store
+            .record_source_regression(&ledger, held, served, now)
+            .await?;
+        self.floor_source(kind, family, &ledger, held, now).await?;
+        Ok(Some(SourceRegressed {
+            family,
+            held,
+            served,
+        }))
+    }
+
+    /// Floor the source's counter at the generation this device holds, over
+    /// the owner connection the check-in rides — once per entry, asked again
+    /// by every refused pass until it lands (part (0′) (a)). The floor is the
+    /// HELD generation, the device's own reading of a ledger the source
+    /// sealed, never the counter it served; each family floors on its own
+    /// serve tag. A floor that fails is logged and the pass stays refused:
+    /// the next one asks again.
+    async fn floor_source(
+        &self,
+        kind: &str,
+        family: SegmentFamily,
+        ledger: &str,
+        held: u32,
+        now: i64,
+    ) -> Result<()> {
+        if self
+            .store
+            .audit_record()
+            .await
+            .source_regressions
+            .get(ledger)
+            .is_some_and(|r| r.floored_at.is_some())
+        {
+            return Ok(());
+        }
+        let tag = family
+            .serve_kind(kind)
+            .ok_or_else(|| anyhow::anyhow!("kind {kind} has no {family:?} family"))?;
+        match self
+            .backup
+            .segments_counter_floor(tag.to_string(), hex::encode(self.scope_id), held)
+            .await
+        {
+            Ok(_) => self.store.record_source_floor(ledger, now).await,
+            Err(e) => {
+                tracing::warn!(
+                    destination_id = %self.destination_id,
+                    kind,
+                    ?family,
+                    held,
+                    error = %e,
+                    "custodian: flooring the regressed source failed; the next refused pass asks again"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// The standing entries' holds this store's rows are judged under — one
+    /// per ledger a [`SourceRegression`] stands against, resolved to the set
+    /// and family it covers.
+    ///
+    /// [`SourceRegression`]: crate::custodian_store::SourceRegression
+    async fn holds(&self) -> Result<Vec<Hold>> {
+        let regressions = self.store.audit_record().await.source_regressions;
+        if regressions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let scope_hex = hex::encode(self.scope_id);
+        let mut out = Vec::new();
+        for kind in crate::segment_backup::BACKED_UP_KINDS {
+            let set = self.kind_set(kind)?;
+            for family in SegmentFamily::PASS_ORDER {
+                if family.serve_kind(kind).is_none() {
+                    continue;
+                }
+                let ledger = Self::mirror_path(&set, family, &scope_hex, kind);
+                if let Some(entry) = regressions.get(&ledger) {
+                    out.push(Hold {
+                        set: set.clone(),
+                        family,
+                        ledger,
+                        held: entry.held,
+                        observed_at: entry.observed_at,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Which of `rows` the standing entries hold up (part (0′) (b)): for each
+    /// entry, every generation that was **live at its `observed_at`** at a
+    /// segment path of its set and family below the held generation — the
+    /// unnamed live rows the compacted-out step now skips, and the
+    /// pre-regression generation of a reused id once an admitted pass
+    /// superseded it — and the pre-regression generation of the ledger
+    /// itself, the mirror that anchors those rows' sidecars for the recovery.
+    /// Parallel to `rows`.
+    fn held_up(rows: &[HeldRow], holds: &[Hold], scope_hex: &str) -> Vec<bool> {
+        let mut out = vec![false; rows.len()];
+        for hold in holds {
+            // The generation live at `observed_at`, per path: the newest stored
+            // no later than it.
+            let mut live_then: HashMap<&str, i64> = HashMap::new();
+            for row in rows {
+                if row.stored_at <= hold.observed_at {
+                    let at = live_then.entry(row.path.as_str()).or_insert(row.stored_at);
+                    *at = (*at).max(row.stored_at);
+                }
+            }
+            for (i, row) in rows.iter().enumerate() {
+                if row.deleted || live_then.get(row.path.as_str()) != Some(&row.stored_at) {
+                    continue;
+                }
+                let below_held = path_in_set(&hold.set, &row.path)
+                    .and_then(|p| hold.family.parse(scope_hex, p))
+                    .is_some_and(|(id, _)| id < hold.held);
+                if below_held || row.path == hold.ledger {
+                    out[i] = true;
+                }
+            }
+        }
+        out
+    }
+
+    /// `rows` projected onto the reclaim policy's input, the generations the
+    /// standing entries hold up pinned — the one projection every
+    /// `plan_reclaim` of a pass reads, so the step that reclaims and the
+    /// figures the check-in carries agree.
+    async fn policy(&self, rows: &[HeldRow]) -> Result<Vec<HeldGeneration>> {
+        let holds = self.holds().await?;
+        let pinned = Self::held_up(rows, &holds, &hex::encode(self.scope_id));
+        Ok(rows
+            .iter()
+            .zip(pinned)
+            .map(|(row, pinned)| HeldGeneration {
+                pinned,
+                ..row.to_policy()
+            })
+            .collect())
+    }
+
+    /// The standing rule (part (0′) (c)), after a family's admitted pass: the
+    /// entry against this family's ledger clears when the store holds nothing
+    /// the source lost — every held-up segment generation still live and
+    /// named by `listing` unchanged (the shared diff neither fetches nor drops
+    /// it), and none of them superseded. Never on the counter alone; the
+    /// recovery's duty is the other way out.
+    async fn rejudge_regression(
+        &self,
+        kind: &str,
+        family: SegmentFamily,
+        listing: &SegmentListing,
+    ) -> Result<()> {
+        let scope_hex = hex::encode(self.scope_id);
+        let set = self.kind_set(kind)?;
+        let ledger = Self::mirror_path(&set, family, &scope_hex, kind);
+        let Some(hold) = self.holds().await?.into_iter().find(|h| h.ledger == ledger) else {
+            return Ok(());
+        };
+        let rows = self.store.held().await?;
+        let held_up = Self::held_up(&rows, std::slice::from_ref(&hold), &scope_hex);
+        let diff = diff_segments(
+            &listing.segments,
+            &Self::local_state(&rows, &set, family, &scope_hex),
+        );
+        let changed: std::collections::HashSet<u32> = diff
+            .to_drop
+            .iter()
+            .copied()
+            .chain(diff.to_upload.iter().map(|r| r.segment_id))
+            .collect();
+        let lost = rows.iter().zip(&held_up).any(|(row, &up)| {
+            if !up || row.path == ledger {
+                return false;
+            }
+            let superseded = CustodianStore::live_at(&rows, &row.path).map(|r| r.stored_at)
+                != Some(row.stored_at);
+            superseded
+                || path_in_set(&set, &row.path)
+                    .and_then(|p| family.parse(&scope_hex, p))
+                    .is_some_and(|(id, _)| changed.contains(&id))
+        });
+        if !lost {
+            self.store.clear_source_regression(&ledger).await?;
+        }
+        Ok(())
     }
 
     /// Steps 2–6 of a pass, over listings [`Self::prepare`] read and compared.
@@ -501,7 +709,7 @@ where
         // store as it stands.
         if let Some(regressed) = regressed {
             let rows = self.store.held().await?;
-            let policy: Vec<_> = rows.iter().map(HeldRow::to_policy).collect();
+            let policy = self.policy(&rows).await?;
             let standing = plan_reclaim(&policy, self.cap_bytes, now);
             report.held_bytes = standing.held_bytes;
             report.cap_state = standing.cap_state;
@@ -521,9 +729,11 @@ where
 
         // 2 — make room BEFORE pulling: expired retention first, then in-grace
         // retention under cap pressure. `plan_reclaim` never names a live path,
-        // so this cannot destroy the owner's only copy of anything.
+        // nor a generation a standing source regression holds up
+        // ([`Self::policy`]), so this cannot destroy the owner's only copy of
+        // anything.
         let rows = self.store.held().await?;
-        let policy: Vec<_> = rows.iter().map(HeldRow::to_policy).collect();
+        let policy = self.policy(&rows).await?;
         let plan = plan_reclaim(&policy, self.cap_bytes, now);
         if !plan.reclaim.is_empty() {
             let victims: Vec<HeldRow> = plan.reclaim.iter().map(|&i| rows[i].clone()).collect();
@@ -570,7 +780,7 @@ where
         // segment would not fit lands under the cap, and reporting the plan's
         // bare verdict would render a stopped backup as ordinary lag.
         let rows = self.store.held().await?;
-        let policy: Vec<_> = rows.iter().map(HeldRow::to_policy).collect();
+        let policy = self.policy(&rows).await?;
         let settled = plan_reclaim(&policy, self.cap_bytes, now);
         let cap_state = if budget.cap_state == CapState::Reached {
             CapState::Reached
@@ -873,7 +1083,22 @@ where
         // everything cannot make this device drop the bytes today. Both halves
         // tombstone; the sidecar's only when a live one is actually held (a
         // dat-only store holds none).
+        //
+        // 4′ — the hold: while a source regression stands against this
+        // family's ledger, an unnamed live segment below its held generation is
+        // loss, not compaction — the copy the owner's recovery will read — so
+        // it stays live (part (0′) (b)).
+        let lost_below = self
+            .store
+            .audit_record()
+            .await
+            .source_regressions
+            .get(&Self::mirror_path(&set, family, &scope_hex, kind))
+            .map(|entry| entry.held);
         for segment_id in &diff.to_drop {
+            if lost_below.is_some_and(|held| *segment_id < held) {
+                continue;
+            }
             self.store
                 .put_tombstone(
                     &Self::segment_path(&set, family, &scope_hex, *segment_id),
@@ -913,6 +1138,10 @@ where
             budget.cap_state = CapState::Reached;
         }
 
+        // 5′ — the standing rule: with the pass's writes in, does the store
+        // still hold anything the source lost?
+        self.rejudge_regression(kind, family, src_listing).await?;
+
         Ok(out)
     }
 
@@ -950,7 +1179,7 @@ where
         // The display name: the listing's plaintext while it still carries one,
         // else the sealed label opened under the owner key this custodian seals
         // with — the owner's own seal, read on the owner's own device
-        // (`segment-backup-protocol.md` § *Where a restored folder's name comes
+        // (`client-device-custodian.md` § *Where a restored folder's name comes
         // from*). A label this key cannot open (a set sealed under a group
         // generation) records no name, and a re-seed reports the set unnamed.
         let name = covered
@@ -982,7 +1211,7 @@ where
         let head = folders.folder_head(covered.folder_id).await?;
 
         let rows = self.store.held().await?;
-        let policy: Vec<_> = rows.iter().map(HeldRow::to_policy).collect();
+        let policy = self.policy(&rows).await?;
         let plan = plan_reclaim(&policy, self.cap_bytes, now);
         let mut budget = ReclaimPlan {
             reclaim: Vec::new(),
@@ -1110,8 +1339,15 @@ where
                 return Vec::new();
             }
         };
+        let held_back = match self.bound_source {
+            Some(bound) => self.rekey_rotated_folder_sets(&bound, &covered).await,
+            None => HashSet::new(),
+        };
         let mut reports = Vec::new();
         for cf in &covered {
+            if held_back.contains(&cf.folder_set) {
+                continue;
+            }
             match self.run_folder_once(folders, cf, now).await {
                 Ok(report) => reports.push(report),
                 Err(e) => tracing::warn!(
@@ -1123,6 +1359,119 @@ where
             }
         }
         reports
+    }
+
+    /// Re-key the held mirror sets a source rotation renamed, before the
+    /// folder passes diff (`segment-backup-protocol.md` § Cross-location
+    /// backup protocol → *The writer seat* → *Where the carry runs, and what
+    /// else follows the identity*: a client-device custodian's held mirror
+    /// sets re-key "at its first pull bound to the successor, before that pull
+    /// diffs").
+    ///
+    /// The source names each covered folder's set after the identity it holds
+    /// now, while this store keeps the name it was given when it pulled. For
+    /// each covered folder whose set is named under `bound`, a held set of the
+    /// same folder named under another identity is renamed onto it
+    /// ([`CustodianStore::rename_folder_set`]) when the bound box's rotation
+    /// chain, verified hop by hop ([`verify_chain`], the seat carry's check),
+    /// links that identity to `bound`. A held set with no verified link is
+    /// another box's and is left alone; a covered set named under any identity
+    /// but `bound` re-keys nothing. Without this the pass re-fetches the
+    /// folder into a second set and the predecessor's copy stays live and
+    /// charged for ever — nothing lists it again to tombstone it.
+    ///
+    /// The chain is asked for only when a candidate exists. Returns the covered
+    /// sets whose pass must wait — a candidate whose chain could not be
+    /// fetched, or whose rename failed — because diffing them now would double
+    /// the copy the rename exists to keep single; the next pass retries.
+    async fn rekey_rotated_folder_sets(
+        &self,
+        bound: &[u8; 32],
+        covered: &[CoveredFolder],
+    ) -> HashSet<String> {
+        let mut held_back = HashSet::new();
+        let successors: HashMap<i64, &str> = covered
+            .iter()
+            .filter_map(|cf| {
+                let (nest, folder_id) = parse_folder_backup_set_name(&cf.folder_set)?;
+                (nest == *bound).then_some((folder_id, cf.folder_set.as_str()))
+            })
+            .collect();
+        if successors.is_empty() {
+            return held_back;
+        }
+        // A held set's name is its row path less the within-set path, which
+        // on the folder axis is one path hash — confirmed through the store's
+        // one inverse, and read as a set name through the one set-name parser.
+        let Ok(rows) = self.store.held().await else {
+            // The folder pass reads the same index and reports the failure.
+            return held_back;
+        };
+        let mut candidates: Vec<(String, [u8; 32], &str)> = Vec::new();
+        for row in &rows {
+            let Some((set, _)) = row.path.rsplit_once('/') else {
+                continue;
+            };
+            if path_in_set(set, &row.path).is_none()
+                || candidates.iter().any(|(held, ..)| held == set)
+            {
+                continue;
+            }
+            let Some((nest, folder_id)) = parse_folder_backup_set_name(set) else {
+                continue;
+            };
+            if nest == *bound {
+                continue;
+            }
+            if let Some(successor) = successors.get(&folder_id) {
+                candidates.push((set.to_string(), nest, successor));
+            }
+        }
+        if candidates.is_empty() {
+            return held_back;
+        }
+
+        let chain = match self.backup.rotation_chain().await {
+            Ok(reply) => reply.chain,
+            Err(e) => {
+                tracing::warn!(
+                    destination_id = %self.destination_id,
+                    error = %e,
+                    "CustodianPull: rotation chain unavailable; holding the folders a held set may rename onto"
+                );
+                held_back.extend(candidates.iter().map(|(.., succ)| succ.to_string()));
+                return held_back;
+            }
+        };
+        for (held, nest, successor) in candidates {
+            if verify_chain(&chain, &nest, bound).is_err() {
+                tracing::info!(
+                    destination_id = %self.destination_id,
+                    held_set = %held,
+                    "CustodianPull: held mirror set names an identity no verified chain links to the bound one; left alone"
+                );
+                continue;
+            }
+            match self.store.rename_folder_set(&held, successor).await {
+                Ok(renamed) => tracing::info!(
+                    destination_id = %self.destination_id,
+                    from = %held,
+                    to = %successor,
+                    renamed,
+                    "CustodianPull: held mirror set re-keyed onto the rotated source's identity"
+                ),
+                Err(e) => {
+                    tracing::warn!(
+                        destination_id = %self.destination_id,
+                        from = %held,
+                        error = %e,
+                        "CustodianPull: held mirror set could not be re-keyed; its folder waits"
+                    );
+                    held_back.insert(successor.to_string());
+                }
+            }
+        }
+        held_back
     }
 
     /// One pass over **every** backed-up kind, at wall-clock `now`.
@@ -1654,6 +2003,16 @@ mod tests {
         covered_folders: Mutex<Vec<CoveredFolder>>,
         /// How the next check-ins are answered; accepted when `None`.
         checkin_fault: Mutex<Option<CheckinFault>>,
+        /// Every `fauna.segments.counter_floor` asked, in order — answered or
+        /// not.
+        floors: Mutex<Vec<fauna_protocol::segments::SegmentsCounterFloorRequest>>,
+        /// While set, a floor is answered with a timeout.
+        floor_fails: Mutex<bool>,
+        /// The source's rotation chain, oldest hop first; `None` answers
+        /// `fauna.auth.rotation_chain` with a timeout.
+        chain: Mutex<Option<Vec<fauna_protocol::nest_rotation::SignedNestRotation>>>,
+        /// How many times the chain was asked for.
+        chain_asked: Mutex<usize>,
     }
 
     /// A check-in the fake nest does not accept.
@@ -1706,6 +2065,33 @@ mod tests {
                         .unwrap()
                         .push(serde_json::from_slice(&raw).map_err(decode)?);
                     serde_json::from_str(r#"{"ok":true}"#).map_err(decode)
+                }
+                fauna_protocol::segments::KIND_SEGMENTS_COUNTER_FLOOR => {
+                    let req: fauna_protocol::segments::SegmentsCounterFloorRequest =
+                        serde_json::from_slice(&raw).map_err(decode)?;
+                    let floor = req.floor;
+                    self.floors.lock().unwrap().push(req);
+                    if *self.floor_fails.lock().unwrap() {
+                        return Err(NestClientError::RpcTimeout);
+                    }
+                    let reply = fauna_protocol::segments::SegmentsCounterFloorReply {
+                        next_segment_id: floor,
+                        extra: Default::default(),
+                    };
+                    let raw = serde_json::to_vec(&reply).map_err(decode)?;
+                    serde_json::from_slice(&raw).map_err(decode)
+                }
+                fauna_protocol::nest_rotation::ROTATION_CHAIN_KIND => {
+                    *self.chain_asked.lock().unwrap() += 1;
+                    let Some(chain) = self.chain.lock().unwrap().clone() else {
+                        return Err(NestClientError::RpcTimeout);
+                    };
+                    let reply = fauna_protocol::nest_rotation::RotationChainReply {
+                        chain,
+                        extra: Default::default(),
+                    };
+                    let raw = serde_json::to_vec(&reply).map_err(decode)?;
+                    serde_json::from_slice(&raw).map_err(decode)
                 }
                 fauna_client_backup::KIND_DESTINATION_LIST => {
                     let reply = fauna_protocol::backup::DestinationListReply {
@@ -1797,6 +2183,7 @@ mod tests {
                 device_id: Some("dev-ipad".into()),
                 folder_source: None,
                 not_assigned: None,
+                bound_source: None,
             }
         }
 
@@ -2273,6 +2660,7 @@ mod tests {
             device_id: Some("dev-ipad".into()),
             folder_source: None,
             not_assigned: None,
+            bound_source: None,
         };
 
         let err = pull.run_once("mail", 0).await.unwrap_err();
@@ -3003,6 +3391,7 @@ mod tests {
                     held: 4,
                     served: 0,
                     observed_at: DAY,
+                    floored_at: Some(DAY),
                 },
             )])
         );
@@ -3157,6 +3546,226 @@ mod tests {
         assert_eq!(check_ins(&rig), check_ins_before);
     }
 
+    // ---- part (0′): the floor, the hold, the standing rule ----
+
+    fn floors(rig: &Rig) -> Vec<(String, u32)> {
+        rig.nest
+            .transport()
+            .floors
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| (r.kind.clone(), r.floor))
+            .collect()
+    }
+
+    fn mail_entry_floored_at(record: &crate::custodian_store::AuditRecord) -> Option<i64> {
+        record.source_regressions[&mail_ledger()].floored_at
+    }
+
+    /// The generations this store holds at mail content segment `id`'s `.dat`.
+    async fn generations_at(rig: &Rig, id: u32) -> usize {
+        let path = CustodianPull::<FakeSource, FakeNest>::segment_path(
+            "__mail",
+            SegmentFamily::Content,
+            &scope_hex(),
+            id,
+        );
+        let rows = rig.store.held().await.unwrap();
+        rows.iter().filter(|r| r.path == path).count()
+    }
+
+    /// **The floor.** The pass that accepts the regression floors the source
+    /// over its own connection with the generation this device HELD — the
+    /// ledger the source itself sealed — never the counter it served, and
+    /// records that it landed; a later refused pass does not ask again.
+    #[tokio::test]
+    async fn the_accepting_pass_floors_the_source_with_the_held_generation() {
+        let rig = pulled_three().await;
+        rig.source.rebuild_empty();
+
+        let report = rig.pull(None).run_once("mail", DAY).await.unwrap();
+
+        assert!(
+            report.source_regressed.is_some(),
+            "the pass is still refused"
+        );
+        assert_eq!(floors(&rig), vec![("mail".to_string(), 4)]);
+        assert_eq!(
+            rig.nest.transport().floors.lock().unwrap()[0].actor_id,
+            scope_hex()
+        );
+        assert_eq!(
+            mail_entry_floored_at(&rig.store.audit_record().await),
+            Some(DAY)
+        );
+
+        rig.pull(None).run_once("mail", 2 * DAY).await.unwrap();
+        assert_eq!(floors(&rig).len(), 1, "a landed floor is not asked again");
+    }
+
+    /// A floor that does not land is asked again on the next refused pass, and
+    /// its failure does not fail the pass.
+    #[tokio::test]
+    async fn a_floor_that_did_not_land_is_asked_again() {
+        let rig = pulled_three().await;
+        rig.source.rebuild_empty();
+        *rig.nest.transport().floor_fails.lock().unwrap() = true;
+
+        let report = rig.pull(None).run_once("mail", DAY).await.unwrap();
+        assert!(report.source_regressed.is_some());
+        assert_eq!(floors(&rig).len(), 1);
+        assert_eq!(mail_entry_floored_at(&rig.store.audit_record().await), None);
+
+        *rig.nest.transport().floor_fails.lock().unwrap() = false;
+        rig.pull(None).run_once("mail", 2 * DAY).await.unwrap();
+        assert_eq!(floors(&rig), vec![("mail".into(), 4), ("mail".into(), 4)]);
+        assert_eq!(
+            mail_entry_floored_at(&rig.store.audit_record().await),
+            Some(2 * DAY)
+        );
+    }
+
+    /// A rig whose source went back to an older copy and reused an id before
+    /// this device's pass caught it: it holds 1–3 at generation 4, the source
+    /// serves 1 and a NEW 2 at counter 3 (3 is lost), the refused pass floors
+    /// it at 4, and the lived-in source then writes 4. Returns after the first
+    /// admitted pass, at `2 * DAY`.
+    async fn admitted_after_a_reuse() -> (Rig, PullReport) {
+        let rig = pulled_three().await;
+        rig.source.remove(3);
+        rig.source.set(2, body(22, 5_000));
+        rig.source.serve_counter("mail", 3);
+        let refused = rig.pull(None).run_once("mail", DAY).await.unwrap();
+        assert!(refused.source_regressed.is_some());
+
+        // The floor raised the source's counter; it went on writing.
+        rig.source.serve_saved_counter("mail");
+        rig.source.set(4, body(4, 4_000));
+        let admitted = rig.pull(None).run_once("mail", 2 * DAY).await.unwrap();
+        (rig, admitted)
+    }
+
+    /// **The hold.** Once the floor stands the pass is admitted and runs in
+    /// full — the reused id is superseded, the new segment stored, a check-in
+    /// made — but the lost segment 3, below the held generation and named by no
+    /// listing, is NOT tombstoned, and the entry outlasts the counter.
+    #[tokio::test]
+    async fn an_admitted_pass_after_the_floor_keeps_the_lost_segment_live() {
+        let (rig, report) = admitted_after_a_reuse().await;
+
+        assert_eq!(report.source_regressed, None, "the pass is admitted");
+        assert_eq!(report.stored_segments, vec![2, 4]);
+        assert!(
+            report.tombstoned_segments.is_empty(),
+            "3 is loss, not compaction"
+        );
+        assert_eq!(live_mail(&rig).await, vec![1, 2, 3, 4]);
+        assert_eq!(generations_at(&rig, 2).await, 2, "the reused id superseded");
+        assert_eq!(check_ins(&rig), 2, "the admitted pass checks in");
+        assert_eq!(
+            rig.store.audit_record().await.source_regressions[&mail_ledger()].held,
+            4,
+            "the entry stands although the counter is back above it"
+        );
+    }
+
+    /// **The hold, at reclaim.** Past the grace window the pre-regression
+    /// generation of the reused id stays — the owner's only copy of it — while
+    /// a generation superseded after the regression, above the held one, ages
+    /// out as ever.
+    #[tokio::test]
+    async fn reclaim_past_the_grace_window_spares_the_held_up_generation() {
+        let (rig, _) = admitted_after_a_reuse().await;
+        rig.source.set(4, body(44, 4_500));
+        rig.pull(None).run_once("mail", 3 * DAY).await.unwrap();
+        assert_eq!(generations_at(&rig, 4).await, 2);
+
+        rig.pull(None).run_once("mail", 40 * DAY).await.unwrap();
+
+        assert_eq!(
+            generations_at(&rig, 2).await,
+            2,
+            "the lost generation stays"
+        );
+        assert_eq!(
+            generations_at(&rig, 4).await,
+            1,
+            "the ordinary one aged out"
+        );
+        assert_eq!(live_mail(&rig).await, vec![1, 2, 3, 4]);
+    }
+
+    /// **The hold, under cap pressure.** Inside the grace window a cap the
+    /// store breaches gives up every ordinary retained generation and never
+    /// the held-up one — and says cap-reached rather than evict it.
+    #[tokio::test]
+    async fn cap_pressure_spares_the_held_up_generation() {
+        let (rig, _) = admitted_after_a_reuse().await;
+        rig.source.set(4, body(44, 4_500));
+        rig.pull(None).run_once("mail", 3 * DAY).await.unwrap();
+
+        let report = rig.pull(Some(1)).run_once("mail", 4 * DAY).await.unwrap();
+
+        assert_eq!(
+            generations_at(&rig, 2).await,
+            2,
+            "the lost generation stays"
+        );
+        assert_eq!(
+            generations_at(&rig, 4).await,
+            1,
+            "the ordinary one gave way"
+        );
+        assert_eq!(report.cap_state, CapState::Reached);
+    }
+
+    /// **The standing rule.** The entry clears when a pass finds the store
+    /// holds nothing the source lost — every row below the held generation
+    /// named by the listing, unchanged, and nothing held up — here the source
+    /// made whole by other means after the floor.
+    #[tokio::test]
+    async fn the_entry_clears_on_a_listing_naming_every_held_row() {
+        let rig = pulled_three().await;
+        rig.source.remove(3);
+        rig.source.serve_counter("mail", 3);
+        rig.pull(None).run_once("mail", DAY).await.unwrap();
+        assert_eq!(rig.store.audit_record().await.source_regressions.len(), 1);
+
+        rig.source.set(3, three()[2].1.clone());
+        rig.source.serve_saved_counter("mail");
+        let report = rig.pull(None).run_once("mail", 2 * DAY).await.unwrap();
+
+        assert_eq!(report.source_regressed, None);
+        assert!(report.stored_segments.is_empty());
+        assert!(
+            rig.store.audit_record().await.source_regressions.is_empty(),
+            "nothing is lost, so the entry clears"
+        );
+    }
+
+    /// A reused id is loss even when every id is still listed: the source
+    /// serves 1–3 again but 2 with other bytes, so the admitted pass
+    /// supersedes 2 — and its pre-regression generation, held up, keeps the
+    /// entry standing.
+    #[tokio::test]
+    async fn a_reused_id_alone_keeps_the_entry_standing() {
+        let rig = pulled_three().await;
+        rig.source.set(2, body(22, 5_000));
+        rig.source.serve_counter("mail", 3);
+        rig.pull(None).run_once("mail", DAY).await.unwrap();
+
+        rig.source.serve_saved_counter("mail");
+        let report = rig.pull(None).run_once("mail", 2 * DAY).await.unwrap();
+
+        assert_eq!(report.stored_segments, vec![2]);
+        assert_eq!(
+            rig.store.audit_record().await.source_regressions.len(),
+            1,
+            "the lost generation of 2 is still held up"
+        );
+    }
+
     // ---- the scheduling hook (slice 3c) ----
 
     /// A source that fails `list_segments` for one named kind — the per-kind
@@ -3302,6 +3911,7 @@ mod tests {
             device_id: Some("dev-ipad".into()),
             folder_source: None,
             not_assigned: None,
+            bound_source: None,
         };
 
         // The refused kind reports nothing — and, load-bearingly, the sweep
@@ -3878,6 +4488,206 @@ mod tests {
         assert!(
             rows.iter().all(|r| !r.path.starts_with("__folder/")),
             "nothing landed under the mirror set: {rows:?}"
+        );
+    }
+
+    // ── a source rotation re-keys the held mirror sets ───────────────────────
+
+    fn box_key(byte: u8) -> fauna_core::identity::ActorKeypair {
+        fauna_core::identity::ActorKeypair::from_secret([byte; 32])
+    }
+
+    fn box_id(key: &fauna_core::identity::ActorKeypair) -> [u8; 32] {
+        key.actor_id().0
+    }
+
+    /// The signed hop `old → new`, minted with both real keys exactly as the
+    /// rotation transaction mints it.
+    fn rotation_hop(
+        old: &fauna_core::identity::ActorKeypair,
+        new: &fauna_core::identity::ActorKeypair,
+    ) -> fauna_protocol::nest_rotation::SignedNestRotation {
+        fauna_protocol::nest_rotation::NestRotation {
+            old_nest_actor_id: box_id(old),
+            new_nest_actor_id: box_id(new),
+            seq: 1,
+            rotated_at: 1_800_000_000,
+        }
+        .sign(old.signing_key(), new.signing_key())
+        .expect("sign the hop")
+    }
+
+    /// The source lists folder 5 under the set `identity` names.
+    fn cover_folder_under(rig: &Rig, identity: &[u8; 32]) -> String {
+        let set = fauna_core::data::folder_backup_set_name(identity, 5);
+        *rig.nest.transport().covered_folders.lock().unwrap() = vec![CoveredFolder {
+            folder_id: 5,
+            folder_set: set.clone(),
+            name: Some("Photos".into()),
+            ..Default::default()
+        }];
+        set
+    }
+
+    /// The live rows of `set`, as `(path within the set, bytes charged)`.
+    fn live_in(rows: &[HeldRow], set: &str) -> Vec<(String, u64)> {
+        rows.iter()
+            .filter(|r| {
+                CustodianStore::live_at(rows, &r.path).map(|l| l.stored_at) == Some(r.stored_at)
+            })
+            .filter_map(|r| Some((path_in_set(set, &r.path)?.to_string(), r.size_bytes)))
+            .collect()
+    }
+
+    /// **The rotation, reproduced and closed.** Before the re-key, the pass
+    /// after the source rotated fetched the folder again into the successor's
+    /// set and left the predecessor's live and charged for ever — the copy
+    /// doubled (reproduced 2026-10-09). Now the first pull bound to the
+    /// successor renames the held set onto the successor's name before it
+    /// diffs: the folder is held once, under the successor's name, nothing is
+    /// fetched again and the cap is charged once; its display name moves with
+    /// it.
+    #[tokio::test]
+    async fn a_rotated_sources_held_folder_is_rekeyed_onto_the_successor_once() {
+        let (pred, succ) = (box_key(0x11), box_key(0x22));
+        let rig = Rig::new(&[]);
+        let folders = FakeFolders::default();
+        let path_hash = [0x21u8; 32];
+        folders.stage_file(path_hash, &[body(7, 3_000)]);
+        let mut pull = rig.pull(None);
+        pull.folder_source = Some(&folders);
+
+        pull.bound_source = Some(box_id(&pred));
+        let pred_set = cover_folder_under(&rig, &box_id(&pred));
+        assert_eq!(pull.run_covered_folders(0).await[0].stored_paths, 1);
+        let charged_before: u64 = live_in(&rig.store.held().await.unwrap(), &pred_set)
+            .iter()
+            .map(|(_, bytes)| bytes)
+            .sum();
+
+        // The box rotates; this device's next pull is bound to the successor,
+        // which names the folder's set after itself.
+        *rig.nest.transport().chain.lock().unwrap() = Some(vec![rotation_hop(&pred, &succ)]);
+        pull.bound_source = Some(box_id(&succ));
+        let succ_set = cover_folder_under(&rig, &box_id(&succ));
+        let reports = pull.run_covered_folders(DAY).await;
+
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].stored_paths, 0, "nothing is fetched again");
+        assert_eq!(reports[0].tombstoned_paths, 0, "nothing is dropped");
+        let rows = rig.store.held().await.unwrap();
+        assert_eq!(
+            live_in(&rows, &succ_set),
+            vec![(hex::encode(path_hash), charged_before)],
+            "held once, under the successor's name, charged once: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .all(|r| path_in_set(&pred_set, &r.path).is_none()),
+            "no row rests under the predecessor's name: {rows:?}"
+        );
+        assert_eq!(
+            rig.store.folder_names().await.unwrap(),
+            std::collections::BTreeMap::from([(succ_set, "Photos".to_string())]),
+            "the display name moved with the set"
+        );
+
+        // A later pass finds nothing to re-key and asks for no chain.
+        let reports = pull.run_covered_folders(2 * DAY).await;
+        assert_eq!(reports[0].stored_paths, 0);
+        assert_eq!(*rig.nest.transport().chain_asked.lock().unwrap(), 1);
+    }
+
+    /// A source that never rotated is untouched: its listing names the set
+    /// after the bound identity the store already holds it under, so there is
+    /// no candidate and no chain is asked for.
+    #[tokio::test]
+    async fn a_custodian_whose_source_did_not_rotate_is_untouched() {
+        let bound = box_key(0x11);
+        let rig = Rig::new(&[]);
+        let folders = FakeFolders::default();
+        folders.stage_file([0x21u8; 32], &[body(7, 3_000)]);
+        let mut pull = rig.pull(None);
+        pull.folder_source = Some(&folders);
+        pull.bound_source = Some(box_id(&bound));
+        let set = cover_folder_under(&rig, &box_id(&bound));
+
+        assert_eq!(pull.run_covered_folders(0).await[0].stored_paths, 1);
+        let before = rig.store.held().await.unwrap();
+        let reports = pull.run_covered_folders(DAY).await;
+
+        assert_eq!(reports[0].stored_paths, 0);
+        assert_eq!(rig.store.held().await.unwrap(), before);
+        assert_eq!(live_in(&before, &set).len(), 1);
+        assert_eq!(*rig.nest.transport().chain_asked.lock().unwrap(), 0);
+    }
+
+    /// A held set named for an identity no verified chain links to the bound
+    /// one is another box's copy and is left alone — renaming it would file a
+    /// stranger's folder under this box's name.
+    #[tokio::test]
+    async fn a_held_set_with_no_verified_link_to_the_bound_identity_is_left_alone() {
+        let (other, bound, unrelated) = (box_key(0x11), box_key(0x22), box_key(0x33));
+        let rig = Rig::new(&[]);
+        let folders = FakeFolders::default();
+        folders.stage_file([0x21u8; 32], &[body(7, 3_000)]);
+        let mut pull = rig.pull(None);
+        pull.folder_source = Some(&folders);
+        pull.bound_source = Some(box_id(&other));
+        let other_set = cover_folder_under(&rig, &box_id(&other));
+        pull.run_covered_folders(0).await;
+        let held_before = live_in(&rig.store.held().await.unwrap(), &other_set);
+
+        // The bound box's chain links some third identity, never `other`.
+        *rig.nest.transport().chain.lock().unwrap() = Some(vec![rotation_hop(&unrelated, &bound)]);
+        pull.bound_source = Some(box_id(&bound));
+        let bound_set = cover_folder_under(&rig, &box_id(&bound));
+        pull.run_covered_folders(DAY).await;
+
+        let rows = rig.store.held().await.unwrap();
+        assert_eq!(
+            live_in(&rows, &other_set),
+            held_before,
+            "the other set stands"
+        );
+        assert_eq!(
+            live_in(&rows, &bound_set).len(),
+            1,
+            "the bound set is pulled afresh"
+        );
+        assert_eq!(*rig.nest.transport().chain_asked.lock().unwrap(), 1);
+    }
+
+    /// A rename the pass cannot verify yet — the chain could not be fetched —
+    /// holds that folder's pass rather than diffing it into a second set; the
+    /// next pass, with the chain, re-keys and fetches nothing.
+    #[tokio::test]
+    async fn an_unfetchable_chain_holds_the_folder_until_the_rekey_can_run() {
+        let (pred, succ) = (box_key(0x11), box_key(0x22));
+        let rig = Rig::new(&[]);
+        let folders = FakeFolders::default();
+        folders.stage_file([0x21u8; 32], &[body(7, 3_000)]);
+        let mut pull = rig.pull(None);
+        pull.folder_source = Some(&folders);
+        pull.bound_source = Some(box_id(&pred));
+        cover_folder_under(&rig, &box_id(&pred));
+        pull.run_covered_folders(0).await;
+        let before = rig.store.held().await.unwrap();
+
+        pull.bound_source = Some(box_id(&succ));
+        let succ_set = cover_folder_under(&rig, &box_id(&succ));
+        assert!(
+            pull.run_covered_folders(DAY).await.is_empty(),
+            "the pass waits"
+        );
+        assert_eq!(rig.store.held().await.unwrap(), before, "nothing moved");
+
+        *rig.nest.transport().chain.lock().unwrap() = Some(vec![rotation_hop(&pred, &succ)]);
+        let reports = pull.run_covered_folders(2 * DAY).await;
+        assert_eq!(reports[0].stored_paths, 0);
+        assert_eq!(
+            live_in(&rig.store.held().await.unwrap(), &succ_set).len(),
+            1
         );
     }
 

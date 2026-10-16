@@ -31,8 +31,13 @@ fn item(folder: &str, path: &str, size: i64, updated: i64) -> MediaItem {
 /// whether or not it holds media.
 fn folder(name: &str) -> MediaFolder {
     MediaFolder {
-        // Stable per set and distinct across sets — all these tests need of it.
-        id: name.len() as i64,
+        // Stable per set and distinct across sets — all these tests need of it,
+        // and load-bearing: the page resolves a set's verdicts by this row id.
+        id: i64::from_le_bytes(
+            fauna_core::path_crypto::set_name_hash(name)[..8]
+                .try_into()
+                .unwrap(),
+        ),
         name: name.into(),
         ..Default::default()
     }
@@ -410,7 +415,11 @@ async fn upload_seals_posts_records_then_refreshes() {
     assert_eq!(
         api.calls(),
         vec![
+            // The audience read at upload time: the gesture decides
+            // plaintext-vs-sealed from a fresh folder list, not the snapshot.
+            MediaNestCall::ListFolders,
             MediaNestCall::RecordMember {
+                folder_id: None,
                 folder: "photos".into(),
                 device_id: "dev-1".into(),
                 path: "photos/c.jpg".into(),
@@ -526,17 +535,21 @@ async fn upload_record_failure_sets_error() {
     let (manifest_hash, _, _) = posted_file(&uploader);
     assert_eq!(
         api.calls(),
-        vec![MediaNestCall::RecordMember {
-            folder: "photos".into(),
-            device_id: "dev-1".into(),
-            path: "photos/c.jpg".into(),
-            manifest_hash: hex::encode(manifest_hash),
-            size_bytes: b"bytes".len() as i64,
-            content_key_version: None,
-            thumbnail_hash: None,
-            path_sealed: Some(expected_path_seal("photos/c.jpg")),
-        }],
-        "the failing record is recorded; no media_snapshot refresh"
+        vec![
+            MediaNestCall::ListFolders,
+            MediaNestCall::RecordMember {
+                folder_id: None,
+                folder: "photos".into(),
+                device_id: "dev-1".into(),
+                path: "photos/c.jpg".into(),
+                manifest_hash: hex::encode(manifest_hash),
+                size_bytes: b"bytes".len() as i64,
+                content_key_version: None,
+                thumbnail_hash: None,
+                path_sealed: Some(expected_path_seal("photos/c.jpg")),
+            }
+        ],
+        "the audience read, then the failing record; no media_snapshot refresh"
     );
 }
 
@@ -556,6 +569,8 @@ async fn delete_tombstones_then_refreshes_without_an_uploader() {
         vec![
             MediaNestCall::DeleteMember {
                 folder: "photos".into(),
+                // No listed rows: the name degrade, sent by name alone.
+                folder_id: None,
                 device_id: "dev-1".into(),
                 path: "photos/b.png".into(),
                 // Keyless machine (no injected owner key) — the best-effort
@@ -589,6 +604,7 @@ async fn delete_failure_sets_error() {
         api.calls(),
         vec![MediaNestCall::DeleteMember {
             folder: "photos".into(),
+            folder_id: None,
             device_id: "dev-1".into(),
             path: "photos/b.png".into(),
             path_sealed: None,
@@ -647,6 +663,7 @@ async fn a_keyed_machines_restore_re_point_seals_under_the_owner_root() {
                 author_display: "alice".into(),
                 pruned: false,
                 purge_after: None,
+                folder_id: None,
             },
         )
         .await;
@@ -701,6 +718,7 @@ async fn an_unkeyed_machines_restore_seals_nothing_so_the_post_flip_nest_refuses
                 author_display: "alice".into(),
                 pruned: false,
                 purge_after: None,
+                folder_id: None,
             },
         )
         .await;
@@ -822,6 +840,7 @@ async fn a_keyed_machines_restore_refresh_still_renders_the_sealed_row() {
                 author_display: "alice".into(),
                 pruned: false,
                 purge_after: None,
+                folder_id: None,
             },
         )
         .await;
@@ -849,6 +868,7 @@ async fn a_bound_sets_delete_tombstone_seals_under_the_content_root_not_the_owne
         home: None,
         home_actor_id: None,
         served: false,
+        ids: Vec::new(),
     });
     let api = Arc::new(FakeMediaNestApi::new());
     let machine = MediaMachine::new(
@@ -905,6 +925,7 @@ async fn a_bound_sets_gesture_with_unresolvable_keys_records_plaintext_only() {
         home: None,
         home_actor_id: None,
         served: false,
+        ids: Vec::new(),
     });
     let api = Arc::new(FakeMediaNestApi::new());
     let machine = MediaMachine::new(
@@ -1346,12 +1367,12 @@ async fn fetch_thumbnail_with_the_wrong_key_fails_decrypt() {
 //
 // `succession-aftermath.md` § Re-key scope's `BackupKey` corpus row: a succession
 // re-points corpus *ownership* but moves no seal, so a successor's inherited
-// thumbnails and Media-page blob primaries still rest under the PREDECESSOR's
-// key while the successor derives its own. The chunk plane got its read
-// candidates in leg 5's read half (`FileDownloadKeys::predecessor_backup_keys`),
-// but that field reaches only the chunk walk — these two sites are a separate
-// raw-AEAD seal under the bare `BackupKey`, so they need their own candidates or
-// the successor's whole inherited library renders dark.
+// thumbnails still rest under the PREDECESSOR's key while the successor
+// derives its own. The chunk plane got its read candidates in leg 5's read
+// half (`FileDownloadKeys::predecessor_backup_keys`), but that field reaches
+// only the chunk walk — a thumbnail is a separate raw-AEAD seal under the bare
+// `BackupKey`, so it needs its own candidates or the successor's whole
+// inherited grid renders dark.
 
 /// The predecessor's retired owner key, distinct from the successor's [`KEY`].
 const RETIRED_KEY: [u8; 32] = [11u8; 32];
@@ -1446,6 +1467,11 @@ async fn fetch_thumbnail_with_no_predecessors_still_fails_on_a_foreign_key() {
 #[derive(Default, Clone)]
 struct FakeDownloadFetcher {
     blobs: std::collections::HashMap<Vec<u8>, Vec<u8>>,
+    /// The folder of every hinted chunk batch, in call order — what the relay
+    /// hint would have named on the wire.
+    hints: Arc<std::sync::Mutex<Vec<String>>>,
+    /// The ref form of every hinted chunk batch, beside [`Self::hints`].
+    refs: Arc<std::sync::Mutex<Vec<Option<fauna_core::folder_keys::FolderRef>>>>,
 }
 
 impl FakeDownloadFetcher {
@@ -1476,6 +1502,17 @@ impl fauna_core::file_download::BlobFetcher for FakeDownloadFetcher {
         _path: &str,
     ) -> anyhow::Result<Vec<Vec<u8>>> {
         store_keys.iter().map(|k| self.get(k)).collect()
+    }
+
+    async fn fetch_folder_chunks(
+        &self,
+        store_keys: &[fauna_core::data::ContentHash],
+        path: &str,
+        folder: &fauna_core::file_download::FolderHint,
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
+        self.hints.lock().unwrap().push(folder.name().to_string());
+        self.refs.lock().unwrap().push(folder.folder_ref());
+        self.fetch_chunks(store_keys, path).await
     }
 }
 
@@ -1593,6 +1630,11 @@ struct FakeFolderKeyResolver {
     /// The served-unshared shape: content-keyed at the serve pseudo-channel,
     /// no MLS group.
     served: bool,
+    /// The set rows (`FolderRef::Local` ids) that resolve BY IDENTITY to the
+    /// same content-keyed answer `folder` gets by name; any other row is a
+    /// positively owner-only own set, as the real resolver answers an
+    /// unbound roster row.
+    ids: Vec<i64>,
 }
 
 impl FakeFolderKeyResolver {
@@ -1604,6 +1646,7 @@ impl FakeFolderKeyResolver {
             home: None,
             home_actor_id: None,
             served: false,
+            ids: Vec::new(),
         }
     }
 
@@ -1614,6 +1657,16 @@ impl FakeFolderKeyResolver {
             ..Self::bound(folder, keys)
         }
     }
+
+    /// The content-keyed answer this fake gives its one set, by either form.
+    fn content_keyed(&self) -> ResolvedCustody {
+        ResolvedCustody::ContentKeyed(ResolvedFolderKeys {
+            mls_group_id: (!self.served).then(|| b"raw-group-id".to_vec()),
+            content_keys: self.keys.clone(),
+            home_nest_url: self.home.clone(),
+            home_nest_actor_id: self.home_actor_id.clone(),
+        })
+    }
 }
 
 #[async_trait::async_trait]
@@ -1621,16 +1674,28 @@ impl FolderKeyResolver for FakeFolderKeyResolver {
     async fn resolve(&self, name_hash: &[u8; 32]) -> anyhow::Result<ResolvedCustody> {
         Ok(
             if *name_hash == fauna_core::path_crypto::set_name_hash(&self.folder) {
-                ResolvedCustody::ContentKeyed(ResolvedFolderKeys {
-                    mls_group_id: (!self.served).then(|| b"raw-group-id".to_vec()),
-                    content_keys: self.keys.clone(),
-                    home_nest_url: self.home.clone(),
-                    home_nest_actor_id: self.home_actor_id.clone(),
-                })
+                self.content_keyed()
             } else {
                 ResolvedCustody::owner_only()
             },
         )
+    }
+
+    /// By identity: a row in `ids` is the content-keyed set; a foreign
+    /// channel is no set this fake knows.
+    async fn resolve_ref(
+        &self,
+        folder_ref: &fauna_core::folder_keys::FolderRef,
+    ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+        match folder_ref {
+            fauna_core::folder_keys::FolderRef::Local(id) if self.ids.contains(id) => {
+                Ok(self.content_keyed())
+            }
+            fauna_core::folder_keys::FolderRef::Local(_) => Ok(ResolvedCustody::owner_only()),
+            fauna_core::folder_keys::FolderRef::Foreign(_) => {
+                anyhow::bail!("no set with that identity")
+            }
+        }
     }
 }
 
@@ -1653,12 +1718,13 @@ async fn download_file_member_decrypts_a_shared_set_via_content_keys() {
         home: None,
         home_actor_id: None,
         served: false,
+        ids: Vec::new(),
     });
     let machine = MediaMachine::new(
         CountingObserver::new(),
         Arc::new(FakeMediaNestApi::new()),
         None,
-        None, // the shared read comes from the walk, not the blob primary
+        None, // the shared read comes from the walk alone
         Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
         Some(resolver as Arc<dyn FolderKeyResolver>),
     );
@@ -1696,6 +1762,7 @@ async fn download_file_member_without_the_generation_fails_closed() {
         home: None,
         home_actor_id: None,
         served: false,
+        ids: Vec::new(),
     });
     let machine = MediaMachine::new(
         CountingObserver::new(),
@@ -1779,6 +1846,7 @@ async fn an_unbound_owned_sets_download_never_touches_the_foreign_fetchers() {
         home: Some("https://stranger.example".into()),
         home_actor_id: None,
         served: false,
+        ids: Vec::new(),
     });
     let machine = MediaMachine::new(
         CountingObserver::new(),
@@ -1820,6 +1888,7 @@ async fn a_genuinely_foreign_set_downloads_through_the_foreign_fetchers() {
         home: Some("https://peer.example".into()),
         home_actor_id: Some("cd".repeat(32)),
         served: false,
+        ids: Vec::new(),
     });
     let factory = Arc::new(RecordingForeignFactory {
         served: fetcher,
@@ -1886,6 +1955,400 @@ async fn download_file_round_trips_a_sealed_owner_file() {
         .await
         .expect("sealed owner file downloads");
     assert_eq!(got, expected);
+}
+
+/// Every chunk the download walks is read **for its folder** — the relay hint
+/// of `file-sync.md` § Relay serving, step (4), without which a device that
+/// does not sync a metadata-only folder cannot open its files. Both same-nest
+/// arms carry it: the owner-only walk and a shared set's content-keyed walk.
+#[tokio::test]
+async fn download_file_reads_its_chunks_for_the_items_folder() {
+    let (fetcher, manifest_hex, expected) = seal_owner_file(&[b"a hinted ", b"read"]);
+    let hints = Arc::clone(&fetcher.hints);
+    let machine = machine_with_download(fetcher);
+    let got = machine
+        .download_file(
+            manifest_hex,
+            None,
+            "set".into(),
+            "notes.txt".into(),
+            KEY.to_vec(),
+        )
+        .await
+        .expect("the owner file downloads");
+    assert_eq!(got, expected);
+    assert_eq!(*hints.lock().unwrap(), vec!["set".to_string()]);
+
+    let content_key = [0x42u8; 32];
+    let (fetcher, manifest_hex, expected) =
+        seal_shared_file(&[b"shared ", b"and hinted"], content_key);
+    let hints = Arc::clone(&fetcher.hints);
+    let resolver = Arc::new(FakeFolderKeyResolver {
+        folder: "shared-docs".into(),
+        keys: Some(fauna_core::folder_keys::FolderContentKeys::genesis(
+            content_key,
+            1_000,
+        )),
+        home: None,
+        home_actor_id: None,
+        served: false,
+        ids: Vec::new(),
+    });
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        Arc::new(FakeMediaNestApi::new()),
+        None,
+        None,
+        Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
+        Some(resolver as Arc<dyn FolderKeyResolver>),
+    );
+    let got = machine
+        .download_file(
+            manifest_hex,
+            Some(1),
+            "shared-docs".into(),
+            "notes.txt".into(),
+            [9u8; 32].to_vec(),
+        )
+        .await
+        .expect("the member decrypts the shared set");
+    assert_eq!(got, expected);
+    assert_eq!(*hints.lock().unwrap(), vec!["shared-docs".to_string()]);
+}
+
+/// The by-manifest reader's ref form (`file-sync.md` § Relay serving, step
+/// (4), the by-manifest ruling): a member whose own set shares a shared set's
+/// name downloads the shared set's item, and the hint names the shared set's
+/// ROW — read off the item being downloaded, never by name, where the own set
+/// would answer. An item the nest stamped no id on sends the name forms alone.
+#[tokio::test]
+async fn download_file_hints_the_row_of_the_items_own_set() {
+    use fauna_core::folder_keys::FolderRef;
+    const OWN: i64 = 7;
+    const SHARED: i64 = 9;
+
+    let (fetcher, manifest_hex, expected) = seal_owner_file(&[b"the shared ", b"set's file"]);
+    let refs = Arc::clone(&fetcher.refs);
+    let manifest = hex::decode(&manifest_hex).unwrap();
+    let at = |folder_id: Option<i64>, manifest: Vec<u8>| MediaItem {
+        manifest_hash: Some(manifest.into()),
+        folder_id,
+        ..item("photos", "notes.txt", 10, 100)
+    };
+    let api = Arc::new(FakeMediaNestApi::new());
+    // Two same-named sets: the reader's own (listed first, so a by-name
+    // lookup would land on it) and the shared one — the same path in each,
+    // told apart only by the manifest each row names.
+    api.set_folders(vec![
+        MediaFolder {
+            id: OWN,
+            name: "photos".into(),
+            ..Default::default()
+        },
+        MediaFolder {
+            id: SHARED,
+            name: "photos".into(),
+            ..Default::default()
+        },
+    ]);
+    api.set_snapshot(MediaSnapshot {
+        items: vec![
+            at(Some(OWN), vec![0xA5; 32]),
+            at(Some(SHARED), manifest.clone()),
+        ],
+        ..Default::default()
+    });
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        api.clone(),
+        None,
+        None,
+        Some(Arc::new(fetcher.clone()) as Arc<dyn fauna_core::file_download::BlobFetcher>),
+        None,
+    );
+    machine.refresh(None).await;
+    let got = machine
+        .download_file(
+            manifest_hex.clone(),
+            None,
+            "photos".into(),
+            "notes.txt".into(),
+            KEY.to_vec(),
+        )
+        .await
+        .expect("the shared set's file downloads");
+    assert_eq!(got, expected);
+    assert_eq!(*refs.lock().unwrap(), vec![Some(FolderRef::Local(SHARED))]);
+
+    // The same item from a producer that stamps no id: the name forms alone.
+    refs.lock().unwrap().clear();
+    api.set_snapshot(MediaSnapshot {
+        items: vec![at(None, manifest)],
+        ..Default::default()
+    });
+    machine.refresh(None).await;
+    machine
+        .download_file(
+            manifest_hex,
+            None,
+            "photos".into(),
+            "notes.txt".into(),
+            KEY.to_vec(),
+        )
+        .await
+        .expect("an id-less row still downloads");
+    assert_eq!(*refs.lock().unwrap(), vec![None]);
+}
+
+// ── A set is addressed by its row (`media.md` § Encryption at rest → *A set is
+// addressed by its row, named by its label*) ──────────────────────────────────
+//
+// A member who owns `photos` also reads a collaborator's shared `photos`. Every
+// custody read below resolves by the item's row (`folder_id`), so the reader's
+// own same-named set — listed first, where a by-name lookup lands — never
+// answers for the shared one.
+
+/// The reader's own set's row and the shared set's row, both named `photos`.
+const OWN_ROW: i64 = 7;
+const SHARED_ROW: i64 = 9;
+
+/// A resolver that answers the SHARED row by identity, content-keyed, and the
+/// name `photos` as positively owner-only — the by-name shadow the reader's
+/// own same-named set casts (`FakeFolderKeyResolver::ids`).
+fn shared_row_resolver(content_key: [u8; 32]) -> Arc<dyn FolderKeyResolver> {
+    Arc::new(FakeFolderKeyResolver {
+        ids: vec![SHARED_ROW],
+        ..FakeFolderKeyResolver::bound(
+            // No set by this name: by name, every set reads owner-only.
+            "no set is named this",
+            Some(fauna_core::folder_keys::FolderContentKeys::genesis(
+                content_key,
+                1_000,
+            )),
+        )
+    })
+}
+
+/// The two same-named rows the control plane lists, own first.
+fn same_named_rows() -> Vec<MediaFolder> {
+    vec![
+        MediaFolder {
+            id: OWN_ROW,
+            name: "photos".into(),
+            ..Default::default()
+        },
+        MediaFolder {
+            id: SHARED_ROW,
+            name: "photos".into(),
+            ..Default::default()
+        },
+    ]
+}
+
+/// A download names the set, the path and the manifest; the machine finds that
+/// item in the page's rows and opens it under ITS row's custody — the shared
+/// set's content keys — never the own set's owner-only custody the name
+/// resolves to.
+#[tokio::test]
+async fn download_file_opens_a_shared_sets_item_under_its_own_rows_custody() {
+    let content_key = [0x42u8; 32];
+    let (fetcher, manifest_hex, expected) =
+        seal_shared_file(&[b"the shared ", b"set's clip"], content_key);
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(same_named_rows());
+    api.set_snapshot(MediaSnapshot {
+        items: vec![MediaItem {
+            manifest_hash: Some(hex::decode(&manifest_hex).unwrap().into()),
+            content_key_version: Some(1),
+            folder_id: Some(SHARED_ROW),
+            ..item("photos", "clip.mp4", 10, 100)
+        }],
+        ..Default::default()
+    });
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        api,
+        None,
+        None,
+        Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
+        Some(shared_row_resolver(content_key)),
+    );
+    machine.refresh(None).await;
+
+    let got = machine
+        .download_file(
+            manifest_hex,
+            Some(1),
+            "photos".into(),
+            "clip.mp4".into(),
+            KEY.to_vec(),
+        )
+        .await
+        .expect("the shared set's item opens under its own row's content keys");
+    assert_eq!(got, expected);
+}
+
+/// Two same-named sealed sets on one page: both rows carry the same
+/// `folder_hash`, so keyed by it their custody collapsed to one answer and the
+/// shared set's labels omitted. Keyed by the row, each renders under its own.
+#[tokio::test]
+async fn sealed_labels_of_a_same_named_shared_set_render_under_its_own_custody() {
+    let content_key = [0x42u8; 32];
+    let content_root = fauna_core::path_crypto::LabelRoot::content_key(content_key, 1);
+    let shared_path = "trip/beach.jpg";
+    let shared_item = MediaItem {
+        folder: String::new(),
+        path: String::new(),
+        size_bytes: 10,
+        updated_at: 100,
+        source_online: true,
+        folder_id: Some(SHARED_ROW),
+        path_sealed: Some(
+            fauna_core::label_custody::seal_path(&content_root, shared_path)
+                .unwrap()
+                .into(),
+        ),
+        path_hash: Some(fauna_core::sync::path_hash(shared_path).to_vec().into()),
+        folder_sealed: Some(
+            fauna_core::label_custody::seal_set_name(&content_root, "photos")
+                .unwrap()
+                .unwrap()
+                .into(),
+        ),
+        folder_hash: Some(
+            fauna_core::path_crypto::set_name_hash("photos")
+                .to_vec()
+                .into(),
+        ),
+        ..Default::default()
+    };
+    let own_item = MediaItem {
+        folder_id: Some(OWN_ROW),
+        ..sealed_set_item("photos", "home/garden.jpg")
+    };
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_snapshot(MediaSnapshot {
+        items: vec![own_item, shared_item],
+        ..Default::default()
+    });
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        api,
+        None,
+        None,
+        None,
+        Some(shared_row_resolver(content_key)),
+    );
+
+    machine.refresh(Some(KEY.to_vec())).await;
+
+    let mut got: Vec<(String, String)> = machine
+        .snapshot()
+        .items
+        .iter()
+        .map(|i| (i.folder.clone(), i.path.clone()))
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            ("photos".to_string(), "home/garden.jpg".to_string()),
+            ("photos".to_string(), shared_path.to_string()),
+        ],
+        "both same-named sets render, each under its own row's custody"
+    );
+}
+
+/// The `(set, manifest)` signer ledger keys by the row: the same bytes in each
+/// set, signed by different identities, keep their own verdicts. Keyed by
+/// name the widest signature won for both, so the shared set's row — signed by
+/// another writer — was offered this account's current owner root.
+#[tokio::test]
+async fn signer_ledger_keeps_a_same_named_pair_apart() {
+    let (fetcher, manifest_hex, expected) = seal_owner_file(&[b"identical ", b"bytes"]);
+    let manifest = hex::decode(&manifest_hex).unwrap();
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(same_named_rows());
+    api.set_snapshot(MediaSnapshot {
+        items: vec![
+            MediaItem {
+                manifest_hash: Some(manifest.clone().into()),
+                folder_id: Some(OWN_ROW),
+                ..item("photos", "mine.bin", 10, 100)
+            },
+            MediaItem {
+                manifest_hash: Some(manifest.into()),
+                folder_id: Some(SHARED_ROW),
+                ..item("photos", "theirs.bin", 10, 100)
+            },
+        ],
+        ..Default::default()
+    });
+    // The shared row is another writer's: no identity of this account.
+    api.set_signed_as(vec!["theirs.bin".into()], [0x0Eu8; 32]);
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        api,
+        None,
+        None,
+        Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
+        None,
+    );
+    machine.refresh(None).await;
+    let download = |path: &str| {
+        machine.download_file(
+            manifest_hex.clone(),
+            None,
+            "photos".into(),
+            path.to_string(),
+            KEY.to_vec(),
+        )
+    };
+
+    assert_eq!(
+        download("mine.bin").await.expect("the own row opens"),
+        expected
+    );
+    download("theirs.bin")
+        .await
+        .expect_err("another writer's row is offered none of the owner family");
+}
+
+/// The declassification verdict is the item's own row's: the own `photos`
+/// rests unsealed, the shared one does not, so the shared item's thumbnail is
+/// opened — never handed back raw as the own set's public bytes.
+#[tokio::test]
+async fn thumbnail_of_a_shared_item_is_not_mistaken_for_the_own_sets_public_bytes() {
+    let plaintext = b"decoded thumbnail JPEG bytes".to_vec();
+    let sealed_bytes = sealed(&plaintext, &KEY);
+    let hash = content_hash_hex(&sealed_bytes);
+    let api = Arc::new(FakeMediaNestApi::new());
+    let mut rows = same_named_rows();
+    rows[0].rests_unsealed = true;
+    api.set_folders(rows);
+    api.set_snapshot(MediaSnapshot {
+        items: vec![MediaItem {
+            thumbnail_hash: Some(hash.clone()),
+            folder_id: Some(SHARED_ROW),
+            ..item("photos", "beach.jpg", 10, 100)
+        }],
+        ..Default::default()
+    });
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        api,
+        None,
+        Some(Arc::new(FakeMediaBlobFetcher::new(sealed_bytes)) as Arc<dyn MediaBlobFetcher>),
+        None,
+        None,
+    );
+    machine.refresh(None).await;
+
+    let got = machine
+        .fetch_thumbnail(hash, KEY.to_vec())
+        .await
+        .expect("the shared item's thumbnail opens");
+    assert_eq!(got, plaintext, "opened, not returned as public bytes");
 }
 
 /// No download seam wired → a Transient "not supported", no panic — the same
@@ -1975,129 +2438,6 @@ async fn download_file_with_the_wrong_key_fails_closed() {
         .await
         .expect_err("wrong key → fails");
     assert!(matches!(err, MediaApiError::Transient { .. }));
-}
-
-/// Arm 1: a Media-page upload's recorded hash names a sealed blob-store
-/// primary — `download_file` resolves it via the blob fetcher (fetch → verify
-/// the content address → owner-key decrypt), never touching the walk.
-#[tokio::test]
-async fn download_file_resolves_a_blob_store_primary() {
-    let sealed_bytes = sealed(b"the full plaintext clip", &KEY);
-    let hash = content_hash_hex(&sealed_bytes);
-    let blob = Arc::new(FakeMediaBlobFetcher::new(sealed_bytes));
-    let machine = MediaMachine::new(
-        CountingObserver::new(),
-        Arc::new(FakeMediaNestApi::new()),
-        None,
-        Some(blob.clone() as Arc<dyn MediaBlobFetcher>),
-        None, // no walk seam at all — the blob arm must suffice
-        None,
-    );
-
-    let got = machine
-        .download_file(
-            hash,
-            None,
-            "set".into(),
-            "photos/clip.mp4".into(),
-            KEY.to_vec(),
-        )
-        .await
-        .expect("the blob primary downloads");
-    assert_eq!(got, b"the full plaintext clip");
-}
-
-/// Arm 1 under a succession: the Media-page primary the successor inherited is
-/// still sealed under the RETIRED identity's key. The chunk walk (arm 2) got its
-/// retired-root candidates in leg 5's read half, but this arm is the separate
-/// raw-AEAD seal that `FileDownloadKeys` does not reach — without its own
-/// candidates a successor cannot download a single Media-page-uploaded file.
-#[tokio::test]
-async fn download_file_opens_a_predecessor_sealed_blob_primary() {
-    let sealed_bytes = sealed(b"the full plaintext clip", &RETIRED_KEY);
-    let hash = content_hash_hex(&sealed_bytes);
-    let blob = Arc::new(FakeMediaBlobFetcher::new(sealed_bytes));
-    let machine = MediaMachine::new(
-        CountingObserver::new(),
-        Arc::new(FakeMediaNestApi::new()),
-        None,
-        Some(blob.clone() as Arc<dyn MediaBlobFetcher>),
-        None,
-        None,
-    );
-    machine.set_predecessor_backup_keys(vec![RETIRED_KEY.to_vec()]);
-
-    let got = machine
-        .download_file(
-            hash,
-            None,
-            "set".into(),
-            "photos/clip.mp4".into(),
-            KEY.to_vec(),
-        )
-        .await
-        .expect("the retired root opens the primary it sealed");
-    assert_eq!(got, b"the full plaintext clip");
-}
-
-/// The typed miss: a hash absent from the blob store falls through to the
-/// chunk-store walk (the sync-engine provenance) and still round-trips.
-#[tokio::test]
-async fn download_file_falls_back_to_the_walk_on_a_blob_miss() {
-    let (walk_fetcher, manifest_hex, expected) = seal_owner_file(&[b"chunked clip bytes"]);
-    let blob = Arc::new(FakeMediaBlobFetcher::new(Vec::new()));
-    blob.fail(MediaApiError::NotFound {
-        detail: "no such blob".into(),
-    });
-    let machine = MediaMachine::new(
-        CountingObserver::new(),
-        Arc::new(FakeMediaNestApi::new()),
-        None,
-        Some(blob.clone() as Arc<dyn MediaBlobFetcher>),
-        Some(Arc::new(walk_fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
-        None,
-    );
-
-    let got = machine
-        .download_file(
-            manifest_hex,
-            None,
-            "set".into(),
-            "docs/report.bin".into(),
-            KEY.to_vec(),
-        )
-        .await
-        .expect("the walk resolves what the blob store misses");
-    assert_eq!(got, expected);
-    assert_eq!(
-        blob.fetches().len(),
-        1,
-        "the blob store was consulted first"
-    );
-}
-
-/// A decrypt failure on the blob arm is a real error — it must NOT fall
-/// through to the walk (the blob IS this hash's content).
-#[tokio::test]
-async fn download_file_blob_decrypt_failure_never_falls_through() {
-    let sealed_bytes = sealed(b"secret", &KEY);
-    let hash = content_hash_hex(&sealed_bytes);
-    let blob = Arc::new(FakeMediaBlobFetcher::new(sealed_bytes));
-    let (walk_fetcher, _, _) = seal_owner_file(&[b"unrelated"]);
-    let machine = MediaMachine::new(
-        CountingObserver::new(),
-        Arc::new(FakeMediaNestApi::new()),
-        None,
-        Some(blob.clone() as Arc<dyn MediaBlobFetcher>),
-        Some(Arc::new(walk_fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
-        None,
-    );
-
-    let err = machine
-        .download_file(hash, None, "set".into(), "a.mp4".into(), [9u8; 32].to_vec())
-        .await
-        .expect_err("wrong key → decrypt fails");
-    assert!(matches!(err, MediaApiError::BadRequest { .. }));
 }
 
 // ── Sealed-first path render (S2b — the read half of expand) ─────────────────
@@ -2279,6 +2619,7 @@ async fn refresh_renders_a_bound_shared_sets_label_under_its_content_keys() {
         home: None,
         home_actor_id: None,
         served: false,
+        ids: Vec::new(),
     });
     let machine = MediaMachine::new(
         observer,
@@ -2844,6 +3185,7 @@ impl fauna_media_machine::nest_api::MediaNestApi for FakeOptionListFailure {
     async fn record_member(
         &self,
         folder: &str,
+        folder_id: Option<i64>,
         device_id: &str,
         path: &str,
         manifest_hash: String,
@@ -2855,6 +3197,7 @@ impl fauna_media_machine::nest_api::MediaNestApi for FakeOptionListFailure {
         self.inner
             .record_member(
                 folder,
+                folder_id,
                 device_id,
                 path,
                 manifest_hash,
@@ -2868,21 +3211,25 @@ impl fauna_media_machine::nest_api::MediaNestApi for FakeOptionListFailure {
     async fn delete_member(
         &self,
         folder: &str,
+        folder_id: Option<i64>,
         device_id: &str,
         path: &str,
         path_sealed: Option<Vec<u8>>,
     ) -> Result<(), MediaApiError> {
         self.inner
-            .delete_member(folder, device_id, path, path_sealed)
+            .delete_member(folder, folder_id, device_id, path, path_sealed)
             .await
     }
     async fn file_versions(
         &self,
         folder: &str,
+        folder_id: Option<i64>,
         path: &str,
         include_pruned: bool,
     ) -> Result<Vec<fauna_media_machine::nest_api::ListedVersion>, MediaApiError> {
-        self.inner.file_versions(folder, path, include_pruned).await
+        self.inner
+            .file_versions(folder, folder_id, path, include_pruned)
+            .await
     }
     async fn undelete_version(&self, path: &str, version_num: i64) -> Result<(), MediaApiError> {
         self.inner.undelete_version(path, version_num).await
@@ -2890,6 +3237,7 @@ impl fauna_media_machine::nest_api::MediaNestApi for FakeOptionListFailure {
     async fn restore_member(
         &self,
         folder: &str,
+        folder_id: Option<i64>,
         device_id: &str,
         path: &str,
         manifest_hash: String,
@@ -2900,6 +3248,7 @@ impl fauna_media_machine::nest_api::MediaNestApi for FakeOptionListFailure {
         self.inner
             .restore_member(
                 folder,
+                folder_id,
                 device_id,
                 path,
                 manifest_hash,
@@ -3512,6 +3861,115 @@ async fn upload_into_an_unlisted_folder_seals() {
     assert_sealed_chunks(&chunks, &raw);
 }
 
+/// The declassification verdict is read **at upload time**, not from
+/// the page's last-refresh snapshot.
+///
+/// The owner flipped the folder back to private on another device after this
+/// page loaded; the page still holds `rests_unsealed: true`. Deciding from that
+/// snapshot would POST plaintext chunks and a plaintext manifest the nest then
+/// refuses (`path_seal_required`) and leaves orphaned until the blob GC, and a
+/// retry would repeat the disclosure. "Flipping back re-seals only future
+/// content" (`principles.md` § The user always controls their data) means the
+/// very next write is sealed.
+#[tokio::test]
+async fn upload_after_the_owner_flips_a_folder_back_to_private_seals_despite_a_stale_snapshot() {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![public_folder("site")]);
+    let uploader = Arc::new(FakeMediaBlobUploader::new("beef"));
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        api.clone(),
+        Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
+        None,
+        None,
+        None,
+    );
+    machine.refresh(None).await;
+
+    // The flip happens on another device: the nest now says private, and this
+    // page has not refreshed.
+    api.set_folders(vec![folder("site")]);
+    api.fail_writes(MediaApiError::BadRequest {
+        detail: "path_seal_required".into(),
+    });
+
+    let raw = b"<h1>must never rest in the clear</h1>".to_vec();
+    for _ in 0..2 {
+        machine
+            .upload(
+                "site".into(),
+                "dev-1".into(),
+                "index.html".into(),
+                raw.clone(),
+                KEY.to_vec(),
+            )
+            .await;
+    }
+
+    assert!(
+        !uploader.chunks().is_empty(),
+        "the upload reached the chunk POSTs"
+    );
+    for (_, body) in uploader.chunks() {
+        assert_ne!(
+            body, raw,
+            "a stale public snapshot must never put plaintext on the nest"
+        );
+        assert!(
+            !body.windows(raw.len()).any(|w| w == raw.as_slice()),
+            "no chunk carries the plaintext"
+        );
+    }
+    for (_, manifest_bytes) in uploader.manifests() {
+        let manifest: fauna_core::chunk::ChunkManifest =
+            fauna_core::encoding::canonical_decode(&manifest_bytes).unwrap();
+        assert!(manifest.is_sealed(), "the manifest names sealed chunks");
+    }
+}
+
+/// A failed folder read at upload time **seals**: the plaintext
+/// direction is never decided from a cache the gesture could not re-check.
+#[tokio::test]
+async fn upload_into_a_cached_public_folder_seals_when_the_fresh_read_fails() {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![public_folder("site")]);
+    let uploader = Arc::new(FakeMediaBlobUploader::new("beef"));
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        api.clone(),
+        Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
+        None,
+        None,
+        None,
+    );
+    machine.refresh(None).await;
+
+    // The control plane stops answering; the cache still says public.
+    api.fail(MediaApiError::Transient {
+        detail: "folders.list unreachable".into(),
+    });
+
+    let raw = b"<h1>unverifiable audience</h1>".to_vec();
+    machine
+        .upload(
+            "site".into(),
+            "dev-1".into(),
+            "index.html".into(),
+            raw.clone(),
+            KEY.to_vec(),
+        )
+        .await;
+
+    let (_, manifest_bytes, chunks) = posted_file(&uploader);
+    let manifest: fauna_core::chunk::ChunkManifest =
+        fauna_core::encoding::canonical_decode(&manifest_bytes).unwrap();
+    assert!(
+        manifest.stored_hashes.is_some() && manifest.is_sealed(),
+        "an audience the gesture could not re-verify seals"
+    );
+    assert_sealed_chunks(&chunks, &raw);
+}
+
 // ── Content-keyed sets: WebDAV-served (and shared) folders ───────────────────
 //
 // `webdav-server.md` § Key model → *The app-side seams*; `media.md`
@@ -3911,6 +4369,14 @@ impl FolderKeyResolver for RetiredServeResolver {
             },
         )
     }
+
+    /// Keyed by name: no answer by identity.
+    async fn resolve_ref(
+        &self,
+        _folder_ref: &fauna_core::folder_keys::FolderRef,
+    ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+        anyhow::bail!("no set with that identity")
+    }
 }
 
 /// Outcome 8's page half: after the owner stops serving, the rows the mount
@@ -3988,6 +4454,7 @@ fn version(num: i64, manifest_hash: String) -> fauna_media_machine::snapshots::F
         author_display: "alice".into(),
         pruned: false,
         purge_after: None,
+        folder_id: None,
     }
 }
 
@@ -4535,10 +5002,10 @@ async fn a_predecessor_signed_item_never_opens_under_the_current_root() {
     );
 }
 
-/// The bare-key twin: a Media-page blob primary and a thumbnail that only a
-/// predecessor's signature names are offered the retired keys alone.
+/// The bare-key twin: a thumbnail that only a predecessor's signature names is
+/// offered the retired keys alone.
 #[tokio::test]
-async fn a_predecessor_signed_blob_is_offered_the_retired_keys_alone() {
+async fn a_predecessor_signed_thumbnail_is_offered_the_retired_keys_alone() {
     for (seal_key, opens) in [(KEY, false), (RETIRED_KEY, true)] {
         let sealed_bytes = sealed(b"blob bytes", &seal_key);
         let hash = content_hash_hex(&sealed_bytes);
@@ -4566,22 +5033,12 @@ async fn a_predecessor_signed_blob_is_offered_the_retired_keys_alone() {
         );
         machine.refresh(Some(KEY.to_vec())).await;
 
-        let thumbnail = machine.fetch_thumbnail(hash.clone(), KEY.to_vec()).await;
-        let primary = machine
-            .download_file(
-                hash,
-                None,
-                "photos".into(),
-                "photos/a.jpg".into(),
-                KEY.to_vec(),
-            )
-            .await;
+        let thumbnail = machine.fetch_thumbnail(hash, KEY.to_vec()).await;
         assert_eq!(
             thumbnail.is_ok(),
             opens,
             "thumbnail sealed under {seal_key:?}"
         );
-        assert_eq!(primary.is_ok(), opens, "primary sealed under {seal_key:?}");
     }
 }
 
@@ -4709,6 +5166,7 @@ fn version_naming(manifest_hex: &str) -> fauna_media_machine::snapshots::FileVer
         author_display: "alice".into(),
         pruned: false,
         purge_after: None,
+        folder_id: None,
     }
 }
 
@@ -4717,14 +5175,13 @@ fn version_naming(manifest_hex: &str) -> fauna_media_machine::snapshots::FileVer
 fn restore_machine(
     api: &Arc<FakeMediaNestApi>,
     uploader: &Arc<FakeMediaBlobUploader>,
-    blob: Arc<FakeMediaBlobFetcher>,
     fetcher: FakeDownloadFetcher,
 ) -> Arc<MediaMachine> {
     let machine = MediaMachine::new(
         CountingObserver::new(),
         api.clone(),
         Some(uploader.clone() as Arc<dyn MediaBlobUploader>),
-        Some(blob as Arc<dyn MediaBlobFetcher>),
+        None,
         Some(Arc::new(fetcher) as Arc<dyn fauna_core::file_download::BlobFetcher>),
         None,
     );
@@ -4766,23 +5223,18 @@ fn uploaded(uploader: &FakeMediaBlobUploader) -> FakeDownloadFetcher {
 
 /// Ruling (8)(d), the restore sentence — **the attack**: a version a
 /// predecessor's signature names whose bytes the successor sealed under its
-/// CURRENT root (as a chunk manifest, and as a blob primary) is not
+/// CURRENT root is not
 /// restorable. Nothing is recorded and nothing uploaded: a bare re-sign would
 /// have made it a head the current root opens.
 #[tokio::test]
 async fn a_predecessor_signed_version_sealed_under_the_current_root_is_not_restorable() {
-    // Chunk-manifest arm.
     let mut fetcher = FakeDownloadFetcher::default();
     let planted = stock_owner_manifest(&mut fetcher, &KEY, b"created after the succession");
     let api = Arc::new(FakeMediaNestApi::new());
     api.set_versions(vec![version_naming(&planted)]);
     api.set_predecessor_signed(vec![planted.clone()]);
     let uploader = Arc::new(FakeMediaBlobUploader::new("unused"));
-    let blob = Arc::new(FakeMediaBlobFetcher::new(Vec::new()));
-    blob.fail(MediaApiError::NotFound {
-        detail: "not a primary".into(),
-    });
-    let machine = restore_machine(&api, &uploader, blob, fetcher);
+    let machine = restore_machine(&api, &uploader, fetcher);
     let versions = machine
         .file_versions("photos".into(), "photos/a.bin".into(), false)
         .await
@@ -4805,34 +5257,6 @@ async fn a_predecessor_signed_version_sealed_under_the_current_root_is_not_resto
             .any(|v| v.contains(fauna_media_machine::machine::RESTORE_INHERITED_UNOPENABLE)),
         "says why: {error:?}"
     );
-
-    // Blob-primary arm.
-    let primary = sealed(b"a Media-page upload after the succession", &KEY);
-    let planted = content_hash_hex(&primary);
-    let api = Arc::new(FakeMediaNestApi::new());
-    api.set_versions(vec![version_naming(&planted)]);
-    api.set_predecessor_signed(vec![planted.clone()]);
-    let uploader = Arc::new(FakeMediaBlobUploader::new("unused"));
-    let machine = restore_machine(
-        &api,
-        &uploader,
-        Arc::new(FakeMediaBlobFetcher::new(primary)),
-        FakeDownloadFetcher::default(),
-    );
-    let versions = machine
-        .file_versions("photos".into(), "photos/a.bin".into(), false)
-        .await
-        .expect("listed");
-    machine
-        .restore_version(
-            "photos".into(),
-            "dev-1".into(),
-            "photos/a.bin".into(),
-            versions[0].clone(),
-        )
-        .await;
-    assert!(restores(&api).is_empty(), "nothing recorded");
-    assert!(uploader.manifests().is_empty(), "nothing re-sealed");
 }
 
 /// …and the same version sealed under the PREDECESSOR's root restores — as a
@@ -4843,7 +5267,6 @@ async fn a_predecessor_signed_version_restores_by_re_sealing_under_the_current_r
     let current_only =
         fauna_core::file_download::FileDownloadKeys::owner(BackupKey::from_bytes(KEY));
 
-    // Chunk-manifest arm.
     let plaintext = b"the inherited file, as the predecessor sealed it".to_vec();
     let mut fetcher = FakeDownloadFetcher::default();
     let inherited = stock_owner_manifest(&mut fetcher, &RETIRED_KEY, &plaintext);
@@ -4851,11 +5274,7 @@ async fn a_predecessor_signed_version_restores_by_re_sealing_under_the_current_r
     api.set_versions(vec![version_naming(&inherited)]);
     api.set_predecessor_signed(vec![inherited.clone()]);
     let uploader = Arc::new(FakeMediaBlobUploader::new("unused"));
-    let blob = Arc::new(FakeMediaBlobFetcher::new(Vec::new()));
-    blob.fail(MediaApiError::NotFound {
-        detail: "not a primary".into(),
-    });
-    let machine = restore_machine(&api, &uploader, blob, fetcher.clone());
+    let machine = restore_machine(&api, &uploader, fetcher.clone());
     let versions = machine
         .file_versions("photos".into(), "photos/a.bin".into(), false)
         .await
@@ -4897,46 +5316,6 @@ async fn a_predecessor_signed_version_restores_by_re_sealing_under_the_current_r
     )
     .await
     .expect_err("the inherited manifest rests under the retired root");
-
-    // Blob-primary arm.
-    let plaintext = b"an inherited Media-page upload".to_vec();
-    let primary = sealed(&plaintext, &RETIRED_KEY);
-    let inherited = content_hash_hex(&primary);
-    let api = Arc::new(FakeMediaNestApi::new());
-    api.set_versions(vec![version_naming(&inherited)]);
-    api.set_predecessor_signed(vec![inherited.clone()]);
-    let uploader = Arc::new(FakeMediaBlobUploader::new("unused"));
-    let machine = restore_machine(
-        &api,
-        &uploader,
-        Arc::new(FakeMediaBlobFetcher::new(primary)),
-        FakeDownloadFetcher::default(),
-    );
-    let versions = machine
-        .file_versions("photos".into(), "photos/a.bin".into(), false)
-        .await
-        .expect("listed");
-    machine
-        .restore_version(
-            "photos".into(),
-            "dev-1".into(),
-            "photos/a.bin".into(),
-            versions[0].clone(),
-        )
-        .await;
-    let recorded = restores(&api);
-    assert_eq!(recorded.len(), 1);
-    assert_ne!(recorded[0].0, inherited);
-    let restored = fauna_core::file_download::download_file_bytes_by_manifest(
-        &uploaded(&uploader),
-        &current_only,
-        fauna_core::data::ContentHash::from_digest_raw(hex_decode32(&recorded[0].0)),
-        None,
-        "photos/a.bin",
-    )
-    .await
-    .expect("the restored head opens under the current root alone");
-    assert_eq!(restored, plaintext);
 }
 
 /// A version the CURRENT identity signed restores as it always did: the
@@ -4946,12 +5325,7 @@ async fn a_current_identity_version_restores_verbatim() {
     let api = Arc::new(FakeMediaNestApi::new());
     api.set_versions(vec![version_naming("abc123")]);
     let uploader = Arc::new(FakeMediaBlobUploader::new("unused"));
-    let machine = restore_machine(
-        &api,
-        &uploader,
-        Arc::new(FakeMediaBlobFetcher::new(Vec::new())),
-        FakeDownloadFetcher::default(),
-    );
+    let machine = restore_machine(&api, &uploader, FakeDownloadFetcher::default());
     let versions = machine
         .file_versions("photos".into(), "photos/a.bin".into(), false)
         .await
@@ -4991,11 +5365,7 @@ async fn a_stamped_version_restored_verbatim_never_opens_under_the_owner_root() 
     }]);
     api.set_predecessor_signed(vec![planted.clone()]);
     let uploader = Arc::new(FakeMediaBlobUploader::new("unused"));
-    let blob = Arc::new(FakeMediaBlobFetcher::new(Vec::new()));
-    blob.fail(MediaApiError::NotFound {
-        detail: "not a primary".into(),
-    });
-    let machine = restore_machine(&api, &uploader, blob, fetcher.clone());
+    let machine = restore_machine(&api, &uploader, fetcher.clone());
     let versions = machine
         .file_versions("photos".into(), "photos/a.bin".into(), false)
         .await
@@ -5059,13 +5429,12 @@ async fn a_stamped_version_restored_verbatim_never_opens_under_the_owner_root() 
     );
 }
 
-/// The bare-key arms: a Media-page blob primary, and a thumbnail no unstamped
-/// row names, are refused under the owner key when the row naming them is
-/// stamped — a stamped record is never an owner-sealed primary (a
-/// content-keyed upload records a chunk manifest and no thumbnail) — while the
-/// same bytes named by an unstamped row of the current identity open.
+/// The bare-key arm: a thumbnail no unstamped row names is refused under the
+/// owner key when the row naming it is stamped (a content-keyed upload records
+/// no thumbnail) — while the same bytes named by an unstamped row of the
+/// current identity open.
 #[tokio::test]
-async fn a_stamped_item_never_opens_a_blob_or_thumbnail_under_the_owner_key() {
+async fn a_stamped_item_never_opens_a_thumbnail_under_the_owner_key() {
     for stamp in [Some(5u64), None] {
         let sealed_bytes = sealed(b"blob bytes", &KEY);
         let hash = content_hash_hex(&sealed_bytes);
@@ -5090,18 +5459,8 @@ async fn a_stamped_item_never_opens_a_blob_or_thumbnail_under_the_owner_key() {
         );
         machine.refresh(Some(KEY.to_vec())).await;
 
-        let thumbnail = machine.fetch_thumbnail(hash.clone(), KEY.to_vec()).await;
-        let primary = machine
-            .download_file(
-                hash,
-                stamp,
-                "photos".into(),
-                "photos/a.jpg".into(),
-                KEY.to_vec(),
-            )
-            .await;
+        let thumbnail = machine.fetch_thumbnail(hash, KEY.to_vec()).await;
         assert_eq!(thumbnail.is_ok(), stamp.is_none(), "thumbnail, {stamp:?}");
-        assert_eq!(primary.is_ok(), stamp.is_none(), "primary, {stamp:?}");
     }
 }
 
@@ -5113,4 +5472,609 @@ async fn the_attested_predecessor_ids_reach_the_seams_reader() {
     let machine = MediaMachine::new(CountingObserver::new(), api.clone(), None, None, None, None);
     machine.set_predecessor_actor_ids(vec![vec![3u8; 32], vec![1, 2, 3]]);
     assert_eq!(api.reader_predecessors(), vec![[3u8; 32]]);
+}
+
+// ── The filter and the upload target address the row (`media.md` § Encryption
+// at rest → *The filter and the upload target address the row*) ──────────────
+//
+// The caller owns `photos` (row 7) and is a member of alice's `photos` (row 9,
+// MLS group "g9"). Each is its own option, its own view, its own target.
+
+/// The MLS join-filter double: the groups this client has joined.
+struct Joined(Vec<&'static str>);
+
+impl fauna_media_machine::MlsQuery for Joined {
+    fn is_joined_shared_set(&self, gid: &str) -> bool {
+        self.0.contains(&gid)
+    }
+}
+
+const OWN_PHOTOS: i64 = 7;
+const SHARED_PHOTOS: i64 = 9;
+
+/// A member row for a set `owner_handle` shared with the caller.
+fn member_row(id: i64, name: &str, owner_handle: &str, gid: &str, writer: bool) -> MediaFolder {
+    MediaFolder {
+        id,
+        name: name.into(),
+        member: true,
+        writer,
+        owner_handle: Some(owner_handle.into()),
+        owner_actor_id: Some("ab".repeat(32)),
+        mls_group_id: Some(gid.into()),
+        ..Default::default()
+    }
+}
+
+fn own_row(id: i64, name: &str) -> MediaFolder {
+    MediaFolder {
+        id,
+        name: name.into(),
+        ..Default::default()
+    }
+}
+
+fn item_in(folder: &str, folder_id: Option<i64>, path: &str) -> MediaItem {
+    MediaItem {
+        folder_id,
+        ..item(folder, path, 10, 100)
+    }
+}
+
+/// A machine over the same-named pair, its items, and (when `joined`) the
+/// join-filter wired with the shared set's group.
+async fn same_named_machine(
+    joined: Option<Vec<&'static str>>,
+    uploader: Option<Arc<FakeMediaBlobUploader>>,
+    resolver: Option<Arc<dyn FolderKeyResolver>>,
+    shared_writer: bool,
+) -> (Arc<MediaMachine>, Arc<FakeMediaNestApi>) {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![
+        own_row(OWN_PHOTOS, "photos"),
+        member_row(SHARED_PHOTOS, "photos", "alice", "g9", shared_writer),
+    ]);
+    api.set_snapshot(MediaSnapshot {
+        items: vec![
+            item_in("photos", Some(OWN_PHOTOS), "mine.jpg"),
+            item_in("photos", Some(SHARED_PHOTOS), "theirs.jpg"),
+        ],
+        ..Default::default()
+    });
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        api.clone(),
+        uploader.map(|u| u as Arc<dyn MediaBlobUploader>),
+        None,
+        None,
+        resolver,
+    );
+    if let Some(groups) = joined {
+        machine.set_mls_query(Arc::new(Joined(groups)));
+    }
+    machine.refresh(None).await;
+    (machine, api)
+}
+
+fn paths(machine: &MediaMachine) -> Vec<String> {
+    let mut out: Vec<String> = machine
+        .snapshot()
+        .items
+        .into_iter()
+        .map(|it| it.path)
+        .collect();
+    out.sort();
+    out
+}
+
+#[tokio::test]
+async fn a_same_named_pair_is_two_options_with_the_shared_one_labelled_by_owner() {
+    let (machine, _) = same_named_machine(Some(vec!["g9"]), None, None, true).await;
+    let options: Vec<(String, String)> = machine
+        .snapshot()
+        .folder_options
+        .into_iter()
+        .map(|o| (o.value, o.label))
+        .collect();
+    assert_eq!(
+        options,
+        vec![
+            ("photos".to_string(), "photos".to_string()),
+            ("local:9".to_string(), "photos (alice)".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn an_unjoined_member_row_is_never_offered() {
+    // Wired but not joined, and unwired: the member row is dropped either way.
+    for joined in [Some(vec!["some-other-group"]), None] {
+        let api = Arc::new(FakeMediaNestApi::new());
+        api.set_folders(vec![
+            own_row(OWN_PHOTOS, "photos"),
+            member_row(SHARED_PHOTOS, "trip", "alice", "g9", true),
+        ]);
+        api.set_snapshot(MediaSnapshot {
+            items: vec![item_in("trip", Some(SHARED_PHOTOS), "beach.jpg")],
+            ..Default::default()
+        });
+        let machine = MediaMachine::new(CountingObserver::new(), api, None, None, None, None);
+        if let Some(groups) = joined.clone() {
+            machine.set_mls_query(Arc::new(Joined(groups)));
+        }
+        machine.refresh(None).await;
+
+        let snap = machine.snapshot();
+        assert!(
+            !snap.folder_options.iter().any(|o| o.value == "local:9"),
+            "{joined:?}: a rostered-but-unjoined set is never a row option"
+        );
+        // Its items still render in all-media, and it surfaces as an item-only
+        // option by name — never with an owner it cannot name.
+        assert_eq!(paths(&machine), vec!["beach.jpg".to_string()]);
+        let trip = snap
+            .folder_options
+            .iter()
+            .find(|o| o.name == "trip")
+            .expect("an item-only option");
+        assert_eq!((trip.value.as_str(), trip.label.as_str()), ("trip", "trip"));
+    }
+}
+
+#[tokio::test]
+async fn the_view_scopes_by_the_items_row() {
+    let (machine, _) = same_named_machine(Some(vec!["g9"]), None, None, true).await;
+    machine.set_filter(Some("photos".into()));
+    assert_eq!(paths(&machine), vec!["mine.jpg".to_string()]);
+    machine.set_filter(Some("local:9".into()));
+    assert_eq!(paths(&machine), vec!["theirs.jpg".to_string()]);
+    machine.set_filter(None);
+    assert_eq!(
+        paths(&machine),
+        vec!["mine.jpg".to_string(), "theirs.jpg".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn an_item_without_folder_id_follows_the_name() {
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(vec![own_row(OWN_PHOTOS, "photos")]);
+    api.set_snapshot(MediaSnapshot {
+        items: vec![
+            item_in("photos", None, "old.jpg"),
+            item_in("legacy", None, "a.jpg"),
+        ],
+        ..Default::default()
+    });
+    let machine = MediaMachine::new(CountingObserver::new(), api, None, None, None, None);
+    machine.refresh(None).await;
+    machine.set_filter(Some("photos".into()));
+    assert_eq!(paths(&machine), vec!["old.jpg".to_string()]);
+    machine.set_filter(Some("legacy".into()));
+    assert_eq!(paths(&machine), vec!["a.jpg".to_string()]);
+}
+
+#[tokio::test]
+async fn upload_selected_into_the_shared_set_records_its_row() {
+    let content_key = [0x5e; 32];
+    let uploader = Arc::new(FakeMediaBlobUploader::new("never-a-blob-primary"));
+    // The shared row resolves BY IDENTITY to its group's content keys; by name
+    // `photos` is the caller's own owner-only set.
+    let resolver: Arc<dyn FolderKeyResolver> = Arc::new(FakeFolderKeyResolver {
+        ids: vec![SHARED_PHOTOS],
+        ..FakeFolderKeyResolver::bound("no set is named this", Some(serve_keys(1, content_key)))
+    });
+    let (machine, api) = same_named_machine(
+        Some(vec!["g9"]),
+        Some(uploader.clone()),
+        Some(resolver),
+        true,
+    )
+    .await;
+    machine.set_filter(Some("local:9".into()));
+    machine
+        .upload_selected(
+            "dev-1".into(),
+            "notes/plan.txt".into(),
+            served_body(),
+            KEY.to_vec(),
+        )
+        .await;
+
+    assert!(
+        machine.snapshot().error.is_none(),
+        "{:?}",
+        machine.snapshot().error
+    );
+    let recorded = api.calls().into_iter().find_map(|c| match c {
+        MediaNestCall::RecordMember {
+            folder,
+            folder_id,
+            content_key_version,
+            path_sealed,
+            ..
+        } => Some((folder, folder_id, content_key_version, path_sealed)),
+        _ => None,
+    });
+    assert_eq!(
+        recorded,
+        Some((
+            "photos".to_string(),
+            Some(SHARED_PHOTOS),
+            // Sealed under the SHARED row's content keys, never the own set's
+            // owner root the name resolves to.
+            Some(1),
+            Some(expected_content_path_seal("notes/plan.txt", content_key, 1)),
+        ))
+    );
+}
+
+#[tokio::test]
+async fn upload_selected_into_a_reader_shared_set_is_refused_with_its_reason() {
+    let uploader = Arc::new(FakeMediaBlobUploader::new("cafef00d"));
+    let (machine, api) =
+        same_named_machine(Some(vec!["g9"]), Some(uploader.clone()), None, false).await;
+    // The reader set stays an option…
+    assert!(
+        machine
+            .snapshot()
+            .folder_options
+            .iter()
+            .any(|o| o.value == "local:9")
+    );
+    machine.set_filter(Some("local:9".into()));
+    machine
+        .upload_selected(
+            "dev-1".into(),
+            "a.jpg".into(),
+            b"bytes".to_vec(),
+            KEY.to_vec(),
+        )
+        .await;
+
+    // …and the upload is refused with its reason, before anything is sealed.
+    assert_eq!(
+        machine.snapshot().error.map(|e| e.key).as_deref(),
+        Some("media.error_read_only_shared_folder")
+    );
+    assert!(uploader.manifests().is_empty() && uploader.chunks().is_empty());
+    assert!(
+        !api.calls()
+            .iter()
+            .any(|c| matches!(c, MediaNestCall::RecordMember { .. }))
+    );
+}
+
+#[tokio::test]
+async fn the_all_media_default_target_is_the_first_own_set() {
+    let api = Arc::new(FakeMediaNestApi::new());
+    // The nest lists the shared (writer) set first.
+    api.set_folders(vec![
+        member_row(SHARED_PHOTOS, "theirs", "alice", "g9", true),
+        own_row(OWN_PHOTOS, "mine"),
+    ]);
+    let uploader = Arc::new(FakeMediaBlobUploader::new("cafef00d"));
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        api.clone(),
+        Some(uploader as Arc<dyn MediaBlobUploader>),
+        None,
+        None,
+        None,
+    );
+    machine.set_mls_query(Arc::new(Joined(vec!["g9"])));
+    machine.refresh(None).await;
+    machine
+        .upload_selected(
+            "dev-1".into(),
+            "a.jpg".into(),
+            b"bytes".to_vec(),
+            KEY.to_vec(),
+        )
+        .await;
+
+    let recorded = api.calls().into_iter().find_map(|c| match c {
+        MediaNestCall::RecordMember {
+            folder, folder_id, ..
+        } => Some((folder, folder_id)),
+        _ => None,
+    });
+    assert_eq!(recorded, Some(("mine".to_string(), Some(OWN_PHOTOS))));
+}
+
+#[tokio::test]
+async fn filter_label_and_filter_value_follow_the_option() {
+    let (machine, _) = same_named_machine(Some(vec!["g9"]), None, None, true).await;
+    let snap = machine.snapshot();
+    assert_eq!(snap.filter_label, None, "all-media has no label");
+    let mut values: Vec<(String, String)> = snap
+        .items
+        .iter()
+        .map(|it| (it.path.clone(), it.filter_value.clone()))
+        .collect();
+    values.sort();
+    assert_eq!(
+        values,
+        vec![
+            ("mine.jpg".to_string(), "photos".to_string()),
+            ("theirs.jpg".to_string(), "local:9".to_string()),
+        ]
+    );
+
+    machine.set_filter(Some("local:9".into()));
+    let snap = machine.snapshot();
+    assert_eq!(snap.filter.as_deref(), Some("local:9"), "echoed as given");
+    assert_eq!(snap.filter_label.as_deref(), Some("photos (alice)"));
+    machine.set_filter(Some("photos".into()));
+    assert_eq!(machine.snapshot().filter_label.as_deref(), Some("photos"));
+}
+
+/// A version names its set's row (`media.md` § Encryption at rest → *A set is
+/// addressed by its row*): a writer member who owns a `photos` restores a
+/// version of a shared `photos` holding the same path. The restore records
+/// into the version's own row — the re-point's `folder_id` — with its path
+/// sealed under that row's content keys, never into the own set the name
+/// resolves to first.
+#[tokio::test]
+async fn a_shared_sets_version_restores_into_its_own_row() {
+    let content_key = [0x42u8; 32];
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(same_named_rows());
+    // The page shows the own set's item at the path; the shared set's
+    // version is reached through the history alone.
+    api.set_snapshot(MediaSnapshot {
+        items: vec![MediaItem {
+            folder_id: Some(OWN_ROW),
+            ..item("photos", "trip/beach.jpg", 10, 100)
+        }],
+        ..Default::default()
+    });
+    api.set_versions(vec![fauna_media_machine::snapshots::FileVersionSummary {
+        content_key_version: Some(1),
+        folder_id: Some(SHARED_ROW),
+        ..version_naming(&"ab".repeat(32))
+    }]);
+    let machine = MediaMachine::new(
+        CountingObserver::new(),
+        api.clone(),
+        None,
+        None,
+        None,
+        Some(shared_row_resolver(content_key)),
+    );
+    machine.set_owner_backup_key(KEY.to_vec());
+    machine.refresh(None).await;
+    let versions = machine
+        .file_versions("photos".into(), "trip/beach.jpg".into(), false)
+        .await
+        .expect("listed");
+    assert_eq!(
+        versions[0].folder_id,
+        Some(SHARED_ROW),
+        "the row is carried"
+    );
+
+    machine
+        .restore_version(
+            "photos".into(),
+            "dev-1".into(),
+            "trip/beach.jpg".into(),
+            versions[0].clone(),
+        )
+        .await;
+
+    let (folder_id, path_sealed) = api
+        .calls()
+        .into_iter()
+        .find_map(|c| match c {
+            MediaNestCall::RestoreMember {
+                folder_id,
+                path_sealed,
+                ..
+            } => Some((folder_id, path_sealed)),
+            _ => None,
+        })
+        .expect("the restore recorded");
+    assert_eq!(
+        folder_id,
+        Some(SHARED_ROW),
+        "the re-point names the version's row"
+    );
+    let content_root = fauna_core::path_crypto::LabelRoot::content_key(content_key, 1);
+    assert_eq!(
+        path_sealed,
+        Some(fauna_core::label_custody::seal_path(&content_root, "trip/beach.jpg").unwrap()),
+        "sealed under the shared row's content keys, not the own set's owner root"
+    );
+}
+
+/// The delete names the row (`set-addressing.md` § The row form → *Whoever
+/// holds the row sends it*): a writer member who owns a `photos` deletes an
+/// item of a shared `photos` by the value that item carries
+/// (`MediaItemSummary::filter_value`, its ref). The tombstone records into the
+/// shared row with its path sealed under that row's content keys, never into
+/// the own set the name resolves to first; a delete by name still writes the
+/// own set, its row stamped.
+#[tokio::test]
+async fn a_delete_by_the_items_value_tombstones_its_own_row() {
+    let content_key = [0x42u8; 32];
+    let (machine, api) = same_named_machine(
+        Some(vec!["g9"]),
+        None,
+        Some(shared_row_resolver(content_key)),
+        true,
+    )
+    .await;
+    machine.set_owner_backup_key(KEY.to_vec());
+    let value = machine
+        .snapshot()
+        .items
+        .into_iter()
+        .find(|it| it.path == "theirs.jpg")
+        .expect("listed")
+        .filter_value;
+    assert_eq!(value, "local:9");
+
+    machine
+        .delete(value, "dev-1".into(), "theirs.jpg".into())
+        .await;
+    machine
+        .delete("photos".into(), "dev-1".into(), "mine.jpg".into())
+        .await;
+
+    let deletes: Vec<_> = api
+        .calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            MediaNestCall::DeleteMember {
+                folder,
+                folder_id,
+                path_sealed,
+                ..
+            } => Some((folder, folder_id, path_sealed)),
+            _ => None,
+        })
+        .collect();
+    let content_root = fauna_core::path_crypto::LabelRoot::content_key(content_key, 1);
+    assert_eq!(
+        deletes[0],
+        (
+            "photos".to_string(),
+            Some(SHARED_PHOTOS),
+            Some(fauna_core::label_custody::seal_path(&content_root, "theirs.jpg").unwrap()),
+        ),
+        "the shared item's tombstone names its row, sealed under its content keys"
+    );
+    assert_eq!(
+        (deletes[1].0.as_str(), deletes[1].1),
+        ("photos", Some(OWN_PHOTOS)),
+        "a delete by name writes the own set, its row stamped"
+    );
+}
+
+/// The versions list names the row like the delete: a writer member who owns
+/// a `photos` opens the history of an item of a shared `photos` by the value
+/// that item carries (its ref), and the list asks for that row, never the own
+/// set the name resolves to first; a list by name asks for the own set's row.
+#[tokio::test]
+async fn a_versions_list_by_the_items_value_names_its_own_row() {
+    let (machine, api) = same_named_machine(Some(vec!["g9"]), None, None, true).await;
+    let value = machine
+        .snapshot()
+        .items
+        .into_iter()
+        .find(|it| it.path == "theirs.jpg")
+        .expect("listed")
+        .filter_value;
+
+    machine
+        .file_versions(value, "theirs.jpg".into(), false)
+        .await
+        .expect("listed");
+    machine
+        .file_versions("photos".into(), "mine.jpg".into(), false)
+        .await
+        .expect("listed");
+    let unlisted = machine
+        .file_versions("local:4242".into(), "x.jpg".into(), false)
+        .await;
+
+    let lists: Vec<_> = api
+        .calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            MediaNestCall::FileVersions {
+                folder, folder_id, ..
+            } => Some((folder, folder_id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        lists,
+        [
+            ("photos".to_string(), Some(SHARED_PHOTOS)),
+            ("photos".to_string(), Some(OWN_PHOTOS)),
+        ],
+        "each list names its row; an unlisted ref asks for nothing"
+    );
+    assert!(matches!(unlisted, Err(MediaApiError::NotFound { .. })));
+}
+
+/// The `(set, manifest)` ledger keys a version by its own row: the same bytes
+/// listed once in each of a same-named pair, the own set's version signed by
+/// this account and the shared set's by another writer. Keyed through the item
+/// at the path, both notes landed on the own row and the current identity won
+/// for both, so the other writer's version re-pointed verbatim — re-signed
+/// under this identity unopened. Keyed by the row, it takes the re-seal branch,
+/// which refuses bytes its signer could never have sealed; the own version
+/// still restores verbatim into its own row.
+#[tokio::test]
+async fn versions_of_a_same_named_pair_restore_each_under_its_own_signer() {
+    let mut fetcher = FakeDownloadFetcher::default();
+    let manifest = stock_owner_manifest(&mut fetcher, &KEY, b"identical bytes in both sets");
+    let api = Arc::new(FakeMediaNestApi::new());
+    api.set_folders(same_named_rows());
+    api.set_snapshot(MediaSnapshot {
+        items: vec![MediaItem {
+            folder_id: Some(OWN_ROW),
+            ..item("photos", "photos/a.bin", 10, 100)
+        }],
+        ..Default::default()
+    });
+    let own = fauna_media_machine::snapshots::FileVersionSummary {
+        version_num: 3,
+        folder_id: Some(OWN_ROW),
+        ..version_naming(&manifest)
+    };
+    let theirs = fauna_media_machine::snapshots::FileVersionSummary {
+        version_num: 4,
+        folder_id: Some(SHARED_ROW),
+        ..version_naming(&manifest)
+    };
+    api.set_versions(vec![own, theirs]);
+    api.set_signed_as(vec!["version:4".into()], [0x0Eu8; 32]);
+    let uploader = Arc::new(FakeMediaBlobUploader::new("unused"));
+    let machine = restore_machine(&api, &uploader, fetcher);
+    machine.refresh(None).await;
+    let versions = machine
+        .file_versions("photos".into(), "photos/a.bin".into(), false)
+        .await
+        .expect("listed");
+    let restore = |v: &fauna_media_machine::snapshots::FileVersionSummary| {
+        machine.restore_version(
+            "photos".into(),
+            "dev-1".into(),
+            "photos/a.bin".into(),
+            v.clone(),
+        )
+    };
+
+    restore(&versions[1]).await;
+    assert!(
+        restores(&api).is_empty(),
+        "another writer's version is never re-signed unopened"
+    );
+    assert!(
+        machine.snapshot().error.is_some(),
+        "the refusal is surfaced"
+    );
+
+    restore(&versions[0]).await;
+    let recorded: Vec<_> = api
+        .calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            MediaNestCall::RestoreMember {
+                folder_id,
+                manifest_hash,
+                ..
+            } => Some((folder_id, manifest_hash)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        recorded,
+        vec![(Some(OWN_ROW), manifest)],
+        "the own version re-points verbatim into its own row"
+    );
 }

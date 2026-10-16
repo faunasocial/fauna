@@ -1,23 +1,16 @@
 <script lang="ts">
   import { identity } from '$lib/store';
-  import { adminStats, setupStatus, type AdminStats, type SetupStatus } from '$lib/rpc';
-  import { fetchNestInfo, type NestInfoResponse } from '$lib/api';
+  import { adminDashboardSnapshot, type AdminStatCard } from '$lib/rpc';
   import { onMount } from 'svelte';
   import MessageBanner from '$lib/components/MessageBanner.svelte';
   import { t } from '$lib/i18n/strings';
-  import { byteSize } from '$lib/value-format';
+  import { resolveLocalized } from '$lib/i18n/localized';
   import { IDS } from '$lib/generated/uiIds';
 
-  // The dashboard is a dumb renderer over three shared reads (no HTTP twins):
-  //   • fauna.admin.stats   (adminStats)  — user count + total storage
-  //   • fauna.setup.status  (setupStatus) — TLS-active status + registration posture
-  //   • fauna.nest.info      (fetchNestInfo) — node domain, version
-  // The HTTP `/admin/api/stats` twin (a richer ad-hoc shape) was deleted by the
-  // WS-RPC-everywhere rip-out; its displayed fields are re-sourced from the
-  // canonical kinds above.
-  let stats = $state<AdminStats | null>(null);
-  let setup = $state<SetupStatus | null>(null);
-  let nestInfo = $state<NestInfoResponse | null>(null);
+  // The dashboard is a dumb renderer over the shared snapshot (`admin.md` § 1.
+  // Dashboard → *The card set*): the fold, its order and its labels/values live
+  // in shared Rust; this page resolves each `LocalizedText` and paints it.
+  let cards = $state<AdminStatCard[]>([]);
   let error = $state('');
   let loading = $state(true);
 
@@ -32,29 +25,17 @@
     const id = $identity;
     if (!id?.secretHex) return;
 
-    const results = await Promise.allSettled([
-      adminStats(id.secretHex),
-      setupStatus(id.secretHex),
-      fetchNestInfo(),
-    ]);
-
-    if (results[0].status === 'fulfilled') {
-      stats = results[0].value;
-    } else {
-      // `allSettled` hands the rejection back on `.reason` — the stats read failed
-      // for a reason the admin can act on (ui/README.md § Copy comprehensibility).
-      const r: unknown = results[0].reason;
+    try {
+      const snapshot = await adminDashboardSnapshot(id.secretHex);
+      cards = snapshot.stats;
+      // A failed read still leaves the cards the other reads produced.
+      if (snapshot.error) {
+        error = t.admin.dashboard.load_error({ message: snapshot.error });
+      }
+    } catch (r: unknown) {
       error = t.admin.dashboard.load_error({
         message: r instanceof Error ? r.message : String(r),
       });
-    }
-
-    if (results[1].status === 'fulfilled') {
-      setup = results[1].value;
-    }
-
-    if (results[2].status === 'fulfilled') {
-      nestInfo = results[2].value;
     }
 
     loading = false;
@@ -68,75 +49,20 @@
 
 {#if loading}
   <p class="muted">{t.admin.dashboard.loading}</p>
-{:else if error}
-  <!-- error shown in banner above -->
 {:else}
   <div class="grid">
-    {#if nestInfo}
+    {#each cards as card}
       <div class="card" data-testid={IDS.ADMIN_STAT_CARD}>
-        <div class="card-label" data-testid={IDS.ADMIN_STAT_CARD_LABEL}>{t.admin.dashboard.nest_domain}</div>
-        <div class="card-value" data-testid={IDS.ADMIN_STAT_CARD_VALUE}>{nestInfo.registration?.handle_domain ?? 'unknown'}</div>
+        <div class="card-label" data-testid={IDS.ADMIN_STAT_CARD_LABEL}>{resolveLocalized(card.label)}</div>
+        <div class="card-value" data-testid={IDS.ADMIN_STAT_CARD_VALUE}>{resolveLocalized(card.value)}</div>
       </div>
-
-      <div class="card" data-testid={IDS.ADMIN_STAT_CARD}>
-        <div class="card-label" data-testid={IDS.ADMIN_STAT_CARD_LABEL}>{t.admin.dashboard.version}</div>
-        <div class="card-value mono" data-testid={IDS.ADMIN_STAT_CARD_VALUE}>{nestInfo.version ?? 'unknown'}</div>
-      </div>
-    {/if}
-
-    {#if stats}
-      <div class="card" data-testid={IDS.ADMIN_STAT_CARD}>
-        <div class="card-label" data-testid={IDS.ADMIN_STAT_CARD_LABEL}>{t.common.users}</div>
-        <div class="card-value" data-testid={IDS.ADMIN_STAT_CARD_VALUE}>{stats.total_users}</div>
-      </div>
-
-      <div class="card" data-testid={IDS.ADMIN_STAT_CARD}>
-        <div class="card-label" data-testid={IDS.ADMIN_STAT_CARD_LABEL}>{t.admin.dashboard.total_storage}</div>
-        <div class="card-value" data-testid={IDS.ADMIN_STAT_CARD_VALUE}>{byteSize(stats.total_storage_bytes)}</div>
-      </div>
-    {/if}
-
-    {#if setup}
-      <div class="card" data-testid={IDS.ADMIN_STAT_CARD}>
-        <div class="card-label" data-testid={IDS.ADMIN_STAT_CARD_LABEL}>{t.admin.dashboard.email}</div>
-        <div class="card-value" data-testid={IDS.ADMIN_STAT_CARD_VALUE}>
-          <span class="badge" class:active={setup.email_enabled} class:inactive={!setup.email_enabled}>
-            {setup.email_enabled ? t.common.enabled : t.common.disabled}
-          </span>
-        </div>
-      </div>
-
-      <div class="card" data-testid={IDS.ADMIN_STAT_CARD}>
-        <div class="card-label" data-testid={IDS.ADMIN_STAT_CARD_LABEL}>{t.admin.dashboard.tls}</div>
-        <div class="card-value" data-testid={IDS.ADMIN_STAT_CARD_VALUE}>
-          <span class="badge" class:active={setup.tls_active} class:inactive={!setup.tls_active}>
-            {setup.tls_active ? t.common.active : t.common.inactive}
-          </span>
-        </div>
-      </div>
-    {/if}
-
-    {#if setup?.registration_mode}
-      <!-- Open = anyone may request an account (the `open` and
-           `invite_required` postures); closed = only the admin admits. -->
-      {@const registrationOpen = setup.registration_mode !== 'closed'}
-      <div class="card" data-testid={IDS.ADMIN_STAT_CARD}>
-        <div class="card-label" data-testid={IDS.ADMIN_STAT_CARD_LABEL}>{t.admin.dashboard.registration}</div>
-        <div class="card-value" data-testid={IDS.ADMIN_STAT_CARD_VALUE}>
-          <span class="badge" class:active={registrationOpen} class:inactive={!registrationOpen}>
-            {registrationOpen ? t.common.open : t.common.closed}
-          </span>
-        </div>
-      </div>
-    {/if}
+    {/each}
   </div>
-
 {/if}
 
 <style>
   h1 { margin-bottom: 1.5rem; font-size: 1.5rem; }
   .muted { color: var(--text-muted, #8b949e); }
-  .mono { font-family: monospace; font-size: 0.875rem; }
 
   .grid {
     display: grid;
@@ -159,22 +85,6 @@
   .card-value {
     font-size: 1.25rem;
     font-weight: 600;
-  }
-
-  .badge {
-    display: inline-block;
-    font-size: 0.75rem;
-    font-weight: 600;
-    padding: 0.125rem 0.5rem;
-    border-radius: 4px;
-  }
-  .badge.active {
-    background: rgba(63, 185, 80, 0.15);
-    color: var(--success, #3fb950);
-  }
-  .badge.inactive {
-    background: rgba(248, 81, 73, 0.15);
-    color: var(--danger, #f85149);
   }
 
 </style>

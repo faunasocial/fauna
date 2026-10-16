@@ -201,8 +201,16 @@ impl InnerObserver for ObserverShim {
     }
 }
 
+/// What `setAccountPort` needs to wire the consent-time grant seams after
+/// construction: a second copy of the actor keypair (the machine took the
+/// first) and the page's socket.
+struct ConsentWiring {
+    keypair: ActorKeypair,
+    client: fauna_rpc_wasm::WsRpcClient,
+}
+
 #[wasm_bindgen]
-pub struct AtprotoSettingsMachine(Arc<InnerMachine>);
+pub struct AtprotoSettingsMachine(Arc<InnerMachine>, ConsentWiring);
 
 #[wasm_bindgen]
 impl AtprotoSettingsMachine {
@@ -224,16 +232,21 @@ impl AtprotoSettingsMachine {
             .try_into()
             .map_err(|_| JsValue::from_str("secret must be 32 bytes"))?;
         let keypair = ActorKeypair::from_secret(arr);
+        let consent_keypair = ActorKeypair::from_secret(arr);
         let observer: Arc<dyn InnerObserver> = Arc::new(ObserverShim(observer));
         let client = fauna_rpc_wasm::WsRpcClient::over_port(port.into())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(AtprotoSettingsMachine(
             fauna_atproto_settings_machine::build_atproto_settings_machine(
-                client,
+                client.clone(),
                 keypair,
                 observer,
                 Some(alerts_registry()),
             ),
+            ConsentWiring {
+                keypair: consent_keypair,
+                client,
+            },
         ))
     }
 
@@ -250,12 +263,21 @@ impl AtprotoSettingsMachine {
     /// - the credential store: the minted app-credential secrets
     ///   (`fauna.state.atproto`) rest there.
     ///
+    /// - the consent-time grant seams (`fauna:records:rw:` / `folder:read` /
+    ///   `post.author` approves): the grant log, kind-manifest rows and folder
+    ///   custody ride the same port, the folder list and the D10 delegation
+    ///   doors the page's socket — an approve of such a request is refused
+    ///   until this runs.
+    ///
     /// With no runtime serving this account every custody read is "cannot
     /// verify", no credential is revealable, and every write is refused.
     /// Throws on an object that is not a port. Call it beside the constructor,
     /// before the first `refresh()`.
     #[wasm_bindgen(js_name = setAccountPort)]
     pub fn set_account_port(&self, port: fauna_account_port::JsAccountPort) -> Result<(), JsValue> {
+        // `.clone()` derefs to the underlying `JsValue`; the seams builder
+        // wants the typed port back.
+        let account: fauna_account_port::JsAccountPort = port.clone().unchecked_into();
         let port: JsValue = port.into();
         let transport = || {
             fauna_account_port::JsAccountTransport::new(port.clone())
@@ -267,6 +289,13 @@ impl AtprotoSettingsMachine {
         self.0.set_credential_store(Arc::new(
             fauna_atproto_settings_machine::port::PortAtprotoCredentials::new(transport()?),
         ));
+        let seams = fauna_atproto_settings_machine::consent_grant_seams_over_port(
+            &self.1.keypair,
+            self.1.client.clone(),
+            &account,
+        )
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.0.set_consent_grant_seams(Arc::new(seams));
         Ok(())
     }
 
@@ -520,6 +549,15 @@ impl AtprotoSettingsMachine {
     #[wasm_bindgen(js_name = cancelDelete)]
     pub fn cancel_delete(&self) {
         self.0.cancel_delete();
+    }
+
+    /// Tick / untick the card's "also permanently retire my identity" opt-in
+    /// (`atproto-delete-tombstone`). Synchronous card state — nothing is sent
+    /// until `confirmDelete`; the machine notifies the registered observer
+    /// itself. Inert without an open card or while a confirm is in flight.
+    #[wasm_bindgen(js_name = setDeleteRetireIdentity)]
+    pub fn set_delete_retire_identity(&self, enabled: bool) {
+        self.0.set_delete_retire_identity(enabled);
     }
 
     /// Perform the sweep (`atproto-delete-confirm`) — the ONE wire call of

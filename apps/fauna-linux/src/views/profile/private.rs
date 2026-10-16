@@ -7,15 +7,15 @@
 //! form as the user opened it), the changed-register diff, the bounds
 //! validation and its refusals are `fauna_core::contact_overlay`
 //! (`OverlayEditor`); the Save is
-//! `fauna_client_account_runtime::contact_overlays::save`, the one door every
-//! app writes through. This file owns the widgets and nothing else.
+//! `fauna_client_account_runtime::contact_overlays::save_staged`, the one
+//! answer every app gives. This file owns the widgets and nothing else.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
+use fauna_client_account_runtime::contact_overlays::{StagedSave, save_staged};
 use fauna_core::contact_overlay::{OverlayEditor, OverlayForm};
-use fauna_sync_engine::contact_overlay_rows::{OverlayWrite, OverlayWriteOutcome};
 use fauna_ui_ids as ids;
 
 use crate::async_helper::spawn_with_snapshot;
@@ -124,53 +124,30 @@ impl Section {
         };
         // The account store assembles off the login path; until it has, there
         // is nowhere to write — the staged edits stay on screen.
-        let Some(store) = crate::account_runtime::handle() else {
-            self.show_error(Some(crate::i18n::strings::common::STILL_LOADING));
-            return;
-        };
+        // The account store assembles off the login path; `save_staged` answers
+        // `common.still_loading` until it has — the staged edits stay on screen.
+        let store = crate::account_runtime::handle();
         let manager = crate::conversations::manager();
         let actor = self.actor_id.clone();
         let section = Rc::clone(self);
         spawn_with_snapshot(
             &client.runtime_handle(),
             move || async move {
-                fauna_client_account_runtime::contact_overlays::save(
-                    &manager,
-                    &store,
-                    &actor,
-                    OverlayWrite::Changes(changes),
-                )
-                .await
-                .map_err(|e| {
-                    (
-                        fauna_client_account_runtime::contact_overlays::not_ready_reason(&e),
-                        format!("{e:#}"),
-                    )
-                })
+                save_staged(Some(&manager), store.as_ref(), &actor, Ok(Some(changes))).await
             },
-            move |outcome| match outcome {
+            move |answer| match answer {
                 // The projection already reloaded: drop the staging and let
                 // the fields read live again.
-                Ok(OverlayWriteOutcome::Written(_) | OverlayWriteOutcome::Unchanged(_)) => {
+                StagedSave::Saved => {
                     section.editor.borrow_mut().reset();
                     section.show_error(None);
                     section.paint();
                 }
-                Ok(OverlayWriteOutcome::Refused(refusal)) => {
-                    section.show_error(Some(&refusal.resolve(crate::i18n::strings::lookup)));
-                }
-                // A replica that is not ready — it has never listed the
-                // account's records, or holds them under a generation it may
-                // still be keyed for — refuses the save at the read gate; it
-                // can be retried once what it waits for has come.
-                Err((Some(not_ready), _)) => {
-                    section.show_error(Some(not_ready));
-                }
-                // The plane refuses to seal while no generation tip resolves
-                // for this device (`account-data-taxonomy.md` → *The
-                // contact-overlay rung*).
-                Err((None, reason)) => {
-                    section.show_error(Some(&p::PRIVATE_SAVE_FAILED.replace("{reason}", &reason)));
+                // Every other arm is a finished text; the staged edits stay.
+                StagedSave::Refused(text)
+                | StagedSave::NotReady(text)
+                | StagedSave::Failed(text) => {
+                    section.show_error(Some(&text.resolve(crate::i18n::strings::lookup)));
                 }
             },
         );

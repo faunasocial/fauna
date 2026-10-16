@@ -41,6 +41,11 @@ public sealed partial class SettingsMailPage : Page
             ErrorBar.Message = message;
             ErrorBar.IsOpen = true;
             App.CurrentErrorMessage = message;
+            // A change made from low on the page (the serve-here switch) leaves this
+            // bar scrolled off the top: bring it into view so the refusal is seen
+            // (and is IsOffscreen=false to the e2e driver, reference_windows_e2e_is_visible_offscreen).
+            ErrorBar.UpdateLayout();
+            ErrorBar.StartBringIntoView();
         }
     }
 

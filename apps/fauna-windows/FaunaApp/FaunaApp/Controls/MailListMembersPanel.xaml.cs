@@ -125,6 +125,9 @@ public sealed partial class MailListMembersPanel : UserControl
         // (real or placeholder-id) completes.
         ListEmpty.Visibility = _vm.Loaded && _vm.Members.Count == 0
             ? Visibility.Visible : Visibility.Collapsed;
+        ImportResultText.Text = _vm.ImportTally;
+        ImportResultText.Visibility = string.IsNullOrEmpty(_vm.ImportTally)
+            ? Visibility.Collapsed : Visibility.Visible;
     }
 
     // ── Add-member sheet ──
@@ -153,6 +156,8 @@ public sealed partial class MailListMembersPanel : UserControl
     {
         AddSheet.Visibility = Visibility.Collapsed;
         ImportInput.Text = string.Empty;
+        _vm?.ClearImportTally();
+        RenderState();
         ImportSheet.Visibility = Visibility.Visible;
     }
 

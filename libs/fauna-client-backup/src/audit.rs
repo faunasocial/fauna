@@ -1101,7 +1101,11 @@ pub async fn evaluate_inclusion_pinned(
     }
 
     let fetcher = inclusion.fetcher(destination_nest_url);
-    let keys = inclusion.keys();
+    // Sealed-only, whatever the platform source hands back: every manifest
+    // address below is the audited destination's own word, so only the seal
+    // authenticates — a plaintext ledger or record it built itself must fail
+    // the pass, not pass it (`backup-restore.md` § Security Properties).
+    let keys = inclusion.keys().sealed_only();
     let seed = now as u64;
 
     // The population is NOT the destination's list: every
@@ -2481,6 +2485,9 @@ pub struct StoreSourceRegression {
     pub served: u32,
     /// Unix seconds of the first pass that found the source there.
     pub observed_at: i64,
+    /// Unix seconds of the pass whose `fauna.segments.counter_floor` the
+    /// store's pull landed on the source at `held`; `None` until one lands.
+    pub floored_at: Option<i64>,
 }
 
 /// What this device's own custodian store reported, read by the shell from
@@ -2504,10 +2511,13 @@ pub struct OwnCustodianStore {
 /// The store's record is the whole truth for that row, so the fold
 /// **replaces** the row's `accepted_regressions` every pass: a regression the
 /// store has since cleared leaves with it. A client-device row has no address
-/// and never reaches the inclusion arm, so nothing else writes that map; each
-/// folded entry carries `floored_at: None` and `recoverable_until: None` — the
-/// floor is the nest-destination record's
-/// ([`SourceLedgerVouch::floor_counter`]), asked only by the inclusion arm.
+/// and never reaches the inclusion arm, so nothing else writes that map. Each
+/// folded entry carries the store's own `floored_at` — the client-device arm
+/// floors the source from its pull (`segment-backup-protocol.md` §
+/// Client-device custodian (pull) → *Restore* → *Recovery from this device's
+/// own store*, part (0′)), the twin of the inclusion arm's
+/// [`SourceLedgerVouch::floor_counter`] — and `recoverable_until: None`: the
+/// store holds the lost copy up until recovered, so no clock reclaims it.
 ///
 /// No row assigning `own.device_id` (the shared matching rule's answer, two
 /// rows naming it included) folds nothing.
@@ -2539,7 +2549,7 @@ pub fn fold_own_custodian_regressions(
                     pinned: r.held,
                     served: r.served,
                     observed_at: r.observed_at,
-                    floored_at: None,
+                    floored_at: r.floored_at,
                     recoverable_until: None,
                 },
             )
@@ -2805,13 +2815,37 @@ mod tests {
     /// The plaintext bytes standing in for one backed-up segment.
     const PAYLOAD: &[u8] = b"one backed-up segment's bytes";
 
-    /// A self-consistent one-chunk plaintext manifest for [`PAYLOAD`].
-    ///
-    /// Plaintext (`stored_hashes: None`) rather than sealed, because what these
-    /// tests pin is the *sampling and verdict* logic; the seal path itself is
-    /// `fauna-core`'s own covered territory, and the key material's necessity is
-    /// pinned separately by `a_sealed_record_this_reader_holds_no_key_for_fails`.
+    /// The owner's audit root: the `NestBackupKey` every mock inclusion source
+    /// hands out, which the source nest seals reserved segment sets under.
+    fn audit_root() -> [u8; 32] {
+        fauna_core::crypto::NestBackupKey::derive(&[7u8; 32]).convergent_chunk_root()
+    }
+
+    /// `payload` sealed under [`audit_root`] — the shape a reserved segment
+    /// set really rests in at a destination. Sealed, never plaintext: the
+    /// audit is a sealed-only reader, so a plaintext record at a listed
+    /// address is the forgery it must fail, not a healthy
+    /// copy. The seal is convergent, so the addresses are deterministic.
+    fn seal_under_audit_root(payload: &[u8]) -> fauna_core::blob_seal::SealedBlob {
+        fauna_core::blob_seal::seal_blob(payload, Some((audit_root(), None))).expect("seal")
+    }
+
+    /// [`PAYLOAD`], sealed once per process.
+    fn sealed_payload() -> &'static fauna_core::blob_seal::SealedBlob {
+        static SEALED: std::sync::OnceLock<fauna_core::blob_seal::SealedBlob> =
+            std::sync::OnceLock::new();
+        SEALED.get_or_init(|| seal_under_audit_root(PAYLOAD))
+    }
+
+    /// The healthy record's manifest: [`PAYLOAD`] sealed under the audit root.
     fn manifest_bytes() -> Vec<u8> {
+        sealed_payload().manifest_bytes.clone()
+    }
+
+    /// A self-consistent one-chunk **plaintext** manifest for [`PAYLOAD`] —
+    /// what a destination that discarded the sealed copy can build on its
+    /// own, at an address it lists.
+    fn plaintext_manifest_bytes() -> Vec<u8> {
         let manifest = fauna_core::chunk::ChunkManifest {
             file_hash: ContentHash::of_raw(PAYLOAD),
             total_size: PAYLOAD.len() as u64,
@@ -2822,6 +2856,12 @@ mod tests {
             min_reader: None,
         };
         fauna_core::encoding::canonical_encode(&manifest).expect("encode manifest")
+    }
+
+    /// The address a custody row must carry to be served
+    /// [`plaintext_manifest_bytes`].
+    fn plaintext_manifest_hash_hex() -> String {
+        hex::encode(ContentHash::of_raw(&plaintext_manifest_bytes()).digest())
     }
 
     /// The `SealedUnopenable` posture's manifest — a *different* document from
@@ -2867,6 +2907,10 @@ mod tests {
         CorruptChunks,
         /// The manifest declares a seal this reader has no key for.
         SealedUnopenable,
+        /// The destination serves a self-built, self-consistent **plaintext**
+        /// record at the address it lists — present, hash-matched, and opened
+        /// by nothing but the destination's own word.
+        PlaintextForged,
         /// The **ordinary-folder mirror** plane, served intact: the manifest's
         /// store keys address content-layer CIPHERTEXT the auditor holds no key
         /// for, and the destination really has those bytes. Present and
@@ -2939,6 +2983,7 @@ mod tests {
             match self.blobs {
                 Blobs::ManifestGone => anyhow::bail!("404 no such manifest"),
                 Blobs::SealedUnopenable => Ok(sealed_manifest_bytes()),
+                Blobs::PlaintextForged => Ok(plaintext_manifest_bytes()),
                 Blobs::MirrorPlane | Blobs::MirrorChunkDropped => Ok(mirror_manifest_bytes()),
                 _ => Ok(manifest_bytes()),
             }
@@ -2959,7 +3004,19 @@ mod tests {
                 Blobs::MirrorPlane => Ok(store_keys.iter().map(|_| CIPHERTEXT.to_vec()).collect()),
                 // Genuinely gone — the case that must still fail.
                 Blobs::MirrorChunkDropped => anyhow::bail!("404 no such chunk"),
-                _ => Ok(store_keys.iter().map(|_| PAYLOAD.to_vec()).collect()),
+                Blobs::PlaintextForged => Ok(store_keys.iter().map(|_| PAYLOAD.to_vec()).collect()),
+                // The sealed bodies, by store key.
+                _ => store_keys
+                    .iter()
+                    .map(|k| {
+                        sealed_payload()
+                            .chunks
+                            .iter()
+                            .find(|(key, _)| key == k)
+                            .map(|(_, body)| body.clone())
+                            .ok_or_else(|| anyhow::anyhow!("404 no such chunk"))
+                    })
+                    .collect(),
             }
         }
     }
@@ -3390,6 +3447,37 @@ mod tests {
             NOW,
         ));
         assert_eq!(verdict, AuditVerdict::Passed);
+    }
+
+    /// A destination that discarded the sealed copies and serves a
+    /// self-built **plaintext** record at every address it lists — present,
+    /// hash-matched, self-consistent — fails every sample. Only the seal
+    /// authenticates a record whose address is the audited party's own word,
+    /// so the audit is a sealed-only reader whatever the platform source's
+    /// `keys()` hands back.
+    #[test]
+    fn a_destination_serving_self_built_plaintext_records_fails_inclusion() {
+        let custody: Vec<CustodyItem> = (0..40)
+            .map(|i| CustodyItem {
+                manifest_hash: plaintext_manifest_hash_hex(),
+                ..custody_at("4242", i, NOW)
+            })
+            .collect();
+        let verdict = block_on(evaluate_inclusion(
+            &MockInclusion::new(Blobs::PlaintextForged),
+            DEST_URL,
+            &custody,
+            &[],
+            &AttachedMirrorSets::new(),
+            NOW,
+        ));
+        match verdict {
+            AuditVerdict::InclusionFailure { missing, sampled } => {
+                assert_eq!(sampled, AUDIT_SAMPLE_K as u32);
+                assert_eq!(missing, sampled, "every plaintext sample is refused");
+            }
+            other => panic!("expected InclusionFailure, got {other:?}"),
+        }
     }
 
     /// The headline: a destination that has *lost* the bytes it claims custody
@@ -4923,6 +5011,7 @@ mod tests {
                     held: 40,
                     served: 0,
                     observed_at: NOW - HOUR,
+                    floored_at: None,
                 })
                 .collect(),
         }
@@ -5144,6 +5233,23 @@ mod tests {
             "the source was dialled: {:?}",
             connector.dialled.lock().unwrap()
         );
+    }
+
+    /// The store's floor reaches the row: a regression the pull floored folds
+    /// with the store's `floored_at`, still deadline-less.
+    #[test]
+    fn a_floored_store_regression_folds_its_floor() {
+        let connector = DialLog::default();
+        let store = MemStore::with(AuditStateSnapshot::default());
+        let dests = vec![custodian_destination("mine", THIS_DEVICE)];
+        let mut own = own_store(&["manifest.mail"]);
+        own.source_regressions[0].floored_at = Some(NOW - HOUR + 60);
+
+        let rendered = block_on(pass_with_store(&connector, &store, &dests, Some(&own), NOW));
+
+        let entry = rendered[0].state.accepted_regressions["manifest.mail"];
+        assert_eq!(entry.floored_at, Some(NOW - HOUR + 60));
+        assert_eq!(entry.recoverable_until, None);
     }
 
     /// A destination's coverage rows share its id; the fold still finds the
@@ -5557,9 +5663,23 @@ mod tests {
     }
 
     impl Corpus {
-        /// Store `payload` as a one-chunk plaintext record; the returned hex is
-        /// the manifest address a custody row carries for it.
+        /// Store `payload` as a record sealed under the audit root — the shape
+        /// a reserved set really rests in; the returned hex is the manifest
+        /// address a custody row carries for it.
         fn add(&mut self, payload: &[u8]) -> String {
+            let sealed = seal_under_audit_root(payload);
+            let address = address_hex(&sealed.manifest_hash);
+            self.manifests
+                .insert(address.clone(), sealed.manifest_bytes);
+            for (key, body) in sealed.chunks {
+                self.chunks.insert(address_hex(&key), body);
+            }
+            address
+        }
+
+        /// Store `payload` as a self-built one-chunk **plaintext** record — a
+        /// destination's forgery at an address it lists.
+        fn add_plaintext(&mut self, payload: &[u8]) -> String {
             let manifest = fauna_core::chunk::ChunkManifest {
                 file_hash: ContentHash::of_raw(payload),
                 total_size: payload.len() as u64,
@@ -5781,6 +5901,34 @@ mod tests {
     fn a_destination_listing_everything_its_ledger_names_passes() {
         let (corpus, custody) = de_listing_destination(40, 0..40, SegmentFamily::Content, false);
         assert_eq!(inclusion_over(corpus, &custody, &[]), AuditVerdict::Passed);
+    }
+
+    /// A destination that discarded the sealed set and rebuilt it
+    /// in **plaintext** — every segment and a ledger naming exactly them, all
+    /// self-consistent at the addresses it lists — fails. Before the
+    /// sealed-only read this passed both arms: the forged ledger anchored the
+    /// population, and every sampled record "opened".
+    #[test]
+    fn a_destination_serving_a_self_built_plaintext_ledger_and_records_fails() {
+        let mut corpus = Corpus::default();
+        let refs: Vec<SegmentRef> = (0..8).map(segment_ref).collect();
+        let family = SegmentFamily::Content;
+        let mut custody = Vec::new();
+        for id in 0..8 {
+            let dat = corpus.add_plaintext(&segment_payload(id));
+            custody.push(row(&family.dat_path(SCOPE, id), dat));
+            let meta = corpus.add_plaintext(SIDECAR);
+            custody.push(row(&family.meta_path(SCOPE, id), meta));
+        }
+        let ledger = corpus.add_plaintext(&ledger_bytes(&refs));
+        custody.push(row(&family.mirror_path(SCOPE, "mail"), ledger));
+        match inclusion_over(corpus, &custody, &[]) {
+            AuditVerdict::InclusionFailure { missing, sampled } => {
+                assert!(sampled > 0);
+                assert_eq!(missing, sampled, "every plaintext sample is refused");
+            }
+            other => panic!("expected InclusionFailure, got {other:?}"),
+        }
     }
 
     /// The ledger names the `.meta` path too: a destination that keeps every

@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use fauna_client_bridges::HolderInfo;
 
 use super::{InspectResult, LabelerCatalogApiError, LabelerCatalogNestApi};
-use crate::snapshots::LabelerCatalogEntry;
+use crate::snapshots::{LabelerCatalogEntry, LabelerInspectView};
 
 /// One recorded gesture.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +114,39 @@ impl LabelerCatalogNestApi for FakeLabelerCatalogNestApi {
         let mut responses = self.inspect_responses.lock().unwrap();
         if let Some(pos) = responses.iter().position(|(id, _)| *id == labeler_id) {
             return responses.remove(pos).1;
+        }
+        // No fixture: a listed labeler inspects as a VERIFIED view of its own
+        // catalog row — the honest nest — so a test about anything after the
+        // subscribe gate need not fixture the inspect the gate runs.
+        let hex = hex::encode(&labeler_id);
+        if let Some(e) = self
+            .entries
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|e| e.labeler_id == hex)
+        {
+            return Ok(InspectResult {
+                view: LabelerInspectView {
+                    labeler_id: e.labeler_id.clone(),
+                    version: e.version,
+                    artifact_kind: e.artifact_kind.clone(),
+                    wasm_hash: e.wasm_hash.clone(),
+                    wasm_size: e.wasm_size,
+                    needs_text: true,
+                    needs_hashtags: false,
+                    needs_media_metadata: false,
+                    needs_author: false,
+                    needs_attachment_bytes: false,
+                    label_abi: 1,
+                    newer_than_this_app: false,
+                    verified: true,
+                    list_name: None,
+                    model_name: None,
+                    list_entries: Vec::new(),
+                    model_ngrams: Vec::new(),
+                },
+            });
         }
         Err(LabelerCatalogApiError::NotFound {
             detail: "no fixture set for this labeler_id".into(),

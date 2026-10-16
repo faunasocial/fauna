@@ -9,6 +9,7 @@ pub mod inbox_routes;
 pub mod instance_actor;
 pub mod interact;
 pub mod key_crypto;
+pub mod oracle;
 pub mod outbound;
 pub mod push;
 pub mod sync_worker;

@@ -39,7 +39,7 @@ pub use fauna_nest_http::ApiError;
 /// ceremony result, re-exported from its `fauna-protocol::auth` home so the
 /// `NestApi::silent_challenge` method and the machine's probe can name it
 /// under the `crate::nest_api` path the rest of this module uses.
-pub use fauna_protocol::auth::SilentChallengeOutcome;
+pub use fauna_protocol::auth::{OutdatedSide, SilentChallengeOutcome};
 
 /// Wire shape of `GET /api/v1/setup-status`. The endpoint is
 /// unauthenticated and returns `{"claimed": bool, "node_mode": "..."}`.
@@ -81,6 +81,13 @@ pub enum ProbeError {
     /// claim substep stop on it instead of resting on the DNS message.
     #[error("nest identity mismatch: {reason}")]
     IdentityMismatch { reason: String },
+    /// The nest refused this app's subprotocol before the upgrade (HTTP 426):
+    /// the app is too old for it (`version-compatibility.md` § Dimension 4).
+    /// Terminal: no retry or poll helps until the app is updated, so it is
+    /// never rendered as a transient. `reason` is the localized "your app is
+    /// out of date" text.
+    #[error("{reason}")]
+    AppOutdated { reason: String },
 }
 
 /// Projection of the `fauna.auth.claim_admin` reply
@@ -205,6 +212,12 @@ pub struct InviteCodeVerification {
     /// (`family-safety.md` § Wire & data shape — `invite-code-supervised-notice`,
     /// rendered before redemption). `None` = an ordinary code.
     pub supervised_by: Option<String>,
+    /// The age band a supervised code was minted with (the reply's additive
+    /// `age_band`, a `fauna_protocol::age::AgeBand` wire token). `None` = no
+    /// band, or an ordinary code. It rides the supervised notice
+    /// (`family-safety.md` § App surface → *Age-band surfaces*).
+    #[serde(default)]
+    pub age_band: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -354,9 +367,15 @@ impl From<ApiError> for ProbeError {
             e @ ApiError::NestIdentityChanged { .. } => ProbeError::IdentityMismatch {
                 reason: e.to_string(),
             },
-            e @ (ApiError::SignInRefused | ApiError::Superseded { .. }) => ProbeError::Transient {
+            e @ ApiError::SubprotocolMismatch => ProbeError::AppOutdated {
                 reason: e.to_string(),
             },
+            e
+            @ (ApiError::SignInRefused | ApiError::Superseded { .. } | ApiError::NestOutdated) => {
+                ProbeError::Transient {
+                    reason: e.to_string(),
+                }
+            }
         }
     }
 }
@@ -374,11 +393,12 @@ impl From<ApiError> for ClaimAdminError {
             e @ ApiError::NestIdentityChanged { .. } => ClaimAdminError::IdentityMismatch {
                 reason: e.to_string(),
             },
-            e @ (ApiError::SignInRefused | ApiError::Superseded { .. }) => {
-                ClaimAdminError::Invalid {
-                    reason: e.to_string(),
-                }
-            }
+            e @ (ApiError::SignInRefused
+            | ApiError::Superseded { .. }
+            | ApiError::NestOutdated
+            | ApiError::SubprotocolMismatch) => ClaimAdminError::Invalid {
+                reason: e.to_string(),
+            },
         }
     }
 }
@@ -400,11 +420,12 @@ impl From<ApiError> for InviteRequestError {
             e @ ApiError::NestIdentityChanged { .. } => InviteRequestError::IdentityMismatch {
                 reason: e.to_string(),
             },
-            e @ (ApiError::SignInRefused | ApiError::Superseded { .. }) => {
-                InviteRequestError::Closed {
-                    cause: e.to_string(),
-                }
-            }
+            e @ (ApiError::SignInRefused
+            | ApiError::Superseded { .. }
+            | ApiError::NestOutdated
+            | ApiError::SubprotocolMismatch) => InviteRequestError::Closed {
+                cause: e.to_string(),
+            },
         }
     }
 }
@@ -417,11 +438,12 @@ impl From<ApiError> for InviteCodeError {
             e @ ApiError::NestIdentityChanged { .. } => InviteCodeError::IdentityMismatch {
                 reason: e.to_string(),
             },
-            e @ (ApiError::SignInRefused | ApiError::Superseded { .. }) => {
-                InviteCodeError::Invalid {
-                    reason: e.to_string(),
-                }
-            }
+            e @ (ApiError::SignInRefused
+            | ApiError::Superseded { .. }
+            | ApiError::NestOutdated
+            | ApiError::SubprotocolMismatch) => InviteCodeError::Invalid {
+                reason: e.to_string(),
+            },
         }
     }
 }
@@ -436,7 +458,10 @@ impl From<ApiError> for RegisterError {
             e @ ApiError::NestIdentityChanged { .. } => RegisterError::IdentityMismatch {
                 reason: e.to_string(),
             },
-            e @ (ApiError::SignInRefused | ApiError::Superseded { .. }) => RegisterError::Failed {
+            e @ (ApiError::SignInRefused
+            | ApiError::Superseded { .. }
+            | ApiError::NestOutdated
+            | ApiError::SubprotocolMismatch) => RegisterError::Failed {
                 cause: e.to_string(),
             },
         }
@@ -456,7 +481,10 @@ impl From<ApiError> for NatModeError {
             e @ ApiError::NestIdentityChanged { .. } => NatModeError::IdentityMismatch {
                 reason: e.to_string(),
             },
-            e @ (ApiError::SignInRefused | ApiError::Superseded { .. }) => NatModeError::Invalid {
+            e @ (ApiError::SignInRefused
+            | ApiError::Superseded { .. }
+            | ApiError::NestOutdated
+            | ApiError::SubprotocolMismatch) => NatModeError::Invalid {
                 reason: e.to_string(),
             },
         }
@@ -511,6 +539,28 @@ pub enum RestoreSeedError {
     /// The connect-stage first-contact trust graduation failed — the server
     /// reached is not the nest this client requires for the host
     /// (`security.md` § Pre-claim surfacing). Terminal, never retryable.
+    #[error("nest identity mismatch: {reason}")]
+    IdentityMismatch { reason: String },
+}
+
+/// How the signed-out lock door's `fauna.account.lockout` can be refused
+/// (`ui/sessions.md` § *The signed-out door*; ceremony
+/// `fauna_client_recovery::lockout::lock_account_with_seed`). Split by what the
+/// screen tells the user: the account already moved, fix/abandon, or retry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+pub enum LockAccountError {
+    /// The identity was succeeded — the lock would land on an account that no
+    /// longer exists. `successor` is the unverified 64-hex id the refusal named.
+    #[error("this identity was succeeded by {successor}")]
+    Superseded { successor: String },
+    /// The nest declined the request (bad signature, clock too far off, …).
+    #[error("the lock was refused: {reason}")]
+    Refused { reason: String },
+    /// The nest could not be reached. The one variant worth a retry.
+    #[error("could not reach that account's nest: {reason}")]
+    Transient { reason: String },
+    /// The server reached is not the expected nest (`security.md` § Pre-claim
+    /// surfacing). Terminal.
     #[error("nest identity mismatch: {reason}")]
     IdentityMismatch { reason: String },
 }

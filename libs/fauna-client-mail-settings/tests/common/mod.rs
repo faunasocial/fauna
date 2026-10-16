@@ -58,3 +58,19 @@ pub fn build() -> (MailSettingsMachine, FakeNestClient, FakeMailStore) {
     let f = fixture();
     (f.machine, f.nest, f.mail)
 }
+
+/// A second machine over `nest` and `mail` — another device, or this one
+/// relaunched over a fresh store (`FakeMailStore::fresh_replica`).
+#[allow(dead_code)]
+pub fn machine_over(nest: &FakeNestClient, mail: &FakeMailStore) -> MailSettingsMachine {
+    MailSettingsMachine::new(
+        ACTOR,
+        Arc::new(nest.clone()),
+        Arc::new(FakeSuccessionLedgerStore::empty(
+            fauna_core::identity::ActorKeypair::from_secret(SIGNER_SEED).actor_id(),
+        )),
+        Arc::new(mail.clone()),
+        Arc::new(FakeSigner::new(SIGNER_SEED)),
+        MuaInstructions::placeholder(),
+    )
+}

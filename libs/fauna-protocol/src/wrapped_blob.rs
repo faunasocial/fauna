@@ -845,11 +845,83 @@ pub struct PutSpamModelRequest {
     /// the wire decodes as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holder_copy: Option<SpamModelHolderCopy>,
+    /// Optional **compare-and-swap precondition**: the stored model this write
+    /// was computed from, in [`SpamModelPrecondition`]'s wire form — empty ⇒
+    /// "the fetch found no stored model" (none, or the cold-start seed), 32
+    /// bytes ⇒ the [`spam_model_fingerprint`] of the stored blob the writer
+    /// fetched. The nest compares it under the lock that serializes the write;
+    /// a mismatch rejects the whole write (model, history op, holder copy)
+    /// with [`PutSpamModelOutcome::StaleModel`], and the writer re-fetches and
+    /// retries ([`SPAM_MODEL_STALE_RETRIES`]). Absent ⇒ no precondition
+    /// (last-write-wins — a writer from before the field). `mail-spam.md`
+    /// § Transactional update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_model: Option<ByteBuf>,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// How many times a `put_spam_model` writer re-fetches and re-applies its
+/// mutation after a [`PutSpamModelOutcome::StaleModel`] before it gives the
+/// event up — the bound every writer (the shared client orchestrator and the
+/// Go MDA) applies (`mail-spam.md` § Transactional update).
+pub const SPAM_MODEL_STALE_RETRIES: u32 = 3;
+
+/// The blake3-256 digest of a stored sealed spam-model blob, exactly as
+/// `fetch_spam_model` returned it — the identity a
+/// [`PutSpamModelRequest::expected_model`] names. Byte-identical to the Go
+/// MDA's `blake3.Sum256`.
+pub fn spam_model_fingerprint(sealed_model: &[u8]) -> [u8; 32] {
+    *blake3::hash(sealed_model).as_bytes()
+}
+
+/// The stored model a `put_spam_model` write was computed from — the typed
+/// form of [`PutSpamModelRequest::expected_model`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpamModelPrecondition {
+    /// The writer's fetch found no stored model (none at all, or only the
+    /// read-time cold-start seed), so it trained a fresh one.
+    NoStoredModel,
+    /// The writer's fetch returned this stored blob ([`spam_model_fingerprint`]).
+    Stored([u8; 32]),
+}
+
+impl SpamModelPrecondition {
+    /// The precondition for a write computed from `stored` — the actor's
+    /// stored sealed model as fetched, `None` when there was none.
+    pub fn of_stored(stored: Option<&[u8]>) -> Self {
+        match stored {
+            Some(blob) => Self::Stored(spam_model_fingerprint(blob)),
+            None => Self::NoStoredModel,
+        }
+    }
+
+    /// The wire form: empty for [`Self::NoStoredModel`], the 32-byte digest
+    /// otherwise.
+    pub fn to_wire(self) -> ByteBuf {
+        match self {
+            Self::NoStoredModel => ByteBuf::new(),
+            Self::Stored(digest) => ByteBuf::from(digest.to_vec()),
+        }
+    }
+
+    /// Parse the wire form; `None` for any length but 0 or 32.
+    pub fn from_wire(bytes: &[u8]) -> Option<Self> {
+        match bytes.len() {
+            0 => Some(Self::NoStoredModel),
+            32 => bytes.try_into().ok().map(Self::Stored),
+            _ => None,
+        }
+    }
+
+    /// Whether the actor's model as stored right now (`None` ⇒ no row) is the
+    /// one this write was computed from.
+    pub fn holds_for(self, stored: Option<&[u8]>) -> bool {
+        self == Self::of_stored(stored)
+    }
 }
 
 /// A spam-model deployment-baseline **holder copy** riding a
@@ -897,6 +969,17 @@ pub enum PutSpamModelOutcome {
     /// carrying a mutated model forward (a multi-message batch) discards this
     /// mutation and continues from the last accepted one.
     DuplicateSignal,
+    /// The write's [`PutSpamModelRequest::expected_model`] no longer names the
+    /// actor's stored model — another write landed between this writer's fetch
+    /// and its put — so the nest wrote NOTHING (not the model, not the history
+    /// op, not the holder copy). The writer re-fetches, re-applies its
+    /// mutation to the model now stored and retries, at most
+    /// [`SPAM_MODEL_STALE_RETRIES`] times (`mail-spam.md` § Transactional
+    /// update). A write that named an `expected_model` can meet this, and so can
+    /// one whose [`PutSpamModelRequest::holder_copy`] is sealed to a pubkey that
+    /// is no longer the resolved aggregation holder (a holder switch): the
+    /// re-fetch re-volunteers the current `holder_seal_target`.
+    StaleModel,
     /// An outcome a newer build added that this build cannot read
     /// (`transport.md` § Schema and forward-compat discipline, rule 3: open,
     /// collapsing). It reads as not written: a writer carrying a mutated model
@@ -2688,6 +2771,65 @@ mod tests {
         let decoded: PutSpamModelReply = decode(&bytes).unwrap();
         assert_eq!(decoded.outcome, PutSpamModelOutcome::DuplicateSignal);
         assert!(decoded.extra.is_empty(), "the known key is not a stray");
+
+        let mut stale: BTreeMap<String, Value> = BTreeMap::new();
+        stale.insert("outcome".into(), Value::String("stale_model".into()));
+        let bytes = encode_canonical(&stale).unwrap();
+        let decoded: PutSpamModelReply = decode(&bytes).unwrap();
+        assert_eq!(decoded.outcome, PutSpamModelOutcome::StaleModel);
+    }
+
+    /// The compare-and-swap precondition rides as `expected_model`: absent
+    /// (no precondition) stays absent on the wire, the "no stored model"
+    /// marker is the EMPTY byte string — present, not dropped — and a stored
+    /// model's precondition is its 32-byte blake3 digest.
+    #[test]
+    fn put_spam_model_request_carries_the_expected_model_precondition() {
+        let none = PutSpamModelRequest {
+            sealed_model: vec![1u8; 8],
+            ..Default::default()
+        };
+        let as_map: BTreeMap<String, Value> = decode(&encode_canonical(&none).unwrap()).unwrap();
+        assert!(
+            !as_map.contains_key("expected_model"),
+            "absent stays absent"
+        );
+
+        let marker = PutSpamModelRequest {
+            sealed_model: vec![1u8; 8],
+            expected_model: Some(SpamModelPrecondition::NoStoredModel.to_wire()),
+            ..Default::default()
+        };
+        let bytes = encode_canonical(&marker).unwrap();
+        let as_map: BTreeMap<String, Value> = decode(&bytes).unwrap();
+        assert_eq!(
+            as_map.get("expected_model"),
+            Some(&Value::Bytes(Vec::new()))
+        );
+        let decoded: PutSpamModelRequest = decode(&bytes).unwrap();
+        assert_eq!(decoded, marker);
+        assert!(decoded.extra.is_empty(), "the known key is not a stray");
+
+        let blob = vec![0xC3u8; 96];
+        let stored = SpamModelPrecondition::of_stored(Some(&blob));
+        assert_eq!(
+            stored,
+            SpamModelPrecondition::Stored(*blake3::hash(&blob).as_bytes())
+        );
+        assert_eq!(
+            SpamModelPrecondition::from_wire(&stored.to_wire()),
+            Some(stored)
+        );
+        assert_eq!(
+            SpamModelPrecondition::from_wire(&[]),
+            Some(SpamModelPrecondition::NoStoredModel)
+        );
+        assert_eq!(SpamModelPrecondition::from_wire(&[0u8; 16]), None);
+        assert!(stored.holds_for(Some(&blob)));
+        assert!(!stored.holds_for(Some(&[0xC4u8; 96])));
+        assert!(!stored.holds_for(None));
+        assert!(SpamModelPrecondition::NoStoredModel.holds_for(None));
+        assert!(!SpamModelPrecondition::NoStoredModel.holds_for(Some(&blob)));
     }
 
     #[test]

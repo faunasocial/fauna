@@ -5,7 +5,59 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:FaunaApp.Controls"
     Loaded="Page_Loaded"
+    xmlns:local="using:FaunaApp.Views"
     xmlns:ids="using:FaunaApp.UiIds">
+
+    <Page.Resources>
+        <!-- Two row shapes, one id (`notifications.md` § Deep-link destinations): a row
+             with a destination is a Button root (a bare Grid has no UIA invoke
+             pattern); a row with none is plain text — never a disabled control, which
+             the automation surface would reject instead of ignore. LITERAL ids and
+             `{Binding}` only, for the reason stated at length on the original template
+             (no `x:DataType` here, so an `x:Bind` would crash the page). -->
+        <DataTemplate x:Key="NavigableRowTemplate">
+            <Button AutomationProperties.AutomationId="notification-item"
+                    AutomationProperties.Name="{Binding Text}"
+                    Tag="{Binding}" Click="NotificationItem_Click"
+                    Background="Transparent" BorderThickness="0" Padding="8"
+                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock AutomationProperties.AutomationId="notification-type-icon"
+                               Text="{Binding TypeIcon}" FontFamily="Segoe MDL2 Assets"
+                               FontSize="16" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="1" Text="{Binding Text}" TextWrapping="Wrap"
+                               HorizontalAlignment="Left" />
+                    <TextBlock Grid.Column="2" Text="{Binding TimeAgo}" Opacity="0.5"
+                               FontSize="12" VerticalAlignment="Center" />
+                </Grid>
+            </Button>
+        </DataTemplate>
+        <DataTemplate x:Key="InertRowTemplate">
+            <Grid Padding="8" ColumnSpacing="12"
+                  AutomationProperties.AutomationId="notification-item"
+                  AutomationProperties.Name="{Binding Text}">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock AutomationProperties.AutomationId="notification-type-icon"
+                           Text="{Binding TypeIcon}" FontFamily="Segoe MDL2 Assets"
+                           FontSize="16" VerticalAlignment="Center" />
+                <TextBlock Grid.Column="1" Text="{Binding Text}" TextWrapping="Wrap" />
+                <TextBlock Grid.Column="2" Text="{Binding TimeAgo}" Opacity="0.5"
+                           FontSize="12" VerticalAlignment="Center" />
+            </Grid>
+        </DataTemplate>
+        <local:NotificationRowTemplateSelector x:Key="RowSelector"
+            Navigable="{StaticResource NavigableRowTemplate}"
+            Inert="{StaticResource InertRowTemplate}" />
+    </Page.Resources>
 
     <Grid Padding="16">
         <Grid.RowDefinitions>
@@ -26,37 +78,8 @@
                        FontWeight="Bold" />
         </StackPanel>
 
-        <ListView Grid.Row="1" x:Name="NotificationsList" SelectionMode="None">
-            <ListView.ItemTemplate>
-                <DataTemplate>
-                    <!-- ⚠ LITERAL ids in this template, not `{x:Bind ids:Ids.…}` — the
-                         same rule `Controls/RecipientPicker.xaml` states at length:
-                         `x:Bind` inside a DataTemplate resolves against that template's
-                         `x:DataType`, and this one declares none. Here it did not fail
-                         quietly, as it does there: these two were the ONLY `x:Bind`s in
-                         the template, so they were the whole reason the XAML compiler
-                         emitted a binding class for it at all — and with no `x:DataType`
-                         to infer from, its `SetDataRoot` cast the real `NotificationItem`
-                         to `DataTemplate` and threw `ArgumentException` the moment a push
-                         mounted this page. A FATAL app crash, not a missing id.
-                         Page-scope `x:Bind` above is fine — the Page IS its own data root. -->
-                    <Grid Padding="8" ColumnSpacing="12"
-                          AutomationProperties.AutomationId="notification-item"
-                          AutomationProperties.Name="{Binding Text}">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto" />
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
-                        <TextBlock AutomationProperties.AutomationId="notification-type-icon"
-                                   Text="{Binding TypeIcon}" FontFamily="Segoe MDL2 Assets"
-                                   FontSize="16" VerticalAlignment="Center" />
-                        <TextBlock Grid.Column="1" Text="{Binding Text}" TextWrapping="Wrap" />
-                        <TextBlock Grid.Column="2" Text="{Binding TimeAgo}" Opacity="0.5"
-                                   FontSize="12" VerticalAlignment="Center" />
-                    </Grid>
-                </DataTemplate>
-            </ListView.ItemTemplate>
+        <ListView Grid.Row="1" x:Name="NotificationsList" SelectionMode="None"
+                  ItemTemplateSelector="{StaticResource RowSelector}">
         </ListView>
 
         <Button Grid.Row="2" x:Name="LoadMoreButton"

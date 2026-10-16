@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -21,9 +22,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/emersion/go-sasl"
 	gosmtp "github.com/emersion/go-smtp"
 	"github.com/fxamacker/cbor/v2"
 
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/auth"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mailfauna"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/wsrpc"
 )
@@ -243,7 +246,7 @@ func TestSubmission465RejectsUnauthenticatedMailFrom(t *testing.T) {
 // in every case — the unit under test is the MAIL/RCPT gate logic.
 
 // newAuthedSubmissionSession constructs a session in the "AUTH-PLAIN
-// just succeeded" shape: authedLocalPart="alice", domain="example.com",
+// just succeeded" shape: authedHandle="alice", domain="example.com",
 // MaxRecipients=maxRecipients. Used by every D.3 test below.
 // sessionActorID is the canonical 32-byte actor id every D.3 fixture
 // authenticates as (bytes 1..32). Tests that drive resolve_recipient
@@ -271,12 +274,12 @@ func newAuthedSubmissionSession(t *testing.T, caller *submissionAuthCaller, maxR
 	}
 	actorID := sessionActorID()
 	return &submissionSession{
-		backend:         backend,
-		sourceIP:        "10.0.0.1",
-		authenticated:   true,
-		actorID:         actorID,
-		credentialID:    "default",
-		authedLocalPart: "alice",
+		backend:       backend,
+		sourceIP:      "10.0.0.1",
+		authenticated: true,
+		actorID:       actorID,
+		credentialID:  "default",
+		authedHandle:  "alice",
 		submissionToken: &mailfauna.SubmissionTokenFfi{
 			ActorId:           actorID,
 			CredentialId:      "default",
@@ -284,8 +287,15 @@ func newAuthedSubmissionSession(t *testing.T, caller *submissionAuthCaller, maxR
 			ExpiresAt:         0,
 			MaxRecipients:     maxRecipients,
 			MaxMessagesPerDay: 1000,
+			CanonicalBytes:    sessionTokenBytes(),
 		},
 	}
+}
+
+// sessionTokenBytes stands in for the signed token plaintext AUTH unwrapped —
+// opaque to the bridge, which forwards it to nest as the submitter proof.
+func sessionTokenBytes() []byte {
+	return []byte("signed-submission-token-plaintext")
 }
 
 // asSMTPError unwraps a gosmtp.SMTPError; t.Fatal on shape mismatch.
@@ -316,6 +326,34 @@ func TestSubmissionMailFromCaseFoldedDomainMatches(t *testing.T) {
 	sess := newAuthedSubmissionSession(t, &submissionAuthCaller{}, 100)
 	if err := sess.Mail("alice@EXAMPLE.com", &gosmtp.MailOptions{}); err != nil {
 		t.Errorf("MAIL FROM with case-folded domain must succeed; got %v", err)
+	}
+}
+
+// TestSubmissionSenderOwnedTrailingDotDomain — the FQDN spelling of the
+// sender's own handle (what a dotted `From:` header host reaches the
+// predicate as; the MAIL FROM parser rejects it earlier) is admitted: one
+// rule at both doors, mail-app-surface.md § Sender-handle verification.
+func TestSubmissionSenderOwnedTrailingDotDomain(t *testing.T) {
+	t.Parallel()
+	sess := newAuthedSubmissionSession(t, &submissionAuthCaller{}, 100)
+	if err := sess.assertSenderOwned("alice", "example.com.", "alice", sessionActorID()); err != nil {
+		t.Fatalf("FQDN-spelled own handle must be owned; got %v", err)
+	}
+}
+
+// TestSubmissionMailFromDottedLocalDomainStillGates — a local domain stored
+// with a trailing dot still gates: a bare-spelled foreign handle on it is
+// refused 550 5.7.1, not waved through as an unmatched domain.
+func TestSubmissionMailFromDottedLocalDomainStillGates(t *testing.T) {
+	t.Parallel()
+	sess := newAuthedSubmissionSession(t, &submissionAuthCaller{}, 100)
+	sess.backend.cfg = staticMTAConfig(&mtaLiveConfig{
+		localDomains:  []string{"example.com."},
+		primaryDomain: "example.com",
+	})
+	se := asSMTPError(t, sess.Mail("bob@example.com", &gosmtp.MailOptions{}))
+	if se.Code != 550 {
+		t.Errorf("expected 550; got %d (%v)", se.Code, se)
 	}
 }
 
@@ -377,6 +415,90 @@ func TestSubmissionMailFromOwnedAliasOnSecondDomain(t *testing.T) {
 	}
 	if got := sess.envelopeFrom; got != "alice@second.example" {
 		t.Errorf("envelopeFrom = %q, want alice@second.example", got)
+	}
+}
+
+// authenticateAs drives a real AUTH PLAIN as `username` on a two-domain box
+// (example.com primary, second.example), the fake resolving the login to
+// fixtureActorID with the given canonical handle.
+func authenticateAs(t *testing.T, username, handle string, caller *submissionAuthCaller) *submissionSession {
+	t.Helper()
+	local, _, _ := strings.Cut(username, "@")
+	caller.validateRecipientReplyHex = hex.EncodeToString(fixtureActorID())
+	caller.validateRecipientHandles = map[string]string{local: handle}
+	caller.submissionBlob = mustReadFixture(t, "wrapped_submission_token.bin")
+	sess := newTestSubmissionSession(caller)
+	sess.backend.cfg = staticMTAConfig(&mtaLiveConfig{
+		localDomains:  []string{"example.com", "second.example"},
+		primaryDomain: "example.com",
+	})
+	if err := sess.authenticate(sasl.Plain, auth.BuildPlainPayload("", username, string(fixturePlainPassword))); err != nil {
+		t.Fatalf("authenticate %s: %v", username, err)
+	}
+	return sess
+}
+
+// TestSubmissionAliasLoginIsNotOwnedOnAnotherDomain — the fast path compares
+// the actor's HANDLE, not the AUTH login (mail-multidomain.md § From: header
+// ownership → Per door). An exact alias is owned only on the domain it names,
+// so a session that logged in as `sender@example.com` (an alias of alice's)
+// is refused `sender@second.example` at MAIL FROM, by the resolver — the
+// earlier, cheaper refusal the nest's enqueue door would otherwise give after
+// DATA.
+func TestSubmissionAliasLoginIsNotOwnedOnAnotherDomain(t *testing.T) {
+	t.Parallel()
+	caller := &submissionAuthCaller{resolveRefused: map[string]bool{"sender@second.example": true}}
+	sess := authenticateAs(t, "sender@example.com", "alice", caller)
+
+	se := asSMTPError(t, sess.Mail("sender@second.example", &gosmtp.MailOptions{}))
+	if se.Code != 550 || se.EnhancedCode != (gosmtp.EnhancedCode{5, 7, 1}) {
+		t.Errorf("expected 550 5.7.1 at MAIL FROM; got %d %v", se.Code, se.EnhancedCode)
+	}
+	if n := len(caller.callsOf(wsrpc.MethodResolveRecipient)); n != 1 {
+		t.Errorf("resolve_recipient fired %d times, want 1 (an alias login takes no fast path)", n)
+	}
+	if n := len(caller.callsOf(wsrpc.MethodEnqueueOutboundMail)); n != 0 {
+		t.Errorf("enqueue_outbound_mail fired %d times, want 0", n)
+	}
+	// The alias on its own domain is still the actor's — through the resolver.
+	if err := sess.Mail("sender@example.com", &gosmtp.MailOptions{}); err != nil {
+		t.Fatalf("MAIL FROM sender@example.com (the alias on its own domain) must succeed; got %v", err)
+	}
+	// And the handle is the actor's on every local domain, with no RPC.
+	before := len(caller.callsOf(wsrpc.MethodResolveRecipient))
+	if err := sess.Mail("Alice@second.example", &gosmtp.MailOptions{}); err != nil {
+		t.Fatalf("MAIL FROM the handle on the second domain must succeed; got %v", err)
+	}
+	if n := len(caller.callsOf(wsrpc.MethodResolveRecipient)); n != before {
+		t.Errorf("the handle took %d resolve_recipient call(s), want none", n-before)
+	}
+}
+
+// TestSubmissionHandleLoginIsOwnedOnEveryDomainWithoutAnRPC — a session that
+// logged in as the handle sends as the handle on a non-primary local domain
+// on the fast path: no resolver call.
+func TestSubmissionHandleLoginIsOwnedOnEveryDomainWithoutAnRPC(t *testing.T) {
+	t.Parallel()
+	caller := &submissionAuthCaller{}
+	sess := authenticateAs(t, "alice@example.com", "alice", caller)
+	if err := sess.Mail("alice@second.example", &gosmtp.MailOptions{}); err != nil {
+		t.Fatalf("MAIL FROM alice@second.example must succeed; got %v", err)
+	}
+	if n := len(caller.callsOf(wsrpc.MethodResolveRecipient)); n != 0 {
+		t.Errorf("resolve_recipient fired %d times, want 0", n)
+	}
+}
+
+// TestSubmissionLoginOfAnActorWithNoHandleTakesNoFastPath — an actor with no
+// handle (the nest's reply names none) owns only what the resolver says, even
+// the very address it logged in with.
+func TestSubmissionLoginOfAnActorWithNoHandleTakesNoFastPath(t *testing.T) {
+	t.Parallel()
+	caller := &submissionAuthCaller{resolveRefused: map[string]bool{"sender@second.example": true}}
+	sess := authenticateAs(t, "sender@example.com", "", caller)
+	se := asSMTPError(t, sess.Mail("sender@second.example", &gosmtp.MailOptions{}))
+	if se.Code != 550 || se.EnhancedCode != (gosmtp.EnhancedCode{5, 7, 1}) {
+		t.Errorf("expected 550 5.7.1; got %d %v", se.Code, se.EnhancedCode)
 	}
 }
 
@@ -492,7 +614,7 @@ func TestSubmissionMailFromRejectsBeforeAuth(t *testing.T) {
 	// that fire after authentication.
 	sess := newAuthedSubmissionSession(t, &submissionAuthCaller{}, 100)
 	sess.authenticated = false
-	sess.authedLocalPart = ""
+	sess.authedHandle = ""
 	err := sess.Mail("alice@example.com", &gosmtp.MailOptions{})
 	se := asSMTPError(t, err)
 	if se.Code != 530 {
@@ -648,6 +770,29 @@ func TestSubmissionRcptQuotaCheckTransportError(t *testing.T) {
 	se := asSMTPError(t, err)
 	if se.Code != 451 {
 		t.Errorf("expected 451 transient on transport error; got %d (%v)", se.Code, se)
+	}
+}
+
+func TestSubmissionRcptSendDisabledIsPermanent550(t *testing.T) {
+	t.Parallel()
+	// The sender turned sending off for their own account
+	// (mail-policy-config.md § Tier 3): the nest refuses the quota check
+	// with the typed send_disabled code, which is permanent — 550 5.7.1,
+	// never the transport-error 451 a retry could cure.
+	payload, err := cbor.Marshal(map[string]any{"code": wsrpc.CodeSendDisabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller := &submissionAuthCaller{
+		checkQuotaErr: fmt.Errorf("check_submission_quota: %w", &wsrpc.ServerError{Payload: payload}),
+	}
+	sess := newAuthedSubmissionSession(t, caller, 100)
+	if err := sess.Mail("alice@example.com", &gosmtp.MailOptions{}); err != nil {
+		t.Fatalf("MAIL FROM: %v", err)
+	}
+	se := asSMTPError(t, sess.Rcpt("bob@remote.test", &gosmtp.RcptOptions{}))
+	if se.Code != 550 || se.EnhancedCode != (gosmtp.EnhancedCode{5, 7, 1}) {
+		t.Errorf("expected 550 5.7.1 for send disabled; got %d %v", se.Code, se.EnhancedCode)
 	}
 }
 
@@ -1032,6 +1177,16 @@ func TestSubmissionDataEnqueuesOnSuccess(t *testing.T) {
 	if got.OriginalSender != "alice@example.com" {
 		t.Errorf("original_sender=%q want alice@example.com", got.OriginalSender)
 	}
+	// The AUTH'd submitter rides as on_behalf_of_actor: nest holds the From:
+	// header to it (mail-multidomain.md § From: header ownership).
+	if got.OnBehalfOf == nil || !bytes.Equal(*got.OnBehalfOf, sess.actorID) {
+		t.Errorf("on_behalf_of_actor=%v want the AUTH'd actor %x", got.OnBehalfOf, sess.actorID)
+	}
+	// The submission token AUTH unwrapped rides beside it as the proof: nest
+	// takes no MTA's word for whom it submits (§ *Per door, nest-side*).
+	if !bytes.Equal(got.SubmissionToken, sessionTokenBytes()) {
+		t.Errorf("submission_token=%q want the AUTH'd token's canonical bytes", got.SubmissionToken)
+	}
 	if got.OriginalMsgID != "abc@example.com" {
 		t.Errorf("original_msgid=%q want abc@example.com", got.OriginalMsgID)
 	}
@@ -1065,7 +1220,7 @@ func TestSubmissionDataGeneratesMessageIDWhenAbsent(t *testing.T) {
 	// REJECTS an empty original_msgid, so before this a Message-ID-less
 	// submission died at DATA with a misleading transient 451 ("Outbound
 	// enqueue temporarily unavailable") that no retry could clear —
-	// root-caused live against example.com + the :latest image, 2026-07-09.
+	// root-caused live against the live nest + the :latest image, 2026-07-09.
 	// The header is stamped BEFORE the enqueue so the nest's DKIM signature
 	// covers it and the Sent copy carries the same id.
 	caller := &submissionAuthCaller{
@@ -1214,6 +1369,47 @@ func TestSubmissionDataReturns451WhenEnqueueFails(t *testing.T) {
 	want := gosmtp.EnhancedCode{4, 5, 0}
 	if se.EnhancedCode != want {
 		t.Errorf("expected enhanced 4.5.0; got %v", se.EnhancedCode)
+	}
+}
+
+// TestSubmissionDataMapsPermanentEnqueueRefusalsTo5xx pins the DATA-arm
+// mapping: the nest's permanent enqueue refusals are 5xx (a retry can never
+// succeed), while `fauna.bridges.internal` stays the 451 tempfail.
+func TestSubmissionDataMapsPermanentEnqueueRefusalsTo5xx(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		code         string
+		wantCode     int
+		wantEnhanced gosmtp.EnhancedCode
+	}{
+		{"list sender", wsrpc.CodeListSubmissionRequiresSendRPC, 550, gosmtp.EnhancedCode{5, 7, 1}},
+		{"From: not owned by the submitter", wsrpc.CodeSenderNotOwned, 550, gosmtp.EnhancedCode{5, 7, 1}},
+		{"submitter not proven by its token", wsrpc.CodeSubmitterNotProven, 550, gosmtp.EnhancedCode{5, 7, 1}},
+		{"malformed request", wsrpc.CodeProtocolMalformed, 554, gosmtp.EnhancedCode{5, 6, 0}},
+		{"nest internal error", "fauna.bridges.internal", 451, gosmtp.EnhancedCode{4, 5, 0}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			payload, err := cbor.Marshal(map[string]any{"code": tc.code})
+			if err != nil {
+				t.Fatal(err)
+			}
+			caller := &submissionAuthCaller{
+				mlsPubkey:              freshRecipientPubkey32(t),
+				indexPubkey:            freshRecipientPubkey32(t),
+				enqueueOutboundMailErr: fmt.Errorf("enqueue_outbound_mail: %w", &wsrpc.ServerError{Payload: payload}),
+			}
+			sess := newAuthedSubmissionSession(t, caller, 100)
+			sess.recipients = []string{"bob@external.test"}
+			sess.recipientCount = 1
+			se := asSMTPError(t, sess.Data(strings.NewReader(
+				"From: alice@example.com\r\nTo: bob@external.test\r\n\r\nbody\r\n")))
+			if se.Code != tc.wantCode || se.EnhancedCode != tc.wantEnhanced {
+				t.Errorf("code %q: want %d %v; got %d %v", tc.code, tc.wantCode, tc.wantEnhanced, se.Code, se.EnhancedCode)
+			}
+		})
 	}
 }
 

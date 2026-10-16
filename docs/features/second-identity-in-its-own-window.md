@@ -57,15 +57,17 @@ Stamped 2026-09-19 at acb58fddf3.
    - `tests/e2e-unified/tests/test_launch_instance_chooser_linux.py::test_linux_focus_existing_onto_an_instance_that_has_gone_starts_normally`
    - `tests/e2e-unified/tests/test_launch_instance_chooser_windows.py::test_windows_focus_existing_onto_an_instance_that_has_gone_starts_normally`
    - `tests/e2e-unified/tests/artifact/test_macos_app_bundle.py::test_relaunching_the_bundle_after_quitting_starts_normally_as_the_same_account`
+   - `tests/e2e-unified/tests/test_account_tab_pin_web.py::test_web_a_tab_pinned_to_a_gone_account_starts_on_the_running_identity`
+   - `tests/e2e-unified/tests/test_account_tab_pin_web.py::test_web_a_tab_pinned_to_a_gone_account_with_none_left_lands_on_the_launch_flow`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+e7095c29 standalone |
-| linux | ✅ full | 0.1.2-dev+c4a95c20 standalone |
-| windows | ⚠ partial | 0.1.3-dev+3a518178 standalone |
+| web | ✅ full | 0.1.2-dev+e7095c29 standalone |
+| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
+| windows | ✅ full | 0.1.3-dev+b00cb884 standalone |
 | macos | ✅ full | |
 | ios | — absent | |
 | android | — absent | |
@@ -91,17 +93,19 @@ Stamped 2026-09-19 at acb58fddf3.
 | 3 | app | `tests/e2e-unified/tests/artifact/test_macos_app_bundle.py::test_launching_the_bundle_again_lands_on_the_running_instance` | macos (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_account_tab_pin_web.py::test_web_launching_again_comes_up_on_the_running_identity_and_offers_the_others` | web (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_account_instance_lock_linux.py::test_linux_bound_launch_onto_the_served_account_coexists` | linux (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_account_instance_lock_windows.py::test_windows_bound_launch_onto_the_served_account_coexists` | windows (windows): failed |
+| 4 | app | `tests/e2e-unified/tests/test_account_instance_lock_windows.py::test_windows_bound_launch_onto_the_served_account_coexists` | windows (windows): passed |
 | 4 | app | `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_bound_launch_onto_the_served_account_coexists` | macos (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_account_instance_lock_tui.py::test_tui_bound_launch_onto_the_served_account_coexists` | tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_engine_role_election_web.py::test_a_second_tab_on_one_account_runs_no_second_mls_engine` | web (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_engine_role_election_web.py::test_a_second_tab_on_one_account_runs_no_second_mls_engine` | web (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_account_instance_lock_linux.py::test_linux_bound_launch_onto_the_served_account_coexists` | linux (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_account_instance_lock_windows.py::test_windows_bound_launch_onto_the_served_account_coexists` | windows (windows): failed |
+| 5 | app | `tests/e2e-unified/tests/test_account_instance_lock_windows.py::test_windows_bound_launch_onto_the_served_account_coexists` | windows (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_account_switcher_apple.py::test_apple_bound_launch_onto_the_served_account_coexists` | macos (macos): passed |
 | 5 | app | `tests/e2e-unified/tests/test_account_instance_lock_tui.py::test_tui_bound_launch_onto_the_served_account_coexists` | tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_tui.py::test_tui_focus_existing_onto_an_instance_that_has_gone_starts_normally` | tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_linux.py::test_linux_focus_existing_onto_an_instance_that_has_gone_starts_normally` | linux (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_launch_instance_chooser_windows.py::test_windows_focus_existing_onto_an_instance_that_has_gone_starts_normally` | windows (windows): passed |
 | 6 | app | `tests/e2e-unified/tests/artifact/test_macos_app_bundle.py::test_relaunching_the_bundle_after_quitting_starts_normally_as_the_same_account` | macos (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_account_tab_pin_web.py::test_web_a_tab_pinned_to_a_gone_account_starts_on_the_running_identity` | web (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_account_tab_pin_web.py::test_web_a_tab_pinned_to_a_gone_account_with_none_left_lands_on_the_launch_flow` | web (linux): passed |
 <!-- features-render:end -->

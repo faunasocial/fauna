@@ -215,28 +215,18 @@ fn paywall_mint_token_handler() -> RpcHandler {
             // The token is scoped to a path that must actually be servable —
             // both arms below refuse up front rather than minting a token that
             // would only ever yield the teaser.
+            // One shared servability check (`web_content::paywall`), the
+            // same the visitor redeem door applies; each arm keeps its own
+            // refusal text and accepts only its own half.
+            use crate::web_content::paywall::{PaywallResourceKind, paywall_resource};
             let path = match file_path {
                 // ── The folder half: a sealed file in a paywalled web set. ──
                 Some(p) => {
                     let path = p.trim_start_matches('/').to_string();
-                    let row = state
-                        .db
-                        .get_web_file(&actor_id, &path)
+                    let paywalled = paywall_resource(&state.db, &actor_id, &path)
                         .await
-                        .map_err(internal)?;
-                    let paywalled = match &row {
-                        Some(r) if r.is_sealed() => match r.folder_id {
-                            Some(id) => state
-                                .db
-                                .get_folder_by_id(id)
-                                .await
-                                .map_err(internal)?
-                                .and_then(|fs| fs.web_paywall_tier)
-                                .is_some(),
-                            None => false,
-                        },
-                        _ => false,
-                    };
+                        .map_err(internal)?
+                        .is_some_and(|r| r.kind == PaywallResourceKind::FolderFile);
                     if !paywalled {
                         let mut e =
                             RpcError::new("fauna.web.not_paywalled", "error.web.not_paywalled");
@@ -252,12 +242,11 @@ fn paywall_mint_token_handler() -> RpcHandler {
                 // ── The post half: a gated, published post's sealed page. ──
                 None => {
                     let path = format!("post/{}.html", req.slug);
-                    let sealed = state
-                        .db
-                        .get_web_rendered_sealed(&actor_id, &path)
+                    let sealed = paywall_resource(&state.db, &actor_id, &path)
                         .await
-                        .map_err(internal)?;
-                    if sealed.is_none() {
+                        .map_err(internal)?
+                        .is_some_and(|r| r.kind == PaywallResourceKind::Post);
+                    if !sealed {
                         let mut e =
                             RpcError::new("fauna.web.not_paywalled", "error.web.not_paywalled");
                         e.details = Some(Box::new(Value::String(format!(
@@ -336,7 +325,15 @@ fn domain_set_handler() -> RpcHandler {
             }
 
             let apex = state.web_serving_domain();
-            match domain::register_domain(&state.db, &actor_id, &req.domain, &apex).await {
+            let plugin_names: Vec<String> = crate::plugin_runner::claimed_plugin_labels(&state.db)
+                .await
+                .map_err(internal)?
+                .into_iter()
+                .map(|label| format!("{label}.{apex}"))
+                .collect();
+            match domain::register_domain(&state.db, &actor_id, &req.domain, &apex, &plugin_names)
+                .await
+            {
                 Ok(reg) => encode_reply(&WebDomainSetReply {
                     txt_record: txt_record(&reg.domain),
                     domain: reg.domain,
@@ -352,6 +349,7 @@ fn domain_set_handler() -> RpcHandler {
                         Err(conflict(msg))
                     } else if msg.contains("invalid domain")
                         || msg.contains("reserved by this nest")
+                        || msg.contains("claimed by a plugin")
                     {
                         // Client-supplied domain failed validation / is a
                         // nest-owned host — a 4xx-class client error, not a 500.
@@ -507,6 +505,27 @@ fn set_subdomain_enabled_handler() -> RpcHandler {
             require_permission(&state, &actor_id, "fauna.web.set_subdomain_enabled").await?;
             let req: WebSetSubdomainEnabledRequest = decode(&payload).map_err(malformed)?;
 
+            // A hosted plugin's claimed whole name is `<label>.<apex>` too
+            // (`plugin_ingress`): the install refused a label a live user site
+            // holds, and this is the reverse — the user is told, not shadowed.
+            if req.enabled
+                && let Some(handle) = state.db.get_handle(&actor_id).await.map_err(internal)?
+                && !handle.is_empty()
+                && crate::plugin_runner::claimed_plugin_labels(&state.db)
+                    .await
+                    .map_err(internal)?
+                    .contains(&handle)
+            {
+                let apex = state
+                    .host_resolver
+                    .as_ref()
+                    .map(|r| r.nest_domain().to_string())
+                    .unwrap_or_else(|| state.web_serving_domain());
+                return Err(conflict(format!(
+                    "{handle}.{apex} is claimed by a plugin this nest hosts"
+                )));
+            }
+
             // Persist the per-actor opt-in (presence-as-flag; the authoritative
             // state the boot seed + cert lifecycle reconcile from).
             if req.enabled {
@@ -595,8 +614,8 @@ fn files_prune_sealed_handler() -> RpcHandler {
         Box::pin(async move {
             require_permission(&state, &actor_id, "fauna.web.files.prune_sealed").await?;
             let req: WebFilesPruneSealedRequest = decode(&payload).map_err(malformed)?;
-            let name_hash = crate::routes::parse_name_hash(&req.name_hash, |m| invalid_request(m))?;
-            if req.folder.is_empty() && name_hash.is_none() {
+            let address = crate::routes::parse_set_address(&req, |m| invalid_request(m))?;
+            if req.folder.is_empty() && req.name_hash.is_none() && req.folder_id.is_none() {
                 return Err(invalid_request("folder is required"));
             }
             if req.paths.is_empty() {
@@ -604,17 +623,12 @@ fn files_prune_sealed_handler() -> RpcHandler {
                     "an empty declaration is indistinguishable from a seat that has not caught up",
                 ));
             }
-            // Hash-first (S5b), like every owner-scoped folder door.
-            let Some(row) = match name_hash {
-                Some(h) => {
-                    state
-                        .db
-                        .get_folder_for_actor_by_name_hash(&h, &actor_id)
-                        .await
-                }
-                None => state.db.get_folder_for_actor(&req.folder, &actor_id).await,
-            }
-            .map_err(internal)?
+            // The row when carried, else hash-first (S5b), like every
+            // owner-scoped folder door (`set-addressing.md` § The row form).
+            let Some(row) =
+                crate::folder_authz::resolve_owned_folder(&state.db, address, &actor_id)
+                    .await
+                    .map_err(internal)?
             else {
                 // Indistinguishable from "no such folder", like every other
                 // owner-scoped folder door.

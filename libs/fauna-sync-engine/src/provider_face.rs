@@ -1,7 +1,7 @@
 //! Replicated-file-provider serving face — the callback→engine primitives a
 //! macOS/iOS `NSFileProviderReplicatedExtension` calls.
 //!
-//! `docs/goal/behavior/file-sync.md` § On-Demand Files → Apple File Provider
+//! `docs/goal/behavior/on-demand-files-apple.md` § On-Demand Files → Apple File Provider
 //! binding (ratified 2026-07-18) owns the callback→engine table + milestone chain.
 //! This is **M1**: the shared,
 //! platform-agnostic, tier-1-tested provider face; the appex consumes it in M2
@@ -13,7 +13,7 @@
 //! streaming cfapi callbacks through [`crate::always_resident::LocalWrites`] +
 //! `run_hydration_loop` (a `select!` over a watcher, rescan/reconnect ticks, and a
 //! chunked `TransferSink`). A **replicated** File Provider is *control-inverted*
-//! (`file-sync.md` § Apple File Provider binding, first bullet): the OS owns the
+//! (`on-demand-files-apple.md` § Apple File Provider binding, first bullet): the OS owns the
 //! on-disk tree under `~/Library/CloudStorage/` and **calls** the extension —
 //! there is no watcher and no disk scan on this surface, and `fetchContents` hands
 //! back a whole materialized file, not chunked sink pushes. So the face is a set
@@ -37,13 +37,13 @@
 //! no OS keeps the replica for it) drives these same cores through
 //! [`owned_tree`], which adds what the OS does for apple: the kept and cache
 //! roots, hydrate-for-open, prepare-for-write, close → ingest, the start sweep
-//! and eviction observation (`on-demand-files.md` § Android SAF
+//! and eviction observation (`on-demand-files-android.md` § Android SAF
 //! DocumentsProvider binding).
 //!
 //! ## A reader's host is read-only
 //!
 //! A set shared with the account that it may only read is served by the same
-//! cores with **no write half** (`on-demand-files.md` § Shared sets on a
+//! cores with **no write half** (`on-demand-files-shared-sets.md` § Shared sets on a
 //! capability host, decision 3): the engine says so
 //! ([`ProviderEngine::read_only`]), and every write core — ingest, delete,
 //! rename, and the owned tree's open-for-write, close, create, delete and
@@ -118,7 +118,7 @@ pub struct FetchedContent {
 /// The result of a write primitive ([`serve_ingest`] / [`serve_rename`]): whether
 /// the local change reached the nest **and** the row was stamped
 /// (`UploadOutcome::recorded`). The FP extension acks the OS **only** when this is
-/// `true` — the OS then never discards an un-acked local copy (`file-sync.md`
+/// `true` — the OS then never discards an un-acked local copy (`on-demand-files.md`
 /// § Apple File Provider binding, *recorded-head gate*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteAck {
@@ -152,7 +152,7 @@ impl WriteAck {
 }
 
 /// The typed refusal every write core gives on a read-only host — a set the
-/// account holds as a reader (`on-demand-files.md` § Shared sets on a
+/// account holds as a reader (`on-demand-files-shared-sets.md` § Shared sets on a
 /// capability host, decision 3). Nothing was sealed, uploaded, recorded or
 /// changed on disk. Recover it from a core's error with
 /// `err.downcast_ref::<ReadOnlyHost>()`.
@@ -597,6 +597,31 @@ pub(crate) async fn rename_halves<E: ProviderEngine>(
 /// observed eviction → demote the materialized file back to a placeholder row.
 pub async fn serve_evict<E: ProviderEngine>(engine: &E, rel: &str) -> Result<()> {
     engine.mark_placeholder(rel)
+}
+
+/// Leave a third-party deposit the host's refresh just adopted honest on a
+/// host whose OS keeps the replica (apple's File Provider): the engine landed
+/// it in `staging_root` (its `watch_dir`, never the OS's tree) and recorded
+/// it, so the row is demoted to a placeholder — the OS enumerates the item
+/// and fetches it on open — and the staging copy is removed (`on-demand-files-apple.md`
+/// § Apple File Provider binding → *Third-party deposit adoption on a
+/// capability host*). Row first, unlink second, on the engine's own proof
+/// that the staged bytes are the recorded head: a body that proof does not
+/// cover is left as it is.
+pub fn settle_adopted_in_staging<E: ProviderEngine>(
+    engine: &E,
+    staging_root: &Path,
+    rel: &str,
+) -> Result<()> {
+    let staged = fauna_core::path_guard::contained_apply_target(staging_root, rel)?;
+    if !engine.is_dehydration_safe(rel) {
+        return Ok(());
+    }
+    engine.mark_placeholder(rel)?;
+    match std::fs::remove_file(&staged) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
 }
 
 /// eviction-observation tick → the rels the host believes are materialized.

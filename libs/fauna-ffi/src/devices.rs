@@ -180,6 +180,42 @@ fn this_device_row_over(enrolled: Option<String>, own: Option<String>) -> Option
     fauna_devices_machine::this_device_row(enrolled.as_deref(), own.as_deref())
 }
 
+/// The `folder-lease-status` line for one folder row
+/// (`docs/goal/ui/folders.md` § Exclusive editing): `None` while the folder is
+/// not lease-governed, else the free / this device / held-by-‹label› /
+/// another-device reading, resolved once by
+/// [`fauna_devices_machine::folder_lease_status`] so no app re-derives the
+/// expiry rule or the never-the-hex rule. `devices` is the roster
+/// (`DevicesSnapshot::devices`); `this_device_row` is
+/// [`devices_this_device_row`]'s answer. The clock is read here, so an app
+/// repaints the line by calling again — never by probing the lease.
+#[uniffi::export]
+pub fn devices_folder_lease_status(
+    folder: FolderSummary,
+    devices: Vec<DeviceSummary>,
+    this_device_row: Option<String>,
+) -> Option<fauna_core::localized::LocalizedText> {
+    fauna_devices_machine::folder_lease_status(
+        &folder,
+        &devices,
+        this_device_row.as_deref(),
+        fauna_core::data::Timestamp::now_secs(),
+    )
+}
+
+/// Is `folder` an owner row that is public on the nest's say-so while its
+/// audience attestation does not verify under this seat? The paint condition
+/// for `folder-audience-unattested` and `folder-audience-reconfirm-button`
+/// (`docs/goal/ui/folders.md` § Audience and website serving → *Re-confirming
+/// a public folder this seat cannot verify*). `own_actor_id` is the seat's own
+/// actor id as hex; an id that does not parse answers `false`. Resolved once by
+/// [`fauna_devices_machine::folder_is_public_unverified`] so no app re-derives
+/// the signature check.
+#[uniffi::export]
+pub fn devices_folder_is_public_unverified(folder: FolderSummary, own_actor_id: String) -> bool {
+    fauna_devices_machine::folder_is_public_unverified(&folder, &own_actor_id)
+}
+
 /// Which roster rows carry the keyless-posture marker
 /// (`device-keyless-posture-badge`; `docs/goal/ui/devices.md` § Custody facet
 /// piece 1) — one answer per entry of `principals`, in order, where each entry

@@ -1227,7 +1227,8 @@ async fn the_originator_wrappers_drive_the_backup_plane_through_the_pool() {
         &req,
     )
     .await
-    .expect("granted source nest records custody");
+    .expect("granted source nest records custody")
+    .expect("the destination accepts the record");
 
     // Exactly-once by content: a re-record of the identical change returns the
     // same seq (the retry-safe policy the wrapper declares depends on this).
@@ -1239,7 +1240,8 @@ async fn the_originator_wrappers_drive_the_backup_plane_through_the_pool() {
         &req,
     )
     .await
-    .expect("replay succeeds");
+    .expect("replay succeeds")
+    .expect("the destination accepts the replay");
     assert_eq!(
         first.seq, replay.seq,
         "a content-identical replay must return the original seq"

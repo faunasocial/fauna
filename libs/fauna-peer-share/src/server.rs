@@ -106,14 +106,11 @@ pub const fn allowlisted_kinds() -> [&'static str; 8] {
     ]
 }
 
-/// Serve-page bounds, sized under the peer channel's 1 MiB frame
-/// (`fauna_peer_channel::MAX_FRAME_LEN`). Rust constants — never a knob
-/// (§ Product invariants: no human chooses these).
-const MAX_ROWS_PER_PAGE: u32 = 64;
-/// Byte budget for one manifests/chunks reply; entries over it are `deferred`
-/// rather than dropped, so a puller can always make progress by asking for
-/// fewer.
-const MAX_BODY_BYTES_PER_REPLY: usize = 700 * 1024;
+/// Serve-page bounds, sized under the peer channel's 1 MiB frame — one home in
+/// `fauna-peer-sync`, read by both peer legs' servers so the pages cannot
+/// drift. A manifests/chunks entry over the byte budget is `deferred` rather
+/// than dropped, so a puller can always make progress by asking for fewer.
+use fauna_peer_sync::ranged::{MAX_BODY_BYTES_PER_REPLY, MAX_ROWS_PER_PAGE};
 
 /// What the serve side reads from local sync state, as one seam.
 ///

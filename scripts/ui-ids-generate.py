@@ -275,6 +275,41 @@ GATED_EMISSION: dict[str, dict[str, str]] = {
 }
 
 
+# The Fauna Kids flavor's excised element ids, as anchored prefixes — the SAME list
+# `android-kids-check`'s `ID_PATS` greps the kids dex for (the justfile), held equal
+# to it by `test_kids_excision_spine.py`. The kids flavor is a build flavor, not a
+# gated-feature registry member (family-safety.md § The account age band, the
+# kids-app bullet), so it is not a `gated_features:` key; it is a second axis the
+# Swift table splits on, because Swift is the one target here whose table ships an
+# unreferenced id (the `GATED_EMISSION` swift row). Android needs no split: R8
+# strips an unreferenced field, which `android-kids-check` measures.
+KIDS_EXCISED_ID_PREFIXES = (
+    "feed-", "search-", "atproto-", "personalization-", "nostr-", "labeler-catalog",
+    "connected-app", "mail-settings-", "web-settings-", "admin-mail-", "admin-dns-",
+    "bridge-", "profile-follow-button", "profile-tiers-tab", "link-preview-card",
+    "folder-paywall-tier-select",
+)
+# Apple's kids condition — POSITIVE, added only by the kids target and absent
+# everywhere else (family-safety.md § The account age band, the kids-app bullet,
+# item (5)), so the table's gate reads `#if !FAUNA_KIDS`.
+SWIFT_KIDS_CONDITION = "FAUNA_KIDS"
+
+
+def kids_split(ids: list[str]) -> tuple[list[str], list[str]]:
+    """`(ids every flavor keeps, ids the kids flavor excises)`. A prefix matching
+    nothing is a hard error, for `load_gated`'s reason: the witness reading it would
+    go vacuously green."""
+    for prefix in KIDS_EXCISED_ID_PREFIXES:
+        if not any(i.startswith(prefix) for i in ids):
+            raise SystemExit(
+                f"ui-ids-generate: the kids prefix '{prefix}' matches no element id this "
+                f"table emits. Either the ids were renamed (fix KIDS_EXCISED_ID_PREFIXES "
+                f"and android-kids-check's ID_PATS together) or the surface is gone."
+            )
+    kids = [i for i in ids if i.startswith(KIDS_EXCISED_ID_PREFIXES)]
+    return [i for i in ids if i not in set(kids)], kids
+
+
 def check_emission(gated: dict[str, list[str]]) -> None:
     """Every member a target claims to gate must be one ui.yaml actually declares.
 
@@ -368,9 +403,20 @@ def emit_swift(ids: list[str], gated: dict[str, list[str]]) -> list[tuple[str, s
             name = f"`{name}`"
         return f'    public static let {name} = "{element_id}"'
 
+    plain, kids = kids_split(plain)
     out = [f"// {BANNER}", "", "public enum Ids {"]
     out += [member(i) for i in plain]
     out += ["}"]
+    out += [
+        "",
+        "// The surfaces the Fauna Kids flavor compiles out (family-safety.md § The",
+        "// account age band, the kids-app bullet). The kids build must not carry these",
+        "// ids at all, and a kept render naming one is a compile error there.",
+        f"#if !{SWIFT_KIDS_CONDITION}",
+        "extension Ids {",
+    ]
+    out += [member(i) for i in kids]
+    out += ["}", "#endif"]
     for key, members in groups.items():
         condition = GATED_EMISSION["swift"][key]
         out += [

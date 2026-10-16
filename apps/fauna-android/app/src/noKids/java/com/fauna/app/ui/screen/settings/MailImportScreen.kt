@@ -12,20 +12,31 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
+import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.components.rememberTwoClickArm
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.MailTransferText
+import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.MailImportVM
+import uniffi.fauna_client_mail_settings.ImportMailboxProgress
+import uniffi.fauna_client_mail_settings.ImportSessionState
 import uniffi.fauna_client_mail_settings.ImportSourceKind
 import uniffi.fauna_client_mail_settings.ImportStep
 import uniffi.fauna_client_mail_settings.ImportTlsMode
 import uniffi.fauna_client_mail_settings.MailImportSnapshot
 import uniffi.fauna_client_mail_settings.SourceMailboxOption
+import uniffi.fauna_client_mail_settings.importMailboxProgressText
+import uniffi.fauna_client_mail_settings.importSelectedTotals
 import uniffi.fauna_client_mail_settings.importSourceKindLabel
 import uniffi.fauna_client_mail_settings.importTlsModeLabel
 import social.fauna.generated.Ids
@@ -99,7 +110,6 @@ fun MailImportScreen(
         onResume = vm::resume,
         onCancel = vm::cancel,
         onViewImported = { navController.popBackStack() },
-        onReviewSkipped = { navController.popBackStack() },
     )
 }
 
@@ -118,10 +128,9 @@ fun MailImportContent(
     onPrev: () -> Unit,
     onStart: () -> Unit,
     onPause: () -> Unit,
-    onResume: () -> Unit,
+    onResume: (String, String) -> Unit,
     onCancel: () -> Unit,
     onViewImported: () -> Unit,
-    onReviewSkipped: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -155,8 +164,8 @@ fun MailImportContent(
                 ImportStep.SOURCE -> SourceStep(snapshot, sourceKindLabel, tlsModeLabel, onSelectSourceKind, onSetTlsMode, onConnect)
                 ImportStep.SCOPE -> ScopeStep(snapshot, onToggleMailbox, onScopeNext, onPrev)
                 ImportStep.CONFIRM -> ConfirmStep(snapshot, sourceKindLabel, onPrev, onStart)
-                ImportStep.PROGRESS -> ProgressStep(snapshot, onPause, onResume, onCancel)
-                ImportStep.DONE -> DoneStep(snapshot, onViewImported, onReviewSkipped)
+                ImportStep.PROGRESS -> ProgressStep(snapshot, onSetTlsMode, tlsModeLabel, onPause, onResume, onCancel)
+                ImportStep.DONE -> DoneStep(snapshot, onViewImported)
             }
         }
     }
@@ -236,22 +245,28 @@ private fun SourceStep(
     )
 
     if (appPasswordKind) {
+        val helpText = stringResource(
+            if (kind == ImportSourceKind.GMAIL) {
+                R.string.mail_import_source_app_password_help_gmail
+            } else {
+                R.string.mail_import_source_app_password_help_icloud
+            }
+        )
         OutlinedTextField(
             value = password,
             onValueChange = { password = it },
             label = { Text(stringResource(R.string.mail_import_source_app_password_label)) },
             singleLine = true,
             visualTransformation = PasswordVisualTransformation(),
-            modifier = Modifier.fillMaxWidth().testTag(Ids.MAIL_IMPORT_SOURCE_APP_PASSWORD),
+            // The explanation rides the field as its `help` attribute too (the
+            // bare `stateDescription` the bridge answers any name from), so
+            // `get_attr(id, "help")` reads the same as on tui.
+            modifier = Modifier.fillMaxWidth()
+                .testTag(Ids.MAIL_IMPORT_SOURCE_APP_PASSWORD)
+                .semantics { stateDescription = helpText },
         )
         Text(
-            stringResource(
-                if (kind == ImportSourceKind.GMAIL) {
-                    R.string.mail_import_source_app_password_help_gmail
-                } else {
-                    R.string.mail_import_source_app_password_help_icloud
-                }
-            ),
+            helpText,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -304,6 +319,75 @@ private fun SourceStep(
         onClick = { onConnect(kind, host, port, username, password) },
         modifier = Modifier.testTag(Ids.MAIL_IMPORT_CONNECT_BUTTON),
     ) { Text(stringResource(R.string.mail_import_connect_button)) }
+}
+
+/**
+ * The Source step's own credential field for the adopted session's provider,
+ * painted on the Progress step under the same ids: the app password (Gmail,
+ * iCloud), Generic's password with its port and connection security (the
+ * session row records neither), or the Microsoft sign-in note (Outlook,
+ * whose button stays inert — see [SourceStep]).
+ */
+@Composable
+private fun ResumeCredentialFields(
+    snapshot: MailImportSnapshot,
+    tlsModeLabel: (ImportTlsMode) -> String,
+    onSetTlsMode: (ImportTlsMode) -> Unit,
+    port: String,
+    onPortChange: (String) -> Unit,
+    password: String,
+    onPasswordChange: (String) -> Unit,
+) {
+    val kind = snapshot.sourceKind
+    val notice = if (kind == ImportSourceKind.OUTLOOK) {
+        R.string.mail_import_resume_needs_microsoft
+    } else {
+        R.string.mail_import_resume_needs_password
+    }
+    Text(
+        stringResource(notice),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    when (kind) {
+        ImportSourceKind.GMAIL, ImportSourceKind.I_CLOUD -> OutlinedTextField(
+            value = password,
+            onValueChange = onPasswordChange,
+            label = { Text(stringResource(R.string.mail_import_source_app_password_label)) },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth().testTag(Ids.MAIL_IMPORT_SOURCE_APP_PASSWORD),
+        )
+        ImportSourceKind.GENERIC -> {
+            OutlinedTextField(
+                value = port,
+                onValueChange = onPortChange,
+                label = { Text(stringResource(R.string.mail_import_source_port_placeholder)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag(Ids.MAIL_IMPORT_SOURCE_PORT),
+            )
+            Column(
+                modifier = Modifier.testTag(Ids.MAIL_IMPORT_SOURCE_TLS_MODE),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                TlsOption(ImportTlsMode.IMPLICIT, snapshot.tlsMode, tlsModeLabel, onSetTlsMode)
+                TlsOption(ImportTlsMode.START_TLS, snapshot.tlsMode, tlsModeLabel, onSetTlsMode)
+            }
+            OutlinedTextField(
+                value = password,
+                onValueChange = onPasswordChange,
+                label = { Text(stringResource(R.string.mail_import_source_password_placeholder)) },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth().testTag(Ids.MAIL_IMPORT_SOURCE_PASSWORD),
+            )
+        }
+        ImportSourceKind.OUTLOOK -> OutlinedButton(
+            onClick = {},
+            enabled = false,
+            modifier = Modifier.testTag(Ids.MAIL_IMPORT_SOURCE_OAUTH_BUTTON),
+        ) { Text(stringResource(R.string.mail_import_source_oauth_button)) }
+    }
 }
 
 @Composable
@@ -401,6 +485,16 @@ private fun ScopeStep(
     }
 }
 
+/** The shared elapsed time / time left of this session (`mailbox-migration.md` § Wizard steps steps 5–6). */
+private fun importTiming(snapshot: MailImportSnapshot) = MailTransferText.timing(
+    startedAt = snapshot.startedAt,
+    lastProgressAt = snapshot.lastProgressAt,
+    running = snapshot.sessionState == ImportSessionState.RUNNING,
+    processed = snapshot.importedCount.toULong() + snapshot.skippedCount.toULong() +
+        snapshot.erroredCount.toULong(),
+    total = snapshot.totalCount.toULong(),
+)
+
 @Composable
 private fun ConfirmStep(
     snapshot: MailImportSnapshot,
@@ -408,69 +502,136 @@ private fun ConfirmStep(
     onPrev: () -> Unit,
     onStart: () -> Unit,
 ) {
-    val selected = snapshot.mailboxes.filter { it.selected }
+    // The Confirm estimate is the shared `selected_totals` sum (§ Wizard steps
+    // step 4): messages and, when every selected mailbox was sized, roughly how
+    // much data — never re-summed here.
+    val totals = importSelectedTotals(snapshot)
+    val source = sourceKindLabel(snapshot.sourceKind)
+    val sizeBytes = totals.bytes
     Text(stringResource(R.string.mail_import_confirm_title), style = MaterialTheme.typography.titleMedium)
     Text(
-        stringResourceFmt(
-            R.string.mail_import_confirm_summary_fmt,
-            sourceKindLabel(snapshot.sourceKind),
-            selected.size,
-            // The Confirm estimate is the sum of the SELECTED mailboxes' own
-            // reported counts (§ Wizard steps step 4) — no estimated-bytes or
-            // wall-clock field exists on the snapshot, so neither is claimed.
-            selected.sumOf { it.messageCount.toLong() },
-        ),
+        if (sizeBytes != null) {
+            stringResourceFmt(
+                R.string.mail_import_confirm_summary_sized_fmt,
+                source,
+                totals.mailboxes,
+                totals.messages,
+                localized(com.fauna.ffi.byteSize(sizeBytes)).orEmpty(),
+            )
+        } else {
+            stringResourceFmt(
+                R.string.mail_import_confirm_summary_fmt,
+                source,
+                totals.mailboxes,
+                totals.messages,
+            )
+        },
         style = MaterialTheme.typography.bodyMedium,
         modifier = Modifier.testTag(Ids.MAIL_IMPORT_CONFIRM_SUMMARY),
     )
+    // Start opens an import session on the nest (OnlineOnly); Back stays live.
+    val startGate = faunaGate("fauna.bridges.start_import_session")
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(onClick = onPrev, modifier = Modifier.testTag(Ids.WIZARD_BACK_BUTTON)) {
             Text(stringResource(R.string.mail_import_back))
         }
-        Button(onClick = onStart, modifier = Modifier.testTag(Ids.MAIL_IMPORT_START_BUTTON)) {
+        Button(
+            onClick = onStart,
+            enabled = startGate.enabled,
+            modifier = Modifier.testTag(Ids.MAIL_IMPORT_START_BUTTON),
+        ) {
             Text(stringResource(R.string.mail_import_start_button))
         }
     }
+    DisabledControlReasonText(startGate.reason)
 }
 
 @Composable
 private fun ProgressStep(
     snapshot: MailImportSnapshot,
+    onSetTlsMode: (ImportTlsMode) -> Unit,
+    tlsModeLabel: (ImportTlsMode) -> String,
     onPause: () -> Unit,
-    onResume: () -> Unit,
+    onResume: (String, String) -> Unit,
     onCancel: () -> Unit,
 ) {
+    // Page-local drafts for the credential a session adopted after a restart
+    // asks for beside Resume (`MailImportSnapshot.resumeNeedsCredentials`,
+    // § Resume protocol step 2). The port is seeded from the session when the
+    // ask begins; the password is dropped once a Resume has used it.
+    var port by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    val needsCredentials = snapshot.resumeNeedsCredentials
+    LaunchedEffect(needsCredentials) {
+        if (needsCredentials) port = snapshot.port.toString() else password = ""
+    }
     Text(stringResource(R.string.mail_import_progress_title), style = MaterialTheme.typography.titleMedium)
     Text(
-        stringResourceFmt(
-            R.string.mail_import_progress_summary_fmt,
-            snapshot.importedCount, snapshot.totalCount, snapshot.skippedCount, snapshot.erroredCount,
+        MailTransferText.importProgress(
+            LocalContext.current,
+            stringResourceFmt(
+                R.string.mail_import_progress_summary_fmt,
+                snapshot.importedCount, snapshot.totalCount, snapshot.skippedCount, snapshot.erroredCount,
+            ),
+            importTiming(snapshot),
         ),
         style = MaterialTheme.typography.bodyMedium,
         modifier = Modifier.testTag(Ids.MAIL_IMPORT_PROGRESS_SUMMARY),
     )
+    // Shared `fauna_core::format::quota_fraction` — the same zero-guarded,
+    // clamped ratio every app's quota/progress bar uses (value-formatting.md
+    // § Quota fraction), not a mail-import-specific hand-roll.
+    val fraction = com.fauna.ffi.quotaFraction(snapshot.importedCount.toLong(), snapshot.totalCount.toLong())
     LinearProgressIndicator(
-        // Shared `fauna_core::format::quota_fraction` — the same zero-guarded,
-        // clamped ratio every app's quota/progress bar uses (value-formatting.md
-        // § Quota fraction), not a mail-import-specific hand-roll.
-        progress = {
-            com.fauna.ffi.quotaFraction(snapshot.importedCount.toLong(), snapshot.totalCount.toLong()).toFloat()
-        },
-        modifier = Modifier.fillMaxWidth().testTag(Ids.MAIL_IMPORT_PROGRESS_BAR),
+        progress = { fraction.toFloat() },
+        // The bar's filled fraction is its `fraction` attribute, as on tui.
+        modifier = Modifier.fillMaxWidth()
+            .testTag(Ids.MAIL_IMPORT_PROGRESS_BAR)
+            .semantics { stateDescription = String.format(java.util.Locale.ROOT, "%.4f", fraction) },
     )
+    if (needsCredentials) {
+        ResumeCredentialFields(
+            snapshot, tlsModeLabel, onSetTlsMode,
+            port, { port = it }, password, { password = it },
+        )
+    }
+    // Each control drives an import-session row on the nest (OnlineOnly).
+    val pauseGate = faunaGate("fauna.bridges.pause_import_session")
+    val resumeGate = faunaGate("fauna.bridges.resume_import_session")
+    val cancelGate = faunaGate("fauna.bridges.cancel_import_session")
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedButton(onClick = onPause, modifier = Modifier.testTag(Ids.MAIL_IMPORT_PAUSE_BUTTON)) {
+        OutlinedButton(
+            onClick = onPause,
+            enabled = pauseGate.enabled,
+            modifier = Modifier.testTag(Ids.MAIL_IMPORT_PAUSE_BUTTON),
+        ) {
             Text(stringResource(R.string.mail_import_pause_button))
         }
-        OutlinedButton(onClick = onResume, modifier = Modifier.testTag(Ids.MAIL_IMPORT_RESUME_BUTTON)) {
+        OutlinedButton(
+            onClick = { onResume(port, password) },
+            enabled = resumeGate.enabled,
+            modifier = Modifier.testTag(Ids.MAIL_IMPORT_RESUME_BUTTON),
+        ) {
             Text(stringResource(R.string.mail_import_resume_button))
         }
+        // Two-click confirm (`common.md` § Two-click confirm): Cancel
+        // stops a running import, so it arms before it performs.
+        val cancelArm = rememberTwoClickArm()
         OutlinedButton(
-            onClick = onCancel,
+            onClick = { cancelArm.press(onCancel) },
+            enabled = cancelGate.enabled,
             colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
             modifier = Modifier.testTag(Ids.MAIL_IMPORT_CANCEL_BUTTON),
-        ) { Text(stringResource(R.string.mail_import_cancel_button)) }
+        ) {
+            Text(
+                stringResource(
+                    if (cancelArm.armed) R.string.common_confirm_q else R.string.mail_import_cancel_button,
+                ),
+            )
+        }
     }
+    // One reason for the three controls: they gate on the same condition.
+    DisabledControlReasonText(pauseGate.reason)
     // Per-mailbox rows (indexed). The machine tracks only GLOBAL counts — no
     // per-mailbox breakdown exists on the snapshot the way export's does — so
     // each row shows its PLANNED message count, the tui lead's own
@@ -486,14 +647,16 @@ private fun ProgressStep(
         }
     }
     Column(modifier = Modifier.testTag(Ids.MAIL_IMPORT_MAILBOX_PROGRESS_LIST)) {
-        snapshot.mailboxes.filter { it.selected }.forEach { box: SourceMailboxOption ->
+        // One row per mailbox the run takes, each with the shared machine's own
+        // counts (`mailboxProgress`), worded by the one shared formatter.
+        snapshot.mailboxProgress.forEach { row: ImportMailboxProgress ->
             Row(modifier = Modifier.fillMaxWidth().testTag(Ids.MAIL_IMPORT_MAILBOX_PROGRESS_LIST_ITEM)) {
                 Text(
-                    box.name,
+                    row.name,
                     modifier = Modifier.weight(1f).testTag(Ids.MAIL_IMPORT_MAILBOX_PROGRESS_LIST_ITEM_NAME),
                 )
                 Text(
-                    stringResourceFmt(R.string.mail_import_progress_row_fmt, box.messageCount),
+                    localized(importMailboxProgressText(row)).orEmpty(),
                     modifier = Modifier.testTag(Ids.MAIL_IMPORT_MAILBOX_PROGRESS_LIST_ITEM_PROGRESS),
                 )
             }
@@ -505,27 +668,42 @@ private fun ProgressStep(
 private fun DoneStep(
     snapshot: MailImportSnapshot,
     onViewImported: () -> Unit,
-    onReviewSkipped: () -> Unit,
 ) {
+    // Review skipped is a view toggle, not a machine action: the skip log is
+    // already on the snapshot. Page-local and re-seeded on every entry to Done
+    // (the composable leaves composition with the step), the tui `show_skipped`
+    // shape.
+    var showSkipped by remember { mutableStateOf(false) }
     Text(stringResource(R.string.mail_import_done_title), style = MaterialTheme.typography.titleMedium)
     Text(
-        stringResourceFmt(
-            R.string.mail_import_done_summary_fmt,
+        MailTransferText.importDone(
+            LocalContext.current,
             snapshot.importedCount, snapshot.skippedCount, snapshot.erroredCount,
+            importTiming(snapshot),
         ),
         style = MaterialTheme.typography.bodyMedium,
         modifier = Modifier.testTag(Ids.MAIL_IMPORT_DONE_SUMMARY),
     )
-    // Neither button is backed by a MailImportAction — the shared machine never
-    // wired a "view inbox" / "skip log" RPC. Both leave the wizard, the tui
-    // lead's own resolution; "Review skipped" cannot deep-link to a skip-log
-    // page that exists nowhere yet (the log is inline on Progress instead).
+    // Neither button is backed by a MailImportAction. View imported leaves the
+    // wizard; Review skipped reveals the skip log below the card.
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Button(onClick = onViewImported, modifier = Modifier.testTag(Ids.MAIL_IMPORT_VIEW_IMPORTED_BUTTON)) {
             Text(stringResource(R.string.mail_import_view_imported_button))
         }
-        OutlinedButton(onClick = onReviewSkipped, modifier = Modifier.testTag(Ids.MAIL_IMPORT_REVIEW_SKIPPED_BUTTON)) {
+        OutlinedButton(onClick = { showSkipped = !showSkipped }, modifier = Modifier.testTag(Ids.MAIL_IMPORT_REVIEW_SKIPPED_BUTTON)) {
             Text(stringResource(R.string.mail_import_review_skipped_button))
+        }
+    }
+    if (showSkipped) {
+        Text(
+            stringResource(R.string.mail_import_error_log_title),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Column(modifier = Modifier.testTag(Ids.MAIL_IMPORT_ERROR_LOG)) {
+            snapshot.errorLog.forEach { line ->
+                Text(line, style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
 }

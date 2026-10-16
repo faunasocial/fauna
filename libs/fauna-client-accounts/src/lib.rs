@@ -46,7 +46,9 @@ use serde::{Deserialize, Serialize};
 /// the sweep could not remove everything (`account-scoping.md` § Erasure follows
 /// scope, the ⚠ *What this does NOT yet do is tell the USER* note).
 mod credential_sweep;
+mod removed_account;
 pub use credential_sweep::CredentialSweep;
+pub use removed_account::RemovedAccountCredentials;
 mod erase_residue;
 pub use erase_residue::{
     EraseResidueCopy, EraseResidueView, remove_account_blocked_copy,
@@ -57,6 +59,12 @@ mod add_refusal;
 pub use add_refusal::add_refused_copy;
 mod switch_refusal;
 pub use switch_refusal::switch_refused_copy;
+
+/// The account's own `<handle>@<domain>`: the send address and the profile
+/// header's display handle (`mail-primary-domain-rename.md` § Display-handle
+/// interaction), one resolution table for every app.
+mod self_address;
+pub use self_address::{display_handle, self_address};
 
 /// The sync device id's secret-store get-or-create (the 2026-09-20 derived
 /// named-row id, `sync-agent-credentials.md` § Credential model).
@@ -119,7 +127,7 @@ pub use sign_out_record::{SIGN_OUT_RECORD_KEY, SignOutPlan, SignOutRecord};
 #[cfg(feature = "web-localstorage")]
 mod web_store;
 #[cfg(all(feature = "web-localstorage", target_arch = "wasm32"))]
-pub use web_store::LocalStorageSecretStore;
+pub use web_store::{LocalStorageSecretStore, TAB_PIN_KEY, tab_pin};
 
 /// Web's cross-tab registry mutation lock — the Web Locks leg of
 /// [`MutationLock`], taken by every wasm-facing mutator entry from OUTSIDE
@@ -218,6 +226,21 @@ fn grant_registered_key(actor_id: &str) -> String {
 fn enrollment_refused_key(actor_id: &str) -> String {
     format!("{actor_id}/enrollment-refused")
 }
+/// The account plane's two slots beside the latch, in the same
+/// `{actor_id}/{suffix}` shape (`fauna_account_plane::principal_bundle`):
+/// the writer key's mint marker (`WRITER_UNSTAMPED_SUFFIX` — set at a mint,
+/// spent by the first store open) and this machine's staged fleet removals
+/// (`ATTR_PENDING_FLEET_REMOVALS`). Neither holds key material, but both are
+/// the account's own state with its lifetime: a removed or signed-out
+/// account's marker or staged removals left behind is residue the next
+/// account on this machine never asked for — and a removal's nest half
+/// assembles over a snapshot of these slots, which must read as the slot did.
+fn writer_unstamped_key(actor_id: &str) -> String {
+    format!("{actor_id}/writer-unstamped")
+}
+fn pending_fleet_removals_key(actor_id: &str) -> String {
+    format!("{actor_id}/pending-fleet-removals")
+}
 
 /// The T10 **store writer signing key** slot, at the BARE actor id — no
 /// `fauna/` prefix and, unlike the four above, no suffix either
@@ -281,6 +304,8 @@ const PER_ACTOR_KEY_BUILDERS: &[fn(&str) -> String] = &[
     generation_keys_key,
     grant_registered_key,
     enrollment_refused_key,
+    writer_unstamped_key,
+    pending_fleet_removals_key,
     store_writer_key,
 ];
 
@@ -460,6 +485,16 @@ impl AccountIndex {
     fn position(&self, actor_id: &str) -> Option<usize> {
         self.accounts.iter().position(|a| a.actor_id == actor_id)
     }
+
+    /// The re-seat target when the active account leaves the index: the
+    /// first account that needs no re-auth. Re-seating is not an activation,
+    /// so it must never land on a `require_confirm_to_activate` account.
+    fn first_unflagged(&self) -> Option<String> {
+        self.accounts
+            .iter()
+            .find(|a| !a.require_confirm_to_activate)
+            .map(|a| a.actor_id.clone())
+    }
 }
 
 /// One account's non-secret metadata: identity + server-data cache
@@ -537,6 +572,21 @@ pub struct AccountEntry {
     /// field loads with an empty list, and an older build re-emits the key through `extra`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub succeeded_from: Vec<String>,
+    /// This identity's fleet as the device that ran its succession ceremony
+    /// merged it — every device id its verified fleet view named, members and
+    /// removed alike, as lowercase hex — set on a retired predecessor's row by
+    /// [`AccountRegistry::record_departed_devices`]. The successor's runtime
+    /// on this device attests each as a departed device in the successor's
+    /// device set (`succession-aftermath.md` § Re-key scope → *Predecessor
+    /// devices are departed devices*), so a predecessor device's inherited
+    /// rows stay the account's own words.
+    ///
+    /// Only the ceremony device holds it: a row restored out of the escrow
+    /// container, or a link proven from the landed statement, carries none —
+    /// the ceremony device attests, the rest read the merged attestation.
+    /// Additive at rest, omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub departed_devices: Vec<String>,
     /// Unknown keys a newer build wrote — preserved verbatim across a rewrite.
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, serde_json::Value>,
@@ -553,6 +603,7 @@ impl AccountEntry {
             require_confirm_user_set: false,
             succeeded_by: None,
             succeeded_from: Vec::new(),
+            departed_devices: Vec::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -884,15 +935,25 @@ impl AccountRegistry {
 
     /// Write `actor_id`'s identity secret — the one door every secret-slot
     /// write goes through, so the E2E bridge's `refuse_secret_writes_for_test`
-    /// fault (a keystore that takes the write and keeps nothing) reaches every
-    /// writer. The fault check is compiled out of release artifacts with the
-    /// bridge (`e2e-conventions.md` § point 15).
+    /// fault reaches every writer.
     fn write_secret_slot(&self, actor_id: &str, secret_hex: &str) {
+        self.write_read_back_slot(&secret_key(actor_id), secret_hex);
+    }
+
+    /// Write a slot whose caller reads it back before acting on it — the
+    /// identity secret (`add_account`'s refusal) and the pending-factory-reset
+    /// record (`mint_and_persist_pending_factory_reset`'s refusal to dispatch).
+    /// These are the writes the E2E bridge's `refuse_secret_writes_for_test`
+    /// fault (a keystore that takes the write and keeps nothing) drops, because
+    /// a read-back guard is only witnessed by a write that silently fails. The
+    /// fault check is compiled out of release artifacts with the bridge
+    /// (`e2e-conventions.md` § point 15).
+    fn write_read_back_slot(&self, key: &str, value: &str) {
         #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
         if e2e_bridge::secret_writes_refused(&self.store) {
             return;
         }
-        self.store.set(&secret_key(actor_id), secret_hex);
+        self.store.set(key, value);
     }
 
     /// Delete every per-actor slot for `actor_id` from `store` **and** from
@@ -1152,6 +1213,25 @@ impl AccountRegistry {
         RegistryLaunchPersistence::from_registry_bound(self.clone(), actor_id)
     }
 
+    /// The launch adapter for a browser tab, given its per-tab pin — web's twin
+    /// of the native binding-aware launch seam (linux's `launch_persistence()`,
+    /// tui's `session::launch_persistence`). A tab pinned to a **non-active**
+    /// account is a genuine secondary and gets [`Self::bound_launch_persistence`];
+    /// an unpinned tab, or one pinned to the account that is already active, is
+    /// the primary wearing a pin and gets [`Self::launch_persistence`], so it
+    /// keeps following `active` through an onboarding that moves it
+    /// (`account-scoping.md` § Concurrent instances → *Web*, "Which tabs
+    /// mirror"). The pin is normalized as [`BOUND_ACCOUNT_ENV`] is, and judged
+    /// once, when the adapter is built.
+    pub fn tab_launch_persistence(&self, pin: Option<&str>) -> RegistryLaunchPersistence {
+        match parse_bound_account(pin) {
+            Some(pinned) if Some(&pinned) != self.active().as_ref() => {
+                self.bound_launch_persistence(pinned)
+            }
+            _ => self.launch_persistence(),
+        }
+    }
+
     fn check_bindable(&self, actor_id: &str, confirmed: bool) -> Result<(), AccountError> {
         // `index()` is pure; on an unreadable (newer-build) index it reports
         // no accounts, so binding fails closed as UnknownActor — consistent
@@ -1345,13 +1425,14 @@ impl AccountRegistry {
     /// Write the per-actor pending-factory-reset record (opaque JSON). Raw slot
     /// write, like [`Self::set_awaiting_dns_json`] (same [`Self::is_live`]
     /// guard) — but the caller must treat it as durable-before-dispatch, so
-    /// it goes through the store synchronously.
+    /// it goes through the store synchronously, and through the read-back
+    /// door the store-write fault reaches.
     pub fn set_pending_factory_reset_json(&self, actor_id: &str, json: &str) {
         let _mutation = self.lock.acquire();
         if !self.is_live(actor_id) {
             return;
         }
-        self.store.set(&pending_factory_reset_key(actor_id), json);
+        self.write_read_back_slot(&pending_factory_reset_key(actor_id), json);
     }
 
     /// Clear the per-actor pending-factory-reset slot (no-op if absent). Called
@@ -1558,7 +1639,7 @@ impl AccountRegistry {
             .as_deref()
             .is_none_or(|a| doomed.iter().any(|d| d == a))
         {
-            idx.active = idx.accounts.first().map(|a| a.actor_id.clone());
+            idx.active = idx.first_unflagged();
         }
         // Encoded before the deletes, stored after them. Retiring rows only
         // shrinks the index, so the bound cannot refuse it.
@@ -1580,10 +1661,17 @@ impl AccountRegistry {
     }
 
     /// Remove an account: delete its per-actor slots and drop it from the
-    /// index. If it was active, the first remaining account (if any)
-    /// becomes active. Errors if unknown.
+    /// index. If it was active, the first remaining **unflagged** account (if
+    /// any) becomes active; a `require_confirm_to_activate` account is never
+    /// promoted here, since this path bypasses the re-auth gate — with only
+    /// flagged survivors `active` is left `None`. Errors if unknown.
     pub fn remove(&self, actor_id: &str) -> Result<(), AccountError> {
         let _mutation = self.lock.acquire();
+        self.remove_locked(actor_id)
+    }
+
+    /// [`Self::remove`]'s body, the mutation lock already held.
+    fn remove_locked(&self, actor_id: &str) -> Result<(), AccountError> {
         let mut idx = self.writable_index()?;
         let pos = idx
             .position(actor_id)
@@ -1591,7 +1679,7 @@ impl AccountRegistry {
         let was_active = idx.active.as_deref() == Some(actor_id);
         idx.accounts.remove(pos);
         if was_active {
-            idx.active = idx.accounts.first().map(|a| a.actor_id.clone());
+            idx.active = idx.first_unflagged();
         }
         // Encoded before the deletes, stored after them; a removal only
         // shrinks the index, so the bound never refuses it.
@@ -1599,6 +1687,40 @@ impl AccountRegistry {
         self.delete_per_actor_everywhere(actor_id);
         self.store.set(INDEX_KEY, &raw);
         Ok(())
+    }
+
+    /// [`Self::remove`], taking the removed account's slots into memory first
+    /// — the remove-account gesture's registry step (`account-scoping.md`
+    /// § Erasure follows scope → *Removing an account retires this machine
+    /// from it, as a sign-out does*, decision 1).
+    ///
+    /// One mutation: every per-actor slot is read — from this store and every
+    /// auxiliary erase namespace, the auxiliary value taken where both hold a
+    /// key — under the same lock that then removes the entry and deletes them,
+    /// so no write can land between the read and the delete. The gesture's
+    /// nest half rides the returned [`RemovedAccountCredentials`] and never
+    /// this registry: nothing it writes can re-create a slot this deleted.
+    ///
+    /// [`Self::remove`] stays for the callers that owe no nest half (the e2e
+    /// agent's reset).
+    pub fn remove_with_snapshot(
+        &self,
+        actor_id: &str,
+    ) -> Result<RemovedAccountCredentials, AccountError> {
+        let _mutation = self.lock.acquire();
+        let mut taken = std::collections::HashMap::new();
+        for key in per_actor_keys(actor_id) {
+            let value = self
+                .aux_erase
+                .iter()
+                .find_map(|aux| aux.get(&key))
+                .or_else(|| self.store.get(&key));
+            if let Some(value) = value {
+                taken.insert(key, SecretString::from(value));
+            }
+        }
+        self.remove_locked(actor_id)?;
+        Ok(RemovedAccountCredentials::new(actor_id.to_string(), taken))
     }
 
     /// Walk away from `actor_id`'s nest, keeping the identity: delete the
@@ -1953,6 +2075,67 @@ impl AccountRegistry {
         Ok(())
     }
 
+    /// Record `old_actor`'s fleet as this device — the one running its
+    /// succession ceremony — merged it: `devices` is every id its verified
+    /// fleet view names (`AccountStoreHandle::fleet_device_ids`), stored on
+    /// the predecessor's row ([`AccountEntry::departed_devices`]) beside the
+    /// seed. Merges: existing ids are kept, a repeat writes nothing. An
+    /// unknown `old_actor` is a caller bug.
+    ///
+    /// Never fatal to the ceremony that calls it — the succession has
+    /// landed; a missing record costs only the attestation, whose residual
+    /// `succession-aftermath.md` § Re-key scope → *Predecessor devices are
+    /// departed devices* states.
+    pub fn record_departed_devices(
+        &self,
+        old_actor: &str,
+        devices: &[[u8; 32]],
+    ) -> Result<(), AccountError> {
+        let _mutation = self.lock.acquire();
+        let mut idx = self.writable_index()?;
+        let Some(pos) = idx.position(old_actor) else {
+            return Err(AccountError::UnknownActor(old_actor.to_string()));
+        };
+        let list = &mut idx.accounts[pos].departed_devices;
+        let before = list.len();
+        for id in devices {
+            let hex = fauna_core::hex32::encode(id);
+            if !list.contains(&hex) {
+                list.push(hex);
+            }
+        }
+        if list.len() != before {
+            self.write_index(&idx)?;
+        }
+        Ok(())
+    }
+
+    /// The departed devices `actor_id`'s attested predecessors' rows record
+    /// ([`AccountEntry::departed_devices`]) — over the same walk as
+    /// [`Self::predecessor_backup_keys_by_actor`], so an identity counts here
+    /// exactly when it is attested at all. A flat set in walk order; an id
+    /// that does not decode is skipped.
+    pub fn attested_departed_devices(&self, actor_id: &str) -> Vec<[u8; 32]> {
+        let accounts = self.index().accounts;
+        let mut out: Vec<[u8; 32]> = Vec::new();
+        for (hex, _keypair) in self.predecessor_material(actor_id) {
+            if fauna_core::hex32::decode(&hex).is_err() {
+                continue; // the paired walk's own skip
+            }
+            let Some(entry) = accounts.iter().find(|e| e.actor_id == hex) else {
+                continue;
+            };
+            for id in &entry.departed_devices {
+                if let Ok(id) = fauna_core::hex32::decode(id)
+                    && !out.contains(&id)
+                {
+                    out.push(id);
+                }
+            }
+        }
+        out
+    }
+
     /// The identity at the END of `actor_id`'s succession chain — the account
     /// as it is today — or `None` when `actor_id` was never succeeded (or is
     /// unknown here). The forward walk [`Self::predecessors_of`] is the reverse
@@ -2105,6 +2288,18 @@ impl AccountRegistry {
                 ))
             })
             .collect()
+    }
+
+    /// [`Self::predecessor_backup_keys_by_actor`] in the wire shape
+    /// `set_predecessor_chain` takes — `(actor_ids, keys)`, two equal-length
+    /// halves in the same order, raw 32-byte values. The one conversion both
+    /// browser chunks (media, folders) share, so the Media and Devices machines
+    /// are always handed the same chain.
+    pub fn predecessor_chain_wire(&self, actor_id: &str) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        self.predecessor_backup_keys_by_actor(actor_id)
+            .into_iter()
+            .map(|(id, key)| (id.0.to_vec(), key.to_bytes().to_vec()))
+            .unzip()
     }
 
     /// The **attested** predecessor set — the actor ids of
@@ -2402,6 +2597,12 @@ mod in_memory {
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub use in_memory::InMemorySecretStore;
+
+/// The registry-construction census each Rust app pins its choke point with —
+/// a test-only source scan, reached by an app's tests through this crate's
+/// `test-helpers` dev-dependency feature.
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod registry_census;
 
 /// Test-only helpers shared between this module's tests and the adapter's
 /// (`launch_persistence.rs`).
@@ -2985,6 +3186,46 @@ mod tests {
 
         reg.set_active_confirmed(&b).unwrap();
         assert_eq!(reg.active().as_deref(), Some(b.as_str()));
+    }
+
+    /// Removing the active account re-seats `active` outside the
+    /// gate, so it may only ever pick an unflagged account; a flagged one
+    /// stays reachable solely through `set_active_confirmed`.
+    #[test]
+    fn remove_active_never_promotes_a_flagged_account() {
+        let (reg, _s) = registry();
+        let a = reg.add_account(SECRET_A, None, None).unwrap();
+        let b = reg.add_account(SECRET_B, None, None).unwrap();
+        reg.set_require_confirm(&b, true).unwrap();
+        reg.set_active(&a).unwrap();
+
+        reg.remove(&a).unwrap();
+        assert_eq!(
+            reg.active(),
+            None,
+            "the only survivor is flagged: nothing may become active without the gate"
+        );
+        assert!(matches!(
+            reg.set_active(&b),
+            Err(AccountError::ConfirmationRequired(_))
+        ));
+        reg.set_active_confirmed(&b).unwrap();
+        assert_eq!(reg.active().as_deref(), Some(b.as_str()));
+    }
+
+    /// With a mix, removal skips the flagged account and promotes
+    /// the first unflagged one.
+    #[test]
+    fn remove_active_promotes_the_first_unflagged_survivor() {
+        let (reg, _s) = registry();
+        let a = reg.add_account(SECRET_A, None, None).unwrap();
+        let b = reg.add_account(SECRET_B, None, None).unwrap();
+        let c = reg.add_account(SECRET_C, None, None).unwrap();
+        reg.set_require_confirm(&b, true).unwrap();
+        reg.set_active(&a).unwrap();
+
+        reg.remove(&a).unwrap();
+        assert_eq!(reg.active().as_deref(), Some(c.as_str()));
     }
 
     /// The concurrent-instances bind gate mirrors every activation guard 1:1
@@ -4145,6 +4386,31 @@ mod tests {
         );
     }
 
+    /// The wire form both browser chunks hand `set_predecessor_chain` is the
+    /// paired walk, unzipped in order: id *i* names the actor key *i* opens.
+    #[test]
+    fn the_wire_chain_is_the_paired_walk_unzipped_in_order() {
+        let (reg, _s) = registry();
+        let a = reg.add_account(SECRET_A, None, None).unwrap();
+        let b = reg.add_account(SECRET_B, None, None).unwrap();
+        let c = reg.add_account(SECRET_C, None, None).unwrap();
+        reg.record_succession(&a, &b).unwrap();
+        reg.record_succession(&b, &c).unwrap();
+
+        let (ids, keys) = reg.predecessor_chain_wire(&c);
+        let paired = reg.predecessor_backup_keys_by_actor(&c);
+        assert_eq!(ids.len(), paired.len());
+        assert_eq!(keys.len(), paired.len());
+        assert!(!ids.is_empty());
+        for (i, (actor, key)) in paired.iter().enumerate() {
+            assert_eq!(ids[i], actor.0.to_vec());
+            assert_eq!(keys[i], key.to_bytes().to_vec());
+        }
+        // An identity that never succeeded hands over nothing.
+        let (none_ids, none_keys) = reg.predecessor_chain_wire(&a);
+        assert!(none_ids.is_empty() && none_keys.is_empty());
+    }
+
     #[test]
     fn predecessor_backup_keys_derive_the_keys_the_corpus_is_sealed_under() {
         let (reg, _s) = registry();
@@ -4536,6 +4802,42 @@ mod tests {
             None,
             "the writer signing key survived clear_all (sign-out / factory reset)"
         );
+    }
+
+    /// The two slots the account plane writes beside the writer key and the
+    /// principal bundles — `{actor}/writer-unstamped` (the writer key's mint
+    /// marker) and `{actor}/pending-fleet-removals` (this machine's staged
+    /// fleet removals) — are per-actor slots like the rest: an erase that
+    /// leaves them leaves the removed account's residue, and a removal's
+    /// snapshot that leaves them hands the nest half's assembly a slot that
+    /// reads differently from the one it would have read before the removal
+    /// (the writer key LOADED over an unstamped store reads as a lost slot
+    /// without its marker).
+    #[test]
+    fn both_erases_sweep_the_account_planes_own_slots() {
+        let (reg, store) = registry();
+        let a = reg.add_account(SECRET_A, None, None).unwrap();
+        let b = reg.add_account(SECRET_B, None, None).unwrap();
+        let plane_slots = |actor: &str| {
+            [
+                format!("{actor}/writer-unstamped"),
+                format!("{actor}/pending-fleet-removals"),
+            ]
+        };
+        for actor in [&a, &b] {
+            for key in plane_slots(actor) {
+                store.set(&key, "1");
+            }
+        }
+
+        reg.remove(&a).unwrap();
+        for key in plane_slots(&a) {
+            assert_eq!(store.get(&key), None, "remove left {key}");
+        }
+        let _ = reg.clear_all();
+        for key in plane_slots(&b) {
+            assert_eq!(store.get(&key), None, "clear_all left {key}");
+        }
     }
 
     /// One row of [`every_raw_per_actor_setter_writes_nothing_once_the_account_is_gone`]'s

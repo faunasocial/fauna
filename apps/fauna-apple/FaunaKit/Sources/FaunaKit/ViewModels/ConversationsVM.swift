@@ -297,6 +297,7 @@ public final class ConversationsVM {
         return FfiContactOverlays(manager: manager)
     }
 
+#if !FAUNA_KIDS
     /// What the viewer calls a post's author (`post-author`,
     /// `feed-post-detail-author`): their nickname for the author when one is
     /// set, else the author's public name — a bridged author's display name or
@@ -309,6 +310,7 @@ public final class ConversationsVM {
             actorId: post.author
         ).primary
     }
+#endif
 
     /// One receive pass over both rails — the session's own reconnect /
     /// missed-push backstop (`pollConversations` + `pollMail`), whose ingest ticks

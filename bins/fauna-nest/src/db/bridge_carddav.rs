@@ -1169,6 +1169,10 @@ impl CacheDb {
     /// handling); the MDA then emits `DAV:valid-sync-token` and the MUA
     /// full-resyncs. Pure read; the `(actor_id, addressbook_id, modseq)` index
     /// covers the `modseq >` range, then `expunged_at` is checked per row.
+    ///
+    /// Also `true` below the address book's restore-carried prune floor
+    /// (`bridge_carddav_addressbooks.pruned_modseq`) — the calendar twin's
+    /// rule, [`CacheDb::caldav_has_expunged_past_retention`].
     pub async fn carddav_has_expunged_past_retention(
         &self,
         actor: &[u8; 32],
@@ -1184,7 +1188,11 @@ impl CacheDb {
                 "SELECT EXISTS( \
                      SELECT 1 FROM bridge_carddav_expunged \
                      WHERE actor_id = ?1 AND addressbook_id = ?2 \
-                       AND modseq > ?3 AND expunged_at < ?4)",
+                       AND modseq > ?3 AND expunged_at < ?4) \
+                 OR EXISTS( \
+                     SELECT 1 FROM bridge_carddav_addressbooks \
+                     WHERE actor_id = ?1 AND addressbook_id = ?2 \
+                       AND pruned_modseq > ?3)",
                 rusqlite::params![&actor[..], &addressbook_id[..], since_modseq, cutoff_ts],
                 |row| row.get(0),
             )

@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.fauna.app.R
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.HexUtil
+import com.fauna.app.core.InheritedFilterMarks
 import com.fauna.app.core.SecureStorage
 import com.fauna.ffi.FfiEmailFilter
 import com.fauna.ffi.FfiFilterActionInputs
@@ -21,6 +22,7 @@ import com.fauna.ffi.spamThresholdBand
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -42,6 +44,7 @@ private val SUPPORTED_ACTION_KINDS = listOf("Allow", "Discard", "Reject", "Forwa
 class PrivacySettingsVM @Inject constructor(
     private val api: ApiClient,
     private val secureStorage: SecureStorage,
+    private val inheritedFilterMarks: InheritedFilterMarks,
     @ApplicationContext private val appContext: Context,
 ) : ViewModel() {
 
@@ -67,6 +70,11 @@ class PrivacySettingsVM @Inject constructor(
     // sheet opens already pre-populated (never an empty flash).
     val editingFilterId = MutableStateFlow<Long?>(null)
     val editFilterPrefill = MutableStateFlow<FilterPrefill?>(null)
+    // The ids of every rule the succession aftermath carried across that the
+    // owner has not answered — `filter-unattested-mark` +
+    // `filter-review-keep-button` render on exactly these rows. The shared
+    // cache the Account line counts too ([InheritedFilterMarks]).
+    val filterMarks: StateFlow<List<Long>> = inheritedFilterMarks.marks
 
     // Spam preferences
     val spamThreshold = MutableStateFlow(0.5f)
@@ -95,6 +103,9 @@ class PrivacySettingsVM @Inject constructor(
         loadInboxMode()
         loadFilters()
         loadSpamPreferences()
+        // Every Privacy visit re-reads the inherited-rule marks (apple's
+        // pattern), so a verdict given on another device clears here too.
+        viewModelScope.launch { inheritedFilterMarks.reload() }
     }
 
     private fun loadInboxMode() {
@@ -216,7 +227,28 @@ class PrivacySettingsVM @Inject constructor(
         viewModelScope.launch {
             try {
                 api.deleteEmailFilter(id)
-                loadFilters()
+            } catch (e: Exception) {
+                emailFilterError.value = e.message
+                return@launch
+            }
+            loadFilters()
+            // `filter-delete` IS the Remove half of an inherited rule's review
+            // (`succession-aftermath.md` § Adjudicating — no second removal
+            // mechanism): a marked row's verdict is recorded strictly AFTER the
+            // deletion landed, best-effort ([InheritedFilterMarks.recordRemoved]).
+            inheritedFilterMarks.recordRemoved(id)
+        }
+    }
+
+    /** `filter-review-keep-button` — the owner recognises this inherited rule:
+     *  it stays, and its mark (and its share of the Account line) clears. A
+     *  failure is surfaced, never swallowed: a Keep that silently did not land
+     *  leaves the owner believing they answered a question asked again later. */
+    fun keepFilterMark(id: Long) {
+        viewModelScope.launch {
+            emailFilterError.value = null
+            try {
+                inheritedFilterMarks.keep(id)
             } catch (e: Exception) {
                 emailFilterError.value = e.message
             }

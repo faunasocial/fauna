@@ -59,9 +59,26 @@ pub struct FilesVersionsListRequest {
     /// default projection, which excludes them. Wire-additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_pruned: Option<bool>,
+    /// `Some(true)` = also the rows the GC purge stamped `superseded_at`
+    /// (`file-versions.md` § Retention): their bytes may be gone, their signed
+    /// statement is not — this is the **licence read** of the snapshot
+    /// restore, which binds a plaintext snapshot entry to the writer-signed
+    /// row that named its manifest while the snapshot still pins the bytes the
+    /// purge released (`backup-restore.md` § Security Properties → Integrity).
+    /// Never a listing's flag: a purged row restores nothing by itself.
+    /// Absent/`Some(false)` = the default projection. Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_superseded: Option<bool>,
     /// Hash-first addressing (S5b) — see `crate::folders::FolderUpdateRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -94,6 +111,15 @@ pub struct FileVersionInfo {
     /// on the nest (`path-sealing.md` § the set-name plane). Additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_hash: Option<ByteBuf>,
+    /// The same set's **row** on this nest (`folders.id`) — nest-stamped. Two
+    /// readable sets may share a name (a member who owns `photos` also reads a
+    /// collaborator's shared `photos`), so a by-name listing interleaves both
+    /// sets' versions of one path; this is what tells them apart, and what a
+    /// restore of the version sends back as the record's `folder_id`
+    /// (`media.md` § Encryption at rest → *A set is addressed by its row*;
+    /// `set-addressing.md` § The row form). Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     /// The M2 content-key **generation** this version's chunks were sealed under
     /// (see [`crate::sync::SyncChange::content_key_version`]). `None` for
     /// owner-only sets. A restore record must carry this

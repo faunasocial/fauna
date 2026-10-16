@@ -211,18 +211,23 @@ pub fn mirror_pin_file(primary_dir: &std::path::Path, replica_dir: &std::path::P
 /// | macOS | `<home>/Library/Application Support/Fauna/trust` — the user-domain home; the app-group container's `trust/` is the app-maintained READ REPLICA for the sandboxed File Provider extension (see [`mirror_pin_file`]) | `NestTrust.installPinStore()` (macOS) + fauna-tui writers; agent consumer; the extension reads the replica |
 /// | windows | `%LOCALAPPDATA%\Fauna` | C# app writer (`BackupPaths.DataDir`); agent consumer |
 ///
-/// Always ABSOLUTE (missing/relative env falls back under `/tmp` /
-/// `C:\ProgramData` rather than yielding a relative path — a background agent
-/// under launchd runs with cwd `/`, where a relative path panics the first
-/// thing that touches it; see the sync-agent's 2026-07-20 `.pkg` incident).
-pub fn install_scoped_trust_home() -> PathBuf {
+/// Always ABSOLUTE, and `None` on a unix target with no absolute home (a
+/// missing/empty/relative `HOME` and no absolute `XDG_CONFIG_HOME`): the pin
+/// file decides which certificate the agent trusts for its nest, so a
+/// `/tmp` fallback another local account could pre-plant is REFUSED, never
+/// derived (the 2026-07-20 `.pkg` incident's relative-path
+/// panic is avoided the same way). Every caller logs the refusal
+/// ([`fauna_core::platform_ids::NO_HOME_REFUSAL`]) and fails closed — never a
+/// panic. Windows falls back to `C:\ProgramData` as before (a machine-wide,
+/// ACL'd dir).
+pub fn install_scoped_trust_home() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         macos_trust_home(std::env::var_os("HOME"))
     }
     #[cfg(windows)]
     {
-        windows_trust_home(std::env::var_os("LOCALAPPDATA"))
+        Some(windows_trust_home(std::env::var_os("LOCALAPPDATA")))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -248,8 +253,8 @@ fn absolute_or_none(v: Option<std::ffi::OsString>) -> Option<PathBuf> {
 pub fn unix_trust_home(
     xdg_config_home: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
-) -> PathBuf {
-    fauna_core::platform_ids::xdg_config_root(xdg_config_home, home).join("fauna")
+) -> Option<PathBuf> {
+    Some(fauna_core::platform_ids::xdg_config_root(xdg_config_home, home)?.join("fauna"))
 }
 
 /// See [`install_scoped_trust_home`]; must equal the parent of the sync
@@ -259,10 +264,12 @@ pub fn unix_trust_home(
 /// every instance (`installers/macos.md` § Identifier domain, item 5). The
 /// sandboxed File Provider extension cannot reach this dir, so the macOS app
 /// keeps a read replica for it in the container's `trust/` — [`mirror_pin_file`].
-pub fn macos_trust_home(home: Option<std::ffi::OsString>) -> PathBuf {
-    fauna_core::platform_ids::apple_user_domain_home(absolute_or_none(home))
-        .join("Fauna")
-        .join("trust")
+pub fn macos_trust_home(home: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    Some(
+        fauna_core::platform_ids::apple_user_domain_home(absolute_or_none(home))?
+            .join("Fauna")
+            .join("trust"),
+    )
 }
 
 /// See [`install_scoped_trust_home`]; must equal the windows app's
@@ -451,20 +458,26 @@ mod tests {
     }
 
     #[test]
-    fn unix_trust_home_prefers_absolute_xdg_then_home_then_tmp() {
+    fn unix_trust_home_prefers_absolute_xdg_then_home() {
         assert_eq!(
             unix_trust_home(Some("/xdg".into()), Some("/home/u".into())),
-            PathBuf::from("/xdg/fauna")
+            Some(PathBuf::from("/xdg/fauna"))
         );
         // Relative XDG is ignored (a launchd/systemd child may run with cwd /).
         assert_eq!(
             unix_trust_home(Some("rel".into()), Some("/home/u".into())),
-            PathBuf::from("/home/u/.config/fauna")
+            Some(PathBuf::from("/home/u/.config/fauna"))
         );
-        assert_eq!(
-            unix_trust_home(None, None),
-            PathBuf::from("/tmp/.config/fauna")
-        );
+    }
+
+    #[test]
+    fn unix_trust_home_is_refused_without_an_absolute_home_never_tmp() {
+        // A pin file another local account pre-planted under a
+        // `/tmp` fallback would decide which certificate the agent trusts.
+        for home in [None, Some("".into()), Some("rel".into())] {
+            assert_eq!(unix_trust_home(None, home.clone()), None);
+            assert_eq!(unix_trust_home(Some("rel".into()), home), None);
+        }
     }
 
     #[test]
@@ -474,16 +487,19 @@ mod tests {
         // agent's `…/Fauna/sync`-parent + `trust/` — the agent + tui read here.
         assert_eq!(
             macos_trust_home(Some("/Users/u".into())),
-            PathBuf::from("/Users/u/Library/Application Support/Fauna/trust")
+            Some(PathBuf::from(
+                "/Users/u/Library/Application Support/Fauna/trust"
+            ))
         );
-        assert_eq!(
-            macos_trust_home(None),
-            PathBuf::from("/tmp/Library/Application Support/Fauna/trust")
-        );
+        // No `/tmp/Library/…` fallback for a missing/empty/relative home.
+        for home in [None, Some("".into()), Some("rel".into())] {
+            assert_eq!(macos_trust_home(home), None);
+        }
         // Never the TCC-protected container — the agent would be prompted on
         // every instance there (installers/macos.md § Identifier domain, item 5).
         assert!(
             !macos_trust_home(Some("/Users/u".into()))
+                .unwrap()
                 .to_string_lossy()
                 .contains("Group Containers")
         );

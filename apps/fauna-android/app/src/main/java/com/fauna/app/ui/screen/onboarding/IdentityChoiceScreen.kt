@@ -28,6 +28,7 @@ class IdentityChoiceVM @Inject constructor(
     fun beginImport() = host.machine.beginImportIdentity()
     fun beginRecoverLostBox() = host.machine.beginRecoverLostBox()
     fun beginRecoveryEntry() = host.machine.beginRecoveryEntry()
+    fun beginEmergencyLockoutEntry() = host.machine.beginEmergencyLockoutEntry()
 }
 
 /**
@@ -110,6 +111,31 @@ fun IdentityChoiceScreen(
             },
             modifier = Modifier.fillMaxWidth().testTag(Ids.RECOVER_LOST_BOX_BUTTON),
         ) { Text(stringResource(R.string.onboarding_identity_choice_recover_lost_box)) }
+
+        Spacer(Modifier.height(12.dp))
+
+        // The signed-out lock door (ui/sessions.md § The signed-out door): locks
+        // an account from a device the owner will not sign in on; persists nothing.
+        TextButton(
+            onClick = {
+                vm.beginEmergencyLockoutEntry()
+                navController.navigate(EMERGENCY_LOCKOUT_ENTRY_ROUTE)
+            },
+            modifier = Modifier.fillMaxWidth().testTag(Ids.EMERGENCY_LOCKOUT_ENTRY_BUTTON),
+        ) { Text(stringResource(R.string.onboarding_identity_choice_emergency_lockout_entry)) }
+
+        // The lock's confirmation (with the unlock time) lands here, on the
+        // page the wizard returns to.
+        val tick by vm.host.tick.collectAsState()
+        remember(tick) { vm.host.machine.errorMessage() }?.ifEmpty { null }?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                it,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.testTag(Ids.ERROR_MESSAGE),
+            )
+        }
 
         SignOutResidueView(signOutResidue, onRemoveAgain)
     }

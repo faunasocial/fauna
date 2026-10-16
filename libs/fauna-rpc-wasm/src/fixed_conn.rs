@@ -9,14 +9,14 @@
 
 use std::rc::Rc;
 
-use bytes::Bytes;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use wasm_bindgen_futures::spawn_local;
 
 use fauna_protocol::{KindRegistry, RpcDispatcher};
 
-use crate::client::{DEFAULT_DEADLINE, dispatch_typed};
+use crate::adapter::{GlooAdapter, ReconnectSignal, SignalCell};
+use crate::client::{DEFAULT_DEADLINE, dispatch_typed_keyed};
 use crate::error::WsRpcError;
 
 pub(crate) struct Inner {
@@ -26,20 +26,19 @@ pub(crate) struct Inner {
     /// [`dispatch_typed`] here fails with `Disconnected` — no `Option`/cell
     /// needed.
     dispatcher: Rc<RpcDispatcher>,
+    /// The adapter's close reading, kept after the adapter moved into the
+    /// dispatcher: a request that failed on a 4426 close is the app being too
+    /// old for the nest, not a blip (`transport-connection.md` § Connection
+    /// lifecycle, the 4426 paragraph).
+    signal: SignalCell,
 }
 
 /// Start driving an already-connected `adapter` to completion on `spawn_local`
 /// and wrap it as the shared `Inner` both fixed-connection clients hold.
 /// Returns immediately; the browser `WebSocket` completes its handshake
 /// asynchronously (gloo buffers sends until open).
-pub(crate) fn drive_and_wrap<S, E>(adapter: S) -> Rc<Inner>
-where
-    S: futures_util::Stream<Item = Result<Bytes, E>>
-        + futures_util::Sink<Bytes, Error = E>
-        + Unpin
-        + 'static,
-    E: std::fmt::Display + 'static,
-{
+pub(crate) fn drive_and_wrap(adapter: GlooAdapter) -> Rc<Inner> {
+    let signal = adapter.signal_cell();
     let (dispatcher, driver) = RpcDispatcher::new(adapter);
     // The wire `replay_forbidden` hint comes off this registry; a fresh
     // dispatcher has none attached, so without this every request would omit
@@ -54,15 +53,35 @@ where
     Rc::new(Inner {
         kind_registry: KindRegistry::full(),
         dispatcher: Rc::new(dispatcher),
+        signal,
     })
 }
 
 /// The shared `RpcRequester::request` body for a fixed connection: no
 /// reconnect-wait (the connection is fixed), so a closed connection surfaces
-/// as `Disconnected` from within [`dispatch_typed`].
+/// as `Disconnected` from within [`dispatch_typed`] — or as
+/// [`WsRpcError::SubprotocolMismatch`] when the adapter recorded a 4426 close.
 pub(crate) async fn request<Req, Reply>(
     inner: &Inner,
     kind: &'static str,
+    payload: Req,
+) -> Result<Reply, WsRpcError>
+where
+    Req: Serialize,
+    Reply: DeserializeOwned,
+{
+    let mut idem = [0u8; 16];
+    getrandom::fill(&mut idem).map_err(|e| WsRpcError::Codec(format!("idempotency_key: {e}")))?;
+    request_keyed(inner, kind, idem, payload).await
+}
+
+/// [`request`] with a caller-supplied envelope idempotency key — the
+/// keyed-requester seam ([`fauna_protocol::KeyedRpcRequester`]) for a fixed
+/// connection, so an account runtime can drive its outbox over one.
+pub(crate) async fn request_keyed<Req, Reply>(
+    inner: &Inner,
+    kind: &'static str,
+    idempotency_key: [u8; 16],
     payload: Req,
 ) -> Result<Reply, WsRpcError>
 where
@@ -75,5 +94,15 @@ where
         .map(|m| m.default_deadline)
         .unwrap_or(DEFAULT_DEADLINE);
     let budget_ms = deadline.as_millis() as u32;
-    dispatch_typed(&inner.dispatcher, kind, payload, budget_ms).await
+    match dispatch_typed_keyed(&inner.dispatcher, kind, idempotency_key, payload, budget_ms).await {
+        Err(WsRpcError::Disconnected)
+            if matches!(
+                *inner.signal.borrow(),
+                Some(ReconnectSignal::SubprotocolMismatch)
+            ) =>
+        {
+            Err(WsRpcError::SubprotocolMismatch)
+        }
+        other => other,
+    }
 }

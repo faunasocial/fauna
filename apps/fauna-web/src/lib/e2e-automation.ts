@@ -14,6 +14,7 @@ import { goto } from '$app/navigation';
 import { identity, inbox, sent, knocks, contacts, connectionStatus } from '$lib/store';
 import { feedSnapshot, feedReloads, type FeedReloads } from '$lib/feed';
 import { devicesRefreshes } from '$lib/devices-session';
+import { paintedSessionTokenIds } from '$lib/sessions-painted';
 import { messageBanners, type FiredBanner } from '$lib/message-banner';
 import { resetActorScopedState } from '$lib/actorScope';
 import { installRpcTestHooks } from '$lib/rpc';
@@ -24,6 +25,7 @@ import { clearTabPin } from '$lib/tabPin';
 import {
   ensureWasm,
   enableDnsFakeProviderForTest,
+  setDnsRecheckSecsForTest,
   enableFakePlcDirectoryForTestCore,
   servingEnablement,
   type ServingEnablement,
@@ -32,6 +34,7 @@ import { enableFakePlcDirectoryForTest } from '$lib/wasm-atproto-settings';
 import { launchClockForTest } from '$lib/wasm-launch';
 import {
   conversationThreads,
+  conversationSort,
   successionWitness,
   convRealBackendActive,
   registerConversationsCommands,
@@ -41,6 +44,7 @@ import { registerBackupAuditCommands } from '$lib/backup-audit-e2e';
 import { registerBackupCustodianCommands } from '$lib/backup-custodian-e2e';
 import { registerAtprotoDelegationCommands } from '$lib/atproto-delegation-e2e';
 import { registerTrustClockCommands } from '$lib/trust-clock-e2e';
+import { registerFeedCueCommands } from '$lib/feed-cues-e2e';
 import { registerFamilyNotifyCommands } from '$lib/family-notify-e2e';
 import { registerAccountRuntimeCommands } from '$lib/account-runtime-e2e';
 import { registerScreenTimeCommands } from '$lib/screen-time-e2e';
@@ -117,9 +121,20 @@ let installed = false;
 export function installAutomationSurface(): void {
   if (typeof window === 'undefined' || installed) return;
   installed = true;
+  // The `?fauna_e2e_provider_base_urls` override (`driver.set_provider_base_urls`)
+  // is read at MODULE LOAD of `$lib/onboarding/machine.svelte`, whose only
+  // importer is the onboarding page. A test that installs it on an
+  // authenticated page and then enters the onboarding route by navigation —
+  // `admin-nest-retire-button` → `/app/onboarding?retire=1` — would load that
+  // module only after the param has left the URL, and the retire page's machine
+  // would reach the real provider. Load it now, while this reload's URL still
+  // carries the param.
+  if (new URLSearchParams(location.search).has('fauna_e2e_provider_base_urls')) {
+    void import('$lib/onboarding/machine.svelte');
+  }
   (window as any).__fauna_stores = {
     identity, inbox, sent, knocks, contacts, feedSnapshot, goto, conversationThreads,
-    convRealBackendActive, successionWitness,
+    conversationSort, convRealBackendActive, successionWitness,
   };
   installRpcTestHooks();
   // Convention 17's `region_block_render` (`region-block-never-silent`,
@@ -136,6 +151,24 @@ export function installAutomationSurface(): void {
       await ensureWasm();
       enableDnsFakeProviderForTest();
     };
+  // Compress the `admin-dns` page's two slow clocks (the background re-check
+  // and the managed re-publish interval) — the wasm twin of native's
+  // `FAUNA_DNS_RECHECK_SECS` launch env. The web driver writes the launch value
+  // into localStorage under that name (`drivers/web.py::launch`) and calls this
+  // hook; the wasm flag dies with the page, so every install re-applies the
+  // stored value too.
+  const setDnsRecheckSecs = async (secs: number) => {
+    await ensureWasm();
+    setDnsRecheckSecsForTest(secs);
+  };
+  (window as unknown as { __fauna_setDnsRecheckSecsForTest?: (secs: number) => Promise<void> })
+    .__fauna_setDnsRecheckSecsForTest = setDnsRecheckSecs;
+  try {
+    const stored = Number(localStorage.getItem('FAUNA_DNS_RECHECK_SECS'));
+    if (stored > 0) void setDnsRecheckSecs(stored);
+  } catch {
+    // No localStorage (a sandboxed frame): the driver's direct call still lands.
+  }
   // Point the ATProto custody check (critical-alerts.md feeder #1) at a fake
   // PLC directory so test_atproto_custody_alarm.py can drive the mint →
   // tamper → alarm → un-tamper → clear round trip with no real
@@ -267,6 +300,7 @@ export function installAutomationSurface(): void {
   //   * trust facet: `trust_facet_advance_clock` → the Nests page's grant
   //     liveness render clock (a ~90-day window — convention 14's fake clock).
   registerTrustClockCommands();
+  registerFeedCueCommands();
   //   * screen time: `screen_time_heartbeat` → the usage heartbeat's own
   //     production step, with only the clock advanced (convention 14's fake
   //     clock — sleeping for a real heartbeat would be a defunct test).
@@ -364,6 +398,11 @@ export function installAutomationSurface(): void {
   (
     window as unknown as { __fauna_devicesRefreshes?: typeof devicesRefreshes }
   ).__fauna_devicesRefreshes = devicesRefreshes;
+  // The Sessions page's painted token ids, card order — `settings.
+  // session_token_ids` (`$lib/sessions-painted`); null before its hydrate.
+  (
+    window as unknown as { __fauna_sessionTokenIds?: typeof paintedSessionTokenIds }
+  ).__fauna_sessionTokenIds = paintedSessionTokenIds;
   // One post's link previews with their states (`{url, state}`, in body order) —
   // `data.feed.posts[].link_previews`, the shared `RenderDocument::link_previews`
   // projection (render-model.md § D4). A card is absent while a preview is still
@@ -394,7 +433,12 @@ export function installAutomationSurface(): void {
   // assertion the key exists to make.
   (
     window as unknown as {
-      __fauna_messageBanners?: () => { started: number; completed: number; fired: FiredBanner[] };
+      __fauna_messageBanners?: () => {
+        started: number;
+        completed: number;
+        fired: FiredBanner[];
+        seeded_with: string[];
+      };
     }
   ).__fauna_messageBanners = messageBanners;
   // The transport's own state + the offline gate's verdict on it — the

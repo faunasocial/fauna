@@ -10,7 +10,7 @@ use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
 use fauna_media_machine::{MediaMachine as InnerMedia, MediaObserver as InnerMediaObserver};
-use fauna_wasm_panic_hook::err_to_js;
+use fauna_wasm_panic_hook::{err_to_js, to_js};
 
 /// The `sync-state-badge` label for a `media-item` row. Web is a
 /// **control-plane** client (`fauna.sync.files` carries no per-file status and
@@ -22,7 +22,7 @@ use fauna_wasm_panic_hook::err_to_js;
 /// text. Only the badge's icon/color is a per-app render.
 #[wasm_bindgen(js_name = syncedStateBadgeLabel)]
 pub fn synced_state_badge_label() -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_core::format::sync_display_state_label(
+    to_js(&fauna_core::format::sync_display_state_label(
         fauna_core::format::SyncDisplayState::Synced,
     ))
     .map_err(err_to_js)
@@ -34,8 +34,7 @@ pub fn synced_state_badge_label() -> Result<JsValue, JsValue> {
 /// value (`undefined` across the boundary), which the page paints raw.
 #[wasm_bindgen(js_name = shareLinkExpiryLabel)]
 pub fn share_link_expiry_label(value: String) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_core::format::share_link_expiry_label(&value))
-        .map_err(err_to_js)
+    to_js(&fauna_core::format::share_link_expiry_label(&value)).map_err(err_to_js)
 }
 
 /// The `share-link-item-state` label for a row's stable state (`"active"` /
@@ -44,8 +43,7 @@ pub fn share_link_expiry_label(value: String) -> Result<JsValue, JsValue> {
 /// state (`undefined` across the boundary), painted raw.
 #[wasm_bindgen(js_name = shareLinkStateLabel)]
 pub fn share_link_state_label(state: String) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&fauna_core::format::share_link_state_label(&state))
-        .map_err(err_to_js)
+    to_js(&fauna_core::format::share_link_state_label(&state)).map_err(err_to_js)
 }
 
 #[wasm_bindgen]
@@ -62,6 +60,28 @@ unsafe impl Sync for MediaObserverShim {}
 impl InnerMediaObserver for MediaObserverShim {
     fn on_changed(&self) {
         self.0.on_changed()
+    }
+}
+
+#[wasm_bindgen]
+extern "C" {
+    /// The browser's local MLS join-filter — the shape `fauna-wasm-folders`'s
+    /// `JsMlsQuery` takes, backed by the MAIN `fauna_wasm` bundle's
+    /// `WasmConversationsManager.foldersIsJoined` (the engine lives in that
+    /// bundle; the JS callback is the bridge). The filter itself is
+    /// `fauna_protocol::member_rows`.
+    pub type JsMlsQuery;
+    #[wasm_bindgen(method, js_name = isJoinedSharedSet)]
+    fn is_joined_shared_set(this: &JsMlsQuery, mls_group_id_hex: &str) -> bool;
+}
+
+struct MlsQueryShim(JsMlsQuery);
+// SAFETY: wasm32 is single-threaded; the JS object never crosses a thread.
+unsafe impl Send for MlsQueryShim {}
+unsafe impl Sync for MlsQueryShim {}
+impl fauna_media_machine::MlsQuery for MlsQueryShim {
+    fn is_joined_shared_set(&self, mls_group_id_hex: &str) -> bool {
+        self.0.is_joined_shared_set(mls_group_id_hex)
     }
 }
 
@@ -126,6 +146,18 @@ impl MediaMachine {
             ),
             client,
         ))
+    }
+
+    /// Wire the member-row MLS join-filter — the Media page's twin of
+    /// `fauna-wasm-folders`'s `setMlsQuery`, same callback shape. Until called,
+    /// every shared set's row is dropped (fail-safe): a shared set reaches the
+    /// page only through its items, as an item-only option by name
+    /// (`docs/goal/ui/media.md` § Layout & flow → *Where the offerable sets
+    /// come from*). Call right after construction, before the first
+    /// `refresh()`.
+    #[wasm_bindgen(js_name = setMlsQuery)]
+    pub fn set_mls_query(&self, query: JsMlsQuery) {
+        self.0.set_mls_query(Arc::new(MlsQueryShim(query)));
     }
 
     /// Wire the **followed public folders** source — the browser twin of tui's
@@ -249,11 +281,7 @@ impl MediaMachine {
         // …and the keys PAIRED with those identities, replacing the bare keys
         // above: a row signed as a predecessor opens only under that
         // identity's root and its predecessors' (ruling (8)(c)).
-        let (chain_ids, chain_keys): (Vec<Vec<u8>>, Vec<Vec<u8>>) = registry
-            .predecessor_backup_keys_by_actor(&keypair.actor_id_hex())
-            .into_iter()
-            .map(|(id, key)| (id.0.to_vec(), key.to_bytes().to_vec()))
-            .unzip();
+        let (chain_ids, chain_keys) = registry.predecessor_chain_wire(&keypair.actor_id_hex());
         if !chain_ids.is_empty() {
             self.0.set_predecessor_chain(chain_ids, chain_keys);
         }

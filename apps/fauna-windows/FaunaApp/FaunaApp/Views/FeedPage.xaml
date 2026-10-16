@@ -357,7 +357,7 @@
                         <!-- Author + time -->
                         <StackPanel Grid.Row="0" Grid.Column="0"
                                     Orientation="Horizontal" Spacing="8">
-                            <TextBlock Text="{x:Bind ShortAuthor}"
+                            <TextBlock Text="{x:Bind AuthorLabel}"
                                        AutomationProperties.AutomationId="{x:Bind ids:Ids.PostAuthor}"
                                        FontWeight="SemiBold" FontSize="13" />
                             <!-- REPOST ROW attribution marker (feed.md § Interaction bar →
@@ -652,29 +652,26 @@
                         </ItemsControl>
                         <!-- Video thumbnail (video-thumbnail): the D6b `Video` sibling of `Image`
                              (render-model.md § Implementation status today) — painted from the
-                             folded `RenderBlock.Video` hash via VideoHashHex, the exact twin of
+                             folded `RenderBlock.Video` (VideoBlock), the twin of
                              MediaHashHex/post-image. No poster frame exists to paint
                              (`MediaItem.thumbnail`/`dimensions` are `None` from every writer,
-                             deliberately) — a play glyph + the hash as text, mirroring tui's
-                             `video_thumbnail_element` / android's `FeedPostVideo` (neither decodes
-                             a poster frame either). A DataTemplate layout Panel that sets only
-                             AutomationId is UIA-pruned, so bind a non-empty Name (the hash) to
-                             keep it discoverable (memory reference_winui_flaui_datatemplate_name),
-                             exactly as quoted-post binds Name below.
+                             deliberately) — a play glyph + the hash as text. Since inline
+                             playback (§ D6c → Inline playback) the element is the player host:
+                             controls:VideoThumbnailView swaps the glyph, on a tap, for WinUI's
+                             MediaPlayerElement in the same slot, off the shared playback_source for
+                             the bound VideoBlock — never autoplay — and publishes
+                             state/position/source through its automation peer. It names itself
+                             from the block (an unnamed DataTemplate element is UIA-pruned — memory
+                             reference_winui_flaui_datatemplate_name).
                              A bridged post's `ProxiedVideo` (render-model.md § D6c → Proxied
-                             video) paints in this same element: VideoThumbnailText is the hash
-                             for a `Video`, the nest-relative path for a `ProxiedVideo`. Text
-                             only — a proxied video is never byte-loaded for its thumbnail. -->
-                        <StackPanel Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="2"
-                                    Orientation="Horizontal" Spacing="4" Margin="0,4,0,0"
-                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.VideoThumbnail}"
-                                    AutomationProperties.Name="{x:Bind VideoThumbnailText, Mode=OneWay}"
-                                    Visibility="{x:Bind local:FeedPage.BoolToVisibility(HasVideo), Mode=OneWay}">
-                            <TextBlock Text="&#xE768;" FontFamily="Segoe MDL2 Assets"
-                                       FontSize="14" VerticalAlignment="Center" />
-                            <TextBlock Text="{x:Bind VideoThumbnailText, Mode=OneWay}" FontSize="12"
-                                       Opacity="0.7" VerticalAlignment="Center" />
-                        </StackPanel>
+                             video) is the block of this same element: the glyph + its
+                             nest-relative path, never byte-loaded before the tap, and played off
+                             the ticketed path playback_source answers for it. -->
+                        <controls:VideoThumbnailView Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="2"
+                                                     Margin="0,4,0,0"
+                                                     AutomationProperties.AutomationId="{x:Bind ids:Ids.VideoThumbnail}"
+                                                     Block="{x:Bind VideoBlock, Mode=OneWay}"
+                                                     Visibility="{x:Bind local:FeedPage.BoolToVisibility(HasVideo), Mode=OneWay}" />
                         <!-- Quoted-post embed (render-model.md § D6). A bare layout Border inside a
                              DataTemplate that sets only AutomationId is pruned from the UIA tree, so
                              FlaUI's scoped is_visible("quoted-post", scope="post-card[i]") finds 0 even

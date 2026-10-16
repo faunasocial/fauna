@@ -44,6 +44,18 @@ use fauna_sync_engine::preference_surfaces;
 
 use crate::{FfiError, general_err};
 
+/// Whether a preference page's load-failure text is the first-listing gate's
+/// refusal (`common.needs_nest` / `common.needs_other_device`) — the one
+/// shared predicate behind every seat that logs a background read's failure
+/// but must say why a page has not loaded when the replica is not ready
+/// (`account-client-lifecycle.md` § The client-side lifecycle → *The first
+/// listing*, clauses (4) and (5)). A failure it does not recognise stays the
+/// seat's ordinary background-read handling.
+#[uniffi::export]
+pub fn refused_as_not_ready(reason: String) -> bool {
+    preference_surfaces::refused_as_not_ready(&reason)
+}
+
 /// Read the owner's muted-keywords list from the sealed
 /// `fauna.state.moderation` record, as the page record
 /// [`MutedWordsSnapshot`] — the rows **and** the `loaded` bit that gates

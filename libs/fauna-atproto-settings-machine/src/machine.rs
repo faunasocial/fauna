@@ -64,10 +64,11 @@ use fauna_client_atproto::rotation_key::{
 use fauna_client_bridges::atproto_credential::{
     compute_app_credential_verifier, generate_app_credential,
 };
+#[cfg(test)]
 use fauna_client_bridges::atproto_delegation::{
     AUTHORING_CAPABILITIES, DELEGATION_WINDOW_SECS, build_authoring_delegation_cert,
-    delegation_liveness, parse_delegation_cert,
 };
+use fauna_client_bridges::atproto_delegation::{delegation_liveness, parse_delegation_cert};
 use fauna_client_bridges::derive_credential_id;
 use fauna_client_config::StoreError;
 
@@ -92,6 +93,9 @@ use crate::snapshots::{
 };
 use std::collections::HashMap;
 
+/// i18n key for the history opt-in's label, which names the `{count}` of
+/// posts a backfill would publish.
+const HISTORY_BACKFILL_LABEL_KEY: &str = "atproto_settings.history_backfill_count_label";
 /// i18n key for a page read (`refresh()`) failure.
 const REFRESH_ERROR_KEY: &str = "atproto_settings.error_refresh";
 /// i18n key for a `mint` failure.
@@ -198,6 +202,8 @@ struct State {
     pending: Option<PendingTransition>,
     did_method: String,
     history_backfill: bool,
+    /// The nest's count of posts a history backfill would publish.
+    public_post_count: u64,
     // ── S4-C custody check ──────────────────────────────────────────────
     /// The minted DID as the last status read reported it (never rendered).
     custody_did: Option<String>,
@@ -340,6 +346,7 @@ impl State {
             pending: None,
             did_method: "plc".to_string(),
             history_backfill: false,
+            public_post_count: 0,
             custody_did: None,
             tombstone_requested: false,
             custody_ok: std::collections::HashSet::new(),
@@ -879,6 +886,11 @@ impl AtprotoSettingsMachine {
                 target_level: p.target.as_str().to_string(),
                 lines: compose_card_lines(&p.plan, &s),
                 show_history_backfill: p.plan.mints_identity,
+                history_backfill_label: LocalizedText::key_arg(
+                    HISTORY_BACKFILL_LABEL_KEY,
+                    "count",
+                    s.public_post_count.to_string(),
+                ),
                 in_progress: p.in_progress,
             }),
             did_method: s.did_method.clone(),
@@ -1112,6 +1124,7 @@ impl AtprotoSettingsMachine {
                     s.hosted_allowed = status.hosted_allowed;
                     s.handle_domain = status.handle_domain;
                     s.handle_preview = status.handle_preview;
+                    s.public_post_count = status.public_post_count;
                     let new_did = status.identity.as_ref().and_then(|i| i.did.clone());
                     // A DID leaving the roster (retirement archived it, or a
                     // re-mint replaced it) takes its custody *bookkeeping* with
@@ -2236,50 +2249,18 @@ impl AtprotoSettingsMachine {
             return;
         }
 
-        let k_pub = match self.nest_api.fetch_authoring_key().await {
-            Ok(k) => k,
-            Err(e) => {
-                self.set_error(AUTHORIZE_ERROR_KEY, e.detail());
-                self.observer.on_changed();
-                return;
-            }
+        let Some(identity) = self.identity.as_ref() else {
+            self.set_error_localized(LocalizedText::key(NO_IDENTITY_ERROR_KEY));
+            self.observer.on_changed();
+            return;
         };
-
-        // MICROSECONDS on both sides: `Timestamp` is micros and the window
-        // constant is seconds. The nest compares the same way (its check 5, and
-        // the authoring-time wall-clock gate), and a millisecond clock here
-        // would put every real expiry ~1000x into its own future — the exact
-        // bug that made the nest's expiry check dead until 2026-07-29.
-        let created_at = Timestamp::now();
-        let expires_at = Timestamp(created_at.0 + DELEGATION_WINDOW_SECS * 1_000_000);
-
-        // Signing is synchronous and the borrow is scoped to this block, so the
-        // identity key is never held across an `await`.
-        let minted = {
-            let Some(identity) = self.identity.as_ref() else {
-                self.set_error_localized(LocalizedText::key(NO_IDENTITY_ERROR_KEY));
-                self.observer.on_changed();
-                return;
-            };
-            build_authoring_delegation_cert(
-                identity,
-                k_pub,
-                &AUTHORING_CAPABILITIES,
-                created_at,
-                Some(expires_at),
-            )
-        };
-        let cert = match minted {
-            Ok(c) => c,
-            Err(e) => {
-                self.set_error(AUTHORIZE_ERROR_KEY, &e.to_string());
-                self.observer.on_changed();
-                return;
-            }
-        };
-
-        if let Err(e) = self.nest_api.provision_authoring_delegation(cert).await {
-            self.set_error(AUTHORIZE_ERROR_KEY, e.detail());
+        // The one ceremony the `post.author` consent runs too
+        // (`consent_grant::provision_delegation`).
+        if let Err(e) =
+            consent_grant::provision_delegation(self.nest_api.as_ref(), identity, Timestamp::now())
+                .await
+        {
+            self.set_error(AUTHORIZE_ERROR_KEY, &e.to_string());
             self.observer.on_changed();
             return;
         }
@@ -2374,8 +2355,11 @@ impl AtprotoSettingsMachine {
             seams.as_deref(),
             &row,
             approved,
+            // The card's folder picker is unbuilt: a
+            // bare folder-plane row is refused until it chooses.
+            None,
             |blob| nest.mint_grant(blob),
-            |id, approved| nest.resolve_consent(id, approved),
+            |id, approved, folder| nest.resolve_consent(id, approved, folder),
             |grant_id| nest.revoke_grant(grant_id),
         )
         .await;
@@ -2537,13 +2521,17 @@ impl AtprotoSettingsMachine {
             let Some(p) = s.pending.as_ref() else { return };
             (
                 p.target,
-                // Send the mint parameters whenever the move enters a hosted
-                // level from outside — even when OUR view says "reactivate":
-                // nest recomputes the plan from ITS state, and a stale client
-                // whose identity view lags must not turn a genuine mint into
-                // a malformed-parameters refusal. Nest ignores them on the
-                // reactivate path.
-                p.target.is_hosted() && !s.level.is_hosted(),
+                // Send the mint parameters on EVERY move whose target is
+                // hosted — even when OUR view says "reactivate" or "step
+                // within hosting": nest recomputes the plan from ITS state, and
+                // a stale view must not turn a genuine mint into a malformed-
+                // parameters refusal no retry clears (a view still parked at a
+                // hosted level after another device retired the identity meets
+                // a nest at `off` with nothing to restore). Nest ignores them
+                // on every non-mint path, and they cost the custody ring
+                // nothing: `mint_rotation_key` reuses the one unpublished key
+                // until a published log burns it.
+                p.target.is_hosted(),
                 s.history_backfill,
                 s.did_method.clone(),
             )
@@ -2711,6 +2699,36 @@ pub fn consent_card_row(
         // `client_name` and exactly as unreviewed.
         sets: c.sets.into_iter().map(consent_set_row).collect(),
         ends: None,
+        // Publisher-authored too, so fenced in this same pass.
+        install: c.install.map(consent_install_row),
+    }
+}
+
+/// The install section of an admin's install card, every publisher-authored
+/// string control-stripped here for the reason `client_name` is.
+fn consent_install_row(i: crate::NestConsentInstall) -> crate::ConsentInstallRow {
+    let strip = |s: String| strip_control_chars(&s).into_owned();
+    let strip_all = |v: Vec<String>| v.into_iter().map(strip).collect();
+    crate::ConsentInstallRow {
+        execution_form: strip(i.execution_form),
+        requested_kinds: strip_all(i.requested_kinds),
+        settings: i
+            .settings
+            .into_iter()
+            .map(|f| crate::ConsentInstallSettingRow {
+                key: strip(f.key),
+                label: strip(f.label),
+                setting_type: strip(f.setting_type),
+            })
+            .collect(),
+        publisher_domain: strip(i.publisher_domain),
+        // A development plugin has no key; an empty one is never a row.
+        publisher_key: (!i.development && !i.publisher_key.is_empty())
+            .then(|| strip(i.publisher_key)),
+        module_digest: strip(i.module_digest),
+        hosts: strip_all(i.hosts),
+        ingress_paths: strip_all(i.ingress_paths),
+        development: i.development,
     }
 }
 
@@ -2746,6 +2764,30 @@ pub fn scope_words(scopes: &str) -> Vec<String> {
         .collect()
 }
 
+/// One `identity.op` class in words: the consent card's row for its
+/// `fauna:identity:op:<class>` scope, through [`scope_words`] — so the oracle
+/// record on the connected-apps roster names an operation exactly as the card
+/// named the permission. `None` for a name that is no class this build knows
+/// (a newer nest's, or a sovereign name, which no custodian performs).
+pub fn identity_op_words(class: &str) -> Option<String> {
+    let class = fauna_core::identity_op::IdentityOpClass::parse(class).ok()?;
+    scope_words(fauna_bridge_atproto::fauna_scope::identity_op_scope(class)).pop()
+}
+
+/// One oracle record class in words — an `identity.op` class through
+/// [`identity_op_words`], and the ATProto write door's
+/// [`fauna_protocol::principals::ATPROTO_COMMIT_CLASS`] through the consent
+/// card's row for the permission every such write rides, the `repo:*` scope
+/// (`key-material-hierarchy.md` § *The oracle* → *The ATProto classes ride
+/// the protocol's own door*: carried by the ATProto family, never an
+/// `identity.op` class). `None` for a class this build does not know.
+pub fn oracle_class_words(class: &str) -> Option<String> {
+    if class == fauna_protocol::principals::ATPROTO_COMMIT_CLASS {
+        return scope_words("repo:*").pop();
+    }
+    identity_op_words(class)
+}
+
 /// Compose the OAuth half of a connected-apps row from the wire grant.
 ///
 /// Two rules, both of them the same rules the consent card composes under —
@@ -2779,8 +2821,9 @@ fn grant_row(g: fauna_protocol::atproto_pds::AtprotoGrantInfo) -> AtprotoGrantRo
 
 /// The wire's grant set → the seam's shape → the card row, so the connected-apps
 /// row and the consent card share one composition (fence and wording alike)
-/// rather than growing a second one that can drift.
-fn grant_set(s: fauna_protocol::atproto_pds::ConsentSetInfo) -> ConsentSetRow {
+/// rather than growing a second one that can drift. Public for the Connected
+/// apps machine, whose principal rows carry the same provenance.
+pub fn grant_set(s: fauna_protocol::atproto_pds::ConsentSetInfo) -> ConsentSetRow {
     consent_set_row(NestConsentSet {
         nsid: s.nsid,
         title: s.title,
@@ -4819,6 +4862,24 @@ mod selector_tests {
         );
     }
 
+    /// The history opt-in's label names the count the nest reported — the
+    /// user consents to publishing exactly that many posts
+    /// (`atproto-pds-bridge.md` § Projection & backfill).
+    #[tokio::test]
+    async fn the_history_opt_in_label_names_the_nest_reported_post_count() {
+        let (m, api, _cfg, _o) = machine();
+        api.set_public_post_count(17);
+        m.refresh().await;
+
+        m.select_level("hosted_visible".into()).await;
+
+        let card = m.snapshot().pending_transition.expect("card staged");
+        assert_eq!(
+            card.history_backfill_label,
+            LocalizedText::key_arg(HISTORY_BACKFILL_LABEL_KEY, "count", "17")
+        );
+    }
+
     #[tokio::test]
     async fn confirm_makes_the_one_call_with_mint_parameters_and_converges() {
         let (m, api, cfg, _o) = machine();
@@ -5013,6 +5074,132 @@ mod selector_tests {
         assert!(!card.in_progress, "confirm re-enabled for retry");
         assert!(snap.error.is_some());
         assert_eq!(snap.level, "off", "level unchanged on failure");
+    }
+
+    #[tokio::test]
+    async fn a_card_staged_before_the_gate_closed_fails_on_the_nest_and_retries_clean() {
+        // The nest, not the greyed rung, enforces the real-domain gate: a card
+        // staged while the box was public meets the handler's refusal if the
+        // verdict flips before the confirm, and the retry applies once the
+        // domain is back.
+        let (m, api, _cfg, _o) = machine();
+        m.refresh().await;
+        m.select_level("hosted_visible".into()).await;
+        api.set_status("off", false, "localhost", "", None);
+
+        m.confirm_transition().await;
+
+        let snap = m.snapshot();
+        let card = snap.pending_transition.expect("card still open");
+        assert!(!card.in_progress, "confirm re-enabled for retry");
+        assert!(
+            format!("{:?}", snap.error).contains("domain_not_public"),
+            "the page error carries the nest's refusal: {:?}",
+            snap.error
+        );
+        assert_eq!(snap.level, "off", "level unchanged on failure");
+
+        api.set_status("off", true, "example.com", "alice.example.com", None);
+        m.confirm_transition().await;
+
+        let snap = m.snapshot();
+        assert!(
+            snap.pending_transition.is_none(),
+            "the retry closed the card"
+        );
+        assert_eq!(snap.level, "hosted_visible");
+    }
+
+    #[tokio::test]
+    async fn a_step_up_staged_on_a_stale_hosted_view_after_a_remote_retirement_mints() {
+        // This device's view is parked at hosted_visible; another device
+        // deletes the presence with the retire opt-in and its converge
+        // publishes the tombstone, so the nest is at `off` with no restorable
+        // identity. The step up staged on the stale view must still carry the
+        // mint parameters — the nest recomputes the plan from its own state
+        // and mints — rather than meet a `malformed` refusal no retry clears.
+        let (m, api, cfg, _o) = machine();
+        let active = |status: &str| NestIdentitySummary {
+            handle: "alice.example.com".into(),
+            method: "plc".into(),
+            status: status.into(),
+            tombstone_requested: false,
+            did: None,
+        };
+        api.set_status(
+            "hosted_visible",
+            true,
+            "example.com",
+            "alice.example.com",
+            Some(active("active")),
+        );
+        m.refresh().await;
+        m.select_level("hosted_full".into()).await;
+        api.set_status(
+            "off",
+            true,
+            "example.com",
+            "alice.example.com",
+            Some(active("tombstoned")),
+        );
+
+        m.confirm_transition().await;
+
+        let snap = m.snapshot();
+        assert!(
+            snap.pending_transition.is_none(),
+            "the step up converged on a mint: {:?}",
+            snap.error
+        );
+        assert_eq!(snap.level, "hosted_full");
+        assert_eq!(
+            snap.identity.expect("the mint's intent row").status,
+            "pending"
+        );
+        let calls = set_level_calls(&api);
+        let FakeCall::SetIntegrationLevel {
+            did_method,
+            user_rotation_pub_did_key,
+            ..
+        } = &calls[0]
+        else {
+            unreachable!()
+        };
+        assert_eq!(did_method, "plc");
+        assert!(user_rotation_pub_did_key.starts_with("did:key:zDn"));
+        // The custody ring holds exactly the one unpublished key the mint
+        // rode on — the parameters sent on a hosted move do not churn it.
+        assert_eq!(cfg.current().rotation_keys.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn repeated_hosted_moves_reuse_the_one_unpublished_rotation_key() {
+        // Sending the mint parameters on every hosted move is free for the
+        // custody ring: until a log publishes it, the one unpublished key is
+        // reused, so a step up and back down mint nothing new.
+        let (m, api, cfg, _o) = machine();
+        api.set_status(
+            "hosted_visible",
+            true,
+            "example.com",
+            "alice.example.com",
+            Some(NestIdentitySummary {
+                handle: "alice.example.com".into(),
+                method: "plc".into(),
+                status: "active".into(),
+                tombstone_requested: false,
+                did: None,
+            }),
+        );
+        m.refresh().await;
+        m.select_level("hosted_full".into()).await;
+        m.confirm_transition().await;
+        m.select_level("hosted_visible".into()).await;
+        m.confirm_transition().await;
+
+        assert_eq!(m.snapshot().level, "hosted_visible");
+        assert_eq!(set_level_calls(&api).len(), 2);
+        assert_eq!(cfg.current().rotation_keys.len(), 1);
     }
 
     #[tokio::test]
@@ -6383,6 +6570,91 @@ mod consent_tests {
         );
     }
 
+    /// An admin's install card for a hosted plugin carries its install
+    /// section from the wire to the card row: the typed settings summary, the
+    /// publisher's domain and `did:key`, the digest, hosts and ingress — every
+    /// publisher-authored string through the same control-strip fence as
+    /// `client_name` (`third-party.md` § The runner contract → *The
+    /// install-approval leg*).
+    #[test]
+    fn an_install_card_carries_its_install_section_fenced() {
+        use fauna_protocol::atproto_pds::{ConsentInstallInfo, PendingConsentRow};
+        use fauna_protocol::bridges_ui::BridgeSetting;
+        let wire = PendingConsentRow {
+            consent_id: vec![7],
+            code: "AAA-BBB".into(),
+            client_id: "https://plugins.example/hello.json".into(),
+            client_name: Some("Hello Plugin".into()),
+            scopes: vec!["atproto".into()],
+            install: Some(Box::new(ConsentInstallInfo {
+                execution_form: "wasm".into(),
+                requested_kinds: vec!["ext.plugins.example.notes".into()],
+                requested_scopes: vec!["atproto".into()],
+                settings: vec!["greeting".into()],
+                settings_fields: vec![BridgeSetting {
+                    key: "greeting".into(),
+                    label: "Greeting\nApprove this".into(),
+                    setting_type: "string".into(),
+                    value: fauna_protocol::Value::Null,
+                    options: None,
+                    extra: Default::default(),
+                }],
+                publisher_domain: "plugins.example".into(),
+                publisher_key: "did:key:z6Mk".into(),
+                module_digest: "sha256:ab".into(),
+                hosts: vec!["api.example".into()],
+                ingress_paths: vec!["/hello".into()],
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let card = consent_card_row(wire.into(), &Default::default());
+        let install = card.install.expect("the install section");
+        assert_eq!(install.execution_form, "wasm");
+        assert_eq!(install.requested_kinds, ["ext.plugins.example.notes"]);
+        assert_eq!(install.settings.len(), 1);
+        assert_eq!(install.settings[0].key, "greeting");
+        assert_eq!(install.settings[0].setting_type, "string");
+        assert!(
+            !install.settings[0].label.chars().any(char::is_control),
+            "a settings label may not carry row structure: {:?}",
+            install.settings[0].label
+        );
+        assert!(install.settings[0].label.contains("Approve this"));
+        assert_eq!(install.publisher_domain, "plugins.example");
+        assert_eq!(install.publisher_key.as_deref(), Some("did:key:z6Mk"));
+        assert_eq!(install.module_digest, "sha256:ab");
+        assert_eq!(install.hosts, ["api.example"]);
+        assert_eq!(install.ingress_paths, ["/hello"]);
+        assert!(!install.development);
+    }
+
+    /// A development plugin's card names no `did:key` — it has none — and an
+    /// ordinary consent carries no install section at all.
+    #[test]
+    fn a_development_install_has_no_key_row_and_a_consent_no_section() {
+        use fauna_protocol::atproto_pds::{ConsentInstallInfo, PendingConsentRow};
+        let wire = PendingConsentRow {
+            client_id: "http://localhost/plugins/hello_dev".into(),
+            install: Some(Box::new(ConsentInstallInfo {
+                execution_form: "wasm".into(),
+                publisher_domain: "localhost".into(),
+                development: true,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let install = consent_card_row(wire.into(), &Default::default())
+            .install
+            .expect("the install section");
+        assert!(install.development);
+        assert_eq!(install.publisher_key, None);
+        assert_eq!(install.publisher_domain, "localhost");
+
+        let plain = consent_card_row(consent(&[1], "AAA-BBB", &["atproto"]), &Default::default());
+        assert_eq!(plain.install, None);
+    }
+
     /// The do-not-cheat control for the pin above: an ordinary multi-word name
     /// is untouched, byte for byte. A strip that mangled legitimate names would
     /// pass every assertion about hostile ones.
@@ -6458,6 +6730,7 @@ mod consent_tests {
         assert!(api.calls().contains(&FakeCall::ResolveConsent {
             consent_id: vec![0xAB, 0xCD],
             approved: true,
+            folder: None,
         }));
         let snap = m.snapshot();
         assert!(
@@ -6481,6 +6754,7 @@ mod consent_tests {
         assert!(api.calls().contains(&FakeCall::ResolveConsent {
             consent_id: vec![9],
             approved: false,
+            folder: None,
         }));
         assert!(api.pending_consents().is_empty());
         assert!(m.snapshot().consents.is_empty());

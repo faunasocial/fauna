@@ -39,11 +39,24 @@ public sealed partial class SettingsMutedWordsPage : Page
         }
     }
 
+    protected override void OnNavigatedFrom(NavigationEventArgs e)
+    {
+        base.OnNavigatedFrom(e);
+        _vm?.CleanupStoreChange();
+        if (_vm is not null) _vm.StoreResynced -= RenderState;
+    }
+
     private async void Page_Loaded(object sender, RoutedEventArgs e)
     {
         if (_vm is null) return;
         await _vm.LoadAsync();
         RenderState();
+        // The shared store-change notice: another device's word paints on this
+        // open page with no re-visit (account-runtime.md § A runtime's own pump
+        // is a source of the notice too).
+        _vm.StoreResynced -= RenderState;
+        _vm.StoreResynced += RenderState;
+        _vm.WatchStore();
     }
 
     private void RenderState()
@@ -52,6 +65,11 @@ public sealed partial class SettingsMutedWordsPage : Page
 
         ErrorBar.Message = _vm.ErrorMessage ?? string.Empty;
         ErrorBar.IsOpen = !string.IsNullOrEmpty(_vm.ErrorMessage);
+        // The page mirror `messages.error` reads (every sibling sub-page's
+        // OnPanelError idiom): without it this page's refusal — a read gate's
+        // "needs a connection to your nest" — painted the banner yet read back
+        // as no error at all.
+        App.CurrentErrorMessage = string.IsNullOrEmpty(_vm.ErrorMessage) ? null : _vm.ErrorMessage;
 
         WordsContainer.Children.Clear();
         foreach (var word in _vm.Words)

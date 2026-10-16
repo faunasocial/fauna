@@ -60,9 +60,8 @@ public sealed partial class AdminWebPage : Page
     {
         if (_vm is not null || _clients?.Rpc is null) return;
         var web = await _clients.Rpc.BuildWebClientAsync();
-        var domain = _clients.Account.Domain ?? string.Empty;
         var rpc = _clients.Rpc;
-        _vm = new AdminWebViewModel(web, () => LoadActorsAsync(rpc), domain);
+        _vm = new AdminWebViewModel(web, () => LoadActorsAsync(rpc));
     }
 
     /// <summary>Project every account on the nest into the apex picker's actor options

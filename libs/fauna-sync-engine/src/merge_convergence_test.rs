@@ -922,6 +922,17 @@ fn tracing_on() -> bool {
     std::env::var("ORACLE_TRACE").is_ok()
 }
 
+thread_local! {
+    /// Production's latest-writer clocks under near-simultaneous writes: the
+    /// local side is the file's MTIME (the write instant) and the incoming
+    /// side the peer row's nest `created_at` (its RECORD instant, after the
+    /// peer's own write by its upload latency). Two seats writing within that
+    /// latency each read the peer as the later writer. Set by the schedules
+    /// that pin the crossed resolution; the default clocks are untouched.
+    static LOCAL_WRITE_PREDATES_PEER_RECORD: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 /// Process one row for a causal seat. Returns what the seat publishes, if
 /// the outcome calls for one — in production's shape ([`CPublish`]): the
 /// divergence path always files a resolved report (whatever the resolver
@@ -1269,12 +1280,20 @@ fn resolve_and_report(
     // `CPublish::Report::winner_carries_novelty`).
     let consumed_unpublished =
         pre_merge != seat.base && seat.last_recorded.as_ref() != Some(&pre_merge);
+    // The latest-writer clocks: the model's default stamps order local and
+    // incoming arbitrarily; [`LOCAL_WRITE_PREDATES_PEER_RECORD`] stamps them
+    // the way two near-simultaneous writes do in production.
+    let local_ms = if LOCAL_WRITE_PREDATES_PEER_RECORD.with(std::cell::Cell::get) {
+        1_700_000_000_000 - 1
+    } else {
+        1_700_000_000_000 + i as i64
+    };
     let resolution = resolve_conflict(
         ConflictPolicy::Auto,
         &TextAdapter,
         Some(&ancestor),
         &seat.local,
-        1_700_000_000_000 + i as i64,
+        local_ms,
         remote,
         1_700_000_000_000 + idx_ts,
     );
@@ -1567,10 +1586,14 @@ fn converge_causal(
                         CApply::Done(publish) => {
                             state[i].seen = seq.max(state[i].seen);
                             if let Some(p) = publish {
-                                // Stamped at capture: the contiguous prefix
-                                // processed so far — never anything the seat
-                                // has not consumed.
-                                publishes.push((state[i].seen, p));
+                                // Stamped at the listing's START: production's
+                                // stamp reads the persisted anchor, and
+                                // `set_anchor` runs after the whole fold — a
+                                // publish mid-listing claims nothing the
+                                // listing carried (the processed `seen` was an
+                                // over-claim: peers go first, so it could
+                                // even pass an own row not yet processed).
+                                publishes.push((start, p));
                             }
                         }
                     }
@@ -2426,6 +2449,10 @@ impl Fuzz {
         if batch.is_empty() {
             return;
         }
+        // A publish mid-batch is stamped at the anchor the batch started from
+        // — production's stamp reads the persisted anchor, which `set_anchor`
+        // moves only after the whole fold (see `converge_causal`).
+        let anchor = self.seen(i);
         // The causal batch fold, identical to `converge_causal`'s: earlier
         // rows fold only under a batch-latest PEER row whose watermark covers
         // every earlier batch row's seq.
@@ -2559,7 +2586,7 @@ impl Fuzz {
                     let new_seen = seq.max(self.seen(i));
                     self.set_seen(i, new_seen);
                     if let Some(p) = publish {
-                        publishes.push((self.seen(i), p));
+                        publishes.push((anchor, p));
                     }
                 }
             }
@@ -3452,6 +3479,58 @@ proptest::proptest! {
         proptest::prop_assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
     }
 }
+
+/// One listing, delivered exactly as `converge_causal` delivers it:
+/// pre-pass, peers first, own echoes last, under the transient cap.
+/// Nothing folds on this shape — the carrier is the latest PEER row and
+/// nothing in the listing sits below it (the carrier-less form). A publish is
+/// stamped at the listing's starting anchor, as in `converge_causal`.
+///
+/// `interleaved`: the path shares its SET with a sibling path written in the
+/// same burst (the `clash` step writes `clash.txt` and `clash.bin` together),
+/// so the path's rows are not contiguous set seqs — `honest_winner_claim`
+/// then never widens (`incoming_seq ≠ frontier + 1`, and the own-gap
+/// widening needs the path frontier at the set-wide anchor, which the
+/// sibling's rows hold above it): every winner claims the pre-merge frontier.
+fn deliver_listing(
+    seat: &mut CSeat,
+    nest: &[CRow],
+    me: usize,
+    interleaved: bool,
+) -> Vec<(usize, CPublish)> {
+    let anchor = seat.seen;
+    let batch: Vec<usize> = (seat.seen..nest.len()).collect();
+    pre_pass(seat, nest, &batch, me);
+    let mut order: Vec<usize> = Vec::with_capacity(batch.len());
+    order.extend(batch.iter().copied().filter(|&idx| nest[idx].author != me));
+    order.extend(batch.iter().copied().filter(|&idx| nest[idx].author == me));
+    let mut publishes = Vec::new();
+    let mut cap: Option<usize> = None;
+    for idx in order {
+        let seq = idx + 1;
+        if cap.is_some_and(|c| seq >= c) {
+            continue;
+        }
+        let f = seat.frontier;
+        let claim = if !interleaved && ((f + 1)..seq).all(|gs| nest[gs - 1].author == me) {
+            seq
+        } else {
+            f
+        };
+        let row = nest[idx].clone();
+        match causal_apply(seat, seq, &row, me, idx as i64, claim) {
+            CApply::Defer => cap = Some(seq),
+            CApply::Done(publish) => {
+                seat.seen = seq.max(seat.seen);
+                if let Some(p) = publish {
+                    publishes.push((anchor, p));
+                }
+            }
+        }
+    }
+    publishes
+}
+
 /// **The fresh-bind park and its release, at the oracle** (the cap-release
 /// ruling, 2026-09-21 — `conflicts.md` clause 5).
 /// Every seat this model had ever run was SEEDED — frontier 0 tracked, a
@@ -3529,45 +3608,8 @@ fn a_fresh_binds_counted_own_row_releases_the_defer_cap() {
     );
     let mut seats = [peer, fresh];
 
-    // One listing, delivered exactly as `converge_causal` delivers it:
-    // pre-pass, peers first, own echoes last, under the transient cap.
-    // Nothing folds on this shape — the carrier is the latest PEER row and
-    // nothing in the listing sits below it (the carrier-less form).
-    fn deliver(seat: &mut CSeat, nest: &[CRow], me: usize) -> Vec<(usize, CPublish)> {
-        let batch: Vec<usize> = (seat.seen..nest.len()).collect();
-        pre_pass(seat, nest, &batch, me);
-        let mut order: Vec<usize> = Vec::with_capacity(batch.len());
-        order.extend(batch.iter().copied().filter(|&idx| nest[idx].author != me));
-        order.extend(batch.iter().copied().filter(|&idx| nest[idx].author == me));
-        let mut publishes = Vec::new();
-        let mut cap: Option<usize> = None;
-        for idx in order {
-            let seq = idx + 1;
-            if cap.is_some_and(|c| seq >= c) {
-                continue;
-            }
-            let f = seat.frontier;
-            let claim = if ((f + 1)..seq).all(|gs| nest[gs - 1].author == me) {
-                seq
-            } else {
-                f
-            };
-            let row = nest[idx].clone();
-            match causal_apply(seat, seq, &row, me, idx as i64, claim) {
-                CApply::Defer => cap = Some(seq),
-                CApply::Done(publish) => {
-                    seat.seen = seq.max(seat.seen);
-                    if let Some(p) = publish {
-                        publishes.push((seat.seen, p));
-                    }
-                }
-            }
-        }
-        publishes
-    }
-
     // The fresh seat's first listing: [peer create@1, own echo@2].
-    let published = deliver(&mut seats[1], &nest, 1);
+    let published = deliver_listing(&mut seats[1], &nest, 1, false);
     assert_eq!(
         seats[1].seen, 2,
         "the fresh bind PARKED: the peer's create was capped and the own echo \
@@ -3606,7 +3648,7 @@ fn a_fresh_binds_counted_own_row_releases_the_defer_cap() {
         for me in 0..2 {
             if seats[me].seen < nest.len() {
                 progressed = true;
-                for (w, p) in deliver(&mut seats[me], &nest, me) {
+                for (w, p) in deliver_listing(&mut seats[me], &nest, me, false) {
                     note_published(&mut seats[me].last_recorded, me, &p);
                     mint_publish(&mut nest, me, w, p);
                 }
@@ -3703,4 +3745,106 @@ fn a_reverts_own_held_bytes_do_not_park_a_covering_peer_edit() {
              covering edit adopted, the stale revert lost as rule 5 trades it"
         );
     }
+}
+
+/// **Crossed latest-wins resolutions converge — at the oracle** (the
+/// `clash` step of `test_seat_scenarios`, `conflicts.md` clause 2: convergence,
+/// not winner-permanence). Two seats rewrite the SAME line of a shared file
+/// from one base and publish at once; no three-way merge exists, so each
+/// seat's resolver falls to latest-writer-wins — and with production's clocks
+/// (local mtime vs. the peer row's record time,
+/// [`LOCAL_WRITE_PREDATES_PEER_RECORD`]) EACH seat reads the PEER as the
+/// later writer. Both take `IncomingWins`: a adopts b's body, b adopts a's.
+/// Each report's winner row is attributed to the candidate's device, so it
+/// returns to that device as an own echo carrying bytes its disk no longer
+/// holds — the stale-declined own tail — and each seat re-asserts its
+/// swapped body. The live red's agent logs show exactly that sequence, and
+/// the seats quiesced with their bodies exchanged.
+#[test]
+fn crossed_latest_wins_resolutions_converge_on_one_body() {
+    LOCAL_WRITE_PREDATES_PEER_RECORD.with(|c| c.set(true));
+    let base = b"clash: base\n".to_vec();
+    let bodies = [b"clash: from a\n".to_vec(), b"clash: from b\n".to_vec()];
+    // Log: seq 1 = a's edit, seq 2 = b's edit, both stamped at the shared
+    // anchor (0 — the seed both seats hold).
+    let mut nest: Vec<CRow> = (0..2)
+        .map(|me| CRow {
+            author: me,
+            content: bodies[me].clone(),
+            derived_through: 0,
+            is_resolution: false,
+            is_retention: false,
+        })
+        .collect();
+    let seat = |me: usize| CSeat {
+        name: ["a", "b"][me],
+        local: bodies[me].clone(),
+        base: base.clone(),
+        frontier: 0,
+        edit_frontier: 0,
+        content_frontier: None,
+        pending_winners: Vec::new(),
+        ledger: vec![(0, base.clone())],
+        seen: 0,
+        last_recorded: Some(bodies[me].clone()),
+        fresh_bind: false,
+    };
+    let mut seats = [seat(0), seat(1)];
+
+    // The crossed interleaving: BOTH seats take their first listing (both
+    // edits) before either report lands, so each resolves the mirror image.
+    let mut reports = Vec::new();
+    for (me, s) in seats.iter_mut().enumerate() {
+        reports.push(deliver_listing(s, &nest, me, true));
+    }
+    assert_eq!(
+        (seats[0].local.clone(), seats[1].local.clone()),
+        (bodies[1].clone(), bodies[0].clone()),
+        "precondition: the resolutions CROSS (each seat adopted its peer's body)"
+    );
+    for (me, published) in reports.into_iter().enumerate() {
+        for (w, p) in published {
+            note_published(&mut seats[me].last_recorded, me, &p);
+            mint_publish(&mut nest, me, w, p);
+        }
+    }
+
+    // Every later round crosses the same way: both seats read the log as it
+    // stands, THEN the round's publishes land — so neither seat's re-assert
+    // is listed before the other has acted on its own stale-declined tail.
+    for _round in 0..24 {
+        let mut round = Vec::new();
+        for (me, s) in seats.iter_mut().enumerate() {
+            if s.seen < nest.len() {
+                round.push((me, deliver_listing(s, &nest, me, true)));
+            }
+        }
+        if round.is_empty() {
+            break;
+        }
+        for (me, published) in round {
+            for (w, p) in published {
+                note_published(&mut seats[me].last_recorded, me, &p);
+                mint_publish(&mut nest, me, w, p);
+            }
+        }
+    }
+    LOCAL_WRITE_PREDATES_PEER_RECORD.with(|c| c.set(false));
+    assert!(
+        seats.iter().all(|s| s.seen == nest.len()),
+        "the schedule never quiesced ({} rows)",
+        nest.len()
+    );
+    assert_eq!(
+        seats[0].local,
+        seats[1].local,
+        "the seats quiesced on DIFFERENT bodies (a={:?}, b={:?}) — the crossed \
+         resolutions never converged",
+        String::from_utf8_lossy(&seats[0].local),
+        String::from_utf8_lossy(&seats[1].local)
+    );
+    assert!(
+        bodies.contains(&seats[0].local),
+        "the converged body must be one of the writers' bodies"
+    );
 }

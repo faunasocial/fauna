@@ -129,9 +129,40 @@ pub fn launch_token_json(
     })
 }
 
+/// Build `fauna_e2e_agent::CUSTODY_CEREMONY_INGEST_KEY`'s value:
+/// `{"seen", "moved", "duplicate", "refused", "uncaptured"}`. The caller reads
+/// the counts (`fauna_client_conversations::custody_ceremony_ingest_counts`,
+/// which owns the counting); here rather than in each app so tui, linux and
+/// the UniFFI apps (`fauna-ffi`) publish one shape.
+pub fn custody_ceremony_ingest_json(
+    seen: u64,
+    moved: u64,
+    duplicate: u64,
+    refused: u64,
+    uncaptured: u64,
+) -> Value {
+    json!({
+        "seen": seen,
+        "moved": moved,
+        "duplicate": duplicate,
+        "refused": refused,
+        "uncaptured": uncaptured,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The five tally counts land under the names the cross-app journeys
+    /// read, so tui, linux and the UniFFI apps publish one shape.
+    #[test]
+    fn custody_ceremony_ingest_names_each_count() {
+        assert_eq!(
+            custody_ceremony_ingest_json(5, 2, 1, 1, 1),
+            json!({ "seen": 5, "moved": 2, "duplicate": 1, "refused": 1, "uncaptured": 1 })
+        );
+    }
 
     /// Stickiness is read as "reports moved, transitions did not", so a repeat
     /// of the same word must count as a report and never as a transition.

@@ -4,8 +4,8 @@ use crate::backend::{
     ResolveResult, ResolvedAttachment, RoomPolicyEdit,
 };
 use crate::compose::{
-    AddParticipantState, AttachmentDraft, ComposeState, RecipientPickerState, ResolveState,
-    SendState,
+    AddParticipantState, AttachmentDraft, ComposeState, RECIPIENT_SUGGESTION_CAP,
+    RecipientPickerState, ResolveState, SendState,
 };
 use crate::contacts::ContactsCache;
 use crate::eviction::CrossGroupEviction;
@@ -192,6 +192,14 @@ pub struct ConversationsManager {
     /// [`Self::attachment_refill_poke`]. `None` on web and on test managers,
     /// which drain the owed writes themselves.
     mail_read_poke: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Where [`Self::refresh_contact_roster`] reads the contact roster from
+    /// ([`crate::backend::ContactRosterSource`]); `None` on a test manager.
+    contact_roster: RwLock<Option<Arc<dyn crate::backend::ContactRosterSource>>>,
+    /// Reloads the contact roster now — installed by the native
+    /// `ConversationsSession`, fired when a recipient picker opens, so a
+    /// contact accepted elsewhere a moment ago is offered without waiting for
+    /// the backstop tick. `None` on web and on test managers.
+    contact_roster_poke: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Resolved link-preview state keyed by URL (render-model.md § D4) — the
     /// conversations twin of `FeedManager::resolved_previews`. The shared producer emits a
     /// bubble's bare-url `RenderBlock::LinkPreview` block `Resolving`;
@@ -268,6 +276,15 @@ pub struct ConversationsManager {
     /// [`Self::engine_served_elsewhere`] with top precedence over
     /// `page_error`/send-failure in each app's `error-message` projection.
     engine_served_elsewhere: RwLock<bool>,
+    /// Whether this account's `mls.db` was written by a **newer build with a
+    /// breaking change** (`MlsError::SchemaIncompatible` at engine
+    /// construction — `ui/conversations.md` § Errors & edge cases, the sixth
+    /// standing truth). A field of its own for the reason
+    /// [`Self::engine_served_elsewhere`] gives: a standing condition no
+    /// unrelated gesture's `page_error` clear may mask. Set/cleared by
+    /// [`Self::set_engine_state_needs_newer_app`] at the engine-construction
+    /// site, read by [`Self::engine_state_needs_newer_app`].
+    engine_state_needs_newer_app: RwLock<bool>,
     /// The receive-loop generation most recently started over this manager —
     /// claimed by [`Self::begin_receive_loop`], one per
     /// `ConversationsSession::start_receive_loop`. A manager can outlive the
@@ -624,6 +641,57 @@ impl ConversationsManager {
         *self.attachment_refill_poke.write().unwrap() = Some(poke);
     }
 
+    /// Install the receive loop's contact-roster reload, fired when a
+    /// recipient picker opens ([`Self::contact_roster_poke`]). Plain Rust —
+    /// the native session wires it in-process.
+    pub fn set_contact_roster_poke(&self, poke: Arc<dyn Fn() + Send + Sync>) {
+        *self.contact_roster_poke.write().unwrap() = Some(poke);
+    }
+
+    fn poke_contact_roster(&self) {
+        let poke = self.contact_roster_poke.read().unwrap().clone();
+        if let Some(poke) = poke {
+            poke();
+        }
+    }
+
+    /// Register where the contact roster comes from
+    /// ([`crate::backend::ContactRosterSource`]) — every host's session
+    /// factory does, beside its other nest-backed seams. Replaces any source
+    /// registered before.
+    pub fn register_contact_roster(&self, source: Arc<dyn crate::backend::ContactRosterSource>) {
+        *self.contact_roster.write().unwrap() = Some(source);
+    }
+
+    /// Reload the contact roster from the registered source into the
+    /// projection the recipient picker completes over, re-emitting when it
+    /// moved. A read failure keeps the roster already held (logged); no
+    /// source is a no-op. Run by the receive loop at start, on reconnect, on
+    /// every backstop tick and when a picker opens; web's JS loop calls it
+    /// through the wasm face.
+    pub async fn refresh_contact_roster(&self) {
+        let source = self.contact_roster.read().unwrap().clone();
+        let Some(source) = source else {
+            return;
+        };
+        match source.roster().await {
+            Ok(roster) => {
+                self.apply_contact_roster(roster);
+            }
+            Err(e) => tracing::debug!("contact roster read failed, keeping the last: {e}"),
+        }
+    }
+
+    /// Load `roster` into the projection; re-emits and returns `true` when it
+    /// changed anything.
+    pub fn apply_contact_roster(&self, roster: Vec<crate::contacts::RosterEntry>) -> bool {
+        let changed = self.contacts.replace_roster(roster);
+        if changed {
+            self.notify();
+        }
+        changed
+    }
+
     /// Test-only: shrink the attachment store's budget so a handful of small
     /// attachments exercise eviction (`ATTACHMENT_STORE_BUDGET_BYTES` is the
     /// production value, a constant). Takes effect at the next insert.
@@ -664,6 +732,8 @@ impl ConversationsManager {
             attachment_refill_poke: RwLock::new(None),
             mail_read: Mutex::new(MailReadSync::default()),
             mail_read_poke: RwLock::new(None),
+            contact_roster: RwLock::new(None),
+            contact_roster_poke: RwLock::new(None),
             resolved_previews: RwLock::new(HashMap::new()),
             link_preview_rpc: RwLock::new(None),
             local_detections: RwLock::new(None),
@@ -674,6 +744,7 @@ impl ConversationsManager {
             contact_overlays: RwLock::new(ContactOverlaySlot::default()),
             page_error: RwLock::new(None),
             engine_served_elsewhere: RwLock::new(false),
+            engine_state_needs_newer_app: RwLock::new(false),
             receive_loop_generation: std::sync::atomic::AtomicU64::new(0),
             receive_stopped_generation: std::sync::atomic::AtomicU64::new(0),
             unopenable_mail: RwLock::new(std::collections::BTreeSet::new()),
@@ -742,6 +813,30 @@ impl ConversationsManager {
         *self.engine_served_elsewhere.read().unwrap()
     }
 
+    /// Record whether this account's MLS store needs a newer app
+    /// (`MlsError::SchemaIncompatible` at engine construction). Called by the
+    /// app's engine-construction site on every attempt — success clears it,
+    /// `SchemaIncompatible` sets it, any other failure leaves it cleared. A
+    /// no-op (no `notify`) when the value is unchanged.
+    pub fn set_engine_state_needs_newer_app(&self, needs: bool) {
+        {
+            let mut slot = self.engine_state_needs_newer_app.write().unwrap();
+            if *slot == needs {
+                return;
+            }
+            *slot = needs;
+        }
+        self.notify();
+    }
+
+    /// See [`Self::set_engine_state_needs_newer_app`]. Read by each app's
+    /// `error-message` projection at top precedence beside
+    /// [`Self::engine_served_elsewhere`] — a standing condition no gesture
+    /// clears.
+    pub fn engine_state_needs_newer_app(&self) -> bool {
+        *self.engine_state_needs_newer_app.read().unwrap()
+    }
+
     pub fn snapshot(&self) -> ConversationsSnapshot {
         let sort = *self.sort.read().unwrap();
         let search_query = self.search.read().unwrap().clone();
@@ -757,12 +852,21 @@ impl ConversationsManager {
             // Surface the persisted new-thread draft as the shown composer ONLY
             // while the composer is the active detail view; otherwise the draft
             // is kept (recoverable via `+`) but the selected thread shows.
+            // Both pickers carry their completion, derived here on every
+            // snapshot and never stored (`conversations.md` § Where logic
+            // lives → *Recipient suggestions*).
             new_thread_compose: if *self.new_thread_active.read().unwrap() {
-                self.drafts.new_thread()
+                self.drafts.new_thread().map(|mut c| {
+                    c.recipient_picker = c.recipient_picker.map(|p| self.with_suggestions(p, None));
+                    c
+                })
             } else {
                 None
             },
-            add_participant: self.add_participant.read().unwrap().clone(),
+            add_participant: self.add_participant.read().unwrap().clone().map(|mut s| {
+                s.picker = self.with_suggestions(s.picker, Some(&s.target_thread_id));
+                s
+            }),
             error: self.page_error.read().unwrap().clone(),
             launch_floor_ms: self.threads.launch_floor_ms(),
             bridges: self.bridge_identities(),
@@ -1721,6 +1825,8 @@ impl ConversationsManager {
         }
         *self.new_thread_active.write().unwrap() = true;
         self.notify();
+        // The picker completes over the contact roster: read it fresh.
+        self.poke_contact_roster();
     }
 
     pub fn cancel_new_conversation(&self) {
@@ -1872,6 +1978,7 @@ impl ConversationsManager {
             ),
         });
         self.notify();
+        self.poke_contact_roster();
     }
 
     /// Update the add-participant picker's raw input. No-op if the overlay
@@ -1950,6 +2057,62 @@ impl ConversationsManager {
             return true;
         }
         false
+    }
+
+    /// `recipient-picker-suggestion[i]` — accept the active picker's `index`th
+    /// suggestion. **The click is the Enter path, not a shortcut past it**
+    /// (`conversations.md` § Where logic lives → *Recipient suggestions*): the
+    /// suggestion's spelling ([`suggestion_spelling`]) is written into the
+    /// picker as typing would write it, the ordinary probe runs
+    /// ([`Self::resolve_recipient`]), and the chip commits through
+    /// [`Self::accept_current_recipient_chip`] — so a person whose key
+    /// packages ran out, or whose nest stopped answering, reads `not-found` /
+    /// `error` and commits nothing. Returns whether a chip was pushed; an
+    /// index past the list is a no-op `false`.
+    pub async fn accept_suggestion(&self, index: u32) -> bool {
+        let Some(picker) = self.active_picker() else {
+            return false;
+        };
+        let (suggestions, _) = self.suggestions_for_active(&picker);
+        let Some(addr) = suggestions.get(index as usize) else {
+            return false;
+        };
+        let spelling = suggestion_spelling(addr);
+        if self.add_participant.read().unwrap().is_some() {
+            self.set_add_participant_recipient_input(spelling);
+        } else {
+            self.set_new_thread_recipient_input(spelling);
+        }
+        self.resolve_recipient().await;
+        self.accept_current_recipient_chip()
+    }
+
+    /// `recipient-picker-chip[i]`'s × — drop the active picker's `index`th
+    /// chip (the add-participant overlay first, as
+    /// [`Self::accept_current_recipient_chip`]). An index past the chips is a
+    /// no-op.
+    pub fn remove_recipient_chip(&self, index: u32) {
+        let i = index as usize;
+        {
+            let mut guard = self.add_participant.write().unwrap();
+            if let Some(state) = guard.as_mut() {
+                if i < state.picker.chips.len() {
+                    state.picker.chips.remove(i);
+                    drop(guard);
+                    self.notify();
+                }
+                return;
+            }
+        }
+        if let Some(mut compose) = self.drafts.new_thread()
+            && let Some(mut picker) = compose.recipient_picker.take()
+            && i < picker.chips.len()
+        {
+            picker.chips.remove(i);
+            compose.recipient_picker = Some(picker);
+            self.drafts.set_new_thread(Some(compose));
+            self.notify();
+        }
     }
 
     // ── Membership / rename ──────────────────────────────────────
@@ -2516,25 +2679,39 @@ impl ConversationsManager {
             .iter()
             .zip(detail.participant_displays.iter_mut())
         {
-            let Some(actor) = participant.person_actor_id() else {
-                continue;
-            };
-            if !proven
-                .as_ref()
-                .is_some_and(|roster| roster.contains(&actor))
+            if let Some(painted) =
+                self.gated_nickname_label(proven.as_deref(), participant, display)
             {
-                continue;
+                *display = painted;
             }
-            let hex = actor.to_hex();
-            let nickname = self.contacts.nickname(&hex);
-            *display = fauna_core::format::peer_display_label(
+        }
+    }
+
+    /// One member chip's name under the paint gate
+    /// ([`Self::project_participant_nicknames`]): `Some` with the nicknamed
+    /// label when `participant` is a verified leaf in `proven`, else `None`
+    /// (the stored `display` stands).
+    fn gated_nickname_label(
+        &self,
+        proven: Option<&[ActorId]>,
+        participant: &TypedAddress,
+        display: &str,
+    ) -> Option<String> {
+        let actor = participant.person_actor_id()?;
+        if !proven.is_some_and(|roster| roster.contains(&actor)) {
+            return None;
+        }
+        let hex = actor.to_hex();
+        let nickname = self.contacts.nickname(&hex);
+        Some(
+            fauna_core::format::peer_display_label(
                 nickname.as_deref(),
-                Some(display.as_str()),
+                Some(display),
                 participant.person_handle(),
                 &hex,
             )
-            .primary;
-        }
+            .primary,
+        )
     }
 
     /// Register the **read-position** seam
@@ -3605,6 +3782,65 @@ impl ConversationsManager {
             .await;
         if notified {
             self.notify();
+        }
+    }
+
+    /// Re-derive [`ComposeState::list_send`] for a compose — the thread `id`'s,
+    /// or the new-thread compose's when `None` — from the nest's current
+    /// figures (`mail-mass-mailing.md` § Composing a list message): set when
+    /// its one mail recipient is one of the account's own lists, cleared
+    /// otherwise. Apps call it when a recipient chip commits and when a thread
+    /// opens; [`Self::send`] calls it after every send. The rail answers
+    /// ([`RailBackend::list_send_view`]); only SMTP has lists.
+    pub async fn refresh_list_send(&self, id: Option<ThreadId>) {
+        let (rail, recipients) = match &id {
+            Some(id) => {
+                let Some(detail) = self.thread_detail(id.clone()) else {
+                    return;
+                };
+                let compose = self.drafts.get(id);
+                let recipients = if compose.reply_recipients.is_empty() {
+                    detail.participants
+                } else {
+                    compose.reply_recipients
+                };
+                (Some(detail.rail), recipients)
+            }
+            None => {
+                let Some(compose) = self.drafts.new_thread() else {
+                    return;
+                };
+                let chips = compose
+                    .recipient_picker
+                    .map(|p| p.chips)
+                    .unwrap_or_default();
+                (chips.first().and_then(TypedAddress::rail), chips)
+            }
+        };
+        let backend = rail.and_then(|rail| self.backends.read().unwrap().get(&rail).cloned());
+        let view = match backend {
+            Some(backend) => backend.list_send_view(&recipients).await,
+            None => None,
+        };
+        // Re-read after the await, so an edit made meanwhile is kept.
+        match id {
+            Some(id) => {
+                let mut compose = self.drafts.get(&id);
+                if compose.list_send != view {
+                    compose.list_send = view;
+                    self.drafts.set(id, compose);
+                    self.notify();
+                }
+            }
+            None => {
+                if let Some(mut compose) = self.drafts.new_thread()
+                    && compose.list_send != view
+                {
+                    compose.list_send = view;
+                    self.drafts.set_new_thread(Some(compose));
+                    self.notify();
+                }
+            }
         }
     }
 
@@ -5292,6 +5528,114 @@ impl ConversationsManager {
         }
     }
 
+    /// The picker a user gesture speaks for — the add-participant overlay's if
+    /// open, else the new-thread compose's.
+    fn active_picker(&self) -> Option<RecipientPickerState> {
+        if let Some(state) = self.add_participant.read().unwrap().as_ref() {
+            return Some(state.picker.clone());
+        }
+        self.drafts.new_thread().and_then(|c| c.recipient_picker)
+    }
+
+    /// The suggestions `picker` shows, given whether the add-participant
+    /// overlay is the one open (its target's members are excluded).
+    fn suggestions_for_active(
+        &self,
+        picker: &RecipientPickerState,
+    ) -> (Vec<TypedAddress>, Vec<String>) {
+        let target = self
+            .add_participant
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.target_thread_id.clone());
+        self.recipient_suggestions(picker, target.as_ref())
+    }
+
+    /// Derive `picker`'s completion (`conversations.md` § Where logic lives →
+    /// *Recipient suggestions*): the roster's accepted and confirmed contacts,
+    /// then every thread's participants newest thread first, matched by
+    /// [`ContactsCache`]'s roster filter (handle, domain, actor id, nickname,
+    /// labels) and the address spelling; deduplicated by
+    /// [`TypedAddress::same_participant`]; excluding the account's own
+    /// addresses, the picker's chips, `members_of`'s current members, blocked
+    /// contacts and addresses with no rail; capped at
+    /// [`RECIPIENT_SUGGESTION_CAP`]. Empty input suggests nothing.
+    fn recipient_suggestions(
+        &self,
+        picker: &RecipientPickerState,
+        members_of: Option<&ThreadId>,
+    ) -> (Vec<TypedAddress>, Vec<String>) {
+        let query = picker.raw_input.trim();
+        if query.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let mut excluded: Vec<TypedAddress> = self
+            .backends
+            .read()
+            .unwrap()
+            .values()
+            .filter_map(|b| b.self_address())
+            .collect();
+        excluded.extend(picker.chips.iter().cloned());
+        if let Some(id) = members_of
+            && let Some(detail) = self.threads.get(id)
+        {
+            excluded.extend(detail.participants);
+        }
+        let contacts = self.contacts.people_matching(query);
+        let mut correspondents = Vec::new();
+        for (thread_id, participants, displays) in self.threads.correspondents() {
+            let proven = self.proven_roster(&thread_id);
+            for (participant, display) in participants.iter().zip(displays.iter()) {
+                if !self.correspondent_matches(query, participant, display) {
+                    continue;
+                }
+                let painted = self
+                    .gated_nickname_label(proven.as_deref(), participant, display)
+                    .unwrap_or_else(|| display.clone());
+                correspondents.push((participant.clone(), painted));
+            }
+        }
+        let blocked = |a: &TypedAddress| {
+            a.person_actor_id()
+                .is_some_and(|id| self.contacts.is_blocked(&id.to_hex()))
+        };
+        rank_recipient_suggestions(contacts, correspondents, &excluded, blocked)
+    }
+
+    /// Whether `query` completes to the correspondent `participant` — the
+    /// roster filter over a Fauna person's handle, actor id, nickname and
+    /// labels, and the address spelling and stored display on every rail.
+    fn correspondent_matches(
+        &self,
+        query: &str,
+        participant: &TypedAddress,
+        display: &str,
+    ) -> bool {
+        let q = query.to_lowercase();
+        if participant.display().to_lowercase().contains(&q) || display.to_lowercase().contains(&q)
+        {
+            return true;
+        }
+        participant.person_actor_id().is_some_and(|id| {
+            self.contacts
+                .matches_filter(query, participant.person_handle(), None, &id.to_hex())
+        })
+    }
+
+    /// A picker as the snapshot shows it: its derived suggestions filled in.
+    fn with_suggestions(
+        &self,
+        mut picker: RecipientPickerState,
+        members_of: Option<&ThreadId>,
+    ) -> RecipientPickerState {
+        let (suggestions, displays) = self.recipient_suggestions(&picker, members_of);
+        picker.suggestions = suggestions;
+        picker.suggestion_displays = displays;
+        picker
+    }
+
     fn picker_raw_input(&self, target: PickerTarget) -> Option<String> {
         if target == PickerTarget::Active
             && let Some(state) = self.add_participant.read().unwrap().as_ref()
@@ -5374,64 +5718,7 @@ impl ConversationsManager {
         ResolveResult::NotFound
     }
 
-    /// Re-derive [`ComposeState::list_send`] for a compose — the thread `id`'s,
-    /// or the new-thread compose's when `None` — from the nest's current
-    /// figures (`mail-mass-mailing.md` § Composing a list message): set when
-    /// its one mail recipient is one of the account's own lists, cleared
-    /// otherwise. Apps call it when a recipient chip commits and when a thread
-    /// opens; [`Self::send`] calls it after every send. The rail answers
-    /// ([`RailBackend::list_send_view`]); only SMTP has lists.
-    pub async fn refresh_list_send(&self, id: Option<ThreadId>) {
-        let (rail, recipients) = match &id {
-            Some(id) => {
-                let Some(detail) = self.thread_detail(id.clone()) else {
-                    return;
-                };
-                let compose = self.drafts.get(id);
-                let recipients = if compose.reply_recipients.is_empty() {
-                    detail.participants
-                } else {
-                    compose.reply_recipients
-                };
-                (Some(detail.rail), recipients)
-            }
-            None => {
-                let Some(compose) = self.drafts.new_thread() else {
-                    return;
-                };
-                let chips = compose
-                    .recipient_picker
-                    .map(|p| p.chips)
-                    .unwrap_or_default();
-                (chips.first().and_then(TypedAddress::rail), chips)
-            }
-        };
-        let backend = rail.and_then(|rail| self.backends.read().unwrap().get(&rail).cloned());
-        let view = match backend {
-            Some(backend) => backend.list_send_view(&recipients).await,
-            None => None,
-        };
-        // Re-read after the await, so an edit made meanwhile is kept.
-        match id {
-            Some(id) => {
-                let mut compose = self.drafts.get(&id);
-                if compose.list_send != view {
-                    compose.list_send = view;
-                    self.drafts.set(id, compose);
-                    self.notify();
-                }
-            }
-            None => {
-                if let Some(mut compose) = self.drafts.new_thread()
-                    && compose.list_send != view
-                {
-                    compose.list_send = view;
-                    self.drafts.set_new_thread(Some(compose));
-                    self.notify();
-                }
-            }
-        }
-    }
+    // `refresh_list_send` lives in the exported block above, next to `send`.
 
     fn set_send_state(&self, id: &ThreadId, state: SendState) {
         let mut s = self.drafts.get(id);
@@ -5708,7 +5995,6 @@ impl ConversationsManager {
     }
 }
 
-/// The Fauna actor id of a message's sender, or None for a non-Fauna sender.
 /// The picker state a raw-input write stamps before any probe has run: `Idle`
 /// for empty input, else `Resolving` — the probe is owed, and only
 /// `ConversationsManager::resolve_recipient` moves the state to a terminal
@@ -5722,6 +6008,53 @@ fn unprobed_resolve_state(text: &str) -> ResolveState {
     }
 }
 
+/// The text [`ConversationsManager::accept_suggestion`] writes into the picker
+/// for `addr` — what the user would have typed to reach that person: a Fauna
+/// person's handle when the address carries one, else their actor id (the
+/// probe's other accepted form); the address spelling on every other rail.
+fn suggestion_spelling(addr: &TypedAddress) -> String {
+    match addr {
+        TypedAddress::Fauna { actor_id, .. } => addr
+            .person_handle()
+            .map(str::to_string)
+            .unwrap_or_else(|| actor_id.to_hex()),
+        other => other.display(),
+    }
+}
+
+/// Rank and trim the picker's completion (`conversations.md` § Where logic
+/// lives → *Recipient suggestions*): `contacts` (already ordered confirmed
+/// before accepted) ahead of `correspondents` (already newest thread first),
+/// the first of each person kept ([`TypedAddress::same_participant`]), every
+/// address in `excluded`, every `blocked` one and every rail-less one dropped,
+/// at most [`RECIPIENT_SUGGESTION_CAP`] rows. Returns the addresses and their
+/// index-parallel labels.
+fn rank_recipient_suggestions(
+    contacts: Vec<(TypedAddress, String)>,
+    correspondents: Vec<(TypedAddress, String)>,
+    excluded: &[TypedAddress],
+    blocked: impl Fn(&TypedAddress) -> bool,
+) -> (Vec<TypedAddress>, Vec<String>) {
+    let mut addrs: Vec<TypedAddress> = Vec::new();
+    let mut labels = Vec::new();
+    for (addr, label) in contacts.into_iter().chain(correspondents) {
+        if addrs.len() >= RECIPIENT_SUGGESTION_CAP {
+            break;
+        }
+        if addr.rail().is_none()
+            || blocked(&addr)
+            || excluded.iter().any(|e| e.same_participant(&addr))
+            || addrs.iter().any(|a| a.same_participant(&addr))
+        {
+            continue;
+        }
+        addrs.push(addr);
+        labels.push(label);
+    }
+    (addrs, labels)
+}
+
+/// The Fauna actor id of a message's sender, or None for a non-Fauna sender.
 fn sender_actor(m: &MessageSnapshot) -> Option<ActorId> {
     match &m.sender {
         TypedAddress::Fauna { actor_id, .. } => Some(*actor_id),

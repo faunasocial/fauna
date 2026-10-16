@@ -1,6 +1,7 @@
 import type { SharedRpcPort } from '../../static/fauna_wasm_media.js';
 import { base } from '$app/paths';
 import { sharedAccountPort } from './account-runtime';
+import { conversationsManagerIfReady } from './conversations';
 import type { MediaMachine } from '../../static/fauna_wasm_media.js';
 import type { LocalizedText } from '$lib/i18n/localized';
 
@@ -96,6 +97,17 @@ export async function createMediaMachine(
   // unrepresentable here. The BackupKey is derived inside wasm; the raw key
   // never enters JS.
   machine.setOwnerBackupKey(secretHex);
+  // B3 join-filter (folders.md § Sharing, Member list-visibility): the same
+  // seam the Devices page wires. Unwired, every shared set's row is dropped
+  // (fail-safe) and a shared set is offered only as an item-only option by
+  // name — never the row-addressed `local:<id>` option. The MLS engine lives
+  // in the OTHER wasm bundle, so the callback bridges to it; while that bundle
+  // is still loading it answers false (hide, never surface unbidden) and the
+  // page's 15 s refresh re-asks.
+  machine.setMlsQuery({
+    isJoinedSharedSet: (groupIdHex: string) =>
+      conversationsManagerIfReady()?.foldersIsJoined(groupIdHex) ?? false,
+  });
   // READ-side custody for a successor, and deliberately a SECOND call rather
   // than a second key on the line above: that one is the delete/restore seal
   // root, and a retired key must never reach a seal. Without this a media

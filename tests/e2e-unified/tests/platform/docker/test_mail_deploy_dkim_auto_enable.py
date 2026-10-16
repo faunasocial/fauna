@@ -1,9 +1,11 @@
 """tier_4 e2e: the nest holds the DKIM key and signs outbound mail, with no admin step.
 
-DKIM signing is provisioned **automatically nest-side**: the nest mints an Ed25519
-key for a mail domain when the domain is added (and at boot for one found without a
-key), keeps the private half sealed under its own key-encryption key, and signs each
-outbound message as it hands the message to the MTA — *no admin clicks, no client*
+DKIM signing is provisioned **automatically nest-side**: the nest mints an RSA-2048 +
+Ed25519 key pair for a mail domain when the domain is added (and at boot for one found
+without them), keeps the private halves sealed under its own key-encryption key, and
+signs each outbound message twice — ``s=default-rsa`` then ``s=default-ed25519``
+(``mail-multidomain.md`` § Per-domain DKIM → *Key shape*) — as it hands the message
+to the MTA — *no admin clicks, no client*
 (``mail-bridge-lifecycle.md`` § DKIM provisioning (automatic) →
 *Custody moves to the nest*; ``bins/fauna-nest/src/mail_dkim_key.rs``). This is the
 in-CI proof of that mechanism in the real deploy image: where the sibling
@@ -12,24 +14,24 @@ signed and aligned, this one reads the published record and verifies against it.
 
 **Two distinct bars share the one (module-scoped) image build:**
   - ``test_nest_auto_provisions_dkim_signed_outbound`` — the nest mints + signs,
-    and the relayed message bears a ``d=``-aligned ``DKIM-Signature``
+    and the relayed message bears two ``d=``-aligned ``DKIM-Signature`` headers
     (header **presence** + DMARC alignment).
-  - ``test_nest_dkim_signature_verifies_against_published_record`` — the relayed
+  - ``test_nest_dkim_signature_verifies_against_published_record`` — each relayed
     signature **cryptographically verifies** against the nest's stored
-    ``public_dns_value`` (the ``b=`` ed25519 check), catching a
+    ``public_dns_value`` for its selector (the RSA and Ed25519 ``b=`` checks), catching a
     publish-vs-key divergence that header-presence cannot. The deployment-level
-    analogue of the example.com 2026-06-21 ``dkim=fail`` live miss
+    analogue of the live nest's 2026-06-21 ``dkim=fail`` live miss
     (tracked internally (C); memory ``dkim-publish-goes-stale-silently``).
 
 What ``test_nest_auto_provisions_dkim_signed_outbound`` asserts:
   1. Bring the deploy image's bridges to *serving*
      (``bring_bridges_to_serving``; the domain's key was minted when the domain
      was registered — no bridge takes part in it).
-  2. **The nest holds the domain's DKIM key** — ``list_dkim_selectors``
-     shows the primary domain's ``default`` selector carrying a real RFC-6376
-     ``v=DKIM1; k=ed25519`` public TXT value.
+  2. **The nest holds the domain's DKIM keys** — ``list_dkim_selectors``
+     shows the primary domain's ``default-rsa`` and ``default-ed25519`` selectors
+     carrying real RFC-6376 ``v=DKIM1; k=rsa`` / ``k=ed25519`` public TXT values.
   3. **Submit + relay, signed:** an authenticated submission on 465 relays to a stub
-     external MX bearing a ``DKIM-Signature`` whose ``d=`` aligns with the From:
+     external MX bearing two ``DKIM-Signature`` headers whose ``d=`` aligns with the From:
      domain — the Gmail ``dkim=pass`` + DMARC-alignment proxy, reached with no manual
      DKIM step at all.
 
@@ -46,12 +48,16 @@ import ssl
 import tempfile
 import time
 
-import dkim
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from helpers.mail_wire import dkim_signature_tag
+from helpers.mail_wire import (
+    dkim_selector_pair,
+    dkim_signature_tags,
+    verify_each_dkim_signature,
+)
 
 from .helpers import (
     IMAGE_TAG,
@@ -101,32 +107,19 @@ def _dkim_selectors(nest, domain: str) -> list[dict]:
         return admin.call("fauna.bridges.list_dkim_selectors", {"domain": domain})["selectors"]
 
 
-def _dnsfunc_returning(selector: str, domain: str, public_dns_value: str):
-    """A dkimpy ``dnsfunc`` that answers ``<selector>._domainkey.<domain>`` with
-    ``public_dns_value`` and NXDOMAINs everything else — i.e. it stands in for the
-    admin having published *exactly* the nest's stored TXT on the admin-dns page.
-    dkimpy passes the query name as **bytes** with a trailing dot, so match on bytes."""
-    want = f"{selector}._domainkey.{domain}.".encode()
-
-    def _resolve(name, timeout=5):
-        key = name if isinstance(name, bytes) else name.encode()
-        return public_dns_value.encode() if key == want else b""
-
-    return _resolve
-
-
-def _dkim_verifies(received: bytes, public_dns_value: str) -> bool:
-    """Cryptographically verify the received message's first ``DKIM-Signature``
-    against ``public_dns_value`` as if it were the published TXT — the ``b=``
-    ed25519 check that example.com failed live 2026-06-21. The selector + domain are
-    read from the signature itself (``s=`` / ``d=``), so the published name matches
-    what the signer actually claimed."""
-    selector = dkim_signature_tag(received, "s")
-    domain = dkim_signature_tag(received, "d")
-    assert selector and domain, (
-        f"received message has no parseable DKIM-Signature s=/d=: s={selector!r} d={domain!r}")
-    return dkim.verify(
-        received, dnsfunc=_dnsfunc_returning(selector, domain, public_dns_value))
+def _bogus_records() -> dict[str, str]:
+    """Unrelated RSA-2048 and Ed25519 public records under the two ``default``
+    selectors — the negative control's stand-in for a stale publish."""
+    rsa_pub = rsa.generate_private_key(public_exponent=65537, key_size=2048).public_key()
+    ed_pub = Ed25519PrivateKey.generate().public_key()
+    rsa_p = base64.b64encode(
+        rsa_pub.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)).decode()
+    ed_p = base64.b64encode(ed_pub.public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()
+    rsa_selector, ed_selector = dkim_selector_pair("default")
+    return {
+        rsa_selector: f"v=DKIM1; k=rsa; p={rsa_p}",
+        ed_selector: f"v=DKIM1; k=ed25519; p={ed_p}",
+    }
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────
@@ -201,10 +194,11 @@ def auto_dkim_nest(docker_image, stub_mx):
 
 def _bring_up_and_relay(nest, run_seal_helper, token: str):
     """The bring-up both DKIM tier_4 tests share: register the primary domain
-    (the nest mints its DKIM key) + a send-only submission identity, bring the
-    bridges to serving, read the nest-held ``default`` selector, submit an
-    authenticated 465 message tagged ``token``, and return
-    ``(received_raw, default_selector)``.
+    (the nest mints its DKIM keys) + a send-only submission identity, bring the
+    bridges to serving, read the nest-held ``default`` label's two records,
+    submit an authenticated 465 message tagged ``token``, and return
+    ``(received_raw, {selector: public_dns_value})`` — ``default-rsa`` then
+    ``default-ed25519``.
 
     DKIM uses **no** seal-helper (the nest holds the key); the seal-helper is
     only the submission-sender scaffolding (orthogonal — see the module docstring)."""
@@ -222,19 +216,20 @@ def _bring_up_and_relay(nest, run_seal_helper, token: str):
     )
     bring_bridges_to_serving(name, nest, mp, DOMAIN)
 
-    # ── 2. The NEST holds the `default` DKIM key — minted when the domain was
-    # registered, with no client and no admin call. Poll briefly rather than
-    # read once. ─────────────────────────────────────────────────────────────
+    # ── 2. The NEST holds the `default` label's two DKIM keys — minted when the
+    # domain was registered, with no client and no admin call. Poll briefly
+    # rather than read once. ─────────────────────────────────────────────────
+    want = dkim_selector_pair("default")
     deadline = time.monotonic() + 30.0
-    default_sel = None
-    while time.monotonic() < deadline and default_sel is None:
-        default_sel = next(
-            (s for s in _dkim_selectors(nest, DOMAIN) if s["selector"] == "default"), None)
-        if default_sel is None:
+    published: dict[str, str] = {}
+    while time.monotonic() < deadline and list(published) != want:
+        listed = {s["selector"]: s["public_dns_value"] for s in _dkim_selectors(nest, DOMAIN)}
+        published = {s: listed[s] for s in want if s in listed}
+        if list(published) != want:
             time.sleep(1.5)
-    assert default_sel is not None, (
-        "the nest holds NO `default` DKIM selector for the primary "
-        "domain after the MTA reached serving — the nest should hold a key for every "
+    assert list(published) == want, (
+        f"the nest holds NOT both of {want!r} for the primary domain after the MTA "
+        "reached serving — the nest should hold an RSA + Ed25519 key pair for every "
         "active mail domain (minted when the domain is added, or at boot). "
         f"selectors={_dkim_selectors(nest, DOMAIN)}\n"
         f"── bridge diagnostics ──\n{bridge_diag(name)}"
@@ -270,7 +265,7 @@ def _bring_up_and_relay(nest, run_seal_helper, token: str):
         f"stub external MX received no message tagged {token} within 30s — outbound "
         f"delivery did not complete.\n\n── bridge diagnostics ──\n{bridge_diag(name)}"
     )
-    return received, default_sel
+    return received, published
 
 
 # ── Tests ─────────────────────────────────────────────────────────────
@@ -280,65 +275,69 @@ def _bring_up_and_relay(nest, run_seal_helper, token: str):
 def test_nest_auto_provisions_dkim_signed_outbound(auto_dkim_nest, run_seal_helper):
     nest = auto_dkim_nest
     token = f"dkauto-{int(time.time() * 1000)}"
-    received, default_sel = _bring_up_and_relay(nest, run_seal_helper, token)
+    received, published = _bring_up_and_relay(nest, run_seal_helper, token)
 
-    # The auto-provisioned selector carries a real RFC-6376 ed25519 public TXT value.
-    assert default_sel["public_dns_value"].startswith("v=DKIM1; k=ed25519; p="), (
-        "the auto-provisioned selector must carry a real RFC-6376 ed25519 public TXT "
-        f"value (for the admin to publish on admin-dns); got {default_sel!r}"
-    )
+    # The auto-provisioned selectors carry real RFC-6376 public TXT values, one
+    # per algorithm.
+    for selector, k in zip(dkim_selector_pair("default"), ("rsa", "ed25519")):
+        assert published[selector].startswith(f"v=DKIM1; k={k}; p="), (
+            f"the auto-provisioned {selector!r} selector must carry a real RFC-6376 "
+            f"{k} public TXT value (for the admin to publish on admin-dns); "
+            f"got {published!r}"
+        )
 
-    # The relayed message must bear a DKIM-Signature with d= aligned — the whole point:
-    # the NEST holds a *working* signing key and signs with it.
-    assert b"dkim-signature:" in received.lower(), (
-        "the relayed message has no DKIM-Signature header — the nest-auto-provisioned "
-        f"key did not sign outbound mail. First 600 bytes:\n{received[:600]!r}"
+    # The relayed message must bear two DKIM-Signatures, RSA first, with d=
+    # aligned — the whole point: the NEST holds *working* signing keys and signs
+    # with both.
+    s_tags = dkim_signature_tags(received, "s")
+    assert s_tags == dkim_selector_pair("default"), (
+        "the relayed message does not carry the two DKIM-Signatures (s=default-rsa, "
+        f"then s=default-ed25519); got s={s_tags!r}. First 900 bytes:\n{received[:900]!r}"
     )
-    d_tag = dkim_signature_tag(received, "d")
-    assert d_tag == DOMAIN, (
-        f"DKIM-Signature d= must align with the From: domain {DOMAIN!r} (Gmail "
-        f"dkim=pass + DMARC-aligned proxy); got d={d_tag!r}"
+    d_tags = dkim_signature_tags(received, "d")
+    assert d_tags == [DOMAIN, DOMAIN], (
+        f"every DKIM-Signature d= must align with the From: domain {DOMAIN!r} (Gmail "
+        f"dkim=pass + DMARC-aligned proxy); got d={d_tags!r}"
     )
 
 
 @pytest.mark.feature("mail-server")
 def test_nest_dkim_signature_verifies_against_published_record(auto_dkim_nest, run_seal_helper):
-    """(C) The relayed signature **cryptographically verifies** against the nest's
-    stored ``public_dns_value`` — the ``b=`` ed25519 check, end-to-end, on the real
-    deploy image. This is the bar header-presence (``..._signed_outbound``) cannot
+    """(C) BOTH relayed signatures **cryptographically verify**, each against the
+    nest's stored ``public_dns_value`` for its selector — the ``b=`` check of the
+    RSA signature (the one Gmail reads) and of the Ed25519 one, end-to-end, on the
+    real deploy image. This is the bar header-presence (``..._signed_outbound``) cannot
     reach: it catches a **publish-vs-key divergence** where the key the nest
     signs with does not correspond to the public the nest reports for
     publication. The matched-pair unit round-trip
     (``libs/fauna-mail/tests/dkim_tests.rs``) cannot catch this (it signs + verifies
     with one keypair by construction); only the real mint→store→sign→stored-public
-    path on the deploy image can. Deployment-level analogue of the example.com
+    path on the deploy image can. Deployment-level analogue of the live nest's
     2026-06-21 ``dkim=fail`` live miss (tracked internally (C))."""
     nest = auto_dkim_nest
     token = f"dkverify-{int(time.time() * 1000)}"
-    received, default_sel = _bring_up_and_relay(nest, run_seal_helper, token)
-    published = default_sel["public_dns_value"]
+    received, published = _bring_up_and_relay(nest, run_seal_helper, token)
 
-    # POSITIVE: the actual relayed signature verifies against the value the nest
-    # reports for publication (`list_dkim_selectors` reads the same `mail_dkim_keys`
-    # row the nest signs with — so a green here proves the sealed private half and the
-    # stored public half are a matched pair, on the real image).
-    assert _dkim_verifies(received, published), (
-        "the relayed DKIM-Signature did NOT cryptographically verify against the nest's "
-        f"stored public_dns_value {published!r} — the key the nest signs with "
-        "does not match the public the nest reports for publication (the publish-vs-key "
-        "divergence; the deployment-level example.com 2026-06-21 dkim=fail "
-        f"class). Received head:\n{received[:600]!r}\n"
+    # POSITIVE: each relayed signature verifies against the value the nest reports
+    # for publication under its selector (`list_dkim_selectors` reads the same
+    # `mail_dkim_keys` rows the nest signs with — so a green here proves each sealed
+    # private half and its stored public half are a matched pair, on the real image).
+    verified, queries = verify_each_dkim_signature(received, DOMAIN, published)
+    assert verified == list(published), (
+        f"only {verified!r} of the relayed DKIM-Signatures cryptographically verified "
+        f"against the nest's stored public_dns_values {published!r} — a key the nest "
+        "signs with does not match the public the nest reports for publication (the "
+        "publish-vs-key divergence; the deployment-level live-nest 2026-06-21 dkim=fail "
+        f"class). dnsfunc queries: {queries!r}. Received head:\n{received[:900]!r}\n"
         f"── bridge diagnostics ──\n{bridge_diag(nest['name'])}"
     )
 
-    # NEGATIVE control: the same message must FAIL against an unrelated published key,
-    # proving the verify actually checks `b=` (guards against a vacuous always-True
-    # green that would let a real divergence slip through).
-    bogus_pub = Ed25519PrivateKey.generate().public_key().public_bytes(
-        Encoding.Raw, PublicFormat.Raw)
-    bogus_value = f"v=DKIM1; k=ed25519; p={base64.b64encode(bogus_pub).decode()}"
-    assert not _dkim_verifies(received, bogus_value), (
-        "DKIM verify returned True against an UNRELATED published key — the verification "
-        "is vacuous (not actually checking the b= signature), so a real publish-vs-key "
-        "divergence would slip through this gate."
+    # NEGATIVE control: the same message must FAIL against unrelated published keys,
+    # proving the verify actually checks each `b=` (guards against a vacuous
+    # always-True green that would let a real divergence slip through).
+    verified, _ = verify_each_dkim_signature(received, DOMAIN, _bogus_records())
+    assert verified == [], (
+        f"DKIM verify passed {verified!r} against UNRELATED published keys — the "
+        "verification is vacuous (not actually checking the b= signature), so a real "
+        "publish-vs-key divergence would slip through this gate."
     )

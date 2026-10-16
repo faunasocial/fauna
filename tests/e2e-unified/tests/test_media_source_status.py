@@ -116,7 +116,7 @@ def _await_wire_verdicts(nest_instance, secret_key: str, folder: str, want: tupl
 @pytest.mark.tui
 @pytest.mark.macos
 @pytest.mark.ios
-@pytest.mark.timeout(int(SEAT_READY_BUDGET_S + RECORD_BUDGET_S + 4 * ITEM_BUDGET_S + 180))
+@pytest.mark.timeout(int(SEAT_READY_BUDGET_S + RECORD_BUDGET_S + 6 * ITEM_BUDGET_S + 180))
 @pytest.mark.feature("media")
 def test_media_item_says_whether_its_folder_can_be_reached_apart_from_its_sync_state(
     request, app, nest_instance
@@ -131,6 +131,10 @@ def test_media_item_says_whether_its_folder_can_be_reached_apart_from_its_sync_s
     is the assertion: a dot that always read one value (the easy wrong
     implementation) fails one half or the other, and a dot that followed the
     file's sync state instead of the folder's reachability fails on the badge.
+
+    While the holder runs, the file also OPENS: the Media download fetches it
+    by relay from the holder's seat (``file-sync.md`` § Relay serving, step
+    (4)), since neither this app nor the nest holds its bytes.
     """
     from tests.test_filesync_seats import harness_sign_in
 
@@ -173,9 +177,8 @@ def test_media_item_says_whether_its_folder_can_be_reached_apart_from_its_sync_s
         )
         with seat:
             seat.await_ready(SEAT_READY_BUDGET_S)
-            (seat.path / name).write_text(
-                f"a file whose folder can be reached {secrets.token_hex(8)}\n"
-            )
+            content = f"a file whose folder can be reached {secrets.token_hex(8)}\n"
+            (seat.path / name).write_text(content)
             listed = _await_listed(nest_instance, secret_key, folder, RECORD_BUDGET_S)
             assert len(listed) == 1, (
                 f"the holder's engine should have recorded {name!r} into {folder!r}; "
@@ -209,6 +212,26 @@ def test_media_item_says_whether_its_folder_can_be_reached_apart_from_its_sync_s
             badge_while_reachable = app.driver.get_text(
                 "sync-state-badge", scope=f"media-item[{media.index_of(name)}]"
             )
+
+            # The file opens by relay: the app under test holds no copy and the
+            # nest rests none, so the bytes come from the holder's seat.
+            media.open_item_detail(media.index_of(name))
+            versions = media.wait_for_version_count(1, timeout=ITEM_BUDGET_S)
+            assert versions == 1, (
+                f"{name!r} should show its one recorded version; shows {versions}; "
+                f"error={app.error_text()!r}\n{seat.diagnostics()}"
+            )
+            try:
+                opened = media.download_open_item(timeout=ITEM_BUDGET_S)
+            except Exception as e:
+                raise AssertionError(
+                    f"opening {name!r} while its holder runs should fetch it by relay; "
+                    f"{e}; error={app.error_text()!r}\n{seat.diagnostics()}"
+                ) from e
+            assert opened == content.encode(), (
+                f"the opened file should be the holder's bytes; got {opened[:80]!r}"
+            )
+            media.close_detail()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

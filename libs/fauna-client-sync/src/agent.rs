@@ -1058,7 +1058,7 @@ where
     /// file materialized, `on-demand` serves placeholders that hydrate on access.
     /// The agent owns what a mode change means per platform — on windows it
     /// decides whether the cfapi placeholder host serves that root
-    /// (`file-sync.md` § On-Demand Files); linux's FUSE root is future work and
+    /// (`on-demand-files.md` § On-Demand Files); linux's FUSE root is future work and
     /// macOS/iOS keep on-demand in the File Provider extension, so this is only
     /// ever *sent* by a surface that offers the toggle.
     ///
@@ -1124,6 +1124,37 @@ where
             .agent_request(RequestMethod::ReconcileAccountRuntime)
             .await?;
         Ok(())
+    }
+
+    /// Ask the agent to walk the fleet scope of the account store it has
+    /// mounted, now, and answer whether the walk landed
+    /// (`RequestMethod::WalkFleetNow`) — the holder's arm of this app
+    /// runtime's awaited walk when the agent holds the engine role
+    /// (`docs/goal/architecture/account-runtime.md` § Multi-instance
+    /// concurrency → *A non-holder's awaited fleet walk reaches the holder*).
+    /// Waits [`fauna_ipc::sync::WALK_FLEET_NOW_REQUEST_TIMEOUT`], past the
+    /// agent's own bound, so the reply read is the agent's verdict.
+    ///
+    /// Plain (not ensuring), deliberately: the caller holds a refresh on it,
+    /// and an absent agent holds no role to walk with — the caller's own
+    /// backstop (the next connect) stands.
+    pub async fn walk_fleet_now(
+        &self,
+    ) -> Result<fauna_ipc::sync::FleetWalkOutcome, AgentControlError> {
+        let payload = self
+            .inner
+            .agent_exchange(
+                RequestMethod::WalkFleetNow,
+                None,
+                fauna_ipc::sync::WALK_FLEET_NOW_REQUEST_TIMEOUT,
+            )
+            .await?;
+        match payload {
+            fauna_ipc::sync::ResponsePayload::FleetWalked(outcome) => Ok(outcome),
+            other => Err(AgentControlError::new(format!(
+                "WalkFleetNow expected a FleetWalked, got {other:?}"
+            ))),
+        }
     }
 
     /// What this device's sealed **custodian store** occupies on disk
@@ -1223,6 +1254,38 @@ where
             ))
             .await?;
         reseed_job_from(payload, "ReseedCustodianStore")
+    }
+
+    /// Start the recovery from this device's custodian store
+    /// (`RequestMethod::RecoverCustodianStore`): the confirmed
+    /// `backup-audit-recover-button` action on this device's own client-device
+    /// row. Returns the job's state at once, `Running` in the ordinary case;
+    /// [`Self::custodian_recover`] reads how it ends.
+    ///
+    /// `nest_backup_key` is the owner's seed-derived `NestBackupKey`, handed
+    /// over for this one job (`owner-key-material.md` § Path A-sibling-0).
+    pub async fn recover_custodian_store(
+        &self,
+        nest_backup_key: [u8; 32],
+    ) -> Result<crate::recover_wire::RecoverJob, AgentControlError> {
+        let payload = self
+            .inner
+            .agent_request_ensuring_agent(RequestMethod::RecoverCustodianStore(
+                fauna_ipc::sync::CustodianRecoverRequest::new(nest_backup_key),
+            ))
+            .await?;
+        recover_job_from(payload, "RecoverCustodianStore")
+    }
+
+    /// Read the recovery job's state (`RequestMethod::GetCustodianRecover`).
+    pub async fn custodian_recover(
+        &self,
+    ) -> Result<crate::recover_wire::RecoverJob, AgentControlError> {
+        let payload = self
+            .inner
+            .agent_request_ensuring_agent(RequestMethod::GetCustodianRecover)
+            .await?;
+        recover_job_from(payload, "GetCustodianRecover")
     }
 
     /// The covered-folder display names this device's custodian store learned
@@ -1459,7 +1522,7 @@ where
     /// sign-out where the agent will find it on its own —
     /// [`fauna_ipc::sync::SignedOutMarker`] — *before* sending a message that
     /// may never arrive. That marker, not the message, is what makes
-    /// `on-demand-files.md` § Multi-account × File Provider consequence 1 true
+    /// `on-demand-files-apple.md` § Multi-account × File Provider consequence 1 true
     /// when delivery fails.
     pub async fn unprovision(&self) -> Result<(), AgentControlError> {
         // Stop the convergence loop first, so it cannot re-provision after
@@ -1480,7 +1543,7 @@ where
         //
         // **But it is logged either way**, because "asked and it landed" and
         // "asked and the message was lost" are the two halves of
-        // `on-demand-files.md` § Multi-account × File Provider consequence 1 —
+        // `on-demand-files-apple.md` § Multi-account × File Provider consequence 1 —
         // *is asked to unprovision, and made to reconcile if the asking fails* —
         // and swallowing the result made them indistinguishable from every
         // vantage point at once. The agent logs only on ARRIVAL, so a lost push
@@ -1569,6 +1632,7 @@ pub fn own_custodian_store(
                 held: r.held,
                 served: r.served,
                 observed_at: r.observed_at,
+                floored_at: r.floored_at,
             })
             .collect(),
     }
@@ -1586,6 +1650,20 @@ fn reseed_job_from(
         }
         other => Err(AgentControlError::new(format!(
             "{verb} expected a CustodianReseed, got {other:?}"
+        ))),
+    }
+}
+
+fn recover_job_from(
+    payload: fauna_ipc::sync::ResponsePayload,
+    verb: &str,
+) -> Result<crate::recover_wire::RecoverJob, AgentControlError> {
+    match payload {
+        fauna_ipc::sync::ResponsePayload::CustodianRecover(state) => {
+            Ok(crate::recover_wire::job_from_state(state))
+        }
+        other => Err(AgentControlError::new(format!(
+            "{verb} expected a CustodianRecover, got {other:?}"
         ))),
     }
 }
@@ -1713,7 +1791,8 @@ where
         &self,
         method: RequestMethod,
     ) -> Result<ResponsePayload, AgentControlError> {
-        self.agent_exchange(method, None).await
+        self.agent_exchange(method, None, fauna_ipc::sync_pipe_client::REQUEST_TIMEOUT)
+            .await
     }
 
     /// [`Self::agent_request`] **plus the ensure step** — probe →
@@ -1730,17 +1809,23 @@ where
         &self,
         method: RequestMethod,
     ) -> Result<ResponsePayload, AgentControlError> {
-        self.agent_exchange(method, Some(Arc::clone(&self.spawner)))
-            .await
+        self.agent_exchange(
+            method,
+            Some(Arc::clone(&self.spawner)),
+            fauna_ipc::sync_pipe_client::REQUEST_TIMEOUT,
+        )
+        .await
     }
 
     /// The shared body of [`Self::agent_request`] and
     /// [`Self::agent_request_ensuring_agent`] — `ensure` carries the spawner
-    /// when the caller wants the agent brought up, and is `None` otherwise.
+    /// when the caller wants the agent brought up, and is `None` otherwise;
+    /// `timeout` is the wait on the reply.
     async fn agent_exchange(
         &self,
         method: RequestMethod,
         ensure: Option<Arc<dyn AgentSpawner>>,
+        timeout: std::time::Duration,
     ) -> Result<ResponsePayload, AgentControlError> {
         let endpoint = self.endpoint.clone();
         let verb = method.name();
@@ -1755,7 +1840,7 @@ where
                 )?,
                 None => endpoint.connect()?,
             };
-            client.request(method)
+            client.request_with_timeout(method, timeout)
         })
         .await;
         match result {
@@ -2162,7 +2247,7 @@ pub struct BindingRow {
 }
 
 /// What a bound row's `folder-location-mode-toggle` says beside the switch
-/// (`on-demand-files.md` § Linux FUSE binding, the lifecycle rule). Each app
+/// (`on-demand-files-linux.md` § Linux FUSE binding, the lifecycle rule). Each app
 /// maps a variant to its own localized line; the mapping from the agent's
 /// codes is here so no app carries a copy of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2590,7 +2675,7 @@ impl LocationBindingsModel {
     /// How `row`'s `folder-location-mode-toggle` renders on this host, or
     /// `None` where no switch is rendered at all. The ONE availability rule
     /// for the switch, shared by every app that drives the agent
-    /// (`on-demand-files.md` § Linux FUSE binding, the lifecycle rule):
+    /// (`on-demand-files-linux.md` § Linux FUSE binding, the lifecycle rule):
     ///
     /// * a host whose agent can mount → a live switch, plus this row's own
     ///   mount failure when it is on-demand and its root runs unmounted;
@@ -3951,7 +4036,7 @@ mod tests {
 
     /// The Availability flow's app half: a host without the mount helper
     /// renders the switch disabled WITH the reason, never hidden and never a
-    /// silent no-op (`on-demand-files.md` § Linux FUSE binding).
+    /// silent no-op (`on-demand-files-linux.md` § Linux FUSE binding).
     #[test]
     #[cfg(any(windows, target_os = "linux"))]
     fn an_unavailable_host_disables_the_switch_with_its_reason() {

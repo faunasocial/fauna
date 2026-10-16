@@ -8,8 +8,9 @@ license.workspace = true
 [features]
 default = ["network"]
 network = ["dep:redb", "dep:tokio", "dep:tokio-stream", "dep:hickory-resolver", "dep:tokio-util"]
-## Enable js-sys-based time helpers when compiling for wasm32.
-js = ["dep:js-sys"]
+## Enable js-sys-based time helpers when compiling for wasm32, and the one Web
+## Locks request primitive (`web_lock`) every web lock in shared Rust rides.
+js = ["dep:js-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures"]
 format_text = []
 ## QR module-matrix generation (`qr_matrix`). Off by default so the nest / provisioning
 ## builds don't carry a QR encoder they never render; the client-facing faces
@@ -44,7 +45,7 @@ sqlite-schema-meta = ["dep:rusqlite"]
 ## binding `fauna-wasm` (Backups per-file download, the mail client-feed
 ## reference leg) and `fauna-media-machine`'s wasm build (the Media page) share.
 ## wasm32-only; the dep is target-gated below so this is a no-op on native.
-blob-fetch-wasm = ["dep:gloo-net"]
+blob-fetch-wasm = ["dep:gloo-net", "dep:js-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures"]
 ## Marker only (no deps) — lets `screen_time::ScreenLockCore`'s test-clock-skew
 ## field/methods build into a release binary that still wants convention-14's
 ## fake clock. Off by default; a consumer's own `e2e-agent` feature forwards
@@ -143,6 +144,13 @@ tokio-util = { workspace = true, optional = true }
 # + target-gated (mirrors `fauna-wasm`'s own direct use of the same crate for
 # the same purpose, pre-consolidation) so it never links into a native build.
 gloo-net = { version = "0.6", default-features = false, features = ["http"], optional = true }
+# `js`: the `web_lock` primitive's callback and promise glue. Not a new
+# supply-chain edge — both are already in the wasm graph at these ranges
+# (`fauna-account-store`, `fauna-client-accounts`, `fauna-wasm`); this only
+# makes them direct here so the one Web Locks primitive lives in the lowest
+# crate its three legs share.
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

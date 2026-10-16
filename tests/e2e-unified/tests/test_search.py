@@ -249,8 +249,8 @@ def test_activating_a_post_search_result_navigates_to_its_post_detail(
 # shape, not a behaviour the phones lack, and their witness is a phone-shaped
 # twin with a desktop seat, as `test_search_outcomes.py`'s
 # `_a_desktop_seat_indexed` journey already does for outcome 6. iOS's twins
-# close this module; android's pairing awaits a desktop seat on the emulator's
-# host. web STAYS in the set on purpose: it
+# close this module, and android's twins pair with a tui seat the Linux harness
+# launches beside the emulator (`alice_builder_seats`). web STAYS in the set on purpose: it
 # has no local arm by design, so the helper's `declared_absence` there is the
 # real thing — the run's confirmation of the page's own absence
 # (`private-search-index` declares it page-level; `search` outcomes 3 and 4
@@ -595,6 +595,7 @@ def _the_phone_finds(phone, needle, *, what):
 
 
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.real_conversations
 @pytest.mark.feature("search", "private-search-index")
 def test_a_phone_opens_a_contact_result_a_desktop_seat_indexed(
@@ -643,6 +644,7 @@ def test_a_phone_opens_a_contact_result_a_desktop_seat_indexed(
 
 
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.real_conversations
 @pytest.mark.feature("search")
 def test_a_phone_result_for_a_card_deleted_since_a_desktop_seat_indexed_it_surfaces_error(
@@ -700,6 +702,7 @@ def test_a_phone_result_for_a_card_deleted_since_a_desktop_seat_indexed_it_surfa
 
 
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.real_conversations
 @pytest.mark.feature("search", "private-search-index")
 def test_a_phone_opens_a_file_result_a_desktop_seat_indexed(

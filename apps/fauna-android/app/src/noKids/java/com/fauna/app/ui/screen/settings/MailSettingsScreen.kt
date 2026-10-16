@@ -32,6 +32,7 @@ import uniffi.fauna_client_mail_settings.MailCredentialSummary
 import uniffi.fauna_client_mail_settings.MuaInstructions
 import uniffi.fauna_client_mail_settings.PendingRotationStatus
 import uniffi.fauna_client_mail_settings.SettingsStatus
+import uniffi.fauna_client_mail_settings.forwardPerHourHint
 import uniffi.fauna_client_mail_settings.passwordStrengthLabel
 import uniffi.fauna_client_mail_settings.settingsStatusLabel
 import social.fauna.generated.Ids
@@ -61,6 +62,9 @@ fun MailSettingsScreen(
     val nestEncrypted by vm.nestEncrypted.collectAsState()
     val generatedPassword by vm.generatedPassword.collectAsState()
     val lastToken by vm.lastToken.collectAsState()
+    val forwardAllTo by vm.forwardAllTo.collectAsState()
+    val forwardPerHour by vm.forwardPerHour.collectAsState()
+    val forwardCeiling by vm.forwardCeiling.collectAsState()
     val appMessages = LocalAppMessages.current
     val context = LocalContext.current
 
@@ -102,6 +106,15 @@ fun MailSettingsScreen(
         onResumeRotation = vm::resumeRotation,
         onRegeneratePassword = vm::regeneratePassword,
         onClearToken = vm::clearToken,
+        forwardAllTo = forwardAllTo,
+        forwardPerHour = forwardPerHour,
+        // The limit's explainer names the ceiling once the first read has
+        // returned it — via shared `forward_per_hour_hint`; FFI off the Content.
+        forwardPerHourHint = forwardCeiling?.let {
+            resolveLocalized(context, forwardPerHourHint(it)).orEmpty()
+        }.orEmpty(),
+        onCommitForwardAllTo = vm::commitForwardAllTo,
+        onCommitForwardPerHour = vm::commitForwardPerHour,
     )
 }
 
@@ -160,6 +173,15 @@ fun MailSettingsContent(
     onResumeRotation: () -> Unit,
     onRegeneratePassword: () -> Unit,
     onClearToken: () -> Unit,
+    // The Forwarding section (mail-forwarding.md): the nest-confirmed texts, the
+    // limit's explainer (shared `forward_per_hour_hint`, resolved by the wrapper),
+    // and the Done-key commits. Defaults keep the pre-existing Content tests
+    // compiling; the wrapper passes the real values.
+    forwardAllTo: String = "",
+    forwardPerHour: String = "",
+    forwardPerHourHint: String = "",
+    onCommitForwardAllTo: (String) -> Unit = {},
+    onCommitForwardPerHour: (String) -> Unit = {},
 ) {
     var form by remember { mutableStateOf<CredForm>(CredForm.Closed) }
     var showRotate by remember { mutableStateOf(false) }
@@ -399,6 +421,20 @@ fun MailSettingsContent(
                     )
                 }
 
+                // ── Forwarding (mail-forwarding.md) — a mail feature, so shown
+                // while mail is enabled. Both fields commit on the IME Done key,
+                // the Spam page's threshold shape (no Save button), so the
+                // control that issues the kind IS the field.
+                if (enabled) {
+                    ForwardingSection(
+                        forwardAllTo = forwardAllTo,
+                        forwardPerHour = forwardPerHour,
+                        forwardPerHourHint = forwardPerHourHint,
+                        onCommitForwardAllTo = onCommitForwardAllTo,
+                        onCommitForwardPerHour = onCommitForwardPerHour,
+                    )
+                }
+
                 // ── Sub-page nav rows (Aliases / Lists / Export / Spam) ──
                 // All email-feature sub-pages, so they stay gated on `enabled`
                 // (a CalDAV-only mailbox has no email aliases/lists/export/spam).
@@ -459,6 +495,73 @@ fun MailSettingsContent(
     }
 }
 
+
+@Composable
+private fun ForwardingSection(
+    forwardAllTo: String,
+    forwardPerHour: String,
+    forwardPerHourHint: String,
+    onCommitForwardAllTo: (String) -> Unit,
+    onCommitForwardPerHour: (String) -> Unit,
+) {
+    // A disabled Material text field still renders its current value, so the
+    // persisted values stay readable with no nest — only editing-to-commit closes.
+    val allToGate = faunaGate("fauna.bridges.set_forward_all_to")
+    val perHourGate = faunaGate("fauna.bridges.set_forward_per_hour")
+    var allToInput by remember(forwardAllTo) { mutableStateOf(forwardAllTo) }
+    var perHourInput by remember(forwardPerHour) { mutableStateOf(forwardPerHour) }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(stringResource(R.string.mail_settings_forwarding_title), style = MaterialTheme.typography.titleMedium)
+        Text(stringResource(R.string.mail_settings_forward_all_to_label), style = MaterialTheme.typography.bodyLarge)
+        Text(
+            stringResource(R.string.mail_settings_forward_all_to_subtitle),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedTextField(
+            value = allToInput,
+            onValueChange = { allToInput = it },
+            singleLine = true,
+            enabled = allToGate.enabled,
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                keyboardType = androidx.compose.ui.text.input.KeyboardType.Email,
+                imeAction = androidx.compose.ui.text.input.ImeAction.Done,
+            ),
+            keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                onDone = { onCommitForwardAllTo(allToInput) },
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(Ids.MAIL_SETTINGS_FORWARD_ALL_TO_INPUT),
+        )
+        DisabledControlReasonText(allToGate.reason)
+        Text(stringResource(R.string.mail_settings_forward_per_hour_label), style = MaterialTheme.typography.bodyLarge)
+        if (forwardPerHourHint.isNotEmpty()) {
+            Text(
+                forwardPerHourHint,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        OutlinedTextField(
+            value = perHourInput,
+            onValueChange = { perHourInput = it },
+            singleLine = true,
+            enabled = perHourGate.enabled,
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                keyboardType = androidx.compose.ui.text.input.KeyboardType.Number,
+                imeAction = androidx.compose.ui.text.input.ImeAction.Done,
+            ),
+            keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                onDone = { onCommitForwardPerHour(perHourInput) },
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(Ids.MAIL_SETTINGS_FORWARD_PER_HOUR_INPUT),
+        )
+        DisabledControlReasonText(perHourGate.reason)
+    }
+}
 
 @Composable
 private fun NavRow(label: String, onClick: () -> Unit) {

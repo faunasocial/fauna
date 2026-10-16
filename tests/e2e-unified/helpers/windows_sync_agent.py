@@ -350,12 +350,13 @@ def describe_foreign_server(pipe_path, *, server_pid, server_command_line,
     return "\n".join(lines)
 
 
-def _spawn(exe, pipe_path, data_dir, log_path):
+def _spawn(exe, pipe_path, data_dir, log_path, extra_env=None):
     """Popen an agent with a private credential store; returns ``(proc, log)``."""
     cred_dir = Path(data_dir) / "credentials"
     cred_dir.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["FAUNA_E2E_CREDENTIAL_DIR"] = str(cred_dir)
+    env.update(extra_env or {})
     log = open(log_path, "w")
     # The sync agent is the textbook point-9 case: it is BUILT to outlive the
     # process that starts it, so an unarmed spawn leaves it holding this run's
@@ -401,7 +402,7 @@ def _refusal(pipe_path, server_pid, expected, log_path=None):
 
 
 @contextmanager
-def running_agent(exe, pipe_path, data_dir, log_path):
+def running_agent(exe, pipe_path, data_dir, log_path, extra_env=None):
     """Popen a fauna-sync agent, confirm IT serves ``pipe_path``, and guarantee
     teardown in finally.
 
@@ -416,17 +417,24 @@ def running_agent(exe, pipe_path, data_dir, log_path):
     fights 401s against the production nest instead of serving the test's), and
     every provision/unprovision the test drives writes into — or deletes from —
     the real ``fauna-sync-agent`` credman record (found live 2026-07-22: the
-    disk-delete media test's agent booted with ``nest_url=https://example.com``).
+    disk-delete media test's agent booted with the live nest's ``nest_url``).
     Deriving the dir from ``data_dir`` keeps it stable across a kill+respawn on
     the same data dir, so restore-from-persisted-capability tests still work.
+
+    The account store is not data-dir-routed either: a provisioned agent that
+    mounts its account resolves ``%LOCALAPPDATA%\\Fauna\\sync``
+    (``fauna_account_store::root``). A test whose agent mounts one relocates
+    ``LOCALAPPDATA`` through ``extra_env``, as every windows app launch does
+    (``drivers/windows.py``, convention 10's third windows axis).
 
     Args:
         exe: Path to fauna-sync-agent.exe (str).
         pipe_path: Full Win32 pipe path, e.g. ``r'\\\\.\\pipe\\fauna-sync-test-a'``.
         data_dir: Path object for the agent's --data-dir (fresh per test).
         log_path: Path object where stdout+stderr are captured.
+        extra_env: Variables set on the agent's environment over the defaults.
     """
-    proc, log = _spawn(exe, pipe_path, data_dir, log_path)
+    proc, log = _spawn(exe, pipe_path, data_dir, log_path, extra_env)
     try:
         ipc.wait_for_pipe(pipe_path, timeout=20)
         server_pid = ipc.pipe_server_pid(pipe_path, timeout=20)
@@ -561,6 +569,61 @@ def request(pipe_path: str, req: dict, *, timeout: float = 20.0) -> object:
             time.sleep(0.1)  # sleep-ok: poll cadence of a deadline poll, not a settle wait
 
 
+def provision(pipe_path: str, **caps) -> None:
+    """``ProvisionCapability`` through :func:`request`'s busy retry — the first
+    request after :func:`running_agent` confirmed the server can race the
+    accept loop's next instance. ``caps`` as
+    :func:`sync_agent_ipc.provision_capability_request` takes them."""
+    payload = request(pipe_path, ipc.provision_capability_request(1, **caps))
+    assert payload == "Empty", f"ProvisionCapability expected 'Empty', got {payload!r}"
+
+
+def _attach_app_request(identity: str | None) -> dict:
+    method = {"app": "windows"}
+    if identity is not None:
+        method["notification_identity"] = identity
+    return {"id": 1, "method": {"AttachApp": method}}
+
+
+def attach_once(pipe_path: str, identity: str | None = None) -> None:
+    """Attach as the windows app and let go at once — the identity is adopted
+    (before the reply) and kept; the lease ends as the connection closes."""
+    request(pipe_path, _attach_app_request(identity))
+
+
+@contextmanager
+def attached_app(pipe_path: str, identity: str | None = None, *, timeout: float = 20.0):
+    """Hold the windows app's attachment lease for the ``with`` body — an open
+    app, as the agent's push arm sees one (`RequestMethod::AttachApp`).
+
+    The agent takes the lease before it replies, so the body runs attached; the
+    lease ends when the connection closes on exit. A busy open is retried
+    inside ``timeout``, as :func:`request` does."""
+    import time
+    from contextlib import ExitStack
+
+    frame = ipc.encode_frame(_attach_app_request(identity))
+    deadline = time.monotonic() + timeout
+    with ExitStack() as connection:
+        while True:
+            try:
+                ipc.wait_for_pipe(pipe_path, timeout=max(0.1, deadline - time.monotonic()))
+                reply = connection.enter_context(ipc.held_request(pipe_path, frame))
+                break
+            except (OSError, TimeoutError):
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.1)  # sleep-ok: poll cadence of a deadline poll, not a settle wait
+        ipc.unwrap_ok(reply)
+        yield
+
+
+def push_arm_tally(pipe_path: str) -> dict:
+    """The agent's push-arm decisions so far (test-only `GetPushArmTally`):
+    ``{attached_apps, withheld, no_sink, posted, failed}``."""
+    return request(pipe_path, {"id": 1, "method": "GetPushArmTally"})["PushArmTally"]
+
+
 def shutdown_agent(pipe_path: str, *, timeout: float = 60.0) -> int:
     """Stop the agent serving ``pipe_path`` through its own ``Shutdown`` request
     and wait until its PROCESS has exited — not merely until the pipe stops
@@ -581,6 +644,30 @@ def shutdown_agent(pipe_path: str, *, timeout: float = 60.0) -> int:
             )
         time.sleep(0.2)  # sleep-ok: poll cadence of a deadline poll, not a settle wait
     return pid
+
+
+def stop_agent_if_serving(pipe_path: str, *, probe: float = 2.0) -> int | None:
+    """Stop whatever agent still serves ``pipe_path`` through its own
+    ``Shutdown`` (:func:`shutdown_agent`); the pid that exited, or None when
+    nothing served the pipe.
+
+    For a caller whose app is already gone: a windows agent is built to outlive
+    its app (`agent_spawner.rs::CREATE_NO_WINDOW`), so "the app quit" never says
+    "the device is away". ``probe`` bounds only the question "is anything
+    there?" — a pipe with no server answers it at once. A server that vanishes
+    between that answer and the request was already exiting, and reads as
+    stopped once its process is gone; one still running is an error.
+    """
+    try:
+        pid = ipc.pipe_server_pid(pipe_path, timeout=probe)
+    except TimeoutError:
+        return None
+    try:
+        return shutdown_agent(pipe_path)
+    except (OSError, TimeoutError):
+        if process_has_exited(pid):
+            return pid
+        raise
 
 
 def file_status(pipe_path: str, abs_path: str) -> str:

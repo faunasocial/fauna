@@ -385,7 +385,8 @@ def terminate_tree(proc: subprocess.Popen | None, *, term_timeout: float = 5.0) 
         proc.wait(timeout=term_timeout)
     except Exception:
         pass
-    if not _signal_group(proc.pid, signal.SIGKILL):
+    grouped = _signal_group(proc.pid, signal.SIGKILL)
+    if not grouped:
         try:
             proc.kill()
         except Exception:
@@ -394,6 +395,25 @@ def terminate_tree(proc: subprocess.Popen | None, *, term_timeout: float = 5.0) 
         proc.wait(timeout=3.0)
     except Exception:
         pass
+    if grouped:
+        _wait_group_gone(proc.pid)
+
+
+def _wait_group_gone(pgid: int, timeout: float = 10.0) -> None:
+    """Block until no process is left in group `pgid` (bounded).
+
+    `proc.wait()` reaps only the LEADER (`xvfb-run`, a shell wrapper); a
+    SIGKILLed grandchild — the app itself — is still exiting when killpg
+    returns, and keeps every fd, `flock` included, until it is gone. A relaunch
+    that starts inside that window finds the old instance's per-account lock
+    still held and lands on the launch-collision chooser, not the app."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except (ProcessLookupError, PermissionError, OSError):
+            return
+        time.sleep(0.05)
 
 
 def find_free_port() -> int:

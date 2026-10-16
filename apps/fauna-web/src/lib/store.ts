@@ -17,9 +17,10 @@ import {
   type SessionMaterial,
 } from './accounts';
 import { tabPin, clearTabPin } from './tabPin';
-import { clearTokenCache, silentSignIn } from './api';
+import { clearTokenCache, silentSignIn, storedNestUrlOrNull } from './api';
 import { escalateIfTerminalAuthVerdict, escalateSignInRefused } from './post-auth-escalation';
 import { silentSignInRetryDelay } from './silent-sign-in-retry';
+import { keepVerifiedSession } from './identity-reread';
 import { resetActorScopedState } from './actorScope';
 
 // --- Identity ---
@@ -261,7 +262,12 @@ function createIdentityStore() {
     set,
     init() {
       const id = loadIdentity();
-      set(id); // instant identity from the registry (null if wasm is not up yet)
+      // Instant identity from the registry (null if wasm is not up yet). Through
+      // `keepVerifiedSession`, never a bare `set(id)`: the registry does not hold
+      // `registered`, and the sticky refresh below will not re-verify a secret it
+      // already settled, so a bare re-read on a later route mount dropped the
+      // verified session for the rest of the document (`identity-reread.ts`).
+      set(keepVerifiedSession(get({ subscribe }), id));
       // ALWAYS boot, whatever the sync read found: it fails closed when wasm is
       // not initialized (see `loadIdentity`), and the async path below is the
       // only place wasm is guaranteed — so it is also the only place that can
@@ -309,7 +315,7 @@ function createIdentityStore() {
             window.location.reload();
             return;
           }
-          if (healed.secretHex !== id?.secretHex) set(healed);
+          if (healed.secretHex !== id?.secretHex) set(keepVerifiedSession(get({ subscribe }), healed));
           // Background refresh: pull current handle/domain/tier from the nest so
           // out-of-band changes (server-side handle rename, tier upgrade) replace
           // the cache. Non-blocking — the store already holds the registry's
@@ -423,6 +429,18 @@ function createIdentityStore() {
       } catch (e) {
         logMessage('warn', 'fauna_web::store', `sign-out: runtime stop not run: ${e}`);
       }
+      // The WS-RPC singleton is the signed-out actor's too: close it through
+      // the one shared retire door (`rpc.ts::retireRpcClient`, which runs the
+      // canonical actor-scope drop), or its reconnect loop keeps signing in
+      // with that secret until a reload. Ordered AFTER the awaited runtime
+      // stop and the push-row drop above has taken the live client — a retire
+      // first would let that drop's `getClient` rebuild one for this actor.
+      // Dynamic import for the `rpc.ts` → this module static cycle.
+      try {
+        (await import('./rpc')).retireRpcClient();
+      } catch (e) {
+        logMessage('warn', 'fauna_web::store', `sign-out: rpc client not retired: ${e}`);
+      }
       clearTokenCache();
       set(null);
       // Always this tab's own wipe, whatever the record says: a sibling tab
@@ -496,6 +514,54 @@ export function onActorChange(fn: ActorChangeHandler): () => void {
   };
 }
 
+/** Signed-in handlers held back from the current actor because it had no home
+ *  nest when it settled — delivered by {@link deliverWithheldActorChange}. */
+const withheldUntilHomed = new Set<ActorChangeHandler>();
+
+/**
+ * {@link onActorChange} for work a SIGNED-IN session owes — anything that dials
+ * the actor's home nest — held back while the actor has no home nest stored.
+ *
+ * An identity exists before its account does: the onboarding wizard commits it
+ * (`identity.login`) before the claim or registration that creates the account.
+ * With no stored nest, a dial goes to the SPA's own origin — on a nest serving
+ * its own SPA, the very box about to be claimed — which answers
+ * `fauna.auth.not_registered` and stops the client's reconnect loop for good
+ * (`security.md` § Post-auth surfacing: that refusal ends a *signed-in*
+ * session, and there is none yet). The gate is the one `resolveRecoveryBoxes`
+ * applies: `storedNestUrlOrNull()`, never the origin fallback.
+ *
+ * A withheld handler is not dropped: the `LoggedIn` terminal records the home
+ * nest and calls `deliverWithheldActorChange()`, which runs it then. A route
+ * mounted only inside the signed-in app has no pre-account window and keeps
+ * plain `onActorChange`.
+ */
+export function onSignedInActorChange(fn: ActorChangeHandler): () => void {
+  const off = onActorChange((id) => {
+    if (storedNestUrlOrNull() === null) {
+      withheldUntilHomed.add(fn);
+      return;
+    }
+    withheldUntilHomed.delete(fn);
+    return fn(id);
+  });
+  return () => {
+    withheldUntilHomed.delete(fn);
+    off();
+  };
+}
+
+/** Run every signed-in handler withheld from the current actor, now that its
+ *  home nest is stored — the `LoggedIn` terminal's call, after its registry
+ *  write. A no-op when nothing was withheld, or the nest is still unknown. */
+export function deliverWithheldActorChange(): void {
+  const id = get(identity);
+  if (!id || storedNestUrlOrNull() === null) return;
+  const due = [...withheldUntilHomed];
+  withheldUntilHomed.clear();
+  for (const fn of due) void fn(id);
+}
+
 identity.subscribe((id) => {
   const secretHex = id?.secretHex ?? null;
   // The store seeds to `null`, so a signed-out load's first notification lands
@@ -503,6 +569,9 @@ identity.subscribe((id) => {
   // against an absent identity.
   if (secretHex === lastActorSecretHex) return;
   lastActorSecretHex = secretHex;
+  // Withheld for the actor that just left; the handlers below re-decide for
+  // the new one.
+  withheldUntilHomed.clear();
   resetActorScopedState();
   if (!id) return;
   for (const handler of actorChangeHandlers) void handler(id);
@@ -541,6 +610,13 @@ export const contacts = writable<Contact[]>([]);
 // so a DM/mail delivered across the gap arrives on reconnect rather than up to a
 // full backstop tick later. Notifications/contacts reload on navigation.
 export const reconnectTick = writable(0);
+
+/** Whether the `family-tab` nav entry is gated in (the layout's one
+ *  `fauna.family.status` read). Published here so a page that routes INTO the
+ *  Family page — the Notifications tap-through — applies the same gate the nav
+ *  does, instead of painting a control for a tab the user cannot see
+ *  (`notifications.md` § Deep-link destinations). */
+export const familyTabGated = writable(false);
 
 // --- Connection status ---
 //

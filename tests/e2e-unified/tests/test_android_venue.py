@@ -287,3 +287,30 @@ def test_the_justfile_recipe_runs_this_module():
     recipe = justfile.split("\nandroid-tunnel-spec ", 1)
     assert len(recipe) == 2, "the justfile has no `android-tunnel-spec` recipe"
     assert "tests/e2e-unified/helpers/android_venue.py" in recipe[1].split("\n\n", 1)[0]
+
+
+# ── the pebble directory port ───────────────────────────────────────────────
+#
+# The device reaches pebble's ACME directory exactly as it reaches a nest (an
+# `adb reverse`, carried home by the tunnel), so in a venue run its published
+# port is leased from the same tunnelled range.
+
+
+def test_pebble_takes_its_directory_port_from_the_nest_port_seam():
+    from helpers import acme_pebble
+
+    android_device.set_adb_server(android_venue.ADB_SERVER_SPEC)
+    port, release = acme_pebble.lease_directory_port()
+    try:
+        assert port in android_venue.NEST_PORTS
+    finally:
+        release()
+
+
+def test_the_directory_port_is_read_back_from_the_seed():
+    from helpers import acme_pebble
+
+    assert acme_pebble.directory_port(
+        {"FAUNA_E2E_ACME_DIRECTORY_URL": "https://127.0.0.1:18601/dir"}
+    ) == 18601
+    assert acme_pebble.directory_port({}) is None

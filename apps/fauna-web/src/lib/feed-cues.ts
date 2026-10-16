@@ -19,19 +19,28 @@
 // - **Scheduling:** the shared `cueSampleIntervalMs()` tick while the feed is
 //   on screen, so dwell accrues while the user holds still, plus an extra
 //   sample on every scroll frame.
-// - **Lifecycle:** built with the page, stopped with it. Leaving the list —
+// - **Lifecycle:** built with the page, stopped with it — over ONE tracker per
+//   feed manager (`cueTrackerFor`), as tui and linux keep one per auth: every
+//   leave drains it empty, so a re-mount starts clean, and the frozen test
+//   clock (`$lib/feed-cues-e2e`) survives a trip off the page. Leaving the list —
 //   the route unmounting, a post-detail or compose dialog covering it, the tab
 //   going hidden — drains every tracked card (off-screen is off-viewport). The
 //   route leaving and the tab going hidden also flush the rollup
 //   (`flushCuesNow`, which the root layout calls beside its draft flushes).
 //
 // Two clocks by contract: `performance.now()` feeds dwell credit, `Date.now()`
-// only stamps the observation. Feed media renders as stills with no playback
-// surface, so `media_played_pm` is always `null`.
+// only stamps the observation.
+//
+// - **Playback:** an inline `VideoThumbnail` player notes its progress
+//   (`notePlayback`, on `timeupdate` and `ended`) into a per-post unread peak;
+//   each sample takes it for the post's row (`takePlayedPm`) — the contract on
+//   the shared `CueRow::media_played_pm` — so a video played to the end derives
+//   the media `watch-complete`.
 
 import type { WasmFeedManager } from '../../static/fauna_wasm.js';
 import { feedManagerIfReady } from './feed';
 import {
+  cuePlayedPerMille,
   cueSampleIntervalMs,
   logMessage,
   newCueTracker,
@@ -39,6 +48,25 @@ import {
   type CueRow,
   type CueTrackerHandle,
 } from './wasm';
+
+/** Each post's highest played per-mille since the probe last took it. */
+const unreadPlayedPm = new Map<string, number>();
+
+/** An inline player's progress report: `position` and `duration` in its own
+ *  unit (a `<video>`'s seconds). Folded by max into the post's unread peak. */
+export function notePlayback(postId: string, position: number, duration: number): void {
+  const pm = cuePlayedPerMille(position, duration);
+  if (pm === null) return;
+  unreadPlayedPm.set(postId, Math.max(pm, unreadPlayedPm.get(postId) ?? 0));
+}
+
+/** The probe's read: the peak played on `postId` since the last take, cleared
+ *  by the take; `null` when nothing played since. */
+export function takePlayedPm(postId: string): number | null {
+  const pm = unreadPlayedPm.get(postId);
+  unreadPlayedPm.delete(postId);
+  return pm ?? null;
+}
 
 /** What the page tells the probe each sample: whether the post list is what
  *  the user is looking at, and every post id in the loaded window. */
@@ -49,11 +77,28 @@ export interface CueListView {
 
 /** The attribute a feed card carries only while it shows its post. */
 export const CUE_POST_ATTR = 'data-cue-post';
-/** The card's post `has_media`, as `"true"`/`"false"`. */
+/** The card's post `plays_media` (never `has_media` — a still image is a
+ *  non-media post), as `"true"`/`"false"`. */
 export const CUE_MEDIA_ATTR = 'data-cue-media';
 
 let active: CueCapture | null = null;
 const hydrated = new WeakMap<WasmFeedManager, Promise<void>>();
+const trackers = new WeakMap<WasmFeedManager, CueTrackerHandle>();
+
+/** The manager's one capture tracker, built on first use. */
+export function cueTrackerFor(manager: WasmFeedManager): CueTrackerHandle {
+  let tracker = trackers.get(manager);
+  if (!tracker) {
+    tracker = newCueTracker('hold-unmeasured');
+    trackers.set(manager, tracker);
+  }
+  return tracker;
+}
+
+/** The capture sampling the mounted feed page, if any. */
+export function activeCueCapture(): CueCapture | null {
+  return active;
+}
 
 /** Fetch-on-session-start for the sealed `cues:v1` rollup, and the Layer-B
  *  opt-in cache beside it — ONCE per manager. `hydrateCues` replaces the live
@@ -76,7 +121,7 @@ export function hydrateCuesOnce(manager: WasmFeedManager): Promise<void> {
 }
 
 export class CueCapture {
-  private readonly tracker: CueTrackerHandle;
+  readonly tracker: CueTrackerHandle;
   private timer: ReturnType<typeof setInterval> | null = null;
   private frame: number | null = null;
   /** Whether the previous sample found the list on screen — turns "not on
@@ -87,35 +132,36 @@ export class CueCapture {
     if (this.frame !== null) return;
     this.frame = requestAnimationFrame(() => {
       this.frame = null;
-      this.sample();
+      void this.sample();
     });
   };
 
   constructor(
     private readonly manager: WasmFeedManager,
-    private readonly container: HTMLElement,
+    readonly container: HTMLElement,
     private readonly view: () => CueListView,
     private readonly onError: (message: string) => void,
   ) {
-    this.tracker = newCueTracker('hold-unmeasured');
+    this.tracker = cueTrackerFor(manager);
   }
 
   start(): void {
-    this.timer = setInterval(() => this.sample(), cueSampleIntervalMs());
+    this.timer = setInterval(() => void this.sample(), cueSampleIntervalMs());
     this.container.addEventListener('scroll', this.onScroll, { passive: true });
     active = this;
   }
 
-  /** One probe read. */
-  sample(): void {
-    if (this.stopped) return;
+  /** One probe read. Resolves once every exposure it ended is recorded — the
+   *  Layer-A train and its put included; the ticks never wait on it. */
+  sample(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
     const { showing, windowPostIds } = this.view();
     if (!showing || document.visibilityState === 'hidden') {
       if (this.showing) {
         this.showing = false;
-        void this.emit(this.tracker.drainAll(Date.now()));
+        return this.emit(this.tracker.drainAll(Date.now()));
       }
-      return;
+      return Promise.resolve();
     }
     this.showing = true;
     const box = this.container.getBoundingClientRect();
@@ -124,15 +170,17 @@ export class CueCapture {
     const rows: CueRow[] = [];
     for (const card of this.container.querySelectorAll<HTMLElement>(`[${CUE_POST_ATTR}]`)) {
       const rect = card.getBoundingClientRect();
+      const postId = card.getAttribute(CUE_POST_ATTR)!;
+      const isMedia = card.getAttribute(CUE_MEDIA_ATTR) === 'true';
       rows.push({
-        post_id: card.getAttribute(CUE_POST_ATTR)!,
+        post_id: postId,
         top: rect.top,
         height: rect.height,
-        is_media: card.getAttribute(CUE_MEDIA_ATTR) === 'true',
-        media_played_pm: null,
+        is_media: isMedia,
+        media_played_pm: isMedia ? takePlayedPm(postId) : null,
       });
     }
-    void this.emit(
+    return this.emit(
       this.tracker.sample(rows, windowPostIds, viewportStart, viewportEnd, performance.now(), Date.now()),
     );
   }
@@ -154,7 +202,6 @@ export class CueCapture {
     if (active === this) active = null;
     const left = this.tracker.drainAll(Date.now());
     this.stopped = true;
-    this.tracker.free();
     await this.emit(left);
     await flushRollup(this.manager);
   }
@@ -163,14 +210,7 @@ export class CueCapture {
     await Promise.all(
       exposures.map((o) =>
         this.manager
-          .recordObservation(
-            o.content_id,
-            o.is_media,
-            o.media_played_pm ?? undefined,
-            BigInt(o.dwell_ms_at_skip_visibility),
-            BigInt(o.dwell_ms_at_long_visibility),
-            BigInt(o.observed_at_ms),
-          )
+          .recordObservation(o)
           .catch((e: unknown) => this.onError(String(e))),
       ),
     );

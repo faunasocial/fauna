@@ -1,8 +1,7 @@
 package com.fauna.app.core
 
 import com.fauna.ffi.classifyRecipient
-import com.fauna.ffi.resolveHandle
-import com.fauna.ffi.resolveNest
+import com.fauna.ffi.findUser
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -14,7 +13,14 @@ class ResolveService @Inject constructor(
         val actorId: String,
         val nodeUrl: String,
         val handle: String? = null,
-        val domain: String? = null
+        val domain: String? = null,
+        /**
+         * The peer nest the lookup resolved on — `null` for a home-nest actor.
+         * The knock hands it to `fauna.inbox.send` as `recipient_nest_url`;
+         * carried from the lookup, never re-derived (`contacts.md` §
+         * Implementation status today → *Cross-nest knocks*).
+         */
+        val nestUrl: String? = null
     )
 
     /**
@@ -34,19 +40,21 @@ class ResolveService @Inject constructor(
                 nodeUrl = api.nodeUrl
             )
             "handle" -> {
-                // The home nest performs the SRV lookup; the resolved URL is the
-                // nest that owns the handle (local nest or a cross-nest peer).
-                val targetNodeUrl = resolveNest(api.nodeUrl, parts[3])
-                // [actorId, handle, domain] — thread the typed `@domain` qualifier
-                // (parts[3]) so a multi-domain handle echoes it and the find-result
-                // renders `bob@domain2` (mail-multidomain.md § Multi-domain handles
-                // § Resolution); `ContactsScreen` already shows `handle@domain`.
-                val resolved = resolveHandle(targetNodeUrl, parts[2], parts[3])
+                // One shared lookup (`find_user_across_nests`): a home probe with
+                // the typed `@domain` (parts[3]) as the multi-domain qualifier, so
+                // a multi-domain handle echoes it and the find-result renders
+                // `bob@domain2` (mail-multidomain.md § Multi-domain handles §
+                // Resolution); and, when the domain is foreign, a direct dial of
+                // the peer. [actorId, handle, domain, nestUrl] — nestUrl is the
+                // peer it resolved on, empty for a home-nest actor.
+                val found = findUser(api.nodeUrl, parts[2], parts[3])
+                val peerNestUrl = found[3].ifEmpty { null }
                 ResolvedRecipient(
-                    actorId = resolved[0],
-                    nodeUrl = targetNodeUrl,
-                    handle = resolved[1],
-                    domain = resolved[2]
+                    actorId = found[0],
+                    nodeUrl = peerNestUrl ?: api.nodeUrl,
+                    handle = found[1],
+                    domain = found[2],
+                    nestUrl = peerNestUrl
                 )
             }
             else -> throw IllegalArgumentException("Enter a handle (alice@fauna.social) or 64-char actor ID")

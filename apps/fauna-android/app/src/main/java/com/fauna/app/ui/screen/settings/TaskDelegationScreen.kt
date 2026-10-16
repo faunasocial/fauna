@@ -29,7 +29,6 @@ import com.fauna.ffi.FfiParticipantRef
 import com.fauna.ffi.FfiPinOption
 import com.fauna.ffi.FfiRunnerStatus
 import com.fauna.ffi.FfiTaskDelegationRow
-import com.fauna.ffi.hexFull
 import uniffi.fauna_core.LocalizedText
 import social.fauna.generated.Ids
 
@@ -223,18 +222,11 @@ private fun AssignmentPicker(
 
 /**
  * The stable cross-app picker key for one option — `"automatic"` /
- * `"this-device"` / a participant's hex (a device's id verbatim, a nest's
- * pubkey hex-encoded); the same three keys web's `pinOptionKey`, windows'
- * `TaskDelegationViewModel.OptionKey` and apple's `optionKey` derive.
+ * `"this-device"` / a participant's hex: the one shared decision,
+ * `fauna_core::delegation::option_key` over UniFFI (priority #2).
  */
-private fun pinOptionKey(option: FfiPinOption): String = when (option) {
-    FfiPinOption.Automatic -> "automatic"
-    FfiPinOption.ThisDevice -> "this-device"
-    is FfiPinOption.Other -> when (val who = option.who) {
-        is FfiParticipantRef.Device -> who.deviceId
-        is FfiParticipantRef.Nest -> hexFull(who.actorPubkey)
-    }
-}
+private fun pinOptionKey(option: FfiPinOption): String =
+    com.fauna.ffi.taskDelegationOptionKey(option)
 
 /** Label a runner status via the injected shared decision (`runnerLabelFn` —
  *  `fauna_core::delegation::runner_label` over UniFFI, participant-name

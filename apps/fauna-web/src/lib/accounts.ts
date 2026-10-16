@@ -20,10 +20,15 @@
 // reach an unlocked mutator. Reads stay synchronous.
 
 import { writable, type Readable } from 'svelte/store';
-import { ensureWasm, wasmCoreModule, signOutFinishRecorded, signOutPlannedErase } from '$lib/wasm';
+import {
+  actorsServedByAnotherTab,
+  ensureWasm,
+  wasmCoreModule,
+  signOutFinishRecorded,
+  signOutPlannedErase,
+} from '$lib/wasm';
 import type { LocalizedText } from '$lib/i18n/localized';
 import { tabPin, setTabPin, clearTabPin, setTabNestUrl } from './tabPin';
-import { actorsServedByAnotherTab } from './webLocks';
 import type { WasmAccountRegistry } from '../../static/fauna_wasm.js';
 import type { SupervisionSnapshotValue } from './supervisionRestore';
 
@@ -82,6 +87,23 @@ function withRegistrySync<T>(fn: (reg: WasmAccountRegistry) => T): T | undefined
     return undefined;
   } finally {
     reg?.free();
+  }
+}
+
+/** The profile SELF header's display handle — `<handle>@<current primary>`,
+ *  resolved by shared Rust (`fauna_client_accounts::display_handle`,
+ *  `mail-primary-domain-rename.md` § Display-handle interaction) from the
+ *  identity's handle + live domain. `undefined` while nothing resolves (or
+ *  before wasm is up), and never the bare handle. */
+export function accountDisplayHandle(
+  handle: string | null | undefined,
+  domain: string | null | undefined,
+): string | undefined {
+  try {
+    return wasmCoreModule().accountDisplayHandle(handle ?? '', handle ?? null, domain ?? null) ??
+      undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -360,7 +382,7 @@ export async function signOutFinish(sweep: 'gesture' | 'load' | 'retry'): Promis
   if (sweep !== 'gesture') {
     const planned = await signOutPlannedErase();
     eraseRefused =
-      planned.length > 0 && (await actorsServedByAnotherTab(planned, () => false)).length > 0;
+      planned.length > 0 && (await actorsServedByAnotherTab(planned)).length > 0;
   }
   const finish = await signOutFinishRecorded(eraseRefused);
   residue.set(finish.residue ?? null);

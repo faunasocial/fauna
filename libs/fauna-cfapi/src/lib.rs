@@ -352,7 +352,7 @@ fn current_user_sid_string() -> Result<String> {
 /// and needs its child entries (lazy directory listing — fired under the
 /// `CF_POPULATION_POLICY_FULL` policy `register_sync_root` sets, which requests
 /// *all* entries of the accessed directory; see
-/// `docs/goal/behavior/file-sync.md` § On-Demand Files).
+/// `docs/goal/behavior/on-demand-files.md` § On-Demand Files).
 ///
 /// `dehydrate_completion_cb` fires **after** the OS has freed a placeholder's
 /// local bytes — Explorer's native "Free up space" or Storage Sense. We register
@@ -466,13 +466,20 @@ pub fn transfer_data(
     Ok(())
 }
 
-/// Report a failed data transfer to Windows.
+/// Report a failed data transfer to Windows, so the open that asked for the data fails at once.
 ///
-/// Called when the sync engine cannot provide the requested file data.
+/// Called when the sync engine cannot provide the requested file data. `offset` and `length`
+/// are the callback's own `RequiredFileOffset` and `RequiredLength`: the failure must name the
+/// range the platform asked for. Until 2026-10-09 this passed `0, 0`, and the failure was never
+/// delivered — the opening program waited out cfapi's 60 s request timeout and then failed with
+/// `ERROR_CLOUD_FILE_REQUEST_TIMEOUT` (measured,
+/// `fauna-sync-agent`'s `cfapi_live_integration::a_restore_whose_free_was_refused_opens_whole_after_a_bare_eviction`).
 pub fn transfer_failed(
     connection_key: &CF_CONNECTION_KEY,
     transfer_key: i64,
     request_key: i64,
+    offset: i64,
+    length: i64,
     status: NTSTATUS,
 ) -> Result<()> {
     let op_info = CF_OPERATION_INFO {
@@ -495,8 +502,8 @@ pub fn transfer_failed(
                 Flags: CF_OPERATION_TRANSFER_DATA_FLAG_NONE,
                 CompletionStatus: status,
                 Buffer: std::ptr::null(),
-                Offset: 0,
-                Length: 0,
+                Offset: offset,
+                Length: length,
             },
         },
     };
@@ -934,9 +941,115 @@ pub fn dehydrate_placeholder(path: &Path) -> Result<()> {
 /// handle of [`open_file_handle`] is refused `0x80070006` (measured,
 /// `cfapi_live_integration::supersede_placeholder_redescribes_a_hydrated_file`). Opened
 /// `FILE_SHARE_READ` alone, as [`set_in_sync`] is, so no other handle may write the file while
-/// the update runs; a file another process holds open for writing refuses the update (it is
-/// not settled content), and the caller retries on the next pull.
+/// the update runs; a file another process holds open — for writing, or shutting writers out —
+/// refuses the update (measured, `fauna-sync-agent`'s
+/// `cfapi_live_integration::a_remote_edit_reaches_a_cloud_only_file_whose_redescribe_a_held_handle_refused`),
+/// and the on-demand host retries it: the next pull reports a stale hydrated copy again, a
+/// re-pointed placeholder is owed a retry, and an open refused on a placeholder still behind its
+/// row re-describes it (`fauna-sync-agent`'s `bridge::PendingRedescribes`,
+/// `bridge::owed_redescribe`).
 pub fn supersede_placeholder(path: &Path, size: u64, mtime: i64) -> Result<()> {
+    update_placeholder_raw(
+        path,
+        size,
+        mtime,
+        CF_UPDATE_FLAG_VERIFY_IN_SYNC
+            | CF_UPDATE_FLAG_DEHYDRATE
+            | CF_UPDATE_FLAG_MARK_IN_SYNC
+            | CF_UPDATE_FLAG_PASSTHROUGH_FS_METADATA,
+        None,
+    )
+    .context("CfUpdatePlaceholder(new version, dehydrate, verify in sync) failed")?;
+    tracing::debug!(path = %path.display(), size, mtime, "placeholder superseded");
+    Ok(())
+}
+
+/// Replace the hydrated placeholder `target` with the bytes of `replacement` — an ordinary file
+/// beside it holding a newer version whole — in ONE rename. It is how a copy another device's
+/// edit superseded is updated when the platform will not free it: a PINNED file ("Always keep on
+/// this device"), whose [`supersede_placeholder`] and bare dehydrate cfapi refuses `0x80070188`.
+///
+/// 1. `replacement` is anchored as a hydrated, NOT-in-sync placeholder with `rel_identity`
+///    ([`convert_to_placeholder_anchored`]) and takes `target`'s pin;
+/// 2. `target` is opened excluding every other writer (`FILE_SHARE_READ | FILE_SHARE_DELETE`) and
+///    must be in sync — the dirty-file refusal [`supersede_placeholder`]'s `VERIFY_IN_SYNC` gives,
+///    made by hand: a file carrying a local edit is refused and nothing about it changes, and no
+///    write can land between the check and the rename, because no writer can hold the file while
+///    the handle is open;
+/// 3. `replacement` is renamed over `target`, the handle still open;
+/// 4. the swapped-in file takes `mtime` (Unix seconds) as its last-write time.
+///
+/// So the device holds one whole version at every instant — the old one until the rename, the new
+/// one after — and the pin is never off the file. Measured 2026-10-09 on Windows 11 ARM64
+/// (`fauna-sync-agent`'s `cfapi_live_integration::diag_update_a_pinned_file`): the rename lands
+/// with the guard open, and the result is the replacement's file whole, a placeholder, pinned and
+/// not in sync. The in-sync assertion is the caller's, after it proves the content
+/// ([`set_in_sync`]); nothing here vouches for bytes.
+///
+/// On any failure `target` is untouched; `replacement` is left for the caller to remove.
+pub fn replace_placeholder(
+    target: &Path,
+    replacement: &Path,
+    rel_identity: &str,
+    mtime: i64,
+) -> Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    /// `FILE_SHARE_READ | FILE_SHARE_DELETE`: no other handle may write the target while ours is
+    /// open, and the rename over it may delete it.
+    const FILE_SHARE_READ_DELETE: u32 = 0x0000_0001 | 0x0000_0004;
+    convert_to_placeholder_anchored(replacement, rel_identity)?;
+    if pin_state(target)? == PinState::Pinned {
+        set_pin_state(replacement, true)
+            .with_context(|| format!("pin the replacement {}", replacement.display()))?;
+    }
+    let guard = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ_DELETE)
+        .open(target)
+        .with_context(|| {
+            format!(
+                "open {} excluding writers (held open for writing elsewhere?)",
+                target.display()
+            )
+        })?;
+    anyhow::ensure!(
+        placeholder_state(target)? & CF_PLACEHOLDER_STATE_IN_SYNC.0 != 0,
+        "{} is not in sync (a local edit not yet uploaded); not replacing it",
+        target.display()
+    );
+    std::fs::rename(replacement, target)
+        .with_context(|| format!("rename {} over {}", replacement.display(), target.display()))?;
+    drop(guard);
+    // Stamped after the swap: a rename over a file held open restamps the last-write time
+    // with the moment it ran (measured, `diag_update_a_pinned_file` F2), whatever the
+    // replacement carried. The swap has landed, so a failed stamp costs only the shown
+    // date — never the swap.
+    let modified = u64::try_from(mtime)
+        .map(|secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    if let Err(e) = std::fs::OpenOptions::new()
+        .write(true)
+        .open(target)
+        .and_then(|f| f.set_times(std::fs::FileTimes::new().set_modified(modified)))
+    {
+        tracing::warn!(path = %target.display(), error = %e, "stamping a replaced file's modification time failed");
+    }
+    tracing::debug!(path = %target.display(), mtime, "placeholder replaced");
+    Ok(())
+}
+
+/// The measurement door under [`supersede_placeholder`]: one `CfUpdatePlaceholder` describing
+/// `size` bytes last written at `mtime`, with the caller's `flags` and optional
+/// `dehydrate_range` — through the same write-excluding handle and the same read-back of the
+/// creation time and attributes. Probes measure the platform's answers through it; production
+/// code calls the named wrappers.
+pub fn update_placeholder_raw(
+    path: &Path,
+    size: u64,
+    mtime: i64,
+    flags: CF_UPDATE_FLAGS,
+    dehydrate_range: Option<&[CF_FILE_RANGE]>,
+) -> Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Storage::FileSystem::{FileBasicInfo, GetFileInformationByHandleEx};
@@ -981,18 +1094,14 @@ pub fn supersede_placeholder(path: &Path, size: u64, mtime: i64) -> Result<()> {
             Some(&metadata),
             None, // the identity stays
             0,
-            None, // with DEHYDRATE: the whole file
-            CF_UPDATE_FLAG_VERIFY_IN_SYNC
-                | CF_UPDATE_FLAG_DEHYDRATE
-                | CF_UPDATE_FLAG_MARK_IN_SYNC
-                | CF_UPDATE_FLAG_PASSTHROUGH_FS_METADATA,
+            dehydrate_range, // with DEHYDRATE and no range: the whole file
+            flags,
             None, // no USN output
             None, // no overlapped
         )
     };
     drop(file);
-    result.context("CfUpdatePlaceholder(new version, dehydrate, verify in sync) failed")?;
-    tracing::debug!(path = %path.display(), size, mtime, "placeholder superseded");
+    result.context("CfUpdatePlaceholder failed")?;
     Ok(())
 }
 

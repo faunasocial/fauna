@@ -102,7 +102,23 @@ pub(crate) fn resolve_relay_hints(relay_hints: Option<&str>) -> Vec<String> {
     }
 }
 
+/// [`DEFAULT_RELAYS`] as owned strings — or, under `test-hooks` **only**, the
+/// comma-separated `FAUNA_TEST_NOSTR_DEFAULT_RELAYS` when it is set: the stand-in
+/// for the public relay network, so an e2e whose user follows someone through
+/// the app (a follow with no relay hints) has the nest subscribe at a fake
+/// relay rather than the real defaults — the `FAUNA_TEST_ATPROTO_FAR_END`
+/// precedent. The dial still runs under [`relay_dial_policy`], so a loopback
+/// fake also needs `FAUNA_TEST_NOSTR_ALLOW_LOOPBACK`.
 fn default_relays_vec() -> Vec<String> {
+    #[cfg(feature = "test-hooks")]
+    if let Ok(list) = std::env::var("FAUNA_TEST_NOSTR_DEFAULT_RELAYS") {
+        return list
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
     DEFAULT_RELAYS.iter().map(|s| s.to_string()).collect()
 }
 

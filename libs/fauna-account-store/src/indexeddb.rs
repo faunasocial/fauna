@@ -77,7 +77,7 @@ use web_sys::{
 use fauna_core::data::ContentHash;
 
 use crate::backend::{
-    ReadSeek, RelayEvicted, RelayScopeMeter, RetiredCompaction, ScopeDropCounts, SegmentScopeMeter,
+    RelayEvicted, RelayScopeMeter, RetiredCompaction, ScopeDropCounts, SegmentScopeMeter,
     SegmentStaging, StoreBackend,
 };
 use crate::physical::{
@@ -87,8 +87,9 @@ use crate::physical::{
 };
 use crate::segments::{AdoptedBlock, SegmentHalf, SegmentKey, SegmentSink};
 use crate::types::{
-    InsertOutcome, IntentDrainer, IntentStatus, IssuedRetire, ItemRef, JournalOp, JournalRow,
-    NewOutboxIntent, OutboxIntent, RecordIndexEntry, RelayRow, StateEntry, WriterId,
+    CustodiedEscrow, CustodiedRecovery, InsertOutcome, IntentDrainer, IntentStatus, IssuedRetire,
+    ItemRef, JournalOp, JournalRow, NewOutboxIntent, OutboxIntent, RecordIndexEntry, RelayRow,
+    StateEntry, WriterId,
 };
 
 /// The IndexedDB schema version. Version 1 is the genesis: every object store
@@ -99,7 +100,11 @@ use crate::types::{
 ///
 /// **2 (2026-10-01):** the retire record's object store ([`RETIRES`]) —
 /// additive: the upgrade creates it and touches nothing else.
-const DB_VERSION: u32 = 2;
+///
+/// **3 (2026-10-09):** the custodied recovery material's three object stores
+/// ([`CUSTODIED_CHAIN`], [`CUSTODIED_SUCCESSION`], [`CUSTODIED_ESCROW`]) —
+/// additive, as version 2 was.
+const DB_VERSION: u32 = 3;
 
 // ── Object stores (the SQLite arm's tables, one to one) ──────────────────────
 const META: &str = "store_meta";
@@ -117,6 +122,13 @@ const OUTBOX: &str = "outbox";
 /// Recreatable: derived from retires already sent; a lost entry delays its
 /// retire at a secondary or leaves a redundant row there (ruling 6).
 const RETIRES: &str = "issued_retires";
+/// A custodied owner's recovery material (`identity-succession.md` § Seed
+/// escrow → *The custodian copy*) — the SQLite arm's three
+/// `custodied_recovery_*` tables, replaced whole in one transaction.
+const CUSTODIED_CHAIN: &str = "custodied_recovery_chain";
+const CUSTODIED_SUCCESSION: &str = "custodied_recovery_succession";
+const CUSTODIED_ESCROW: &str = "custodied_recovery_escrow";
+const CUSTODIED_STORES: &[&str] = &[CUSTODIED_CHAIN, CUSTODIED_SUCCESSION, CUSTODIED_ESCROW];
 
 /// Every store a scope departure reaches (the group plane is not one — the
 /// SQLite arm's departure leaves `group_entries` alone, and the conformance
@@ -177,6 +189,9 @@ const SCHEMA: &[(&str, &[&str], &[IndexSpec])] = &[
         // The order token: rising with every put, so the newest is last.
         &[("ord", &["ord"], true)],
     ),
+    (CUSTODIED_CHAIN, &["ord"], &[]),
+    (CUSTODIED_SUCCESSION, &["ord"], &[]),
+    (CUSTODIED_ESCROW, &["id"], &[]),
 ];
 
 /// Web's store backend: one IndexedDB database + one OPFS segment directory.
@@ -1172,6 +1187,14 @@ fn issued_retire_key(retire: &IssuedRetire) -> JsValue {
     ])
 }
 
+/// Every key of a store keyed by one order-preserving `u64` ([`be`]) — the
+/// custodied recovery stores' whole extent.
+fn every_be_key() -> Result<JsValue> {
+    Ok(IdbKeyRange::lower_bound(&be(0))
+        .map_err(|e| js_error("range", e))?
+        .into())
+}
+
 /// Every key of the retire record's `ord` index at or below `through`.
 fn ord_through(through: u64) -> Result<JsValue> {
     Ok(IdbKeyRange::upper_bound(&be(through))
@@ -1820,6 +1843,83 @@ impl StoreBackend for IndexedDbBackend {
             let held = get_all(&by_ord, &everything, None).await?;
             for stale in held.iter().rev().skip(cap as usize) {
                 delete(&retires, &issued_retire_key(&issued_retire(stale)?.1)).await?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn custodied_recovery(&self) -> Result<CustodiedRecovery> {
+        self.read(CUSTODIED_STORES, |t| async move {
+            let all = every_be_key()?;
+            let chain = get_all(&t.store(CUSTODIED_CHAIN)?, &all, None)
+                .await?
+                .iter()
+                .map(|o| bin_of(o, "record"))
+                .collect::<Result<_>>()?;
+            let successions = get_all(&t.store(CUSTODIED_SUCCESSION)?, &all, None)
+                .await?
+                .iter()
+                .map(|o| bin_of(o, "statement"))
+                .collect::<Result<_>>()?;
+            let escrow = match get(&t.store(CUSTODIED_ESCROW)?, &be(0)).await? {
+                Some(o) => Some(CustodiedEscrow {
+                    blob: bin_of(&o, "blob")?,
+                    updated_at: i64::from_be_bytes(arr_of::<8>(&o, "at")?),
+                    head_seq: be_of(&o, "head")?,
+                }),
+                None => None,
+            };
+            Ok(CustodiedRecovery {
+                chain,
+                successions,
+                escrow,
+            })
+        })
+        .await
+    }
+
+    async fn custodied_recovery_put(&self, material: &CustodiedRecovery) -> Result<()> {
+        if let Some(escrow) = &material.escrow {
+            fits_i64(escrow.head_seq, "custodied head_seq")?;
+        }
+        let material = material.clone();
+        self.write(CUSTODIED_STORES, move |t| async move {
+            let all = every_be_key()?;
+            let chain = t.store(CUSTODIED_CHAIN)?;
+            delete(&chain, &all).await?;
+            for (ord, link) in material.chain.iter().enumerate() {
+                put(
+                    &chain,
+                    &record(&[("ord", Some(be(ord as u64))), ("record", Some(bin(link)))]),
+                )
+                .await?;
+            }
+            let successions = t.store(CUSTODIED_SUCCESSION)?;
+            delete(&successions, &all).await?;
+            for (ord, statement) in material.successions.iter().enumerate() {
+                put(
+                    &successions,
+                    &record(&[
+                        ("ord", Some(be(ord as u64))),
+                        ("statement", Some(bin(statement))),
+                    ]),
+                )
+                .await?;
+            }
+            let escrow_store = t.store(CUSTODIED_ESCROW)?;
+            delete(&escrow_store, &all).await?;
+            if let Some(escrow) = &material.escrow {
+                put(
+                    &escrow_store,
+                    &record(&[
+                        ("id", Some(be(0))),
+                        ("blob", Some(bin(&escrow.blob))),
+                        ("at", Some(bin(&escrow.updated_at.to_be_bytes()))),
+                        ("head", Some(be(escrow.head_seq))),
+                    ]),
+                )
+                .await?;
             }
             Ok(())
         })
@@ -2814,15 +2914,10 @@ impl StoreBackend for IndexedDbBackend {
 /// The web arm's [`SegmentStaging`] slot: the pair's two files in the store's
 /// OPFS directory under [`STAGING_PREFIX`], each written through one open
 /// writable stream a chunk at a time, committed at `close()`, and adopted by
-/// an OPFS rename.
-///
-/// **One gap against the native arm:** [`SegmentStaging::dat_reader`] reads
-/// the staged `.dat` back whole — OPFS offers this arm no synchronous
-/// random-access read outside a worker, and admission's CARv2 reader is
-/// synchronous. The web has no network path into adoption today (the
-/// transfer lives in the native-only sync engine), so the transfer half is
-/// bounded here and the admission half is its own tracked gap
-/// (`message-segment-store.md` § Segment size).
+/// an OPFS rename. Admission reads the staged `.dat` back by range
+/// ([`OpfsDatReader`]) — OPFS offers this arm no synchronous random-access read
+/// outside a worker, and the async read is all admission needs — so, as on the
+/// native arm, a staged segment is never held whole.
 pub struct IndexedDbStaging {
     dir: String,
     dat: StagedOpfsFile,
@@ -2907,7 +3002,21 @@ impl SegmentSink for IndexedDbStaging {
     }
 }
 
+/// A staged `.dat` read by range: the committed file's `File`, each range one
+/// `slice().arrayBuffer()` ([`IndexedDbStaging`]).
+pub struct OpfsDatReader(JsValue);
+
+impl fauna_carv2::ReadAt for OpfsDatReader {
+    async fn read_at(&mut self, offset: u64, max_len: u64) -> std::io::Result<Vec<u8>> {
+        opfs::read_range(&self.0, offset, max_len)
+            .await
+            .map_err(|e| std::io::Error::other(format!("{e:#}")))
+    }
+}
+
 impl SegmentStaging for IndexedDbStaging {
+    type DatReader<'a> = OpfsDatReader;
+
     fn len(&self, half: SegmentHalf) -> u64 {
         match half {
             SegmentHalf::Dat => self.dat.len,
@@ -2920,10 +3029,11 @@ impl SegmentStaging for IndexedDbStaging {
         opfs::read(&self.dir, &self.meta.name).await
     }
 
-    async fn dat_reader(&mut self) -> Result<Box<dyn ReadSeek + '_>> {
+    async fn dat_reader(&mut self) -> Result<Self::DatReader<'_>> {
         self.dat.close().await?;
-        let dat = opfs::read(&self.dir, &self.dat.name).await?;
-        Ok(Box::new(std::io::Cursor::new(dat)))
+        Ok(OpfsDatReader(
+            opfs::snapshot(&self.dir, &self.dat.name).await?,
+        ))
     }
 
     #[cfg(feature = "test-helpers")]
@@ -3045,12 +3155,35 @@ mod opfs {
     }
 
     pub(super) async fn read(dir_name: &str, file: &str) -> Result<Vec<u8>> {
+        let blob = snapshot(dir_name, file).await?;
+        let buffer = call(&blob, "arrayBuffer", &[]).await?;
+        Ok(Uint8Array::new(&buffer).to_vec())
+    }
+
+    /// `file`'s committed contents as a `File` — a blob handle that holds no
+    /// bytes until a range of it is read ([`read_range`]).
+    pub(super) async fn snapshot(dir_name: &str, file: &str) -> Result<JsValue> {
         let dir = dir(dir_name, false)
             .await?
             .context("the store has no segment area")?;
         let handle = call(&dir, "getFileHandle", &[&JsValue::from_str(file)]).await?;
-        let blob = call(&handle, "getFile", &[]).await?;
-        let buffer = call(&blob, "arrayBuffer", &[]).await?;
+        call(&handle, "getFile", &[]).await
+    }
+
+    /// Up to `max_len` bytes of `blob` from `offset` — `slice().arrayBuffer()`,
+    /// so only the range is read: shorter at the end, empty past it.
+    pub(super) async fn read_range(blob: &JsValue, offset: u64, max_len: u64) -> Result<Vec<u8>> {
+        let end = offset.saturating_add(max_len);
+        let range = call(
+            blob,
+            "slice",
+            &[
+                &JsValue::from_f64(offset as f64),
+                &JsValue::from_f64(end as f64),
+            ],
+        )
+        .await?;
+        let buffer = call(&range, "arrayBuffer", &[]).await?;
         Ok(Uint8Array::new(&buffer).to_vec())
     }
 

@@ -197,8 +197,10 @@ public enum ActorScope {
         // keep renewing DNS and polling subscriptions as the previous identity;
         // `completeAuthenticatedLaunch` restarts them against the new `api`, which
         // for the DNS cadence only works because it was stopped here first.
+        #if !FAUNA_KIDS
         DnsAutoRenewCadence.shared.stop()
         SubscriptionsAuthorCadence.shared.stop()
+        #endif
         // Guardian Notify (family-safety.md § Guardian Notify) — drops the
         // pending count batch AND the per-item dedup set, not just the loop:
         // carrying the dedup set across a switch would make the incoming
@@ -216,8 +218,10 @@ public enum ActorScope {
         // the test agent's state serialization, so a survivor reports the departed
         // account's posts as the current one's (e2e-conventions.md § point 11: a
         // wrong answer from the agent reads downstream as a product bug).
+        #if !FAUNA_KIDS
         FeedVM.lastLoadedPosts = []
         FeedVM.revealedMutedPostIds = []
+        #endif
     }
 
     /// The app-owned half of the drop — was a byte-identical per-target twin
@@ -237,6 +241,7 @@ public enum ActorScope {
     /// or model type, unlike ``resetSharedState()``'s siblings' need for a
     /// full SwiftUI `App` — closing the gap `ActorScopeTests.swift`'s own
     /// scope note names for the app-owned half.
+    #if !FAUNA_KIDS
     @MainActor
     public static func dropAppOwnedState<Caches: ActorScopedAppCaches>(
         criticalAlertsHost: CriticalAlertsHost,
@@ -249,10 +254,54 @@ public enum ActorScope {
         appState: Caches,
         newModelContainer: () -> ModelContainer = { PhotoBackupRecord.buildModelContainer(actorIdHex: nil) }
     ) {
+        dropAppOwnedStateInOrder(
+            clearCriticalAlerts: { criticalAlertsHost.clearAll() },
+            conversationsVM: conversationsVM, resetFeed: { feedVM.reset() },
+            eventsVM: eventsVM, devicesVM: devicesVM, screenTime: screenTime,
+            modelContainer: &modelContainer, appState: appState,
+            newModelContainer: newModelContainer)
+    }
+    #else
+    /// The Fauna Kids head: the critical-alerts host and the Feed page's view
+    /// model are planes the kids build compiles out, so there is nothing of
+    /// theirs to drop.
+    @MainActor
+    public static func dropAppOwnedState<Caches: ActorScopedAppCaches>(
+        conversationsVM: ConversationsVM,
+        eventsVM: EventsVM,
+        devicesVM: DevicesMachineVM,
+        screenTime: ScreenTimeStore,
+        modelContainer: inout ModelContainer,
+        appState: Caches,
+        newModelContainer: () -> ModelContainer = { PhotoBackupRecord.buildModelContainer(actorIdHex: nil) }
+    ) {
+        dropAppOwnedStateInOrder(
+            clearCriticalAlerts: {}, conversationsVM: conversationsVM, resetFeed: {},
+            eventsVM: eventsVM, devicesVM: devicesVM, screenTime: screenTime,
+            modelContainer: &modelContainer, appState: appState,
+            newModelContainer: newModelContainer)
+    }
+    #endif
+
+    /// The drop itself, in its one order. Two thin heads above call it because
+    /// the Fauna Kids build has no `CriticalAlertsHost` or `FeedVM` to name,
+    /// and a Swift parameter list cannot carry an `#if`.
+    @MainActor
+    private static func dropAppOwnedStateInOrder<Caches: ActorScopedAppCaches>(
+        clearCriticalAlerts: () -> Void,
+        conversationsVM: ConversationsVM,
+        resetFeed: () -> Void,
+        eventsVM: EventsVM,
+        devicesVM: DevicesMachineVM,
+        screenTime: ScreenTimeStore,
+        modelContainer: inout ModelContainer,
+        appState: Caches,
+        newModelContainer: () -> ModelContainer
+    ) {
         // An alert keyed to the departing identity's DID must not outlive it
         // (critical-alerts.md § Mechanism → *Lifetime*; also stops the sweep loop,
         // `CriticalAlerts::teardown_epoch`).
-        criticalAlertsHost.clearAll()
+        clearCriticalAlerts()
 
         // The PRODUCTION identity-scoped wipe, not the `_for_test` seam (a thin
         // alias for it — `manager.rs::clear_for_test`): the manager is an
@@ -275,7 +324,7 @@ public enum ActorScope {
         // `reset()` names what it drops and why; the headline is that its
         // `configuredSecret` early-return otherwise let a same-actor re-claim keep a
         // manager built on the discarded `APIClient` .
-        feedVM.reset()
+        resetFeed()
 
         // The Events page's view model — app-scene-level `@State` like `feedVM`, so a
         // half-written event outlives leaving the page. Its `reset()` detaches the
@@ -301,7 +350,9 @@ public enum ActorScope {
         // (`web-content-hosting.md` § Published-post management). Reached through the protocol so this one
         // call drops BOTH shells' `webPublish` field, matching
         // `liveModelContainer` below.
+        #if !FAUNA_KIDS
         appState.webPublish.reset()
+        #endif
 
         // Drop the outgoing actor's photo-backup container. A switch's incoming
         // actor gets its own next (`completeAuthenticatedLaunch`); sign-out's
@@ -346,7 +397,9 @@ public protocol ActorScopedAppCaches: AnyObject {
     /// reaches both shells' `WebPublishStore.reset()` through this ONE
     /// protocol, exactly as `liveModelContainer` above does for the
     /// photo-backup slot.
+    #if !FAUNA_KIDS
     var webPublish: WebPublishStore { get }
+    #endif
 }
 
 extension AppState: ActorScopedAppCaches {}

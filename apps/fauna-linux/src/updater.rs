@@ -11,9 +11,10 @@
 //! are the shared `fauna_client::update_look::check_for_newer_release_over_http`.
 //! This module is the asked check's call, the once-per-sign-in look's call ([`look_at_sign_in`], spawned
 //! by `client.rs::check_for_updates`, over the shared
-//! `fauna_client::update_look::look_at_sign_in_over_http`) and the desktop
-//! notification, nothing more. Both reach the feed through the one
-//! [`feed_origin`], and whatever either finds is painted as the
+//! `fauna_client::update_look::look_at_sign_in`, which reads the newest release
+//! the signed-in nest reports and never the feed) and the desktop
+//! notification, nothing more. Only the asked check reaches the feed, through
+//! [`feed_origin`]; whatever either finds is painted as the
 //! `update-available-notice` on Settings → General
 //! (`settings/general.rs::show_update_notice`).
 //!
@@ -60,17 +61,12 @@ pub async fn check_for_update(
     .await
 }
 
-/// The once-per-sign-in look: a newer release's tag, or `None` (nothing newer,
-/// or a failed look — silent by rule). Same feed, same origin seam as
-/// [`check_for_update`].
-pub async fn look_at_sign_in(http: &reqwest::Client) -> Option<String> {
-    fauna_client::update_look::look_at_sign_in_over_http(
-        http,
-        &feed_origin(),
-        &user_agent(),
-        CURRENT_VERSION,
-    )
-    .await
+/// The once-per-sign-in look: the tag of a newer release the nest just signed
+/// in to reports, or `None` (nothing newer, the nest says nothing, or a failed
+/// look — silent by rule). Never the release host: only [`check_for_update`],
+/// the asked check, reads the feed.
+pub async fn look_at_sign_in<R: fauna_protocol::RpcRequester>(nest: &R) -> Option<String> {
+    fauna_client::update_look::look_at_sign_in(nest, CURRENT_VERSION).await
 }
 
 /// Show a desktop notification that an update is available.

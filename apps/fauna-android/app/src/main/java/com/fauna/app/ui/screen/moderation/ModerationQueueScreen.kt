@@ -14,6 +14,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -26,6 +28,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -34,13 +38,16 @@ import com.fauna.app.R
 import com.fauna.app.ui.components.ContentLabelBadge
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.AutomationAttributePack
 import com.fauna.app.ui.util.FaunaGateVerdict
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.ModerationQueueVM
 import com.fauna.ffi.FfiReportLedgerRow
+import com.fauna.ffi.appealFormView
 import com.fauna.ffi.obligationActionLabel
+import com.fauna.ffi.rowIsAppealable
 import com.fauna.ffi.shortId
 import uniffi.fauna_client_moderation.QueueRow
 import uniffi.fauna_core.LocalizedText
@@ -83,6 +90,8 @@ fun ModerationQueueScreen(
     val reports by vm.reports.collectAsState()
     val reportsLoaded by vm.reportsLoaded.collectAsState()
     val reportStatus by vm.reportStatus.collectAsState()
+    val appealDraft by vm.appealDraft.collectAsState()
+    val appealStatus by vm.appealStatus.collectAsState()
 
     ModerationQueueContent(
         queue = queue,
@@ -92,6 +101,12 @@ fun ModerationQueueScreen(
         reportsLoaded = reportsLoaded,
         reportStatus = reportStatus,
         onWithdrawReport = vm::withdrawReport,
+        appealDraft = appealDraft,
+        appealStatus = appealStatus,
+        onOpenAppeal = { row -> vm.openAppeal(row.contentId) },
+        onAppealReasonChange = vm::setAppealReason,
+        onSubmitAppeal = vm::submitAppeal,
+        onCancelAppeal = vm::cancelAppeal,
     )
 }
 
@@ -112,6 +127,13 @@ fun ModerationQueueContent(
     reportsLoaded: Boolean = false,
     reportStatus: LocalizedText? = null,
     onWithdrawReport: (String) -> Unit = {},
+    // The appeal form (defaults keep the queue-only harnesses unchanged).
+    appealDraft: ModerationQueueVM.AppealDraft? = null,
+    appealStatus: LocalizedText? = null,
+    onOpenAppeal: (QueueRow) -> Unit = {},
+    onAppealReasonChange: (String) -> Unit = {},
+    onSubmitAppeal: () -> Unit = {},
+    onCancelAppeal: () -> Unit = {},
 ) {
     // One scrolling page: the enforcement queue, then the reporter's own ledger
     // beneath it (moderation.md § User-initiated reporting → *What the reporter is
@@ -151,9 +173,31 @@ fun ModerationQueueContent(
             Column(modifier = Modifier.fillMaxWidth().testTag(Ids.MODERATION_QUEUE)) {
                 queue.forEach { row ->
                     key(row.contentId) {
-                        ModerationQueueRow(row = row, onCorrect = { onCorrect(row) })
+                        ModerationQueueRow(
+                            row = row,
+                            onCorrect = { onCorrect(row) },
+                            onAppeal = { onOpenAppeal(row) },
+                        )
+                        // The open form paints under the row it was opened against.
+                        if (appealDraft != null && appealDraft.contentId == row.contentId) {
+                            AppealForm(
+                                draft = appealDraft,
+                                onReasonChange = onAppealReasonChange,
+                                onSubmit = onSubmitAppeal,
+                                onCancel = onCancelAppeal,
+                            )
+                        }
                         HorizontalDivider()
                     }
+                }
+                localized(appealStatus)?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                            .testTag(Ids.APPEAL_STATUS),
+                    )
                 }
             }
         }
@@ -233,6 +277,52 @@ private fun ReportLedgerSection(
 }
 
 /**
+ * The open appeal form (moderation.md § Legal takedown — the transparency
+ * triple's second leg). Every decision is the shared
+ * `fauna_client_moderation::appeal` fold ([appealFormView]): the submit control
+ * renders disabled with the fold's stated reason until the reason is typed, and
+ * the summary names the content the appeal is filed against. No offline gate:
+ * `fauna.moderation.appeal` is `OfflineQueued`, which the gate never desensitizes.
+ */
+@Composable
+private fun AppealForm(
+    draft: ModerationQueueVM.AppealDraft,
+    onReasonChange: (String) -> Unit,
+    onSubmit: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    val view = appealFormView(draft.contentId, draft.reason)
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            localized(view.summary).orEmpty(),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedTextField(
+            value = draft.reason,
+            onValueChange = onReasonChange,
+            label = { Text(stringResource(R.string.moderation_appeal_reason_label)) },
+            modifier = Modifier.fillMaxWidth().testTag(Ids.APPEAL_REASON_INPUT),
+        )
+        DisabledControlReasonText(localized(view.blockedReason))
+        Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp)) {
+            OutlinedButton(
+                onClick = onCancel,
+                modifier = Modifier.testTag(Ids.APPEAL_CANCEL_BUTTON),
+            ) { Text(stringResource(R.string.moderation_appeal_cancel)) }
+            OutlinedButton(
+                onClick = onSubmit,
+                enabled = view.canSubmit,
+                modifier = Modifier.testTag(Ids.APPEAL_SUBMIT_BUTTON),
+            ) { Text(localized(view.submitLabel).orEmpty()) }
+        }
+    }
+}
+
+/**
  * One `moderation-queue` row: category badge + enforcement action (server rows only) +
  * content ref + confidence, with a single `train-correction-button` (mirrors linux
  * `build_queue_row`). Branches only on `row.action` being present — a local detection
@@ -240,7 +330,7 @@ private fun ReportLedgerSection(
  * § Don't do these).
  */
 @Composable
-private fun ModerationQueueRow(row: QueueRow, onCorrect: () -> Unit) {
+private fun ModerationQueueRow(row: QueueRow, onCorrect: () -> Unit, onAppeal: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -248,19 +338,34 @@ private fun ModerationQueueRow(row: QueueRow, onCorrect: () -> Unit) {
         verticalAlignment = Alignment.Top,
     ) {
         Column(modifier = Modifier.weight(1f)) {
+            // The enforcement action taken, via the shared discriminant→label map
+            // (co-located with the enum in `fauna_core::obligation`). Server rows
+            // only — a local detection carries none, so its action column stays blank.
+            val actionText = row.action?.let { localized(obligationActionLabel(it)).orEmpty() }
+            val confidence = "${ModerationQueueVM.confidencePercent(row.confidencePerMille)}%"
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // `content-label-badge` — the category, presented entirely through
                 // the shared `content_label_style` map (icon + accent colour + i18n
                 // label) so no styling drifts per client (moderation.md § Where
-                // logic lives, drift #157).
-                ContentLabelBadge(label = row.category)
-                // The enforcement action taken, via the shared discriminant→label map
-                // (co-located with the enum in `fauna_core::obligation`). Server rows
-                // only — a local detection's action column stays blank.
-                row.action?.let { action ->
+                // logic lives, drift #157). It also publishes the confidence and
+                // action this row paints as `confidence` / `action` attributes
+                // (moderation.md § Element IDs → *Queue row facts*), packed into
+                // the node's one string carrier. A local detection packs an
+                // empty `action`, which the bridge reads as not set — packing
+                // even then keeps a bare confidence from answering every name.
+                ContentLabelBadge(
+                    label = row.category,
+                    modifier = Modifier.semantics {
+                        stateDescription = AutomationAttributePack.pack(
+                            "confidence" to confidence,
+                            "action" to actionText.orEmpty(),
+                        )
+                    },
+                )
+                actionText?.let { text ->
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        localized(obligationActionLabel(action)).orEmpty(),
+                        text,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -275,8 +380,7 @@ private fun ModerationQueueRow(row: QueueRow, onCorrect: () -> Unit) {
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                "${ModerationQueueVM.confidencePercent(row.confidencePerMille)}% " +
-                    stringResource(R.string.moderation_confidence),
+                "$confidence " + stringResource(R.string.moderation_confidence),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -311,5 +415,14 @@ private fun ModerationQueueRow(row: QueueRow, onCorrect: () -> Unit) {
             Text(stringResource(R.string.moderation_correct))
         }
         DisabledControlReasonText(gate.reason)
+        // The appeal handle: nest-issued (server) rows only, per the shared
+        // `row_is_appealable` rule — a local detection records nobody's decision,
+        // so its lever is the correction button above.
+        if (rowIsAppealable(row)) {
+            TextButton(
+                onClick = onAppeal,
+                modifier = Modifier.testTag(Ids.APPEAL_BUTTON),
+            ) { Text(stringResource(R.string.moderation_appeal)) }
+        }
     }
 }

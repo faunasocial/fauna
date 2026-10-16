@@ -20,6 +20,7 @@
     accountDisplayLabel,
     parseCountI64,
     devicePlaceLabel,
+    accountEnrolledDeviceRow,
   } from '$lib/wasm';
   import {
     conflictBadgeLabel,
@@ -35,6 +36,8 @@
     normalizeAudience,
     websiteServeHint,
     writerGrantReach,
+    folderLeaseStatus,
+    folderIsPublicUnverified,
     residencyOptions,
     residencyHint,
     normalizeResidency,
@@ -48,6 +51,7 @@
   import { getConversationsManager } from '$lib/conversations';
   import { sessionDevicesMachine } from '$lib/devices-session';
   import { parseRecipient } from '$lib/resolve';
+  import { refusedAsNotReady } from '$lib/wasm';
   import {
     defaultConflictPolicyGet,
     defaultConflictPolicySet,
@@ -66,6 +70,7 @@
   import { resolveLocalized, resolveLocalizedNested } from '$lib/i18n/localized';
   import { onMount, onDestroy } from 'svelte';
   import { onStoreChange } from '$lib/store-change';
+  import { registerActorScopedReset, sameActorSince } from '$lib/actorScope';
   import { t } from '$lib/i18n/strings';
   import { byteSize } from '$lib/value-format';
   import { getDeviceId } from '$lib/device-id';
@@ -94,6 +99,14 @@
   let snap = $state<DevicesSnapshot | null>(null);
   let ready = $state(false);
   let timer: ReturnType<typeof setInterval> | null = null;
+  // The 15 s poll writes this actor's rows, so the canonical drop retires it
+  // (`account-scoping.md` § The scoping taxonomy: background loops die with the
+  // state they write); it must not outlive an in-place identity change.
+  function stopTimer(): void {
+    if (timer) clearInterval(timer);
+    timer = null;
+  }
+  const unregisterActorReset = registerActorScopedReset(stopTimer);
   let unsubPush: (() => void) | null = null;
   let unlisten: (() => void) | null = null;
 
@@ -149,14 +162,36 @@
   // page-level "Sync defaults" section, `sync-default-conflict-policy-select`)
   // — file-sync.md § Conflicts, policy. `null` (absent preference) renders as
   // the column default "auto". A failed read degrades to "auto" (the same
-  // outcome as no preference) rather than blocking the section.
+  // outcome as no preference) rather than blocking the section — except the
+  // first-listing gate's refusal (`common.needs_nest` / `common.needs_other_device`),
+  // which says why on `error-message` (account-client-lifecycle.md § The first
+  // listing, clauses (4) and (5)).
   let defaultConflictPolicy = $state('auto');
 
   async function loadDefaultConflictPolicy(secretHex: string): Promise<void> {
     try {
       defaultConflictPolicy = (await defaultConflictPolicyGet(secretHex)) ?? 'auto';
-    } catch {
+    } catch (e: unknown) {
       defaultConflictPolicy = 'auto';
+      const reason = e instanceof Error ? e.message : String(e);
+      if (refusedAsNotReady(reason)) error = reason;
+    }
+  }
+  /** Bumped by every pick of the select, so a store-change re-read that a
+   *  pick overtook paints nothing. */
+  let defaultConflictPolicyPicks = 0;
+
+  // The store-change re-read (`$lib/store-change`): the same read, level-shaped
+  // — a failed or overtaken re-read keeps the painted policy (the visit's own
+  // load degrades a failure to "auto"; a notice must never repaint on a
+  // failure).
+  async function rereadDefaultConflictPolicy(secretHex: string): Promise<void> {
+    const picks = defaultConflictPolicyPicks;
+    try {
+      const policy = (await defaultConflictPolicyGet(secretHex)) ?? 'auto';
+      if (picks === defaultConflictPolicyPicks && policy !== defaultConflictPolicy) defaultConflictPolicy = policy;
+    } catch {
+      // The select on screen stands; the next notice or visit reads again.
     }
   }
 
@@ -391,6 +426,7 @@
   }
 
   onMount(async () => {
+    const sameActor = sameActorSince();
     const id = $identity;
     if (!id) {
       ready = true;
@@ -401,6 +437,7 @@
       // The session's ONE machine, shared with the Devices section and wired
       // once (`devices-session.ts` says why it must outlive this mount — the
       // followed rows' last-read memory and the refresh barrier).
+      enrolledRow = await accountEnrolledDeviceRow();
       const session = await sessionDevicesMachine(id.secretHex, () => applySnapshot());
       machine = session.machine;
       unlisten = session.unlisten;
@@ -413,10 +450,14 @@
       void loadDefaultConflictPolicy(id.secretHex);
       void loadOwnTiers(id.secretHex);
       void loadPendingShares();
-      timer = setInterval(() => {
-        machine?.refresh();
-        void loadPendingShares();
-      }, 15000);
+      // An identity change landing during the awaits above already ran the drop;
+      // starting the poll now would resurrect the outgoing actor's loop.
+      if (sameActor()) {
+        timer = setInterval(() => {
+          machine?.refresh();
+          void loadPendingShares();
+        }, 15000);
+      }
       // Remote-change nudge (file-sync.md § Remote-change nudge): the nest
       // fires `fauna.sync.changed` at every same-nest participant of a set
       // (owner's other devices, or a shared-set member) after a durable sync
@@ -450,15 +491,18 @@
 
   // The store-change notice (`$lib/store-change`): the followed folders and
   // foreign sets rest in the account store, so the open page runs the periodic
-  // re-read's own body at once. The default conflict policy is NOT joined: a
-  // failed re-read resets that select to "auto".
+  // re-read's own body at once; the default conflict policy (a sync-prefs
+  // state entry) re-reads too, keeping its painted value on a failure.
   const unsubStoreChange = onStoreChange(() => {
     machine?.refresh();
     void loadPendingShares();
+    const id = $identity;
+    if (id) void rereadDefaultConflictPolicy(id.secretHex);
   });
 
   onDestroy(() => {
-    if (timer) clearInterval(timer);
+    stopTimer();
+    unregisterActorReset();
     unsubPush?.();
     unsubStoreChange();
     unlisten?.();
@@ -565,6 +609,54 @@
     applySnapshot();
   }
 
+  // The row `device-this-mark-badge` marks (`ui/devices.md` § This-device
+  // marker) — what `folder-lease-status` calls "this device". The enrolled row
+  // once latched, else the id this browser's enrollment targets; the rule is
+  // the Devices section's, read here so a lock on this browser reads "this
+  // device" and not another device's label.
+  let enrolledRow = $state<string | null>(null);
+  const thisDeviceRow = $derived.by(() => {
+    if (enrolledRow) return enrolledRow;
+    const actorId = $identity?.actorId;
+    if (!actorId) return null;
+    try {
+      return getDeviceId(actorId);
+    } catch {
+      return null;
+    }
+  });
+
+  // The `folder-lease-status` line, resolved in shared Rust — read off the
+  // snapshot, never probed (asking for the lease takes it).
+  function leaseLine(fs: FolderSummary): string {
+    const text = folderLeaseStatus(fs, snap?.devices ?? [], thisDeviceRow);
+    return text ? resolveLocalized(text) : '';
+  }
+
+  // `folder-audience-unattested` / `folder-audience-reconfirm-button`: a folder
+  // public on the nest's say-so whose owner attestation this seat cannot verify.
+  // The verdict is the shared predicate — never re-derived from the signature
+  // here. Owner rows only; the member projection never carries the attestation.
+  function audienceUnattested(fs: FolderSummary): boolean {
+    const actorId = $identity?.actorId;
+    return !!actorId && folderIsPublicUnverified(fs, actorId);
+  }
+
+  // The re-confirm button ARMS `folder-audience-public-confirm` exactly as
+  // picking Public on the select does — it commits nothing itself.
+  function onReconfirmAudience(name: string): void {
+    void changeAudience(name, 'public');
+  }
+
+  // `folder-exclusive-editing-toggle`: NON-optimistic — the checkbox paints the
+  // nest's `exclusive_editing`, repainted from the refreshed snapshot, so a
+  // refused write never leaves it showing a state the folder does not have.
+  async function changeExclusiveEditing(name: string, on: boolean): Promise<void> {
+    if (!machine) return;
+    await machine.setFolderExclusiveEditing(name, on);
+    applySnapshot();
+  }
+
   async function changeWebsite(name: string, enabled: boolean): Promise<void> {
     if (!machine) return;
     await machine.setFolderWebsiteEnabled(name, enabled);
@@ -661,6 +753,7 @@
   async function changeDefaultConflictPolicy(policy: string): Promise<void> {
     const id = $identity;
     if (!id) return;
+    defaultConflictPolicyPicks += 1;
     try {
       defaultConflictPolicy = (await defaultConflictPolicySet(id.secretHex, policy)) ?? 'auto';
     } catch (e: unknown) {
@@ -987,11 +1080,14 @@
     }
   }
 
-  async function saveSelectivePaths(name: string): Promise<void> {
+  async function saveSelectivePaths(fs: FolderSummary): Promise<void> {
     if (!machine) return;
+    const name = fs.name;
     savingPaths = true;
-    const include = parsePathsField(editIncludePaths);
-    const exclude = parsePathsField(editExcludePaths);
+    // A list this device could not open is sent as `null` ("leave unchanged"),
+    // never as the blank the editor no longer shows.
+    const include = fs.include_paths_unreadable ? null : parsePathsField(editIncludePaths);
+    const exclude = fs.exclude_paths_unreadable ? null : parsePathsField(editExcludePaths);
     await machine.setFolderPaths(name, include, exclude);
     // Collapse so the next expand reads back the nest-authoritative, stored
     // paths from the refreshed snapshot (proves the round-trip).
@@ -1201,8 +1297,8 @@
     <div class="overlay" role="dialog">
       <div class="dialog">
         <h3>{t.devices.declassify_title}</h3>
-        <p>{t.devices.declassify_body}</p>
-        <p>{t.devices.declassify_irreversible}</p>
+        <p data-testid={IDS.FOLDER_AUDIENCE_PUBLIC_NAMES_WARNING}>{t.devices.declassify_body}</p>
+        <p data-testid={IDS.FOLDER_AUDIENCE_PUBLIC_RESEAL_WARNING}>{t.devices.declassify_irreversible}</p>
         <div class="dialog-actions">
           <button
             class="btn btn-danger"
@@ -1377,6 +1473,12 @@
                     >{t.devices.shared_badge({ count: String(sharedMembers(fs.name).length) })}</span
                   >
                 {/if}
+                <!-- The writable-right-now line rides the row HEADER on owner AND
+                     member rows (a reader has no body to expand and most needs to
+                     see the lock); present only while the folder is governed. -->
+                {#if leaseLine(fs)}
+                  <span class="badge" data-testid={IDS.FOLDER_LEASE_STATUS}>{leaseLine(fs)}</span>
+                {/if}
               </td>
               <td class="num">{members(fs.name).length}</td>
               <td class="num">{fs.cached_snapshot_count ?? 0}</td>
@@ -1390,7 +1492,7 @@
                       <!-- Phase 4 slice 4d — audience + website serving. Both render on
                            ANY folder: a folder has no type since slice e, and the
                            website toggle is what restores website-folder creation. -->
-                      <label class="fs-select" title={t.devices.folder_audience_hint}>
+                      <label class="fs-select">
                         <strong>{t.devices.folder_audience}:</strong>
                         <select
                           data-testid={IDS.FOLDER_AUDIENCE_SELECT}
@@ -1403,17 +1505,35 @@
                             </option>
                           {/each}
                         </select>
-                        {#if fs.mls_group_id}
-                          <!-- The shared (bound, current) hint: while the bound folder
-                               is public it explains the one exit its picker offers —
-                               picking Shared re-seals it for its members. -->
-                          <span class="fs-webdav-needs-mail">
-                            {resolveLocalized(
-                              audienceHint(true, normalizeAudience(fs.audience ?? '', true)),
-                            )}
-                          </span>
-                        {/if}
+                        <!-- The hint rides the same (bound, current) inputs as the option
+                             set: a shared folder says sharing is edited below, a shared
+                             folder currently public explains the one exit its picker
+                             offers, an unbound one says what the choices mean. -->
+                        <span class="fs-webdav-needs-mail" data-testid={IDS.FOLDER_AUDIENCE_HINT}>
+                          {resolveLocalized(
+                            audienceHint(
+                              !!fs.mls_group_id,
+                              normalizeAudience(fs.audience ?? '', !!fs.mls_group_id),
+                            ),
+                          )}
+                        </span>
                       </label>
+                      {#if audienceUnattested(fs)}
+                        <!-- A public folder this seat cannot verify rests sealed here until
+                             the owner re-confirms. The button is hidden while the confirm
+                             is armed, like tui's. -->
+                        <span class="fs-webdav-needs-mail" data-testid={IDS.FOLDER_AUDIENCE_UNATTESTED}>
+                          {t.devices.folder_audience_unattested}
+                        </span>
+                        {#if pendingPublicFs !== fs.name}
+                          <button
+                            class="btn"
+                            data-testid={IDS.FOLDER_AUDIENCE_RECONFIRM_BUTTON}
+                            onclick={() => onReconfirmAudience(fs.name)}
+                            >{t.devices.folder_audience_reconfirm}</button
+                          >
+                        {/if}
+                      {/if}
                       <label class="fs-webdav">
                         <input
                           type="checkbox"
@@ -1426,7 +1546,7 @@
                              address OFF / address unknown. Never a hand-rolled two-state
                              if-else — the degrade direction is load-bearing, since
                              unknown must not claim the site is live. -->
-                        <span class="fs-webdav-needs-mail">
+                        <span class="fs-webdav-needs-mail" data-testid={IDS.FOLDER_WEBSITE_HINT}>
                           {resolveLocalized(
                             websiteServeHint(
                               normalizeAudience(fs.audience ?? '', !!fs.mls_group_id),
@@ -1435,6 +1555,16 @@
                             ),
                           )}
                         </span>
+                      </label>
+                      <label class="fs-webdav">
+                        <input
+                          type="checkbox"
+                          data-testid={IDS.FOLDER_EXCLUSIVE_EDITING_TOGGLE}
+                          data-checked={fs.exclusive_editing ? 'true' : 'false'}
+                          checked={fs.exclusive_editing ?? false}
+                          onchange={(e) => changeExclusiveEditing(fs.name, e.currentTarget.checked)}
+                        />
+                        <strong>{t.devices.folder_exclusive_editing}</strong>
                       </label>
                       <!-- The per-row scan-frequency select that used to sit
                            here retired with phase 5: the cadence is a constant,
@@ -1709,17 +1839,25 @@
                     <div class="selective-sync">
                       <label class="field">
                         <span>{t.devices.include_paths}</span>
-                        <input type="text" data-testid={IDS.FOLDER_INCLUDE_PATHS} bind:value={editIncludePaths} placeholder={t.devices.paths_placeholder} />
+                        {#if fs.include_paths_unreadable}
+                          <span data-testid={IDS.FOLDER_INCLUDE_PATHS}>{t.devices.paths_unavailable}</span>
+                        {:else}
+                          <input type="text" data-testid={IDS.FOLDER_INCLUDE_PATHS} bind:value={editIncludePaths} placeholder={t.devices.paths_placeholder} />
+                        {/if}
                       </label>
                       <label class="field">
                         <span>{t.devices.exclude_paths}</span>
-                        <input type="text" data-testid={IDS.FOLDER_EXCLUDE_PATHS} bind:value={editExcludePaths} placeholder={t.devices.exclude_placeholder} />
+                        {#if fs.exclude_paths_unreadable}
+                          <span data-testid={IDS.FOLDER_EXCLUDE_PATHS}>{t.devices.paths_unavailable}</span>
+                        {:else}
+                          <input type="text" data-testid={IDS.FOLDER_EXCLUDE_PATHS} bind:value={editExcludePaths} placeholder={t.devices.exclude_placeholder} />
+                        {/if}
                       </label>
                       <button
                         class="btn btn-small btn-primary"
                         data-testid={IDS.FOLDER_SAVE_PATHS}
                         disabled={savingPaths}
-                        onclick={() => saveSelectivePaths(fs.name)}
+                        onclick={() => saveSelectivePaths(fs)}
                       >{savingPaths ? t.common.saving : t.devices.save_paths}</button>
                     </div>
 

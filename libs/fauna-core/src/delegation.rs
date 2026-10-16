@@ -574,6 +574,25 @@ pub fn option_label(option: &PinOption, labels: &HashMap<String, String>) -> Loc
     }
 }
 
+/// The stable cross-app key of one assignment-picker option — `"automatic"` /
+/// `"this-device"` / a participant's hex (a device's id verbatim, a nest's
+/// actor pubkey via [`crate::format::hex_full`]). It backs the picker's option
+/// value, which the e2e driver selects by and reads back, so every app must
+/// derive the same string (priority #2: one shared decision). A participant
+/// kind a newer build names yields the empty string — no option the picker
+/// offers can carry it.
+pub fn option_key(option: &PinOption) -> String {
+    match option {
+        PinOption::Automatic => "automatic".to_string(),
+        PinOption::ThisDevice => "this-device".to_string(),
+        PinOption::Other { who } => match who {
+            ParticipantRef::Device { device_id } => device_id.clone(),
+            ParticipantRef::Nest { actor_pubkey } => crate::format::hex_full(actor_pubkey),
+            ParticipantRef::Unknown(_) => String::new(),
+        },
+    }
+}
+
 /// One row of the Task-delegation surface (ui.yaml `task-delegation-kind-item`):
 /// a heavy task kind, its localizable display name, the current runner, and the
 /// user's assignment together with the options the picker may offer.
@@ -736,6 +755,24 @@ mod tests {
     use crate::data::TaskAssignment;
 
     const KIND: &str = "backup-upload";
+
+    #[test]
+    fn option_key_pins_the_three_cross_app_shapes() {
+        assert_eq!(option_key(&PinOption::Automatic), "automatic");
+        assert_eq!(option_key(&PinOption::ThisDevice), "this-device");
+        let device = PinOption::Other {
+            who: ParticipantRef::Device {
+                device_id: "ab12cd".to_string(),
+            },
+        };
+        assert_eq!(option_key(&device), "ab12cd");
+        let nest = PinOption::Other {
+            who: ParticipantRef::Nest {
+                actor_pubkey: [0xab; 32],
+            },
+        };
+        assert_eq!(option_key(&nest), "ab".repeat(32));
+    }
 
     fn nest(pubkey: u8, holds_grant: bool) -> ParticipantDescriptor {
         ParticipantDescriptor {

@@ -69,8 +69,9 @@ pub const SAMPLE_INTERVAL: Duration = Duration::from_millis(CUE_SAMPLE_INTERVAL_
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CueSubject {
     pub post_id: String,
-    /// The post's `has_media`, from the same snapshot row the card was built
-    /// from. Stamped once per exposure by the tracker.
+    /// The post's `plays_media` (never `has_media` — a still image is a
+    /// non-media post), from the same snapshot row the card was built from.
+    /// The tracker keeps the latest visible sample's reading.
     pub is_media: bool,
 }
 
@@ -101,6 +102,13 @@ impl CueCapture {
         self.mono_epoch.elapsed().as_millis() as u64
     }
 
+    /// The wall clock this capture stamps finished exposures with — the one
+    /// the engine's fast-scroll gate reads (`observed_at_ms`). A frozen
+    /// tracker substitutes its own reading (§ *The test clock*).
+    pub fn wall_now_ms(&self) -> u64 {
+        fauna_core::data::Timestamp::now_millis_or_zero()
+    }
+
     /// Whether the post list was on screen at the last sample — the tick's
     /// gate, so an idle terminal on any other page is never woken for it.
     pub fn showing(&self) -> bool {
@@ -127,8 +135,9 @@ impl CueCapture {
         self.showing = true;
         let (top, bottom) = page.band();
         let mono_now_ms = self.mono_now_ms();
+        let rows = card_rows(page);
         self.tracker.sample(
-            &card_rows(page),
+            &rows,
             window_post_ids,
             top as f64,
             bottom as f64,
@@ -141,6 +150,39 @@ impl CueCapture {
     pub fn drain(&mut self, wall_now_ms: u64) -> Vec<CueObservation> {
         self.showing = false;
         self.tracker.drain_all(wall_now_ms)
+    }
+}
+
+/// # The test clock
+///
+/// The frozen engagement-cue clock lives on the shared tracker
+/// (`fauna_feed::CueTracker`, § *The test clock*), so every capture shell
+/// freezes, advances and probes the same way; these are tui's thin doors onto
+/// it. Each advance lands on the draw after it, which tui's loop gives every
+/// agent request. The freeze lives on this capture's tracker, so a re-auth
+/// (which rebuilds it) thaws it.
+#[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+impl CueCapture {
+    /// Freeze both clocks at their current real readings. Idempotent.
+    pub fn freeze_clock_for_test(&mut self) {
+        let (mono, wall) = (self.mono_now_ms(), self.wall_now_ms());
+        self.tracker.freeze_clock_for_test(mono, wall);
+    }
+
+    /// Move both frozen clocks forward by `ms` (at most one sample's credit
+    /// cap; refused when nothing is frozen).
+    pub fn advance_clock_for_test(&mut self, ms: u64) -> Result<(), String> {
+        self.tracker.advance_clock_for_test(ms)
+    }
+
+    /// Back to the real clocks.
+    pub fn thaw_clock_for_test(&mut self) {
+        self.tracker.thaw_clock_for_test();
+    }
+
+    /// The shared probe (`fauna_feed::CueProbe`), in the page's line space.
+    pub fn probe_for_test(&self) -> serde_json::Value {
+        serde_json::to_value(self.tracker.probe_for_test()).unwrap_or(serde_json::Value::Null)
     }
 }
 
@@ -216,10 +258,11 @@ pub fn sample_frame(app: &mut App, page: &PaintedPage, tx: &UnboundedSender<UiMe
             .map(|p| p.post_id.clone())
             .collect()
     });
-    let finished = app.feed.cue_capture.sample(
-        window.as_deref().map(|ids| (page, ids)),
-        fauna_core::data::Timestamp::now_millis_or_zero(),
-    );
+    let wall_now_ms = app.feed.cue_capture.wall_now_ms();
+    let finished = app
+        .feed
+        .cue_capture
+        .sample(window.as_deref().map(|ids| (page, ids)), wall_now_ms);
     emit(&manager, finished, tx, app.session_generation);
 }
 
@@ -260,10 +303,8 @@ pub async fn flush_on_quit(app: &mut App, budget: Duration) {
     let Some(manager) = app.feed.manager.clone() else {
         return;
     };
-    let finished = app
-        .feed
-        .cue_capture
-        .drain(fauna_core::data::Timestamp::now_millis_or_zero());
+    let wall_now_ms = app.feed.cue_capture.wall_now_ms();
+    let finished = app.feed.cue_capture.drain(wall_now_ms);
     let _ = tokio::time::timeout(budget, async {
         for observation in finished {
             if manager.record_observation(observation).await.is_err() {
@@ -367,6 +408,35 @@ mod tests {
             aa.dwell_ms_at_long_visibility >= CUE_DWELL_LONG_MS,
             "{aa:?}"
         );
+    }
+
+    /// The test clock, through tui's doors: frozen, a card accrues exactly
+    /// the time the test advanced while it was in view, and the probe reads
+    /// the painted band in line space. (The clock's own semantics — the
+    /// frozen wall stamp, the refusals — are the shared tracker's tests.)
+    #[test]
+    fn a_frozen_clock_credits_exactly_what_the_test_advanced() {
+        use fauna_feed::ExposureEnd;
+        let window = vec!["aa".to_string(), "bb".to_string()];
+        let mut capture = CueCapture::default();
+        capture.freeze_clock_for_test();
+        let shown = PaintedPage::for_test(two_cards(), 0, 4);
+        // Several samples with no advance: in view, credited nothing.
+        for _ in 0..3 {
+            capture.sample(Some((&shown, &window)), capture.wall_now_ms());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        capture.advance_clock_for_test(600).unwrap();
+        capture.sample(Some((&shown, &window)), capture.wall_now_ms());
+        let probe = capture.probe_for_test();
+        assert_eq!(probe["tracked"], serde_json::json!(["aa"]), "{probe}");
+        assert_eq!(probe["band"], serde_json::json!([0.0, 4.0]), "{probe}");
+        // Scroll "aa" out of the band.
+        let scrolled = PaintedPage::for_test(two_cards(), 4, 4);
+        let left = capture.sample(Some((&scrolled, &window)), capture.wall_now_ms());
+        let aa = left.iter().find(|o| o.content_id == "aa").expect("aa left");
+        assert_eq!(aa.dwell_ms_at_skip_visibility, 600, "{aa:?}");
+        assert_eq!(aa.ended_by, ExposureEnd::ScrolledPast);
     }
 
     /// Leaving the list drains what is tracked exactly once; a second

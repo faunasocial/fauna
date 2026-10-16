@@ -43,6 +43,8 @@ pub mod gate_impl;
 // inject) — native-only: the wasm leg's trigger is web's own chokepoint.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod launcher;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod nest_transport;
 pub mod orchestration;
 mod seal;
 pub mod store;
@@ -59,6 +61,8 @@ pub use gate_impl::{BackendCatchUp, BackendChannelSend, FaunaCommitGate, MlsSync
 // tokio trigger to configure, so it has no `SuccessionReseal` to re-export.
 #[cfg(not(target_arch = "wasm32"))]
 pub use launcher::SuccessionReseal;
+#[cfg(not(target_arch = "wasm32"))]
+pub use nest_transport::NestMlsReplicaTransport;
 pub use orchestration::{
     ReplicaSnapshot, RestoreRetryEnd, SaveReplicaError, bind_restored_slice, restore_and_wire,
     restore_and_wire_with_retry, save_snapshot, snapshot_replica,
@@ -66,7 +70,8 @@ pub use orchestration::{
 pub use seal::{ReplicaSealError, backup_key_from_seed, seal_replica, unseal_replica};
 pub use store::{
     MlsReplicaClient, MlsReplicaClientError, MlsReplicaTransport, MlsTransportError, PATH_PROVIDER,
-    PutOutcome, history_path, rpc_transport_get, rpc_transport_get_hash, rpc_transport_put,
+    PutOutcome, history_path, retired_provider_path, rpc_transport_get, rpc_transport_get_hash,
+    rpc_transport_put,
 };
 pub use succession::{ReplicaResealOutcome, ReplicaResealProgress};
 pub use sync::{AdoptedChannel, LoadedReplica, MlsStateSync};

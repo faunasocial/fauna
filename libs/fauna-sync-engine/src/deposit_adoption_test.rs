@@ -12,7 +12,7 @@ use fauna_core::format::FormatRegistry;
 use fauna_core::identity::ActorKeypair;
 use fauna_core::secret::SecretArray32;
 use fauna_nest_http::{BearerSource, StaticBearer};
-use fauna_protocol::folders::{DepositEnvelope, ParkedDeposit};
+use fauna_protocol::folders::{DepositEnvelope, DepositPart, ParkedDeposit};
 use wiremock::MockServer;
 
 use crate::adaptive::AdaptiveConcurrency;
@@ -77,19 +77,59 @@ fn envelope(name: &str, body: &[u8]) -> Vec<u8> {
         name: name.into(),
         content_type: "text/plain".into(),
         body: body.to_vec().into(),
+        parts: 0,
         extra: Default::default(),
     })
     .unwrap()
     .to_vec()
 }
 
-/// Sealed as the nest's door seals it: X-Wing to the owner's standing key.
-fn sealed_hybrid(msek: &[u8; 32], name: &str, body: &[u8]) -> Vec<u8> {
+/// Seal any plaintext as the nest's door seals it: X-Wing to the owner's
+/// standing key.
+fn seal_xwing(msek: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
     let kp = fauna_mls::wrapped_blob::derive_recipient_xwing_keypair(msek);
-    fauna_mls::wrapped_blob::seal_to_recipient_xwing(&envelope(name, body), &kp.public)
+    fauna_mls::wrapped_blob::seal_to_recipient_xwing(plaintext, &kp.public)
         .unwrap()
         .to_canonical_bytes()
         .unwrap()
+}
+
+fn sealed_hybrid(msek: &[u8; 32], name: &str, body: &[u8]) -> Vec<u8> {
+    seal_xwing(msek, &envelope(name, body))
+}
+
+/// A larger item as the staged upload parks it: a header naming the part
+/// count, and each part sealed on its own with its index inside the seal.
+fn park_parts(control: &FakeSyncControl, id: i64, name: &str, parts: &[&[u8]]) {
+    let header = fauna_protocol::encode_canonical(&DepositEnvelope {
+        name: name.into(),
+        content_type: "application/octet-stream".into(),
+        body: Vec::new().into(),
+        parts: u32::try_from(parts.len()).unwrap(),
+        extra: Default::default(),
+    })
+    .unwrap();
+    control.park_deposit(FOLDER, parked(id, seal_xwing(&MSEK, &header)));
+    for (i, body) in parts.iter().enumerate() {
+        park_part(
+            control,
+            id,
+            u32::try_from(i).unwrap(),
+            u32::try_from(i).unwrap(),
+            body,
+        );
+    }
+}
+
+/// Park part `slot` of item `id`, sealed as part `sealed_index`.
+fn park_part(control: &FakeSyncControl, id: i64, slot: u32, sealed_index: u32, body: &[u8]) {
+    let part = fauna_protocol::encode_canonical(&DepositPart {
+        index: sealed_index,
+        body: body.to_vec().into(),
+        extra: Default::default(),
+    })
+    .unwrap();
+    control.park_deposit_part(id, slot, seal_xwing(&MSEK, &part));
 }
 
 /// The classical degrade the door falls back to when the X-Wing seal fails.
@@ -182,6 +222,7 @@ async fn a_parked_deposit_lands_and_retires_once_its_row_is_durable() {
         second,
         DepositAdoption {
             already_landed: 1,
+            landed: vec!["note.txt".to_string()],
             ..Default::default()
         }
     );
@@ -271,6 +312,59 @@ async fn an_unopenable_item_stays_parked() {
     assert!(!keyless.watch.path().join("x.txt").exists());
 }
 
+/// An item larger than one message lands as its parts concatenated in index
+/// order, and its retire takes the parts with it.
+#[tokio::test]
+async fn a_multi_part_item_lands_its_parts_in_order() {
+    let s = seat(vec![MSEK]).await;
+    park_parts(
+        &s.control,
+        3,
+        "scan.bin",
+        &[b"first-", b"second-", b"third"],
+    );
+    s.engine.adopt_deposits().await.unwrap();
+    assert_eq!(
+        std::fs::read(s.watch.path().join("scan.bin")).unwrap(),
+        b"first-second-third"
+    );
+    s.engine
+        .mark_hydrated("scan.bin", ContentHash::of_raw(b"first-second-third"))
+        .unwrap();
+    assert_eq!(s.engine.adopt_deposits().await.unwrap().already_landed, 1);
+    assert!(s.control.parked_ids(FOLDER).is_empty());
+}
+
+/// A part whose sealed index is not its place — swapped at rest — refuses
+/// the item: nothing lands, it stays parked.
+#[tokio::test]
+async fn a_part_out_of_its_place_leaves_the_item_parked() {
+    let s = seat(vec![MSEK]).await;
+    let header = fauna_protocol::encode_canonical(&DepositEnvelope {
+        name: "scan.bin".into(),
+        parts: 2,
+        ..Default::default()
+    })
+    .unwrap();
+    s.control
+        .park_deposit(FOLDER, parked(5, seal_xwing(&MSEK, &header)));
+    park_part(&s.control, 5, 0, 1, b"b");
+    park_part(&s.control, 5, 1, 0, b"a");
+    let done = s.engine.adopt_deposits().await.unwrap();
+    assert_eq!(done.deferred, 1);
+    assert!(!s.watch.path().join("scan.bin").exists());
+    assert_eq!(s.control.parked_ids(FOLDER), vec![5]);
+    let stages: Vec<_> = std::fs::read_dir(s.watch.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n.to_string_lossy().starts_with(".fauna-deposit-"))
+        .collect();
+    assert!(
+        stages.is_empty(),
+        "the refused item's staged parts leave no temp file behind: {stages:?}"
+    );
+}
+
 /// An engine no inbox armed — a member's, a cross-nest set's — never even
 /// lists.
 #[tokio::test]
@@ -285,4 +379,67 @@ async fn an_unarmed_engine_never_lists() {
         DepositAdoption::default()
     );
     assert!(control.calls().is_empty());
+}
+
+/// **An on-demand root adopts too** — the linux FUSE root's off-disk posture,
+/// where a placeholder is a row and never a file on the disk. A cloud-only file
+/// holding the item's name is a taken name, never a free one: the item lands
+/// beside it under its deposit variant, the placeholder row is left as it was,
+/// and once the item's row is durable the pass retires it and names the path
+/// the root flips in-sync.
+#[tokio::test]
+async fn an_on_demand_root_lands_the_item_beside_a_placeholder_holding_its_name() {
+    let s = seat(vec![MSEK]).await;
+    s.engine.set_placeholders_off_disk();
+    // The fold's cloud-only row for the user's own report — no bytes here.
+    let theirs = ContentHash::of_raw(b"the user's own report");
+    s.engine
+        .db()
+        .upsert_entry(
+            "report.pdf",
+            None,
+            None,
+            Some(theirs),
+            crate::db::SyncState::Placeholder,
+            0,
+            1_700_000_000,
+            21,
+            1,
+            None,
+        )
+        .unwrap();
+    s.control
+        .park_deposit(FOLDER, parked(17, sealed_hybrid(&MSEK, "report.pdf", BODY)));
+
+    let first = s.engine.adopt_deposits().await.unwrap();
+    assert_eq!(first.deferred, 1, "not durable yet, not retired");
+    assert!(
+        !s.watch.path().join("report.pdf").exists(),
+        "the placeholder stays a row: nothing is written over the user's file"
+    );
+    assert_eq!(
+        s.engine
+            .db()
+            .get_entry("report.pdf")
+            .unwrap()
+            .unwrap()
+            .state,
+        crate::db::SyncState::Placeholder
+    );
+    let variant = "report (deposit 17).pdf";
+    assert_eq!(std::fs::read(s.watch.path().join(variant)).unwrap(), BODY);
+
+    s.engine
+        .mark_hydrated(variant, ContentHash::of_raw(BODY))
+        .unwrap();
+    let second = s.engine.adopt_deposits().await.unwrap();
+    assert_eq!(
+        second,
+        DepositAdoption {
+            already_landed: 1,
+            landed: vec![variant.to_string()],
+            ..Default::default()
+        }
+    );
+    assert!(s.control.parked_ids(FOLDER).is_empty());
 }

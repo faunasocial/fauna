@@ -18,7 +18,7 @@ import time
 
 import pytest
 
-from helpers.atproto_fakes import FakePlcDirectory, dag_cbor
+from helpers.atproto_fakes import FakeDNS, FakePlcDirectory, dag_cbor
 
 #: The permission set the bridge serves through the e2e-flavor
 #: `FAUNA_ATPROTO_PERMISSION_SET_FIXTURES` seam — the same document the Go
@@ -68,7 +68,7 @@ def consent_nest_env():
 
 
 @pytest.fixture(scope="module")
-def consent_nest(nest_binary, tmp_path_factory, consent_nest_env):
+def consent_nest(consent_nest_binary, tmp_path_factory, consent_nest_env):
     """A claimed nest with a **public** handle domain and a HANDLED user already
     at `hosted_full`.
 
@@ -82,7 +82,7 @@ def consent_nest(nest_binary, tmp_path_factory, consent_nest_env):
     first time this fixture skipped the mint.
     """
     nest, cleanup = start_consent_nest(
-        nest_binary, tmp_path_factory, extra_env=consent_nest_env
+        consent_nest_binary, tmp_path_factory, extra_env=consent_nest_env
     )
     yield nest
     cleanup()
@@ -167,6 +167,12 @@ def consent_bridge(consent_nest, atproto_bridge_e2e_binary, tmp_path_factory):
     # `access_denied` instead of releasing a code. That refusal is CORRECT
     # product behaviour; it just is not the path this test is about.
     directory = FakePlcDirectory()
+    # The fake DNS answers the handle's `_atproto` TXT through the
+    # `FAUNA_ATPROTO_FAKE_DNS_URL` seam. Nothing is published at start-up: the
+    # bridge refuses a repo write until the identity resolves (the first-emit
+    # gate), and opening it costs a projection pass, so only a test that writes
+    # pays for it — `open_first_emit_gate`.
+    dns = FakeDNS()
 
     # The bridge binary is built by the `atproto_bridge_e2e_binary` fixture at
     # COLLECTION time — outside the per-test timeout budget; see
@@ -196,38 +202,88 @@ def consent_bridge(consent_nest, atproto_bridge_e2e_binary, tmp_path_factory):
     pubkey_hex = minted.stdout.strip()
     pub_bytes = bytes.fromhex(pubkey_hex)
 
-    env = os.environ.copy()
-    env["FAUNA_ATPROTO_PLC_DIRECTORY_URL"] = directory.url
-    # The permission-set document the nest→bridge request call resolves in
-    # `test_a_permission_set_resolves_through_the_bridge…` — served as if the
-    # chain had verified it (e2e flavor only). Every other NSID still runs the
-    # real chain, which is what makes the unresolvable arm's refusal genuine.
-    env["FAUNA_ATPROTO_PERMISSION_SET_FIXTURES"] = json.dumps({
-        PERMISSION_SET_NSID: base64.b64encode(PERMISSION_SET_DOCUMENT).decode(),
-    })
-
     log_path = tmp / "bridge.log"
     log_fh = open(log_path, "wb")
-    proc = subprocess.Popen(
-        [
-            atproto_bin,
-            f"--keypair-file={keyfile_path}",
-            f"--nest-endpoint={consent_nest['url']}",
-            f"--data-dir={tmp.as_posix()}",
-            f"--xrpc-listen={xrpc_listen}",
-            "--log-level=debug",
-        ],
-        stdout=log_fh, stderr=subprocess.STDOUT, env=env,
-        **popen_group_kwargs(),
-    )
-    # Windows half of the die-with-the-run guarantee — `popen_group_kwargs()` is
-    # `{}` there, so without this the bridge's only protection is the atexit
-    # sweep a killed run never reaches (testing.md § point 9). No-op off Windows.
-    reap_descendants_of(proc.pid)
-    track_process(proc)
+    # One mutable slot, because `restart` replaces the process the `finally`
+    # below must reap.
+    running = {}
+
+    def spawn(permission_set_document: bytes) -> None:
+        env = os.environ.copy()
+        env["FAUNA_ATPROTO_PLC_DIRECTORY_URL"] = directory.url
+        env["FAUNA_ATPROTO_FAKE_DNS_URL"] = dns.url
+        # The permission-set document the nest→bridge request call resolves in
+        # `test_a_permission_set_resolves_through_the_bridge…` — served as if
+        # the chain had verified it (e2e flavor only). Every other NSID still
+        # runs the real chain, which is what makes the unresolvable arm's
+        # refusal genuine. Read once at bridge start, so a test that needs the
+        # publisher to CHANGE the set calls `restart` below.
+        env["FAUNA_ATPROTO_PERMISSION_SET_FIXTURES"] = json.dumps({
+            PERMISSION_SET_NSID: base64.b64encode(permission_set_document).decode(),
+        })
+        proc = subprocess.Popen(
+            [
+                atproto_bin,
+                f"--keypair-file={keyfile_path}",
+                f"--nest-endpoint={consent_nest['url']}",
+                f"--data-dir={tmp.as_posix()}",
+                f"--xrpc-listen={xrpc_listen}",
+                "--log-level=debug",
+            ],
+            stdout=log_fh, stderr=subprocess.STDOUT, env=env,
+            **popen_group_kwargs(),
+        )
+        # Windows half of the die-with-the-run guarantee — `popen_group_kwargs()`
+        # is `{}` there, so without this the bridge's only protection is the
+        # atexit sweep a killed run never reaches (testing.md § point 9). No-op
+        # off Windows.
+        reap_descendants_of(proc.pid)
+        track_process(proc)
+        running["proc"] = proc
+
+    def stop() -> None:
+        proc = running.pop("proc", None)
+        if proc is None:
+            return
+        untrack_process(proc)
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
 
     def tail() -> str:
         return log_path.read_text(errors="replace")[-4000:]
+
+    def await_listener(count: int) -> None:
+        """Wait for the `count`-th "xrpc listener up" line — the listener comes
+        up only after the bridge's authed handshake with the nest, so it is
+        also the signal that the nest can reach this bridge again."""
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if log_path.read_text(errors="replace").count("xrpc listener up") >= count:
+                return
+            assert running["proc"].poll() is None, (
+                "bridge exited before serving XRPC:\n" + tail()
+            )
+            time.sleep(0.5)
+        pytest.fail("XRPC listener never came up:\n" + tail())
+
+    starts = {"n": 1}
+
+    def restart(permission_set_document: bytes = PERMISSION_SET_DOCUMENT) -> None:
+        """Re-Popen the identical argv with a different permission-set document
+        — a publisher changing its set, as far as this bridge can ever see. The
+        conftest `respawn()` pattern: the binaries e2e has no supervisor. The
+        keypair, data dir and listen address are the same, so the nest sees the
+        same approved bridge come back."""
+        stop()
+        spawn(permission_set_document)
+        starts["n"] += 1
+        await_listener(starts["n"])
+
+    spawn(PERMISSION_SET_DOCUMENT)
 
     try:
         admin = consent_nest["admin"]
@@ -244,7 +300,9 @@ def consent_bridge(consent_nest, atproto_bridge_e2e_binary, tmp_path_factory):
                 )["service_users"]
                 if any(bytes(r["ed25519_pubkey"]) == pub_bytes for r in rows):
                     break
-                assert proc.poll() is None, "bridge exited before enrolling:\n" + tail()
+                assert running["proc"].poll() is None, (
+                    "bridge exited before enrolling:\n" + tail()
+                )
                 time.sleep(0.5)
             else:
                 pytest.fail("atproto.pds bridge never appeared PENDING:\n" + tail())
@@ -253,14 +311,7 @@ def consent_bridge(consent_nest, atproto_bridge_e2e_binary, tmp_path_factory):
             consent_nest["url"], admin["signing_key"], bytes.fromhex(pubkey_hex), "atproto.pds",
         )
 
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            if "xrpc listener up" in log_path.read_text(errors="replace"):
-                break
-            assert proc.poll() is None, "bridge exited before serving XRPC:\n" + tail()
-            time.sleep(0.5)
-        else:
-            pytest.fail("XRPC listener never came up:\n" + tail())
+        await_listener(1)
 
         # The PDS host the bridge published itself at — what a DPoP proof's
         # `htu` at the resource server is built from, and NOT necessarily the
@@ -289,7 +340,9 @@ def consent_bridge(consent_nest, atproto_bridge_e2e_binary, tmp_path_factory):
                 if status == "active":
                     alice_did = identity.get("did")
                     break
-                assert proc.poll() is None, "bridge exited before minting:\n" + tail()
+                assert running["proc"].poll() is None, (
+                    "bridge exited before minting:\n" + tail()
+                )
                 time.sleep(0.5)
             else:
                 pytest.fail(
@@ -304,18 +357,48 @@ def consent_bridge(consent_nest, atproto_bridge_e2e_binary, tmp_path_factory):
             # resolve to, so the token leg asserts the APPROVING account rather
             # than merely some account.
             "did": alice_did,
-            "proc": proc,
+            # The fake PLC directory alice's DID was published to — where a
+            # test reads the signing key her DID document names.
+            "directory": directory,
+            # The fake DNS the bridge resolves the handle through.
+            "dns": dns,
+            "log_path": log_path,
+            # A callable, not the process: `restart` replaces it.
+            "proc": lambda: running["proc"],
+            "restart": restart,
             "tail": tail,
         }
     finally:
-        untrack_process(proc)
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        stop()
         log_fh.close()
         directory.close()
+        dns.close()
+
+
+def open_first_emit_gate(consent_bridge) -> None:
+    """Publish alice's `_atproto` TXT and wait for the bridge's projection loop
+    to clear her first-emit gate — the precondition of any repo write (the
+    bridge will not put an unresolvable identity's first event on the
+    firehose). Idempotent: a second call finds the line already logged.
+
+    The wait is on the loop's own log line (convention 14), its budget well
+    above the loop's 30 s poll interval."""
+    consent_bridge["dns"].publish(
+        f"_atproto.alice.{HANDLE_DOMAIN}", [f"did={consent_bridge['did']}"]
+    )
+    log_path = consent_bridge["log_path"]
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        if "first-emit gate cleared" in log_path.read_text(errors="replace"):
+            return
+        assert consent_bridge["proc"]().poll() is None, (
+            "bridge exited before clearing the gate:\n" + consent_bridge["tail"]()
+        )
+        time.sleep(1.0)  # sleep-ok: poll interval inside a deadline poll on observable state (convention 14), not a settle-sleep
+    pytest.fail(
+        "the projection loop never cleared alice's first-emit gate:\n"
+        + consent_bridge["tail"]()
+    )
 
 
 def _read_pds_host(log_path, fallback: str) -> str:

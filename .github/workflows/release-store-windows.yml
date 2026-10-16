@@ -1,0 +1,217 @@
+name: Release (Microsoft Store packages)
+
+# The two Microsoft Store packages (Fauna-Store-x64.msix, Fauna-Store-arm64.msix)
+# are built HERE -- on GitHub-hosted runners, from the public commit a version
+# records -- and graded in the job. The owner downloads the run's artifacts,
+# checks each SHA-256 and identity, and uploads them in Partner Center. Design:
+# docs/goal/architecture/release-integrity.md § Release signing -> *A store
+# upload is built from a recorded public commit*, and
+# docs/goal/architecture/installers/windows.md § Store distribution (MSIX).
+#
+# Why a workflow of its own, dispatched by hand, and not a job in release.yml:
+#
+#   * The Store signs the package itself, so a Store payload is UNSIGNED and is
+#     never a download. release.yml's `release` job downloads every artifact of
+#     its run, hashes, cosign-signs and publishes all of them; a Store job in
+#     that run would put its packages on the GitHub Release. A separate workflow
+#     cannot leak into it by construction.
+#   * The input is the PUBLIC COMMIT the version records, so "built from the
+#     recorded commit" holds because the runner checks out exactly that commit
+#     and the job asserts it did.
+#
+# Trust: no secret, no Environment, a read-only token. Nothing here publishes;
+# the artifacts expire with the run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "The public commit the version records (full 40-hex SHA)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-store-windows-${{ inputs.commit }}
+  cancel-in-progress: false
+
+env:
+  # The Partner Center reservation (installers/windows.md § Identity &
+  # coexistence). The packer writes it into the manifest; the grade step
+  # reads it back out of the package.
+  STORE_IDENTITY_NAME: FaunaSocial.FaunaSocial
+  STORE_PUBLISHER: "CN=E8868D60-047A-46A3-B608-0D4CA88AB791"
+  # Artifact build: per-invocation feature resolution, never workspace-unified
+  # (.cargo/config.toml § feature unification) -- the recipe's own setting.
+  CARGO_RESOLVER_FEATURE_UNIFICATION: selected
+
+jobs:
+  # `just windows-store-package <arch> store-safe <identity> <publisher>`,
+  # inlined: the runner has no `just`, so each step runs what the recipe runs.
+  # The flavour is `store-safe`, for now (installers/windows.md § Store
+  # distribution, the flavour paragraph, owner ruling 2026-10-14): Microsoft
+  # Store Policies 10.8 ask a non-game app taking payment to name the commerce
+  # provider at each transaction, so the Store build carries no payments plane,
+  # and zaps and peer-to-peer sharing go with it. The direct-download MSI
+  # (release.yml) keeps the full build. The two
+  # deviations are the runner's: cargo is called directly (the recipe's
+  # `scripts\cargo-win.cmd` wrapper only locates a dev box's MSVC install,
+  # which the runner image already provides), and the app is published with
+  # `dotnet publish` (release.yml's `build-windows` does the same; the recipe
+  # needs MSBuild only because the dev box is arm64, where the XAML compiler
+  # does not run under `dotnet`). The generated i18n and provider files are
+  # tracked, so the recipe's two generator dependencies have nothing to do.
+  build-store:
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            rust_target: x86_64-pc-windows-msvc
+            dotnet_rid: win-x64
+          - arch: arm64
+            rust_target: aarch64-pc-windows-msvc
+            dotnet_rid: win-arm64
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - name: Refuse anything but a full commit SHA
+        shell: bash
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::commit must be a full 40-hex SHA, got '$COMMIT'"; exit 1; }
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          ref: ${{ inputs.commit }}
+
+      - name: Assert the checkout is the recorded commit
+        shell: bash
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          head="$(git rev-parse HEAD)"
+          [ "$head" = "$COMMIT" ] || {
+            echo "::error::checked out $head, the version records $COMMIT"; exit 1; }
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
+        with:
+          target: ${{ matrix.rust_target }}
+          rustflags: ""
+          cache: false
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9  # v4.3.1
+        with:
+          dotnet-version: '10.0.204'  # = global.json; moves only in a bump round
+
+      # 1. The PRODUCTION FFI (no `test-helpers`: the automation surface is
+      #    compiled out of a shipped package, convention 15) in the store-safe
+      #    flavour -- `just windows-ffi-store-safe`'s complement build, NOT a
+      #    feature added to the defaults -- its C# bindings, generated from that
+      #    very dll so the app compiles against the excised face, and the dll
+      #    staged where FaunaApp.csproj packs it.
+      - name: Build FFI + generate C# bindings + stage native dll
+        shell: bash
+        run: |
+          cargo rustc --locked -p fauna-ffi --lib --crate-type cdylib --profile dist --no-default-features --features store-safe --target ${{ matrix.rust_target }}
+          cargo run -p uniffi-bindgen-cs-fauna --bin uniffi-bindgen-cs --release -- \
+            --library target/${{ matrix.rust_target }}/dist/fauna_ffi.dll \
+            --out-dir apps/fauna-windows/FaunaApp/FaunaApp.Core/Generated/uniffi/
+          mkdir -p apps/fauna-windows/FaunaApp/FaunaApp/runtimes/${{ matrix.dotnet_rid }}/native
+          cp target/${{ matrix.rust_target }}/dist/fauna_ffi.dll \
+             apps/fauna-windows/FaunaApp/FaunaApp/runtimes/${{ matrix.dotnet_rid }}/native/fauna_ffi.dll
+
+      # 2. The two Rust binaries the package carries, each in its OWN
+      #    invocation: one naming several packages unifies their features. The
+      #    sync agent builds without `p2p-share`, its only default feature.
+      - name: Build the sync agent and the shell extension
+        run: |
+          cargo build --locked --profile dist -p fauna-sync-agent --no-default-features --target ${{ matrix.rust_target }}
+          cargo build --locked --profile dist -p fauna-shell-ext  --target ${{ matrix.rust_target }}
+
+      # 3. The app, self-contained Release (the works-out-of-the-box invariant),
+      #    with the store-safe define: the csproj drops the payments and
+      #    peer-to-peer sharing pages and their glue.
+      - name: Publish the app
+        run: >
+          dotnet publish
+          apps/fauna-windows/FaunaApp/FaunaApp/FaunaApp.csproj
+          -c Release -r ${{ matrix.dotnet_rid }}
+          -p:SelfContained=true -p:WindowsAppSDKSelfContained=true
+          -p:FaunaStoreSafe=true
+
+      # 4. Stage exactly the payload the manifest references.
+      - name: Stage the payload
+        shell: bash
+        run: |
+          publish=(apps/fauna-windows/FaunaApp/FaunaApp/bin/Release/*/${{ matrix.dotnet_rid }}/publish)
+          [ -f "${publish[0]}/FaunaApp.exe" ] || {
+            echo "::error::no FaunaApp.exe under ${publish[0]} after the publish"; exit 1; }
+          stage=build/installer/store-payload/${{ matrix.arch }}
+          mkdir -p "$stage/App"
+          cp -r "${publish[0]}/." "$stage/App/"
+          cp target/${{ matrix.rust_target }}/dist/fauna-sync-agent.exe "$stage/"
+          cp target/${{ matrix.rust_target }}/dist/fauna_shell.dll "$stage/"
+
+      # 5. Pack, then grade the PACKAGE. The packer refuses a payload missing its
+      #    native core or carrying the automation surface; the grade reads the
+      #    finished .msix back: identity (the reservation above, the version in
+      #    Package.wxs, this arch), runFullTrust as the only capability, every
+      #    PE built for this arch, no .pdb, no automation surface, and the
+      #    store-safe excision: the packaged fauna_ffi.dll carries no
+      #    `fauna.payments.*` / `fauna.tips.*` / zap-signer kind string and no
+      #    peer-to-peer sharing face (`just windows-store-safe-check`'s native
+      #    column). Both are
+      #    standard-library Python, run on the runner image's own interpreter
+      #    so nothing is installed for them.
+      - name: Pack
+        run: >
+          python scripts/build-store-package.py
+          --arch ${{ matrix.arch }}
+          --payload-root build/installer/store-payload/${{ matrix.arch }}
+          --out-dir store-out
+          --identity-name "$env:STORE_IDENTITY_NAME"
+          --publisher "$env:STORE_PUBLISHER"
+
+      # The grade comes from THIS workflow's commit, not the recorded one: an
+      # older recorded commit may predate a grade, and the grade is a check on
+      # the package, not part of what the version builds. Sparse: the packer,
+      # its identity helper and the installer files they read at import.
+      - name: Check out the grade (this workflow's commit)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          path: grader
+          sparse-checkout: |
+            scripts
+            apps/fauna-windows/installer
+
+      - name: Grade
+        run: >
+          python grader/scripts/build-store-package.py
+          --grade store-out/Fauna-Store-${{ matrix.arch }}.msix
+          --flavour store-safe
+          --package-wxs apps/fauna-windows/installer/Package.wxs
+          --arch ${{ matrix.arch }}
+          --identity-name "$env:STORE_IDENTITY_NAME"
+          --publisher "$env:STORE_PUBLISHER"
+
+      - name: SHA-256
+        shell: bash
+        working-directory: store-out
+        run: |
+          sha256sum Fauna-Store-${{ matrix.arch }}.msix > Fauna-Store-${{ matrix.arch }}.msix.sha256
+          cat Fauna-Store-${{ matrix.arch }}.msix.sha256
+
+      # Workflow artifacts, NOT release assets: an unsigned Store payload is not
+      # a download (the Store signs it at certification).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: store-windows-${{ matrix.arch }}
+          path: |
+            store-out/Fauna-Store-${{ matrix.arch }}.msix
+            store-out/Fauna-Store-${{ matrix.arch }}.msix.sha256
+          if-no-files-found: error

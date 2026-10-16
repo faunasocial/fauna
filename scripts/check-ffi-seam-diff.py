@@ -214,6 +214,24 @@ KNOWN_SEAMS: list[dict[str, str]] = [
         "why": "a real plane-content read: the account runtime's per-device "
         "set state as JSON",
     },
+    {
+        "name": "read_marker_state_json",
+        "kind": "method",
+        "why": "a real plane-content read: the account store's read marker "
+        "for one channel as JSON (the read-state relaunch witness's barrier)",
+    },
+    {
+        "name": "custody_owner_resend_now",
+        "kind": "method",
+        "why": "re-posts every granted custody ceremony's newest sent step "
+        "with no user gesture (devices outcome 15's trigger)",
+    },
+    {
+        "name": "custody_ceremony_ingest_json",
+        "kind": "method",
+        "why": "the custody ceremony sink's process-wide ingest tally as JSON "
+        "(the host-side barrier for the owner re-send)",
+    },
     # -- process-wide fake clocks (testing.md convention 14), same class as
     # the delegation/backup-audit pair above
     {

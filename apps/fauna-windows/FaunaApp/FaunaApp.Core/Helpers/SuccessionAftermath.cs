@@ -149,7 +149,28 @@ internal sealed class LoggingAftermathSink : FfiAftermathSink
         // (The member-review surfaces re-read their roster on their own page
         // loads, so they need nothing from this hook.)
         if (_rpc is { } rpc) _ = Task.Run(() => InheritedFilterMarks.RefreshAsync(rpc));
+        // The pass's last leg (the mail burn) has settled: a Mail page already on
+        // screen re-reads, or it keeps painting the burned credentials as live
+        // (web's `configStageSettled`, linux's `config_stage_settled`).
+        AftermathSettled.Raise();
     }
+}
+
+/// <summary>
+/// The aftermath pass's "config stage settled" notice, as a process-wide event for
+/// the surfaces that must re-read once the pass's raises (the mail burn) have
+/// written — today the Mail settings panel
+/// (<c>succession-aftermath.md</c> § Implementation status today, the MSEK leg).
+/// <see cref="Settled"/> fires on the FFI runtime's thread — subscribers marshal to
+/// their own UI thread. The page-less case needs nothing: a Mail page opened after
+/// the burn loads fresh.
+/// </summary>
+internal static class AftermathSettled
+{
+    /// <summary>Raised once per pass, after its last leg.</summary>
+    internal static event Action? Settled;
+
+    internal static void Raise() => Settled?.Invoke();
 }
 
 /// <summary>
@@ -199,7 +220,15 @@ internal static class InheritedFilterMarks
                 $"filter_marks_list failed, keeping the cached marks: {ex.GetType().Name}: {ex.Message}");
             return;
         }
-        lock (Gate) _ids = new HashSet<long>(ids);
+        var fresh = new HashSet<long>(ids);
+        lock (Gate)
+        {
+            // The level rule (account-runtime.md § A runtime's own pump is a source
+            // of the notice too, part 4): a read that answers what is held paints
+            // nothing, so the store-change re-read can run on every notice.
+            if (_ids.SetEquals(fresh)) return;
+            _ids = fresh;
+        }
         Changed?.Invoke();
     }
 

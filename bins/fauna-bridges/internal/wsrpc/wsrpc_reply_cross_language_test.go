@@ -133,9 +133,10 @@ var replyFixtures = map[string]replyFixture{
 	"reply-mark-outbound-bounced.cbor":   rf[markOutboundBouncedReply](),
 	"reply-enqueue-outbound-mail.cbor":   rf[enqueueOutboundMailReply](),
 
-	"reply-fetch-mta-sts-policy.cbor": rf[FetchMtaStsPolicyReply](),
-	"reply-fetch-tlsa.cbor":           rf[FetchTlsaReply](),
-	"reply-report-tls-attempt.cbor":   rf[reportTlsAttemptReply](),
+	"reply-fetch-mta-sts-policy.cbor":     rf[FetchMtaStsPolicyReply](),
+	"reply-fetch-tlsa.cbor":               rf[FetchTlsaReply](),
+	"reply-report-tls-attempt.cbor":       rf[reportTlsAttemptReply](),
+	"reply-report-dmarc-observation.cbor": rf[reportDmarcObservationReply](),
 
 	"reply-fetch-recipient-forward-config.cbor": rf[fetchRecipientForwardConfigReply](),
 	"reply-fetch-recipient-filters.cbor":        rf[fetchRecipientFiltersReply](),
@@ -245,6 +246,7 @@ var replyConformanceTypes = []any{
 	subscribeMailboxReply{}, unsubscribeMailboxReply{}, subscribeMailboxStateReply{},
 	provisionCalendarReply{}, listCalendarsReply{}, putEventCiphertextReply{},
 	deleteEventReply{}, queryEventsReply{}, syncCalendarSinceReply{},
+	reportDmarcObservationReply{},
 }
 
 // TestWsrpcReplyFixtureCoverage fails if any reply body type in

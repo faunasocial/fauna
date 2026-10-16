@@ -36,7 +36,7 @@ fauna-protocol = { path = "../fauna-protocol", default-features = false, feature
 # the same `WsRpcClient`). Folded into this crate rather than a separate
 # fauna-wasm-devices (priority #2: the web Devices page loads one chunk for both
 # the page machine and its embedded wizard).
-fauna-devices-machine = { path = "../fauna-devices-machine", default-features = false, features = ["rpc-glue", "account-port"] }
+fauna-devices-machine = { path = "../fauna-devices-machine", default-features = false, features = ["rpc-glue", "web", "account-port"] }
 # The account port's consumer half (`DevicesMachine.setAccountPort`): the JS
 # binding over the SPA's `SharedAccountPort` the fleet seam's forwarder calls
 # through (`fauna-devices-machine`'s `account-port` feature above). A thin
@@ -51,6 +51,9 @@ fauna-client-folders = { path = "../fauna-client-folders", features = ["mls"] }
 # The browser WS-RPC transport the wizard's `submit()` rides; `connect()` opens
 # the connection from the JS-passed nest URL + actor id + token provider.
 fauna-rpc-wasm = { path = "../fauna-rpc-wasm" }
+# The account registry the Devices machine's predecessor chain is walked from
+# (`setPredecessorChain`) — read inside wasm so the raw backup keys never enter JS.
+fauna-client-accounts = { path = "../fauna-client-accounts", features = ["web-localstorage"] }
 # The T16 custody facet's shared halves: `view_model::fold_custody_facet` (the
 # pure three-family fold), `custody_view::CustodyFacetView` (the boundary rows —
 # read here through serde, and by the native apps through the SAME types'

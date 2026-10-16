@@ -25,7 +25,7 @@ use fauna_core::secret::SecretString;
 use fauna_protocol::atproto_pds::{AtprotoGrantInfo, AtprotoSessionInfo};
 use fauna_protocol::nostr::BunkerAppEntry;
 use fauna_protocol::oauth_consent::BlockedClient;
-use fauna_protocol::principals::PrincipalInfo;
+use fauna_protocol::principals::{OracleOp, PrincipalInfo};
 
 fauna_core::declare_api_error!(
     /// Failure of one nest call on this page.
@@ -49,14 +49,21 @@ pub trait ConnectedAppsNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
     async fn list_principals(&self) -> Result<Vec<PrincipalInfo>, ConnectedAppsApiError>;
     /// `fauna.principals.revoke` — `false` when already gone.
     async fn revoke_principal(&self, principal_id: Vec<u8>) -> Result<bool, ConnectedAppsApiError>;
+    /// `fauna.principals.ops` — one principal's oracle record, newest first.
+    async fn list_principal_ops(
+        &self,
+        principal_id: Vec<u8>,
+    ) -> Result<Vec<OracleOp>, ConnectedAppsApiError>;
     /// `fauna.bridges.atproto.list_pending_consents`.
     async fn list_pending_consents(&self) -> Result<Vec<NestConsentRow>, ConnectedAppsApiError>;
     /// `fauna.bridges.atproto.resolve_consent` — `false` when nothing live was
-    /// there to resolve.
+    /// there to resolve. `folder` is the card's choice for a row carrying a
+    /// bare folder-plane scope.
     async fn resolve_consent(
         &self,
         consent_id: Vec<u8>,
         approved: bool,
+        folder: Option<i64>,
     ) -> Result<bool, ConnectedAppsApiError>;
     /// `fauna.capabilities.mint` — deposit the consent-time grant an approve
     /// of a records consent prepared, before the resolve.
@@ -112,4 +119,9 @@ pub trait ConnectedAppsNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
         &self,
         credential_id: String,
     ) -> Result<SecretString, ConnectedAppsApiError>;
+    /// The account's external-apps switch, read off
+    /// `fauna.bridges.atproto.list_app_credentials` (the flag rides that
+    /// reply). `Unavailable` when this nest or session cannot answer it; the
+    /// machine then holds the flag at its default, ON.
+    async fn external_apps_enabled(&self) -> Result<bool, ConnectedAppsApiError>;
 }

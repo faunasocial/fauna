@@ -120,3 +120,98 @@ def assert_nothing_plaintext(blobs: list[bytes], markers: list[bytes]) -> None:
                 f"{marker!r} appears in cleartext at rest — the body is not sealed "
                 "(encryption-at-rest.md § Plaintext ceiling per mode)"
             )
+
+
+def unopenable_mail_record(nest: dict, actor_id: bytes, mailbox: str = "INBOX") -> tuple[str, int]:
+    """Make the newest message in ``actor_id``'s ``mailbox`` unopenable AT REST,
+    and return its ``(mailbox, uid)``.
+
+    The fault is a **tampered envelope** (`mail-export.md` § An unopenable
+    record fails the session names it beside a retired key): one byte inside
+    the record's sealed body is flipped in its finalized `__mail` segment on
+    nest disk, so its AEAD can no longer authenticate under any key the account
+    holds. Nothing else moves — the record's CID, its length, the CARv2 index
+    and the `.meta` sidecar all stay as they were, and the nest's read path
+    (`read_sealed_body_with_floor` → `Segment::read_record` →
+    `fauna_carv2::Reader::get`) checks the on-disk CID header but never
+    re-hashes the block — so the nest still serves the record, and the fault
+    reaches the one party that can tell: the client that tries to open it.
+
+    The record is found through the nest's own read-only mirrors: its UID and
+    record id from `bridge_imap_messages`, the segment that holds it from
+    `segment_records` (joined on the CID's 32-byte digest tail, the documented
+    join). Read-your-own-writes finalizes the open segment on the first read of
+    the record, so the caller must have had it read once already (the app
+    surfacing it decrypted does) — this waits for the finalized file, never
+    for a clock.
+
+    Raises ``PermissionError`` when the harness cannot write the nest's data
+    dir in this nest mode; the caller decides how to declare that.
+    """
+    import io
+    import time
+
+    import cbor2
+
+    conn = sqlite3.connect(f"file:{nest['db_path']}?mode=ro", uri=True, timeout=10.0)
+    try:
+        rows = conn.execute(
+            "SELECT uid, message_id FROM bridge_imap_messages "
+            "WHERE actor_id = ? AND mailbox = ? ORDER BY uid",
+            (actor_id, mailbox),
+        ).fetchall()
+        assert rows, f"no message in {mailbox!r} for this actor — nothing to make unopenable"
+        uid, message_id = rows[-1]
+        placed = conn.execute(
+            "SELECT segment_id, record_cid FROM segment_records "
+            "WHERE scope_id = ? AND kind = 'mail' AND substr(record_cid, 5) = ?",
+            (actor_id, bytes(message_id)),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(placed) == 1, (
+        f"{mailbox} uid {uid} must rest in exactly one mail segment record; "
+        f"segment_records has {len(placed)}"
+    )
+    segment_id, record_cid = placed[0][0], bytes(placed[0][1])
+    seg = pathlib.Path(nest["db_path"]).parent / "__mail" / actor_id.hex() / f"seg-{segment_id:08}.dat"
+    meta = seg.with_suffix(".meta")
+
+    deadline = time.monotonic() + 30.0
+    while not (meta.exists() and seg.exists() and record_cid in seg.read_bytes()):
+        assert time.monotonic() < deadline, (
+            f"{mailbox} uid {uid}'s segment {seg} was never finalized on disk "
+            f"(.dat present: {seg.exists()}, .meta present: {meta.exists()}) — "
+            "it is read once before this is called, which flushes it"
+        )
+        time.sleep(0.2)
+
+    data = seg.read_bytes()
+    # A CARv2 data-section record is `varint(len) || cid || block`: find the CID
+    # whose following block decodes as the mail envelope (the index section may
+    # carry the digest again, never followed by an envelope).
+    body_at = None
+    start = 0
+    while (at := data.find(record_cid, start)) != -1:
+        start = at + 1
+        try:
+            envelope = cbor2.CBORDecoder(io.BytesIO(data[at + len(record_cid):])).decode()
+        except Exception:
+            continue
+        body = envelope.get("encrypted_body") if isinstance(envelope, dict) else None
+        if isinstance(body, bytes) and len(body) > 32:
+            body_at = data.find(body, at + len(record_cid))
+            body_len = len(body)
+            break
+    assert body_at is not None and body_at >= 0, (
+        f"{mailbox} uid {uid}: no inline envelope carrying an `encrypted_body` "
+        f"follows its CID in {seg} — the record rests in another shape "
+        "(a continuation head?), so this probe cannot reach its ciphertext"
+    )
+    flip = body_at + body_len // 2
+    with open(seg, "r+b") as fh:
+        fh.seek(flip)
+        (byte,) = fh.read(1)
+        fh.seek(flip)
+        fh.write(bytes([byte ^ 0xFF]))
+    return mailbox, int(uid)

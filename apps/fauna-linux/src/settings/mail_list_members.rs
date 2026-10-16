@@ -65,6 +65,7 @@ struct MembersWidgets {
     import_input: gtk::TextView,
     import_submit: gtk::Button,
     import_cancel: gtk::Button,
+    import_result: gtk::Label,
 }
 
 struct MembersCtx {
@@ -82,6 +83,12 @@ struct MembersCtx {
     /// `has_list = m.machine.is_some()` (`apps/fauna-tui/src/settings/mail_list_members.rs`)
     /// — drives which of the two rule-5 reasons `render()` paints.
     has_list: Cell<bool>,
+    /// Whether an import has been submitted since the sheet was last opened,
+    /// gating `mail-list-members-import-result`. The machine clears
+    /// `last_import` only on the next dispatch, and reopening the sheet is not
+    /// one, so this local flag keeps a previous batch's tally from greeting a
+    /// fresh paste (tui's `import_result_shown`).
+    import_result_shown: Cell<bool>,
 }
 
 /// `select(list_id_hex, friendly_name)` — `mail-lists`' Members button calls it
@@ -209,6 +216,18 @@ pub fn build_mail_list_members_page()
         ids::MAIL_LIST_MEMBERS_IMPORT_SHEET_CANCEL_BUTTON,
     );
     import_box.append(&import_cancel);
+    // mail-list-members-import-result — the batch tally ("N added · M already
+    // subscribed · K invalid"), rendered in place: the sheet stays open on submit.
+    let import_result = gtk::Label::builder()
+        .label("")
+        .visible(false)
+        .wrap(true)
+        .xalign(0.0)
+        .max_width_chars(40)
+        .css_classes(["dim-label"])
+        .build();
+    set_test_id(&import_result, ids::MAIL_LIST_MEMBERS_IMPORT_RESULT);
+    import_box.append(&import_result);
     import_sheet.add(&import_box);
     page.add(&import_sheet);
 
@@ -228,6 +247,7 @@ pub fn build_mail_list_members_page()
         import_input,
         import_submit,
         import_cancel,
+        import_result,
     };
     let (select, resolve_fallback) = wire_machine(widgets);
 
@@ -257,6 +277,7 @@ fn wire_machine(widgets: MembersWidgets) -> (SelectClosure, ResolveFallbackClosu
         client,
         w: widgets,
         has_list: Cell::new(false),
+        import_result_shown: Cell::new(false),
     });
 
     hydrate_and_render(&ctx);
@@ -294,6 +315,8 @@ fn wire_machine(widgets: MembersWidgets) -> (SelectClosure, ResolveFallbackClosu
         ctx.w.import_button.clone().connect_clicked(move |_| {
             ctx.w.add_sheet.set_visible(false);
             ctx.w.import_input.buffer().set_text("");
+            ctx.import_result_shown.set(false);
+            ctx.w.import_result.set_visible(false);
             ctx.w.import_sheet.set_visible(true);
         });
     }
@@ -310,11 +333,9 @@ fn wire_machine(widgets: MembersWidgets) -> (SelectClosure, ResolveFallbackClosu
             let buf = ctx.w.import_input.buffer();
             let (start, end) = buf.bounds();
             let addresses = buf.text(&start, &end, false).to_string();
-            dispatch_then_close(
-                &ctx,
-                MailListMembersAction::BatchImport { addresses },
-                CloseSheet::Import,
-            );
+            // The sheet stays open: the tally lives inside it.
+            ctx.import_result_shown.set(true);
+            dispatch_action(&ctx, MailListMembersAction::BatchImport { addresses });
         });
     }
 
@@ -389,6 +410,7 @@ fn select(ctx: &Rc<MembersCtx>, list_id_hex: String, friendly_name: String) {
     // but its snapshot hasn't landed yet — that is `members_loading`, not
     // `members_no_list` (`ui/README.md` rule 5's pre-hydrate case).
     ctx.w.list_placeholder.set_title(S::MEMBERS_LOADING);
+    ctx.import_result_shown.set(false);
     ctx.w.list_placeholder.set_visible(true);
     hydrate_and_render(ctx);
 }
@@ -396,7 +418,6 @@ fn select(ctx: &Rc<MembersCtx>, list_id_hex: String, friendly_name: String) {
 #[derive(Clone, Copy)]
 enum CloseSheet {
     Add,
-    Import,
 }
 
 fn hydrate_and_render(ctx: &Rc<MembersCtx>) {
@@ -439,7 +460,6 @@ fn dispatch_then_close(ctx: &Rc<MembersCtx>, action: MailListMembersAction, clos
             if snap.error.is_none() {
                 match close {
                     CloseSheet::Add => ctx_render.w.add_sheet.set_visible(false),
-                    CloseSheet::Import => ctx_render.w.import_sheet.set_visible(false),
                 }
             }
         },
@@ -473,6 +493,18 @@ fn render(ctx: &Rc<MembersCtx>, snap: &MailListMembersSnapshot) {
     // matching tui's reference (no chrome once `has_list && snapshot present`,
     // regardless of member count).
     w.list_placeholder.set_visible(!ctx.has_list.get());
+
+    match snap.last_import.as_ref() {
+        Some(tally) if ctx.import_result_shown.get() => {
+            w.import_result.set_text(&S::import_result(
+                &tally.added.to_string(),
+                &tally.skipped_duplicate.to_string(),
+                &tally.skipped_invalid.to_string(),
+            ));
+            w.import_result.set_visible(true);
+        }
+        _ => w.import_result.set_visible(false),
+    }
 }
 
 fn build_member_row(ctx: &Rc<MembersCtx>, view: &MemberView) -> adw::ActionRow {

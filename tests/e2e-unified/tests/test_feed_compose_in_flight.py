@@ -37,6 +37,7 @@ from helpers.rpc_hold import (
     arm_rpc_hold,
     refuse_rpc,
     release_rpc_hold,
+    rpc_hold_status,
     wait_for_held_rpc,
     wait_for_refused_rpc,
 )
@@ -61,16 +62,51 @@ def _state(app) -> str:
         body = feed.compose_body_text()
     except Exception as e:  # noqa: BLE001 — diagnostic only
         body = f"<{type(e).__name__}: {e}>"
+    # The audience, because a composer that came back from an earlier test's draft
+    # still holding its sale or tier sends the teaser as the post's visible body —
+    # a send that "succeeds" with the text nowhere in the feed.
+    try:
+        audience = feed.compose_audience()
+    except Exception as e:  # noqa: BLE001 — diagnostic only
+        audience = f"<{type(e).__name__}: {e}>"
     return (
-        f"compose-text-field={body!r} compose-error={feed.compose_error_text()!r} "
-        f"error-message={app.error_text()!r}"
+        f"compose-text-field={body!r} compose-audience={audience!r} "
+        f"compose-error={feed.compose_error_text()!r} error-message={app.error_text()!r}"
+    )
+
+
+def _retry_state(app, port: int, text: str) -> str:
+    """Where a retried post stopped, for the retry's failure message: the nest's
+    count of creates it turned away (two means the retry was refused too), and
+    whether the app's own feed state holds the post (it does: it was sent and
+    loaded but never painted; it does not: it never came back from the nest)."""
+    try:
+        hold = rpc_hold_status(port, POSTS_CREATE)
+    except Exception as e:  # noqa: BLE001 — diagnostic only
+        hold = f"<{type(e).__name__}: {e}>"
+    try:
+        bodies = [p.get("body", "") for p in app.feed_posts_from_state()]
+        in_state = any(text in b for b in bodies)
+    except Exception as e:  # noqa: BLE001 — diagnostic only
+        bodies, in_state = f"<{type(e).__name__}: {e}>", "?"
+    return (
+        f"{_state(app)} rpc-hold={hold!r} post-in-feed-state={in_state} "
+        f"feed-state-bodies={bodies!r}"
     )
 
 
 def _empty_composer(app) -> None:
     """Leave the composer empty and Public for the next test — its state is
     manager-owned and persisted as a draft, so what a test leaves in it is
-    what the next test's first keystroke appends to."""
+    what the next test's first keystroke appends to.
+
+    The emptied draft reaches the next test's sign-in only if it reaches the
+    nest first, and the per-test reset comes well inside the autosave debounce
+    of these last edits. So it rests on the sign-out leave-flush
+    (`reserved-folders.md` § The leave-flush promise): an app whose sign-out
+    drops its pending save restores the previous draft — here the second
+    test's sale, which turned the third test's post into a sale with its
+    teaser for a body."""
     feed = app.feed
     feed.open_composer()
     d = app.driver
@@ -204,7 +240,7 @@ def test_a_post_that_fails_to_send_says_so_and_keeps_what_you_wrote(
         # "…so you can try again": the kept text sends on the next press.
         feed.start_submit()
         assert feed.wait_for_post_text(text, timeout_s=budgets.RPC_ROUNDTRIP_S), (
-            f"the retried post never landed; {_state(app)}"
+            f"the retried post never landed; {_retry_state(app, port, text)}"
         )
         assert wait_until(
             lambda: feed.compose_body_text() == "",

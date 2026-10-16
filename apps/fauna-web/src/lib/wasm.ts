@@ -1,15 +1,18 @@
 import { base } from '$app/paths';
 import type { WsRpcClient, WasmUploadPayload } from '../../static/fauna_wasm.js';
 import type { LocalizedText } from '$lib/i18n/localized';
+import type { ImportTotals } from '$lib/mail-import-confirm';
 // Type-only (erased at build, so no runtime cycle with rpc.ts, which imports this
 // module): `ObligationAction` is the `fauna.moderation.actions` wire row and stays
 // owned by its rpc module — the merge below takes it as the queue's server half.
 import type {
   AdminUser,
   ObligationAction,
+  StolenOutcome,
   EmailFilter,
   BackupDestination,
   MutedKeyword,
+  NodeLeg,
 } from '$lib/rpc';
 import type {
   IssuerForcedArm,
@@ -19,7 +22,9 @@ import type {
 } from '$lib/admin-oauth-keys';
 import type { MdDecoration, MdRevealRange, ComposeMarkerPlan } from '$lib/markdown-decorations';
 import type { Affordance } from '$lib/offline-gate';
+import type { OverlayFace } from '$lib/contact-overlay';
 import type { AskRules, FeedRequestState } from '$lib/ward-asks';
+import type { DeadGenerations, LetGoOutcome } from '$lib/recovery-let-go';
 import type {
   Block,
   BlockCaret,
@@ -154,6 +159,41 @@ export async function signOutFinishRecorded(eraseRefused: boolean): Promise<Sign
   await ensureWasm();
   return (await wasm().signOutFinish(eraseRefused)) as SignOutFinish;
 }
+/** The conversations-engine role's faces over `fauna-wasm` — the Web Lock
+ *  `conversationsManager` takes before any engine exists, whose model and two
+ *  postures `fauna_mls::engine_role` owns (`$lib/conversations` and
+ *  `$lib/accounts` are their callers). The accounts among `actorIds` whose
+ *  role ANOTHER tab of this browser holds right now: the erase's question,
+ *  this tab's own hold consulted, never probed; degrades open. */
+export async function actorsServedByAnotherTab(actorIds: readonly string[]): Promise<string[]> {
+  await ensureWasm();
+  return await wasm().actorsServedByAnotherTab([...actorIds]);
+}
+/** Why a remove-account refuses, or `null` when it may proceed. */
+export type RemoveAccountBlock = 'this_tab' | 'other_tab' | null;
+/** Remove-account's question, in the ruling's order: `'this_tab'` when
+ *  `actorId` is `servedHere` (this tab's signed-in actor), else `'other_tab'`
+ *  when another tab holds its role. */
+export async function removeAccountBlock(
+  actorId: string,
+  servedHere: string | null | undefined,
+): Promise<RemoveAccountBlock> {
+  await ensureWasm();
+  return await wasm().removeAccountBlock(actorId, servedHere ?? undefined);
+}
+/** Whether a rejected `conversationsManager` build is the role's refusal —
+ *  another tab serves the account, or no lock manager can prove this tab is
+ *  alone — rather than a build that failed for another reason. */
+export function isConversationsEngineRoleRefusal(e: unknown): boolean {
+  return wasmModule?.isConversationsEngineRoleRefusal(e) ?? false;
+}
+/** Hand this tab's conversations-engine role back: `actorId`'s alone, or every
+ *  one this tab holds when absent. Nothing to release before the core chunk
+ *  loads — no build can have taken one. */
+export async function releaseConversationsEngineRole(actorId?: string): Promise<void> {
+  if (!wasmModule) return;
+  await wasmModule.releaseConversationsEngineRole(actorId);
+}
 /** The standing refusal of this browser's enrollment — the one rendered
  *  sentence (`EnrollmentRefusal::notice`) — or `null`. */
 export async function accountEnrollmentNotice(): Promise<string | null> {
@@ -171,6 +211,27 @@ export async function accountStoreChangedAfter(seen: number): Promise<number | u
 export async function accountEnrolledDeviceRow(): Promise<string | null> {
   if (!wasmModule) return null;
   return (await wasmModule.accountEnrolledDeviceRow()) ?? null;
+}
+/** The let-go's clock face: the shared line's mint date, rendered in JS
+ *  because wasm has no OS timezone database (`fauna-wasm`'s
+ *  `generation_let_go` module docs). */
+const letGoDate = (ms: number): string => new Date(ms).toLocaleDateString();
+/** The let-go's confirm word — shared Rust's one constant — or `null` before
+ *  wasm has loaded (the trio is not rendered then either). */
+export function recoveryLetGoConfirmWord(): string | null {
+  return wasmModule ? wasmModule.recoveryLetGoConfirmWord() : null;
+}
+/** The account runtime's dead generations — the Recovery kit let-go's render
+ *  read. Never rejects: no runtime, or a failed read, is the empty answer. */
+export async function recoveryDeadGenerations(): Promise<DeadGenerations> {
+  if (!wasmModule) return { generation_ids: [], unreadable_status: null };
+  return (await wasmModule.recoveryDeadGenerations(letGoDate)) as DeadGenerations;
+}
+/** `recovery-kit-let-go-button` — let go of the listed generations, then
+ *  re-read. Rejects with the reason `let_go_failed` words. */
+export async function recoveryLetGo(generationIds: string[]): Promise<LetGoOutcome> {
+  await ensureWasm();
+  return (await wasm().recoveryLetGo(generationIds, letGoDate)) as LetGoOutcome;
 }
 /** The shared `PumpCyclesView` — `fauna_e2e_agent::ACCOUNT_PUMP_CYCLES_KEY`'s
  *  body; `runtime: false` before the chunk loads, as while no runtime runs. */
@@ -195,6 +256,21 @@ export async function accountDeviceSetState(deviceIdHex: string): Promise<unknow
     );
   }
   return JSON.parse(await (fn as (id: string) => Promise<string>)(deviceIdHex));
+}
+/** Test-only: the `read_marker_state` command's body — this browser's account
+ *  store read marker for one channel, the shared reader every hosting app
+ *  answers with. Same `wasm-core-test`-only gating as `accountDeviceSetState`;
+ *  THROWS on a production bundle. */
+export async function accountReadMarkerState(channelIdHex: string): Promise<unknown> {
+  await ensureWasm();
+  const fn = (wasm() as unknown as Record<string, unknown>).accountReadMarkerStateJsonForTest;
+  if (typeof fn !== 'function') {
+    throw new Error(
+      'accountReadMarkerStateJsonForTest is absent: this SPA is running the PRODUCTION ' +
+        'wasm flavor, which compiles the e2e seams out. Build with `just web-test`.',
+    );
+  }
+  return JSON.parse(await (fn as (id: string) => Promise<string>)(channelIdHex));
 }
 /** One full account-pump pass now (`fauna_e2e_agent::ACCOUNT_PUMP_NOW`). */
 export async function accountPumpNow(): Promise<void> {
@@ -269,9 +345,15 @@ export interface StaleSurfaces {
   family: boolean;
   /** The Spam page's training history — set by
    *  `fauna.bridges.push.spam_model_updated` / `…_reset` (an undo or a reset on
-   *  another device). Page-gated like `address_book` (one push per lesson).
-   *  Web's Spam page does not consume it yet. */
+   *  another device). Page-gated like `address_book` (one push per lesson):
+   *  read by `MailSpamSection.svelte` while it is mounted. */
   mail_spam: boolean;
+  /** The Export page's session view — set by the three export events
+   *  (`fauna.bridges.push.export_*`) when another device starts, finishes,
+   *  fails or dismisses an export. Page-gated: read by
+   *  `MailExportSection.svelte` while it is mounted, which re-runs the
+   *  machine's hydrate. */
+  mail_export: boolean;
 }
 
 /** Which client surfaces a push `kind` has made stale
@@ -314,6 +396,23 @@ export function enableDnsFakeProviderForTest(): void {
     );
   }
   (fn as () => void)();
+}
+
+/** Test-only: compress the `admin-dns` page's two slow clocks (the background
+ *  re-check and the managed re-publish interval) to `secs` — the wasm twin of
+ *  native's `FAUNA_DNS_RECHECK_SECS`. Installed as
+ *  `window.__fauna_setDnsRecheckSecsForTest` (`e2e-automation.ts`); called only
+ *  from the Playwright e2e bridge. Present only in the `wasm-core-test` flavor,
+ *  and THROWS on a production bundle, like `enableDnsFakeProviderForTest`. */
+export function setDnsRecheckSecsForTest(secs: number): void {
+  const fn = (wasm() as unknown as Record<string, unknown>).setDnsRecheckSecsForTest;
+  if (typeof fn !== 'function') {
+    throw new Error(
+      'setDnsRecheckSecsForTest is absent: this SPA is running the PRODUCTION ' +
+        'wasm flavor, which compiles the e2e seams out. Build with `just web-test`.',
+    );
+  }
+  (fn as (secs: number) => void)(secs);
 }
 
 /** Test-only: point *this core chunk's* directory-backed feeders (the
@@ -416,35 +515,6 @@ export function pushOptedIn(): boolean {
   return wasm().pushOptedIn();
 }
 
-/**
- * One snapshot file's **decrypted** bytes, via the shared client-side walk
- * (`fauna_core::file_download`, over wasm): manifest + chunks fetched by content
- * address, opened under the owner `BackupKey` derived from `secretHex`,
- * reassembled, and verified against the manifest's whole-file address.
- *
- * This is the only mechanism that can read a **sealed** snapshot file — owner
- * chunks are sealed unconditionally and the nest holds no opening key, so the
- * nest cannot reassemble them.
- * The caller saves the bytes as a browser blob download; that save is the one
- * platform-specific leg (`ui/backups.md` § Where logic lives).
- *
- * `manifestHash` takes the `SnapshotFile.manifest_hash` wire value in either
- * shape the decoder produces (`Uint8Array` or `number[]`).
- */
-export async function downloadSnapshotFileBytes(
-  manifestHash: Uint8Array | number[],
-  relativePath: string,
-  secretHex: string,
-  nestUrl: string,
-): Promise<Uint8Array> {
-  await ensureWasm();
-  return wasm().downloadSnapshotFileBytes(
-    new Uint8Array(manifestHash),
-    relativePath,
-    secretHex,
-    nestUrl,
-  );
-}
 
 // ── Logging (observability.md § Surfaces) ──────────────
 //
@@ -615,6 +685,30 @@ export function passwordStrengthLabel(password: string): LocalizedText | null {
   return wasm().passwordStrengthLabel(password) as LocalizedText | null;
 }
 
+/** The Forwarding section's draft checks (`mail-forwarding.md`) — wasm twins of
+ *  `fauna_client_mail_settings::{forward_all_to_draft_outcome,
+ *  forward_per_hour_draft_outcome, forward_per_hour_hint}`. A `refused` outcome
+ *  carries the `LocalizedText` the page shows; nothing is sent. */
+export type ForwardAllToDraftOutcome =
+  | { kind: 'clear' }
+  | { kind: 'set'; address: string }
+  | { kind: 'refused'; message: LocalizedText };
+export type ForwardPerHourDraftOutcome =
+  | { kind: 'value'; value: number }
+  | { kind: 'refused'; message: LocalizedText };
+
+export function forwardAllToDraftOutcome(draft: string): ForwardAllToDraftOutcome {
+  return wasm().forwardAllToDraftOutcome(draft) as ForwardAllToDraftOutcome;
+}
+
+export function forwardPerHourDraftOutcome(draft: string, ceiling: number): ForwardPerHourDraftOutcome {
+  return wasm().forwardPerHourDraftOutcome(draft, ceiling) as ForwardPerHourDraftOutcome;
+}
+
+export function forwardPerHourHint(ceiling: number): LocalizedText {
+  return wasm().forwardPerHourHint(ceiling) as LocalizedText;
+}
+
 // The §4 provider form's two faces (`paymentsKnownKinds`, `paymentsWebhookUrl`)
 // MOVED to `$lib/payments` with the rest of the payments glue — see
 // `wasmCoreModule` above for why a face whose name must excise cannot be
@@ -760,7 +854,8 @@ export function buildRegisterRequest(secretHex: string, handle: string, domain: 
  *  (`fauna.auth.not_registered`). The anonymous WS is CORS-exempt, so a
  *  cross-origin `origin` works where the HTTP fetch was CORS-blocked. Throws
  *  `TransientAuthError` on a transport failure, `NestOutdatedError` when the nest
- *  reports it is outdated (`fauna.nest.outdated`), a plain `Error` otherwise (see
+ *  reports it is outdated (`fauna.nest.outdated`), `AppOutdatedError` when the
+ *  nest closes the dial 4426 (this app is too old), a plain `Error` otherwise (see
  *  `classifyChallengeError`). */
 export async function challengeVerify(
   secretHex: string,
@@ -788,7 +883,8 @@ export async function challengeVerify(
     json = await wasm().challengeVerify(secretHex, origin);
   } catch (e) {
     // `transient:` → TransientAuthError (Retry CTA); `outdated:` →
-    // NestOutdatedError (non-retry "update your nest" surface); anything else →
+    // NestOutdatedError (non-retry "update your nest" surface); `app-outdated:` →
+    // AppOutdatedError (the same surface naming the app); anything else →
     // a plain Error the launch screen treats as `unreachable`. The wire prefixes
     // are produced by the wasm `map_silent_err` (version-compatibility.md Dim 4).
     throw classifyChallengeError(e);
@@ -868,16 +964,13 @@ export async function adoptHeldSuccessor(
   return wasm().adoptHeldSuccessor(predecessorActorIdHex, verifiedSuccessor) as boolean;
 }
 
-/** Discharge the group sweep a relaunch adoption owes — the unbidden press of
- *  `recovery-kit-sweep-retry-button` (`succession-propagation.md` § Propagation
- *  → *Own device fleet*, the relaunch-adoption clause). Claims once; `null` when
- *  nothing was owed, else the press's answer for `error-message`. The report it
- *  parks is the one `successionSweepCopy` then reads. */
-export async function dischargeOwedSuccessionSweep(
-  actorIdHex: string,
-): Promise<LocalizedText | null> {
+/** Whether this identity is owed a relaunch adoption's group sweep — a PEEK,
+ *  so the Settings page brings conversations up only on the launch that owes
+ *  one. The discharge itself is `$lib/rpc`'s `dischargeOwedSuccessionSweep`: it
+ *  sweeps over the live session and the live engine. */
+export async function successionSweepOwed(actorIdHex: string): Promise<boolean> {
   await ensureWasm();
-  return wasm().dischargeOwedSuccessionSweep(actorIdHex) as LocalizedText | null;
+  return wasm().successionSweepOwed(actorIdHex) as boolean;
 }
 
 /** Walk the registration chain anonymously and return the **verified** successor
@@ -925,6 +1018,23 @@ export async function actorByHandle(
 ): Promise<{ actor_id: string; handle: string; domain: string }> {
   await ensureWasm();
   return JSON.parse((await wasm().actorByHandle(handle, origin, domain)) as string);
+}
+
+/** The Contacts Find User lookup with cross-nest peer discovery — shared
+ *  `fauna_client_core::find_user::find_user_across_nests` over wasm. `origin` is
+ *  the home nest; `domain` the typed `@domain` qualifier (omit for a bare
+ *  handle). A foreign domain is dialed DIRECTLY at its derived base URL (not
+ *  through `nestResolve`, whose nest-proxied hop refuses loopback / IP /
+ *  `.local` authorities). `nest_url` is the peer nest the actor resolved on —
+ *  the knock's `recipientNestUrl` — and `null` for a home-nest actor
+ *  (`contacts.md` § Implementation status today → *Cross-nest knocks*). */
+export async function findUser(
+  handle: string,
+  origin: string,
+  domain?: string,
+): Promise<{ actor_id: string; handle: string; domain: string; nest_url: string | null }> {
+  await ensureWasm();
+  return JSON.parse((await wasm().findUser(handle, origin, domain)) as string);
 }
 
 /** Classify a user-entered Linked-nests value via shared
@@ -1209,6 +1319,36 @@ export interface RelativeTimeDisplay {
   absolute_epoch_ms: number | null;
 }
 
+// ── The Status page's element texts ────────────────────────────────────
+// `ui/status.md` § State & data shape. The seven `status-*` element texts from
+// the legs web has (no local sync agent, so the two `sync_*` stay `null`): each
+// is the bare value, `null` = the leg is not loaded and the element is NOT
+// rendered. Computed once in shared Rust (`fauna_client_status::render_static`).
+
+/** Mirrors shared Rust `fauna_client_status::StatusText`. */
+export interface StatusText {
+  node_domain: string | null;
+  node_version: string | null;
+  sync_pending: string | null;
+  sync_last: string | null;
+  mls_key_packages: string | null;
+  mls_channels: string | null;
+  build_sha: string | null;
+}
+
+/** `node` is `statusNode`'s reply (or `null`), `keyPackages` the bearer's
+ *  `keypackageCount` (or `null` until it resolves), `channels` the live
+ *  `WasmConversationsManager.secureChannelCount()`, `buildStamp` the
+ *  compile-time commit (`dev`/empty/`null` = an unstamped build, no row). */
+export function statusTextRaw(
+  node: NodeLeg | null,
+  keyPackages: number | null,
+  channels: number,
+  buildStamp: string | null,
+): StatusText {
+  return wasm().statusText(node, keyPackages ?? undefined, channels, buildStamp ?? undefined) as StatusText;
+}
+
 export function byteSizeRaw(bytes: number): LocalizedText {
   return wasm().byteSize(bytes) as LocalizedText;
 }
@@ -1252,6 +1392,12 @@ export function conversationTimestampRaw(
  *  (negatives clamp to `0`). `admin/settings/+page.svelte`. */
 export function parseCap(text: string): number | undefined {
   return wasm().parseCap(text) ?? undefined;
+}
+
+/** The default lapse tier (`fauna_protocol::admin::DEFAULT_LAPSE_TIER`) a
+ *  membership draft falls back to. `admin/settings/+page.svelte`. */
+export function defaultLapseTier(): string {
+  return wasm().defaultLapseTier();
 }
 
 /** Parse an admin-mail `u32` integer knob → the value, or `undefined`. A leading
@@ -1323,6 +1469,38 @@ export function takedownFormView(
  *  failure, `null` on success. */
 export function takedownVerdict(restore: boolean, error: string | null): LocalizedText {
   return wasm().takedownVerdict(restore, error ?? undefined) as LocalizedText;
+}
+
+/** `fauna_client_moderation::row_is_appealable` → whether a merged queue row
+ *  (`moderationQueue`'s output) carries a nest-issued decision to appeal — true
+ *  for a server row only; a local detection's lever is the correction button
+ *  (`moderation.md` § Legal takedown — the transparency triple's second leg).
+ *  Twin of native's `row_is_appealable`. Pure — no nest hop. */
+export function moderationRowIsAppealable(row: QueueRow): boolean {
+  return wasm().moderationRowIsAppealable(row);
+}
+
+/** `fauna_client_moderation::appeal_form_view` → what the queue's appeal form
+ *  renders: submit gating (a reasonless or over-long appeal is never
+ *  submittable, with the reason stated), the submit label, and the summary
+ *  naming the content the appeal is filed against. Pass the content id
+ *  captured when the form OPENED and the reason as typed. */
+export interface AppealFormView {
+  can_submit: boolean;
+  blocked_reason: LocalizedText | null;
+  submit_label: LocalizedText;
+  summary: LocalizedText;
+}
+
+export function appealFormView(contentId: string, reason: string): AppealFormView {
+  return wasm().appealFormView(contentId, reason) as AppealFormView;
+}
+
+/** `fauna_client_moderation::appeal_verdict` → the appeal's outcome line
+ *  (`appeal-status`). Pass the dispatch rejection's message on failure, `null`
+ *  on success. */
+export function appealVerdict(error: string | null): LocalizedText {
+  return wasm().appealVerdict(error ?? undefined) as LocalizedText;
 }
 
 // ── User-initiated reporting (`moderation.md` § User-initiated reporting →
@@ -1776,10 +1954,14 @@ export function backupLastUploadLabel(
 // Shared `backup-destination-backlog-count` row text.
 // `fauna_core::format::backup_backlog_label` (over wasm) carries the absent-status 0
 // baseline every app applied by hand, and returns a complete `LocalizedText` — no
-// client-side composition. See `docs/goal/behavior/value-formatting.md` § Backup
-// destination status labels.
-export function backupBacklogLabel(backlogCount: number | null): LocalizedText {
-  return wasm().backupBacklogLabel(backlogCount ?? undefined) as LocalizedText;
+// client-side composition; a row whose `writer_state` is refused reads the
+// refusal in place of the count. See `docs/goal/behavior/value-formatting.md`
+// § Backup destination status labels.
+export function backupBacklogLabel(
+  backlogCount: number | null,
+  writerState: string | null,
+): LocalizedText {
+  return wasm().backupBacklogLabel(backlogCount ?? undefined, writerState ?? undefined) as LocalizedText;
 }
 
 /** Same `{ label, when? }` shape as `BackupLastUploadDisplay`, and deliberately a
@@ -1986,6 +2168,13 @@ export function hexFull(bytes: Uint8Array): string {
   return wasm().hexFull(bytes) as string;
 }
 
+/** Lowercase-hex `blake3` of a blob's bytes — the content address the nest
+ *  computes on ingest (shared `fauna_media::pipeline::bytes_content_hash_hex`).
+ *  `uploadBlobMultipart` checks the nest's echoed hash against it. */
+export function blobContentHashHex(bytes: Uint8Array): string {
+  return wasm().blobContentHashHex(bytes) as string;
+}
+
 /** Canonical short display form for a long hex id — 12-char prefix + `…`; ids of
  *  12 or fewer chars pass through unchanged. Twin of native's `short_id`.
  *  See `docs/goal/behavior/value-formatting.md` § Short id. */
@@ -2168,6 +2357,16 @@ export function matchesMutedKeywords(body: string, mutedKeywords: MutedKeyword[]
   return wasm().matchesMutedKeywords(body, mutedKeywords) as boolean;
 }
 
+/** `preference_surfaces::refused_as_not_ready` — is a preference page's
+ *  load-failure text the first-listing gate's refusal (`common.needs_nest` /
+ *  `common.needs_other_device`)? A load that otherwise degrades quietly shows
+ *  the text on `error-message` when this holds (`account-client-lifecycle.md`
+ *  § The first listing, clauses (4) and (5)). Twin of native's
+ *  `refused_as_not_ready`. */
+export function refusedAsNotReady(reason: string): boolean {
+  return wasm().refusedAsNotReady(reason) as boolean;
+}
+
 /** The exact acknowledge phrase the immediate-delete modal requires the user to
  *  type — the protocol constant `IMMEDIATE_DELETE_ACK_TEXT` the nest checks
  *  byte-for-byte (NOT an i18n string: locale-independent). Twin of native's
@@ -2311,6 +2510,10 @@ export function taskDelegationOptionLabelRaw(
   return wasm().taskDelegationOptionLabel(option, Object.fromEntries(labels)) as LocalizedText;
 }
 
+export function taskDelegationOptionKeyRaw(option: PinOption): string {
+  return wasm().taskDelegationOptionKey(option) as string;
+}
+
 // Shared conversation thread label display. `fauna_core::format::thread_label_display`
 // (over wasm) owns the empty-label fallback: a blank/whitespace-only label resolves to
 // the canonical `conversations.detail.no_subject` key (`(no subject)`), a non-empty
@@ -2420,6 +2623,34 @@ export interface RoleAddressOption {
 // § Per-domain role-address routing. Mirrors [unknownSenderOptions].
 export function roleAddressOptions(): RoleAddressOption[] {
   return wasm().roleAddressOptions() as RoleAddressOption[];
+}
+
+// One `admin-dns-domain-dmarc-policy-select` option, as [dmarcPolicyOptions]
+// hands it over.
+export interface DmarcPolicyOption {
+  // The RFC 7489 tag (`reject` / `quarantine` / `none`) — the `<option value>`.
+  value: string;
+  label: LocalizedText;
+  // The policy the tag names, as serde spells it (`Reject` / `Quarantine` /
+  // `Monitor`): what `UpdateConfig.dmarc_policy` carries and
+  // `LocalDomainView.dmarc_policy` is compared against. `none` is not a variant
+  // name, so never derive this from `value`.
+  policy: string;
+}
+
+// The shared per-domain DMARC policy catalog
+// (`fauna_client_mail_settings::local_domains::dmarc_policy_options` over wasm)
+// — the single source of the three options and their paint order.
+// `dmarc-reporting.md` § Multi-domain deployments. Mirrors [roleAddressOptions].
+export function dmarcPolicyOptions(): DmarcPolicyOption[] {
+  return wasm().dmarcPolicyOptions() as DmarcPolicyOption[];
+}
+
+// How often an open `admin-dns` page runs the shared machine's
+// `backgroundRecheck` (`fauna_client_dns::record_recheck_secs` over wasm) —
+// the shared cadence; the page owns only the timer.
+export function recordRecheckSecs(): number {
+  return wasm().recordRecheckSecs();
 }
 
 // The shared `fcrdns_mode` picker catalog
@@ -2656,6 +2887,108 @@ export function openRegionPlane(languageTag: string | null, record: Uint8Array |
   return new (wasm().WasmRegionPlane)(languageTag, record) as unknown as RegionPlaneHandle;
 }
 
+// ── The shared feature-policy editor (`feature-policy-editor-*`) ──────────
+//
+// `WasmPolicyEditor` (`libs/fauna-wasm/src/feature_editor.rs`) is the web twin
+// of the UniFFI `FfiPolicyEditor`: the draft, the cell list, the labels, the
+// parser and the tier-to-kind choice are shared Rust. The SPA paints
+// `view()` and forwards keystrokes (`dynamic-features.md` § Authoring
+// surfaces). These interfaces mirror `fauna_client_features::editor`'s
+// serde shapes field-for-field.
+
+/** The tiers the SPA opens the editor at. `guardian` is the family page's host:
+ *  it opens by ward (`openForWard`), never by `featureAuthoredRows` /
+ *  `openFeaturePolicyEditor`, which take the two bare-key tiers only. */
+export type FeatureAuthoringTier = 'admin' | 'self' | 'guardian';
+
+/** The tiers that open without a ward. */
+export type BareFeatureAuthoringTier = Exclude<FeatureAuthoringTier, 'guardian'>;
+
+/** `fauna_client_features::AuthoredRow` — one registry member's row on an
+ *  authoring host: its name and the tier's authored document in words. */
+export interface AuthoredRow {
+  feature: string;
+  name: LocalizedText;
+  summary: LocalizedText;
+  has_document: boolean;
+  unreadable: boolean;
+}
+
+/** `fauna_client_features::EditorCell` — one editable cell. */
+export interface EditorCell {
+  label: LocalizedText;
+  text: string;
+  note: LocalizedText | null;
+  note_magnitude: LocalizedText | null;
+}
+
+/** `fauna_client_features::PolicyEditorView` — everything the editor paints. */
+export interface PolicyEditorView {
+  feature: string;
+  tier: string;
+  title: LocalizedText;
+  on: boolean;
+  cells: EditorCell[];
+  off_note: LocalizedText | null;
+  can_remove: boolean;
+  hint: LocalizedText;
+}
+
+/** A write's verdict: `status` when it landed (the editor has re-seeded),
+ *  `invalid` when the shared parser refused a cell and nothing was sent. */
+export interface PolicyEditorVerdict {
+  status?: LocalizedText;
+  invalid?: LocalizedText;
+}
+
+/** The open editor — `WasmPolicyEditor`. */
+export interface PolicyEditorHandle {
+  view(): PolicyEditorView;
+  setOn(on: boolean): void;
+  setCell(index: number, text: string): void;
+  save(client: WsRpcClient): Promise<PolicyEditorVerdict>;
+  remove(client: WsRpcClient): Promise<PolicyEditorVerdict>;
+  free(): void;
+}
+
+/** One tier's authored documents as host rows (admin: `fauna.features.policy.get`;
+ *  self: `fauna.features.self_limits.get`), joined with the nest's capability
+ *  set. */
+export function featureAuthoredRows(
+  client: WsRpcClient,
+  tier: BareFeatureAuthoringTier,
+): Promise<AuthoredRow[]> {
+  return wasm().WasmPolicyEditor.authoredRows(client, tier) as Promise<AuthoredRow[]>;
+}
+
+/** Open the editor over one member at `tier`, seeded from the tier's
+ *  authored document. */
+export function openFeaturePolicyEditor(
+  client: WsRpcClient,
+  tier: BareFeatureAuthoringTier,
+  feature: string,
+): Promise<PolicyEditorHandle> {
+  return wasm().WasmPolicyEditor.open(client, tier, feature) as unknown as Promise<PolicyEditorHandle>;
+}
+
+/** The guardian host's rows for one ward (`ward` = the ward's actor id bytes,
+ *  as `familyPolicyUpdate` takes it). */
+export function featureAuthoredRowsForWard(
+  client: WsRpcClient,
+  ward: Uint8Array,
+): Promise<AuthoredRow[]> {
+  return wasm().WasmPolicyEditor.authoredRowsForWard(client, ward) as Promise<AuthoredRow[]>;
+}
+
+/** Open the editor over one member at the guardian tier for `ward`. */
+export function openFeaturePolicyEditorForWard(
+  client: WsRpcClient,
+  ward: Uint8Array,
+  feature: string,
+): Promise<PolicyEditorHandle> {
+  return wasm().WasmPolicyEditor.openForWard(client, ward, feature) as unknown as Promise<PolicyEditorHandle>;
+}
+
 // The guardian-floor categories a piece of content triggers, for Guardian Notify
 // counting (`family-safety.md` § Guardian Notify) — the web twin of the shared
 // `guardian_enforced_categories`. Returns the subset of `nsfw|spam|phishing|
@@ -2781,8 +3114,10 @@ export interface CueRow {
   media_played_pm: number | null;
 }
 
-/** One finished exposure — `fauna_feed::CueObservation`, exactly
- *  `WasmFeedManager.recordObservation`'s arguments. */
+/** One finished exposure — `fauna_feed::CueObservation`, the object
+ *  `WasmFeedManager.recordObservation` takes back whole. `ended_by` is how the
+ *  tracker saw the exposure end (`fauna_feed::ExposureEnd`); a `skip` derives
+ *  only from `"scrolled-past"`. The shell relays it, never chooses it. */
 export interface CueExposure {
   content_id: string;
   is_media: boolean;
@@ -2790,6 +3125,7 @@ export interface CueExposure {
   dwell_ms_at_skip_visibility: number;
   dwell_ms_at_long_visibility: number;
   observed_at_ms: number;
+  ended_by: 'scrolled-past' | 'window-dropped' | 'drained';
 }
 
 export interface CueTrackerHandle {
@@ -2816,6 +3152,13 @@ export function cueSampleIntervalMs(): number {
   return wasm().cueSampleIntervalMs();
 }
 
+/** A player's position through its media as the per-mille a cue row's
+ *  `media_played_pm` carries — the shared clamp (`played_per_mille`), never
+ *  re-derived here. `null` while the duration is unknown. */
+export function cuePlayedPerMille(position: number, duration: number): number | null {
+  return (wasm().cuePlayedPerMille(position, duration) ?? null) as number | null;
+}
+
 // A guardian-typed `"HH:MM"` window bound as minutes from local midnight, for
 // the two `family-policy-screen-window-*-input`s. `null` for an empty input
 // ("this bound is unset" — how a guardian clears the window); THROWS the reason
@@ -2835,6 +3178,18 @@ export function formatTimeOfDay(minutesFromMidnight: number): string {
 // THROWS outside `0..=1440`, the same bound the nest enforces at `policy.update`.
 export function parseDailyMinutes(input: string): number | null {
   return (wasm().parseDailyMinutes(input) ?? null) as number | null;
+}
+
+// The cross-field write rule the nest refuses by at `policy.update` (half-set
+// window bounds, `start == end`, an out-of-range bound or budget), run on the
+// three PARSED values before the RPC — the parsers above judge one field each,
+// only this sees the pair. THROWS the reason string, like the parsers.
+export function validateScreenTime(
+  windowStart: number | null,
+  windowEnd: number | null,
+  dailyMinutes: number | null,
+): void {
+  wasm().validateScreenTime(windowStart ?? undefined, windowEnd ?? undefined, dailyMinutes ?? undefined);
 }
 
 // What a `family-approval-item` row should display verbatim, or `null` when
@@ -2861,6 +3216,25 @@ export function approvalDisplayTextRaw(
   ) as string | null;
 }
 
+// When a held mail arrived, beside `approvalDisplayTextRaw`'s sender —
+// `fauna_core::format::approval_timestamp_display` over wasm: the
+// `conversationTimestampRaw` shape over the entry's `created_at` (unix
+// seconds), or `null` for every kind but `mail_hold` and for an unstamped hold
+// (`docs/goal/behavior/family-safety.md` § Guardian policy).
+export function approvalTimestampRaw(
+  kind: string,
+  createdAtSecs: number,
+  nowMs: number,
+  utcOffsetSeconds: number,
+): ConversationTimestampDisplay | null {
+  return wasm().approvalTimestamp(
+    kind,
+    createdAtSecs,
+    nowMs,
+    utcOffsetSeconds,
+  ) as ConversationTimestampDisplay | null;
+}
+
 // Shared admin-nest host-OS-maintenance status label.
 // `fauna_core::format::os_maintenance_status_label` (over wasm) owns the state→key
 // decision (reboot-pending / updates-pending / up-to-date, from the `os_*` fields
@@ -2874,19 +3248,33 @@ export function osMaintenanceStatusLabel(
   return wasm().osMaintenanceStatusLabel(securityUpdatesPending, rebootPending) as LocalizedText;
 }
 
-// Shared contact-roster filter predicate. `fauna_core::format::contact_matches_filter`
-// (over wasm) owns the `contacts-search-field` match: a case-insensitive substring of
-// the trimmed query over handle / domain / hex actor-id (empty query matches all), so
-// web filters the roster through the same predicate the native apps use instead of
-// its own actor-id-only `.includes`. `handle`/`domain` are `undefined` for a federated
-// peer. Local-only — never a nest query. See `docs/goal/ui/contacts.md` § Where logic lives.
-export function contactMatchesFilter(
-  query: string,
-  handle: string | undefined,
-  domain: string | undefined,
-  actorId: string,
-): boolean {
-  return wasm().contactMatchesFilter(query, handle, domain, actorId) as boolean;
+// Mail health readout labels (`mail-deliverability.md` § The mail health readout).
+// `fauna_core::format::mail_health_*_label` (over wasm) own the state→key and
+// heartbeat-bucket decisions the native apps consume via UniFFI. The two state
+// labels return a `LocalizedText`; the heartbeat label a `RelativeTimeDisplay`
+// (`atSecs` in unix **seconds**, `null` = never → "Never").
+export function mailHealthStateLabel(state: string): LocalizedText {
+  return wasm().mailHealthStateLabel(state) as LocalizedText;
+}
+
+export function mailHealthCheckStateLabel(state: string): LocalizedText {
+  return wasm().mailHealthCheckStateLabel(state) as LocalizedText;
+}
+
+export function mailHealthHeartbeatLabelRaw(
+  atSecs: number | null,
+  nowMs: number,
+): RelativeTimeDisplay {
+  return wasm().mailHealthHeartbeatLabel(atSecs ?? undefined, nowMs) as RelativeTimeDisplay;
+}
+
+// The private contact overlay's face for a tab that hosts no account runtime —
+// an empty projection (every name its public label) whose Save is refused. The
+// tab that hosts one reads `WasmConversationsManager.contactOverlays()`
+// instead; `$lib/conversations`'s `contactOverlays()` picks between them.
+// See `docs/goal/ui/contacts.md` § The private overlay.
+export function contactOverlaysWithoutRuntime(): OverlayFace {
+  return new (wasm().WasmContactOverlays)() as unknown as OverlayFace;
 }
 
 // Shared `profile-block-button` toggle label. `fauna_core::format::contact_toggle_block_label`
@@ -3281,6 +3669,17 @@ export function aliasHitsLabel(hitCount: number, lastHitDate: string | null): Lo
   return wasm().aliasHitsLabel(hitCount, lastHitDate ?? undefined) as LocalizedText;
 }
 
+/** Whether saving this archive link must first ask once (it is off the user's own
+ *  domains and not the link the list already stores). Twin of native's
+ *  `archive_url_needs_confirm`; the add/edit sheet's Submit arms on it. */
+export function archiveUrlNeedsConfirm(
+  archiveUrl: string,
+  savedArchiveUrl: string | null,
+  localDomains: string[],
+): boolean {
+  return wasm().archiveUrlNeedsConfirm(archiveUrl, savedArchiveUrl ?? undefined, localDomains) as boolean;
+}
+
 export function aliasKindBadge(kind: string): LocalizedText {
   return wasm().aliasKindBadge(kind) as LocalizedText;
 }
@@ -3293,6 +3692,37 @@ export function trainingSourceBadge(source: string): LocalizedText {
 export function exportFormatLabel(format: string): LocalizedText {
   return wasm().exportFormatLabel(format) as LocalizedText;
 }
+/** The mail export confirm step's three figures over the selected mailboxes
+ *  (`fauna_client_mail_settings::export_confirm_estimate`): the message total,
+ *  the estimated bytes and the estimated seconds. `sealed_bytes === 0` with
+ *  `messages > 0` is a nest that reports no sizes. */
+export interface ExportConfirmEstimate {
+  messages: number;
+  sealed_bytes: number;
+  secs: number;
+}
+export function exportConfirmEstimate(
+  mailboxes: { name: string; selected: boolean; message_count: number; sealed_bytes: number }[],
+): ExportConfirmEstimate {
+  return wasm().exportConfirmEstimate(mailboxes) as ExportConfirmEstimate;
+}
+/** The shared elapsed time / time left of a mail export or import session
+ *  (`fauna_client_mail_settings::transfer_timing`); a field is absent when it
+ *  has no answer (no session, nothing processed yet, not running). */
+export interface TransferTiming {
+  elapsed_secs?: number | null;
+  remaining_secs?: number | null;
+}
+export function transferTiming(
+  startedAt: number,
+  lastProgressAt: number,
+  running: boolean,
+  processed: number,
+  total: number,
+  nowSecs: number,
+): TransferTiming {
+  return wasm().transferTiming(startedAt, lastProgressAt, running, processed, total, nowSecs) as TransferTiming;
+}
 // The `mail-import` wizard's two picker vocabularies, from the same shared map
 // every other app reads (`import_source_kind_label` / `import_tls_mode_label`)
 // — the export twin's precedent, so a seventh app cannot hand-roll a sixth copy.
@@ -3301,6 +3731,11 @@ export function importSourceKindLabel(kind: string): LocalizedText {
 }
 export function importTlsModeLabel(mode: string): LocalizedText {
   return wasm().importTlsModeLabel(mode) as LocalizedText;
+}
+// The Confirm step's sum (`MailImportSnapshot::selected_totals`) — shared Rust,
+// so the SPA never re-sums `message_count`.
+export function importSelectedTotals(snapshot: unknown): ImportTotals {
+  return wasm().importSelectedTotals(snapshot) as ImportTotals;
 }
 
 // The Source step's ordered commit-then-Connect action list
@@ -3642,10 +4077,27 @@ export function nextSortOrder(current: string | undefined): string {
 // emoji in `conversations/+page.svelte`; the ORDER is a cross-app contract
 // (`dm-reaction-option` is indexed, so an e2e tapping index 0 asserts 👍 everywhere), and a
 // hand-kept copy had nothing to catch it drifting. See `docs/goal/ui/conversations.md`
-// § Reactions & message delete. The fuller "more" grid stays web-local — that picker widget
-// is the one sanctioned per-platform divergence (§ Rendering / picker glue).
+// § Reactions & message delete.
 export function quicksetEmojis(): string[] {
   return wasm().quicksetEmojis() as string[];
+}
+
+// The fuller picker's twenty-emoji shortcut grid, in the shared order —
+// `fauna_conversations::MORE_GRID_EMOJIS` over wasm, the list windows reads over UniFFI.
+// The picker WIDGET is per-platform glue (a free-entry field on web); the list beside it
+// is not (`docs/goal/ui/conversations.md` § Reactions & message delete → *Rendering /
+// picker glue*).
+export function moreGridEmojis(): string[] {
+  return wasm().moreGridEmojis() as string[];
+}
+
+// Settings → Encryption's read-only low flag — the shared
+// `fauna_conversations::keypackages_low` (`direct-messages.md` § Key Package
+// Management: fewer than five, a display flag only, never an auto-mint
+// trigger), the SAME predicate tui and linux call directly, so the SPA carries
+// no threshold literal of its own.
+export function keypackagesLow(count: number): boolean {
+  return wasm().keypackagesLow(count) as boolean;
 }
 
 // ── The room model's render mappings (`ui/conversations.md` § Element IDs) ──
@@ -3721,6 +4173,39 @@ export function roomProspectiveClass(
   includeHomeNest: boolean,
 ): string | null {
   return wasm().roomProspectiveClass(chips, includeHomeNest) as string | null;
+}
+
+// `thread-room-notice`: which standing notice (if any) the room states, from
+// the two facts the projected room carries (`awaiting_key` wins) — the shared
+// `RoomNotice::for_facts`, so no app re-decides precedence.
+export function roomNoticeFor(awaitingKey: boolean, moderationUnverified: boolean): string | null {
+  return wasm().roomNoticeFor(awaitingKey, moderationUnverified) as string | null;
+}
+
+// …its text, and its driver-facing `state` attribute
+// (`moderation-unverified` / `awaiting-key`).
+export function roomNoticeLabel(notice: string): string {
+  return wasm().roomNoticeLabel(notice) as string;
+}
+
+export function roomNoticeAttrToken(notice: string): string {
+  return wasm().roomNoticeAttrToken(notice) as string;
+}
+
+// `room-invitation[i]`'s sentence off a snapshot `room_invitations` entry, and
+// `room-pending-invite[i]`'s off a `room.pending_invites` entry.
+export function roomInvitationText(invitation: unknown): string {
+  return wasm().roomInvitationText(invitation) as string;
+}
+
+export function roomPendingInviteText(invite: unknown): string {
+  return wasm().roomPendingInviteText(invite) as string;
+}
+
+// Whether a community room may name a labeler of this artifact kind — the
+// filter over the catalog before a `room-labeler-toggle` row is painted.
+export function roomMayNameLabelerKind(kind: string): boolean {
+  return wasm().roomMayNameLabelerKind(kind) as boolean;
 }
 
 // Notes editor block model (over `fauna_core::notes`) — the substrate-agnostic editor layer
@@ -3897,10 +4382,69 @@ export interface SourceBadge {
    *  lowercase id (`fox | envelope | butterfly | bolt | globe | unknown | archive | bridge`); the
    *  key for `$lib/source-glyph` `sourceGlyphEmoji`. */
   glyph: string;
+  /** `SourceKind::badge_paints_label`: true for a third-party bridge's badge,
+   *  whose glyph does not name it. Web paints every badge's label already. */
+  paints_label: boolean;
 }
 
-export function classifySources(sourceField: string): SourceBadge[] {
-  return (wasm().classifySources(sourceField) as SourceBadge[]) ?? [];
+/** One entry of the feed snapshot's `bridge_roster` (`fauna_core`
+ *  `BridgeIdentitySnapshot`): a bridge's manifest id — the source token its
+ *  posts carry — with its declared label and glyph. */
+export interface BridgeIdentity {
+  id: string;
+  label: string;
+  glyph: string;
+}
+
+/** `bridgeRoster` is the snapshot's `bridge_roster`: a token naming a listed
+ *  bridge classifies as that bridge, with its declared label and glyph
+ *  (`ui/feed.md` § Implementation status today, `SourceKind::Bridged`). */
+export function classifySources(sourceField: string, bridgeRoster: BridgeIdentity[]): SourceBadge[] {
+  return (wasm().classifySources(sourceField, bridgeRoster) as SourceBadge[]) ?? [];
+}
+
+/** Whether a post whose wire `source` field is `source` offers *View thread*
+ *  (`feed-post-view-thread-button`) — the shared
+ *  `fauna_feed::PostSummary::offers_thread_view`, never a page-side
+ *  `source === 'bluesky'` (`bridges.md` § Bluesky-native thread view). Sync
+ *  for the same reason as `classifySources`. */
+export function postOffersThreadView(source: string): boolean {
+  return wasm().postOffersThreadView(source) === true;
+}
+
+/** What a post card's `gated-post-badge` paints — the shared
+ *  `fauna_feed::PostSummary::card_gate`: the row's own gate, else, on a repost
+ *  row, its target's (`behavior/restricted-posts.md` § Encryption at rest,
+ *  ruling 3). `null` = no badge. Sync for the same reason as `classifySources`. */
+export function postCardGate(post: {
+  gated_tier?: string | null;
+  room_label?: string | null;
+  reposted_gated_tier?: string | null;
+  reposted_room_label?: string | null;
+}): { tier: string; room_label: string | null } | null {
+  const gate = wasm().postCardGate(
+    post.gated_tier ?? undefined,
+    post.room_label ?? undefined,
+    post.reposted_gated_tier ?? undefined,
+    post.reposted_room_label ?? undefined,
+  ) as { tier: string; room_label: string | null } | null | undefined;
+  return gate ?? null;
+}
+
+/** One entry of the feed snapshot's `thread.posts` (`fauna_feed::ThreadPostView`). */
+export interface ThreadPostView {
+  at_uri: string;
+  author_handle: string;
+  author_display_name: string | null;
+  text: string;
+  created_at: string;
+  is_focal: boolean;
+}
+
+/** How the thread page names a post's author — the shared
+ *  `ThreadPostView::author_label` (display name, else `@handle`). */
+export function threadPostAuthorLabel(post: ThreadPostView): string {
+  return wasm().threadPostAuthorLabel(post) as string;
 }
 
 // The i18n key for a feed-manager error that is a STATED REFUSAL (today only
@@ -4121,6 +4665,30 @@ export async function recoveryBoxesLocal(secretHex: string): Promise<RecoveryBox
   return raw.map((e) => ({ nestActorId: e.nest_actor_id, domain: e.domain ?? null }));
 }
 
+/** What the `nest_retire` page hands its machine from the signed-in account's
+ *  DNS record (`fauna.state.dns`, read through this tab's account runtime):
+ *  every held credential as the index-paired bags `setHeldDnsJson` takes, and
+ *  the remembered slot names as the three JSON objects `setRememberedSlotsJson`
+ *  takes (nest-retirement.md § Credential stance (b), § DNS cleanup). */
+export interface RetireHeldDns {
+  providerIds: string[];
+  credsJson: string[];
+  dkim: string;
+  atproto: string;
+  faunaSelf: string;
+}
+
+/** The read's outcome: `null` when no account runtime runs in this tab (the
+ *  launch entry, before any session — nothing to pass), `{ error, notReady }`
+ *  when the read failed (`notReady`: the first-listing gate's refusal, which
+ *  the page surfaces rather than reading as "the account holds none"). */
+export type RetireHeldDnsRead = RetireHeldDns | { error: string; notReady: boolean } | null;
+
+export async function retireHeldDns(): Promise<RetireHeldDnsRead> {
+  const raw = (await wasm().retireHeldDnsJson()) as string | undefined;
+  return raw ? (JSON.parse(raw) as RetireHeldDnsRead) : null;
+}
+
 /** The `recover-selfhosted-command` line read from this device's own account
  *  store — the nest-less twin of `rpc.ts`'s `recoverSelfhostedCommand()`.
  *  Rejects when the store custodies no seed for that box. */
@@ -4305,10 +4873,112 @@ export function notificationText(row: unknown): NotificationText {
   return wasm().notificationText(row) as NotificationText;
 }
 
+/** Where a notification row goes when opened — see `notificationDestination`. */
+export type NotificationDestination =
+  | { Post: { post_id: string } }
+  | { Knock: { sender_id: string } }
+  | 'Family'
+  | { External: { url: string } };
+
+// Where a notification row leads, or `null` for an honestly inert row —
+// `fauna_client_notifications::notification_destination` over wasm
+// (`docs/goal/behavior/notifications.md` § Deep-link destinations). Pass the row
+// AS IT ARRIVES from `notificationsList` (before the SPA renames `notif_type` to
+// `type`). Never switch on the row's type yourself: the decision is keyed on
+// `source` then `notif_type`.
+export function notificationDestination(row: unknown): NotificationDestination | null {
+  return (wasm().notificationDestination(row) ?? null) as NotificationDestination | null;
+}
+
 // The conversations rail / feed badge source icon: glyph id → display emoji.
 // `fauna_core::source_glyph::source_glyph_emoji` over wasm — the shared map
 // lifted out of this app's own hand-written `sourceGlyphEmoji()` switch, which
 // all seven apps had a copy of. See `render-model.md` § Deltas → D5.
 export function sourceGlyphEmoji(glyphId: string): string {
   return wasm().sourceGlyphEmoji(glyphId) as string;
+}
+
+// ── Settings → Sessions (`docs/goal/ui/sessions.md`) ────────────────────────
+//
+// The wasm twin of the UniFFI sessions face (`libs/fauna-wasm/src/sessions.rs`):
+// one shared pass acts, re-reads and re-folds; the rows, their order, kinds,
+// marks and the lock's word gate are all shared Rust. Every call resolves —
+// never rejects — to the re-folded page beside whether a lock landed.
+
+/** One `session-card` — `SessionRowView` across the boundary. Times are epoch
+ *  seconds; the SPA formats them itself (`format_unix_local` is native-only). */
+export interface SessionRow {
+  tokenId: string;
+  kind: LocalizedText;
+  mark: LocalizedText | null;
+  createdAt: number;
+  lastUsedAt: number;
+  expiresAt: number;
+  ipAddress: string | null;
+  canRevoke: boolean;
+}
+
+export interface SessionsSnapshot {
+  rows: SessionRow[];
+  error: LocalizedText | null;
+}
+
+export interface SessionsPage {
+  snapshot: SessionsSnapshot;
+  /** The lock landed: every session is gone, this tab's too. */
+  locked: boolean;
+}
+
+/** What every call reads besides the act (`SessionsInput` in the twin). */
+export interface SessionsInput {
+  ownTokenIds: string[];
+  currentTokenId: string | null;
+  devices: { deviceId: string; principal: string | null; label: string }[];
+  thisDeviceRow: string | null;
+  previous: SessionsSnapshot | null;
+}
+
+export function sessionsLoad(client: WsRpcClient, input: SessionsInput): Promise<SessionsPage> {
+  return wasm().sessionsLoad(client, input) as Promise<SessionsPage>;
+}
+
+export function sessionsRevoke(
+  client: WsRpcClient,
+  input: SessionsInput,
+  tokenId: string,
+): Promise<SessionsPage> {
+  return wasm().sessionsRevoke(client, input, tokenId) as Promise<SessionsPage>;
+}
+
+export function sessionsRevokeOthers(client: WsRpcClient, input: SessionsInput): Promise<SessionsPage> {
+  return wasm().sessionsRevokeOthers(client, input) as Promise<SessionsPage>;
+}
+
+/** `confirmWord` is the confirm field verbatim — checked in Rust (the action
+ *  arm), so a wrong word refuses on `error` and reaches no nest. */
+export function sessionsLockout(
+  client: WsRpcClient,
+  input: SessionsInput,
+  confirmWord: string,
+): Promise<SessionsPage> {
+  return wasm().sessionsLockout(client, input, confirmWord) as Promise<SessionsPage>;
+}
+
+/** The lock's confirm word, `LOCK` — for the render's enable check only. */
+export function sessionsLockoutConfirmWord(): string {
+  return wasm().sessionsLockoutConfirmWord() as string;
+}
+
+/** `identity-stolen-button` on the locked launch surface — the stolen-identity
+ *  ceremony with NO session, over an anonymous connection of its own
+ *  (`devices.md` § The two panic buttons, point 5). `nestUrl` is the nest the
+ *  successor's row is bound to, `dialUrl` where the sockets go — as for
+ *  `succeedIdentityWithHeldKit`. */
+export function succeedStolenIdentityLockedWasm(
+  secretHex: string,
+  phrase: string,
+  nestUrl: string,
+  dialUrl: string,
+): Promise<StolenOutcome> {
+  return wasm().succeedStolenIdentityLocked(secretHex, phrase, nestUrl, dialUrl) as Promise<StolenOutcome>;
 }

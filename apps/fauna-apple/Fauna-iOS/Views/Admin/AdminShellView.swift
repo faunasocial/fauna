@@ -97,6 +97,7 @@ struct AdminShellView: View {
             }
             .navigationTitle(page.label)
             .navigationBarTitleDisplayMode(.inline)
+        #if !FAUNA_KIDS
         case .mail:
             AdminMailView(reloadToken: appState.navGeneration)
                 .navigationTitle(page.label)
@@ -129,6 +130,7 @@ struct AdminShellView: View {
             AdminBridgesPendingView(reloadToken: appState.navGeneration)
                 .navigationTitle(page.label)
                 .navigationBarTitleDisplayMode(.inline)
+        #endif
         case .custodyHosting:
             AdminCustodyHostingView(reloadToken: appState.navGeneration)
                 .navigationTitle(page.label)

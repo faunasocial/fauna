@@ -48,7 +48,7 @@ from helpers.client_metadata_server import (
     sign_manifest,
 )
 from helpers.oauth_client import OAuthClient
-from tests.api.test_third_party_session import _alice, _refusal_code, _Session, _upgrade
+from helpers.principal_session import alice_client, PrincipalSession, refusal_code, upgrade
 
 pytestmark = pytest.mark.tier_3
 
@@ -104,7 +104,7 @@ def _approve(nest, client):
     No grant twin: the arm wraps no key of the account's."""
     request_uri = client.push_authorization_request()
     browser_code, flow_token = client.open_consent_page(request_uri)
-    with _alice(nest) as ws:
+    with alice_client(nest) as ws:
         pending = ws.call("fauna.bridges.atproto.list_pending_consents", {})["consents"]
         consent = next((c for c in pending if c["code"] == browser_code), None)
         assert consent, f"no pending consent carries {browser_code!r}: {pending!r}"
@@ -152,7 +152,7 @@ def test_a_bridge_carries_a_conversation_both_ways_through_the_sealed_mailbox(
     tokens = _approve(nest, client)
 
     # ── The block consented and carried. ──
-    with _alice(nest) as ws:
+    with alice_client(nest) as ws:
         rows = [
             p for p in ws.call("fauna.principals.list", {})["principals"]
             if p["client_id"] == client.client_id
@@ -164,12 +164,12 @@ def test_a_bridge_carries_a_conversation_both_ways_through_the_sealed_mailbox(
         assert listed[0]["glyph"] == "bridge" and listed[0]["linked"], listed[0]
 
     # ── The bridge's side: the key, the room, the deposit. ──
-    session = _Session(_upgrade(nest, client, tokens["access_token"]))
+    session = PrincipalSession(upgrade(nest, client, tokens["access_token"]))
     _ok(session, "fauna.bridges.fetch_recipient_mls_pubkey", {"actor_id": alice["actor_id_bytes"]})
     ok, reply = session.call(
         "fauna.bridges.fetch_recipient_mls_pubkey", {"actor_id": b"\x01" * 32}
     )
-    assert not ok and _refusal_code(reply) == "fauna.bridges.permission_denied", reply
+    assert not ok and refusal_code(reply) == "fauna.bridges.permission_denied", reply
 
     upserted = _ok(
         session,
@@ -191,7 +191,7 @@ def test_a_bridge_carries_a_conversation_both_ways_through_the_sealed_mailbox(
     assert again["id"] == first["id"]
 
     # ── The user's side: the room, the deposit read back, the reply. ──
-    with _alice(nest) as ws:
+    with alice_client(nest) as ws:
         rooms = ws.call("fauna.bridges.conversation.rooms.list", {})["rooms"]
         assert [bytes(r["room_id"]) for r in rooms] == [room_id], rooms
         room = rooms[0]
@@ -217,7 +217,7 @@ def test_a_bridge_carries_a_conversation_both_ways_through_the_sealed_mailbox(
     session.ws.close()
 
     # ── Both directions, in arrival order; the grammar matched nest-side. ──
-    with _alice(nest) as ws:
+    with alice_client(nest) as ws:
         rows = ws.call("fauna.bridges.conversation.inbox.fetch", {"room_id": room_id})["messages"]
         assert [(m["outbound"], bytes(m["sealed_content"])) for m in rows] == [
             (False, b"sealed-to-alice-1"),

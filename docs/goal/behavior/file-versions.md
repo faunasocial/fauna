@@ -62,6 +62,11 @@ Projection semantics (each rule is load-bearing):
 - **Reply items carry `content_key_version`** (nullable, additive) — the M2 content-key
   generation the version's chunks were sealed under, echoed from the `sync_changes`
   column so the reader selects `key_for(version)` (see Restore below).
+- **Reply items carry `folder_id`** (the version's set row, nest-stamped, additive) beside
+  `folder` / `folder_hash`: a by-name listing may span a same-named pair of readable sets,
+  so each version names its own row, and a restore of it records into that row. Why and
+  how a set is addressed by its row: `../ui/media.md` § Encryption at rest → *A set is
+  addressed by its row, named by its label*, and `set-addressing.md` § The row form.
 - **Every ordinary folder has version history.** Since the head
   unification (2026-08-17, `file-sync.md` § Membership) an ordinary backup-type
   folder records to `sync_changes` like any other, so its files list versions too (the handler has no
@@ -142,14 +147,75 @@ historical **`content_key_version`**. Properties, each by construction:
      host invalidates it via ordering 3 below. If that invalidation's dehydrate refuses (a locally
      edited file), the row stays hydrated and the divergence becomes an ordinary conflict; otherwise
      the file becomes a placeholder at the new head and the next open re-hydrates the restored bytes.
+
+     **An always-resident root has no start-up fold** — its pull is the change log from this
+     device's anchor, and a restore this device recorded reads there as its own echo, which only
+     refreshes the merge base. So the crash window on a resident root is closed by an
+     **owed-restore intent** instead (ratified 2026-10-10): a row in the folder's state DB holding
+     the path, the restored head (manifest, size, content-key generation), the identity the restore
+     records as, and when it was owed — written **before** the nest record, so a crash at any point
+     leaves either the intent or nothing; drained by the resident loop at start and on every rescan
+     tick, after its pull. The drain asks the nest for the path's current head (the versions
+     listing) and takes exactly one of four roads: the head is **not** the restored version and the
+     intent is older than the record's grace → **dropped** (the record never landed, or another
+     change has since moved past it — that change arrives by the pull like any other); younger →
+     **kept** for the next tick (the record may still be in flight); the head **is** the restored
+     version → the kept-copy replace of ordering 2 (written in over the exact recorded body, the row
+     moved last and stamped with the restore's signer; a row already standing there takes only the
+     stamp), after which the intent is dropped — a copy holding an unsynced edit refuses the
+     replace and drops the intent too, the edit uploading as a conflict with the restore; a fetch
+     that fails **keeps** the intent for the next tick. The intent dies in one place, the replace,
+     whichever road reached it — the restore's own hand-off or the drain — and a drop never touches
+     a newer intent on the same path (a second restore before the first drained replaces the
+     first). **The on-demand root keeps its fold**: a full head listing at start heals every stale
+     row, restores included, so the intent is written only for a location served always-resident —
+     one heal per root kind, never both. An own-echo heuristic ("an own echo whose head differs
+     from the row while the disk holds the row's recorded body") was considered and refused: an
+     older own upload's echo arriving after a newer own record has the same shape and would write an
+     old version over a newer one.
   2. **Within a *restore's* local apply: durable row before volatile cache.** Re-point the sync-state
      row, *then* drop the cached bytes. A failed free then leaves a correct row and a stale
      cache — never a truncated file: an open of a placeholder that describes another size than its
-     row's version is refused, not served (`on-demand-files.md` § On-Demand Files). The reverse would
+     row's version is refused, not served (`on-demand-files.md` § On-Demand Files). Whatever frees
+     that cache later completes the restore: this device's own free leaves the placeholder
+     describing the restored version, and one the OS's eviction left at the replaced version's
+     size is re-described from the row, owed by the eviction's notice or, at the latest, by the
+     open it refuses — whose retry is then served (same section). The reverse would
      leave a freed placeholder still pointing at the **old** manifest, so the next open actively
      re-materializes the pre-restore bytes — strictly worse than a stale cache. This holds because a
      restore records content the user *chose*: there is no local edit to protect, so the row is
      authoritative and leads.
+
+     **The stale cache is never taken for a local edit.** Its bytes are the version the restore
+     replaced, already recorded, so recording them again would put the replaced version back over
+     the restore on every device. The re-pointed row therefore keeps their identity as its local
+     one, and drops the proof that tied them to the head it left. The uploader and the converge
+     take a `Placeholder` row over exactly the bytes it names for no edit, and leave its size, the
+     restored version's, for the free to read. A real edit of the cache is other bytes, and it
+     uploads as a conflict with the restore. The row keeps the identity only when it proves the
+     bytes recorded: its local identity is the content its head was proven to reassemble to. An
+     upload whose record has not landed names bytes no record holds, so it keeps none, and that
+     edit uploads too. A later re-point of the row (another device's edit folded in while the
+     cache stands) carries the identity the same way.
+
+     **A copy this device keeps is the exception: its row moves *last*, as in ordering 3.** Two
+     kinds of copy are kept: a pinned file on an on-demand root, which cfapi never frees, and
+     every file on an always-resident root, an ordinary file no free reaches. There is no free
+     for the row to lead, so the restored version is replaced in instead, and only then does the
+     row move to it, `Synced` over the bytes now on the disk and signed as the identity the
+     restore recorded as. A pinned copy takes the road a remote edit takes to it
+     ([`on-demand-files.md`](on-demand-files.md) § On-Demand Files, *A placeholder describes the
+     version its row resolves*): the restored version is fetched beside the copy and swapped in,
+     pin and all, under the in-sync refusal. A resident root's copy is written over by the root's
+     own apply, which writes only over the exact bytes its row proves recorded. Row-first rests on
+     a free that never comes here. A row moved first would name the restored version over the
+     replaced bytes for as long as the fetch runs, and the uploader would take those bytes for a
+     local edit and record them over the restore. A kept copy carrying an unsynced local edit
+     refuses the replace: the edit survives, the row stays where it was, and the edit uploads as a
+     conflict with the restore. A restore whose root is not running leaves a kept copy and its
+     row as they are. An on-demand root's next start-up fold then reports the row stale
+     (ordering 1) and replaces it the same way; a resident root's loop drains the owed-restore
+     intent (ordering 1) through the same replace.
   3. **Within a stale-hydrated *invalidation*: free the bytes before the row — the inverse of 2.**
      When the trigger is not the user's own restore but the fold discovering that a **remote** change
      moved the head under a hydrated file, the on-disk copy may be racing a **local edit that has not
@@ -159,7 +225,10 @@ historical **`content_key_version`**. Properties, each by construction:
      is one `CfUpdatePlaceholder` that also re-describes the placeholder as the new version (size and
      mtime: cfapi asks for exactly the placeholder's size on the next open, so a placeholder left at
      the old size served a grown file truncated — which was then uploaded over the real edit) and is
-     refused unless the file is in sync. A dirty file makes
+     refused unless the file is in sync. A pinned copy, which cfapi never frees, is replaced
+     instead: the new version is swapped in under the same in-sync refusal, and the row again moves
+     last ([`on-demand-files.md`](on-demand-files.md) § On-Demand Files, *A placeholder describes
+     the version its row resolves*). A dirty file makes
      the free refuse, so the edit survives and the row stays `Synced` — and because a tracked file's
      change **must** be uploaded (`on-demand-files.md` § On-Demand Files → *Sync direction*), what happens next is an
      ordinary two-sided divergence, resolved per [`conflicts.md`](conflicts.md) like any other. Re-pointing first would
@@ -229,7 +298,11 @@ with a **7-day** cancellable `execute_after`, marking its target rows prune-pend
 window; the executor then **soft-prunes** — targets leave the default `versions.list`
 projection but remain recoverable for **30 days** (`purge_after`) via
 `fauna.files.versions.undelete`, with `versions.list { include_pruned: true }` as the
-recovery browse (additive wire, within-major); only past `purge_after` does the purge step
+recovery browse (additive wire, within-major) — and, additive since 2026-10-13,
+`include_superseded: true` serves the purged rows too, their signed statement intact:
+the snapshot restore's licence read, never a listing's (`backup-restore.md` § Security
+Properties → Integrity owns it; `db::VersionScope` carries both flags nest-side); only
+past `purge_after` does the purge step
 stamp `superseded_at`, after which the existing pin predicate releases the chunks one GC
 grace later. Two safety properties to pin at build: **restoring a pending or soft-pruned
 version is always safe** (restore-as-re-point makes its manifest the new head, and GC
@@ -364,6 +437,15 @@ a charge with no delete verb could not have released them (`reserved-folders.md`
 
 ## Implementation status today (File Versions)
 
+- **The version's row BUILT (2026-10-12):** `files_handlers::row_to_info` stamps
+  `FileVersionInfo.folder_id` on every `list`/`get` item (conformance
+  `every_version_names_its_sets_row`); the Media machine carries it on
+  `FileVersionSummary.folder_id`, keys each version's signer ledger and custody by it
+  (`MediaMachine::version_set_key`), and its restore records into that row
+  (`SyncClient::restore_version`'s `row`; `a_shared_sets_version_restores_into_its_own_row`,
+  `versions_of_a_same_named_pair_restore_each_under_its_own_signer`). The sync agent's
+  and the devices review list's restores still record by name; the agent's follows once
+  its versions read narrows to its binding's row.
 - **Retention metering BUILT (2026-08-18, row 165 slice 3 — ruling 4 live, retained
   accounting):** `record_sync_change_metered` charges every content record's full
   `size_bytes` (a modify — shrink included — can refuse at the quota; a delete is net
@@ -509,6 +591,23 @@ a charge with no delete verb could not have released them (`reserved-folders.md`
   re-describes each placeholder already on the disk (`bridge::redescribe_repointed` →
   `fauna_cfapi::supersede_placeholder`) — until then a cloud-only file whose size a remote edit
   changed kept its old size on disk, and its next open was served truncated or short.
+  **A placeholder left behind its row heals from it (2026-10-09):** a re-describe a held file
+  refused is retried, an open refused on size re-describes the placeholder from its row, and
+  so do the OS's eviction notice and this device's own free of a restore's stale cache
+  (`bridge::owed_redescribe`, `bridge::PendingRedescribes`; [`on-demand-files.md`](on-demand-files.md) § On-Demand Files,
+  *A placeholder describes the version its row resolves*). **Ordering 2's stale cache is inert
+  to the uploader (2026-10-10):** until then the restore re-pointed the row with no local
+  identity, so the next rescan's converge, or any watcher event on the file, took the stale
+  cache for a local edit and uploaded the replaced version over the restore. Now
+  `repoint_entry` keeps the row's local identity when the row proves it recorded and drops the
+  replaced head's proof; `SyncEngine::upload_file` declines a `Placeholder` row over the bytes it
+  names; `SyncEngine::reconcile` leaves such a row as it is, its restored size included; and the
+  fold's re-point of a `Placeholder` row carries its local identity and drops the old head's
+  proof. Live: `cfapi_live_integration::a_restore_whose_free_was_refused_is_completed_by_the_providers_own_free`
+  (a converge, then Explorer's unpin, records nothing, and the first open reads the restored
+  version) and `an_edit_of_a_refused_restores_stale_cache_still_uploads`. An always-resident
+  Windows root no longer takes this road, whose free can never succeed on an ordinary file: it
+  takes the kept-copy road (next bullet, 2026-10-10).
 - **Stale hydrated copies invalidated at service start: LANDED (2026-07-10).** A `Synced` row is
   still never *rewritten* by the fold — its bytes are on disk and may carry an unsynced local edit.
   But the fold no longer stays silent about one whose head moved: it now **reports** each such row
@@ -523,6 +622,40 @@ a charge with no delete verb could not have released them (`reserved-folders.md`
   head via `SyncEngine::repoint_hydrated_to_placeholder`, then emitting `FileStatusChanged{CloudOnly}`
   (§ Restore ordering 3 — dehydrate-before-row, the inverse of a restore's ordering). This heals both
   a remote modify to a hydrated file *and* a restore interrupted on a hydrated file.
+  **A pinned copy is replaced, not freed (2026-10-09):** cfapi refuses that update on a pinned file
+  (`0x80070188`), so until then a file kept on this device never took another device's edit. The
+  host now swaps the fetched head in over it, pin and all, under the same in-sync refusal, and moves
+  the row after the swap (`bridge::replace_pinned_copy`; mechanism and tests:
+  [`on-demand-files.md`](on-demand-files.md), *A pinned stale hydrated copy is replaced in place*).
+  **A *restore* of a pinned file takes the same road (2026-10-10):** until then the restore
+  re-pointed the row and then had its free refused, which left the pinned copy at the replaced
+  version under a row naming the restored one. `pipe_server::apply_restore_locally` now hands the
+  restored version to the root's own loop as a stale hydrated row
+  (`EngineCommand::ApplyStaleHydrated`). The loop replaces the copy and moves the row after the
+  swap, stamping the head's signer (§ Restore, ordering 2's kept-copy branch).
+  **So does a restore on an always-resident Windows root (2026-10-10):** until then the restore
+  read only the cfapi pin, which an ordinary file never carries. So it re-pointed the row to a
+  `Placeholder` and had its free fail on a file that is no cloud file, which left the replaced
+  version on the disk with nothing to write the restored one: the resident loop refused the
+  command, and its pull reads the restore as this device's own echo. `apply_restore_locally`
+  now also takes the road for a location whose mode is always-resident
+  (`path_map::ResolvedFolder::mode`). The resident loop answers the command through
+  `SyncEngine::replace_kept_copy`, which writes the restored version in over the copy only while
+  the disk holds exactly the recorded body, and then moves the row and stamps the restore's
+  signer. Pinned by `resident_restore_test` (the restored version on the disk, the row `Synced`
+  and signed, nothing uploaded; an unsynced edit kept and uploaded) and
+  `pipe_server::tests::a_restore_on_an_always_resident_root_takes_the_kept_copy_road`.
+  ⚠ **Two gaps remain.** (1) Explorer cannot reach the road yet: `path_map::resolve_to_folder_rel`
+  serves on-demand roots only, so a resident file has no badge, no "Fauna" menu, no version
+  list and no restore. (2) A resident root has no start-up fold. A
+  restore its loop never applied — the root not running, the loop stopping before it answers,
+  or a crash between the record and the hand-off — leaves the copy at the replaced version
+  until the user restores again or another device's change arrives. **The heal is ratified, not
+  built (2026-10-10):** the owed-restore intent of § Restore, ordering 1 — a state-DB row the
+  restore verb writes before the nest record for an always-resident location, the resident loop
+  draining it at start and on every tick against the nest's head, the intent dying in
+  `SyncEngine::replace_kept_copy`. Nothing of it exists in code yet: no table, no write, no
+  drain.
   ⚠ **Until 2026-07-17 this same comparison also misfired on the device's own successful uploads**
   (not just genuine remote modifies): the upload path left `manifest_hash` at the pre-upload merge
   base even after a change record succeeded, so the very next fold read the device's own echoed

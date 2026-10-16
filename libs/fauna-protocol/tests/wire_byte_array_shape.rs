@@ -132,6 +132,7 @@ fn actor_id_field_refuses_the_array_spelling_naming_the_rule() {
         ("actor_id", array_spelling()),
     ]);
     let msg = schema_mismatch::<SnapshotCreateMessageKindRequest>(&bytes);
+    assert!(msg.starts_with("actor_id: major type mismatch: "), "{msg}");
     assert!(
         msg.contains("expected 0x02 (byte string), got 0x98 (array)"),
         "{msg}"
@@ -140,6 +141,7 @@ fn actor_id_field_refuses_the_array_spelling_naming_the_rule() {
 
     let bytes = map(vec![("author_id", array_spelling())]);
     let msg = schema_mismatch::<OffersListRequest>(&bytes);
+    assert!(msg.starts_with("author_id: "), "{msg}");
     assert!(msg.contains("got 0x98 (array)"), "{msg}");
 }
 
@@ -168,6 +170,7 @@ fn byte_buf_field_refuses_the_array_spelling_naming_the_rule() {
         ("actor_id", array_spelling()),
     ]);
     let msg = schema_mismatch::<AdminFolderCreateRequest>(&bytes);
+    assert!(msg.starts_with("actor_id: "), "{msg}");
     assert!(
         msg.contains("expected 0x02 (byte string), got 0x98 (array)"),
         "{msg}"
@@ -219,6 +222,7 @@ fn a_byte_vector_field_refuses_the_array_spelling_naming_the_rule() {
         ),
     ]);
     let msg = schema_mismatch::<KeyBlobEntry>(&bytes);
+    assert!(msg.starts_with("encrypted_key: "), "{msg}");
     assert!(
         msg.contains("expected 0x02 (byte string), got 0x98 (array)"),
         "{msg}"

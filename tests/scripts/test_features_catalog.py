@@ -654,6 +654,54 @@ def test_a_parametrization_the_run_does_not_deselect_on_does_not_narrow(tmp_path
                      "test_unnameable": (), "test_not_an_app_set": ()}
 
 
+def test_a_test_that_is_only_its_second_app_seat_narrows_to_the_seat(tmp_path):
+    """A `SECOND_APP_FIXTURES` seat beside the run's own `app` leaves the column the
+    run's — but a test requesting NO other app fixture IS its seat: conftest
+    deselects it unless every seat value was selected, so it speaks only for the
+    seats' apps. The scan read it unrestricted, and `--runnable` listed it on columns
+    whose run collects `0 of N` (the cross-nest foreign-row witness's old five-app
+    shape was the live case). Two seats are one restriction, their union (conftest needs every seat selected, then matches any-of); a mark intersects it."""
+    facts = _scan_apps(tmp_path, (
+        "import pytest\n\n\n"
+        "@pytest.mark.parametrize(\"folder_share_owner_app\", [\"tui\", \"macos\"], indirect=True)\n"
+        "def test_seat_only(folder_share_owner_app):\n    pass\n\n\n"
+        "@pytest.mark.parametrize(\"folder_share_owner_app\", [\"tui\", \"macos\"], indirect=True)\n"
+        "@pytest.mark.parametrize(\"folder_share_recipient_app\", [\"macos\", \"windows\"], indirect=True)\n"
+        "def test_two_seats(folder_share_owner_app, folder_share_recipient_app):\n    pass\n\n\n"
+        "@pytest.mark.parametrize(\"folder_share_owner_app\", [\"tui\"], indirect=True)\n"
+        "def test_seat_beside_app(app, folder_share_owner_app):\n    pass\n"))
+    assert facts == {"test_seat_only": ("macos", "tui"), "test_two_seats": ("macos", "tui", "windows"),
+                     "test_seat_beside_app": ()}
+
+
+def test_an_app_set_imported_from_a_helper_is_read_in_the_helpers_scope(tmp_path):
+    """`SKEW_CLIENTS` / `AT_REST_CLIENTS` live in `helpers/skew_client.py`, the second a
+    filtering `tuple(...)` over the first that the importing module never sees. The
+    scan resolved only names bound in the test module, so an imported tuple read as
+    'no restriction' and the version-skew suite counted on tui and web."""
+    helpers = tmp_path / "helpers"
+    helpers.mkdir()
+    (helpers / "skew_client.py").write_text(
+        "SKEW_CLIENTS = (\"linux\", \"macos\", \"windows\")\n"
+        "AT_REST_CLIENTS = tuple(c for c in SKEW_CLIENTS if supports(c))\n"
+        "OTHER = get_available_apps()\n", encoding="utf-8")
+    facts = _scan_apps(tmp_path, (
+        "import pytest\n"
+        "from helpers.skew_client import AT_REST_CLIENTS, SKEW_CLIENTS, OTHER\n\n\n"
+        "@pytest.fixture(params=SKEW_CLIENTS)\n"
+        "def skew(request):\n    yield request.param\n\n\n"
+        "@pytest.fixture(params=AT_REST_CLIENTS)\n"
+        "def at_rest(request):\n    yield request.param\n\n\n"
+        "@pytest.fixture(params=OTHER)\n"
+        "def unnameable(request):\n    yield request.param\n\n\n"
+        "def test_skew(skew):\n    pass\n\n\n"
+        "def test_at_rest(at_rest):\n    pass\n\n\n"
+        "def test_unnameable(unnameable):\n    pass\n"))
+    assert facts == {"test_skew": ("linux", "macos", "windows"),
+                     "test_at_rest": ("linux", "macos", "windows"),
+                     "test_unnameable": ()}
+
+
 def test_the_second_app_seats_are_the_runs_own_list():
     """`SECOND_APP_FIXTURES` is the scan's copy of conftest's `_REAL_SECOND_APP_FIXTURES`
     — the seats whose parametrization launches a second app beside the run's, and so

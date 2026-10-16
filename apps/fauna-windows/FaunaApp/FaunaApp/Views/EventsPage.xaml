@@ -104,7 +104,12 @@
              list scrolls instead. Its panel is a plain StackPanel, not the
              default virtualizing one, so every row stays realized: a calendar
              scrolled out of view is still selectable and readable. -->
-        <ListView Grid.Row="3" x:Name="CalendarList"
+        <Grid Grid.Row="3" ColumnSpacing="12">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <ListView Grid.Column="0" x:Name="CalendarList"
                   Visibility="Collapsed" SelectionMode="Single"
                   MaxHeight="120"
                   SelectionChanged="CalendarList_SelectionChanged">
@@ -128,6 +133,39 @@
                 </DataTemplate>
             </ListView.ItemTemplate>
         </ListView>
+
+        <!-- Calendar-level .ics import / export (events.md § Import / Export), beside
+             the calendar list and painted ONLY while a calendar is selected — absent
+             (Collapsed), never inert, so count(calendar-export-button) is 0 without a
+             selection. calendar-import-file is an editable path box the Browse picker
+             fills (the `file-upload` shape on MediaPage): the e2e bridge types the path
+             into it, so it must NOT be read-only, and it carries both AutomationId and
+             AutomationProperties.Name or FlaUI prunes the peer. The notice line is
+             unlabelled chrome (no id): it says the import counts / the export path. -->
+        <StackPanel Grid.Column="1" x:Name="CalendarFilePanel" Spacing="4"
+                    MinWidth="320" Visibility="Collapsed">
+            <Grid ColumnSpacing="4">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox Grid.Column="0" x:Name="CalendarImportFileBox"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.CalendarImportFile}"
+                         AutomationProperties.Name="calendar-import-file" />
+                <Button Grid.Column="1" x:Name="CalendarImportBrowseButton"
+                        Click="CalendarImportBrowse_Click" />
+                <Button Grid.Column="2" x:Name="CalendarImportButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.CalendarImportButton}"
+                        Click="CalendarImport_Click" />
+            </Grid>
+            <Button x:Name="CalendarExportButton"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.CalendarExportButton}"
+                    Click="CalendarExport_Click" />
+            <TextBlock x:Name="CalendarFileNotice" Visibility="Collapsed"
+                       TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+        </StackPanel>
+        </Grid>
 
         <!-- Event creation panel (shown when new-event-btn is clicked). Scrolls
              inside a capped region so the open form never pushes row 5 off the

@@ -63,7 +63,7 @@ class CustodianHostWorker @AssistedInject constructor(
     override suspend fun doWork(): Result {
         // No device id yet (pre-onboarding) → this device cannot be the subject
         // of a registry row, so there is nothing to match on.
-        val deviceId = secureStorage.deviceId ?: return Result.success()
+        val deviceId = secureStorage.resolveDeviceId() ?: return Result.success()
 
         // Not connected / not authenticated (WorkManager woke us in a fresh
         // background process before login), or the registry read failed because

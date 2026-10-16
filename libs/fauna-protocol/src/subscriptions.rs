@@ -225,6 +225,10 @@ pub struct TierCreateReply {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct TierUpdateRequest {
     pub name: String,
+    /// A new rank, refused by the same check as `tiers.create`'s and binding
+    /// forward only: a changed rank fans subscribers into the tiers it now
+    /// reaches and removes no one (`monetization.md` § The unifying model →
+    /// *A tier's rank is editable*); `None` keeps the current rank.
     #[serde(default)]
     pub rank: Option<u32>,
     #[serde(default)]
@@ -632,9 +636,47 @@ pub struct StatusGetReply {
     pub tier: Option<String>,
     pub expires_at: Option<Timestamp>,
     pub auto_approve: bool,
+    /// A follow is asked and waiting on the author's client: a `subscribe`
+    /// request for the free `followers` tier is pending and the tier is not
+    /// yet held. The "pending" of a follow's three states — following,
+    /// pending, neither (`authorization-server.md` § Scope grammar → *The
+    /// sixth arm*). Additive: omitted on the wire when `false`, so an older
+    /// reader sees the reply it always did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub follow_pending: bool,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+// ── encaps_key.publish ─────────────────────────────────────────
+
+/// `fauna.subscriptions.encaps_key.publish` — the account's **subscriber
+/// encapsulation-key registry entry** (`post-quantum.md` § surface B: "the
+/// subscriber … publishes the encapsulation key (a new registry entry)").
+/// The caller's own 1184-byte ML-KEM-768 encapsulation key, derived from its
+/// identity seed (`fauna_core::subscription::crypto::subscriber_mlkem_encaps_key`),
+/// so every device publishes the same bytes and a re-publish is idempotent.
+/// The nest reads it where the subscriber is not the one asking — a
+/// third-party follow (`authorization-server.md` § Scope grammar → *The sixth
+/// arm*) — and never holds the decapsulation half.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EncapsKeyPublishRequest {
+    pub mlkem_encaps_key: ByteBuf,
+    /// Forward-compat catch-all: unknown keys from a newer peer are
+    /// preserved here and re-emitted on encode (transport.md § Schema
+    /// and forward-compat discipline, rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// The publish's reply: nothing but the acknowledgement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct EncapsKeyPublishReply {
+    /// Forward-compat catch-all (transport.md § Schema and forward-compat
+    /// discipline, rule 4).
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }

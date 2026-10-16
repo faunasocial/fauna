@@ -22,8 +22,9 @@ use crate::acme::CERT_FILENAME;
 
 pub use fauna_acme_http01::{
     ACME_FAILED_VALIDATION_BUDGET_PER_HOUR, ACME_RATE_WINDOW_SECS, ChallengeState, Http01Config,
-    RETRY_STATE_FILENAME, RetryState, cert_covers_sans, cert_dns_sans, cert_seconds_remaining,
-    http01_router, next_attempt_delay, now_unix, obtain_certificate, start_http01_listener,
+    IssuanceError, IssuanceOrder, RETRY_STATE_FILENAME, RetryState, cert_covers_sans,
+    cert_dns_sans, cert_seconds_remaining, http01_router, next_attempt_delay, now_unix,
+    obtain_certificate, start_http01_listener,
 };
 
 /// Build the desired ACME SAN list for a mail deployment.
@@ -731,13 +732,48 @@ async fn cert_lifecycle_loop_domain_only<I, Fut>(
     .await;
 }
 
+/// Boot of a nest that places no HTTP-01 order (the private axis, or a
+/// client-driven DNS-01 deployment): drop every kept order error, which no
+/// lifecycle task would ever clear again (`tls-certificates.md` § Keeping the
+/// cert alive, *The admin sees why issuance is failing*). The HTTP-01 decision
+/// is restart-applied, so boot is the one place it changes. The failure log is
+/// left alone: it ages out on its own.
+pub fn clear_issuance_errors_when_not_ordering(acme_dir: &std::path::Path) {
+    let mut retry = RetryState::load(acme_dir);
+    let domain = retry.clear_order_error(IssuanceOrder::Domain);
+    let bridge = retry.clear_order_error(IssuanceOrder::IpBridge);
+    if domain || bridge {
+        retry.save(acme_dir);
+    }
+}
+
+/// What one IP-bridge pass did.
+#[derive(Debug, PartialEq, Eq)]
+enum IpBridgeOutcome {
+    /// Nothing ordered: no bridge is wanted, or the carried chain is still fresh.
+    NotOrdered,
+    /// An order (possibly narrowed to IPv4) succeeded and was installed.
+    Issued,
+    /// The order failed; the error chain as logged (`{e:#}`), the CA's detail
+    /// included.
+    Failed(String),
+}
+
+impl IpBridgeOutcome {
+    fn is_failure(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+}
+
 /// One IP-bridge pass, run at the top of every [`cert_lifecycle_loop`] tick.
 ///
-/// Returns `true` when an order was attempted and **failed**, so the caller can
-/// fold it into the tick's shared failed-validation pacing — the bridge
-/// deliberately has no budget of its own (`tls-certificates.md` § B-IP
-/// *Lifetime*: "under the persisted failed-validation pacing of § Keeping the
-/// cert alive … no second budget").
+/// Returns [`IpBridgeOutcome::Failed`] when an order was attempted and
+/// **failed**, so the caller can fold it into the tick's shared
+/// failed-validation pacing — the bridge deliberately has no budget of its own
+/// (`tls-certificates.md` § B-IP *Lifetime*: "under the persisted
+/// failed-validation pacing of § Keeping the cert alive … no second budget") —
+/// and keep its error for the admin (§ Keeping the cert alive, *The admin sees
+/// why issuance is failing*).
 ///
 /// Three decisions, in order:
 ///
@@ -771,11 +807,18 @@ async fn ip_bridge_pass<J, JFut>(
     cert_resolver: Option<&Arc<crate::acme::MultiDomainCertResolver>>,
     issue_ip: &J,
     primary_domain_cert_trusted: bool,
-) -> bool
+) -> IpBridgeOutcome
 where
     J: Fn(Vec<std::net::IpAddr>) -> JFut,
     JFut: std::future::Future<Output = Result<()>>,
 {
+    // Source (2) of § B-IP *When*: the host-published set, read from the
+    // root-owned host→nest mount under the data dir. The data dir is resolved
+    // from the db path — the resolution `read_host_status` uses for the
+    // sibling `host-status` file — not from `acme_dir`'s parent, which
+    // `--acme-dir` / `[acme].dir` can move anywhere.
+    let host_published =
+        crate::host_maintenance::read_host_addresses_from_db_path(&app_state.config.nest.db_path);
     ip_bridge_pass_for_attached(
         config,
         app_state,
@@ -783,11 +826,12 @@ where
         issue_ip,
         primary_domain_cert_trusted,
         &crate::acme::attached_interface_addresses(),
+        &host_published,
     )
     .await
 }
 
-/// [`ip_bridge_pass`] with the interface table injected — split out so the
+/// [`ip_bridge_pass`] with both address sources injected — split out so the
 /// live-`node_mode` derivation below is pinnable in a test without the box's
 /// own addresses (mirrors [`ip_bridge_pass_inner`]'s split for `addrs`).
 async fn ip_bridge_pass_for_attached<J, JFut>(
@@ -797,7 +841,8 @@ async fn ip_bridge_pass_for_attached<J, JFut>(
     issue_ip: &J,
     primary_domain_cert_trusted: bool,
     attached: &[std::net::IpAddr],
-) -> bool
+    host_published: &[std::net::IpAddr],
+) -> IpBridgeOutcome
 where
     J: Fn(Vec<std::net::IpAddr>) -> JFut,
     JFut: std::future::Future<Output = Result<()>>,
@@ -812,9 +857,16 @@ where
     // self-signed floor indefinitely (`docs/goal/architecture/nest/common.md`
     // § NAT mode).
     let live_mode = *app_state.node_mode.read().await;
-    // `ip_bridge_addresses` (node-mode gate → global-unicast filter) is
-    // separately unit-pinned in `crate::acme`.
-    let addrs = crate::acme::ip_bridge_addresses(live_mode, attached);
+    // `ip_bridge_addresses` (node-mode gate → global-unicast filter over the
+    // union of both sources) is separately unit-pinned in `crate::acme`. The
+    // `directory_url` override is the only thing that selects a test CA, so it
+    // alone binds the § B-IP *Testing* widening.
+    let addrs = crate::acme::ip_bridge_addresses(
+        live_mode,
+        attached,
+        host_published,
+        config.directory_url.is_some(),
+    );
     ip_bridge_pass_inner(
         config,
         cert_resolver,
@@ -834,7 +886,7 @@ async fn ip_bridge_pass_inner<J, JFut>(
     issue_ip: &J,
     primary_domain_cert_trusted: bool,
     addrs: &[std::net::IpAddr],
-) -> bool
+) -> IpBridgeOutcome
 where
     J: Fn(Vec<std::net::IpAddr>) -> JFut,
     JFut: std::future::Future<Output = Result<()>>,
@@ -842,23 +894,33 @@ where
     let Some(resolver) = cert_resolver else {
         // No TLS listener (a plain-HTTP dev/e2e nest) — nothing to serve a
         // bridge cert on, so nothing to order.
-        return false;
+        return IpBridgeOutcome::NotOrdered;
     };
 
     let addrs = addrs.to_vec();
     if !crate::acme::ip_bridge_should_renew(!addrs.is_empty(), primary_domain_cert_trusted) {
-        // Either nothing orderable, or the deployment's own domain cert is live
-        // and the bridge has served its purpose. Dropping an installed one is the
-        // documented switch-back; doing it unconditionally here also cleans up a
-        // bridge left behind by a previous boot.
-        if resolver.current_ip_cert().is_some() {
-            tracing::info!(
-                "IP bridge cert no longer needed (primary-domain cert trusted, or no \
-                 orderable address) — dropping it; IP dials return to the floor"
-            );
-            resolver.clear_ip_cert();
+        // Either nothing orderable, or the deployment's own domain cert is live.
+        // Nothing is ordered or renewed from here, but an installed bridge is
+        // never dropped by policy: it is served to its own `notAfter` and the
+        // resolver stops serving it on its own then (§ B-IP *Lifetime*) — the
+        // domain cert goes live before a user's resolver may see the record, and
+        // the reach hint dials `https://<ip>` for that gap. Reconcile a restart
+        // mid-carry: a still-valid chain on disk with nothing installed is
+        // installed; an expired one is left alone.
+        if resolver.current_ip_cert().is_none() {
+            let ip_cert_path = config.acme_dir.join(crate::acme::IP_CERT_FILENAME);
+            let ip_key_path = config.acme_dir.join(crate::acme::IP_KEY_FILENAME);
+            let now = now_unix() as i64;
+            let still_valid = tokio::fs::read(&ip_cert_path)
+                .await
+                .ok()
+                .and_then(|pem| crate::acme::pem_validity_window(&pem))
+                .is_some_and(|(not_before, not_after)| not_before <= now && now < not_after);
+            if still_valid {
+                install_ip_cert(resolver, &ip_cert_path, &ip_key_path);
+            }
         }
-        return false;
+        return IpBridgeOutcome::NotOrdered;
     }
 
     let ip_cert_path = config.acme_dir.join(crate::acme::IP_CERT_FILENAME);
@@ -892,7 +954,7 @@ where
         if resolver.current_ip_cert().is_none() {
             install_ip_cert(resolver, &ip_cert_path, &ip_key_path);
         }
-        return false;
+        return IpBridgeOutcome::NotOrdered;
     }
 
     tracing::info!(?addrs, "ACME: ordering the IP bridge cert (§ B-IP)");
@@ -906,7 +968,7 @@ where
             Ok(()) => {
                 install_ip_cert(resolver, &ip_cert_path, &ip_key_path);
                 tracing::info!(ordered = ?attempt, "IP bridge cert issued");
-                return false;
+                return IpBridgeOutcome::Issued;
             }
             Err(e) => {
                 // One narrowing retry, v4-only: an IPv6 address the CA cannot
@@ -923,7 +985,7 @@ where
                     continue;
                 }
                 tracing::error!(attempted = ?attempt, "IP bridge order failed: {e:#}");
-                return true;
+                return IpBridgeOutcome::Failed(format!("{e:#}"));
             }
         }
     }
@@ -979,6 +1041,118 @@ fn install_ip_cert(
             "could not load the IP bridge cert from {}: {e:#}",
             cert_path.display()
         ),
+    }
+}
+
+/// The cert-independent tail of one cert-lifecycle tick for a primary-domain
+/// rename (`mail-primary-domain-rename.md` § Lifecycle, § Crash recovery): the
+/// anchor flip of a row that was `cert_ready` at the start of the tick, the
+/// unconditional identity-projection reconcile, and the grace watcher.
+/// [`cert_lifecycle_loop`] runs it every tick; the `test-hooks` rename hook
+/// (`crate::rename_cert_test_hook`) runs the same steps on a test nest, where
+/// no ACME loop is spawned.
+pub(crate) async fn rename_post_cert_steps(
+    app_state: &Arc<crate::routes::AppState>,
+    rename_cert_ready_at_tick_start: Option<[u8; 16]>,
+) {
+    // Primary-domain rename (SLICE 3): the anchor flip. A rename that was
+    // `cert_ready` at the START of this tick (captured by the caller) flips now — the
+    // tick *after* cert_ready, so `cert_ready` stays an observable resting
+    // state. `advance_rename_to_grace` atomically flips `is_primary` + enters
+    // `grace` (`mail-primary-domain-rename.md` § Lifecycle / § Data — Mutations
+    // to mail_domains). The runtime identity projection + the
+    // `config_changed`/`local_domains` push follow from the **unconditional
+    // reconcile below**, which reads the freshly-flipped DB primary — so the
+    // flip itself only owns the DB transition. Crash-safe: the flip is ONE DB
+    // transaction, so a restart re-derives the identity from the flipped
+    // primary row at boot.
+    if let Some(rid) = rename_cert_ready_at_tick_start {
+        match app_state.db.advance_rename_to_grace(&rid).await {
+            Ok(_) => tracing::info!(
+                "primary-domain rename: anchor flip committed — is_primary flipped, entering grace"
+            ),
+            Err(e) => tracing::warn!("primary-domain rename: anchor flip failed: {e:#}"),
+        }
+    }
+
+    // Identity-projection self-heal.
+    // The deployment's identity domain is an in-memory projection of the
+    // primary `mail_domains` row (`identity_domain_core`), so re-derive it
+    // from the DB primary **unconditionally each tick** — NOT only while a
+    // rename is post-flip-active. This one reconcile covers every source of
+    // divergence with a single self-healing rule: the anchor flip (new
+    // primary just promoted), the abort re-flip (old primary restored), AND
+    // any raced divergence the old rename-gated reconcile could not heal —
+    // a stale tick re-applying a since-aborted `new` (which then had no
+    // active rename left to trigger a heal), or the abort handler's own
+    // silent skip-on-lookup-failure. Whatever the source, the next tick
+    // converges the projection onto the DB truth
+    // (`mail-primary-domain-rename.md` § Crash recovery — self-healing).
+    //
+    // Gated exactly like the other identity setter (`add_local_domain_handler`)
+    // and `apply_primary_identity`'s own contract: act only when a primary
+    // mail domain exists and is non-local. An IP / domainless-claimed box
+    // registers no `mail_domains` row (`lookup_primary_mail_domain` → None),
+    // so its identity comes from the registration handle and is left
+    // untouched. The `!=` guard makes the steady state a pure no-op — boot's
+    // `resolve_identity_domain` seeds `identity_domain` from the same
+    // `domain_name`, so no reconcile fires and no `config_changed` is pushed
+    // unless the projection has actually drifted.
+    if let Ok(Some(primary)) = app_state.db.lookup_primary_mail_domain().await
+        && fauna_core::resolve::is_public_dns_name(&primary.domain_name)
+        && app_state.handle_domain() != primary.domain_name
+    {
+        crate::identity_domain_core::apply_primary_identity(app_state, &primary.domain_name);
+        crate::bridge_routing_handlers::notify_bridges_config_changed(
+            app_state,
+            fauna_protocol::bridge_routing::config_change_reason::LOCAL_DOMAINS,
+        )
+        .await;
+        // Every ATProto handle on the box is derived from this domain, so the
+        // identity domain moving renames the WHOLE roster at once
+        // (`atproto-pds-bridge.md` § Identity — a Fauna handle *or domain*
+        // change re-derives). No actor hint: the nudge covers all of them.
+        // This one site catches every cause — the anchor flip, the abort
+        // re-flip, and any raced divergence — because it is the single place
+        // the projection actually converges onto the DB primary. Latency
+        // only: the bridge's own pass compares derived-vs-published, so a
+        // dropped push delays a rename, never loses it.
+        crate::bridge_atproto_handlers::notify_bridges_atproto_projection_ready(app_state, None)
+            .await;
+        tracing::info!(
+            domain = %primary.domain_name,
+            "primary-domain identity reconcile: projection swapped to the DB primary + config_changed(local_domains) pushed"
+        );
+    }
+
+    // Primary-domain rename (SLICE 4): the grace watcher. When a `grace` row's
+    // wall-clock window has elapsed (`NOW() > grace_ends_at`), promote it to
+    // `ready_to_complete` — the source-of-truth advancement past grace
+    // (`mail-primary-domain-rename.md` § Architectural rules — no admin action
+    // is needed for `grace → ready_to_complete`; the admin's `complete` gates
+    // only `ready_to_complete → completed`). No cert/DNS/identity side effect:
+    // `ready_to_complete` is functionally identical to `grace` for the keep-
+    // alives (both `is_post_flip_active`), so nothing to re-derive. Idempotent
+    // + crash-safe — re-read fresh from the persisted row each tick, so a
+    // restart mid-grace resumes the watch; a row that just entered `grace` this
+    // tick has `grace_ends_at = now + grace_days`, so it won't promote early.
+    if let Some(rename) = app_state.db.get_active_rename().await.ok().flatten()
+        && rename.parsed_state() == Some(fauna_mail::RenameState::Grace)
+        && let Some(ends_at) = rename.grace_ends_at
+        && crate::db::now_epoch_millis() > ends_at
+    {
+        match app_state
+            .db
+            .advance_rename_to_ready_to_complete(&rename.rename_id)
+            .await
+        {
+            Ok(_) => tracing::info!(
+                "primary-domain rename: grace window elapsed — ready_to_complete (awaiting admin complete)"
+            ),
+            Err(e) => tracing::warn!(
+                "primary-domain rename: grace watcher advance to ready_to_complete failed: {e:#}"
+            ),
+        }
     }
 }
 
@@ -1249,7 +1423,7 @@ async fn cert_lifecycle_loop<I, Fut, J, JFut>(
                 }
                 Err(_) => false,
             };
-        let ip_issue_failed = ip_bridge_pass(
+        let ip_outcome = ip_bridge_pass(
             &config,
             &app_state,
             cert_resolver.as_ref(),
@@ -1258,7 +1432,7 @@ async fn cert_lifecycle_loop<I, Fut, J, JFut>(
         )
         .await;
 
-        let mut issue_failed = ip_issue_failed;
+        let mut issue_failed = ip_outcome.is_failure();
         if need_issue {
             // Log every attempt (the "recent attempts" log the budget is built on).
             tracing::info!(
@@ -1270,6 +1444,7 @@ async fn cert_lifecycle_loop<I, Fut, J, JFut>(
             match issue(desired.clone()).await {
                 Ok(()) => {
                     retry.reset();
+                    retry.clear_order_error(IssuanceOrder::Domain);
                     retry.save(&config.acme_dir);
                     tracing::info!(?desired, "ACME certificate issued/renewed");
                     // Prompt-refresh-on-provision: a running MDA/MTA fetches its
@@ -1290,6 +1465,7 @@ async fn cert_lifecycle_loop<I, Fut, J, JFut>(
                 }
                 Err(e) => {
                     retry.record_failure(now_unix());
+                    retry.record_order_error(IssuanceOrder::Domain, &format!("{e:#}"), now_unix());
                     retry.save(&config.acme_dir);
                     issue_failed = true;
                     tracing::error!(
@@ -1300,6 +1476,27 @@ async fn cert_lifecycle_loop<I, Fut, J, JFut>(
                     );
                 }
             }
+        } else if retry.clear_order_error(IssuanceOrder::Domain) {
+            // Nothing to order — the desired set is covered, or there is none:
+            // an error kept from an earlier attempt no longer describes the box.
+            retry.save(&config.acme_dir);
+        }
+
+        // The bridge's admin-visible error entry, kept or cleared by its own
+        // outcome only (a domain success above never touches it). Recorded here,
+        // not with the budget charge below, which waits for the domain arm's
+        // `reset`; the entry is not part of the budget, so it need not wait.
+        let ip_error_changed = match &ip_outcome {
+            IpBridgeOutcome::Failed(detail) => {
+                retry.record_order_error(IssuanceOrder::IpBridge, detail, now_unix());
+                true
+            }
+            IpBridgeOutcome::NotOrdered | IpBridgeOutcome::Issued => {
+                retry.clear_order_error(IssuanceOrder::IpBridge)
+            }
+        };
+        if ip_error_changed {
+            retry.save(&config.acme_dir);
         }
 
         // Primary-domain rename (SLICE 2): once the (re-)issued managed cert on
@@ -1335,107 +1532,7 @@ async fn cert_lifecycle_loop<I, Fut, J, JFut>(
             }
         }
 
-        // Primary-domain rename (SLICE 3): the anchor flip. A rename that was
-        // `cert_ready` at the START of this tick (captured above) flips now — the
-        // tick *after* cert_ready, so `cert_ready` stays an observable resting
-        // state. `advance_rename_to_grace` atomically flips `is_primary` + enters
-        // `grace` (`mail-primary-domain-rename.md` § Lifecycle / § Data — Mutations
-        // to mail_domains). The runtime identity projection + the
-        // `config_changed`/`local_domains` push follow from the **unconditional
-        // reconcile below**, which reads the freshly-flipped DB primary — so the
-        // flip itself only owns the DB transition. Crash-safe: the flip is ONE DB
-        // transaction, so a restart re-derives the identity from the flipped
-        // primary row at boot.
-        if let Some(rid) = rename_cert_ready_at_tick_start {
-            match app_state.db.advance_rename_to_grace(&rid).await {
-                Ok(_) => tracing::info!(
-                    "primary-domain rename: anchor flip committed — is_primary flipped, entering grace"
-                ),
-                Err(e) => tracing::warn!("primary-domain rename: anchor flip failed: {e:#}"),
-            }
-        }
-
-        // Identity-projection self-heal.
-        // The deployment's identity domain is an in-memory projection of the
-        // primary `mail_domains` row (`identity_domain_core`), so re-derive it
-        // from the DB primary **unconditionally each tick** — NOT only while a
-        // rename is post-flip-active. This one reconcile covers every source of
-        // divergence with a single self-healing rule: the anchor flip (new
-        // primary just promoted), the abort re-flip (old primary restored), AND
-        // any raced divergence the old rename-gated reconcile could not heal —
-        // a stale tick re-applying a since-aborted `new` (which then had no
-        // active rename left to trigger a heal), or the abort handler's own
-        // silent skip-on-lookup-failure. Whatever the source, the next tick
-        // converges the projection onto the DB truth
-        // (`mail-primary-domain-rename.md` § Crash recovery — self-healing).
-        //
-        // Gated exactly like the other identity setter (`add_local_domain_handler`)
-        // and `apply_primary_identity`'s own contract: act only when a primary
-        // mail domain exists and is non-local. An IP / domainless-claimed box
-        // registers no `mail_domains` row (`lookup_primary_mail_domain` → None),
-        // so its identity comes from the registration handle and is left
-        // untouched. The `!=` guard makes the steady state a pure no-op — boot's
-        // `resolve_identity_domain` seeds `identity_domain` from the same
-        // `domain_name`, so no reconcile fires and no `config_changed` is pushed
-        // unless the projection has actually drifted.
-        if let Ok(Some(primary)) = app_state.db.lookup_primary_mail_domain().await
-            && fauna_core::resolve::is_public_dns_name(&primary.domain_name)
-            && app_state.handle_domain() != primary.domain_name
-        {
-            crate::identity_domain_core::apply_primary_identity(&app_state, &primary.domain_name);
-            crate::bridge_routing_handlers::notify_bridges_config_changed(
-                &app_state,
-                fauna_protocol::bridge_routing::config_change_reason::LOCAL_DOMAINS,
-            )
-            .await;
-            // Every ATProto handle on the box is derived from this domain, so the
-            // identity domain moving renames the WHOLE roster at once
-            // (`atproto-pds-bridge.md` § Identity — a Fauna handle *or domain*
-            // change re-derives). No actor hint: the nudge covers all of them.
-            // This one site catches every cause — the anchor flip, the abort
-            // re-flip, and any raced divergence — because it is the single place
-            // the projection actually converges onto the DB primary. Latency
-            // only: the bridge's own pass compares derived-vs-published, so a
-            // dropped push delays a rename, never loses it.
-            crate::bridge_atproto_handlers::notify_bridges_atproto_projection_ready(
-                &app_state, None,
-            )
-            .await;
-            tracing::info!(
-                domain = %primary.domain_name,
-                "primary-domain identity reconcile: projection swapped to the DB primary + config_changed(local_domains) pushed"
-            );
-        }
-
-        // Primary-domain rename (SLICE 4): the grace watcher. When a `grace` row's
-        // wall-clock window has elapsed (`NOW() > grace_ends_at`), promote it to
-        // `ready_to_complete` — the source-of-truth advancement past grace
-        // (`mail-primary-domain-rename.md` § Architectural rules — no admin action
-        // is needed for `grace → ready_to_complete`; the admin's `complete` gates
-        // only `ready_to_complete → completed`). No cert/DNS/identity side effect:
-        // `ready_to_complete` is functionally identical to `grace` for the keep-
-        // alives (both `is_post_flip_active`), so nothing to re-derive. Idempotent
-        // + crash-safe — re-read fresh from the persisted row each tick, so a
-        // restart mid-grace resumes the watch; a row that just entered `grace` this
-        // tick has `grace_ends_at = now + grace_days`, so it won't promote early.
-        if let Some(rename) = app_state.db.get_active_rename().await.ok().flatten()
-            && rename.parsed_state() == Some(fauna_mail::RenameState::Grace)
-            && let Some(ends_at) = rename.grace_ends_at
-            && crate::db::now_epoch_millis() > ends_at
-        {
-            match app_state
-                .db
-                .advance_rename_to_ready_to_complete(&rename.rename_id)
-                .await
-            {
-                Ok(_) => tracing::info!(
-                    "primary-domain rename: grace window elapsed — ready_to_complete (awaiting admin complete)"
-                ),
-                Err(e) => tracing::warn!(
-                    "primary-domain rename: grace watcher advance to ready_to_complete failed: {e:#}"
-                ),
-            }
-        }
+        rename_post_cert_steps(&app_state, rename_cert_ready_at_tick_start).await;
 
         iterations += 1;
         if let Some(max) = max_iterations
@@ -1448,7 +1545,7 @@ async fn cert_lifecycle_loop<I, Fut, J, JFut>(
         // domain arm has had its say: a domain success calls `retry.reset()`,
         // which would otherwise erase a failure recorded earlier in the same
         // tick and let the bridge re-attempt unpaced.
-        if ip_issue_failed {
+        if ip_outcome.is_failure() {
             retry.record_failure(now_unix());
             retry.save(&config.acme_dir);
         }
@@ -1534,6 +1631,7 @@ mod tests {
             recent_failures: (0..ACME_FAILED_VALIDATION_BUDGET_PER_HOUR as u64)
                 .map(|i| now + i)
                 .collect(),
+            ..Default::default()
         };
         prior.save(dir.path());
 
@@ -1634,6 +1732,57 @@ mod tests {
             persisted.recent_failures.len(),
             2,
             "two failed attempts must persist two log entries for the next boot to resume"
+        );
+    }
+
+    /// The admin-visible half (`tls-certificates.md` § Keeping the cert alive,
+    /// *The admin sees why issuance is failing*): a failed domain order leaves
+    /// the CA's text in the state file the cert-status read serves, and the next
+    /// success of that same order clears it.
+    #[tokio::test(start_paused = true)]
+    async fn lifecycle_keeps_the_domain_orders_error_until_it_succeeds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let failing = move |_desired: Vec<String>| async move {
+            Err(anyhow::anyhow!(
+                "order invalid: nest.example.com: urn:ietf:params:acme:error:connection: \
+                 Timeout during connect (likely firewall problem)"
+            ))
+        };
+        cert_lifecycle_loop_domain_only(
+            test_config(dir.path().to_path_buf()),
+            test_app_state(),
+            failing,
+            Some(1),
+        )
+        .await;
+
+        let persisted = RetryState::load(dir.path());
+        assert_eq!(
+            persisted.last_errors.len(),
+            1,
+            "{:?}",
+            persisted.last_errors
+        );
+        let kept = &persisted.last_errors[0];
+        assert_eq!(kept.order, IssuanceOrder::Domain.as_str());
+        assert!(
+            kept.detail.contains("nest.example.com") && kept.detail.contains("firewall"),
+            "the failing identifier and the CA's detail must both survive: {}",
+            kept.detail
+        );
+        assert!(kept.failed_at_unix > 0);
+
+        let succeeding = move |_desired: Vec<String>| async move { Ok(()) };
+        cert_lifecycle_loop_domain_only(
+            test_config(dir.path().to_path_buf()),
+            test_app_state(),
+            succeeding,
+            Some(1),
+        )
+        .await;
+        assert!(
+            RetryState::load(dir.path()).last_errors.is_empty(),
+            "the same order succeeding clears its error"
         );
     }
 
@@ -2408,7 +2557,8 @@ mod tests {
             false,
             &addrs,
         )
-        .await;
+        .await
+        .is_failure();
 
         assert!(!failed, "a successful order is not a budget failure");
         let placed = orders.lock().unwrap().clone();
@@ -2422,6 +2572,53 @@ mod tests {
             resolver.current_ip_cert().is_some(),
             "the issued bridge must be installed without waiting for a restart — the \
              cert watcher only watches the domain cert's filenames"
+        );
+    }
+
+    /// A boot that will run no HTTP-01 task clears the kept errors (nothing else
+    /// would) but keeps the budget log, and writes nothing when there are none.
+    #[test]
+    fn a_boot_without_http01_clears_kept_order_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        clear_issuance_errors_when_not_ordering(dir.path());
+        assert!(
+            !dir.path().join(RETRY_STATE_FILENAME).exists(),
+            "no file, nothing to clear, nothing written"
+        );
+
+        let mut retry = RetryState::default();
+        retry.record_failure(now_unix());
+        retry.record_order_error(IssuanceOrder::Domain, "d", 1);
+        retry.record_order_error(IssuanceOrder::IpBridge, "b", 2);
+        retry.save(dir.path());
+        clear_issuance_errors_when_not_ordering(dir.path());
+        let after = RetryState::load(dir.path());
+        assert!(after.last_errors.is_empty());
+        assert_eq!(after.recent_failures, retry.recent_failures);
+    }
+
+    /// A bridge order that fails outright hands its error back to the loop, which
+    /// keeps it for the admin under the bridge's own tag (`tls-certificates.md`
+    /// § Keeping the cert alive, *The admin sees why issuance is failing*).
+    #[tokio::test]
+    async fn ip_bridge_failure_carries_the_cas_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let orders = StdArc::new(StdMutex::new(Vec::new()));
+        let resolver = floor_resolver();
+        let v6: std::net::IpAddr = "2001:db8::1".parse().unwrap();
+
+        let outcome = ip_bridge_pass_inner(
+            &test_config(dir.path().to_path_buf()),
+            Some(&resolver),
+            &ip_issuer(dir.path().to_path_buf(), orders.clone(), true),
+            false,
+            &[v6],
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            IpBridgeOutcome::Failed("the CA could not reach :80 over IPv6".into())
         );
     }
 
@@ -2442,7 +2639,8 @@ mod tests {
             false,
             &[v4, v6],
         )
-        .await;
+        .await
+        .is_failure();
 
         assert!(
             !failed,
@@ -2503,16 +2701,18 @@ mod tests {
         );
     }
 
-    /// § B-IP *Lifetime*: "once the domain cert is live the IP cert is left to
-    /// lapse, and the floor serves IP dials again."
+    /// § B-IP *Lifetime*: once the domain cert is live the IP cert is left to
+    /// lapse — served to its own `notAfter`, never renewed, never dropped early
+    /// by policy (the web reach hint dials `https://<ip>` until the user's
+    /// resolver sees the domain).
     #[tokio::test]
-    async fn ip_bridge_is_dropped_once_the_primary_domain_cert_is_trusted() {
+    async fn ip_bridge_is_left_to_lapse_once_the_primary_domain_cert_is_trusted() {
         let dir = tempfile::tempdir().expect("tempdir");
         let orders = StdArc::new(StdMutex::new(Vec::new()));
         let resolver = floor_resolver();
         let addrs = vec!["203.0.113.7".parse::<std::net::IpAddr>().unwrap()];
 
-        // Bridge first, to have something to drop.
+        // Bridge first, to have something to carry.
         ip_bridge_pass_inner(
             &test_config(dir.path().to_path_buf()),
             Some(&resolver),
@@ -2531,18 +2731,107 @@ mod tests {
             true,
             &addrs,
         )
-        .await;
+        .await
+        .is_failure();
 
         assert!(!failed);
         assert!(
-            resolver.current_ip_cert().is_none(),
-            "the bridge is dropped and IP dials return to the floor"
+            resolver.current_ip_cert().is_some(),
+            "the bridge keeps being served to its own notAfter — not dropped on the \
+             tick the domain cert goes live"
         );
         assert_eq!(
             orders.lock().unwrap().len(),
             1,
-            "and nothing is re-ordered — the bridge is left to lapse, never renewed onward"
+            "and nothing is re-ordered — the bridge is never renewed onward"
         );
+    }
+
+    /// The same lapse holds when the address set leaves the derive: policy never
+    /// drops an installed bridge early.
+    #[tokio::test]
+    async fn ip_bridge_is_kept_when_the_address_set_leaves_the_derive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let orders = StdArc::new(StdMutex::new(Vec::new()));
+        let resolver = floor_resolver();
+        let addrs = ["203.0.113.7".parse::<std::net::IpAddr>().unwrap()];
+
+        for pass_addrs in [&addrs[..], &[][..]] {
+            ip_bridge_pass_inner(
+                &test_config(dir.path().to_path_buf()),
+                Some(&resolver),
+                &ip_issuer(dir.path().to_path_buf(), orders.clone(), false),
+                false,
+                pass_addrs,
+            )
+            .await;
+        }
+
+        assert!(resolver.current_ip_cert().is_some());
+        assert_eq!(orders.lock().unwrap().len(), 1);
+    }
+
+    /// A restart mid-carry: a still-valid chain on disk with nothing installed is
+    /// installed and served out on the same terms, with no order placed.
+    #[tokio::test]
+    async fn ip_bridge_valid_chain_on_disk_is_installed_after_the_domain_cert_is_trusted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let orders = StdArc::new(StdMutex::new(Vec::new()));
+        let addrs = vec!["203.0.113.7".parse::<std::net::IpAddr>().unwrap()];
+        ip_bridge_pass_inner(
+            &test_config(dir.path().to_path_buf()),
+            Some(&floor_resolver()),
+            &ip_issuer(dir.path().to_path_buf(), orders.clone(), false),
+            false,
+            &addrs,
+        )
+        .await;
+
+        let rebooted = floor_resolver();
+        ip_bridge_pass_inner(
+            &test_config(dir.path().to_path_buf()),
+            Some(&rebooted),
+            &ip_issuer(dir.path().to_path_buf(), orders.clone(), false),
+            true,
+            &addrs,
+        )
+        .await;
+
+        assert!(rebooted.current_ip_cert().is_some());
+        assert_eq!(orders.lock().unwrap().len(), 1, "no re-order");
+    }
+
+    /// Domain trusted + an expired chain on disk: nothing installed, nothing
+    /// ordered — the lapse is final.
+    #[tokio::test]
+    async fn ip_bridge_expired_chain_on_disk_is_neither_installed_nor_reordered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let orders = StdArc::new(StdMutex::new(Vec::new()));
+        let resolver = floor_resolver();
+        let addrs = vec!["203.0.113.7".parse::<std::net::IpAddr>().unwrap()];
+        let (cert, key) =
+            fauna_acme_http01::test_support::make_expired_multi_san_cert_and_key_pem(&[
+                "203.0.113.7",
+            ]);
+        std::fs::write(dir.path().join(crate::acme::IP_CERT_FILENAME), cert).unwrap();
+        std::fs::write(dir.path().join(crate::acme::IP_KEY_FILENAME), key).unwrap();
+
+        let failed = ip_bridge_pass_inner(
+            &test_config(dir.path().to_path_buf()),
+            Some(&resolver),
+            &ip_issuer(dir.path().to_path_buf(), orders.clone(), false),
+            true,
+            &addrs,
+        )
+        .await
+        .is_failure();
+
+        assert!(!failed);
+        assert!(
+            resolver.current_ip_cert().is_none(),
+            "expired: not installed"
+        );
+        assert!(orders.lock().unwrap().is_empty(), "and not re-ordered");
     }
 
     /// A restart must not respend the CA's duplicate-certificate budget (5/week
@@ -2638,7 +2927,8 @@ mod tests {
             false,
             &["203.0.113.7".parse().unwrap()],
         )
-        .await;
+        .await
+        .is_failure();
 
         assert!(!failed);
         assert!(orders.lock().unwrap().is_empty(), "no listener, no bridge");
@@ -2682,8 +2972,10 @@ mod tests {
             &ip_issuer(dir.path().to_path_buf(), orders.clone(), false),
             false,
             &addrs,
+            &[],
         )
-        .await;
+        .await
+        .is_failure();
 
         assert!(!failed, "a successful order is not a budget failure");
         assert_eq!(
@@ -2692,6 +2984,38 @@ mod tests {
             "must order using the LIVE public mode, not the stale private boot seed \
              (which would derive an empty address set and order nothing)"
         );
+    }
+
+    /// The provisioned-VPS shape (`tls-certificates.md` § B-IP *When*, source
+    /// (2)): the container's interface table holds only a bridge-network
+    /// RFC 1918 address, the host published its public one — the pass orders
+    /// for the host-published address.
+    #[tokio::test]
+    async fn ip_bridge_orders_from_the_host_published_set_behind_published_ports() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let orders = StdArc::new(StdMutex::new(Vec::new()));
+        let resolver = floor_resolver();
+        let db = StdArc::new(crate::db::CacheDb::open_in_memory().expect("in-memory db"));
+        let app_state = StdArc::new(crate::routes::AppState::for_test_with_node_mode(
+            db,
+            crate::config::NodeMode::Public,
+        ));
+        let attached: Vec<std::net::IpAddr> = vec!["172.18.0.2".parse().unwrap()];
+        let host: Vec<std::net::IpAddr> = vec!["93.184.216.34".parse().unwrap()];
+        let failed = ip_bridge_pass_for_attached(
+            &test_config(dir.path().to_path_buf()),
+            &app_state,
+            Some(&resolver),
+            &ip_issuer(dir.path().to_path_buf(), orders.clone(), false),
+            false,
+            &attached,
+            &host,
+        )
+        .await
+        .is_failure();
+
+        assert!(!failed);
+        assert_eq!(orders.lock().unwrap().clone(), vec![host]);
     }
 
     /// Fake issuer that writes a self-signed cert covering the requested SAN set

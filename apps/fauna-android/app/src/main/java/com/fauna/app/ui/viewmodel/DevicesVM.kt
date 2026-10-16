@@ -7,11 +7,13 @@ import com.fauna.app.R
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.HexUtil
 import com.fauna.app.core.ResolveService
+import com.fauna.app.ui.util.firstListingRefusal
 import com.fauna.app.core.SecureStorage
 import com.fauna.app.p2pshare.GroupShareRows
 import com.fauna.app.p2pshare.OfflinePanel
 import com.fauna.app.p2pshare.OfflineShareDecision
 import com.fauna.app.p2pshare.OfflineShareHost
+import com.fauna.app.provider.OnDemandToggle
 import com.fauna.ffi.FfiFolderActorMember
 import com.fauna.ffi.FfiFolderDevice
 import com.fauna.ffi.FfiPendingShare
@@ -20,11 +22,19 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import uniffi.fauna_client_capabilities.CustodyFacetView
+import uniffi.fauna_client_capabilities.CustodyHeldRowView
+import uniffi.fauna_client_capabilities.CustodyMintCandidateView
+import uniffi.fauna_client_capabilities.CustodyOfferRowView
+import uniffi.fauna_core.LocalizedText
 import uniffi.fauna_devices_machine.DevicesMachine
 import uniffi.fauna_devices_machine.DevicesObserver
 import uniffi.fauna_devices_machine.DevicesSnapshot
+import uniffi.fauna_devices_machine.FolderSummary
 import uniffi.fauna_folders_machine.FolderWizardStep
 import javax.inject.Inject
 
@@ -53,6 +63,9 @@ class DevicesVM @Inject constructor(
     // The co-present offline-share ceremony's session-long state (seat, panel,
     // acts in flight) — app-scoped, never this VM's: see [OfflineShareHost].
     private val offlineShare: OfflineShareHost,
+    // The on-demand presence the `folder-on-demand-toggle` steers (the shared
+    // preference store + plan, behind the provider's source).
+    private val onDemandToggle: OnDemandToggle,
 ) : ViewModel() {
 
     private val _snapshot = MutableStateFlow<DevicesSnapshot?>(null)
@@ -61,10 +74,10 @@ class DevicesVM @Inject constructor(
 
     /**
      * This app's own locally-stored device id — drives the `device-this-mark-badge`
-     * row match (`devices.md` § This-device marker). [SecureStorage.deviceId] mints
-     * and persists on first read, so this is stable for the VM's lifetime.
+     * row match (`devices.md` § This-device marker). [SecureStorage.resolveDeviceId] mints
+     * and persists on first call, so this is stable for the VM's lifetime.
      */
-    val localDeviceId: String? get() = secureStorage.deviceId
+    val localDeviceId: String? get() = secureStorage.resolveDeviceId()
 
     /**
      * This client's own actor ID — drives the page-level `peer-actor-id-copy-btn`
@@ -109,6 +122,17 @@ class DevicesVM @Inject constructor(
         MutableStateFlow<Map<String, List<com.fauna.ffi.FfiFolderDestinationPlace>>>(emptyMap())
     val folderDestinationPlaces: StateFlow<Map<String, List<com.fauna.ffi.FfiFolderDestinationPlace>>> =
         _folderDestinationPlaces
+
+    // ── On-demand presence (`folder-on-demand-toggle`, on-demand-files.md
+    // § Android SAF DocumentsProvider binding) ──
+    //
+    // Each row's "Show in Files" reading — the device-local preference (default
+    // ON) and whether a watched-directory ingress presents the set instead —
+    // keyed by [OnDemandRowKey]. Not part of DevicesSnapshot: the preference is
+    // this device's, never nest state. A row absent here renders no toggle (no
+    // session, or a row that resolves no set ref).
+    private val _onDemand = MutableStateFlow<Map<OnDemandRowKey, OnDemandRow>>(emptyMap())
+    val onDemand: StateFlow<Map<OnDemandRowKey, OnDemandRow>> = _onDemand
 
     // Which rows the Compose screen currently has expanded — a VM-side shadow of
     // FolderRow's own local `expanded` boolean (Compose state the VM has no other
@@ -172,7 +196,7 @@ class DevicesVM @Inject constructor(
     private val _pendingShares = MutableStateFlow<List<FfiPendingShare>>(emptyList())
     val pendingShares: StateFlow<List<FfiPendingShare>> = _pendingShares
 
-    // ── T16 custody facet, owner side — devices.md § Custody facet, piece 2 ──
+    // ── T16 custody facet — devices.md § Custody facet, pieces 1–3 + the mint ──
     //
     // NOT part of DevicesSnapshot: the facet folds the `fauna.state.custody-ceremony` entries, which the
     // deliberately-keyless DevicesMachine cannot read — so it rides its own load
@@ -187,6 +211,32 @@ class DevicesVM @Inject constructor(
         MutableStateFlow<List<uniffi.fauna_client_capabilities.CustodyHolderRowView>>(emptyList())
     val custodyRows: StateFlow<List<uniffi.fauna_client_capabilities.CustodyHolderRowView>> =
         _custodyRows
+
+    // Piece 3, from the SAME fold as [custodyRows]: one `custody-held-card` per
+    // custody this device holds for another account, one `custody-offer-card`
+    // per offer waiting on this account's consent. Same keep-on-transient rule.
+    private val _custodyHeld = MutableStateFlow<List<CustodyHeldRowView>>(emptyList())
+    val custodyHeld: StateFlow<List<CustodyHeldRowView>> = _custodyHeld
+    private val _custodyOffers = MutableStateFlow<List<CustodyOfferRowView>>(emptyList())
+    val custodyOffers: StateFlow<List<CustodyOfferRowView>> = _custodyOffers
+
+    // The offers (by lowercase-hex grant id) whose consent card renders
+    // `custody-offer-target-select` — the shared `custody_offer_shows_target_select`
+    // answer, read beside the rows it decorates on every fold. Never derived from
+    // the offer row's own fields.
+    private val _custodyOfferTargets = MutableStateFlow<Set<String>>(emptySet())
+    val custodyOfferTargets: StateFlow<Set<String>> = _custodyOfferTargets
+
+    // Piece 1: the enrolled principals the shared `devices_keyless_posture` rule
+    // marks relay-only (`device-keyless-posture-badge`).
+    private val _keylessPrincipals = MutableStateFlow<Set<String>>(emptySet())
+    val keylessPrincipals: StateFlow<Set<String>> = _keylessPrincipals
+
+    // The `custody-mint-*` flow: `null` = closed; a non-empty list = open over
+    // these host options. Never an open empty list — no one to ask is answered on
+    // `error-message` instead of a picker whose confirm can never succeed.
+    private val _mintCandidates = MutableStateFlow<List<CustodyMintCandidateView>?>(null)
+    val mintCandidates: StateFlow<List<CustodyMintCandidateView>?> = _mintCandidates
 
     private val observer = object : DevicesObserver {
         override fun onChanged() {
@@ -234,15 +284,25 @@ class DevicesVM @Inject constructor(
             }
         }
         // The store-change notice: followed folders and foreign sets ride the
-        // machine's refresh, and the enrollment notice is a store read
-        // ([ApiClient.storeChangedTick]). The custody facet's load is left on
-        // its visit edge: it drives the ceremony before it folds, and a notice
-        // must not become a drive.
+        // machine's refresh, and the enrollment notice, the custody facet and
+        // the sync-defaults select are store reads ([ApiClient.storeChangedTick]).
+        // The custody facet re-FOLDS only: its visit edge drives the ceremony
+        // first ([loadCustodyFacet]), and a notice must not become a drive.
         viewModelScope.launch {
             api.storeChangedTick.collect {
                 refresh()
                 loadEnrollmentNotice()
+                foldCustodyFacet()
+                loadDefaultConflictPolicy()
             }
+        }
+        // Piece 1 follows the roster: the keyless posture is a read over the rows'
+        // enrolled principals, so it re-runs whenever that list changes — a row
+        // enrolling or leaving — rather than only on the page's load edge.
+        viewModelScope.launch {
+            _snapshot.map { snap -> snap?.devices.orEmpty().map { it.principal } }
+                .distinctUntilChanged()
+                .collect { loadKeylessPosture(it) }
         }
     }
 
@@ -252,6 +312,8 @@ class DevicesVM @Inject constructor(
      * next [refresh] retries the build.
      */
     fun start() {
+        // A fresh visit disarms any member removal left armed by a prior visit.
+        _memberRemovePending.value = null
         refresh()
         loadPendingShares()
         loadOfflineGroupShares()
@@ -307,6 +369,33 @@ class DevicesVM @Inject constructor(
         viewModelScope.launch { m.removeDevice(index.toUInt()) }
     }
 
+    // ── Members without a matching entry — devices.md § Members without a matching entry ──
+    //
+    // The armed card's fleet id (`FleetMemberSummary.deviceId`), or null while no card is
+    // armed. Keyed by the member's id, never its position: a refresh between arm and
+    // confirm that inserts a card earlier in the list must not retarget the removal
+    // (`fleet-scope-reclamation.md` § Fleet-scope reclamation, clause (4)). Mirrors
+    // tui's `DevicesState::member_remove_pending`.
+    private val _memberRemovePending = MutableStateFlow<String?>(null)
+    val memberRemovePending: StateFlow<String?> = _memberRemovePending
+
+    /** `device-member-remove-button`: arm THAT card only (arming another moves the arm). */
+    fun armMemberRemoval(deviceId: String) { _memberRemovePending.value = deviceId }
+
+    /** `device-member-remove-cancel-button`: disarm; nothing is written. */
+    fun cancelMemberRemoval() { _memberRemovePending.value = null }
+
+    /**
+     * `device-member-remove-confirm-button`: disarm, then remove the member by its
+     * fleet id through the key-addressed door. A refusal paints on `error-message`
+     * (the machine's own copy) and the card stays.
+     */
+    fun confirmMemberRemoval(deviceId: String) {
+        _memberRemovePending.value = null
+        val m = machine ?: return
+        viewModelScope.launch { m.removeMemberById(deviceId) }
+    }
+
     /**
      * `device-p2p-participation-toggle[index]` (`p2p.md` § Per-device participation):
      * the machine picks the arm — this device's own switch, or a request that a
@@ -331,7 +420,7 @@ class DevicesVM @Inject constructor(
      */
     fun useOtherVersion(conflictId: Long) {
         val m = machine ?: return
-        val deviceId = secureStorage.deviceId ?: return
+        val deviceId = secureStorage.resolveDeviceId() ?: return
         viewModelScope.launch { m.useOtherVersion(conflictId, deviceId) }
     }
 
@@ -341,14 +430,16 @@ class DevicesVM @Inject constructor(
      * parses to `[]` — ALWAYS a list, never `null`, so a cleared field actually
      * clears the stored filter instead of the wire's `null` = "leave unchanged"
      * silently no-opping — folders.md § Where logic lives, selective-sync bullet).
+     * A `null` text is a list this device could not open: it goes out as `null`
+     * ("leave unchanged"), never as a blank over the stored seal.
      */
-    fun saveFolderPaths(name: String, includeText: String, excludeText: String) {
+    fun saveFolderPaths(name: String, includeText: String?, excludeText: String?) {
         val m = machine ?: return
         viewModelScope.launch {
             m.setFolderPaths(
                 name,
-                com.fauna.ffi.parsePathsField(includeText),
-                com.fauna.ffi.parsePathsField(excludeText),
+                includeText?.let { com.fauna.ffi.parsePathsField(it) },
+                excludeText?.let { com.fauna.ffi.parsePathsField(it) },
             )
         }
     }
@@ -423,13 +514,47 @@ class DevicesVM @Inject constructor(
     }
 
     /**
+     * Turn a folder's exclusive editing on or off (`folder-exclusive-editing-toggle`,
+     * owner row only; `ui/folders.md` § Exclusive editing). **Non-optimistic**: the
+     * machine refreshes on success and the toggle repaints `exclusiveEditing` from
+     * the new snapshot — a refused write never leaves it showing a state the folder
+     * does not have.
+     */
+    fun setFolderExclusiveEditing(name: String, on: Boolean) {
+        val m = machine ?: return
+        viewModelScope.launch { m.setFolderExclusiveEditing(name, on) }
+    }
+
+    /**
+     * The `folder-lease-status` line for [folder] (`null` while the folder is not
+     * lease-governed), resolved once in shared Rust — read off the snapshot, never
+     * probed (asking for the lease takes it). "This device" is the same
+     * [localDeviceId] `device-this-mark-badge` matches.
+     */
+    fun folderLeaseStatus(folder: FolderSummary): LocalizedText? =
+        com.fauna.ffi.devicesFolderLeaseStatus(
+            folder,
+            snapshot.value?.devices.orEmpty(),
+            localDeviceId,
+        )
+
+    /**
      * Load the persisted default-conflict-policy preference for new sets
      * (`sync-default-conflict-policy-select`'s current value). Absent (no
-     * preference) leaves [defaultConflictPolicy] null, rendered as "auto".
+     * preference) leaves [defaultConflictPolicy] null, rendered as "auto". A
+     * failed read keeps the painted value — the store-change notice re-runs
+     * this while the page is open, and a transient must never flip a chosen
+     * policy back to "auto" — except the first-listing gate's refusal, whose
+     * reason rides [sharingError] (`account-client-lifecycle.md` § The first
+     * listing, clauses (4) and (5)).
      */
     fun loadDefaultConflictPolicy() {
         viewModelScope.launch {
-            _defaultConflictPolicy.value = runCatching { api.defaultConflictPolicyGet() }.getOrNull()
+            runCatching { api.defaultConflictPolicyGet() }
+                .onSuccess { _defaultConflictPolicy.value = it }
+                .onFailure { e ->
+                    (e as? Exception)?.firstListingRefusal()?.let { _sharingError.value = it }
+                }
         }
     }
 
@@ -653,6 +778,56 @@ class DevicesVM @Inject constructor(
         }
     }
 
+    /**
+     * Read every row's `folder-on-demand-toggle` state (the screen calls this
+     * whenever the folder list changes). Re-read from the store, never held in
+     * view state alone, so a flip reads the same after the user leaves the page
+     * and returns, and across a relaunch (`on-demand-files.md` § On-Demand
+     * Files: the choice is remembered).
+     */
+    fun loadOnDemand(folders: List<FolderSummary>) {
+        viewModelScope.launch {
+            val identities = folders.mapNotNull { folder ->
+                onDemandToggle.identify(folder)?.let { OnDemandRowKey.of(folder) to it }
+            }
+            val states = runCatching { onDemandToggle.read(identities.map { it.second }) }
+                .getOrDefault(emptyMap())
+            _onDemand.value = identities.mapNotNull { (key, id) ->
+                states[id.scopedId]?.let { key to OnDemandRow(id.scopedId, it.shown, it.stronger) }
+            }.toMap()
+        }
+    }
+
+    /**
+     * Flip a row's `folder-on-demand-toggle` — apple's `FolderOnDemandToggle.apply`
+     * twin: persist the preference, then (ON, on an OWNER row) the enrol gesture
+     * — the shared `ensure_place` writes this device's place at the default
+     * point iff it holds none (`file-sync.md` § 4, *A local presence writes the
+     * place it needs*) — and only then re-plan, so the plan sees the place the
+     * presence needs. **A member's row is hide-only** (`on-demand-files.md`
+     * § Shared sets on a capability host, decision 3): the membership is the
+     * seat, and the roster kinds resolve a folder by name among the caller's
+     * OWN folders, so no place is read or written there. A failed enrol leaves
+     * the device place-less until the next gesture, as on apple.
+     */
+    fun setFolderOnDemand(folder: FolderSummary, shown: Boolean) {
+        val key = OnDemandRowKey.of(folder)
+        val row = _onDemand.value[key] ?: return
+        _onDemand.update { it + (key to row.copy(shown = shown)) }
+        viewModelScope.launch {
+            val persisted = runCatching { onDemandToggle.setShown(row.scopedId, shown) }
+            if (persisted.isFailure) {
+                _onDemand.update { it + (key to row) }
+                return@launch
+            }
+            val deviceId = secureStorage.resolveDeviceId()
+            if (shown && folder.role != "member" && !deviceId.isNullOrEmpty()) {
+                runCatching { api.ensureFolderPlace(folder.name, deviceId) }
+            }
+            runCatching { onDemandToggle.replan() }
+        }
+    }
+
     // ── Cross-user sharing (recipient side) — folders.md § Sharing, Recipient side ──
 
     /**
@@ -762,10 +937,11 @@ class DevicesVM @Inject constructor(
      */
     fun loadOfflineGroupShares() = offlineShare.loadGroupShares(api)
 
-    // ── T16 custody facet, owner side — devices.md § Custody facet, piece 2 ──
+    // ── T16 custody facet — devices.md § Custody facet, pieces 1–3 + the mint ──
 
     /**
-     * Fire a ceremony drive pass, then refold the owner-side custody facet.
+     * Fire a ceremony drive pass, then refold the custody facet into all three
+     * row families.
      *
      * Rides [start] (every nav to the page), the android twin of linux's
      * `devices_page.connect_map` hydrate. The drive comes FIRST and is
@@ -783,7 +959,119 @@ class DevicesVM @Inject constructor(
     fun loadCustodyFacet() {
         viewModelScope.launch {
             api.custodyDrive()
-            runCatching { api.custodyFacetLoad() }.getOrNull()?.let { _custodyRows.value = it.rows }
+            runCatching { api.custodyFacetLoad() }.getOrNull()?.let { applyCustodyFacet(it) }
+        }
+    }
+
+    /**
+     * Refold the custody facet WITHOUT a drive pass — the store-change notice's
+     * re-read. Same keep-what-we-have contract as [loadCustodyFacet]'s fold.
+     */
+    fun foldCustodyFacet() {
+        viewModelScope.launch {
+            runCatching { api.custodyFacetLoad() }.getOrNull()?.let { applyCustodyFacet(it) }
+        }
+    }
+
+    /**
+     * Paint one re-folded facet — the load edge's and every act's. The
+     * target-select answer is read per offer here, beside the rows it decorates,
+     * so a card never renders against a stale answer.
+     */
+    private fun applyCustodyFacet(facet: CustodyFacetView) {
+        _custodyOfferTargets.value = facet.offers
+            .filter { api.custodyOfferShowsTarget(it) }
+            .map { HexUtil.bytesToHex(it.grantId) }
+            .toSet()
+        _custodyRows.value = facet.rows
+        _custodyHeld.value = facet.held
+        _custodyOffers.value = facet.offers
+    }
+
+    /**
+     * Piece 1: which enrolled rows hold no keys, through the shared
+     * `fauna_devices_machine::keyless_posture` rule. A failed read keeps the
+     * previous set (a transient must not flicker the marker); every unknown the
+     * rule meets answers `false`, so the marker never rests on a guess.
+     */
+    private suspend fun loadKeylessPosture(principals: List<String?>) {
+        val keyless = runCatching { api.devicesKeylessPosture(principals) }.getOrNull() ?: return
+        _keylessPrincipals.value = principals.zip(keyless)
+            .mapNotNull { (principal, isKeyless) -> principal?.takeIf { isKeyless } }
+            .toSet()
+    }
+
+    /**
+     * Run one custody gesture from the page — the android twin of linux's
+     * `run_custody_gesture`. Every act runs through the shared
+     * `run_custody_act`; its outcome repaints from the re-folded facet (a `null`
+     * facet keeps the painted rows) and its error goes on `error-message`, never
+     * swallowed (e2e convention 11).
+     */
+    fun runCustodyGesture(gesture: CustodyGesture) {
+        when (gesture) {
+            is CustodyGesture.Revoke -> revokeCustody(gesture.grantId, gesture.holder)
+            is CustodyGesture.Accept ->
+                runCustodyAct { api.custodyAccept(gesture.grantId, gesture.onNest) }
+            is CustodyGesture.Decline -> runCustodyAct { api.custodyDecline(gesture.grantId) }
+            is CustodyGesture.SetBudget -> {
+                // The shared parser — never an app-side one — and an unparseable or
+                // zero budget makes no call and says so (tui's and linux's answer).
+                val cap = runCatching { com.fauna.ffi.parseByteSize(gesture.typed) }.getOrNull()
+                if (cap == null || cap == 0UL) {
+                    _sharingError.value =
+                        appContext.getString(R.string.backups_backup_destination_capacity_invalid)
+                    return
+                }
+                runCustodyAct { api.custodySetBudget(gesture.grantId, cap) }
+            }
+            is CustodyGesture.Stop -> runCustodyAct { api.custodyStop(gesture.grantId) }
+            is CustodyGesture.Remove -> runCustodyAct { api.custodyRemove(gesture.grantId) }
+            CustodyGesture.MintOpen -> openCustodyMint()
+            CustodyGesture.MintCancel -> _mintCandidates.value = null
+            is CustodyGesture.Mint -> runCustodyAct(closesMint = true) {
+                api.custodyMint(gesture.host, gesture.channelHex)
+            }
+        }
+    }
+
+    /**
+     * Run one host-side or mint act and answer it. A mint that recorded its offer
+     * closes the flow; a failed one leaves it open beside its error, so the user
+     * can pick again.
+     */
+    private fun runCustodyAct(
+        closesMint: Boolean = false,
+        act: suspend () -> com.fauna.ffi.FfiCustodyActOutcome,
+    ) {
+        viewModelScope.launch {
+            _sharingError.value = null
+            val outcome = runCatching { act() }.getOrElse { e ->
+                _sharingError.value = e.message ?: e.toString()
+                return@launch
+            }
+            outcome.facet?.let { applyCustodyFacet(it) }
+            _sharingError.value = outcome.error
+            if (closesMint && outcome.error == null) _mintCandidates.value = null
+        }
+    }
+
+    /**
+     * `custody-mint-button`: open the flow over this account's 1:1
+     * conversations, or — with no one to ask — keep it closed and say on
+     * `error-message` to start a conversation first.
+     */
+    private fun openCustodyMint() {
+        _sharingError.value = null
+        val candidates = runCatching { api.custodyMintCandidates() }.getOrElse { e ->
+            _sharingError.value = e.message ?: e.toString()
+            return
+        }
+        if (candidates.isEmpty()) {
+            _mintCandidates.value = null
+            _sharingError.value = appContext.getString(R.string.devices_custody_mint_no_contacts)
+        } else {
+            _mintCandidates.value = candidates
         }
     }
 
@@ -805,7 +1093,7 @@ class DevicesVM @Inject constructor(
                     .replace("{message}", e.message ?: "")
                 return@launch
             }
-            outcome.facet?.let { _custodyRows.value = it.rows }
+            outcome.facet?.let { applyCustodyFacet(it) }
             outcome.error?.let { message ->
                 _sharingError.value = appContext.getString(R.string.devices_error_revoke_custody)
                     .replace("{message}", message)
@@ -902,3 +1190,17 @@ class DevicesVM @Inject constructor(
         return built
     }
 }
+
+/**
+ * A folder row's identity on the Folders page — the row id plus the nest it
+ * lives on (a cross-nest member row's id is its home nest's), so an own row and
+ * a shared row never collide even when their names do.
+ */
+data class OnDemandRowKey(val id: Long, val homeNestUrl: String?) {
+    companion object {
+        fun of(folder: FolderSummary) = OnDemandRowKey(folder.id, folder.homeNestUrl)
+    }
+}
+
+/** One row's `folder-on-demand-toggle` paint: its scoped id, the preference, and the stronger presence. */
+data class OnDemandRow(val scopedId: String, val shown: Boolean, val stronger: Boolean)

@@ -76,7 +76,7 @@ pub fn registry(tx: tokio::sync::mpsc::UnboundedSender<UiMessage>) -> Arc<Critic
 /// `drop_authenticated_state` calls `CriticalAlerts::clear_all`.
 ///
 /// Best-effort and fire-and-forget, exactly like the convergence beside it at
-/// [`crate::session::establish`] (`spawn_refresh_mail_epoch_schedule`): sign-in must not fail, or even wait, because a nest
+/// [`crate::session::establish`] (the mail connect-time refresh): sign-in must not fail, or even wait, because a nest
 /// could not answer the recovery plane. Which feeders run, how often, how a
 /// failure is handled, and what gets logged belong to the shared crate, not
 /// here — this function is deliberately only a spawn, so the other six apps'
@@ -119,38 +119,11 @@ pub fn spawn_session_start_sweep(
 /// `alert_sweep_wake` command, so a witness of "a condition that arises while
 /// the app is open is announced without a restart" drives the production loop
 /// rather than a one-shot pass (`critical-alerts.md` § Mechanism → *How often
-/// the detector runs*).
-///
-/// Empty in a production build (convention 15: the automation surface is
-/// compiled out), so the loop there runs on its clock alone. One per identity:
-/// [`crate::session::establish`] mints a fresh one for each session it
-/// establishes, so a departed identity's loop — which lingers until its next
-/// wake reads the teardown — holds a handle nothing fires any more.
-#[derive(Clone, Default)]
-pub struct SweepWake {
-    #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
-    notify: Arc<tokio::sync::Notify>,
-}
-
-impl SweepWake {
-    /// End the current identity's re-sweep wait now. A wake that lands while a
-    /// pass is running is kept (`notify_one` stores the permit) and ends the
-    /// very next wait, so a test never loses its poke to a busy loop.
-    #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
-    pub fn wake(&self) {
-        self.notify.notify_one();
-    }
-
-    /// Test-only: whether a wake is pending for this handle's loop, consuming
-    /// it. A zero timeout polls the `Notified` once before its deadline, so a
-    /// stored permit answers `true` without any wall clock.
-    #[cfg(test)]
-    pub(crate) async fn take_pending_wake(&self) -> bool {
-        tokio::time::timeout(std::time::Duration::ZERO, self.notify.notified())
-            .await
-            .is_ok()
-    }
-}
+/// the detector runs*). One per identity: [`crate::session::establish`] mints a
+/// fresh one for each session it establishes, so a departed identity's loop —
+/// which lingers until its next wake reads the teardown — holds a handle nothing
+/// fires any more. The shape is the shared [`crate::loop_wake::LoopWake`].
+pub type SweepWake = crate::loop_wake::LoopWake;
 
 /// Run **one** sweep pass against the live session's client, at the converge
 /// arm of the universal post-auth hook ([`crate::session::apply_session_patch`]).

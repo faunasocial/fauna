@@ -15,14 +15,15 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use fauna_core::data::ContentHash;
 
 use crate::backend::{
-    ReadSeek, RelayEvicted, RelayScopeMeter, RetiredCompaction, ScopeDropCounts, SegmentScopeMeter,
+    RelayEvicted, RelayScopeMeter, RetiredCompaction, ScopeDropCounts, SegmentScopeMeter,
     SegmentStaging, StoreBackend,
 };
 use crate::locks::{MigrationLock, MigrationLockOutcome};
 use crate::segments::{AdoptedBlock, SEGMENT_TRANSFER_CHUNK, SegmentHalf, SegmentKey, SegmentSink};
 use crate::types::{
-    InsertOutcome, IntentDrainer, IntentStatus, IssuedRetire, ItemRef, JournalOp, JournalRow,
-    NewOutboxIntent, OutboxIntent, RecordIndexEntry, RelayRow, StateEntry, WriterId,
+    CustodiedEscrow, CustodiedRecovery, InsertOutcome, IntentDrainer, IntentStatus, IssuedRetire,
+    ItemRef, JournalOp, JournalRow, NewOutboxIntent, OutboxIntent, RecordIndexEntry, RelayRow,
+    StateEntry, WriterId,
 };
 
 /// The store DB's filename inside the per-actor store dir, beside
@@ -128,6 +129,10 @@ const CREATE_TABLES_SQL: &str = "
         merge_meta    BLOB,
         entry_version INTEGER NOT NULL,
         tombstone     INTEGER NOT NULL DEFAULT 0,
+        -- 1 when `value` rests sealed under the replica seal key
+        -- (`SqliteBackend::open_keyed`), 0 when it rests opened. Per row, so a
+        -- reader learns a row's form in the same statement that reads it.
+        sealed        INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (kind, key)
     );
 
@@ -149,6 +154,8 @@ const CREATE_TABLES_SQL: &str = "
         merge_meta    BLOB,
         entry_version INTEGER NOT NULL,
         tombstone     INTEGER NOT NULL DEFAULT 0,
+        -- As `state_entries.sealed`.
+        sealed        INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (scope, kind, key)
     );
 
@@ -237,8 +244,8 @@ const CREATE_TABLES_SQL: &str = "
         -- (`account_entry_crypto::peek_generation_id` — the same header a
         -- key-less custodian reads; nothing is opened), NULL for any other
         -- form. What the reclamation pass forgets a shredded generation's
-        -- residue by (`account-data-taxonomy.md` § The generation machinery
-        -- → *Fleet-scope reclamation*, clause (3)(h)); kept when payload
+        -- residue by (`fleet-scope-reclamation.md`
+        -- § *Fleet-scope reclamation*, clause (3)(h)); kept when payload
         -- eviction clears `entry`. Indexed after the column reconcile
         -- ([`RELAY_GENERATION_INDEX_SQL`]).
         generation_id BLOB,
@@ -258,7 +265,9 @@ const CREATE_TABLES_SQL: &str = "
     -- completion-is-deletion). An undrained intent is the ONLY copy of a
     -- pending write, so this table is deliberately outside every scope-keyed
     -- plane: `drop_scope` must never name it. Additive at-rest: an older
-    -- build ignores it, so the format_version pair is untouched.
+    -- build ignores it, so the format_version pair is untouched. `sealed` is
+    -- `state_entries.sealed` for `payload` — an `Mls` intent's payload is the
+    -- opened compose, sealed only at drain.
     CREATE TABLE IF NOT EXISTS outbox (
         intent_id       BLOB PRIMARY KEY,
         kind            TEXT NOT NULL,
@@ -269,7 +278,8 @@ const CREATE_TABLES_SQL: &str = "
         status          TEXT NOT NULL DEFAULT 'pending',
         retry_count     INTEGER NOT NULL DEFAULT 0,
         created_at      INTEGER NOT NULL,
-        last_attempt_at INTEGER
+        last_attempt_at INTEGER,
+        sealed          INTEGER NOT NULL DEFAULT 0
     );
     CREATE UNIQUE INDEX IF NOT EXISTS outbox_scope_fifo
         ON outbox (scope, channel_seq);
@@ -296,6 +306,30 @@ const CREATE_TABLES_SQL: &str = "
     );
     CREATE UNIQUE INDEX IF NOT EXISTS issued_retires_ord
         ON issued_retires (ord);
+
+    -- A custodied owner's recovery material (`identity-succession.md`
+    -- § Seed escrow → *The custodian copy*): the registration chain, the
+    -- succession statements and the seed-escrow blob a custodian's pair store
+    -- holds so it can answer the owner's phrase restore. Outside the relay
+    -- plane — not account rows, never metered or served on the sync doors.
+    -- Replaced whole by one transaction (`custodied_recovery_put`). Every
+    -- byte is re-pullable from the owner's nest while it lives; the copy is
+    -- the one holder left once it does not, so a lost row is a lost restore.
+    -- Additive at-rest, like the retire record above.
+    CREATE TABLE IF NOT EXISTS custodied_recovery_chain (
+        ord    INTEGER PRIMARY KEY,
+        record BLOB NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS custodied_recovery_succession (
+        ord       INTEGER PRIMARY KEY,
+        statement BLOB NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS custodied_recovery_escrow (
+        id         INTEGER PRIMARY KEY CHECK (id = 0),
+        blob       BLOB NOT NULL,
+        updated_at INTEGER NOT NULL,
+        head_seq   INTEGER NOT NULL
+    );
 ";
 
 /// The index over `relay_rows.generation_id` — run AFTER the column
@@ -307,12 +341,98 @@ const RELAY_GENERATION_INDEX_SQL: &str = "
         ON relay_rows (scope, generation_id) WHERE generation_id IS NOT NULL;
 ";
 
+/// The `store_meta` key whose presence marks a **sealed** replica; its
+/// value is the seal key's [`ReplicaSealKey::check_value`].
+pub const META_REPLICA_SEAL: &str = "replica_seal";
+
+pub use fauna_core::crypto::ReplicaSealKey;
+
+/// The at-rest posture the owning runtime opens its replica at
+/// (`account-replica-posture.md` § Local at-rest posture). Chosen by the
+/// platform's credential store, never by a knob: `Plaintext` only where the
+/// seal key would rest beside the data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicaPosture {
+    Sealed,
+    Plaintext,
+}
+
+/// The replica is sealed under a key other than the one this opener holds —
+/// its rows open under neither, so the open refuses rather than touch them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplicaKeyMismatch;
+
+impl std::fmt::Display for ReplicaKeyMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "account store: the replica is sealed under a different key than the one \
+             this opener holds — refusing to open it",
+        )
+    }
+}
+
+impl std::error::Error for ReplicaKeyMismatch {}
+
+/// How an open treats the seal key.
+enum Keying {
+    /// No key: opened rows read and write as before; a sealed row errors.
+    None,
+    /// Key attached for reads and sealed writes; the posture is untouched.
+    Read(ReplicaSealKey),
+    /// The owning runtime: key attached and the posture settled.
+    Settle(ReplicaSealKey, ReplicaPosture),
+}
+
+/// The AEAD binding of an account-plane state row — its primary key, so a
+/// sealed value copied onto another row fails to open.
+fn state_aad(kind: &str, key: &str) -> Vec<u8> {
+    [
+        b"state\0".as_slice(),
+        kind.as_bytes(),
+        b"\0",
+        key.as_bytes(),
+    ]
+    .concat()
+}
+
+/// [`state_aad`] for a group-plane row.
+fn group_aad(scope: &str, kind: &str, key: &str) -> Vec<u8> {
+    [
+        b"group\0".as_slice(),
+        scope.as_bytes(),
+        b"\0",
+        kind.as_bytes(),
+        b"\0",
+        key.as_bytes(),
+    ]
+    .concat()
+}
+
+/// [`state_aad`] for an outbox intent's payload: its id, and the kind and
+/// scope it replays as, so a payload cannot be re-pointed at another drain.
+fn outbox_aad(intent_id: &[u8], kind: &str, scope: &str) -> Vec<u8> {
+    [
+        b"outbox\0".as_slice(),
+        intent_id,
+        b"\0",
+        kind.as_bytes(),
+        b"\0",
+        scope.as_bytes(),
+    ]
+    .concat()
+}
+
 pub struct SqliteBackend {
     conn: Connection,
     /// Where adopted segment files live. `None` for the in-memory backend —
     /// an in-memory store with a hidden on-disk file area would be a lie, so
     /// adoption refuses there and tests that exercise it open a real dir.
     segment_dir: Option<PathBuf>,
+    /// The replica seal key, when the opener holds one
+    /// ([`Self::open_keyed`], [`Self::open_existing_keyed`]). Without it a
+    /// sealed row reads as an error and a write into a sealed store is refused
+    /// — never a plaintext row slipped into a sealed replica.
+    seal_key: Option<ReplicaSealKey>,
 }
 
 impl SqliteBackend {
@@ -356,7 +476,61 @@ impl SqliteBackend {
         let store_dir = store_dir.as_ref();
         std::fs::create_dir_all(store_dir)
             .with_context(|| format!("create store dir {}", store_dir.display()))?;
-        Self::open_in_dir(store_dir, OpenFlags::default())
+        Self::open_in_dir(store_dir, OpenFlags::default(), Keying::None)
+    }
+
+    /// [`Self::open`] by the replica's **owning runtime**, holding the replica
+    /// seal key and the platform's [`ReplicaPosture`]
+    /// (`account-replica-posture.md` § Local at-rest posture). Inside the same
+    /// migration section as the schema work, the store is brought to that
+    /// posture in one transaction — every opened row sealed (or, for
+    /// [`ReplicaPosture::Plaintext`], every sealed row opened) and the
+    /// store-level marker written (or cleared) — so no crash leaves it half
+    /// one and half the other. A store already sealed under a **different**
+    /// key is refused ([`ReplicaKeyMismatch`]), never re-sealed over: its rows
+    /// open under neither key, and refusing keeps them intact for the key that
+    /// does open them.
+    pub fn open_keyed(
+        store_dir: impl AsRef<Path>,
+        key: ReplicaSealKey,
+        posture: ReplicaPosture,
+    ) -> Result<Self> {
+        let store_dir = store_dir.as_ref();
+        std::fs::create_dir_all(store_dir)
+            .with_context(|| format!("create store dir {}", store_dir.display()))?;
+        Self::open_in_dir(
+            store_dir,
+            OpenFlags::default(),
+            Keying::Settle(key, posture),
+        )
+    }
+
+    /// [`Self::open`] for a co-located **reader** holding the seal key — the
+    /// peer leg's serve connection, the succession probe: it opens sealed rows
+    /// and seals what it writes into a sealed store, but never changes the
+    /// store's posture (that is the owning runtime's, [`Self::open_keyed`]).
+    /// Refuses a store sealed under another key.
+    pub fn open_with_key(store_dir: impl AsRef<Path>, key: ReplicaSealKey) -> Result<Self> {
+        let store_dir = store_dir.as_ref();
+        std::fs::create_dir_all(store_dir)
+            .with_context(|| format!("create store dir {}", store_dir.display()))?;
+        Self::open_in_dir(store_dir, OpenFlags::default(), Keying::Read(key))
+    }
+
+    /// [`Self::open_existing`] for a reader holding the seal key (the
+    /// pre-login local read). `None` opens key-less: a sealed row then reads
+    /// as an error, never as garbage.
+    pub fn open_existing_keyed(
+        store_dir: impl AsRef<Path>,
+        key: Option<ReplicaSealKey>,
+    ) -> Result<Option<Self>> {
+        let store_dir = store_dir.as_ref();
+        if !store_dir.join(ACCOUNT_STORE_DB_FILENAME).is_file() {
+            return Ok(None);
+        }
+        let flags = OpenFlags::default() - OpenFlags::SQLITE_OPEN_CREATE;
+        let keying = key.map_or(Keying::None, Keying::Read);
+        Self::open_in_dir(store_dir, flags, keying).map(Some)
     }
 
     /// [`Self::open`] for a store that may not exist: `None` when `store_dir`
@@ -374,16 +548,11 @@ impl SqliteBackend {
     /// and WAL posture, so it is as safe beside a process hosting the engine
     /// as every other opener.
     pub fn open_existing(store_dir: impl AsRef<Path>) -> Result<Option<Self>> {
-        let store_dir = store_dir.as_ref();
-        if !store_dir.join(ACCOUNT_STORE_DB_FILENAME).is_file() {
-            return Ok(None);
-        }
-        let flags = OpenFlags::default() - OpenFlags::SQLITE_OPEN_CREATE;
-        Self::open_in_dir(store_dir, flags).map(Some)
+        Self::open_existing_keyed(store_dir, None)
     }
 
-    /// The open sequence both doors share, over a directory that exists.
-    fn open_in_dir(store_dir: &Path, flags: OpenFlags) -> Result<Self> {
+    /// The open sequence every door shares, over a directory that exists.
+    fn open_in_dir(store_dir: &Path, flags: OpenFlags, keying: Keying) -> Result<Self> {
         let _section = match MigrationLock::acquire(store_dir) {
             MigrationLockOutcome::Held(lock) => Some(lock),
             MigrationLockOutcome::Degraded(e) => {
@@ -417,12 +586,204 @@ impl SqliteBackend {
         let _mode: String = conn
             .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
             .context("set WAL")?;
-        let backend = Self {
+        let mut backend = Self {
             conn,
             segment_dir: Some(store_dir.join(SEGMENT_DIR_NAME)),
+            seal_key: None,
         };
         backend.migrate()?;
+        backend.apply_keying(keying)?;
         Ok(backend)
+    }
+
+    /// Attach the seal key (if any) and, for the owning runtime, settle the
+    /// store's posture — still inside the open's migration section.
+    fn apply_keying(&mut self, keying: Keying) -> Result<()> {
+        let (key, posture) = match keying {
+            Keying::None => return Ok(()),
+            Keying::Read(key) => (key, None),
+            Keying::Settle(key, posture) => (key, Some(posture)),
+        };
+        // A keyed connection zeroes the pages it frees: an in-place seal
+        // rewrites every opened value, and without this the old plaintext
+        // would survive in the pages it leaves behind.
+        self.conn
+            .pragma_update(None, "secure_delete", true)
+            .context("set secure_delete")?;
+        if let Some(stored) = self.meta_get_sync(META_REPLICA_SEAL)?
+            && stored.as_slice() != key.check_value().as_slice()
+        {
+            return Err(ReplicaKeyMismatch.into());
+        }
+        self.seal_key = Some(key);
+        match posture {
+            None => Ok(()),
+            Some(posture) => self.settle_posture(posture),
+        }
+    }
+
+    /// Bring every state row and outbox payload to `posture` and write (or
+    /// clear) the marker, in
+    /// ONE transaction. Idempotent: a store already at the posture rewrites
+    /// nothing.
+    fn settle_posture(&self, posture: ReplicaPosture) -> Result<()> {
+        let key = self
+            .seal_key
+            .as_ref()
+            .expect("settle_posture runs with the key attached");
+        let seal = posture == ReplicaPosture::Sealed;
+        let from = !seal;
+        let tx = self.write_tx().context("replica posture tx")?;
+        let marked = self.meta_get_sync(META_REPLICA_SEAL)?.is_some();
+        let state_rows: Vec<(String, String, Vec<u8>)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT kind, key, value FROM state_entries WHERE sealed = ?1")?;
+            stmt.query_map(params![from], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()
+                .context("replica posture: state rows")?
+        };
+        let group_rows: Vec<(String, String, String, Vec<u8>)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT scope, kind, key, value FROM group_entries WHERE sealed = ?1")?;
+            stmt.query_map(params![from], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<rusqlite::Result<_>>()
+            .context("replica posture: group rows")?
+        };
+        let outbox_rows: Vec<(Vec<u8>, String, String, Vec<u8>)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT intent_id, kind, scope, payload FROM outbox WHERE sealed = ?1")?;
+            stmt.query_map(params![from], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<rusqlite::Result<_>>()
+            .context("replica posture: outbox rows")?
+        };
+        let rewritten = state_rows.len() + group_rows.len() + outbox_rows.len();
+        if rewritten == 0 && marked == seal {
+            return Ok(()); // already at the posture: the tx drops unwritten
+        }
+        let convert = |aad: &[u8], value: &[u8]| -> Result<Vec<u8>> {
+            if seal {
+                key.seal(aad, value)
+            } else {
+                key.open(aad, value)
+            }
+        };
+        for (kind, k, value) in state_rows {
+            let value = convert(&state_aad(&kind, &k), &value)
+                .with_context(|| format!("replica posture: state row {kind}/{k}"))?;
+            self.conn
+                .execute(
+                    "UPDATE state_entries SET value = ?1, sealed = ?2 WHERE kind = ?3 AND key = ?4",
+                    params![value, seal, kind, k],
+                )
+                .context("replica posture: rewrite state row")?;
+        }
+        for (scope, kind, k, value) in group_rows {
+            let value = convert(&group_aad(&scope, &kind, &k), &value)
+                .with_context(|| format!("replica posture: group row {scope}/{kind}/{k}"))?;
+            self.conn
+                .execute(
+                    "UPDATE group_entries SET value = ?1, sealed = ?2
+                     WHERE scope = ?3 AND kind = ?4 AND key = ?5",
+                    params![value, seal, scope, kind, k],
+                )
+                .context("replica posture: rewrite group row")?;
+        }
+        for (id, kind, scope, payload) in outbox_rows {
+            let payload = convert(&outbox_aad(&id, &kind, &scope), &payload)
+                .with_context(|| format!("replica posture: outbox intent {kind}/{scope}"))?;
+            self.conn
+                .execute(
+                    "UPDATE outbox SET payload = ?1, sealed = ?2 WHERE intent_id = ?3",
+                    params![payload, seal, id],
+                )
+                .context("replica posture: rewrite outbox intent")?;
+        }
+        if seal {
+            self.conn
+                .execute(
+                    "INSERT INTO store_meta (key, value) VALUES (?1, ?2)
+                     ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    params![META_REPLICA_SEAL, key.check_value().as_slice()],
+                )
+                .context("replica posture: write marker")?;
+        } else {
+            self.conn
+                .execute(
+                    "DELETE FROM store_meta WHERE key = ?1",
+                    params![META_REPLICA_SEAL],
+                )
+                .context("replica posture: clear marker")?;
+        }
+        tx.commit().context("replica posture commit")?;
+        // The rewritten pages' previous images sit in the WAL until a
+        // checkpoint copies the new ones over the main file; truncate it now
+        // so the opened bytes do not outlive the seal. Best-effort: a
+        // co-located reader mid-snapshot can hold frames back, and the next
+        // automatic checkpoint finishes the job.
+        let _ = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+        tracing::info!(
+            rewritten,
+            sealed = seal,
+            "account store: replica brought to its at-rest posture"
+        );
+        Ok(())
+    }
+
+    /// The stored form of `value` for the row `aad` names, inside a write
+    /// transaction: sealed when the store is marked sealed (refused when this
+    /// opener holds no key), as given otherwise.
+    fn value_for_write(&self, aad: &[u8], value: &[u8]) -> Result<(Vec<u8>, bool)> {
+        if self.meta_get_sync(META_REPLICA_SEAL)?.is_none() {
+            return Ok((value.to_vec(), false));
+        }
+        let Some(key) = self.seal_key.as_ref() else {
+            bail!(
+                "account store: this replica is sealed and the opener holds no seal key \
+                 — refusing to write an opened row into it"
+            );
+        };
+        Ok((key.seal(aad, value)?, true))
+    }
+
+    /// The opened form of a stored value whose row says it is `sealed`.
+    fn value_for_read(&self, aad: &[u8], value: Vec<u8>, sealed: bool) -> Result<Vec<u8>> {
+        if !sealed {
+            return Ok(value);
+        }
+        let Some(key) = self.seal_key.as_ref() else {
+            bail!(
+                "account store: a sealed row was read by an opener holding no seal key \
+                 (open the store with `SqliteBackend::open_with_key`)"
+            );
+        };
+        key.open(aad, &value)
+    }
+
+    /// An account-plane state row as read, its value opened.
+    fn opened_state(&self, mut entry: StateEntry, sealed: bool) -> Result<StateEntry> {
+        let aad = state_aad(&entry.kind, &entry.key);
+        entry.value = self
+            .value_for_read(&aad, std::mem::take(&mut entry.value), sealed)
+            .with_context(|| format!("state row {}/{}", entry.kind, entry.key))?;
+        Ok(entry)
+    }
+
+    /// A group-plane state row as read, its value opened.
+    fn opened_group(&self, mut entry: StateEntry, sealed: bool) -> Result<StateEntry> {
+        let aad = group_aad(&entry.scope, &entry.kind, &entry.key);
+        entry.value = self
+            .value_for_read(&aad, std::mem::take(&mut entry.value), sealed)
+            .with_context(|| format!("group row {}/{}/{}", entry.scope, entry.kind, entry.key))?;
+        Ok(entry)
     }
 
     /// The pre-migrate half of the format verdict (see the call site in
@@ -488,9 +849,36 @@ impl SqliteBackend {
         let backend = Self {
             conn,
             segment_dir: None,
+            seal_key: None,
         };
         backend.migrate()?;
         Ok(backend)
+    }
+
+    /// The `.dat` path of one adopted segment whose container this replica
+    /// still holds — `None` when the segment is unknown here or custody
+    /// eviction dropped its `.dat` (the metadata floor keeps the row and the
+    /// `.meta`, never the bytes).
+    ///
+    /// The serve side's one read of a held pair's container: a store that
+    /// serves its adopted segments onward (the custodian-NEST serve door,
+    /// `fauna_peer_sync::store_serve`) hands this file out verbatim, exactly as
+    /// adoption filed it. SQLite-only on purpose — only a store on a directory
+    /// serves anyone, so the trait stays free of a read no other backend owes.
+    pub fn held_segment_dat_path(&self, key: &SegmentKey) -> Result<Option<PathBuf>> {
+        let dat_len: Option<Option<i64>> = self
+            .conn
+            .query_row(
+                "SELECT dat_len FROM segments WHERE scope = ?1 AND kind = ?2 AND segment_id = ?3",
+                params![key.scope, key.kind, key.segment_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("segments dat_len get")?;
+        match dat_len {
+            Some(Some(_)) => Ok(Some(self.segment_paths(key)?.0)),
+            _ => Ok(None),
+        }
     }
 
     /// The `.dat`/`.meta` paths for one adopted segment. The scope is
@@ -1240,25 +1628,29 @@ impl StoreBackend for SqliteBackend {
             // journal row (and nothing else was written on this path).
             return Ok(outcome);
         }
+        let (value, sealed) =
+            self.value_for_write(&state_aad(&entry.kind, &entry.key), &entry.value)?;
         self.conn
             .execute(
                 "INSERT INTO state_entries
-                     (kind, key, scope, value, merge_meta, entry_version, tombstone)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     (kind, key, scope, value, merge_meta, entry_version, tombstone, sealed)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT (kind, key) DO UPDATE SET
                      scope = excluded.scope,
                      value = excluded.value,
                      merge_meta = excluded.merge_meta,
                      entry_version = excluded.entry_version,
-                     tombstone = excluded.tombstone",
+                     tombstone = excluded.tombstone,
+                     sealed = excluded.sealed",
                 params![
                     entry.kind,
                     entry.key,
                     entry.scope,
-                    entry.value,
+                    value,
                     entry.merge_meta,
                     i64::try_from(entry.entry_version).context("entry_version exceeds i64")?,
                     entry.tombstone,
+                    sealed,
                 ],
             )
             .context("state entry upsert")?;
@@ -1267,25 +1659,31 @@ impl StoreBackend for SqliteBackend {
     }
 
     async fn state_get(&self, kind: &str, key: &str) -> Result<Option<StateEntry>> {
-        self.conn
+        let row = self
+            .conn
             .query_row(
-                "SELECT scope, value, merge_meta, entry_version, tombstone
+                "SELECT scope, value, merge_meta, entry_version, tombstone, sealed
                  FROM state_entries WHERE kind = ?1 AND key = ?2",
                 params![kind, key],
                 |r| {
-                    Ok(StateEntry {
-                        kind: kind.to_string(),
-                        key: key.to_string(),
-                        scope: r.get(0)?,
-                        value: r.get(1)?,
-                        merge_meta: r.get(2)?,
-                        entry_version: r.get::<_, i64>(3)? as u64,
-                        tombstone: r.get(4)?,
-                    })
+                    Ok((
+                        StateEntry {
+                            kind: kind.to_string(),
+                            key: key.to_string(),
+                            scope: r.get(0)?,
+                            value: r.get(1)?,
+                            merge_meta: r.get(2)?,
+                            entry_version: r.get::<_, i64>(3)? as u64,
+                            tombstone: r.get(4)?,
+                        },
+                        r.get::<_, bool>(5)?,
+                    ))
                 },
             )
             .optional()
-            .context("state_entries get")
+            .context("state_entries get")?;
+        row.map(|(entry, sealed)| self.opened_state(entry, sealed))
+            .transpose()
     }
 
     async fn group_state_put_with_row(
@@ -1308,24 +1706,30 @@ impl StoreBackend for SqliteBackend {
             // journal row (and nothing else was written on this path).
             return Ok(outcome);
         }
+        let (value, sealed) = self.value_for_write(
+            &group_aad(&entry.scope, &entry.kind, &entry.key),
+            &entry.value,
+        )?;
         self.conn
             .execute(
                 "INSERT INTO group_entries
-                     (scope, kind, key, value, merge_meta, entry_version, tombstone)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     (scope, kind, key, value, merge_meta, entry_version, tombstone, sealed)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT (scope, kind, key) DO UPDATE SET
                      value = excluded.value,
                      merge_meta = excluded.merge_meta,
                      entry_version = excluded.entry_version,
-                     tombstone = excluded.tombstone",
+                     tombstone = excluded.tombstone,
+                     sealed = excluded.sealed",
                 params![
                     entry.scope,
                     entry.kind,
                     entry.key,
-                    entry.value,
+                    value,
                     entry.merge_meta,
                     i64::try_from(entry.entry_version).context("entry_version exceeds i64")?,
                     entry.tombstone,
+                    sealed,
                 ],
             )
             .context("group entry upsert")?;
@@ -1339,50 +1743,62 @@ impl StoreBackend for SqliteBackend {
         kind: &str,
         key: &str,
     ) -> Result<Option<StateEntry>> {
-        self.conn
+        let row = self
+            .conn
             .query_row(
-                "SELECT value, merge_meta, entry_version, tombstone
+                "SELECT value, merge_meta, entry_version, tombstone, sealed
                  FROM group_entries WHERE scope = ?1 AND kind = ?2 AND key = ?3",
                 params![scope, kind, key],
                 |r| {
-                    Ok(StateEntry {
-                        kind: kind.to_string(),
-                        key: key.to_string(),
-                        scope: scope.to_string(),
-                        value: r.get(0)?,
-                        merge_meta: r.get(1)?,
-                        entry_version: r.get::<_, i64>(2)? as u64,
-                        tombstone: r.get(3)?,
-                    })
+                    Ok((
+                        StateEntry {
+                            kind: kind.to_string(),
+                            key: key.to_string(),
+                            scope: scope.to_string(),
+                            value: r.get(0)?,
+                            merge_meta: r.get(1)?,
+                            entry_version: r.get::<_, i64>(2)? as u64,
+                            tombstone: r.get(3)?,
+                        },
+                        r.get::<_, bool>(4)?,
+                    ))
                 },
             )
             .optional()
-            .context("group_entries get")
+            .context("group_entries get")?;
+        row.map(|(entry, sealed)| self.opened_group(entry, sealed))
+            .transpose()
     }
 
     async fn group_states_for_scope(&self, scope: &str) -> Result<Vec<StateEntry>> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT kind, key, value, merge_meta, entry_version, tombstone
+                "SELECT kind, key, value, merge_meta, entry_version, tombstone, sealed
                  FROM group_entries WHERE scope = ?1 ORDER BY kind, key",
             )
             .context("group_entries scope query")?;
         let rows = stmt
             .query_map(params![scope], |r| {
-                Ok(StateEntry {
-                    kind: r.get(0)?,
-                    key: r.get(1)?,
-                    scope: scope.to_string(),
-                    value: r.get(2)?,
-                    merge_meta: r.get(3)?,
-                    entry_version: r.get::<_, i64>(4)? as u64,
-                    tombstone: r.get(5)?,
-                })
+                Ok((
+                    StateEntry {
+                        kind: r.get(0)?,
+                        key: r.get(1)?,
+                        scope: scope.to_string(),
+                        value: r.get(2)?,
+                        merge_meta: r.get(3)?,
+                        entry_version: r.get::<_, i64>(4)? as u64,
+                        tombstone: r.get(5)?,
+                    },
+                    r.get::<_, bool>(6)?,
+                ))
             })
             .context("group_entries scope rows")?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .context("group_entries scope collect")
+        rows.map(|row| {
+            let (entry, sealed) = row.context("group_entries scope row")?;
+            self.opened_group(entry, sealed)
+        })
+        .collect()
     }
 
     async fn max_writer_seq(&self, writer: &WriterId) -> Result<Option<u64>> {
@@ -1689,6 +2105,91 @@ impl StoreBackend for SqliteBackend {
         )
         .context("issued_retires trim")?;
         tx.commit().context("issued_retires put commit")
+    }
+
+    async fn custodied_recovery(&self) -> Result<CustodiedRecovery> {
+        // One read transaction over the three tables — a concurrent put
+        // replaces them whole, and a reader must see one side of it.
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("custodied_recovery read tx")?;
+        let column = |sql: &str| -> Result<Vec<Vec<u8>>> {
+            let mut stmt = self.conn.prepare(sql)?;
+            let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        };
+        let chain = column("SELECT record FROM custodied_recovery_chain ORDER BY ord")
+            .context("custodied_recovery_chain read")?;
+        let successions =
+            column("SELECT statement FROM custodied_recovery_succession ORDER BY ord")
+                .context("custodied_recovery_succession read")?;
+        let escrow = self
+            .conn
+            .query_row(
+                "SELECT blob, updated_at, head_seq FROM custodied_recovery_escrow WHERE id = 0",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, Vec<u8>>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("custodied_recovery_escrow read")?
+            .map(|(blob, updated_at, head_seq)| -> Result<CustodiedEscrow> {
+                Ok(CustodiedEscrow {
+                    blob,
+                    updated_at,
+                    head_seq: u64::try_from(head_seq).context("negative custodied head_seq")?,
+                })
+            })
+            .transpose()?;
+        tx.commit().context("custodied_recovery read commit")?;
+        Ok(CustodiedRecovery {
+            chain,
+            successions,
+            escrow,
+        })
+    }
+
+    async fn custodied_recovery_put(&self, material: &CustodiedRecovery) -> Result<()> {
+        let tx = self.write_tx().context("custodied_recovery put tx")?;
+        tx.execute("DELETE FROM custodied_recovery_chain", [])
+            .context("custodied_recovery_chain clear")?;
+        for (ord, record) in material.chain.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO custodied_recovery_chain (ord, record) VALUES (?1, ?2)",
+                params![i64::try_from(ord)?, record.as_slice()],
+            )
+            .context("custodied_recovery_chain put")?;
+        }
+        tx.execute("DELETE FROM custodied_recovery_succession", [])
+            .context("custodied_recovery_succession clear")?;
+        for (ord, statement) in material.successions.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO custodied_recovery_succession (ord, statement) VALUES (?1, ?2)",
+                params![i64::try_from(ord)?, statement.as_slice()],
+            )
+            .context("custodied_recovery_succession put")?;
+        }
+        tx.execute("DELETE FROM custodied_recovery_escrow", [])
+            .context("custodied_recovery_escrow clear")?;
+        if let Some(escrow) = &material.escrow {
+            tx.execute(
+                "INSERT INTO custodied_recovery_escrow (id, blob, updated_at, head_seq)
+                 VALUES (0, ?1, ?2, ?3)",
+                params![
+                    escrow.blob.as_slice(),
+                    escrow.updated_at,
+                    i64::try_from(escrow.head_seq).context("custodied head_seq exceeds i64")?,
+                ],
+            )
+            .context("custodied_recovery_escrow put")?;
+        }
+        tx.commit().context("custodied_recovery put commit")
     }
 
     async fn issued_retires(&self) -> Result<Vec<(u64, IssuedRetire)>> {
@@ -2113,23 +2614,29 @@ impl StoreBackend for SqliteBackend {
 
     async fn state_entries_of_kind(&self, kind: &str) -> Result<Vec<StateEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT key, scope, value, merge_meta, entry_version, tombstone
+            "SELECT key, scope, value, merge_meta, entry_version, tombstone, sealed
              FROM state_entries WHERE kind = ?1 AND tombstone = 0
              ORDER BY key ASC",
         )?;
         let rows = stmt.query_map(params![kind], |r| {
-            Ok(StateEntry {
-                kind: kind.to_string(),
-                key: r.get(0)?,
-                scope: r.get(1)?,
-                value: r.get(2)?,
-                merge_meta: r.get(3)?,
-                entry_version: r.get::<_, i64>(4)? as u64,
-                tombstone: r.get(5)?,
-            })
+            Ok((
+                StateEntry {
+                    kind: kind.to_string(),
+                    key: r.get(0)?,
+                    scope: r.get(1)?,
+                    value: r.get(2)?,
+                    merge_meta: r.get(3)?,
+                    entry_version: r.get::<_, i64>(4)? as u64,
+                    tombstone: r.get(5)?,
+                },
+                r.get::<_, bool>(6)?,
+            ))
         })?;
-        rows.map(|r| r.context("state_entries_of_kind row"))
-            .collect()
+        rows.map(|row| {
+            let (entry, sealed) = row.context("state_entries_of_kind row")?;
+            self.opened_state(entry, sealed)
+        })
+        .collect()
     }
 
     async fn block_put(&self, cid: &ContentHash, bytes: &[u8]) -> Result<()> {
@@ -2541,6 +3048,10 @@ impl StoreBackend for SqliteBackend {
         // (the intent payload may embed the writer identity).
         let tx = self.write_tx().context("outbox append tx")?;
         self.writer_guard_sync(local_writer)?;
+        let (payload, sealed) = self.value_for_write(
+            &outbox_aad(&intent.intent_id, &intent.kind, &intent.scope),
+            &intent.payload,
+        )?;
         // OR IGNORE folds BOTH possible conflicts into "0 rows"; the journal's
         // `insert_row_sync` disambiguation pattern applies: an existing
         // intent_id is the composer's crash-retry (idempotent no-op, `false`),
@@ -2553,16 +3064,18 @@ impl StoreBackend for SqliteBackend {
                 .conn
                 .execute(
                     "INSERT OR IGNORE INTO outbox
-                         (intent_id, kind, scope, payload, drainer, channel_seq, created_at)
-                     SELECT ?1, ?2, ?3, ?4, ?5, COALESCE(MAX(channel_seq), 0) + 1, ?6
+                         (intent_id, kind, scope, payload, drainer, channel_seq, created_at,
+                          sealed)
+                     SELECT ?1, ?2, ?3, ?4, ?5, COALESCE(MAX(channel_seq), 0) + 1, ?6, ?7
                      FROM outbox WHERE scope = ?3",
                     params![
                         intent.intent_id.as_slice(),
                         intent.kind,
                         intent.scope,
-                        intent.payload,
+                        payload,
                         intent.drainer.as_str(),
                         now_epoch_secs(),
+                        sealed,
                     ],
                 )
                 .context("outbox append")?;
@@ -2596,7 +3109,7 @@ impl StoreBackend for SqliteBackend {
             .conn
             .prepare(
                 "SELECT intent_id, kind, scope, payload, drainer, channel_seq,
-                        status, retry_count, created_at, last_attempt_at
+                        status, retry_count, created_at, last_attempt_at, sealed
                  FROM outbox ORDER BY scope, channel_seq",
             )
             .context("prepare outbox list")?;
@@ -2613,13 +3126,28 @@ impl StoreBackend for SqliteBackend {
                     r.get::<_, u32>(7)?,
                     r.get::<_, u64>(8)?,
                     r.get::<_, Option<u64>>(9)?,
+                    r.get::<_, bool>(10)?,
                 ))
             })
             .context("query outbox")?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, kind, scope, payload, drainer, channel_seq, status, retries, created, last) =
-                row.context("read outbox row")?;
+            let (
+                id,
+                kind,
+                scope,
+                payload,
+                drainer,
+                channel_seq,
+                status,
+                retries,
+                created,
+                last,
+                sealed,
+            ) = row.context("read outbox row")?;
+            let payload = self
+                .value_for_read(&outbox_aad(&id, &kind, &scope), payload, sealed)
+                .with_context(|| format!("outbox intent {kind}/{scope}"))?;
             let intent_id: [u8; 16] = id
                 .try_into()
                 .map_err(|v: Vec<u8>| anyhow::anyhow!("outbox intent_id: {} bytes", v.len()))?;
@@ -2801,6 +3329,10 @@ impl SegmentSink for SqliteStaging {
 }
 
 impl SegmentStaging for SqliteStaging {
+    /// Each range a seek and a read on the staged file: admission asks for one
+    /// record at a time, so a read buffer would only copy it twice.
+    type DatReader<'a> = fauna_carv2::SeekReadAt<std::fs::File>;
+
     fn len(&self, half: SegmentHalf) -> u64 {
         match half {
             SegmentHalf::Dat => self.dat.len,
@@ -2814,14 +3346,11 @@ impl SegmentStaging for SqliteStaging {
             .with_context(|| format!("read staged {}", self.meta.path.display()))
     }
 
-    async fn dat_reader(&mut self) -> Result<Box<dyn ReadSeek + '_>> {
+    async fn dat_reader(&mut self) -> Result<Self::DatReader<'_>> {
         self.dat.close()?;
         let file = std::fs::File::open(&self.dat.path)
             .with_context(|| format!("open staged {}", self.dat.path.display()))?;
-        Ok(Box::new(std::io::BufReader::with_capacity(
-            SEGMENT_TRANSFER_CHUNK,
-            file,
-        )))
+        Ok(fauna_carv2::SeekReadAt(file))
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
@@ -3530,6 +4059,7 @@ mod tests {
             &SEG_ACTOR,
             None,
         )
+        .await
         .unwrap();
         let key = SegmentKey {
             scope: "content:post:ab".into(),
@@ -3543,5 +4073,385 @@ mod tests {
                 .unwrap(),
             "and it adopts"
         );
+    }
+}
+
+/// The replica seal (`account-replica-posture.md` § Local at-rest posture,
+/// the key-material-kinds paragraph): the owning runtime's keyed open seals
+/// every state value at rest, readers open them, and the plaintext posture
+/// rests them opened.
+#[cfg(test)]
+mod replica_seal_tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::backend::StoreBackend;
+    use crate::types::{
+        IntentDrainer, ItemRef, JournalOp, JournalRow, NewOutboxIntent, StateEntry, WriterId,
+    };
+
+    /// A value no SQLite page could contain by accident — what the on-disk
+    /// scan looks for.
+    const SECRET: &[u8] = b"MSEK-the-opened-key-material-0123456789abcdef";
+    const KIND: &str = "fauna.state.mail";
+    const GROUP_SCOPE: &str = "group:0011";
+    const INTENT_ID: [u8; 16] = [0x1D; 16];
+
+    /// An MLS compose intent: its payload is the opened compose by contract
+    /// ([`NewOutboxIntent::payload`] — sealed only at drain).
+    fn intent(intent_id: [u8; 16], payload: &[u8]) -> NewOutboxIntent {
+        NewOutboxIntent {
+            intent_id,
+            kind: "fauna.conversations.channel.send".into(),
+            scope: "conv:0022".into(),
+            payload: payload.to_vec(),
+            drainer: IntentDrainer::Mls,
+        }
+    }
+
+    fn key(b: u8) -> ReplicaSealKey {
+        ReplicaSealKey::from_bytes([b; 32])
+    }
+
+    fn entry(kind: &str, key: &str, scope: &str, version: u64, value: &[u8]) -> StateEntry {
+        StateEntry {
+            kind: kind.into(),
+            key: key.into(),
+            scope: scope.into(),
+            value: value.to_vec(),
+            merge_meta: None,
+            entry_version: version,
+            tombstone: false,
+        }
+    }
+
+    fn journal(entry: &StateEntry, seq: u64) -> JournalRow {
+        JournalRow {
+            writer: WriterId([0x57; 32]),
+            seq,
+            scope: entry.scope.clone(),
+            op: JournalOp::StatePut,
+            item: ItemRef::StateKey {
+                kind: entry.kind.clone(),
+                key: entry.key.clone(),
+                entry_version: entry.entry_version,
+            },
+        }
+    }
+
+    /// One account row (`KIND`/`k`), one group row and one outbox intent,
+    /// all holding `SECRET`.
+    async fn put_secret_rows(backend: &SqliteBackend) {
+        let account = entry(KIND, "k", "state-fleet", 1, SECRET);
+        backend
+            .state_put_with_row(&account, &journal(&account, 1), None)
+            .await
+            .unwrap();
+        let group = entry("fauna.group.birth", "k", GROUP_SCOPE, 1, SECRET);
+        backend
+            .group_state_put_with_row(&group, &journal(&group, 2), None)
+            .await
+            .unwrap();
+        assert!(
+            backend
+                .outbox_append(&intent(INTENT_ID, SECRET), None)
+                .await
+                .unwrap()
+        );
+    }
+
+    /// Every byte the store dir holds — the DB, its WAL and shm, whatever
+    /// else SQLite left there.
+    fn bytes_on_disk(dir: &Path) -> Vec<u8> {
+        let mut all = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                all.extend(std::fs::read(&path).unwrap());
+            }
+        }
+        all
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    async fn assert_reads_secret(backend: &SqliteBackend) {
+        let got = backend.state_get(KIND, "k").await.unwrap().unwrap();
+        assert_eq!(got.value, SECRET, "state_get opens the row");
+        let of_kind = backend.state_entries_of_kind(KIND).await.unwrap();
+        assert_eq!(of_kind.len(), 1);
+        assert_eq!(of_kind[0].value, SECRET, "state_entries_of_kind opens it");
+        let group = backend
+            .group_state_get(GROUP_SCOPE, "fauna.group.birth", "k")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(group.value, SECRET, "group_state_get opens it");
+        let scope = backend.group_states_for_scope(GROUP_SCOPE).await.unwrap();
+        assert_eq!(scope[0].value, SECRET, "group_states_for_scope opens it");
+        let outbox = backend.outbox_undrained().await.unwrap();
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(
+            outbox[0].payload, SECRET,
+            "outbox_undrained opens the intent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sealed_replica_rests_no_opened_value_and_round_trips_through_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let backend =
+                SqliteBackend::open_keyed(dir.path(), key(1), ReplicaPosture::Sealed).unwrap();
+            put_secret_rows(&backend).await;
+            assert_reads_secret(&backend).await;
+        }
+        assert!(
+            !contains(&bytes_on_disk(dir.path()), SECRET),
+            "no file in the store dir holds the opened value"
+        );
+        let reopened =
+            SqliteBackend::open_keyed(dir.path(), key(1), ReplicaPosture::Sealed).unwrap();
+        assert_reads_secret(&reopened).await;
+        let reader = SqliteBackend::open_with_key(dir.path(), key(1)).unwrap();
+        assert_reads_secret(&reader).await;
+    }
+
+    #[tokio::test]
+    async fn the_plaintext_posture_rests_values_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let backend =
+                SqliteBackend::open_keyed(dir.path(), key(1), ReplicaPosture::Plaintext).unwrap();
+            put_secret_rows(&backend).await;
+            assert_eq!(backend.meta_get_sync(META_REPLICA_SEAL).unwrap(), None);
+        }
+        assert!(
+            contains(&bytes_on_disk(dir.path()), SECRET),
+            "the plaintext posture (key beside the data) rests the value opened"
+        );
+        let unkeyed = SqliteBackend::open(dir.path()).unwrap();
+        assert_reads_secret(&unkeyed).await;
+    }
+
+    /// The migration: a store written before the seal existed — no `sealed`
+    /// column, every value opened — is sealed in place by the first keyed
+    /// open, idempotently.
+    #[tokio::test]
+    async fn a_pre_seal_store_is_sealed_in_place_once() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let backend = SqliteBackend::open(dir.path()).unwrap();
+            put_secret_rows(&backend).await;
+            backend
+                .conn
+                .execute_batch(
+                    "ALTER TABLE state_entries DROP COLUMN sealed;
+                     ALTER TABLE group_entries DROP COLUMN sealed;
+                     ALTER TABLE outbox DROP COLUMN sealed;",
+                )
+                .unwrap();
+        }
+        assert!(contains(&bytes_on_disk(dir.path()), SECRET), "fixture");
+
+        let sealed_bytes = |b: &SqliteBackend| -> Vec<u8> {
+            b.conn
+                .query_row(
+                    "SELECT value FROM state_entries WHERE kind = ?1",
+                    params![KIND],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let first = {
+            let backend =
+                SqliteBackend::open_keyed(dir.path(), key(1), ReplicaPosture::Sealed).unwrap();
+            assert_reads_secret(&backend).await;
+            sealed_bytes(&backend)
+        };
+        assert!(
+            !contains(&bytes_on_disk(dir.path()), SECRET),
+            "the in-place seal leaves no opened value behind (secure_delete + checkpoint)"
+        );
+        let backend =
+            SqliteBackend::open_keyed(dir.path(), key(1), ReplicaPosture::Sealed).unwrap();
+        assert_eq!(
+            sealed_bytes(&backend),
+            first,
+            "a second keyed open rewrites nothing"
+        );
+        assert_reads_secret(&backend).await;
+    }
+
+    #[tokio::test]
+    async fn a_store_sealed_under_another_key_is_refused_and_left_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let backend =
+                SqliteBackend::open_keyed(dir.path(), key(1), ReplicaPosture::Sealed).unwrap();
+            put_secret_rows(&backend).await;
+        }
+        for refused in [
+            SqliteBackend::open_keyed(dir.path(), key(2), ReplicaPosture::Sealed),
+            SqliteBackend::open_keyed(dir.path(), key(2), ReplicaPosture::Plaintext),
+            SqliteBackend::open_with_key(dir.path(), key(2)),
+        ] {
+            let err = refused.err().expect("the wrong key is refused");
+            assert!(
+                err.downcast_ref::<ReplicaKeyMismatch>().is_some(),
+                "{err:#}"
+            );
+        }
+        let backend = SqliteBackend::open_with_key(dir.path(), key(1)).unwrap();
+        assert_reads_secret(&backend).await;
+    }
+
+    /// A key-less opener of a sealed store: a sealed row is an error, never
+    /// garbage, and a write is refused — no opened row slips into the replica.
+    #[tokio::test]
+    async fn a_key_less_opener_of_a_sealed_store_neither_misreads_nor_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let backend =
+                SqliteBackend::open_keyed(dir.path(), key(1), ReplicaPosture::Sealed).unwrap();
+            put_secret_rows(&backend).await;
+        }
+        let unkeyed = SqliteBackend::open(dir.path()).unwrap();
+        assert!(unkeyed.state_get(KIND, "k").await.is_err());
+        assert!(unkeyed.state_entries_of_kind(KIND).await.is_err());
+        let other = entry(KIND, "other", "state-fleet", 1, b"x");
+        assert!(
+            unkeyed
+                .state_put_with_row(&other, &journal(&other, 9), None)
+                .await
+                .is_err()
+        );
+        assert!(unkeyed.state_get(KIND, "other").await.unwrap().is_none());
+        assert!(unkeyed.outbox_undrained().await.is_err());
+        assert!(
+            unkeyed
+                .outbox_append(&intent([0x2E; 16], b"x"), None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_posture_flips_back_to_plaintext_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let backend =
+                SqliteBackend::open_keyed(dir.path(), key(1), ReplicaPosture::Sealed).unwrap();
+            put_secret_rows(&backend).await;
+        }
+        {
+            let backend =
+                SqliteBackend::open_keyed(dir.path(), key(1), ReplicaPosture::Plaintext).unwrap();
+            assert_eq!(backend.meta_get_sync(META_REPLICA_SEAL).unwrap(), None);
+        }
+        let unkeyed = SqliteBackend::open(dir.path()).unwrap();
+        assert_reads_secret(&unkeyed).await;
+    }
+
+    /// A reader's key never settles the posture: the owning runtime chose
+    /// plaintext, so a keyed reader leaves the rows opened and the store
+    /// unmarked.
+    #[tokio::test]
+    async fn a_keyed_reader_never_changes_the_posture() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let backend = SqliteBackend::open(dir.path()).unwrap();
+            put_secret_rows(&backend).await;
+        }
+        let reader = SqliteBackend::open_with_key(dir.path(), key(1)).unwrap();
+        assert_reads_secret(&reader).await;
+        assert_eq!(reader.meta_get_sync(META_REPLICA_SEAL).unwrap(), None);
+        drop(reader);
+        let unkeyed = SqliteBackend::open(dir.path()).unwrap();
+        assert_reads_secret(&unkeyed).await;
+    }
+
+    /// The AEAD binds a sealed value to its row: copied onto another row it
+    /// does not open.
+    #[tokio::test]
+    async fn a_sealed_value_moved_to_another_row_does_not_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend =
+            SqliteBackend::open_keyed(dir.path(), key(1), ReplicaPosture::Sealed).unwrap();
+        put_secret_rows(&backend).await;
+        let other = entry(KIND, "other", "state-fleet", 1, b"x");
+        backend
+            .state_put_with_row(&other, &journal(&other, 3), None)
+            .await
+            .unwrap();
+        backend
+            .conn
+            .execute(
+                "UPDATE state_entries SET value =
+                     (SELECT value FROM state_entries WHERE key = 'k')
+                 WHERE key = 'other'",
+                [],
+            )
+            .unwrap();
+        assert!(backend.state_get(KIND, "other").await.is_err());
+    }
+
+    /// The same binding for an outbox intent: its payload copied onto another
+    /// intent does not open.
+    #[tokio::test]
+    async fn a_sealed_intent_payload_moved_to_another_intent_does_not_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend =
+            SqliteBackend::open_keyed(dir.path(), key(1), ReplicaPosture::Sealed).unwrap();
+        put_secret_rows(&backend).await;
+        backend
+            .outbox_append(&intent([0x2E; 16], b"x"), None)
+            .await
+            .unwrap();
+        backend
+            .conn
+            .execute(
+                "UPDATE outbox SET payload =
+                     (SELECT payload FROM outbox WHERE intent_id = ?1)
+                 WHERE intent_id = ?2",
+                params![INTENT_ID.as_slice(), [0x2Eu8; 16].as_slice()],
+            )
+            .unwrap();
+        assert!(backend.outbox_undrained().await.is_err());
+    }
+
+    /// The read-path cost the row asked to be measured: `states_of_kind` over
+    /// 256 rows, plaintext vs sealed. Run by hand:
+    /// `cargo test -p fauna-account-store --lib replica_seal_tests::measure -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn measure_states_of_kind_256_rows() {
+        let value = vec![0xA5u8; 200];
+        let mut timings = Vec::new();
+        for posture in [ReplicaPosture::Plaintext, ReplicaPosture::Sealed] {
+            let dir = tempfile::tempdir().unwrap();
+            let backend = SqliteBackend::open_keyed(dir.path(), key(1), posture).unwrap();
+            for i in 0..256u64 {
+                let e = entry(KIND, &format!("k{i:03}"), "state-fleet", 1, &value);
+                backend
+                    .state_put_with_row(&e, &journal(&e, i + 1), None)
+                    .await
+                    .unwrap();
+            }
+            const RUNS: u32 = 200;
+            let start = std::time::Instant::now();
+            for _ in 0..RUNS {
+                assert_eq!(
+                    backend.state_entries_of_kind(KIND).await.unwrap().len(),
+                    256
+                );
+            }
+            timings.push((posture, start.elapsed() / RUNS));
+        }
+        for (posture, per_read) in timings {
+            println!("states_of_kind(256 rows, 200 B values) {posture:?}: {per_read:?} per read");
+        }
     }
 }

@@ -53,6 +53,7 @@ import Testing
     let sentence = "No public folder by that name for that person. Check the handle and the folder name."
     #expect(DisplayError.message(FfiError.General(msg: sentence)) == sentence)
     #expect(DisplayError.message(FfiError.NestOutdated(msg: sentence)) == sentence)
+    #expect(DisplayError.message(FfiError.StateNeedsNewerApp(msg: sentence)) == sentence)
 }
 
 @Test func aCancelledBoundaryCallShowsNothing() {

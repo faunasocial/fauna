@@ -57,7 +57,7 @@ Stamped 2026-10-01 at aa1e02642f.
 | App | Status | Stamp |
 |---|---|---|
 | web |  no run recorded | |
-| linux | ⚠ partial | 0.1.2-dev+c4a95c20 standalone |
+| linux | ⚠ partial | 0.1.4-dev+c9a30a7b.dirty standalone |
 | windows |  no run recorded | |
 | macos |  no run recorded | |
 | ios |  no run recorded | |

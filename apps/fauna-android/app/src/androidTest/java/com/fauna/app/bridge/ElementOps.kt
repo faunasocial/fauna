@@ -200,7 +200,7 @@ class ElementOps(
         val target = one(elementId, index, scope)
         val twin = twinOf(target, elementId, index, scope)
         val facts = twin?.let(::factsOf) ?: factsOf(target)
-        if (name == "options" && facts.className == AutomationSemantics.SPINNER_CLASS && twin != null) {
+        if (name == "options" && twin != null && AutomationSemantics.isMenuAnchor(facts)) {
             return AutomationSemantics.optionsJson(paintedOptions(target, twin, elementId))
         }
         return AutomationSemantics.attrValue(facts, name)
@@ -348,9 +348,10 @@ class ElementOps(
         isChecked = node.isChecked,
         isEnabled = node.isEnabled,
         isClickable = node.isClickable,
+        isEditable = node.isEditable,
     )
 
-    /** The facts `UiObject2` exposes on its own — everything but `stateDescription`. */
+    /** The facts `UiObject2` exposes on its own — everything but `stateDescription` and editability. */
     private fun factsOf(obj: UiObject2) = NodeFacts(
         frame = frameOf(obj.visibleBounds),
         resourceName = obj.resourceName,

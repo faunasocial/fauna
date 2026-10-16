@@ -354,11 +354,11 @@ pub const KIND_CUSTODIAN_ENDPOINTS: &str = "fauna.state.custodian-endpoints";
 pub const KIND_SHARE_ENDPOINTS: &str = "fauna.state.share-endpoints";
 
 // ── The R14 generation machinery (charter § The generation machinery, build
-// design ratified 2026-08-13). Six kinds, all fleet-only rung +
+// design ratified 2026-08-13). Every kind here is fleet-only rung +
 // [`SealingEpoch::Gen0`] — the bootstrap stratification: a fresh enrolled
 // device reads the whole mint DAG under root-derivable material before it
 // holds any generation key. Value types + the lattice joins live in
-// `fauna_core::generation`; all six seal into the `state-fleet` scope
+// `fauna_core::generation`; all of them seal into the `state-fleet` scope
 // (the A5 partition — `crate::account_state::ACCOUNT_STATE_FLEET_SCOPE`).
 
 /// Class-2 kind: the fleet-membership truth for generation admissibility and
@@ -392,7 +392,9 @@ pub const KIND_ESCROW_TARGET: &str = "fauna.state.escrow-target";
 /// The per-identity logical keys of the two escrow kinds — the registry's
 /// word for the grammar `fauna_core::generation` owns (`identity/<actor-id-hex>`
 /// for a target row; `<generation>/<holder>/<actor-id-hex>` for a receipt).
-pub use fauna_core::generation::{escrow_receipt_cell_key, escrow_target_identity_key};
+pub use fauna_core::generation::{
+    escrow_receipt_cell_key, escrow_target_identity_key, escrow_wrap_cell_key,
+};
 
 /// Class-2 kind: one holder-signed durable escrow receipt per
 /// (generation id, holder, identity), logical key =
@@ -405,6 +407,19 @@ pub use fauna_core::generation::{escrow_receipt_cell_key, escrow_target_identity
 /// **Frozen** (see the module header).
 pub const KIND_ESCROW_RECEIPT: &str = "fauna.state.escrow-receipt";
 
+/// Class-2 kind: the escrow wrap's **replicated copy** — one Immutable entry
+/// per (generation id, identity), logical key = [`escrow_wrap_cell_key`]
+/// (`<generation-hex>/<actor-id-hex>`), value = the wrap bytes as the
+/// depositing device sealed them to the identity's X-Wing escrow target —
+/// the bytes `fauna.generation.escrow.put` received. Written beside the
+/// receipt row, healed by the re-escrow pass where merged state lacks one,
+/// opened first by every seed-holding opener, retired with the receipt
+/// (`account-replica-posture.md` § Replica posture → the custodian-NEST serve
+/// door bullet → *Escrow custody*). Never an ack — the receipt is. A row of
+/// the fleet plane, so every replica carries it for free; useless without the
+/// seed. **Frozen** (see the module header).
+pub const KIND_ESCROW_WRAP: &str = "fauna.state.escrow-wrap";
+
 /// Class-2 kind: the target-authored "cannot key generation G" signal (
 /// the cure for the durable in-member corrupted-inline-wrap partition),
 /// logical key = `"<generation-id-hex>/<target-device-id-hex>"`, one cell per
@@ -415,10 +430,22 @@ pub const KIND_ESCROW_RECEIPT: &str = "fauna.state.escrow-receipt";
 /// **Frozen** (see the module header).
 pub const KIND_GENERATION_UNKEYABLE: &str = "fauna.state.generation-unkeyable";
 
+/// Class-2 kind: the shredder-authored attestation that generation G is
+/// shredded (ruled 2026-10-13 — `fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, the shredder's veto → *the shred cell*),
+/// logical key = `"<generation-id-hex>/<shredder-device-id-hex>"`, one cell
+/// per (generation, shredder), authored ONLY by the shredder: rows verify
+/// under the cell's own device key, ranked (verifies-at-cell, bytes)
+/// (`fauna_core::generation::ShredAttestation` owns the record and the join).
+/// The one row every destructive consumer counts — the mint row's `Shredded`
+/// marker is availability and attribution only. **Frozen** (see the module
+/// header).
+pub const KIND_GENERATION_SHRED: &str = "fauna.state.generation-shred";
+
 /// Class-2 kind: the target-authored "I hold these generations" statement —
 /// the possession evidence the fleet-scope reclamation ruling rests on
 /// (`account-data-taxonomy.md` § The generation machinery → the reach kind's
-/// bullet + *Fleet-scope reclamation*). Logical key = the device id hex, one
+/// bullet + `fleet-scope-reclamation.md`). Logical key = the device id hex, one
 /// cell per device, authored ONLY by that device: rows verify under the
 /// device's own key, ranked (verifies-at-cell, signed stamp, bytes)
 /// (`fauna_core::generation::DeviceReachRecord` owns the record and the
@@ -1143,12 +1170,32 @@ const POLICIES: &[(&str, MergePolicy, AudienceRung, SealingEpoch)] = &[
         SealingEpoch::Gen0,
     ),
     (
+        KIND_ESCROW_WRAP,
+        // Every wrap of the generation sealed to the identity's target opens
+        // to the one key the mint commits to (the opener checks it), so
+        // first-wins loses nothing a second writer's row would have held.
+        MergePolicy::Immutable,
+        AudienceRung::FleetOnly,
+        SealingEpoch::Gen0,
+    ),
+    (
         KIND_GENERATION_UNKEYABLE,
         // One honest author per cell — the target — with a verifying-preferred
         // rank ((verifies-at-cell, signed stamp, bytes)); the join lives in
         // `fauna_core::generation` (the lattice kinds' pattern), decode-or-
         // fail with first-contact strictness in the adoption arm, exactly
         // the per-healer wrap cells' shape and for the same reasons.
+        MergePolicy::CrdtPerField,
+        AudienceRung::FleetOnly,
+        SealingEpoch::Gen0,
+    ),
+    (
+        KIND_GENERATION_SHRED,
+        // One honest author per cell — the shredder — the unkeyable kind's
+        // verifying-preferred rank less the stamp ((verifies-at-cell,
+        // bytes)) and its adoption split: decode-or-fail join, first-contact
+        // strictness in the adoption arm. Gen0 like the mint row it attests:
+        // fleet-only machinery.
         MergePolicy::CrdtPerField,
         AudienceRung::FleetOnly,
         SealingEpoch::Gen0,
@@ -1451,8 +1498,8 @@ pub fn home_scope_for_kind(kind: &str) -> Option<Cow<'static, str>> {
 }
 
 /// **Whose a generation-sealed row is** — the departure axis of the
-/// `GenerationTip` kinds (`account-data-taxonomy.md` § The generation
-/// machinery → *Fleet-scope reclamation*, clauses (3)(d) and (4)): a device
+/// `GenerationTip` kinds (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clauses (3)(d) and (4)): a device
 /// leaving the fleet — signing out, or removed from the devices page — takes
 /// its **own** rows with it, and nothing else.
 ///
@@ -2139,6 +2186,7 @@ pub fn apply_class2(
                 ),
                 KIND_GENERATION_WRAP => merge_generation_wrap_entry(cur, incoming),
                 KIND_GENERATION_UNKEYABLE => merge_generation_unkeyable_entry(cur, incoming),
+                KIND_GENERATION_SHRED => merge_generation_shred_entry(cur, incoming),
                 KIND_DEVICE_REACH => merge_device_reach_entry(cur, incoming),
                 KIND_GENERATION_CLOSED => merge_generation_closed_entry(cur, incoming),
                 KIND_CONTACT_OVERLAY => merge_contact_overlay_entry(cur, incoming),
@@ -2171,6 +2219,9 @@ pub fn apply_class2(
                 }
                 crate::group_state::KIND_GROUP_GENERATION_UNKEYABLE => {
                     merge_group_unkeyable_entry(cur, incoming)
+                }
+                crate::group_state::KIND_GROUP_GENERATION_SHRED => {
+                    merge_group_shred_entry(cur, incoming)
                 }
                 crate::group_state::KIND_GROUP_AUTHORITY_REVOCATION => {
                     merge_group_authority_revocation_entry(cur, incoming)
@@ -2244,6 +2295,11 @@ fn validate_adoptable(policy: MergePolicy, incoming: &EntryPlaintext) -> Result<
                 KIND_GENERATION_UNKEYABLE => {
                     validate_generation_unkeyable_adoptable(incoming)?;
                 }
+                // The same split again: the join outranks a forged
+                // attestation, first contact refuses one outright.
+                KIND_GENERATION_SHRED => {
+                    validate_generation_shred_adoptable(incoming)?;
+                }
                 KIND_DEVICE_REACH => {
                     validate_device_reach_adoptable(incoming)?;
                 }
@@ -2314,6 +2370,9 @@ fn validate_adoptable(policy: MergePolicy, incoming: &EntryPlaintext) -> Result<
                 }
                 crate::group_state::KIND_GROUP_GENERATION_UNKEYABLE => {
                     validate_group_unkeyable_adoptable(incoming)?;
+                }
+                crate::group_state::KIND_GROUP_GENERATION_SHRED => {
+                    validate_group_shred_adoptable(incoming)?;
                 }
                 crate::group_state::KIND_GROUP_AUTHORITY_REVOCATION => {
                     validate_group_authority_revocation_adoptable(incoming)?;
@@ -2406,8 +2465,8 @@ fn merge_read_marker_entry(
 ///
 /// Delegable kinds only: the fleet-scope CRDT arms keep answering `Merged`
 /// for a join that differs from the held value, because their passes read
-/// the device's own rows (`account-data-taxonomy.md` § The generation
-/// machinery → *Fleet-scope reclamation*, clauses (3)(f) and (3)(g)).
+/// the device's own rows (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clauses (3)(f) and (3)(g)).
 fn crdt_join_outcome(
     current: &EntryPlaintext,
     incoming: &EntryPlaintext,
@@ -3032,6 +3091,66 @@ fn validate_generation_unkeyable_adoptable(incoming: &EntryPlaintext) -> Result<
     Ok(())
 }
 
+/// The shred kinds' cell key, or the refusal both planes' arms return.
+fn shred_cell_of(incoming: &EntryPlaintext) -> Result<([u8; 32], [u8; 32]), MergeError> {
+    fauna_core::generation::parse_shred_cell_key(&incoming.key).ok_or_else(|| {
+        MergeError::BadValue {
+            kind: incoming.kind.clone(),
+            source: fauna_core::error::Error::Encoding(format!(
+                "a generation-shred logical key is two canonical hex32 segments, got {:?}",
+                incoming.key
+            )),
+        }
+    })
+}
+
+/// The `fauna.state.generation-shred` arm — delegating to the byte-level
+/// join `fauna_core::generation` owns and law-tests (the unkeyable cells'
+/// pattern: verbatim winner, byte-equality echo-stop, `Replace` when incoming
+/// wins).
+fn merge_generation_shred_entry(
+    current: &EntryPlaintext,
+    incoming: &EntryPlaintext,
+) -> Result<MergeOutcome, MergeError> {
+    let (generation_id, shredder) = shred_cell_of(incoming)?;
+    let winner = fauna_core::generation::join_generation_shred(
+        &generation_id,
+        &shredder,
+        &current.value,
+        &incoming.value,
+    )
+    .map_err(|source| MergeError::BadValue {
+        kind: incoming.kind.clone(),
+        source,
+    })?;
+    if winner == current.value.as_slice() {
+        Ok(MergeOutcome::KeepCurrent)
+    } else {
+        Ok(MergeOutcome::Replace)
+    }
+}
+
+/// First-contact contract for the shred kind: the row must verify under its
+/// cell's shredder — the join outranking but never refusing a forgery (see
+/// the merge arm), adoption is where a forged attestation is refused
+/// outright.
+fn validate_generation_shred_adoptable(incoming: &EntryPlaintext) -> Result<(), MergeError> {
+    let (generation_id, shredder) = shred_cell_of(incoming)?;
+    let bad = |msg: String| MergeError::BadValue {
+        kind: incoming.kind.clone(),
+        source: fauna_core::error::Error::Encoding(msg),
+    };
+    let record: fauna_core::generation::ShredAttestation =
+        fauna_core::encoding::canonical_decode(&incoming.value)
+            .map_err(|e| bad(format!("a generation-shred row must decode: {e}")))?;
+    if !record.verifies_at(&generation_id, &shredder) {
+        return Err(bad(
+            "a generation-shred row must verify under its cell's shredder at first contact".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// The `fauna.group.generation-wrap` arm — the per-healer wrap cells'
 /// pattern at the group plane's actor-keyed, three-segment-only cells
 /// (no legacy shape ever existed here, so an unparseable key is simply not a
@@ -3431,6 +3550,52 @@ fn validate_group_unkeyable_adoptable(incoming: &EntryPlaintext) -> Result<(), M
     Ok(())
 }
 
+/// The `fauna.group.generation-shred` arm — the R14 shred arm at the group
+/// record type (the cert rides the value, and the join never consults it).
+fn merge_group_shred_entry(
+    current: &EntryPlaintext,
+    incoming: &EntryPlaintext,
+) -> Result<MergeOutcome, MergeError> {
+    let (generation_id, shredder) = shred_cell_of(incoming)?;
+    let winner = fauna_core::group_generation::join_group_generation_shred(
+        &generation_id,
+        &shredder,
+        &current.value,
+        &incoming.value,
+    )
+    .map_err(|source| MergeError::BadValue {
+        kind: incoming.kind.clone(),
+        source,
+    })?;
+    if winner == current.value.as_slice() {
+        Ok(MergeOutcome::KeepCurrent)
+    } else {
+        Ok(MergeOutcome::Replace)
+    }
+}
+
+/// First-contact contract for the group shred kind: the row must verify
+/// under its cell's shredder (the cert is the reader's check, never the
+/// merge's).
+fn validate_group_shred_adoptable(incoming: &EntryPlaintext) -> Result<(), MergeError> {
+    let (generation_id, shredder) = shred_cell_of(incoming)?;
+    let bad = |msg: String| MergeError::BadValue {
+        kind: incoming.kind.clone(),
+        source: fauna_core::error::Error::Encoding(msg),
+    };
+    let record: fauna_core::group_generation::GroupShredAttestation =
+        fauna_core::encoding::canonical_decode(&incoming.value)
+            .map_err(|e| bad(format!("a group generation-shred row must decode: {e}")))?;
+    if !record.verifies_at(&generation_id, &shredder) {
+        return Err(bad(
+            "a group generation-shred row must verify under its cell's shredder at first \
+             contact"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn stamp_of(policy: MergePolicy, entry: &EntryPlaintext) -> Result<LwwStamp, MergeError> {
     let Some(meta) = entry.merge_meta.as_ref() else {
         return Err(MergeError::MissingStamp {
@@ -3640,6 +3805,7 @@ mod tests {
             KIND_GENERATION_WRAP,
             KIND_ESCROW_TARGET,
             KIND_ESCROW_RECEIPT,
+            KIND_ESCROW_WRAP,
         ] {
             assert_eq!(audience_rung(kind), Some(AudienceRung::FleetOnly), "{kind}");
             assert_eq!(sealing_epoch(kind), Some(SealingEpoch::Gen0), "{kind}");
@@ -4308,6 +4474,44 @@ mod tests {
             )
         };
 
+        let shred = {
+            let shredder = ed25519_dalek::SigningKey::from_bytes(&[0x52; 32]);
+            let generation = [0xAB; 32];
+            crdt_entry(
+                KIND_GENERATION_SHRED,
+                &fauna_core::generation::shred_cell_key(
+                    &generation,
+                    &shredder.verifying_key().to_bytes(),
+                ),
+                canonical_encode(&fauna_core::generation::sign_shred(
+                    &shredder,
+                    &generation,
+                    9_000,
+                ))
+                .unwrap(),
+            )
+        };
+
+        let group_shred = {
+            use crate::group_state::KIND_GROUP_GENERATION_SHRED;
+            let shredder = ed25519_dalek::SigningKey::from_bytes(&[0x53; 32]);
+            let generation = [0xAC; 32];
+            crdt_entry(
+                KIND_GROUP_GENERATION_SHRED,
+                &fauna_core::group_generation::group_shred_cell_key(
+                    &generation,
+                    &shredder.verifying_key().to_bytes(),
+                ),
+                canonical_encode(&fauna_core::group_generation::sign_group_shred(
+                    &shredder,
+                    &generation,
+                    vec![0xC0; 8],
+                    9_000,
+                ))
+                .unwrap(),
+            )
+        };
+
         // A variant no build of this major knows yet, canonically encoded.
         #[derive(serde::Serialize)]
         enum Later {
@@ -4318,8 +4522,10 @@ mod tests {
         for honest in [
             wrap,
             unkeyable,
+            shred,
             group_topup,
             group_unkeyable,
+            group_shred,
             roster,
             revocation,
         ] {
@@ -4371,7 +4577,6 @@ mod tests {
             core,
             shredded_at_ms: 2,
             shredded_by: [2; 32],
-            shredder_sig: vec![],
         })
         .unwrap();
         let gen_id = "bb".repeat(32);
@@ -4693,6 +4898,139 @@ mod tests {
     /// at adoption, a verifying one adopted), and the arm delegating to the
     /// stamp-ranked join (a later verifying `Satisfied` replaces the
     /// assertion; a replayed older assertion is kept out).
+    /// The shred kinds register on both planes and adopt verifying
+    /// rows only; through the dispatcher a forged attestation at the honest
+    /// shredder's cell — bytes sorting above the honest row — never displaces
+    /// it, in either order; on the group plane neither does a copy with its
+    /// cert swapped.
+    #[test]
+    fn the_shred_kinds_register_and_never_yield_a_shredders_cell_to_a_forgery() {
+        use crate::group_state::{
+            GroupSealing, KIND_GROUP_GENERATION_SHRED, group_merge_policy, group_sealing,
+        };
+        use fauna_core::encoding::canonical_encode;
+        use fauna_core::generation::{ShredAttestation, shred_cell_key, sign_shred};
+        assert_eq!(
+            merge_policy(KIND_GENERATION_SHRED),
+            Some(MergePolicy::CrdtPerField)
+        );
+        assert_eq!(
+            audience_rung(KIND_GENERATION_SHRED),
+            Some(AudienceRung::FleetOnly)
+        );
+        assert_eq!(
+            sealing_epoch(KIND_GENERATION_SHRED),
+            Some(SealingEpoch::Gen0)
+        );
+        assert_eq!(
+            group_merge_policy(KIND_GROUP_GENERATION_SHRED),
+            Some(MergePolicy::CrdtPerField)
+        );
+        assert_eq!(
+            group_sealing(KIND_GROUP_GENERATION_SHRED),
+            Some(GroupSealing::MachineryRoot)
+        );
+
+        let shredder = ed25519_dalek::SigningKey::from_bytes(&[0x52; 32]);
+        let generation = [0xAB; 32];
+        let cell = shred_cell_key(&generation, &shredder.verifying_key().to_bytes());
+        let honest_record = sign_shred(&shredder, &generation, 9_000);
+        let honest = crdt_entry(
+            KIND_GENERATION_SHRED,
+            &cell,
+            canonical_encode(&honest_record).unwrap(),
+        );
+        let forged = crdt_entry(
+            KIND_GENERATION_SHRED,
+            &cell,
+            canonical_encode(&ShredAttestation {
+                shredder_sig: vec![0xff; 64],
+                ..honest_record
+            })
+            .unwrap(),
+        );
+        assert!(forged.value > honest.value);
+        // First contact: forged refused, verifying adopted; a key that is not
+        // two canonical segments refused.
+        assert!(matches!(
+            apply_class2(MergePolicy::CrdtPerField, None, &forged),
+            Err(MergeError::BadValue { .. })
+        ));
+        let bad_key = EntryPlaintext {
+            key: "00".into(),
+            ..honest.clone()
+        };
+        assert!(matches!(
+            apply_class2(MergePolicy::CrdtPerField, None, &bad_key),
+            Err(MergeError::BadValue { .. })
+        ));
+        assert_eq!(
+            apply_class2(MergePolicy::CrdtPerField, None, &honest).unwrap(),
+            MergeOutcome::Replace
+        );
+        // The arm: the verifying row stands whichever arrives first.
+        assert_eq!(
+            apply_class2(MergePolicy::CrdtPerField, Some(&honest), &forged).unwrap(),
+            MergeOutcome::KeepCurrent
+        );
+        assert_eq!(
+            apply_class2(MergePolicy::CrdtPerField, Some(&forged), &honest).unwrap(),
+            MergeOutcome::Replace
+        );
+
+        // The group plane: the honest signature kept, the carried
+        // cert swapped for byte-greater junk — the cert is signed, so the copy
+        // is refused at first contact and never displaces the honest row.
+        let group_shredder = ed25519_dalek::SigningKey::from_bytes(&[0x53; 32]);
+        let group_cell = fauna_core::group_generation::group_shred_cell_key(
+            &generation,
+            &group_shredder.verifying_key().to_bytes(),
+        );
+        let group_record = fauna_core::group_generation::sign_group_shred(
+            &group_shredder,
+            &generation,
+            vec![0xC0; 8],
+            9_000,
+        );
+        let group_honest = crdt_entry(
+            KIND_GROUP_GENERATION_SHRED,
+            &group_cell,
+            canonical_encode(&group_record).unwrap(),
+        );
+        let cert_swapped = crdt_entry(
+            KIND_GROUP_GENERATION_SHRED,
+            &group_cell,
+            canonical_encode(&fauna_core::group_generation::GroupShredAttestation {
+                authorization: vec![0xff; 8],
+                ..group_record
+            })
+            .unwrap(),
+        );
+        assert!(cert_swapped.value > group_honest.value);
+        assert!(matches!(
+            apply_class2(MergePolicy::CrdtPerField, None, &cert_swapped),
+            Err(MergeError::BadValue { .. })
+        ));
+        assert_eq!(
+            apply_class2(
+                MergePolicy::CrdtPerField,
+                Some(&group_honest),
+                &cert_swapped
+            )
+            .unwrap(),
+            MergeOutcome::KeepCurrent
+        );
+        assert_eq!(
+            apply_class2(
+                MergePolicy::CrdtPerField,
+                Some(&cert_swapped),
+                &group_honest
+            )
+            .unwrap(),
+            MergeOutcome::Replace
+        );
+    }
+
     #[test]
     fn the_unkeyable_kind_registers_and_adopts_verifying_rows_only() {
         use fauna_core::generation::{

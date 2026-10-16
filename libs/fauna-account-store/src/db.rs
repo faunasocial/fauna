@@ -165,9 +165,13 @@ const CREATE_TABLES_SQL: &str = "
         created_at  INTEGER NOT NULL,
         resolved_at INTEGER,
         -- The four columns below serve `catchup_failed` rows only
-        -- (`conflicts.md` § Skipped catch-up changes reach the review list).
+        -- (`conflicts.md` § Skipped catch-up changes reach the review list),
+        -- save `nest_id` on a propagated-winner kind (below).
         -- The nest's conflict id once the skip's report landed; NULL = the
-        -- report is still owed and every catch-up pass re-sends it.
+        -- report is still owed and every catch-up pass re-sends it. On a
+        -- propagated-winner kind: the id of its LANDED candidate-bearing
+        -- chooser report — NULL = no winner can be chosen, so the row never
+        -- arms the verbatim-winner apply.
         nest_id     INTEGER,
         -- 1 when `path` holds the change row's own wire `path_hash` (its
         -- sealed path never opened here — there is no plaintext to file under).
@@ -252,6 +256,18 @@ const CREATE_TABLES_SQL: &str = "
         folder   TEXT    NOT NULL,
         nest_id    BLOB    NOT NULL,
         updated_at INTEGER NOT NULL
+    );
+
+    -- A destination whose writer gate answered this box's last pass with its
+    -- typed refusal (fauna.backup.writer_not_seated): one row per refused
+    -- destination, deleted by the next pass the destination accepts. Absent =
+    -- accepted. The status read's `writer_state` (backup-destinations.md
+    -- section Per-destination status read). Kept here, beside the pass state,
+    -- so a restart does not turn a refused row back into an ordinary lag;
+    -- re-derivable all the same: the next pass re-establishes it.
+    CREATE TABLE IF NOT EXISTS backup_destination_writer_refused (
+        dest_id    TEXT    PRIMARY KEY,
+        refused_at INTEGER NOT NULL
     );
 
     -- Ordinary-folder destination coverage: the per-(destination, folder) mirror
@@ -348,8 +364,12 @@ const CREATE_TABLES_SQL: &str = "
     -- dag-cbor (the signature covers it as served, so it is never re-derived);
     -- `signer_cert` the delegated signer's canonical embed-as-bytes (NULL for
     -- a direct signer). `seq` is the nest's (UNIQUE) for a sequenced row and
-    -- NULL for a writer's pending row, at most one per (author, path_hash) and
-    -- retired when that writer's sequenced row for the path arrives.
+    -- NULL for a writer's pending row, at most one per (author, device,
+    -- path_hash) and retired when that writer-device's sequenced row for the
+    -- path arrives. `device_id` (the row's own, lowercase hex; NULL when it
+    -- names none) is what tells two devices of one account apart on the
+    -- same-account leg, where every row's author is the same actor
+    -- (p2p-shared-set-build.md § Build design — the same-account row leg).
     -- Derived-recoverable: the nest's log is the durable copy; losing this
     -- table costs offline relay until rows are read again, never data.
     CREATE TABLE IF NOT EXISTS relayed_change_log (
@@ -358,7 +378,8 @@ const CREATE_TABLES_SQL: &str = "
         author_actor_id TEXT NOT NULL,
         path_hash       TEXT NOT NULL,
         row             BLOB NOT NULL,
-        signer_cert     BLOB
+        signer_cert     BLOB,
+        device_id       TEXT
     );
 
     -- The share leg's cached WRITER roster (B2 — p2p-shared-set-build.md § Build design — the
@@ -846,7 +867,7 @@ impl EraseSweep {
 
 /// The rels in one folder's state DB whose **local content lacks a proven
 /// record** — the set-level gate behind the iOS File Provider domain-removal
-/// refusal (`file-sync.md` § Multi-account × File Provider, consequence 2: iOS
+/// refusal (`on-demand-files-apple.md` § Multi-account × File Provider, consequence 2: iOS
 /// has no `.preserveDirtyUserData`, so a plain removal would let the OS discard
 /// an un-uploaded edit; removal must refuse while any such row exists and let
 /// the OS's pending-change retry drain it).
@@ -913,9 +934,11 @@ pub const CATCHUP_FAILED: &str = "catchup_failed";
 
 /// The conflict kinds whose unresolved local row means "the next change on this
 /// path is the propagated winner the user chose" — the only kinds the
-/// verbatim-winner apply keys on. An allow-list on purpose: a kind left off it
-/// costs an ordinary detection pass, a kind wrongly on it costs the user's
-/// unpublished edit.
+/// verbatim-winner apply keys on, and only on a row carrying a `nest_id` (its
+/// candidate-bearing chooser report landed). An allow-list on purpose: a kind
+/// left off it costs an ordinary detection pass, a kind wrongly on it costs the
+/// user's unpublished edit — and so does a row of a listed kind no winner can
+/// exist for, which is why the `nest_id` conjunct holds the fence.
 pub const CONFLICT_KINDS_WITH_PROPAGATED_WINNER: &[&str] = &["concurrent_edit", "delete_declined"];
 
 /// [`CONFLICT_KINDS_WITH_PROPAGATED_WINNER`] as an SQL `IN (…)` list (the
@@ -1988,7 +2011,7 @@ impl SyncDb {
 
     /// Set or clear a row's pin — the user's *keep on this device* for one file,
     /// where the platform keeps no pin of its own (the linux FUSE root;
-    /// `on-demand-files.md` § Linux FUSE binding: pins live in the row). `false`
+    /// `on-demand-files-linux.md` § Linux FUSE binding: pins live in the row). `false`
     /// (no write) when the path has no row: a pin needs a tracked file.
     /// `upsert_entry`'s `ON CONFLICT` omits the column, so a pin survives every
     /// later state write.
@@ -2551,9 +2574,9 @@ impl SyncDb {
         Ok(count > 0)
     }
 
-    /// Whether `path` has an unresolved local conflict of a kind a propagated
-    /// winner exists for ([`CONFLICT_KINDS_WITH_PROPAGATED_WINNER`]) —
-    /// read-only.
+    /// Whether `path` has an unresolved local conflict a propagated winner
+    /// exists for — a [`CONFLICT_KINDS_WITH_PROPAGATED_WINNER`] row whose
+    /// candidate-bearing chooser report landed (`nest_id` set) — read-only.
     ///
     /// The catch-up apply path checks this *before* writing an incoming change:
     /// such a row means the incoming `modify` is the propagated winner, so the
@@ -2562,17 +2585,19 @@ impl SyncDb {
     /// [`Self::resolve_winner_conflicts_for_path`] so a failed write doesn't
     /// leave the conflict cleared but the winner unapplied.
     ///
-    /// ⚠ Never any kind: a [`CATCHUP_FAILED`] row has no winner, and arming the
-    /// verbatim apply on one overwrote unpublished local edits with no conflict
-    /// row and no retained loser (`conflicts.md` § Skipped catch-up changes
-    /// reach the review list).
+    /// ⚠ Never a winner-less row: a [`CATCHUP_FAILED`] row has no winner, nor
+    /// has a winner-kind row whose report went candidate-free (the version's
+    /// upload failed) or never landed — arming the verbatim apply on one
+    /// overwrote unpublished local edits with no conflict row and no retained
+    /// loser (`conflicts.md` § Skipped catch-up changes reach the review list).
     pub fn has_unresolved_winner_conflict_for_path(&self, path: &str) -> Result<bool> {
         let count: i64 = self
             .conn
             .query_row(
                 &format!(
                     "SELECT COUNT(*) FROM sync_conflicts
-                     WHERE path = ?1 AND resolved_at IS NULL AND conflict_type IN ({})",
+                     WHERE path = ?1 AND resolved_at IS NULL AND nest_id IS NOT NULL
+                       AND conflict_type IN ({})",
                     winner_kinds_sql()
                 ),
                 params![path],
@@ -2582,9 +2607,10 @@ impl SyncDb {
         Ok(count > 0)
     }
 
-    /// Clear the unresolved winner-bearing conflicts for `path` (apply-winner
-    /// on catch-up; same kinds as
-    /// [`Self::has_unresolved_winner_conflict_for_path`]).
+    /// Clear the unresolved winner-kind conflicts for `path` (apply-winner on
+    /// catch-up; same kinds as [`Self::has_unresolved_winner_conflict_for_path`],
+    /// stamped or not — a change landed over the path supersedes a winner-less
+    /// degrade row too).
     ///
     /// When the nest propagates a chosen winner, every device sees an ordinary
     /// `changes.list` `modify` for the path; the device applies the winning
@@ -3161,6 +3187,41 @@ impl SyncDb {
         Ok(())
     }
 
+    /// Record that `destination_id`'s writer gate refused this box's pass.
+    /// Idempotent; the first refusal's time is kept.
+    pub fn set_backup_writer_refused(&self, destination_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO backup_destination_writer_refused (dest_id, refused_at)
+                 VALUES (?1, ?2) ON CONFLICT(dest_id) DO NOTHING",
+                params![destination_id, now_epoch_secs()],
+            )
+            .context("record backup_destination_writer_refused")?;
+        Ok(())
+    }
+
+    /// Clear `destination_id`'s refusal: the destination accepted a write.
+    pub fn clear_backup_writer_refused(&self, destination_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM backup_destination_writer_refused WHERE dest_id = ?1",
+                params![destination_id],
+            )
+            .context("clear backup_destination_writer_refused")?;
+        Ok(())
+    }
+
+    /// Whether `destination_id`'s writer gate refused this box's last pass
+    /// that reached it.
+    pub fn backup_writer_refused(&self, destination_id: &str) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM backup_destination_writer_refused WHERE dest_id = ?1",
+            params![destination_id],
+            |row| row.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     /// Every destination the coordinator has uploaded to. Removal-reconcile
     /// diffs this against the configured destinations to find departed ones.
     pub fn list_backup_destinations_seen(&self) -> Result<Vec<SeenBackupDestination>> {
@@ -3237,7 +3298,8 @@ impl SyncDb {
 
     /// Forget a destination entirely: its `backup_destination_seen` row plus
     /// every `segment_backup_state` / `segment_backup_manifest_state` /
-    /// `folder_backup_state` row keyed on it. Called by removal-reconcile once
+    /// `folder_backup_state` / `backup_destination_writer_refused` row keyed on
+    /// it. Called by removal-reconcile once
     /// the destination-side custody is torn down, so a later pass neither
     /// re-records nor re-reconciles it.
     pub fn forget_backup_destination(&self, destination_id: &str) -> Result<()> {
@@ -3265,6 +3327,7 @@ impl SyncDb {
                 params![destination_id],
             )
             .context("forget folder_withhold_checkpoint")?;
+        self.clear_backup_writer_refused(destination_id)?;
         self.conn
             .execute(
                 "DELETE FROM backup_destination_seen WHERE dest_id = ?1",
@@ -3624,10 +3687,12 @@ impl SyncDb {
     /// store judges nothing.
     ///
     /// A sequenced row (`seq` = the nest's) is idempotent on `seq` and retires
-    /// that writer's pending row for the path in the same transaction — the
-    /// nest's word supersedes the offline one. A pending row (`seq = None`)
-    /// replaces that writer's previous pending row for the path: the newest is
-    /// the only one worth relaying.
+    /// that writer-device's pending row for the path in the same transaction —
+    /// the nest's word supersedes the offline one. A pending row (`seq = None`)
+    /// replaces that writer-device's previous pending row for the path: the
+    /// newest is the only one worth relaying. Keyed by (author, device, path
+    /// hash), so two siblings of one account — one author — keep one pending
+    /// row each.
     pub fn retain_relayed_change(&self, row: &RelayedChangeRow) -> Result<()> {
         let tx = self
             .conn
@@ -3635,21 +3700,23 @@ impl SyncDb {
             .context("begin relayed-change retention")?;
         tx.execute(
             "DELETE FROM relayed_change_log
-             WHERE author_actor_id = ?1 AND path_hash = ?2 AND seq IS NULL",
-            params![row.author_actor_id, row.path_hash],
+             WHERE author_actor_id = ?1 AND path_hash = ?2 AND device_id IS ?3
+               AND seq IS NULL",
+            params![row.author_actor_id, row.path_hash, row.device_id],
         )
         .context("retire the writer's pending relayed row for the path")?;
         tx.execute(
             "INSERT INTO relayed_change_log
-                (seq, author_actor_id, path_hash, row, signer_cert)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+                (seq, author_actor_id, path_hash, row, signer_cert, device_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(seq) DO NOTHING",
             params![
                 row.seq,
                 row.author_actor_id,
                 row.path_hash,
                 row.row,
-                row.signer_cert
+                row.signer_cert,
+                row.device_id
             ],
         )
         .context("retain relayed change row")?;
@@ -3665,7 +3732,7 @@ impl SyncDb {
         max_rows: u32,
     ) -> Result<Vec<RelayedChangeRow>> {
         self.relayed_rows(
-            "SELECT seq, author_actor_id, path_hash, row, signer_cert
+            "SELECT seq, author_actor_id, path_hash, row, signer_cert, device_id
              FROM relayed_change_log
              WHERE seq IS NOT NULL AND seq > ?1
              ORDER BY seq
@@ -3678,7 +3745,7 @@ impl SyncDb {
     /// served on the tail page beside [`Self::own_pending_changes`].
     pub fn relayed_pending_changes(&self, max_rows: u32) -> Result<Vec<RelayedChangeRow>> {
         self.relayed_rows(
-            "SELECT seq, author_actor_id, path_hash, row, signer_cert
+            "SELECT seq, author_actor_id, path_hash, row, signer_cert, device_id
              FROM relayed_change_log
              WHERE seq IS NULL
              ORDER BY id
@@ -3700,6 +3767,7 @@ impl SyncDb {
                 path_hash: row.get(2)?,
                 row: row.get(3)?,
                 signer_cert: row.get(4)?,
+                device_id: row.get(5)?,
             })
         })?;
         let mut out = Vec::new();
@@ -4271,6 +4339,11 @@ pub struct RelayedChangeRow {
     pub row: Vec<u8>,
     /// The delegated signer's cert, canonical embed-as-bytes.
     pub signer_cert: Option<Vec<u8>>,
+    /// The row's own `device_id`, lowercase hex — with the author and the
+    /// path hash, a pending row's key: on the same-account leg every row's
+    /// author is the one account, and the device is what tells two siblings'
+    /// pending rows for one path apart.
+    pub device_id: Option<String>,
 }
 
 /// Row mapper for the `own_change_log` SELECTs (`own_changes_since` /
@@ -4637,7 +4710,7 @@ mod tests {
         erase_account_scope(&base, ACTOR_A).unwrap();
     }
 
-    /// The iOS domain-removal gate's engine-seam pin (`file-sync.md`
+    /// The iOS domain-removal gate's engine-seam pin (`on-demand-files.md`
     /// § Multi-account × File Provider, consequence 2): exactly the rows whose
     /// local bytes lack a proven record report as un-recorded — mid-flight
     /// states and the record-failed `Synced` shape — while placeholder /
@@ -5584,8 +5657,10 @@ mod tests {
     fn resolve_winner_conflicts_for_path_clears_unresolved_row() {
         let db = SyncDb::open_in_memory().unwrap();
 
-        db.record_conflict("winner.txt", "concurrent_edit", Some("2 conflicts"))
+        let winner = db
+            .record_conflict("winner.txt", "concurrent_edit", Some("2 conflicts"))
             .unwrap();
+        db.set_conflict_nest_id(winner, 7).unwrap();
         db.record_conflict("other.txt", "delete_declined", None)
             .unwrap();
 
@@ -5619,6 +5694,29 @@ mod tests {
             !db.resolve_winner_conflicts_for_path("never-conflicted.txt")
                 .unwrap()
         );
+    }
+
+    /// A winner-kind row whose chooser report never landed (no `nest_id`: the
+    /// report went candidate-free or failed) has no winner either — it does
+    /// not arm the verbatim apply, though a landed change still clears it.
+    #[test]
+    fn an_unstamped_winner_kind_row_never_arms_the_verbatim_apply() {
+        let db = SyncDb::open_in_memory().unwrap();
+        db.record_conflict("edit.txt", "concurrent_edit", None)
+            .unwrap();
+        db.record_conflict("kept.txt", "delete_declined", None)
+            .unwrap();
+
+        assert!(
+            !db.has_unresolved_winner_conflict_for_path("edit.txt")
+                .unwrap()
+        );
+        assert!(
+            !db.has_unresolved_winner_conflict_for_path("kept.txt")
+                .unwrap()
+        );
+        assert!(db.resolve_winner_conflicts_for_path("edit.txt").unwrap());
+        assert_eq!(db.list_unresolved_conflicts().unwrap().len(), 1);
     }
 
     /// A skip row carries no winner: it neither arms the verbatim apply nor
@@ -6253,7 +6351,36 @@ mod tests {
             path_hash: path_byte.repeat(32),
             row: vec![body; 16],
             signer_cert: Some(vec![0xCE; 4]),
+            device_id: Some("d1".repeat(16)),
         }
+    }
+
+    /// The same-account leg: one author, two devices. Each device keeps its
+    /// own pending row for a path, and a device's sequenced row retires its
+    /// own pending row only — the sibling's offline edit stands.
+    #[test]
+    fn two_devices_of_one_author_keep_one_pending_row_each() {
+        let db = SyncDb::open_in_memory().unwrap();
+        let on = |row: RelayedChangeRow, device: &str| RelayedChangeRow {
+            device_id: Some(device.repeat(16)),
+            ..row
+        };
+        db.retain_relayed_change(&on(relayed(None, "a1", "p3", 1), "d1"))
+            .unwrap();
+        db.retain_relayed_change(&on(relayed(None, "a1", "p3", 2), "d2"))
+            .unwrap();
+        assert_eq!(
+            db.relayed_pending_changes(10).unwrap().len(),
+            2,
+            "one pending row per device"
+        );
+        db.retain_relayed_change(&on(relayed(Some(5), "a1", "p3", 3), "d1"))
+            .unwrap();
+        assert_eq!(
+            db.relayed_pending_changes(10).unwrap(),
+            vec![on(relayed(None, "a1", "p3", 2), "d2")],
+            "the sequenced row retires its own device's pending row only"
+        );
     }
 
     /// Sequenced relayed rows page like own rows (strict `since`, seq order,

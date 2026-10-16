@@ -29,7 +29,7 @@
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use fauna_archive::model::{ArchiveAlbum, ArchiveEvent, ArchiveMediaRef, ArchivePost, Rsvp};
+use fauna_archive::model::{ArchiveAlbum, ArchiveEvent, ArchiveMediaRef, ArchivePost};
 use fauna_archive::{
     ArchiveReader, ArchiveSource, Category, Entity, EntityKind, ExternalId, Platform,
 };
@@ -40,8 +40,8 @@ use fauna_core::data::{ContentHash, MediaItem, PostBody, Timestamp};
 
 use crate::audience::{PostAudience, map_audience};
 use crate::machine::{
-    ArchiveImportMachine, DispatchError, RunHandle, StopRequest, index_archive, resolve_date_range,
-    set_snapshot_error,
+    ArchiveImportMachine, DispatchError, RunHandle, StopRequest, TestAnchor, index_archive,
+    resolve_date_range, set_snapshot_error,
 };
 use crate::nest::{
     ArchiveNest, ArchiveNestError, ImportedEvent, MediaSeal, SharedSource, TierGate, UploadedMedia,
@@ -323,12 +323,13 @@ impl ArchiveImportMachine {
             .write_file(&folder, STATE_PATH, encode(&state)?)
             .await?;
 
-        // `stop` only — NOT `test_pause_after`. The test arm is armed BEFORE
-        // Start by contract (`set_test_pause_after_records`; the e2e
-        // restart-resume journey's causal anchor, convention 14), so clearing it
-        // here would disarm the hook's only usage. It cannot leak either: it is
-        // one-shot (`test_pause_due` spends it), the run's tail spends an
-        // un-fired one, and its sole setter is compiled out of release builds.
+        // `stop` only — NOT `test_anchor`. The test arm is armed BEFORE Start
+        // by contract (`set_test_pause_after_records` /
+        // `set_test_hold_after_records`; the e2e journeys' causal anchors,
+        // convention 14), so clearing it here would disarm the hooks' only
+        // usage. It cannot leak either: it is one-shot (`test_anchor_due`
+        // spends it), the run's tail spends an un-fired one, and its sole
+        // setters are compiled out of release builds.
         *self.stop.lock().expect("stop mutex") = StopRequest::None;
         *self.run.lock().expect("run mutex") = Some(RunHandle {
             folder: folder.clone(),
@@ -351,6 +352,8 @@ impl ArchiveImportMachine {
             row.skipped = 0;
         }
         snap.status = ArchiveImportStatus::Working;
+        drop(snap);
+        self.clock_start(0, true);
         Ok(())
     }
 
@@ -402,6 +405,8 @@ impl ArchiveImportMachine {
             set_snapshot_error(&mut snap.error, e.to_string());
             snap.run_state = Some(RunState::Errored);
             snap.status = ArchiveImportStatus::Idle;
+            drop(snap);
+            self.clock_stop();
         }
         result
     }
@@ -624,8 +629,14 @@ impl ArchiveImportMachine {
                 self.checkpoint(&mut run).await?;
                 self.note_progress(&run.state, &category, imported_here, skipped_here);
                 settled_this_run += 1;
-                if self.test_pause_due(settled_this_run) {
-                    *self.stop.lock().expect("stop mutex") = StopRequest::Pause;
+                match self.test_anchor_due(settled_this_run) {
+                    Some(TestAnchor::PauseAfter(_)) => {
+                        *self.stop.lock().expect("stop mutex") = StopRequest::Pause;
+                    }
+                    // Still `Running`; the next iteration's check takes
+                    // whichever stop the user's gesture requested.
+                    Some(TestAnchor::HoldAfter(_)) => self.stop_requested_wait().await,
+                    None => {}
                 }
             }
         }
@@ -638,7 +649,7 @@ impl ArchiveImportMachine {
         // iteration): neither has anything left to act on, and leaving either
         // set would leak into the next run — `resume`/`start` reset `stop`
         // too (this is the third door).
-        *self.test_pause_after.lock().expect("test pause mutex") = None;
+        *self.test_anchor.lock().expect("test anchor mutex") = None;
         *self.stop.lock().expect("stop mutex") = StopRequest::None;
         run.state.phase = ImportPhase::Finished;
         self.checkpoint(&mut run).await?;
@@ -688,6 +699,9 @@ impl ArchiveImportMachine {
             return Err(DispatchError::InvalidState(absent.into()));
         }
         *self.stop.lock().expect("stop mutex") = request;
+        if let Some(waker) = self.stop_waker.lock().expect("stop waker mutex").take() {
+            waker.wake();
+        }
         Ok(())
     }
 
@@ -737,6 +751,9 @@ impl ArchiveImportMachine {
         snap.folder_name = Some(folder);
         snap.run_state = Some(RunState::Running);
         snap.status = ArchiveImportStatus::Working;
+        let settled = snap.imported + snap.skipped;
+        drop(snap);
+        self.clock_start(settled, false);
         Ok(())
     }
 
@@ -877,7 +894,7 @@ impl ArchiveImportMachine {
             end: event.end.map(at),
             location: event.place.as_ref().map(|p| p.name.clone()),
             url: event.url.clone(),
-            rsvp: rsvp_token(event.rsvp).to_string(),
+            rsvp: event.rsvp,
         };
         self.nest
             .put_event(&imported)
@@ -1224,6 +1241,8 @@ impl ArchiveImportMachine {
         snap.run_state = Some(state);
         snap.current_category = None;
         snap.status = ArchiveImportStatus::Idle;
+        drop(snap);
+        self.clock_stop();
     }
 }
 
@@ -1283,16 +1302,6 @@ fn media_item(uploaded: UploadedMedia) -> MediaItem {
 /// leak wearing a teaser's clothes (`archive-import.md` § Audience mapping).
 fn preview_of(platform: &Platform) -> String {
     format!("{} import", platform.label())
-}
-
-/// The archive's RSVP vocabulary onto `fauna_status`'s.
-fn rsvp_token(rsvp: Rsvp) -> &'static str {
-    match rsvp {
-        Rsvp::Joined | Rsvp::Hosted => "going",
-        Rsvp::Interested => "interested",
-        Rsvp::Declined => "declined",
-        Rsvp::Invited | Rsvp::Unknown => "invited",
-    }
 }
 
 /// The `encrypted_ref` a gated post names — what the sealed-body store's reply
@@ -1566,6 +1575,9 @@ mod tests {
         let s = m.snapshot();
         assert_eq!(s.step, ArchiveImportStep::Done);
         assert_eq!(s.run_state, Some(RunState::Completed));
+        // Step 5's estimate: nothing left; the clock stopped with the run.
+        assert_eq!(s.eta_secs, Some(0));
+        assert!(!m.clock.lock().unwrap().is_running());
 
         // Folder + files.
         let folder = s.folder_name.clone().expect("folder");
@@ -1656,7 +1668,8 @@ mod tests {
         assert!(
             nest.events()
                 .iter()
-                .any(|e| e.summary == "Fixture Picnic" && e.rsvp == "going")
+                .any(|e| e.summary == "Fixture Picnic"
+                    && e.rsvp == fauna_archive::model::Rsvp::Joined)
         );
 
         // State: every authored record in the map, the parser skip in the log.
@@ -2329,6 +2342,10 @@ mod tests {
         assert_eq!(s.step, ArchiveImportStep::Progress);
         assert_eq!(s.imported, 1);
         assert_eq!(nest.posts().len(), 1);
+        // One record watched and more left: an estimate, and a clock stopped
+        // by the pause (elapsed does not grow while paused — timing.rs).
+        assert!(s.eta_secs.is_some(), "{:?}", s.eta_secs);
+        assert!(!m.clock.lock().unwrap().is_running());
         let folder = s.folder_name.clone().expect("folder");
         assert!(
             matches!(
@@ -2383,6 +2400,68 @@ mod tests {
         assert_eq!(nest.read_state(&folder).phase, ImportPhase::Finished);
     }
 
+    /// The e2e pause/cancel anchor (convention 14): armed before Start, the
+    /// hook HOLDS the run — still `Running`, N records settled, nothing more
+    /// authored — until the user's own Pause or Cancel arrives, which the run
+    /// then takes at the next record. One-shot, so a second hold is armed
+    /// for the cancel half.
+    #[tokio::test]
+    async fn the_test_hold_hook_holds_the_run_until_the_users_pause_or_cancel() {
+        let (m, nest) = ready(fixture_zip("facebook-json")).await;
+        let m = Arc::new(m);
+        let spawn_run = |m: &Arc<ArchiveImportMachine>| {
+            let m = Arc::clone(m);
+            tokio::spawn(async move { m.run_import().await })
+        };
+        let held = |m: &Arc<ArchiveImportMachine>| {
+            let m = Arc::clone(m);
+            async move {
+                while m.stop_waker.lock().unwrap().is_none() {
+                    tokio::task::yield_now().await;
+                }
+            }
+        };
+
+        m.set_test_hold_after_records(1);
+        m.dispatch(Act::Start).await.unwrap();
+        let running = spawn_run(&m);
+        tokio::time::timeout(std::time::Duration::from_secs(10), held(&m))
+            .await
+            .expect("the run reached its hold");
+        assert_eq!(m.snapshot().run_state, Some(RunState::Running));
+        assert_eq!(nest.posts().len(), 1, "held after one record");
+        m.dispatch(Act::Pause).await.unwrap();
+        running
+            .await
+            .expect("the run task")
+            .expect("a pause is not an error");
+        let s = m.snapshot();
+        assert_eq!(s.run_state, Some(RunState::Paused));
+        assert_eq!(nest.posts().len(), 1);
+        let folder = s.folder_name.clone().expect("folder");
+        assert!(matches!(
+            nest.read_state(&folder).phase,
+            ImportPhase::Authoring { next_index: 1, .. }
+        ));
+
+        m.set_test_hold_after_records(1);
+        m.dispatch(Act::Resume).await.unwrap();
+        let running = spawn_run(&m);
+        tokio::time::timeout(std::time::Duration::from_secs(10), held(&m))
+            .await
+            .expect("the resumed run reached its hold");
+        assert_eq!(nest.posts().len(), 2);
+        m.dispatch(Act::Cancel).await.unwrap();
+        running
+            .await
+            .expect("the run task")
+            .expect("cancel is not an error");
+        assert_eq!(m.snapshot().run_state, Some(RunState::Cancelled));
+        assert_eq!(nest.posts().len(), 2, "what landed stays");
+        assert_eq!(nest.read_state(&folder).phase, ImportPhase::Cancelled);
+        assert!(m.stop_waker.lock().unwrap().is_none());
+    }
+
     /// An arm set past the run's total record count never fires the loop's
     /// own check (there's no settled record left for it to fire on) — the run
     /// completes normally, and the tail of `run_import_inner` spends the
@@ -2397,7 +2476,7 @@ mod tests {
         let s = m.snapshot();
         assert_eq!(s.step, ArchiveImportStep::Done);
         assert_eq!(s.run_state, Some(RunState::Completed));
-        assert!(!m.test_pause_due(u64::MAX));
+        assert_eq!(m.test_anchor_due(u64::MAX), None);
         assert_eq!(*m.stop.lock().unwrap(), StopRequest::None);
     }
 

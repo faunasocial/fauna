@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Controls;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
 using FaunaApp.Views;
+using uniffi.fauna_client_mail_settings;
 using uniffi.fauna_ffi;
 using S = FaunaApp.Core.Services.Strings;
 
@@ -36,6 +37,8 @@ public sealed partial class MailListsPanel : UserControl
     private string? _editingId;
     // The list id armed for the two-click delete confirm.
     private string? _armedDeleteId;
+    // The archive URL armed for the off-server Submit confirm (null = not armed).
+    private string? _armedArchiveUrl;
 
     public event Action<string?>? ErrorChanged;
 
@@ -108,6 +111,7 @@ public sealed partial class MailListsPanel : UserControl
     /// edit, so those fields are disabled).</summary>
     private void OpenSheet(FormMode mode, MailListRow? row)
     {
+        DisarmArchiveConfirm();
         _formMode = mode;
         _editingId = row?.ListIdHex;
         NameInput.Text = row?.FriendlyName ?? string.Empty;
@@ -139,6 +143,25 @@ public sealed partial class MailListsPanel : UserControl
         var listArchive = ListArchiveInput.Text.Trim();
         var perSend = FaunaFfiMethods.ParseCount(PerSendInput.Text);
 
+        // An archive link off the user's own server goes out with every message: ask once
+        // per URL before saving (mail-mass-mailing.md § Don't do these — two-click confirm,
+        // apps/common.md). The predicate is shared; the arm is keyed on the URL so editing
+        // the link disarms it.
+        var saved = _formMode == FormMode.Edit
+            ? _vm.Lists.FirstOrDefault(l => l.ListIdHex == _editingId)?.ListArchiveUrl
+            : null;
+        if (FaunaClientMailSettingsMethods.ArchiveUrlNeedsConfirm(
+                listArchive,
+                string.IsNullOrEmpty(saved) ? null : saved,
+                _vm.LocalDomains.ToArray())
+            && _armedArchiveUrl != listArchive)
+        {
+            _armedArchiveUrl = listArchive;
+            SubmitButton.Content = S.Get("mail_lists/archive_off_server_confirm");
+            return;
+        }
+        DisarmArchiveConfirm();
+
         if (_formMode == FormMode.Add)
         {
             await _vm.CreateAsync(friendlyName, localPart, localDomain, description, listHelp, listArchive, perSend);
@@ -157,8 +180,17 @@ public sealed partial class MailListsPanel : UserControl
         }
     }
 
+    /// <summary>Clear the off-server archive arm and restore the Submit label.</summary>
+    private void DisarmArchiveConfirm()
+    {
+        if (_armedArchiveUrl is null) return;
+        _armedArchiveUrl = null;
+        SubmitButton.Content = S.Get("mail_lists/submit");
+    }
+
     private void Cancel_Click(object sender, RoutedEventArgs e)
     {
+        DisarmArchiveConfirm();
         AddSheet.Visibility = Visibility.Collapsed;
         RenderState();
     }
@@ -186,7 +218,7 @@ public sealed partial class MailListsPanel : UserControl
     }
 
     /// <summary>Delete is destructive — arm-then-confirm (mirrors the linux wire_two_click /
-    /// MailAliasesPanel): first click relabels "Confirm?" + auto-disarms after 4 s; the
+    /// MailAliasesPanel): first click relabels to <c>mail_lists.delete_confirm</c> + auto-disarms after 4 s; the
     /// second click within the window dispatches.</summary>
     private async void Delete_Click(object sender, RoutedEventArgs e)
     {
@@ -196,7 +228,7 @@ public sealed partial class MailListsPanel : UserControl
         {
             _armedDeleteId = listId;
             var baseLabel = btn.Content;
-            btn.Content = "Confirm?";
+            btn.Content = S.Get("mail_lists/delete_confirm");
             await Task.Delay(4000);
             if (_armedDeleteId == listId)
             {

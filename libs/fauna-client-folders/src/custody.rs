@@ -237,6 +237,43 @@ pub fn live_set_nonce(cfg: &FoldersConfig, name: &str) -> Option<[u8; 32]> {
     live_set_by_name(cfg, name).and_then(|s| s.set_nonce)
 }
 
+/// The content keys a set's **own** entries hold at its serve pseudo-channel —
+/// the retired-serve candidates (`writer-signed-change-records.md` ruling
+/// (7)(b)(iii): a tombstone lends nothing to the name). The selection is over
+/// the name's entries only (entries naming another set, or carrying no name
+/// and a different channel, are not candidates): every same-name entry **not
+/// retired before the earliest `created_at` of the entries carrying the live
+/// pick's nonce** — the pick itself, the live nonce-less key holders, the
+/// identity-move twins retired at/after the pick was created — never an entry
+/// retired before the pick existed (a deleted set the name was re-created
+/// over). A name with no live nonce-bearing entry joins its live entries only.
+///
+/// Deliberately standalone, not lifted out of [`set_nonces_for`]: that is the
+/// (11)(b) edge lineage (by nonce, not a timestamp). [`content_keys`]'s
+/// none-live fallback is unchanged for by-channel reads (ruling (l)(i)).
+pub fn name_serve_keys(cfg: &FoldersConfig, name: &str) -> Option<FolderContentKeys> {
+    let pseudo = fauna_core::folder_keys::serve_custody_channel_id(name);
+    let floor = live_set_nonce(cfg, name).and_then(|nonce| {
+        cfg.sets
+            .iter()
+            .filter(|s| s.set_nonce.as_ref() == Some(&nonce))
+            .map(|s| s.created_at)
+            .min()
+    });
+    cfg.sets
+        .iter()
+        .filter(|s| s.channel_id.as_ref() == Some(&pseudo))
+        .filter(|s| s.name.as_deref().is_none_or(|n| n == name))
+        .filter(|s| match floor {
+            Some(floor) => s.is_live() || s.retired_at.is_some_and(|r| r >= floor),
+            None => s.is_live(),
+        })
+        .filter_map(|s| s.keys.as_ref())
+        .fold(None, |acc: Option<FolderContentKeys>, k| {
+            Some(acc.map_or_else(|| k.clone(), |a| a.merge(k)))
+        })
+}
+
 /// Record a fresh live entry for a set the owner is about to create — the
 /// create helper's custody-first write (ruling (d), step 2). Idempotent on the
 /// nonce (a retried write of the same mint adds nothing). Returns whether the
@@ -1090,14 +1127,33 @@ pub fn set_nonce_by_name(
 ) -> Option<[u8; 32]> {
     let name_hash = fauna_core::path_crypto::set_name_hash(folder);
     if let Some(row) = find_named_roster_row(roster, cfg, &name_hash) {
-        let owner_name = (row.role.as_deref() != Some("member")).then_some(folder);
-        let channel = crate::engine_binding::custody_channel_for(&row, cfg)
-            .ok()
-            .flatten();
-        return set_nonces_for(cfg, owner_name, channel.as_ref()).0;
+        return set_nonce_of(&row, folder, cfg);
     }
     find_foreign_set_by_hash(cfg, &name_hash)
         .and_then(|f| set_nonce_for_channel(cfg, &f.channel_id))
+}
+
+/// The live nonce of a roster row already picked and named
+/// ([`named_roster_row`]) — [`set_nonce_by_name`]'s arm for a row the caller
+/// addressed by its **id** instead (a record carrying `folder_id`): an own
+/// row by the owner's entry for its name, a member row by its channel.
+pub fn set_nonce_of_row(
+    row: &fauna_protocol::folders::FolderSummary,
+    cfg: &FoldersConfig,
+) -> Option<[u8; 32]> {
+    set_nonce_of(row, &row.name, cfg)
+}
+
+fn set_nonce_of(
+    row: &fauna_protocol::folders::FolderSummary,
+    name: &str,
+    cfg: &FoldersConfig,
+) -> Option<[u8; 32]> {
+    let owner_name = (row.role.as_deref() != Some("member") && !name.is_empty()).then_some(name);
+    let channel = crate::engine_binding::custody_channel_for(row, cfg)
+        .ok()
+        .flatten();
+    set_nonces_for(cfg, owner_name, channel.as_ref()).0
 }
 
 /// [`set_nonce_by_name`]'s resolution answering the set's whole **lineage**
@@ -1115,22 +1171,61 @@ pub fn set_lineage_by_hash(
     name_hash: &[u8; 32],
 ) -> fauna_core::folder_keys::SetNonceLineage {
     if let Some(row) = find_named_roster_row(roster, cfg, name_hash) {
-        let owner_name = (row.role.as_deref() != Some("member"))
-            .then(|| {
-                cfg.sets
-                    .iter()
-                    .filter_map(|e| e.name.as_deref())
-                    .find(|name| fauna_core::path_crypto::set_name_hash(name) == *name_hash)
-            })
-            .flatten();
-        let channel = crate::engine_binding::custody_channel_for(&row, cfg)
-            .ok()
-            .flatten();
-        return set_lineage(cfg, owner_name, channel.as_ref());
+        return lineage_of_roster_row(&row, cfg, name_hash);
     }
     find_foreign_set_by_hash(cfg, name_hash)
         .map(|f| set_lineage(cfg, None, Some(&f.channel_id)))
         .unwrap_or_default()
+}
+
+/// [`set_lineage_by_hash`] **by the set's identity** — the lineage of the
+/// roster row with that id ([`FolderRef::Local`](fauna_core::folder_keys::FolderRef::Local)),
+/// never the owner-first name search, so a member row answers its own lineage
+/// beside the caller's same-named set; or of the live foreign record at a
+/// channel. `None` when no such row or record exists (the reader then falls
+/// back to the hash). `set-addressing.md` § The row form.
+pub fn set_lineage_by_ref(
+    roster: &[fauna_protocol::folders::FolderSummary],
+    cfg: &FoldersConfig,
+    folder_ref: &fauna_core::folder_keys::FolderRef,
+) -> Option<fauna_core::folder_keys::SetNonceLineage> {
+    use fauna_core::folder_keys::FolderRef;
+    match folder_ref {
+        FolderRef::Local(id) => {
+            let row = roster.iter().find(|s| s.id == *id)?;
+            let name_hash = fauna_core::label_custody::set_name_label_salt(
+                row.name_hash.as_deref().map(|b| &b[..]),
+                &row.name,
+            );
+            let row = named_roster_row(row.clone(), cfg);
+            Some(lineage_of_roster_row(&row, cfg, &name_hash))
+        }
+        FolderRef::Foreign(channel) => {
+            find_foreign_set(cfg, channel).map(|f| set_lineage(cfg, None, Some(&f.channel_id)))
+        }
+    }
+}
+
+/// The lineage of one picked (custody-named) roster row at `name_hash`: the
+/// owner's entry by name for the caller's OWN row — the entry whose name
+/// hashes to the address — and a member's by channel.
+fn lineage_of_roster_row(
+    row: &fauna_protocol::folders::FolderSummary,
+    cfg: &FoldersConfig,
+    name_hash: &[u8; 32],
+) -> fauna_core::folder_keys::SetNonceLineage {
+    let owner_name = (row.role.as_deref() != Some("member"))
+        .then(|| {
+            cfg.sets
+                .iter()
+                .filter_map(|e| e.name.as_deref())
+                .find(|name| fauna_core::path_crypto::set_name_hash(name) == *name_hash)
+        })
+        .flatten();
+    let channel = crate::engine_binding::custody_channel_for(row, cfg)
+        .ok()
+        .flatten();
+    set_lineage(cfg, owner_name, channel.as_ref())
 }
 
 /// The roster row addressed by `name_hash` — the row's projected `name_hash`,
@@ -1165,15 +1260,27 @@ pub fn find_named_roster_row(
     cfg: &FoldersConfig,
     name_hash: &[u8; 32],
 ) -> Option<fauna_protocol::folders::FolderSummary> {
-    let row = find_roster_row(roster, name_hash)?.clone();
+    Some(named_roster_row(
+        find_roster_row(roster, name_hash)?.clone(),
+        cfg,
+    ))
+}
+
+/// [`find_named_roster_row`]'s custody-naming step on a row already picked —
+/// the one the by-identity resolution ([`FolderRef::Local`](fauna_core::folder_keys::FolderRef::Local))
+/// shares with the by-name one, so a sealed own row read either way derives
+/// the same channel. A row that rests its name, or a member's, comes back as
+/// it is.
+pub fn named_roster_row(
+    row: fauna_protocol::folders::FolderSummary,
+    cfg: &FoldersConfig,
+) -> fauna_protocol::folders::FolderSummary {
     if !row.name.is_empty() || row.role.as_deref() == Some("member") {
-        return Some(row);
+        return row;
     }
-    Some(
-        named_from_custody(vec![row.clone()], cfg)
-            .pop()
-            .unwrap_or(row),
-    )
+    named_from_custody(vec![row.clone()], cfg)
+        .pop()
+        .unwrap_or(row)
 }
 
 /// The current (active) generation new uploads seal + stamp under, if the owner
@@ -1409,7 +1516,7 @@ pub struct ForeignReplyStamps<'a> {
 /// reply carried (`../architecture/federation.md` § Cross-nest → *Recipient-side
 /// access discovery*): the caller's `access` grant, the home nest's
 /// `home_nest_actor_id` (byte-plane SPKI-pin trust root), and the set's
-/// owner-stamped `content_key_floor` (`../behavior/on-demand-files.md` § Shared sets on a
+/// owner-stamped `content_key_floor` (`../behavior/on-demand-files-shared-sets.md` § Shared sets on a
 /// capability host → *One mechanism*, question 2 — what the member's engine
 /// arms its pre-seal hold from), and the folder's `residency`
 /// (`../behavior/file-sync.md` § Relay serving → *A member on another nest*,
@@ -2244,7 +2351,7 @@ mod tests {
         );
     }
 
-    /// The federated floor (`on-demand-files.md` § Shared sets on a capability
+    /// The federated floor (`on-demand-files-shared-sets.md` § Shared sets on a capability
     /// host → *One mechanism*, question 2): the home nest's stamp of the set's
     /// owner-stamped `content_key_floor` refreshes the record last-writer-wins
     /// where `Some` (the home nest just read it off its row), CAS-skips when

@@ -44,6 +44,8 @@ public class ConnectedAppsViewModelTests
             ["connected_apps/lasts_until"] = "Until {time}",
             ["connected_apps/open_ended"] = "Until you disconnect it",
             ["connected_apps/blocked_since"] = "Blocked {time}",
+            ["connected_apps/consent_ends_holder"] =
+                "This app now uses a new key. Approving ends the access its earlier key was given.",
             ["settings/mail/credential_revoked"] = "Compromised — access revoked",
             ["atproto_settings/consent_heading"] = "An app wants to connect",
             ["atproto_settings/consent_client"] = "{name} — {client_id}",
@@ -147,6 +149,7 @@ public class ConnectedAppsViewModelTests
         long? lastUsedAtMillis = null,
         long? lastsUntilMillis = null,
         bool connected = true,
+        bool paused = false,
         MailAppPassword? mail = null) =>
         new(
             @key: key,
@@ -159,6 +162,7 @@ public class ConnectedAppsViewModelTests
             @lastUsedAtMillis: lastUsedAtMillis,
             @lastsUntilMillis: lastsUntilMillis,
             @connected: connected,
+            @paused: paused,
             @mail: mail);
 
     private static MailAppPassword MailRow(bool revoked = false) =>
@@ -170,14 +174,16 @@ public class ConnectedAppsViewModelTests
         string clientId = "https://example.com/oauth",
         string? clientName = null,
         string[]? scopes = null,
-        ConsentSetRow[]? sets = null) =>
+        ConsentSetRow[]? sets = null,
+        LocalizedText? ends = null) =>
         new(
             @consentIdHex: consentIdHex,
             @code: code,
             @clientId: clientId,
             @clientName: clientName,
             @scopeDescriptions: scopes ?? new[] { "See your basic account identity" },
-            @sets: sets ?? Array.Empty<ConsentSetRow>());
+            @sets: sets ?? Array.Empty<ConsentSetRow>(),
+            @ends: ends);
 
     private static (ConnectedAppsViewModel Vm, FakeMachine M) Make(
         ConnectedAppsSnapshot snap, string handle = "alice")
@@ -503,6 +509,34 @@ public class ConnectedAppsViewModelTests
         }));
 
         Assert.Contains("Some of that comes from app.bsky.untitled:", text);
+    }
+
+    [Fact]
+    public void A_key_replacement_card_ends_with_the_resolved_ends_line_after_the_sets()
+    {
+        UseRealStrings();
+        var text = ConnectedAppsViewModel.RequestText(Request(
+            sets: new[]
+            {
+                new ConsentSetRow(@nsid: "app.bsky.untitled", @title: null, @details: null,
+                    @memberDescriptions: Array.Empty<string>()),
+            },
+            ends: Text("connected_apps.consent_ends_holder")));
+
+        const string line = "This app now uses a new key. Approving ends the access its earlier key was given.";
+        Assert.EndsWith(line, text);
+        Assert.True(text.IndexOf("app.bsky.untitled", StringComparison.Ordinal)
+            < text.IndexOf(line, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void An_ordinary_card_shows_no_ends_line()
+    {
+        UseRealStrings();
+        var text = ConnectedAppsViewModel.RequestText(Request());
+
+        Assert.DoesNotContain("new key", text);
+        Assert.False(text.EndsWith('\n'));
     }
 
     [Fact]

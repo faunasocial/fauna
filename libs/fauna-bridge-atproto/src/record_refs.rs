@@ -119,14 +119,32 @@ fn quoted_uri(record: &Ipld) -> Option<&str> {
     }
 }
 
-/// The most blob refs one record may carry.
+/// The most distinct blob refs one record may carry.
 ///
 /// An honest record sits far below this (four embed images plus a link-card
 /// thumb); the cap is a defensive bound on a hostile record that nests blob
-/// shapes, not a design limit. Past it the walk stops collecting — see
-/// [`external_record_blob_refs`] for why a miss here only hurts the record's
-/// own author.
+/// shapes, not a design limit. Past it the walk **refuses**
+/// ([`TooManyBlobRefs`]) rather than truncating: a ref the walk dropped would
+/// be neither existence-checked nor stamped, and the sweep would delete its
+/// media (`atproto-pds-full.md` § F2 detail).
 pub const MAX_RECORD_BLOB_REFS: usize = 16;
+
+/// A record names more than [`MAX_RECORD_BLOB_REFS`] distinct blobs, so the
+/// walk cannot vouch for all of them. Every consumer must refuse the record
+/// instead of acting on a shortened list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TooManyBlobRefs;
+
+impl std::fmt::Display for TooManyBlobRefs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "a record may reference at most {MAX_RECORD_BLOB_REFS} distinct blobs"
+        )
+    }
+}
+
+impl std::error::Error for TooManyBlobRefs {}
 
 /// Extract every blob CID this record references, in walk order, deduplicated.
 ///
@@ -141,41 +159,44 @@ pub const MAX_RECORD_BLOB_REFS: usize = 16;
 /// this walk, and an unstamped row reads as unreferenced to the F2.4 GC — a
 /// miss becomes deleted user media.
 ///
-/// Never errors (the [`external_record_refs`] contract): bytes that do not
-/// decode yield no refs. That best-effort stance is safe because every
-/// consequence of a miss lands on the record's own author — an unannounced
-/// `#commit` blob, an unstamped row, an existence check not run — never on
-/// another account.
-pub fn external_record_blob_refs(dag_cbor: &[u8]) -> Vec<String> {
+/// Bytes that do not decode yield no refs (the [`external_record_refs`]
+/// best-effort stance: the nest's input-shape pass refuses them elsewhere).
+/// A record with more than [`MAX_RECORD_BLOB_REFS`] distinct refs is the one
+/// failure: it returns [`TooManyBlobRefs`], never a truncated list, because
+/// a truncated list is exactly the silent miss above.
+pub fn external_record_blob_refs(dag_cbor: &[u8]) -> Result<Vec<String>, TooManyBlobRefs> {
     let Ok(record) = serde_ipld_dagcbor::from_slice::<Ipld>(dag_cbor) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut out = Vec::new();
-    walk_blob_refs(&record, &mut out);
-    out
+    walk_blob_refs(&record, &mut out)?;
+    Ok(out)
 }
 
-fn walk_blob_refs(value: &Ipld, out: &mut Vec<String>) {
+fn walk_blob_refs(value: &Ipld, out: &mut Vec<String>) -> Result<(), TooManyBlobRefs> {
     match value {
         Ipld::Map(map) => {
             if let Some(cid) = blob_shape_cid(value)
                 && !cid.is_empty()
-                && out.len() < MAX_RECORD_BLOB_REFS
                 && !out.iter().any(|c| c == &cid)
             {
+                if out.len() >= MAX_RECORD_BLOB_REFS {
+                    return Err(TooManyBlobRefs);
+                }
                 out.push(cid);
             }
             for v in map.values() {
-                walk_blob_refs(v, out);
+                walk_blob_refs(v, out)?;
             }
         }
         Ipld::List(items) => {
             for v in items {
-                walk_blob_refs(v, out);
+                walk_blob_refs(v, out)?;
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
 /// The CID a `blob`-shaped map names, in either wire form.
@@ -431,7 +452,11 @@ mod tests {
 
     #[test]
     fn a_plain_post_references_no_blobs() {
-        assert!(external_record_blob_refs(&dag_cbor(post_json(json!({})))).is_empty());
+        assert!(
+            external_record_blob_refs(&dag_cbor(post_json(json!({}))))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -446,7 +471,7 @@ mod tests {
             },
         }));
         assert_eq!(
-            external_record_blob_refs(&dag_cbor(record)),
+            external_record_blob_refs(&dag_cbor(record)).unwrap(),
             vec![test_cid(10), test_cid(11)]
         );
     }
@@ -468,7 +493,7 @@ mod tests {
             },
         }));
         assert_eq!(
-            external_record_blob_refs(&dag_cbor(external)),
+            external_record_blob_refs(&dag_cbor(external)).unwrap(),
             vec![test_cid(12)]
         );
 
@@ -476,7 +501,7 @@ mod tests {
             "embed": { "$type": "app.bsky.embed.video", "video": blob_value(13) },
         }));
         assert_eq!(
-            external_record_blob_refs(&dag_cbor(video)),
+            external_record_blob_refs(&dag_cbor(video)).unwrap(),
             vec![test_cid(13)]
         );
 
@@ -486,7 +511,7 @@ mod tests {
             "steps": [ { "photo": blob_value(14) } ],
         });
         assert_eq!(
-            external_record_blob_refs(&dag_cbor(unknown_lexicon)),
+            external_record_blob_refs(&dag_cbor(unknown_lexicon)).unwrap(),
             vec![test_cid(14)]
         );
     }
@@ -506,7 +531,7 @@ mod tests {
             },
         }));
         assert_eq!(
-            external_record_blob_refs(&dag_cbor(record)),
+            external_record_blob_refs(&dag_cbor(record)).unwrap(),
             vec![test_cid(15)]
         );
     }
@@ -520,7 +545,7 @@ mod tests {
             "picture": { "cid": test_cid(16), "mimeType": "image/jpeg" },
         });
         assert_eq!(
-            external_record_blob_refs(&dag_cbor(legacy)),
+            external_record_blob_refs(&dag_cbor(legacy)).unwrap(),
             vec![test_cid(16)]
         );
 
@@ -528,40 +553,75 @@ mod tests {
             "$type": "com.example.other",
             "pin": { "cid": test_cid(17) },
         });
-        assert!(external_record_blob_refs(&dag_cbor(stray)).is_empty());
+        assert!(
+            external_record_blob_refs(&dag_cbor(stray))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
-    fn duplicate_blob_refs_are_emitted_once_and_the_cap_holds() {
+    fn duplicate_blob_refs_are_emitted_once() {
         let record = json!({
             "$type": "com.example.dup",
             "a": blob_value(18),
             "b": blob_value(18),
         });
         assert_eq!(
-            external_record_blob_refs(&dag_cbor(record)),
+            external_record_blob_refs(&dag_cbor(record)).unwrap(),
             vec![test_cid(18)]
         );
+    }
 
-        let hostile_entries: Vec<serde_json::Value> =
-            (0..40u8).map(|i| blob_value(100 + i)).collect();
-        let hostile = json!({ "$type": "com.example.many", "items": hostile_entries });
+    /// The cap REFUSES; it never truncates. A walk that stopped at 16
+    /// left refs 17+ unchecked and unstamped, and the sweep deleted their media.
+    #[test]
+    fn a_record_past_the_cap_is_refused_never_truncated() {
+        let at_cap: Vec<serde_json::Value> = (0..MAX_RECORD_BLOB_REFS as u8)
+            .map(|i| blob_value(100 + i))
+            .collect();
+        let at_cap = json!({ "$type": "com.example.many", "items": at_cap });
         assert_eq!(
-            external_record_blob_refs(&dag_cbor(hostile)).len(),
+            external_record_blob_refs(&dag_cbor(at_cap)).unwrap().len(),
             MAX_RECORD_BLOB_REFS
+        );
+
+        let over: Vec<serde_json::Value> = (0..=MAX_RECORD_BLOB_REFS as u8)
+            .map(|i| blob_value(100 + i))
+            .collect();
+        let over = json!({ "$type": "com.example.many", "items": over });
+        assert_eq!(
+            external_record_blob_refs(&dag_cbor(over)),
+            Err(TooManyBlobRefs)
+        );
+
+        // Duplicates do not count toward the cap.
+        let dups: Vec<serde_json::Value> = (0..40u8).map(|_| blob_value(100)).collect();
+        let dups = json!({ "$type": "com.example.many", "items": dups });
+        assert_eq!(
+            external_record_blob_refs(&dag_cbor(dups)).unwrap(),
+            vec![test_cid(100)]
         );
     }
 
     #[test]
     fn malformed_blob_input_yields_nothing_rather_than_failing() {
-        assert!(external_record_blob_refs(b"not dag-cbor at all").is_empty());
+        assert!(
+            external_record_blob_refs(b"not dag-cbor at all")
+                .unwrap()
+                .is_empty()
+        );
         // A `$type: "blob"` whose ref is a string rather than a link is not a
         // well-formed typed blob.
         let bad_ref = json!({
             "$type": "com.example.x",
             "b": { "$type": "blob", "ref": "not-a-link", "mimeType": "image/png" },
         });
-        assert!(external_record_blob_refs(&dag_cbor(bad_ref)).is_empty());
+        assert!(
+            external_record_blob_refs(&dag_cbor(bad_ref))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// **The drift pin, media axis.** The nest resolves the images
@@ -607,7 +667,7 @@ mod tests {
             let bytes = dag_cbor(record);
             let parsed = parse_post_record(&bytes)
                 .unwrap_or_else(|e| panic!("fixture {name} reverse-translates: {e}"));
-            let walked = external_record_blob_refs(&bytes);
+            let walked = external_record_blob_refs(&bytes).unwrap();
             for img in &parsed.images {
                 assert!(
                     walked.contains(&img.cid),

@@ -21,6 +21,7 @@
 uniffi::setup_scaffolding!("fauna_client_connected_apps");
 
 pub mod client;
+pub mod compose;
 pub mod machine;
 pub mod nest_api;
 pub mod observer;

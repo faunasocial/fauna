@@ -3,6 +3,7 @@ using Xunit;
 using FaunaApp.Core.Models;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
+using uniffi.fauna_core;
 using uniffi.fauna_ffi;
 
 namespace FaunaApp.Tests;
@@ -364,6 +365,82 @@ public class SettingsViewModelTests
         Assert.Equal(7, vm.KeyPackageCount);
         Assert.True(vm.IsMlsAvailable);
         Assert.Contains("KeypackageCount", rpc.Calls);
+    }
+
+    // The Encryption page's low flag is the shared threshold
+    // (fauna_conversations::keypackages_low — fewer than five), read over the real
+    // FFI; five is healthy, four is low, and nothing is low before a read.
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(4, true)]
+    [InlineData(5, false)]
+    [InlineData(20, false)]
+    public async Task Load_FlagsKeyPackagesLow_OnlyBelowTheSharedThreshold(int count, bool expectedLow)
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextIdentity = new IdentityInfo("abc123", "alice", "https://nest.example.com"),
+            NextKeypackageCount = count,
+        };
+        var vm = new SettingsViewModel(new MockNestHttpClient(), rpc);
+        Assert.False(vm.IsKeyPackageLow, "nothing is low before a count has been read");
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Equal(expectedLow, vm.IsKeyPackageLow);
+    }
+
+    [Fact]
+    public async Task RefreshKeyPackages_TopsUpThroughTheManager_ThenReReadsCountAndFlag()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextIdentity = new IdentityInfo("abc123", "alice", "https://nest.example.com"),
+            NextKeypackageCount = 2,
+        };
+        var manager = new RecordingKeyPackageManager(() => rpc.NextKeypackageCount = 20);
+        var vm = new SettingsViewModel(new MockNestHttpClient(), rpc, keyPackageManager: manager);
+        await vm.LoadCommand.ExecuteAsync(null);
+        Assert.True(vm.IsKeyPackageLow);
+        Assert.Empty(manager.Targets);
+
+        await vm.RefreshKeyPackagesCommand.ExecuteAsync(null);
+
+        Assert.Equal(new[] { SettingsViewModel.KeyPackageRefreshTarget }, manager.Targets);
+        Assert.Equal(20, vm.KeyPackageCount);
+        Assert.False(vm.IsKeyPackageLow);
+        Assert.False(vm.IsRefreshingKeyPackages);
+        Assert.Equal(2, rpc.Calls.Count(c => c == "KeypackageCount"));
+    }
+
+    [Fact]
+    public async Task Load_NeverMintsKeyPackages()
+    {
+        // The goal forbids an auto-mint on page load — the low flag is read-only.
+        var rpc = new MockNestRpcClient
+        {
+            NextIdentity = new IdentityInfo("abc123", "alice", "https://nest.example.com"),
+            NextKeypackageCount = 0,
+        };
+        var manager = new RecordingKeyPackageManager(() => { });
+        var vm = new SettingsViewModel(new MockNestHttpClient(), rpc, keyPackageManager: manager);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.True(vm.IsKeyPackageLow);
+        Assert.Empty(manager.Targets);
+    }
+
+    private sealed class RecordingKeyPackageManager(Action onEnsure) : uniffi.fauna_conversations.ConversationsManagerFakeBase
+    {
+        public List<ulong> Targets { get; } = new();
+
+        public override Task<ulong> EnsureKeypackages(ulong target)
+        {
+            Targets.Add(target);
+            onEnsure();
+            return Task.FromResult(target);
+        }
     }
 
     [Fact]
@@ -739,24 +816,49 @@ public class StatusViewModelTests
     }
 
     [Fact]
-    public void LastSyncText_NullReturnsNeverBaseline()
+    public async Task Load_BuildsNodeAndMlsLegs_AndAbsentSyncLegWhenAgentUnreachable()
     {
-        // No completed transfer/clean pass yet (a fresh agent, or one that has
-        // never synced) reads as the shared "Never" baseline — the same
-        // null-baseline idiom as BackupsViewModel.LastUploadText/LastAuditText.
-        Assert.Equal(Strings.Get("common/never"), StatusViewModel.LastSyncText(null, 1_700_000_000_000L));
+        var rpc = new MockNestRpcClient { NextStatusNode = new FfiNodeLeg("nest.example.com", "9.8.7") };
+        var vm = new StatusViewModel(new MockNestHttpClient(), rpc, new FakeAgentStatusProbe(),
+            secureChannelCount: () => 3);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Equal("nest.example.com", vm.StatusLegs.@node?.@domain);
+        Assert.Equal("9.8.7", vm.StatusLegs.@node?.@version);
+        Assert.Equal(3UL, vm.StatusLegs.@mls?.@channels);
+        // No local agent answered: the sync leg is absent, its section is not painted.
+        Assert.Null(vm.StatusLegs.@sync);
     }
 
     [Fact]
-    public void LastSyncText_SecondsRendersThroughSharedRelativeTime()
+    public async Task Load_SyncLegComesFromTheAgentRead()
     {
-        // A real reading is unix SECONDS (the FFI contract) rendered through the
-        // shared ValueFormat.RelativeTime, which wants epoch MILLISECONDS —
-        // pins the ×1000 conversion, the same trap FileVersionFormatTests guards.
-        const long now = 1_700_000_000_000L;
-        const ulong secs = 1_699_999_700UL; // 5 minutes before "now"
-        var expected = ValueFormat.RelativeTime(now, (long)secs * 1000);
-        Assert.Equal(expected, StatusViewModel.LastSyncText(secs, now));
+        var probe = new FakeAgentStatusProbe
+        {
+            SyncStatus = FfiAgentSyncStatusFixture.Make(
+                connected: true, syncing: false, filesPending: 5, bytesPending: 1024, lastSync: 9000),
+        };
+        var vm = new StatusViewModel(new MockNestHttpClient(), new MockNestRpcClient(), probe);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Equal(5UL, vm.StatusLegs.@sync?.@filesPending);
+        Assert.Equal(1024UL, vm.StatusLegs.@sync?.@bytesPending);
+        Assert.Equal(9000UL, vm.StatusLegs.@sync?.@lastSync);
+        // No channel-count source wired (tests) ⇒ the MLS leg stays absent.
+        Assert.Null(vm.StatusLegs.@mls);
+    }
+
+    [Fact]
+    public async Task Load_FailedNodeRead_LeavesNodeLegAbsent()
+    {
+        var rpc = new MockNestRpcClient { NextError = "nest unreachable" };
+        var vm = new StatusViewModel(new MockNestHttpClient(), rpc, new FakeAgentStatusProbe());
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Null(vm.StatusLegs.@node);
     }
 
     [Fact]
@@ -799,6 +901,105 @@ public class EventsViewModelTests
                 MockNestRpcClient.MakeCaldavCalendar("c1", "Work", "#ff0000"),
             },
         };
+
+    // ── calendar-level .ics import / export (events.md § Import / Export) ──────
+
+    private static string NewScratchDir()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "fauna-ics-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task ImportCalendarFile_WithNoFileChosen_SaysSo_AndImportsNothing(string? path)
+    {
+        var rpc = CreateRpcWithCalendars();
+        var vm = new EventsViewModel(rpc)
+        {
+            SelectedCalendar = new CalendarInfo("c1", "Work", "#ff0000", null),
+        };
+
+        await vm.ImportCalendarFileAsync(path);
+
+        // Said on error-message, never a silent no-op (e2e convention 2).
+        Assert.Equal(Strings.Get("events/ics_file_required"), vm.ErrorMessage);
+        Assert.DoesNotContain("CaldavImportCalendarIcs", rpc.Calls);
+    }
+
+    [Fact]
+    public async Task ImportCalendarFile_SendsTheFileToTheSelectedCalendar_AndSaysTheCounts()
+    {
+        var dir = NewScratchDir();
+        try
+        {
+            var file = Path.Combine(dir, "in.ics");
+            const string ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+            await File.WriteAllTextAsync(file, ics);
+            var rpc = CreateRpcWithCalendars();
+            rpc.NextCaldavImportResult = new FfiIcsImportResult(2, 1);
+            var vm = new EventsViewModel(rpc)
+            {
+                SelectedCalendar = new CalendarInfo("c1", "Work", "#ff0000", null),
+            };
+
+            await vm.ImportCalendarFileAsync("  " + file + "  ");
+
+            Assert.Equal(("c1", ics), rpc.LastCaldavImport);
+            Assert.Null(vm.ErrorMessage);
+            // imported, skipped, total — the shared events.import_result template.
+            Assert.Equal(Strings.Format("events/import_result", 2, 1, 3), vm.NoticeMessage);
+            // The calendar is re-read so the imported events list.
+            Assert.Contains("CaldavQueryEvents", rpc.Calls);
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
+    public async Task ExportSelectedCalendar_WritesOneIcsFile_AndNeverOverwritesAnEarlierExport()
+    {
+        var dir = NewScratchDir();
+        try
+        {
+            var rpc = CreateRpcWithCalendars();
+            rpc.NextCaldavExportIcs = "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n";
+            var vm = new EventsViewModel(rpc, () => dir)
+            {
+                SelectedCalendar = new CalendarInfo("c1", "Work", "#ff0000", null),
+            };
+
+            await vm.ExportSelectedCalendarAsync();
+            var first = Path.Combine(dir, "Work.ics");
+            Assert.Equal(new[] { first }, Directory.GetFiles(dir));
+            Assert.Equal(rpc.NextCaldavExportIcs, await File.ReadAllTextAsync(first));
+            Assert.Equal("c1", rpc.LastCaldavExportCalendar);
+            Assert.Equal(Strings.Format("events/calendar_exported", first), vm.NoticeMessage);
+
+            // A second export is a NEW file, the way a browser download is.
+            rpc.NextCaldavExportIcs = "BEGIN:VCALENDAR\r\nX-N:2\r\nEND:VCALENDAR\r\n";
+            await vm.ExportSelectedCalendarAsync();
+            var second = Path.Combine(dir, "Work (2).ics");
+            Assert.True(File.Exists(second));
+            Assert.Equal("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n", await File.ReadAllTextAsync(first));
+            Assert.Equal(Strings.Format("events/calendar_exported", second), vm.NoticeMessage);
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData("Work", "Work")]
+    [InlineData("a/b\\c:d", "a_b_c_d")]
+    [InlineData("  ..  ", "calendar")]
+    [InlineData("", "calendar")]
+    public void IcsExportPath_MakesTheCalendarNameASafeFileStem(string name, string stem)
+    {
+        var dir = NewScratchDir();
+        try { Assert.Equal(Path.Combine(dir, stem + ".ics"), IcsExportPath.Unused(dir, name)); }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
 
     [Fact]
     public async Task Load_PopulatesCalendars()
@@ -1813,7 +2014,7 @@ internal static class BackupsTestData
 
     public static uniffi.fauna_backups_machine.SnapshotDetail Detail(
         long id, params uniffi.fauna_backups_machine.SnapshotFileRow[] files) =>
-        new(id, files);
+        new(id, "", null, files);
 
     public static uniffi.fauna_backups_machine.SnapshotFileRow File(
         string path, long size = 512, string fileType = "regular") =>
@@ -2622,12 +2823,14 @@ public class BackupsViewModelTests
         public ulong StoreBytes { get; init; }
         public bool ReclaimStillHosting { get; init; }
         public Exception? StoreThrows { get; init; }
+        public FfiCustodianSourceRegression[]? SourceRegressions { get; init; }
         public int ReclaimCalls { get; private set; }
 
         public override Task<FfiCustodianStoreInfo> CustodianStore()
         {
             if (StoreThrows is { } ex) throw ex;
-            return Task.FromResult(FfiCustodianStoreInfoFixture.Make(bytes: StoreBytes));
+            return Task.FromResult(FfiCustodianStoreInfoFixture.Make(
+                bytes: StoreBytes, sourceRegressions: SourceRegressions));
         }
 
         public override Task<FfiCustodianReclaimOutcome> ReclaimCustodianStore()
@@ -2641,6 +2844,323 @@ public class BackupsViewModelTests
     private static BackupsViewModel WithAgent(
         MockNestRpcClient rpc, FakeAgentChannel? agent, string deviceId = ThisDevice) =>
         new(rpc, deviceId: deviceId, agentChannel: () => agent);
+
+    private static FfiDestinationAuditRow AuditRow(
+        string id, BackupAuditAlertReason? standing, params BackupAuditAlertReason[] reasons) =>
+        new(@destinationId: id, @lastPassedAt: null, @alertReason: standing,
+            @alertReasons: reasons, @recoverOffered: false);
+
+    /// An audit row whose shared offered-rule answered <paramref name="offered"/>.
+    private static FfiDestinationAuditRow OfferedAuditRow(string id, bool offered) =>
+        new(@destinationId: id, @lastPassedAt: null, @alertReason: null,
+            @alertReasons: new BackupAuditAlertReason[] { new BackupAuditAlertReason.SourceRegressed(3600L) },
+            @recoverOffered: offered);
+
+    private static async Task<(BackupsViewModel Vm, MockNestRpcClient Rpc)> RecoverVm(
+        FfiBackupDestinationView dest, bool offered)
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextDestinations = new[] { dest },
+            NextAuditRows = new[] { OfferedAuditRow(dest.destinationId, offered) },
+        };
+        var vm = new BackupsViewModel(rpc, deviceId: ThisDevice, auditStatePath: "state.json");
+        await vm.LoadDestinationsAsync();
+        await vm.RefreshAuditAsync();
+        return (vm, rpc);
+    }
+
+    /// A nest destination's regression banner carries the recover button (mirrors
+    /// tui's `a_nest_destinations_regression_banner_carries_the_recover_button_inside_it`).
+    [Fact]
+    public async Task RecoverButton_ANestRegressionBannerCarriesIt()
+    {
+        var (vm, _) = await RecoverVm(MockNestRpcClient.MakeDestination("d1", "https://b.test", "Offsite"), true);
+
+        var banner = Assert.Single(vm.AuditAlerts);
+        Assert.True(banner.OfferRecover);
+        Assert.Equal("d1", banner.DestinationId);
+    }
+
+    /// Another device's custodian row (the shared rule answers not-offered) paints
+    /// no button (mirrors tui's `another_devices_custodian_row_carries_no_recover_button`).
+    [Fact]
+    public async Task RecoverButton_ARowTheSharedRuleDoesNotOfferCarriesNone()
+    {
+        var (vm, _) = await RecoverVm(MockNestRpcClient.MakeDestination("d1", "https://b.test", "Offsite"), false);
+
+        Assert.False(Assert.Single(vm.AuditAlerts).OfferRecover);
+    }
+
+    private static FfiBackupDestinationView OwnDeviceRecoverRow() =>
+        MockNestRpcClient.MakeDestination(
+            "d1", "", "This laptop", kind: FaunaFfiMethods.DestinationKindClientDevice(),
+            custodianDeviceId: ThisDevice);
+
+    /// This device's own custodian row paints the button when the shared rule
+    /// offers it — taken whole, no narrowing (android's
+    /// `anOwnClientDeviceBanner_carriesTheRecoverButton`).
+    [Fact]
+    public async Task RecoverButton_AnOwnClientDeviceBannerCarriesIt()
+    {
+        var (vm, _) = await RecoverVm(OwnDeviceRecoverRow(), true);
+
+        Assert.True(Assert.Single(vm.AuditAlerts).OfferRecover);
+    }
+
+    /// Another device's custodian row (the shared rule answers not-offered) paints
+    /// none (android's `anotherDevicesClientDeviceBanner_carriesNone`).
+    [Fact]
+    public async Task RecoverButton_AnotherDevicesClientDeviceBannerCarriesNone()
+    {
+        var (vm, _) = await RecoverVm(OwnDeviceRecoverRow(), false);
+
+        Assert.False(Assert.Single(vm.AuditAlerts).OfferRecover);
+    }
+
+    /// The own-row confirm runs the agent verb once — never the nest face — and
+    /// paints its result lines, then re-reads the audit.
+    [Fact]
+    public async Task RecoverConfirm_OnTheOwnRowRunsTheAgentVerbNotTheNestFace()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextDestinations = new[] { OwnDeviceRecoverRow() },
+            NextAuditRows = new[] { OfferedAuditRow("d1", true) },
+            NextRecoveryResult = new FfiRecoveryResult(true, new[] { "Mail: 2 recovered" }),
+        };
+        var vm = new BackupsViewModel(
+            rpc, deviceId: ThisDevice, auditStatePath: "state.json",
+            agentChannel: () => new FakeAgentChannel());
+        await vm.LoadDestinationsAsync();
+        await vm.RefreshAuditAsync();
+        var passesBefore = rpc.Calls.Count(c => c == "BackupAuditRunPass");
+
+        vm.ArmRecover("d1");
+        await vm.ConfirmRecoverAsync();
+
+        Assert.Equal(1, rpc.OwnStoreRecoverRuns);
+        Assert.Empty(rpc.RecoverRuns);
+        Assert.Equal("Mail: 2 recovered", vm.RecoverResultText);
+        Assert.Equal(passesBefore + 1, rpc.Calls.Count(c => c == "BackupAuditRunPass"));
+    }
+
+    /// No agent on this device: the own-row confirm folds into the stop sentence
+    /// and runs nothing.
+    [Fact]
+    public async Task RecoverConfirm_OnTheOwnRowWithNoAgentSaysItStopped()
+    {
+        var (vm, rpc) = await RecoverVm(OwnDeviceRecoverRow(), true);
+
+        vm.ArmRecover("d1");
+        await vm.ConfirmRecoverAsync();
+
+        Assert.Equal(0, rpc.OwnStoreRecoverRuns);
+        Assert.Empty(rpc.RecoverRuns);
+        Assert.Equal("backups/backup_recover_failed", vm.RecoverResultText);
+    }
+
+    /// The confirm arms only over a painted button, and cancel is a clean no-op
+    /// (mirrors tui's `the_recover_confirm_arms_only_over_a_painted_button_and_cancels_cleanly`).
+    [Fact]
+    public async Task RecoverConfirm_ArmsOnlyOverAPaintedButtonAndCancelsCleanly()
+    {
+        var (vm, rpc) = await RecoverVm(MockNestRpcClient.MakeDestination("d1", "https://b.test", "Offsite"), false);
+        vm.ArmRecover("d1");
+        Assert.Null(vm.RecoverConfirming);
+
+        (vm, rpc) = await RecoverVm(MockNestRpcClient.MakeDestination("d1", "https://b.test", "Offsite"), true);
+        vm.ArmRecover("not-a-banner");
+        Assert.Null(vm.RecoverConfirming);
+        vm.ArmRecover("d1");
+        Assert.Equal("d1", vm.RecoverConfirming);
+        vm.CancelRecover();
+        Assert.Null(vm.RecoverConfirming);
+        Assert.Empty(rpc.RecoverRuns);
+    }
+
+    /// A confirmed recovery runs the face once with this device's id, the clicked
+    /// banner's destination and the audit state path, then re-reads the audit pass
+    /// (mirrors tui's `a_confirmed_recovery_runs_once_and_says_so`).
+    [Fact]
+    public async Task RecoverConfirm_RunsOnceThenReReadsTheAudit()
+    {
+        var (vm, rpc) = await RecoverVm(MockNestRpcClient.MakeDestination("d1", "https://b.test", "Offsite"), true);
+        var passesBefore = rpc.Calls.Count(c => c == "BackupAuditRunPass");
+
+        vm.ArmRecover("d1");
+        await vm.ConfirmRecoverAsync();
+        await vm.ConfirmRecoverAsync(); // nothing armed: a second confirm is a no-op
+
+        var run = Assert.Single(rpc.RecoverRuns);
+        Assert.Equal((ThisDevice, "d1", "state.json"), run);
+        Assert.Null(vm.RecoverConfirming);
+        Assert.Equal(passesBefore + 1, rpc.Calls.Count(c => c == "BackupAuditRunPass"));
+    }
+
+    /// The finished run paints the shared result lines verbatim (mirrors tui's
+    /// `a_finished_recovery_paints_the_shared_result_lines`).
+    [Fact]
+    public async Task RecoverResult_PaintsTheSharedLines()
+    {
+        var (vm, rpc) = await RecoverVm(MockNestRpcClient.MakeDestination("d1", "https://b.test", "Offsite"), true);
+        rpc.NextRecoveryResult = new FfiRecoveryResult(false, new[] { "Not complete.", "Mail: 2 recovered" });
+
+        vm.ArmRecover("d1");
+        await vm.ConfirmRecoverAsync();
+
+        Assert.Equal("Not complete." + "\n" + "Mail: 2 recovered", vm.RecoverResultText);
+        Assert.False(vm.RecoverRunning);
+    }
+
+    /// A run that never reached the end folds into the stop sentence, never a raw
+    /// error banner.
+    [Fact]
+    public async Task RecoverResult_AFailedRunSaysItStopped()
+    {
+        var (vm, rpc) = await RecoverVm(MockNestRpcClient.MakeDestination("d1", "https://b.test", "Offsite"), true);
+        rpc.NextError = "boom";
+
+        vm.ArmRecover("d1");
+        await vm.ConfirmRecoverAsync();
+
+        // Unit tests resolve a string to its key (no resw loaded), so the stop
+        // sentence reads as its key; the {reason} fold is the page's resw.
+        Assert.Equal("backups/backup_recover_failed", vm.RecoverResultText);
+        Assert.False(vm.RecoverRunning);
+    }
+
+    /// While a run is in flight every recover button is disarmed and the result
+    /// carries the running line.
+    [Fact]
+    public async Task RecoverRunning_DisarmsEveryButton()
+    {
+        var (vm, rpc) = await RecoverVm(MockNestRpcClient.MakeDestination("d1", "https://b.test", "Offsite"), true);
+        rpc.RecoverGate = new TaskCompletionSource();
+
+        vm.ArmRecover("d1");
+        var run = vm.ConfirmRecoverAsync();
+        Assert.True(vm.RecoverRunning);
+        Assert.NotNull(vm.RecoverResultText);
+        vm.ArmRecover("d1");
+        Assert.Null(vm.RecoverConfirming);
+
+        rpc.RecoverGate.SetResult();
+        await run;
+        Assert.False(vm.RecoverRunning);
+    }
+
+    /// The recovery notice's open window paints a named banner — the fifth reason
+    /// alone, with no standing verdict behind it (mirrors tui's
+    /// `an_open_recovery_window_paints_a_named_banner`).
+    [Fact]
+    public async Task AuditAlerts_AnOpenRecoveryWindowPaintsANamedBanner()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextDestinations = new[] { MockNestRpcClient.MakeDestination("d1", "", "Offsite") },
+            NextAuditRows = new[]
+            {
+                AuditRow("d1", null, new BackupAuditAlertReason.SourceRegressed(3600L)),
+            },
+        };
+        var vm = new BackupsViewModel(rpc, deviceId: ThisDevice, auditStatePath: "state.json");
+
+        await vm.LoadDestinationsAsync();
+        await vm.RefreshAuditAsync();
+
+        var banner = Assert.Single(vm.AuditAlerts);
+        Assert.Contains("source_regress", banner.Text);
+    }
+
+    /// A closed window (no reasons) paints nothing (mirrors tui's
+    /// `a_closed_recovery_window_paints_nothing`).
+    [Fact]
+    public async Task AuditAlerts_AClosedRecoveryWindowPaintsNothing()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextDestinations = new[] { MockNestRpcClient.MakeDestination("d1", "", "Offsite") },
+            NextAuditRows = new[] { AuditRow("d1", null) },
+        };
+        var vm = new BackupsViewModel(rpc, deviceId: ThisDevice, auditStatePath: "state.json");
+
+        await vm.LoadDestinationsAsync();
+        await vm.RefreshAuditAsync();
+
+        Assert.Empty(vm.AuditAlerts);
+    }
+
+    /// A standing verdict AND an open recovery window paint TWO banners in the one
+    /// flat list (mirrors tui's `a_standing_verdict_and_an_open_window_paint_two_banners`).
+    [Fact]
+    public async Task AuditAlerts_AStandingVerdictAndAnOpenWindowPaintTwoBanners()
+    {
+        var standing = new BackupAuditAlertReason.Overdue(86_400L * 40);
+        var rpc = new MockNestRpcClient
+        {
+            NextDestinations = new[] { MockNestRpcClient.MakeDestination("d1", "", "Offsite") },
+            NextAuditRows = new[]
+            {
+                AuditRow("d1", standing, standing, new BackupAuditAlertReason.SourceRegressed(null)),
+            },
+        };
+        var vm = new BackupsViewModel(rpc, deviceId: ThisDevice, auditStatePath: "state.json");
+
+        await vm.LoadDestinationsAsync();
+        await vm.RefreshAuditAsync();
+
+        Assert.Equal(2, vm.AuditAlerts.Count);
+        Assert.NotEqual(vm.AuditAlerts[0].Text, vm.AuditAlerts[1].Text);
+    }
+
+    /// The audit pass is handed this device's own custodian store read — device id
+    /// plus the store's standing source regressions — so the shared pass can fold
+    /// them into the row that assigns this device (android's
+    /// `BackupDestinationsVM.ownCustodian()` shape).
+    [Fact]
+    public async Task RefreshAuditAsync_HandsThePassTheOwnCustodianStoreRead()
+    {
+        var regression = new FfiCustodianSourceRegression(
+            @ledger: "sets/a/ledger", @held: 9u, @served: 4u, @observedAt: 1_700_000_000L);
+        var rpc = new MockNestRpcClient
+        {
+            NextDestinations = new[] { MockNestRpcClient.MakeDestination("d1", "", "Offsite") },
+        };
+        var vm = new BackupsViewModel(
+            rpc, deviceId: ThisDevice, auditStatePath: "state.json",
+            agentChannel: () => new FakeAgentChannel
+            {
+                StoreBytes = 1024,
+                SourceRegressions = new[] { regression },
+            });
+
+        await vm.LoadDestinationsAsync();
+        await vm.RefreshAuditAsync();
+
+        Assert.NotNull(rpc.LastAuditOwnCustodian);
+        Assert.Equal(ThisDevice, rpc.LastAuditOwnCustodian!.deviceId);
+        Assert.Equal(new[] { regression }, rpc.LastAuditOwnCustodian.sourceRegressions);
+    }
+
+    /// A failed store read (or no agent) passes null — "no store was read", which
+    /// leaves the row's record standing rather than clearing it.
+    [Fact]
+    public async Task RefreshAuditAsync_PassesNullWhenTheStoreReadFails()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextDestinations = new[] { MockNestRpcClient.MakeDestination("d1", "", "Offsite") },
+        };
+        var vm = new BackupsViewModel(
+            rpc, deviceId: ThisDevice, auditStatePath: "state.json",
+            agentChannel: () => new FakeAgentChannel { StoreThrows = new InvalidOperationException("pipe") });
+
+        await vm.LoadDestinationsAsync();
+        await vm.RefreshAuditAsync();
+
+        Assert.Null(rpc.LastAuditOwnCustodian);
+    }
 
     /// The whole point of the row: a store this device still holds with NO
     /// destination row left to justify it. Without the row, that disk space is
@@ -3289,7 +3809,47 @@ public class BackupsViewModelTests
 
         await vm.RestoreAsync();
 
-        Assert.Equal("restore the wrapped-MLS blobs too before restarting the bridge", vm.RestoreWarning);
+        // The shared string keyed off the typed bool, never the reply's diagnostic note.
+        Assert.Equal(Strings.Get("backups/restore_warning_config_absent"), vm.RestoreWarning);
+        Assert.NotEqual("restore the wrapped-MLS blobs too before restarting the bridge", vm.RestoreWarning);
+    }
+
+    [Fact]
+    public async Task Restore_ConfigAbsent_EmptyNote_StillSurfacesSharedWarning()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextMessageKindSnapshots = new[] { MockNestRpcClient.MakeSnapshotSummary(7, "mail") },
+            NextRestoreReply = new uniffi.fauna_ffi.FfiSnapshotRestoreReply(7, "mail", false, ""),
+        };
+        var vm = new BackupsViewModel(rpc);
+        await vm.LoadRestoreAsync();
+        vm.RestoreConfirmInput = "7";
+
+        await vm.RestoreAsync();
+
+        Assert.Equal(Strings.Get("backups/restore_warning_config_absent"), vm.RestoreWarning);
+    }
+
+    [Fact]
+    public async Task Restore_WarningClearsOnNextClick_AndIsNullOnArrival()
+    {
+        var rpc = new MockNestRpcClient
+        {
+            NextMessageKindSnapshots = new[] { MockNestRpcClient.MakeSnapshotSummary(7, "mail") },
+            NextRestoreReply = new uniffi.fauna_ffi.FfiSnapshotRestoreReply(7, "mail", false, "diag"),
+        };
+        var vm = new BackupsViewModel(rpc);
+        await vm.LoadRestoreAsync();
+        Assert.Null(vm.RestoreWarning);                     // page arrival
+        vm.RestoreConfirmInput = "7";
+        await vm.RestoreAsync();
+        Assert.NotNull(vm.RestoreWarning);
+
+        rpc.NextRestoreReply = new uniffi.fauna_ffi.FfiSnapshotRestoreReply(7, "mail", true, "");
+        await vm.RestoreAsync();                            // next click, complete restore
+
+        Assert.Null(vm.RestoreWarning);
     }
 
     // ── Immediate-delete modal (backups.md § User actions + invariant line 309) ──
@@ -3422,12 +3982,15 @@ public class BackupDestinationStatusTests
     // FfiBackupDestinationStatus::audit_state doc). That is the right default for the
     // rows below, which predate the carrier and assert nothing about auditing; a test
     // that means "audited and passing" must pass AUDIT_STATE_OK explicitly.
+    // `writerState` likewise defaults to null — a client-device row's "no writer verdict",
+    // never "refused" (FfiBackupDestinationStatus::writer_state doc).
     private static FfiBackupDestinationStatus Status(
         string id, ulong? lastUpload, uint backlog,
         ulong? heldBytes = null, string? capState = null,
-        string? auditState = null, ulong? lastAuditPassedAt = null) =>
+        string? auditState = null, ulong? lastAuditPassedAt = null,
+        string? writerState = null) =>
         new FfiBackupDestinationStatus(
-            id, lastUpload, backlog, heldBytes, capState, auditState, lastAuditPassedAt);
+            id, lastUpload, backlog, heldBytes, capState, auditState, lastAuditPassedAt, writerState);
 
     [Fact]
     public void LastUploadText_IsNever_WhenNoStatusOrNoUpload()
@@ -3458,6 +4021,39 @@ public class BackupDestinationStatusTests
     {
         Assert.Equal("0 queued", BackupsViewModel.BacklogText(null));
         Assert.Equal("5 queued", BackupsViewModel.BacklogText(Status("a", null, 5)));
+    }
+
+    [Fact]
+    public void BacklogText_ARefusedWriter_ReadsRefused_NeverAQueue()
+    {
+        // backup-destinations.md § A refused writer is a state, never a lag: the
+        // writer_state rides the shared label IN PLACE OF the count, so a row with a
+        // large backlog that the destination turned away must not read "N queued".
+        var text = BackupsViewModel.BacklogText(Status("a", null, 5, writerState: "refused"));
+        // The unit-test host has no localizer, so the shared LocalizedText resolves to
+        // its key (see the NOTE on Strings.Get below) — the key IS the refused text.
+        Assert.Equal("backups.backup_destination_writer_refused", text);
+        Assert.DoesNotContain("queued", text);
+    }
+
+    [Fact]
+    public async Task AddDestination_SeatHeld_SurfacesTheSharedText()
+    {
+        // fauna.backup.writer_seat_held reaches the app as the FFI error string (the
+        // shared WRITER_SEAT_HELD text); the add dialog shows the VM's ErrorMessage
+        // unchanged, so the shared text must survive MapDestinationError → ShowError.
+        const string seatHeld =
+            "This destination already keeps your account's backup from another box. Nothing was added.";
+        var rpc = new MockNestRpcClient
+        {
+            NextDestinationException = new FfiException.General(seatHeld),
+        };
+        var vm = new BackupsViewModel(rpc);
+
+        var ok = await vm.AddDestinationAsync("https://held.example.com/", "X");
+
+        Assert.False(ok);
+        Assert.Contains("already keeps your account's backup from another box", vm.ErrorMessage);
     }
 
     [Fact]
@@ -3768,13 +4364,13 @@ public class ModerationViewModelQueueTests
                 Row("spam", action: 1, perMille: 900, contentId: "deadbeef"),
             },
         };
-        var vm = new ModerationViewModel(rpc);
+        var calls = new List<(string ContentId, bool IsSpam)>();
+        var vm = new ModerationViewModel(rpc, spamWrite: new RecordingCorrectionSeam(calls));
         await vm.LoadCommand.ExecuteAsync(null);
 
         await vm.TrainCommand.ExecuteAsync(vm.Actions[0]);
 
-        Assert.NotNull(rpc.LastTrain);
-        Assert.Equal("deadbeef", rpc.LastTrain!.Value.ContentId);
-        Assert.Equal("ham", rpc.LastTrain!.Value.Verdict);
+        // The not-spam ("ham") correction goes through the one shared flow.
+        Assert.Equal(new[] { ("deadbeef", false) }, calls);
     }
 }

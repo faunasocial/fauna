@@ -162,6 +162,20 @@ rotate.
   delegate one to another member of the nest (a moderator handling `abuse@`,
   say). Sending a role address to a mailbox outside the deployment isn't
   available yet.
+- **DMARC reports never reach anyone's inbox.** The big mail providers send
+  your domain a daily report on who sent mail in its name. Your nest reads
+  these reports itself and keeps them for 90 days, instead of filling the
+  admin's inbox with compressed attachments. Malformed reports, and reports
+  about a domain your nest doesn't serve, are dropped. A screen to read the
+  reports in isn't in the app yet. Your nest returns the favour: once a day it
+  sends each domain that asks for reports in its DMARC record one report on
+  the mail it received claiming to be from that domain, from
+  `dmarc-report@` at your main domain.
+- **TLS failure reports never reach anyone's inbox either.** Mail servers
+  that had trouble making an encrypted connection to your nest send a daily
+  report saying so. Your nest reads those itself too, keeps them for 90 days,
+  and drops broken ones and ones about a domain it doesn't serve. A screen to
+  read them in isn't in the app yet.
 - **More than one domain** on the same nest works: register additional
   domains on the admin page, and each gets its own DKIM keys, policies, and
   addresses.
@@ -209,7 +223,9 @@ settings page, not a separate service you sign up for.
   many subscribers it will reach and how much of today's sending allowance
   you've used — and warns you when you're close to the limit, or when this send
   would go past it. Each subscriber gets their own copy; your sent mail shows
-  the send once, with one progress line for the whole send.
+  the send once, with one progress line for the whole send. An issue goes out
+  from your own address or from the list's own; a send that names anyone else
+  as its sender is refused before it reaches a single subscriber.
 - **One-click unsubscribe is handled for you.** Every message the list sends
   carries the standard headers modern mail apps read, so a recipient's
   "Unsubscribe" button just works — over the web or by mail, whichever their
@@ -251,13 +267,39 @@ Honest status, because this is the part everyone asks about:
 - **Available:** a proper **import wizard** (connect to Gmail/iCloud with an
   app password, or any IMAP server with a hostname/username/password, copy
   everything in, deduplicated and resumable) — pick the source, choose which
-  mailboxes and how far back, review the total, and watch it run with
-  pause/resume/cancel and a per-message skip/error log. "How far back" is a
+  mailboxes and how far back, review how many messages and roughly how much
+  data are coming, and watch it run with
+  pause/resume/cancel, a count of what each mailbox has brought so far, and
+  a per-message skip/error log. "How far back" is a
   single date written as `2023-11-14`: everything that arrived on that day or
   after it comes across and nothing older does, so a "just the last year"
-  move costs you no storage for the decade before it. Outlook's one-click
-  sign-in isn't wired yet — use its IMAP fallback (same as generic IMAP) in
-  the meantime.
+  move costs you no storage for the decade before it. Trash, Junk or Spam,
+  and Gmail's All Mail, Bin, Important and Starred start unticked (they hold
+  discards or copies of mail another mailbox already has) — tick any of them
+  to bring it too. If the connection fails, the wizard says whether it could
+  not sign in, could not reach the server or could not secure the
+  connection, with a tip for Gmail, Outlook and iCloud. If your Fauna
+  mailbox fills up, or the connection drops and does not come back, the
+  import pauses with the reason and resumes from where it stopped — after a
+  full mailbox, from the first message that did not fit, even if you closed
+  the app in between. Close the
+  app in the middle of an import and open it again, and the import wizard
+  brings you back to the same import's progress: type your old provider's
+  password again (the app never keeps it) and press **Resume**, and it carries
+  on where it stopped, with the same mailboxes and the same "how far back"
+  date. For an IMAP server other than Gmail or iCloud, check the port and
+  connection security beside the password too — they start at 993 with
+  implicit TLS. If your old
+  provider stops accepting your password part-way through — you changed it
+  there, say — the import stops and asks you to start again with the new one;
+  if too many messages in a row cannot be read, it stops and says so. Either
+  way the mail that already arrived stays. When the import finishes,
+  **Review skipped** lists every message that didn't come across and why —
+  too large, already in your mailbox, unreadable — and any old mailbox that
+  had disappeared by the time the import reached it. Outlook's
+  one-click sign-in isn't wired yet, and Microsoft no longer accepts a
+  password from a mail app, so an Outlook, Hotmail or Office 365 mailbox
+  can't be brought over until it is.
 - **Moving out** is the next section: export is now built, starting with the
   terminal app, the Linux and Windows desktop apps, and the Mac, iPhone, iPad
   and Android apps.
@@ -280,8 +322,10 @@ Open **Settings → Mail → Export**. It is a five-step wizard:
    anything you do not want. You can narrow it to a date range, and you can
    choose to strip the transit headers — the routing trail a message picks up on
    its way to you — if you would rather not carry that along.
-3. **Review.** A summary of what you just chose, and roughly how many messages
-   that is.
+3. **Review.** A summary of what you just chose: how many messages that is,
+   roughly how large the archive will be, and roughly how long it will take.
+   Both are estimates. If you picked a date range, the real export can only
+   be smaller and quicker. Nothing starts until you press **Start export**.
 4. **While it runs.** A progress screen with a bar and a per-mailbox count. You
    can pause and resume it, or cancel it outright. A big mailbox takes a while;
    you can leave the screen and come back.
@@ -309,8 +353,10 @@ A few things worth knowing:
   cannot read — a message sealed to a key this account no longer holds, say — it
   stops the whole export rather than quietly leaving the message out, and records
   what went wrong. Your other devices see the same thing: the export is marked
-  failed, with the folder and message it stopped on, not merely gone. Fix the
-  cause and run it again.
+  failed, with the folder and message it stopped on, not merely gone — and it is
+  still there after you close and reopen the app. **Dismiss** clears it and takes
+  you back to the first step; starting a new export clears it too. Fix the cause
+  and run it again.
 - **It is yours to delete.** The finished archive sits on the server for 30 days
   so you can fetch it from another device, then goes on its own. **Discard** on
   the Done step removes it straight away.
@@ -344,7 +390,7 @@ any mail app at your mailbox and copy the folders out.
 | Newsletters/mailing lists: create a list, manage members (one at a time or pasted in bulk), send to a list from Conversations with its reach and daily allowance shown first, per-member unsubscribe & re-subscribe, standards-compliant one-click unsubscribe | **Available** |
 | Personal spam training (in-app + Junk-folder moves), history, undo, reset | **Available** |
 | Opt-in spam-report sharing: your flag joins an anonymized count (visible only once 3+ people on your nest flag the same message) your nest shares with peer nests, with a "what this nest publishes" transparency view | **Available** — off by default |
-| New-IP warm-up & blocklist self-check | **Available** (automatic; admin tuning knobs planned) |
-| Import wizard from Gmail/iCloud (app password) or any IMAP server | **Available** — Outlook's one-click sign-in isn't wired yet; use its IMAP fallback meanwhile |
+| New-IP warm-up & blocklist self-check | **Available** (automatic) |
+| Import wizard from Gmail/iCloud (app password) or any IMAP server | **Available** — Outlook's sign-in with Microsoft isn't wired yet, and Microsoft no longer accepts passwords from mail apps, so Outlook, Hotmail and Office 365 mailboxes wait on it |
 | Mailbox export (mbox/Maildir/EML zip), sealed so the server cannot read it, with pause/resume/cancel | **Available** in every app — the terminal app, the web app, the Linux and Windows desktop apps, and the Mac, iPhone, iPad and Android apps |
 | Large attachments | **Available** up to roughly 50 MB per message, sending and receiving. A larger message is refused immediately with a permanent "too large" reply, so the sender is told at once rather than left retrying — and your mail app sees the real limit when it connects, instead of a wrong one. |

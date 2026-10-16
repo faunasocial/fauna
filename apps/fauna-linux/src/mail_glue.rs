@@ -326,7 +326,7 @@ pub fn build_atproto_settings_machine(
 ) -> Result<std::sync::Arc<fauna_atproto_settings_machine::AtprotoSettingsMachine>, String> {
     let keypair = ActorKeypair::from_secret_hex(client.secret_hex())
         .map_err(|e| format!("decode secret_hex: {e}"))?;
-    let consent_grants = consent_grant_seams(&keypair);
+    let consent_grants = consent_grant_seams(&keypair, client.nest_rpc().clone());
     let machine = fauna_atproto_settings_machine::build_atproto_settings_machine(
         client.nest_rpc().clone(),
         keypair,
@@ -358,6 +358,7 @@ pub fn build_atproto_settings_machine(
 /// either answers a third-party app's records request.
 pub fn consent_grant_seams(
     keypair: &ActorKeypair,
+    nest: std::sync::Arc<fauna_client::NestClient>,
 ) -> std::sync::Arc<fauna_atproto_settings_machine::ConsentGrantSeams> {
     let door = std::sync::Arc::new(fauna_client_config::ResolvingLedgerStore::new(
         crate::account_runtime::handle,
@@ -367,6 +368,7 @@ pub fn consent_grant_seams(
             keypair,
             door.clone(),
             door,
-        ),
+        )
+        .with_nest_custody(crate::account_runtime::folder_key_store(), nest),
     )
 }

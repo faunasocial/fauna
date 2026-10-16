@@ -106,12 +106,11 @@ public static class NotificationService
 
     /// <summary>
     /// The title is always <c>notifications/knock_title</c>; the body is the
-    /// shared <c>knock_text_for</c> decision, resolved and sanitized by
+    /// shared <c>knock_text_for</c> decision, resolved by
     /// <see cref="KnockToastText.For"/> (`notifications.md` § Localized body
-    /// → *The knock toast*) — never the raw sender id alone. Tagged with the
-    /// sender's 8-hex prefix (the same prefix the fallback sentence names) so
-    /// a repeat knock from the same stranger replaces the earlier toast
-    /// instead of stacking one per fresh key.
+    /// → *The knock toast*) — never the raw sender id alone. Every knock is
+    /// tagged <see cref="KnockToastBuilder.Tag"/> so a new knock replaces the
+    /// earlier toast, however many distinct senders knock.
     /// </summary>
     internal static void ShowKnockNotification(FfiKnock knock)
     {
@@ -119,12 +118,7 @@ public static class NotificationService
         try
         {
             var (title, body) = KnockToastText.For(knock);
-            var tag = knock.senderId.Length > 8 ? knock.senderId[..8] : knock.senderId;
-            var builder = new AppNotificationBuilder()
-                .AddText(title)
-                .AddText(body)
-                .SetTag(tag);
-            AppNotificationManager.Default.Show(builder.BuildNotification());
+            AppNotificationManager.Default.Show(KnockToastBuilder.Build(title, body));
         }
         catch { }
     }

@@ -22,7 +22,7 @@ use fauna_bridge_atproto::outbound::{
     translate_post_bytes_for_projection, translate_profile_bytes_for_projection,
 };
 
-use crate::FfiError;
+use crate::{FfiError, general_err};
 
 /// Deterministic record key for a projected post (D-s3-2): the 13-char
 /// base32-sortable TID string for
@@ -338,11 +338,14 @@ pub fn atproto_extract_record_refs(record_cbor: Vec<u8>) -> Vec<String> {
 /// The bridge fills the `#commit` frame's `blobs` field from this, and the
 /// nest stamps `atproto_blobs.referenced_at` from the same Rust walk — one
 /// walker, two consumers, so the frame's announcement and the GC guard cannot
-/// disagree about which blobs a record names. Infallible like the refs
-/// extraction above: unreadable bytes announce nothing.
+/// disagree about which blobs a record names. Unreadable bytes announce
+/// nothing, like the refs extraction above; a record naming more than
+/// `MAX_RECORD_BLOB_REFS` distinct blobs is an **error**, never a truncated
+/// list — the nest refuses such a write before it commits, and a caller that
+/// still meets one must not announce or resolve a shortened set.
 #[uniffi::export]
-pub fn atproto_extract_blob_refs(record_cbor: Vec<u8>) -> Vec<String> {
-    fauna_bridge_atproto::record_refs::external_record_blob_refs(&record_cbor)
+pub fn atproto_extract_blob_refs(record_cbor: Vec<u8>) -> Result<Vec<String>, FfiError> {
+    fauna_bridge_atproto::record_refs::external_record_blob_refs(&record_cbor).map_err(general_err)
 }
 
 /// Translate stored Fauna profile bytes (the signed embed-as-bytes wire

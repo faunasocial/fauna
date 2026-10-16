@@ -124,6 +124,124 @@ export async function createAdminNatModeMachine(
   );
 }
 
+// ── NestRetireMachine (the nest_retire page) ──────────────────────────────
+//
+// The wasm twin of the shared `NestRetireMachine`
+// (`fauna_onboarding_machine::retire`; nest-retirement.md § Where logic
+// lives). The page renders `snapshotJson()` and dispatches; every gate, every
+// sentence and the run's binding to the confirmed server are the machine's.
+// Lives in this pre-auth chunk because `launch_retry` opens it with no nest.
+
+/** A `StepState` as `snapshotJson` carries it (serde, externally tagged). */
+export type RetireStepState =
+  | 'Pending'
+  | 'Running'
+  | 'Done'
+  | { Skipped: { why: string } }
+  | { Failed: { cause: string } };
+
+export type RetireTransferCodeState =
+  | 'Unsupported'
+  | 'Idle'
+  | 'Fetching'
+  | { Code: { code: string } }
+  | { AvailableAfter: { when: string } };
+
+export interface RetireServerRow {
+  server_id: string;
+  name: string;
+  ipv4: string | null;
+  domain: string | null;
+  secondary_domains: string[];
+  marked: boolean;
+  current: boolean;
+  transfer_code: RetireTransferCodeState;
+}
+
+export interface RetireSnapshot {
+  phase: 'Credentials' | 'Listing' | 'List' | 'Confirm' | 'Running' | 'Done';
+  servers: RetireServerRow[];
+  selected: string | null;
+  steps: { step: 'Dns' | 'Server'; state: RetireStepState }[];
+  confirm_name: string;
+  confirm_enabled: boolean;
+  force_server_offered: boolean;
+  error: string | null;
+  retired: RetireServerRow | null;
+}
+
+/** A credential field the selected provider shows (`visibleFieldsJson`). */
+export interface RetireField {
+  id: string;
+  label_key: string;
+  field_type: string;
+}
+
+export interface NestRetireMachine {
+  snapshotJson(): string;
+  addCandidateDomains(domains: string[]): void;
+  setHeldDnsJson(providerIds: string[], credsJson: string[]): void;
+  setRememberedSlotsJson(dkim: string, atproto: string, faunaSelf: string): void;
+  selectProvider(providerId: string): void;
+  setCredentialField(fieldId: string, value: string): void;
+  select(serverId: string): void;
+  beginConfirm(): void;
+  setConfirmName(typed: string): void;
+  back(): void;
+  cancel(): void;
+  verify(): Promise<void>;
+  fetchTransferCode(): Promise<void>;
+  confirm(): Promise<void>;
+  retry(): Promise<void>;
+  forceServer(): Promise<void>;
+  resolveCurrentHost(host: string): Promise<boolean>;
+  hostedAuthBegin(fieldId: string): Promise<string | null>;
+  hostedAuthWait(fieldId: string): Promise<void>;
+  hostedAuthCanBegin(fieldId: string): boolean;
+  hostedAuthButtonText(fieldId: string): string;
+  selectedProvider(): string | undefined;
+  visibleFieldsJson(): string;
+  canVerify(): boolean;
+  expectAppInputs(): void;
+  appInputsLanded(): void;
+  setInputError(message: string): void;
+  stepLabelJson(step: string): string;
+  stepNoteJson(stateJson: string): string;
+  stepStatusJson(stateJson: string): string;
+  confirmSummaryJson(): string;
+  leftoverLinesJson(): string;
+  transferCodeNoteJson(serverId: string): string;
+  free(): void;
+}
+
+/** Build the page's machine. All inputs optional (the launch entry opens cold);
+ *  `providerBaseUrl` is the e2e fake-cloud seam — the wizard's `vps` override —
+ *  and `dohBaseUrl` the e2e public-DNS resolver seam (its `doh` override); only a
+ *  test build ever sets either. */
+export async function createNestRetireMachine(
+  candidateDomains: string[],
+  providerBaseUrl: string | undefined,
+  dohBaseUrl: string | undefined,
+): Promise<NestRetireMachine> {
+  await ensureOnboardingWasm();
+  type Ctor = new (
+    candidateDomains: string[],
+    currentIpv4: string | undefined,
+    heldDnsProviderIds: string[],
+    heldDnsCredsJson: string[],
+    providerBaseUrl: string | undefined,
+    dohBaseUrl: string | undefined,
+  ) => NestRetireMachine;
+  return new (wasm() as unknown as { NestRetireMachine: Ctor }).NestRetireMachine(
+    candidateDomains,
+    undefined,
+    [],
+    [],
+    providerBaseUrl,
+    dohBaseUrl,
+  );
+}
+
 // ── Sync helpers (caller must have awaited ensureOnboardingWasm) ──
 
 export function formatPrice(cents: bigint, currency: string): string {
@@ -211,6 +329,18 @@ export function provisioningStatusGlyph(status: string): string {
 /// surface: "read by all 7 apps — never seven hand-copied numbers."
 export function inviteRecheckPollMs(): number {
   return (wasm() as unknown as { inviteRecheckPollMs: () => number }).inviteRecheckPollMs();
+}
+
+/// The signed-out lock door's confirmation line (`ui/sessions.md` § Layout &
+/// flow → *The signed-out door*) — the shared `EmergencyLockoutOutcome::message`
+/// table's `Locked` arm over the unlock time the SPA formatted itself
+/// (`format_unix_local` is native-only). Painted on `identity_choice`'s
+/// `error-message` after a lock lands.
+export function emergencyLockoutLockedMessage(unlockTime: string): LocalizedText {
+  const json = (
+    wasm() as unknown as { emergencyLockoutLockedMessageJson: (t: string) => string }
+  ).emergencyLockoutLockedMessageJson(unlockTime);
+  return JSON.parse(json) as LocalizedText;
 }
 
 /// The `awaiting_manual_dns` page's poll cadence in ms — see

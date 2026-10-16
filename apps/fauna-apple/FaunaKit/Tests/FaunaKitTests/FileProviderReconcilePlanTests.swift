@@ -11,7 +11,7 @@ import Testing
 
     /// Headless pins for the reconcile's wrapper over the shared-Rust presence
     /// plan (`FileProviderCoordinator.plan` → `onDemandPresencePlan` —
-    /// `on-demand-files.md` § Apple File Provider binding, *the actor-scoped
+    /// `on-demand-files-apple.md` § Apple File Provider binding, *the actor-scoped
     /// device identity* + § Multi-account × File Provider, consequence 2). The
     /// plan's rules are pinned in Rust (`fauna_folders_machine::on_demand_presence`,
     /// where these cases were ported one-for-one); what stays here is the Swift

@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use fauna_atproto_settings_machine::consent_grant::{self, AnswerError};
 use fauna_atproto_settings_machine::{
-    ConsentCardRow, ConsentGrantSeams, NestConsentRow, consent_card_row, consent_folder_names,
-    scope_words,
+    ConsentCardRow, ConsentGrantSeams, ConsentSetRow, NestConsentRow, consent_card_row,
+    consent_folder_names, grant_set, oracle_class_words, scope_words,
 };
 use fauna_client_capabilities::grant_log;
 use fauna_client_capabilities::view_model::{
@@ -24,12 +24,13 @@ use fauna_core::secret::SecretString;
 use fauna_core::succession_ledger::SuccessionLedger;
 use fauna_protocol::atproto_pds::{AtprotoGrantInfo, AtprotoSessionInfo};
 use fauna_protocol::nostr::BunkerAppEntry;
-use fauna_protocol::principals::PrincipalInfo;
+use fauna_protocol::principals::{OracleOp, OracleSummary, PrincipalInfo};
 
 use crate::nest_api::{ConnectedAppsApiError, ConnectedAppsNestApi};
 use crate::observer::ConnectedAppsObserver;
 use crate::snapshots::{
-    BlockedAppRow, ConnectedAppRow, ConnectedAppsSnapshot, MailAppPassword, VERBATIM_KEY, class,
+    BlockedAppRow, ConnectedAppRow, ConnectedAppsSnapshot, MailAppPassword, OracleOpRow,
+    OracleRecord, OracleSummaryRow, VERBATIM_KEY, class,
 };
 
 /// "Failed to load connected apps: {message}".
@@ -72,6 +73,8 @@ const SIGNER_SCOPE_KEY: &str = "connected_apps.scope_nostr_sign";
 const MAIL_SCOPE_KEY: &str = "connected_apps.scope_mail";
 /// "Could not read the secret: {message}".
 const SECRET_ERROR_KEY: &str = "connected_apps.error_secret";
+/// "Could not read what your nest did for this app: {message}".
+const RECORD_ERROR_KEY: &str = "connected_apps.error_record";
 
 /// Row-key prefixes. The key is how the machine — never the app — picks the
 /// revoke verb for a row (`connected-apps.md` § User actions).
@@ -97,6 +100,12 @@ struct State {
     /// approve compares the consent's attested keys to.
     principal_keys: Vec<RosterKeys>,
     blocked: Vec<BlockedAppRow>,
+    /// The open per-operation record, at most one.
+    record: Option<OracleRecord>,
+    /// The account's external-apps switch is OFF, as the last read that
+    /// answered said — what pauses the external-app plane's rows. Default
+    /// `false`: the flag's own default is ON.
+    external_apps_off: bool,
     error: Option<LocalizedText>,
 }
 
@@ -182,6 +191,7 @@ impl ConnectedAppsMachine {
             requests: s.requests.clone(),
             principals: s.principals.clone(),
             blocked: s.blocked.clone(),
+            record: s.record.clone(),
             error: s.error.clone(),
         }
     }
@@ -282,8 +292,11 @@ impl ConnectedAppsMachine {
             seams.as_deref(),
             &row,
             approved,
+            // The card's folder picker is unbuilt: a
+            // bare folder-plane row is refused until it chooses.
+            None,
             |blob| nest.mint_grant(blob),
-            |id, approved| nest.resolve_consent(id, approved),
+            |id, approved, folder| nest.resolve_consent(id, approved, folder),
             |grant_id| nest.revoke_grant(grant_id),
         )
         .await;
@@ -320,7 +333,7 @@ impl ConnectedAppsMachine {
                 if let Ok(id) = hex::decode(&consent_id_hex) {
                     // Best-effort: the block alone already hides the card; a
                     // failed decline leaves a row that simply expires.
-                    let _ = self.nest_api.resolve_consent(id, false).await;
+                    let _ = self.nest_api.resolve_consent(id, false, None).await;
                 }
             }
             Err(e) => self.set_error(keyed(BLOCK_ERROR_KEY, e.detail())),
@@ -402,12 +415,78 @@ impl ConnectedAppsMachine {
             }
         }
     }
+
+    /// Open one principal's per-operation record (`fauna.principals.ops`),
+    /// read on demand and never kept beyond the page: the custodians keep the
+    /// record, the app keeps none of its own (`connected-apps.md` § Layout &
+    /// flow, region 3). Opening another row's record closes this one. Notifies
+    /// once with the record open and not yet loaded, then again with it
+    /// loaded; a failed read closes it and sets the page error. A key that
+    /// names no principal row opens nothing.
+    pub async fn open_record(&self, key: String) {
+        {
+            let mut s = self.state.lock().unwrap();
+            if !s.principals.iter().any(|r| r.key == key) || key_principal_id(&key).is_none() {
+                return;
+            }
+            s.record = Some(OracleRecord {
+                key: key.clone(),
+                loaded: false,
+                ops: Vec::new(),
+            });
+        }
+        self.observer.on_changed();
+        let result = self.read_record(&key).await;
+        let failed = {
+            let mut s = self.state.lock().unwrap();
+            // A close, or another row's open, while the read was in flight
+            // wins: this answer is for a record no longer on screen.
+            if !s.record.as_ref().is_some_and(|r| r.key == key) {
+                return;
+            }
+            match result {
+                Ok(ops) => {
+                    s.record = Some(OracleRecord {
+                        key,
+                        loaded: true,
+                        ops,
+                    });
+                    s.error = None;
+                    None
+                }
+                Err(e) => {
+                    s.record = None;
+                    Some(e)
+                }
+            }
+        };
+        if let Some(e) = failed {
+            self.set_error(keyed(RECORD_ERROR_KEY, e.detail()));
+        }
+        self.observer.on_changed();
+    }
+
+    /// Close the open record. Notifies.
+    pub fn close_record(&self) {
+        self.state.lock().unwrap().record = None;
+        self.observer.on_changed();
+    }
 }
 
 impl ConnectedAppsMachine {
     fn set_error(&self, err: LocalizedText) {
         tracing::warn!(target: "fauna_connected_apps", "{}", err.log_line());
         self.state.lock().unwrap().error = Some(err);
+    }
+
+    /// One principal row's record, worded. An `Unavailable` read (a nest that
+    /// answers no record) is an empty record, never an error.
+    async fn read_record(&self, key: &str) -> Result<Vec<OracleOpRow>, ConnectedAppsApiError> {
+        let Some(id) = key_principal_id(key) else {
+            return Ok(Vec::new());
+        };
+        unavailable_is_empty(self.nest_api.list_principal_ops(id).await)
+            .map(|ops| ops.iter().map(oracle_op_row).collect())
     }
 
     fn consent_grant_seams(&self) -> Option<Arc<ConsentGrantSeams>> {
@@ -587,6 +666,31 @@ impl ConnectedAppsMachine {
         let consents = unavailable_is_empty(self.nest_api.list_pending_consents().await);
         let blocked = unavailable_is_empty(self.nest_api.list_blocked_clients().await);
         let grant_log = self.load_grant_log().await;
+        // The open record is part of the page: a re-read re-reads it too.
+        let open_record = self
+            .state
+            .lock()
+            .unwrap()
+            .record
+            .as_ref()
+            .map(|r| r.key.clone());
+        let record = match open_record {
+            Some(key) => {
+                let ops = self.read_record(&key).await;
+                Some((key, ops))
+            }
+            None => None,
+        };
+        // A failed switch read keeps the last answer: an unknown flag never
+        // repaints a paused row as working.
+        let external_apps_off = match self.nest_api.external_apps_enabled().await {
+            Ok(enabled) => !enabled,
+            Err(ConnectedAppsApiError::Unavailable { .. }) => false,
+            Err(e) => {
+                fail(e);
+                self.state.lock().unwrap().external_apps_off
+            }
+        };
 
         let mail = match mail {
             Ok(mail) => Some(mail),
@@ -616,6 +720,7 @@ impl ConnectedAppsMachine {
                     bunker,
                     mail.unwrap_or_default(),
                     grant_log.as_ref(),
+                    external_apps_off,
                 );
                 Some((rows, holders, fresh_mail))
             }
@@ -655,6 +760,7 @@ impl ConnectedAppsMachine {
         };
 
         let mut s = self.state.lock().unwrap();
+        s.external_apps_off = external_apps_off;
         if let Some((mut roster, holders, fresh_mail)) = roster {
             if !fresh_mail {
                 roster.extend(s.principals.iter().filter(|r| r.mail.is_some()).cloned());
@@ -663,6 +769,31 @@ impl ConnectedAppsMachine {
             s.principals = roster;
             s.principal_keys = holders;
             s.loaded = true;
+        }
+        // A record whose row left the roster (revoked here or elsewhere)
+        // closes; a failed re-read keeps the record on screen, like every
+        // other read, and sets the page error.
+        if let Some((key, ops)) = record {
+            let still_listed = s.principals.iter().any(|r| r.key == key);
+            let still_open = s.record.as_ref().is_some_and(|r| r.key == key);
+            if !still_listed {
+                s.record = None;
+            } else if still_open {
+                match ops {
+                    Ok(ops) => {
+                        s.record = Some(OracleRecord {
+                            key,
+                            loaded: true,
+                            ops,
+                        });
+                    }
+                    Err(e) => {
+                        if error.is_none() {
+                            error = Some(keyed(RECORD_ERROR_KEY, e.detail()));
+                        }
+                    }
+                }
+            }
         }
         if let Some(blocked) = blocked {
             s.blocked = blocked;
@@ -746,6 +877,35 @@ fn principal_key(p: &PrincipalInfo) -> String {
     format!("{PRINCIPAL}{}", hex::encode(&p.principal_id))
 }
 
+/// The principal id a principal row's key carries; `None` for every other
+/// class of row.
+fn key_principal_id(key: &str) -> Option<Vec<u8>> {
+    hex::decode(key.strip_prefix(PRINCIPAL)?).ok()
+}
+
+/// One oracle operation, worded: the class through the consent card's
+/// describe path ([`oracle_class_words`] — the ATProto write door's
+/// `atproto.commit` included), a class this build does not know as
+/// its name, and the detail verbatim — both control-stripped, as every field
+/// the nest relays from a third party's request is.
+fn oracle_op_row(op: &OracleOp) -> OracleOpRow {
+    let words = oracle_class_words(&op.class).unwrap_or_else(|| op.class.clone());
+    OracleOpRow {
+        at_millis: secs_to_millis(op.at.max(0) as u64),
+        class: op.class.clone(),
+        words: verbatim(&words),
+        detail: verbatim(&op.detail),
+    }
+}
+
+fn oracle_summary_row(summary: &OracleSummary) -> OracleSummaryRow {
+    OracleSummaryRow {
+        ops_in_window: summary.ops_in_window,
+        requests_served: summary.requests_served,
+        last_op: summary.last_op.as_ref().map(oracle_op_row),
+    }
+}
+
 /// The principal's attested X25519 holder key — `None` for a standard client
 /// that presented none.
 fn holder_key(p: &PrincipalInfo) -> Option<[u8; 32]> {
@@ -799,14 +959,33 @@ fn oauth_lasts_until(client_id: &str, grants: &[AtprotoGrantInfo]) -> Option<i64
     live.iter().filter_map(|g| g.expires_at).max()
 }
 
+/// The permission sets a principal's live OAuth grants were made from, each
+/// once (by NSID, first grant first), composed by the consent card's own
+/// function so the row says what the card said (`atproto-oauth-provider.md`
+/// § Implementation status today). A suspended grant's sets are not shown:
+/// the row describes what the app can reach now, as `oauth_lasts_until` does.
+fn principal_sets(client_id: &str, grants: &[AtprotoGrantInfo]) -> Vec<ConsentSetRow> {
+    let mut seen = std::collections::BTreeSet::new();
+    grants
+        .iter()
+        .filter(|g| g.client_id == client_id && !g.suspended)
+        .flat_map(|g| g.sets.iter())
+        .filter(|s| seen.insert(s.nsid.clone()))
+        .map(|s| grant_set(s.clone()))
+        .collect()
+}
+
 fn now_epoch_secs() -> u64 {
     fauna_core::data::Timestamp::now_secs().max(0) as u64
 }
 
+/// `paused`: the account's external-apps switch is OFF, which suspends every
+/// principal (`atproto-pds-full.md` § F1 detail, the kill-switch bullet).
 fn principal_row(
     p: &PrincipalInfo,
     grants: &[AtprotoGrantInfo],
     grant_log: Option<&SuccessionLedger>,
+    paused: bool,
 ) -> ConnectedAppRow {
     ConnectedAppRow {
         key: principal_key(p),
@@ -818,17 +997,31 @@ fn principal_row(
             .into_iter()
             .map(|w| verbatim(&w))
             .collect(),
+        sets: principal_sets(&p.client_id, grants),
         created_at_millis: p.created_at,
         last_used_at_millis: p.last_used_at,
         lasts_until_millis: principal_lasts_until(p, grants, grant_log),
-        connected: p.live_grants > 0,
+        connected: (p.live_grants > 0 || is_hosted(&p.execution_form)) && !paused,
+        paused,
         mail: None,
+        signer_burned: false,
+        oracle: p.oracle.as_ref().map(oracle_summary_row),
     }
 }
 
+/// A hosted plugin's binding (`wasm` / `container`) holds no token and so no
+/// grant family: its row is its reach, so it is connected while it exists
+/// (`third-party.md` § The principal model → *Hosted principals*).
+fn is_hosted(execution_form: &str) -> bool {
+    matches!(execution_form, class::WASM | class::CONTAINER)
+}
+
 /// An ATProto app-password session: a client that signed in with one of the
-/// user's app passwords.
-fn app_password_row(s: &AtprotoSessionInfo) -> ConnectedAppRow {
+/// user's app passwords. On the external-app plane, so the switch pauses it.
+/// It has no principal, so the oracle summary of its writes at the
+/// `atproto.commit` door rides the session read itself; its per-operation
+/// record has no read (`open_record` opens principal rows only).
+fn app_password_row(s: &AtprotoSessionInfo, paused: bool) -> ConnectedAppRow {
     let label = s.client_note.as_deref().or(s.credential_id.as_deref());
     ConnectedAppRow {
         key: format!("{SESSION}{}", hex::encode(&s.session_id)),
@@ -837,11 +1030,15 @@ fn app_password_row(s: &AtprotoSessionInfo) -> ConnectedAppRow {
         client_id: None,
         publisher: None,
         scope_descriptions: Vec::new(),
+        sets: Vec::new(),
         created_at_millis: s.created_at,
         last_used_at_millis: s.last_refreshed_at,
         lasts_until_millis: Some(s.expires_at),
-        connected: true,
+        connected: !paused,
+        paused,
         mail: None,
+        signer_burned: false,
+        oracle: s.oracle.as_ref().map(oracle_summary_row),
     }
 }
 
@@ -856,15 +1053,19 @@ fn mail_row(c: &MailCredentialSummary) -> ConnectedAppRow {
         client_id: None,
         publisher: None,
         scope_descriptions: vec![LocalizedText::key(MAIL_SCOPE_KEY)],
+        sets: Vec::new(),
         created_at_millis: secs_to_millis(c.created_at),
         last_used_at_millis: None,
         lasts_until_millis: None,
         connected: !c.revoked,
+        paused: false,
         mail: Some(MailAppPassword {
             mua_username: c.mua_username.clone(),
             kind: credential_kind_badge(c.kind),
             revoked: c.revoked,
         }),
+        signer_burned: false,
+        oracle: None,
     }
 }
 
@@ -874,9 +1075,12 @@ fn secs_to_millis(secs: u64) -> i64 {
         .saturating_mul(1000)
 }
 
-/// A NIP-46 signer client — the bunker roster's row.
+/// A NIP-46 signer client — the bunker roster's row. A connection the
+/// identity-succession burn killed (`status == "burned"`) is listed, not
+/// connected — like a burned mail password.
 fn signer_row(b: &BunkerAppEntry) -> ConnectedAppRow {
     let pending = b.status == "pending";
+    let burned = b.status == "burned";
     let name = if !b.label.trim().is_empty() {
         verbatim(&b.label)
     } else if pending {
@@ -891,18 +1095,25 @@ fn signer_row(b: &BunkerAppEntry) -> ConnectedAppRow {
         client_id: None,
         publisher: None,
         scope_descriptions: vec![LocalizedText::key(SIGNER_SCOPE_KEY)],
+        sets: Vec::new(),
         created_at_millis: secs_to_millis(b.created_at),
         last_used_at_millis: b.last_used_at.map(secs_to_millis),
         lasts_until_millis: Some(secs_to_millis(b.expires_at)),
-        connected: !pending,
+        connected: !pending && !burned,
+        paused: false,
         mail: None,
+        signer_burned: burned,
+        oracle: None,
     }
 }
 
 /// The one roster. Every OAuth grant belongs to a principal row and is not
 /// listed again (a row is never shown twice). OAuth-plane sessions are always
 /// covered by a grant; app-password sessions, signer clients and mail app
-/// passwords are rows of their own. Oldest first ([`sort_roster`]).
+/// passwords are rows of their own. Oldest first ([`sort_roster`]). The
+/// external-apps switch OFF pauses the principals and the app-password
+/// sessions — the external-app plane — never a signer client or a mail app
+/// password.
 fn compose_roster(
     principals: Vec<PrincipalInfo>,
     grants: Vec<AtprotoGrantInfo>,
@@ -910,16 +1121,17 @@ fn compose_roster(
     bunker: Vec<BunkerAppEntry>,
     mail: Vec<MailCredentialSummary>,
     grant_log: Option<&SuccessionLedger>,
+    external_apps_off: bool,
 ) -> Vec<ConnectedAppRow> {
     let mut rows: Vec<ConnectedAppRow> = principals
         .iter()
-        .map(|p| principal_row(p, &grants, grant_log))
+        .map(|p| principal_row(p, &grants, grant_log, external_apps_off))
         .collect();
     rows.extend(
         sessions
             .iter()
             .filter(|s| s.plane != "oauth")
-            .map(app_password_row),
+            .map(|s| app_password_row(s, external_apps_off)),
     );
     rows.extend(bunker.iter().map(signer_row));
     rows.extend(mail.iter().map(mail_row));

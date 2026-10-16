@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.settings
 
+import com.fauna.app.ui.navigation.exitAdminToPrimary
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -32,6 +33,7 @@ import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.AdminUsersVM
 import com.fauna.ffi.FfiAdminInviteCode
 import com.fauna.ffi.FfiAdminInviteRequest
+import com.fauna.ffi.FfiAdminPendingAction
 import com.fauna.ffi.FfiAdminUser
 import com.fauna.ffi.FfiAdminUserRowControls
 import com.fauna.ffi.FfiAgeBandOption
@@ -60,6 +62,7 @@ fun AdminUsersScreen(
     vm: AdminUsersVM = hiltViewModel()
 ) {
     val pendingRequests by vm.pendingRequests.collectAsState()
+    val pendingActions by vm.pendingActions.collectAsState()
     val inviteCodes by vm.inviteCodes.collectAsState()
     val users by vm.users.collectAsState()
     val allUsers by vm.allUsers.collectAsState()
@@ -86,6 +89,7 @@ fun AdminUsersScreen(
 
     AdminUsersContent(
         pendingRequests = pendingRequests,
+        pendingActions = pendingActions,
         inviteCodes = inviteCodes,
         users = users,
         allUsers = allUsers,
@@ -98,7 +102,7 @@ fun AdminUsersScreen(
         unknownRegistrationMode = unknownRegistrationMode,
         maxFreeUsers = maxFreeUsers,
         ageVerificationRequired = ageVerificationRequired,
-        onBack = { navController.popBackStack() },
+        onBack = { navController.exitAdminToPrimary() },
         onSetUserTier = vm::setUserTier,
         onCreateCode = vm::createInviteCode,
         onDeleteCode = vm::deleteInviteCode,
@@ -109,10 +113,12 @@ fun AdminUsersScreen(
         onCancelEviction = vm::cancelEviction,
         onMakeAdmin = vm::makeAdmin,
         onRemoveAdmin = vm::removeAdmin,
+        onApprovePendingAction = vm::approvePendingAction,
+        onCancelPendingAction = vm::cancelPendingAction,
         onNextPage = vm::nextPage,
         onPrevPage = vm::prevPage,
         onSaveRegistration = vm::saveRegistration,
-        onAdmitUser = { actor, handle, tier -> vm.admitUser(actor, handle, tier, admitActorHint) },
+        onAdmitUser = { actor, handle, tier, guardian -> vm.admitUser(actor, handle, tier, guardian, admitActorHint) },
     )
 }
 
@@ -120,6 +126,8 @@ fun AdminUsersScreen(
 @Composable
 fun AdminUsersContent(
     pendingRequests: List<FfiAdminInviteRequest>,
+    // Section 6 — still-`pending` admin actions (admin.md § Pending admin actions).
+    pendingActions: List<FfiAdminPendingAction> = emptyList(),
     inviteCodes: List<FfiAdminInviteCode>,
     users: List<FfiAdminUser>,
     // Every account on the nest — the guardian pickers' source (Pending
@@ -160,6 +168,9 @@ fun AdminUsersContent(
     onCancelEviction: (FfiAdminUser) -> Unit,
     onMakeAdmin: (FfiAdminUser) -> Unit,
     onRemoveAdmin: (FfiAdminUser) -> Unit,
+    // Pending admin actions section: approve / cancel one row (one click each).
+    onApprovePendingAction: (FfiAdminPendingAction) -> Unit = {},
+    onCancelPendingAction: (FfiAdminPendingAction) -> Unit = {},
     // Users-section pagination (admin-users-pagination / -prev-page /
     // -next-page): step to the next/previous page, or no-op at a boundary —
     // the shared stepper (`fauna_core::format::{next,prev}_page_offset`)
@@ -172,9 +183,10 @@ fun AdminUsersContent(
     // section is read-only (no Save button renders then).
     onSaveRegistration: (FfiRegistrationMode, String, Boolean) -> Unit,
     // Section: Admit — direct admission, one `fauna.admin.users.create` call
-    // (actorHex, handle, tier). Validation (64-hex actor id) is a VM concern
-    // (mirrors tui/linux); this screen passes through whatever was typed.
-    onAdmitUser: (actorHex: String, handle: String, tier: String) -> Unit,
+    // (actorHex, handle, tier, guardianActorId — null for "None"). Validation
+    // (64-hex actor id) is a VM concern (mirrors tui/linux); this screen passes
+    // through whatever was typed. No age band is sent from this section.
+    onAdmitUser: (actorHex: String, handle: String, tier: String, guardianActorId: ByteArray?) -> Unit,
     // Shared `fauna_core::format::hex_full` display encoder (value-formatting.md
     // § Hex id display), injected FFI-free so the Robolectric harness stays off
     // the native path.
@@ -216,6 +228,9 @@ fun AdminUsersContent(
     claimedAgeBandOption: (String?) -> String = { com.fauna.ffi.claimedAgeBandOption(it) },
     ageClaimLabel: (String?, String?) -> LocalizedText = { band, provenance -> com.fauna.ffi.ageClaimLabel(band, provenance) },
     ageBandLabel: (String) -> LocalizedText? = { com.fauna.ffi.ageBandLabel(it) },
+    // Shared `fauna_core::format::format_unix_local` timestamp (same as the
+    // Settings pending-actions card), injected FFI-free for Robolectric.
+    absoluteLocal: (Long) -> String = { com.fauna.app.ui.util.ValueFormat.absoluteLocal(it) },
 ) {
     val bandSelect = remember(ageBandNotSet) { AgeBandSelectSpec(ageBandOptions, ageBandNotSet) }
     Scaffold(
@@ -255,7 +270,7 @@ fun AdminUsersContent(
                 registrationMode, unknownRegistrationMode, maxFreeUsers, ageVerificationRequired, onSaveRegistration,
             )
             HorizontalDivider()
-            AdmitSection(tiers, onAdmitUser)
+            AdmitSection(tiers, allUsers, guardianOption, onAdmitUser)
             HorizontalDivider()
             InviteSection(
                 inviteCodes, tiers, allUsers, mintedCode, onCreateCode, onDeleteCode, hexFull, guardianOption,
@@ -267,6 +282,8 @@ fun AdminUsersContent(
                 onEvictUser, onSuspendUser, onCancelEviction, onMakeAdmin, onRemoveAdmin,
                 rowControls, onNextPage, onPrevPage, totalPages, currentPage,
             )
+            HorizontalDivider()
+            PendingActionsSection(pendingActions, onApprovePendingAction, onCancelPendingAction, absoluteLocal)
 
             actionError?.let {
                 Text(
@@ -277,6 +294,78 @@ fun AdminUsersContent(
                         .testTag(Ids.ADMIN_USERS_ACTION_ERROR)
                 )
             }
+        }
+    }
+}
+
+// ── Section 6: Pending admin actions ─────────────────────────────────────────
+
+/**
+ * The standing co-admin approve / veto surface (admin.md § Pending admin
+ * actions): one row per still-`pending` action with the shared description
+ * (`FfiAdminPendingAction.description`, derived in Rust with the scheduling
+ * admin's short id), when it applies, its approvals readout, and two one-click
+ * controls. tui twin: `apps/fauna-tui/src/admin/users.rs::pending_section`.
+ */
+@Composable
+private fun PendingActionsSection(
+    actions: List<FfiAdminPendingAction>,
+    onApprove: (FfiAdminPendingAction) -> Unit,
+    onCancel: (FfiAdminPendingAction) -> Unit,
+    absoluteLocal: (Long) -> String,
+) {
+    Column {
+        Text(
+            if (actions.isEmpty()) {
+                stringResource(R.string.admin_users_page_pending_none)
+            } else {
+                stringResource(R.string.admin_users_page_pending_count)
+                    .replace("{count}", actions.size.toString())
+            },
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier
+                .padding(vertical = 8.dp)
+                .testTag(Ids.ADMIN_USERS_PENDING_SECTION)
+        )
+        actions.forEach { action ->
+            ListItem(
+                headlineContent = {
+                    Text(
+                        action.description + " " +
+                            stringResource(R.string.admin_users_page_pending_by)
+                                .replace("{who}", action.actorShort),
+                        modifier = Modifier.testTag(Ids.ADMIN_PENDING_ACTION_DESCRIPTION),
+                    )
+                },
+                supportingContent = {
+                    Column {
+                        Text(
+                            stringResource(R.string.settings_pending_actions_applies)
+                                .replace("{time}", absoluteLocal(action.executeAfter)),
+                            modifier = Modifier.testTag(Ids.ADMIN_PENDING_ACTION_EXECUTE_AFTER),
+                        )
+                        Text(
+                            stringResource(R.string.admin_users_page_pending_approvals)
+                                .replace("{given}", action.approvals.size.toString())
+                                .replace("{needed}", action.requiresQuorum.toString()),
+                            modifier = Modifier.testTag(Ids.ADMIN_PENDING_ACTION_APPROVALS),
+                        )
+                    }
+                },
+                trailingContent = {
+                    Row {
+                        TextButton(
+                            onClick = { onApprove(action) },
+                            modifier = Modifier.testTag(Ids.ADMIN_PENDING_ACTION_APPROVE_BUTTON),
+                        ) { Text(stringResource(R.string.admin_users_page_pending_approve)) }
+                        TextButton(
+                            onClick = { onCancel(action) },
+                            modifier = Modifier.testTag(Ids.ADMIN_PENDING_ACTION_CANCEL_BUTTON),
+                        ) { Text(stringResource(R.string.settings_pending_actions_cancel)) }
+                    }
+                },
+                modifier = Modifier.testTag(Ids.ADMIN_PENDING_ACTION_ITEM),
+            )
         }
     }
 }
@@ -625,11 +714,14 @@ private fun RegistrationModeDropdown(
 @Composable
 private fun AdmitSection(
     tiers: List<String>,
-    onAdmit: (actorHex: String, handle: String, tier: String) -> Unit,
+    allUsers: List<FfiAdminUser>,
+    guardianOption: (FfiAdminUser) -> String,
+    onAdmit: (actorHex: String, handle: String, tier: String, guardianActorId: ByteArray?) -> Unit,
 ) {
     var actorInput by remember { mutableStateOf("") }
     var handleInput by remember { mutableStateOf("") }
     var selectedTier by remember { mutableStateOf(tiers.firstOrNull() ?: "free") }
+    var selectedGuardianActorId by remember { mutableStateOf<ByteArray?>(null) }
 
     Column(modifier = Modifier.testTag(Ids.ADMIN_USERS_ADMIT_SECTION)) {
         Text(
@@ -663,9 +755,20 @@ private fun AdmitSection(
             onSelect = { selectedTier = it },
             modifier = Modifier.padding(top = 8.dp),
         )
+        // Guardian for a supervised admission (family-safety.md § App surface →
+        // Admission surfaces; default "none"). A guardian on a handle-less admit
+        // is refused by the nest and lands on `admin-users-action-error`.
+        GuardianDropdown(
+            testId = Ids.ADMIN_USERS_ADMIT_GUARDIAN_SELECT,
+            users = allUsers,
+            selectedActorId = selectedGuardianActorId,
+            onSelect = { selectedGuardianActorId = it },
+            modifier = Modifier.padding(top = 8.dp),
+            guardianOption = guardianOption,
+        )
         val admitGate = faunaGate("fauna.admin.users.create")
         Button(
-            onClick = { onAdmit(actorInput, handleInput, selectedTier) },
+            onClick = { onAdmit(actorInput, handleInput, selectedTier, selectedGuardianActorId) },
             enabled = admitGate.enabled,
             modifier = Modifier
                 .padding(top = 8.dp)

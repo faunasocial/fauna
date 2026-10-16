@@ -31,20 +31,24 @@ use fauna_core::subscription::types::KeyBlob;
 use fauna_core::subscription::{FOLLOWERS_TIER, FOLLOWERS_TIER_RANK};
 use fauna_protocol::subscriptions::{
     ApproveRequestReply, ApproveRequestRequest, DelegateUploadReply, DelegateUploadRequest,
-    EncryptedKeyBlobUpload, KeyBlobGetReply, KeyBlobGetRequest, MineListReply, MineListRequest,
-    MineSubscription, OffersListRequest, PendingRequest, PostUnlockGetReply, PostUnlockGetRequest,
-    PostUnlockOffer, RejectRequestReply, RejectRequestRequest, RemoveSubscriberReply,
-    RemoveSubscriberRequest, RequestsListReply, RequestsListRequest, RotateKeyBlobReply,
-    RotateKeyBlobRequest, StatusGetReply, StatusGetRequest, SubscribeReply, SubscribeRequest,
-    SubscriberEntry, SubscribersListReply, SubscribersListRequest, TierClearFieldReply,
-    TierClearFieldRequest, TierClearableField, TierCreateReply, TierCreateRequest, TierDeleteReply,
-    TierDeleteRequest, TierItem, TierUpdateReply, TierUpdateRequest, TiersListReply,
-    TiersListRequest, UnsubscribeReply, UnsubscribeRequest,
+    EncapsKeyPublishReply, EncapsKeyPublishRequest, EncryptedKeyBlobUpload, KeyBlobGetReply,
+    KeyBlobGetRequest, MineListReply, MineListRequest, MineSubscription, OffersListRequest,
+    PendingRequest, PostUnlockGetReply, PostUnlockGetRequest, PostUnlockOffer, RejectRequestReply,
+    RejectRequestRequest, RemoveSubscriberReply, RemoveSubscriberRequest, RequestsListReply,
+    RequestsListRequest, RotateKeyBlobReply, RotateKeyBlobRequest, StatusGetReply,
+    StatusGetRequest, SubscribeReply, SubscribeRequest, SubscriberEntry, SubscribersListReply,
+    SubscribersListRequest, TierClearFieldReply, TierClearFieldRequest, TierClearableField,
+    TierCreateReply, TierCreateRequest, TierDeleteReply, TierDeleteRequest, TierItem,
+    TierUpdateReply, TierUpdateRequest, TiersListReply, TiersListRequest, UnsubscribeReply,
+    UnsubscribeRequest,
 };
 use fauna_protocol::{RpcError, Value, decode_strict as decode};
 
 use crate::routes::AppState;
 use crate::rpc_router::{RpcHandler, RpcKindMeta, RpcRouterBuilder};
+
+mod principal;
+pub(crate) use principal::principal_handlers;
 
 // ── Error helpers ──────────────────────────────────────────────
 
@@ -484,6 +488,7 @@ fn status_get_handler() -> RpcHandler {
             // rank-1 fan-out tier wins a lowest-rank pick, and a pay-per-view
             // tier (minted at `max + 1`) wins a highest-rank one. One pin per
             // half in `conformance_unlock_rank_fanout.rs`.
+            let held_followers = subscribed.iter().any(|n| n == FOLLOWERS_TIER);
             let mut chosen: Option<(i64, String, bool)> = None;
             let mut followers_fallback: Option<(i64, String, bool)> = None;
             for name in subscribed {
@@ -525,15 +530,36 @@ fn status_get_handler() -> RpcHandler {
                     .map(|secs| Timestamp((secs as u64).saturating_mul(1_000_000)));
             }
 
+            let follow_pending =
+                follow_pending(&state, &author_id, &subscriber_id, held_followers).await?;
             let reply = StatusGetReply {
                 tier: chosen.as_ref().map(|(_, n, _)| n.clone()),
                 expires_at,
                 auto_approve: chosen.map(|(_, _, a)| a).unwrap_or(false),
+                follow_pending,
                 extra: Default::default(),
             };
             encode_reply(&reply)
         })
     })
+}
+
+/// Is a follow asked and waiting — a `subscribe` request for the `followers`
+/// tier pending while the tier is not held (`StatusGetReply::follow_pending`)?
+async fn follow_pending(
+    state: &Arc<AppState>,
+    author_id: &[u8; 32],
+    subscriber_id: &[u8; 32],
+    held_followers: bool,
+) -> Result<bool, RpcError> {
+    if held_followers {
+        return Ok(false);
+    }
+    state
+        .db
+        .has_pending_subscribe_request(author_id, subscriber_id, FOLLOWERS_TIER)
+        .await
+        .map_err(internal)
 }
 
 /// `fauna.subscriptions.requests.list` — list pending subscribe/unsubscribe
@@ -949,6 +975,48 @@ fn validated_asking_price(
     Ok(Some(wire.clone()))
 }
 
+/// The one rank check `tiers.create` and `tiers.update` share
+/// (`monetization.md` § The unifying model → *A tier's rank is editable*,
+/// rule (1)): the update door refuses exactly what the create door refuses,
+/// with the same `malformed_upload` messages and no new error code.
+///
+/// - **The floor.** `rank < 1` is refused for every name EXCEPT the reserved
+///   `followers` at exactly rank 0 — the idempotent client-side twin of
+///   `ensure_followers_tier`, so an author nobody follows yet can gate a post
+///   to followers.
+/// - **The ceiling.** `OWNER_ONLY_TIER_RANK` is reserved to `only-me` the same
+///   way rank 0 is reserved to `followers`, so the owner-only tier
+///   (`monetization.md` § The unifying model — *A tier may be hidden*) stays
+///   the only tier any cascade could ever reach it through, and only by name
+///   — the ceiling the constant's own doc claims.
+/// - **The reserved names hold their reserved ranks.** `followers` sits only
+///   at 0 and `only-me` only at `OWNER_ONLY_TIER_RANK`, so on the update door
+///   the two reserved tiers' ranks are immutable in effect: the one value
+///   accepted is the one they already hold (a no-op write).
+fn validate_tier_rank(name: &str, rank: u32) -> Result<(), RpcError> {
+    use fauna_core::subscription::{OWNER_ONLY_TIER, OWNER_ONLY_TIER_RANK};
+    let reserved_followers = name == FOLLOWERS_TIER && i64::from(rank) == FOLLOWERS_TIER_RANK;
+    if rank < 1 && !reserved_followers {
+        return Err(malformed_upload("rank must be >= 1"));
+    }
+    if rank == OWNER_ONLY_TIER_RANK && name != OWNER_ONLY_TIER {
+        return Err(malformed_upload(
+            "rank must be below the reserved owner-only tier's rank",
+        ));
+    }
+    if name == FOLLOWERS_TIER && !reserved_followers {
+        return Err(malformed_upload(
+            "the reserved followers tier's rank is fixed at 0",
+        ));
+    }
+    if name == OWNER_ONLY_TIER && rank != OWNER_ONLY_TIER_RANK {
+        return Err(malformed_upload(
+            "the reserved owner-only tier's rank is fixed at the top rank",
+        ));
+    }
+    Ok(())
+}
+
 /// `fauna.subscriptions.tiers.create` — create a subscription tier owned by
 /// the bearer.
 ///
@@ -965,18 +1033,9 @@ fn tiers_create_handler() -> RpcHandler {
             if req.name.is_empty() || req.name.len() > 64 {
                 return Err(malformed_upload("tier name must be 1-64 characters"));
             }
-            // The reserved followers slot (`monetization.md` § The unifying
-            // model): `rank < 1` is refused for every name EXCEPT the reserved
-            // `followers` at exactly rank 0 — the idempotent client-side twin of
-            // `ensure_followers_tier`, birth blob included, so an author nobody
-            // follows yet can gate a post to followers (archive-import slice 3,
-            // ruled 2026-09-06). The reserved row's SHAPE is the nest's, not the
-            // client's: auto-approve, free, undesignated, offered.
+            validate_tier_rank(&req.name, req.rank)?;
             let reserved_followers =
                 req.name == FOLLOWERS_TIER && i64::from(req.rank) == FOLLOWERS_TIER_RANK;
-            if req.rank < 1 && !reserved_followers {
-                return Err(malformed_upload("rank must be >= 1"));
-            }
             // The tier every room-restricted post carries is a constant, never
             // an author's own tier (`ui/feed.md` § Encryption at rest →
             // *Room-restricted — the ruling*, ruling 3): a subscribable tier
@@ -985,22 +1044,6 @@ fn tiers_create_handler() -> RpcHandler {
             if req.name == fauna_core::subscription::ROOM_POST_TIER {
                 return Err(malformed_upload(
                     "\"room\" is reserved for room-restricted posts and is never an author's tier",
-                ));
-            }
-            // The ceiling `OWNER_ONLY_TIER_RANK`'s own doc claims
-            // (`libs/fauna-core/src/subscription/mod.rs` — "a paid tier is
-            // created at `1 <= rank < u32::MAX`") was, until this check,
-            // enforced by nothing: `tiers.create` bounded rank only from
-            // below (above). Reserve the top rank the same way rank 0 is
-            // reserved to `followers`, so the reserved owner-only tier
-            // (`monetization.md` § The unifying model — *A tier may be
-            // hidden*) stays the only tier any cascade could ever reach it
-            // through, and only by name.
-            if req.rank == fauna_core::subscription::OWNER_ONLY_TIER_RANK
-                && req.name != fauna_core::subscription::OWNER_ONLY_TIER
-            {
-                return Err(malformed_upload(
-                    "rank must be below the reserved owner-only tier's rank",
                 ));
             }
             if reserved_followers {
@@ -1229,9 +1272,11 @@ fn tiers_create_handler() -> RpcHandler {
 /// `or_else(current)` merge: any `None` field on the request keeps the
 /// tier's current value.
 ///
-/// Note: `req.rank` is accepted on the wire but not applied — the DB layer's
-/// `update_subscription_tier` does not expose `rank` today. Flag for
-/// follow-up if rank-update becomes a product requirement.
+/// `req.rank` is applied under the create door's own check
+/// ([`validate_tier_rank`]) and binds forward only (`monetization.md` § The
+/// unifying model → *A tier's rank is editable, and a rank edit binds
+/// forward*): a changed rank runs the author-scoped unlock fan-out reconcile
+/// — the edit-time cascade door — and deletes nothing.
 fn tiers_update_handler() -> RpcHandler {
     Box::new(|state, author_id, payload| {
         Box::pin(async move {
@@ -1256,6 +1301,10 @@ fn tiers_update_handler() -> RpcHandler {
                 .as_deref()
                 .or(current.payment_url.as_deref());
             let auto = req.auto_approve.unwrap_or(current.auto_approve);
+            if let Some(new_rank) = req.rank {
+                validate_tier_rank(&req.name, new_rank)?;
+            }
+            let rank = req.rank.map_or(current.rank, i64::from);
 
             // The per-post pay-to-unlock designation is CREATE-time
             // immutable (`monetization.md:131`): re-pointing a tier people
@@ -1311,13 +1360,12 @@ fn tiers_update_handler() -> RpcHandler {
                 .await?;
             }
 
-            // rank updates not yet wired in the DB layer (the HTTP twin that
-            // also skipped them has been deleted).
             let updated = state
                 .db
                 .update_subscription_tier(
                     &author_id,
                     &req.name,
+                    rank,
                     desc,
                     price,
                     url,
@@ -1328,6 +1376,24 @@ fn tiers_update_handler() -> RpcHandler {
                 .map_err(internal)?;
             if !updated {
                 return Err(tier_not_found("tier not found"));
+            }
+
+            // The edit-time cascade door (`monetization.md` § The unifying
+            // model → *A tier's rank is editable*, rule (3)): a moved rank
+            // can bring a subscriber's held rank up to a sibling tier (theirs
+            // raised, or the sibling lowered beneath it), so run the boot
+            // sweep's own predicate scoped to this author. The author's drain
+            // pump — online, it issued this edit — picks the enqueues up.
+            // Never back (rule (4)): an enrolment the new rank no longer
+            // implies is kept; nothing is deleted here. Errors propagate like
+            // the create handler's creation-time enqueue: the row is written
+            // either way, and the client surfaces the failed update.
+            if rank != current.rank {
+                state
+                    .db
+                    .enqueue_unlock_fanout_for_author(&author_id)
+                    .await
+                    .map_err(internal)?;
             }
             encode_reply(&TierUpdateReply {
                 updated: true,
@@ -1378,6 +1444,7 @@ fn tiers_clear_field_handler() -> RpcHandler {
                 .update_subscription_tier(
                     &author_id,
                     &req.name,
+                    current.rank,
                     desc,
                     price,
                     url,
@@ -1621,170 +1688,204 @@ fn subscribe_handler() -> RpcHandler {
     Box::new(|state, subscriber_id, payload| {
         Box::pin(async move {
             let req: SubscribeRequest = decode(&payload).map_err(malformed_upload)?;
-            let author_id = req.author_id.0;
+            encode_reply(&subscribe_core(&state, subscriber_id, &req).await?)
+        })
+    })
+}
 
-            // The client half already refuses an author subscribing to
-            // their own tier (`FeedManager::is_local_actor`), but
-            // the nest's own subscribe door never checked — so any non-Fauna or
-            // non-conforming client could still put the author in
-            // their own roster (a `post-unlock-*` tier included). Refused BEFORE
-            // the followers-tier auto-provision below, so a self-follow does not
-            // even lazily mint that tier for a tier-less author.
-            if subscriber_id == author_id {
-                return Err(self_subscribe_refused("cannot subscribe to your own tier"));
-            }
+/// The subscribe door's body, shared by the account's own handler and the
+/// `fauna:follow:write` principal handler ([`principal_subscribe_handler`]),
+/// which narrows the request to the `followers` tier and fills the ek from
+/// the account's registry entry before calling it — so the self-follow, the
+/// unhosted-author and the hidden-tier refusals are one code path.
+async fn subscribe_core(
+    state: &Arc<AppState>,
+    subscriber_id: [u8; 32],
+    req: &SubscribeRequest,
+) -> Result<SubscribeReply, RpcError> {
+    let author_id = req.author_id.0;
 
-            // Subscriber's optional published ML-KEM ek (post-quantum surface B).
-            // If present it must be exactly 1184 bytes (ML-KEM-768), mirroring the
-            // mail leg-A `provision_recipient_mls_pubkey` length gate. It rides to
-            // the pending `subscribe_requests` row, so the author client's
-            // KeyBlob wrap selects the hybrid X-Wing suite for this subscriber.
-            let mlkem_ek: Option<&[u8]> = req.mlkem_encaps_key.as_ref().map(|b| b.as_ref());
-            if let Some(ek) = mlkem_ek
-                && ek.len() != MLKEM768_ENCAPS_KEY_LEN
-            {
+    // The client half already refuses an author subscribing to
+    // their own tier (`FeedManager::is_local_actor`), but
+    // the nest's own subscribe door never checked — so any non-Fauna or
+    // non-conforming client could still put the author in
+    // their own roster (a `post-unlock-*` tier included). Refused BEFORE
+    // the followers-tier auto-provision below, so a self-follow does not
+    // even lazily mint that tier for a tier-less author.
+    if subscriber_id == author_id {
+        return Err(self_subscribe_refused("cannot subscribe to your own tier"));
+    }
+
+    // Subscriber's optional published ML-KEM ek (post-quantum surface B).
+    // If present it must be exactly 1184 bytes (ML-KEM-768), mirroring the
+    // mail leg-A `provision_recipient_mls_pubkey` length gate. It rides to
+    // the pending `subscribe_requests` row, so the author client's
+    // KeyBlob wrap selects the hybrid X-Wing suite for this subscriber.
+    let mlkem_ek: Option<&[u8]> = req.mlkem_encaps_key.as_ref().map(|b| b.as_ref());
+    if let Some(ek) = mlkem_ek
+        && ek.len() != MLKEM768_ENCAPS_KEY_LEN
+    {
+        return Err(malformed_upload(
+            "mlkem_encaps_key must be 1184 bytes (ML-KEM-768)",
+        ));
+    }
+
+    // Follow = subscribe to the free "followers" tier. The nest
+    // auto-provisions it lazily on the first follow so it exists for any
+    // author with no pre-created tier (monetization.md § Pillar 1); the
+    // tier lookup below then finds it. All other tier names must be
+    // author-created.
+    //
+    // Only for an author this nest hosts: the caller
+    // names any 32-byte `author_id`, and `subscription_tiers` has no
+    // foreign key to `users`, so an unchecked provision would let a
+    // loop over fresh ids grow it — and `subscribe_requests`, which no
+    // author ever drains — without bound. An unhosted author gets the
+    // same `tier_not_found` a missing tier gets, and nothing is written.
+    if req.tier == FOLLOWERS_TIER {
+        let hosted = state
+            .db
+            .get_user(&author_id)
+            .await
+            .map_err(internal)?
+            .is_some();
+        if !hosted {
+            return Err(tier_not_found("tier not found"));
+        }
+        ensure_followers_tier(state, &author_id).await?;
+    }
+
+    // Tier existence is always checked — the enqueue path also needs a
+    // real tier_name to write into subscribe_requests (foreign key on
+    // subscription_tiers).
+    let tier = state
+        .db
+        .get_subscription_tier(&author_id, &req.tier)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| tier_not_found("tier not found"))?;
+
+    // Ruling 4 (`monetization.md` § The unifying model → *A tier may
+    // be hidden*): hidden means not offered AND not subscribable. The
+    // refusal is the same code a nonexistent tier gets, so a stranger
+    // who guesses the reserved name learns nothing, and no pending
+    // request can ever land for the author to approve by accident.
+    if tier.hidden {
+        return Err(tier_not_found("tier not found"));
+    }
+
+    // Idempotency: if already subscribed, return Approved rather than
+    // enqueue duplicate accept work for the author's client.
+    if state
+        .db
+        .is_subscriber(&author_id, &subscriber_id, &req.tier)
+        .await
+        .map_err(internal)?
+    {
+        // Post-quantum surface-B upgrade (SUB-1): an already-subscribed
+        // subscriber re-subscribing with a freshly published ek upgrades
+        // classical → hybrid across all their tiers under this author (the
+        // ek is identity-derived — one per subscriber). Without this the
+        // idempotent return drops the published ek and the author keeps
+        // wrapping classical (HNDL-exposed) entries forever; the author's
+        // next rotation now re-wraps an X-Wing entry off the stored ek.
+        if let Some(ek) = mlkem_ek {
+            state
+                .db
+                .update_subscriber_mlkem_ek(&author_id, &subscriber_id, ek)
+                .await
+                .map_err(internal)?;
+        }
+        // Self-heal: an already-held grant re-checks its rank fan-out
+        // (`monetization.md:126`) — usually a no-op, but it lets a
+        // subscriber whose fan-out enqueue was ever missed recover it
+        // by re-subscribing. Best-effort like the enqueue proper.
+        if let Err(e) = state
+            .db
+            .enqueue_unlock_fanout(&author_id, &subscriber_id, &req.tier)
+            .await
+        {
+            tracing::error!("subscribe: unlock fan-out re-check({}): {e}", req.tier);
+        }
+        return Ok(SubscribeReply::Approved {
+            tier: req.tier.clone(),
+            expires_at: None,
+        });
+    }
+
+    // Idempotency: if a pending request exists for this
+    // (author, subscriber, tier), return Queued with the existing
+    // row's id rather than inserting a duplicate.
+    if state
+        .db
+        .has_pending_subscribe_request(&author_id, &subscriber_id, &req.tier)
+        .await
+        .map_err(internal)?
+    {
+        // Post-quantum surface-B upgrade (SUB-1, enqueue twin): an enqueued
+        // but not-yet-approved subscriber who re-subscribes carrying a
+        // freshly published ek upgrades their pending request row(s), so the
+        // ek survives the enqueue → approve gap and the eventual approval
+        // wraps an X-Wing (not classical) entry. Without this the idempotent
+        // Queued return drops the published ek.
+        if let Some(ek) = mlkem_ek {
+            state
+                .db
+                .update_subscribe_request_mlkem_ek(&author_id, &subscriber_id, ek)
+                .await
+                .map_err(internal)?;
+        }
+        let rows = state
+            .db
+            .list_subscribe_requests(&author_id)
+            .await
+            .map_err(internal)?;
+        let existing_id = rows
+            .into_iter()
+            .find(|r| {
+                r.kind == "subscribe"
+                    && r.tier_name == req.tier
+                    && r.subscriber_id.as_slice() == subscriber_id.as_slice()
+            })
+            .map(|r| r.id)
+            .ok_or_else(|| internal("has_pending says yes but list_requests is empty"))?;
+        return Ok(SubscribeReply::Queued {
+            request_id: existing_id,
+        });
+    }
+
+    // Enqueue for the author's client (carry the ek to approval).
+    let request_id = state
+        .db
+        .insert_subscribe_request(&author_id, &subscriber_id, &req.tier, "subscribe", mlkem_ek)
+        .await
+        .map_err(internal)?;
+    Ok(SubscribeReply::Queued { request_id })
+}
+
+/// `fauna.subscriptions.encaps_key.publish` — the caller's subscriber
+/// encapsulation-key registry entry (`post-quantum.md` § surface B): its own
+/// identity-seed-derived 1184-byte ML-KEM-768 ek, upserted. The account's own
+/// apps call it at session start (`SubscriptionsClient::publish_encaps_key`);
+/// the nest reads it where the subscriber is not the one asking — the
+/// `fauna:follow:write` principal's follow ([`principal`]). The nest cannot
+/// check the key against the identity (it holds no seed); a wrong key only
+/// makes the account's own follows unopenable to itself.
+fn encaps_key_publish_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            let req: EncapsKeyPublishRequest = decode(&payload).map_err(malformed_upload)?;
+            if req.mlkem_encaps_key.len() != MLKEM768_ENCAPS_KEY_LEN {
                 return Err(malformed_upload(
                     "mlkem_encaps_key must be 1184 bytes (ML-KEM-768)",
                 ));
             }
-
-            // Follow = subscribe to the free "followers" tier. The nest
-            // auto-provisions it lazily on the first follow so it exists for any
-            // author with no pre-created tier (monetization.md § Pillar 1); the
-            // tier lookup below then finds it. All other tier names must be
-            // author-created.
-            //
-            // Only for an author this nest hosts: the caller
-            // names any 32-byte `author_id`, and `subscription_tiers` has no
-            // foreign key to `users`, so an unchecked provision would let a
-            // loop over fresh ids grow it — and `subscribe_requests`, which no
-            // author ever drains — without bound. An unhosted author gets the
-            // same `tier_not_found` a missing tier gets, and nothing is written.
-            if req.tier == FOLLOWERS_TIER {
-                let hosted = state
-                    .db
-                    .get_user(&author_id)
-                    .await
-                    .map_err(internal)?
-                    .is_some();
-                if !hosted {
-                    return Err(tier_not_found("tier not found"));
-                }
-                ensure_followers_tier(&state, &author_id).await?;
-            }
-
-            // Tier existence is always checked — the enqueue path also needs a
-            // real tier_name to write into subscribe_requests (foreign key on
-            // subscription_tiers).
-            let tier = state
+            state
                 .db
-                .get_subscription_tier(&author_id, &req.tier)
-                .await
-                .map_err(internal)?
-                .ok_or_else(|| tier_not_found("tier not found"))?;
-
-            // Ruling 4 (`monetization.md` § The unifying model → *A tier may
-            // be hidden*): hidden means not offered AND not subscribable. The
-            // refusal is the same code a nonexistent tier gets, so a stranger
-            // who guesses the reserved name learns nothing, and no pending
-            // request can ever land for the author to approve by accident.
-            if tier.hidden {
-                return Err(tier_not_found("tier not found"));
-            }
-
-            // Idempotency: if already subscribed, return Approved rather than
-            // enqueue duplicate accept work for the author's client.
-            if state
-                .db
-                .is_subscriber(&author_id, &subscriber_id, &req.tier)
-                .await
-                .map_err(internal)?
-            {
-                // Post-quantum surface-B upgrade (SUB-1): an already-subscribed
-                // subscriber re-subscribing with a freshly published ek upgrades
-                // classical → hybrid across all their tiers under this author (the
-                // ek is identity-derived — one per subscriber). Without this the
-                // idempotent return drops the published ek and the author keeps
-                // wrapping classical (HNDL-exposed) entries forever; the author's
-                // next rotation now re-wraps an X-Wing entry off the stored ek.
-                if let Some(ek) = mlkem_ek {
-                    state
-                        .db
-                        .update_subscriber_mlkem_ek(&author_id, &subscriber_id, ek)
-                        .await
-                        .map_err(internal)?;
-                }
-                // Self-heal: an already-held grant re-checks its rank fan-out
-                // (`monetization.md:126`) — usually a no-op, but it lets a
-                // subscriber whose fan-out enqueue was ever missed recover it
-                // by re-subscribing. Best-effort like the enqueue proper.
-                if let Err(e) = state
-                    .db
-                    .enqueue_unlock_fanout(&author_id, &subscriber_id, &req.tier)
-                    .await
-                {
-                    tracing::error!("subscribe: unlock fan-out re-check({}): {e}", req.tier);
-                }
-                return encode_reply(&SubscribeReply::Approved {
-                    tier: req.tier.clone(),
-                    expires_at: None,
-                });
-            }
-
-            // Idempotency: if a pending request exists for this
-            // (author, subscriber, tier), return Queued with the existing
-            // row's id rather than inserting a duplicate.
-            if state
-                .db
-                .has_pending_subscribe_request(&author_id, &subscriber_id, &req.tier)
-                .await
-                .map_err(internal)?
-            {
-                // Post-quantum surface-B upgrade (SUB-1, enqueue twin): an enqueued
-                // but not-yet-approved subscriber who re-subscribes carrying a
-                // freshly published ek upgrades their pending request row(s), so the
-                // ek survives the enqueue → approve gap and the eventual approval
-                // wraps an X-Wing (not classical) entry. Without this the idempotent
-                // Queued return drops the published ek.
-                if let Some(ek) = mlkem_ek {
-                    state
-                        .db
-                        .update_subscribe_request_mlkem_ek(&author_id, &subscriber_id, ek)
-                        .await
-                        .map_err(internal)?;
-                }
-                let rows = state
-                    .db
-                    .list_subscribe_requests(&author_id)
-                    .await
-                    .map_err(internal)?;
-                let existing_id = rows
-                    .into_iter()
-                    .find(|r| {
-                        r.kind == "subscribe"
-                            && r.tier_name == req.tier
-                            && r.subscriber_id.as_slice() == subscriber_id.as_slice()
-                    })
-                    .map(|r| r.id)
-                    .ok_or_else(|| internal("has_pending says yes but list_requests is empty"))?;
-                return encode_reply(&SubscribeReply::Queued {
-                    request_id: existing_id,
-                });
-            }
-
-            // Enqueue for the author's client (carry the ek to approval).
-            let request_id = state
-                .db
-                .insert_subscribe_request(
-                    &author_id,
-                    &subscriber_id,
-                    &req.tier,
-                    "subscribe",
-                    mlkem_ek,
-                )
+                .put_subscriber_encaps_key(&actor_id, &req.mlkem_encaps_key)
                 .await
                 .map_err(internal)?;
-            encode_reply(&SubscribeReply::Queued { request_id })
+            encode_reply(&EncapsKeyPublishReply::default())
         })
     })
 }
@@ -2354,6 +2455,16 @@ pub fn register_subscription_handlers(b: &mut RpcRouterBuilder) {
             // The same headroom as its sibling doors (kind-registry parity).
             default_deadline: Duration::from_secs(15),
             handler: unsubscribe_handler(),
+        },
+    );
+    // `forbid_replay: false`: an upsert of the caller's own derived key —
+    // a replay rewrites the same bytes.
+    b.add(
+        "fauna.subscriptions.encaps_key.publish",
+        RpcKindMeta {
+            forbid_replay: false,
+            default_deadline: Duration::from_secs(5),
+            handler: encaps_key_publish_handler(),
         },
     );
     // `forbid_replay: false` audited 2026-08-01. Consume-shaped on
@@ -3631,6 +3742,262 @@ mod tests {
         // price_hint preserved from the original create.
         assert_eq!(after.price_hint.as_deref(), Some("$5"));
         assert!(!after.auto_approve);
+    }
+
+    /// Create an ordinary (undesignated, visible) tier straight in the DB.
+    async fn plain_tier(
+        state: &Arc<AppState>,
+        author: &[u8; 32],
+        name: &str,
+        rank: i64,
+        hidden: bool,
+    ) {
+        state
+            .db
+            .create_subscription_tier(
+                author, name, rank, None, None, None, false, None, None, hidden,
+            )
+            .await
+            .unwrap();
+    }
+
+    fn rank_update(name: &str, rank: Option<u32>) -> Bytes {
+        encode_req(&TierUpdateRequest {
+            name: name.into(),
+            rank,
+            ..Default::default()
+        })
+    }
+
+    /// `(subscriber, tier)` of every `payment_entitled` subscribe request
+    /// pending for `author` — the edit-time door's output.
+    async fn entitled_requests(state: &Arc<AppState>, author: &[u8; 32]) -> Vec<(Vec<u8>, String)> {
+        let mut rows: Vec<_> = state
+            .db
+            .list_subscribe_requests(author)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.kind == "subscribe" && r.payment_entitled)
+            .map(|r| (r.subscriber_id, r.tier_name))
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// Rule (2) of *A tier's rank is editable* (`monetization.md` § The
+    /// unifying model): `rank` is applied, and `None` keeps it like every
+    /// other field on the kind.
+    #[tokio::test]
+    async fn tiers_update_applies_a_new_rank_and_keeps_it_on_none() {
+        let state = fixture_state().await;
+        let author = actor_from_seed(0x1a);
+        plain_tier(&state, &author, "gold", 1, false).await;
+
+        tiers_update_handler()(state.clone(), author, rank_update("gold", Some(3)))
+            .await
+            .expect("rank edit accepted");
+        let tier = |s: Arc<AppState>| async move {
+            s.db.get_subscription_tier(&author, "gold")
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(tier(state.clone()).await.rank, 3, "the new rank is written");
+
+        tiers_update_handler()(state.clone(), author, rank_update("gold", None))
+            .await
+            .expect("rank-less edit accepted");
+        assert_eq!(
+            tier(state).await.rank,
+            3,
+            "`rank: None` keeps the current rank"
+        );
+    }
+
+    /// Rule (1): one validation, both doors — the update door refuses what
+    /// the create door refuses, and the two reserved tiers' ranks are
+    /// immutable in effect (only the value they hold is accepted).
+    #[tokio::test]
+    async fn tiers_update_rank_shares_the_create_validation() {
+        use fauna_core::subscription::{OWNER_ONLY_TIER, OWNER_ONLY_TIER_RANK};
+        let state = fixture_state().await;
+        let author = actor_from_seed(0x1b);
+        plain_tier(&state, &author, "gold", 2, false).await;
+        plain_tier(&state, &author, FOLLOWERS_TIER, FOLLOWERS_TIER_RANK, false).await;
+        plain_tier(
+            &state,
+            &author,
+            OWNER_ONLY_TIER,
+            i64::from(OWNER_ONLY_TIER_RANK),
+            true,
+        )
+        .await;
+
+        for (name, rank) in [
+            ("gold", 0),
+            ("gold", OWNER_ONLY_TIER_RANK),
+            (FOLLOWERS_TIER, 1),
+            (OWNER_ONLY_TIER, 5),
+        ] {
+            let err = tiers_update_handler()(state.clone(), author, rank_update(name, Some(rank)))
+                .await
+                .expect_err("an out-of-bounds rank is refused");
+            assert_eq!(
+                err.code, "fauna.subscriptions.malformed_upload",
+                "{name} at {rank}"
+            );
+        }
+        for (name, rank) in [(FOLLOWERS_TIER, 0), (OWNER_ONLY_TIER, OWNER_ONLY_TIER_RANK)] {
+            tiers_update_handler()(state.clone(), author, rank_update(name, Some(rank)))
+                .await
+                .expect("re-sending a reserved tier's own rank is a no-op accept");
+        }
+
+        let rank_of = |name: &'static str| {
+            let s = state.clone();
+            async move {
+                s.db.get_subscription_tier(&author, name)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .rank
+            }
+        };
+        assert_eq!(rank_of("gold").await, 2, "a refused edit writes nothing");
+        assert_eq!(rank_of(FOLLOWERS_TIER).await, FOLLOWERS_TIER_RANK);
+        assert_eq!(
+            rank_of(OWNER_ONLY_TIER).await,
+            i64::from(OWNER_ONLY_TIER_RANK)
+        );
+    }
+
+    /// Rule (3), the edit-time cascade door: raising a held tier above a
+    /// sibling enqueues the `payment_entitled` subscribe for its subscribers
+    /// into the sibling — and for nobody whose held rank still falls short;
+    /// a hidden sibling is never a target (rule (e)); an identical second
+    /// edit enqueues nothing more.
+    #[tokio::test]
+    async fn tiers_update_rank_raise_runs_the_edit_time_fanout() {
+        let state = fixture_state().await;
+        let author = actor_from_seed(0x1c);
+        let fan = actor_from_seed(0x1d);
+        let other_fan = actor_from_seed(0x1e);
+        plain_tier(&state, &author, "bronze", 1, false).await;
+        plain_tier(&state, &author, "silver", 2, false).await;
+        plain_tier(&state, &author, "backstage", 2, true).await;
+        plain_tier(&state, &author, "platinum", 5, false).await;
+        state
+            .db
+            .add_subscriber(&author, &fan, "bronze", None)
+            .await
+            .unwrap();
+        state
+            .db
+            .add_subscriber(&author, &other_fan, "bronze", None)
+            .await
+            .unwrap();
+        // Bronze is raised to 3: above silver and the hidden backstage (both
+        // 2), still below platinum (5).
+        let before = entitled_requests(&state, &author).await;
+        assert!(before.is_empty(), "no request before the edit: {before:?}");
+
+        tiers_update_handler()(state.clone(), author, rank_update("bronze", Some(3)))
+            .await
+            .expect("rank raise accepted");
+
+        let after = entitled_requests(&state, &author).await;
+        let mut want = vec![
+            (fan.to_vec(), "silver".to_string()),
+            (other_fan.to_vec(), "silver".to_string()),
+        ];
+        want.sort();
+        assert_eq!(
+            after, want,
+            "every bronze holder fans into silver; never into the hidden \
+             backstage at the same rank, never up into platinum"
+        );
+
+        tiers_update_handler()(state.clone(), author, rank_update("bronze", Some(3)))
+            .await
+            .expect("identical edit accepted");
+        assert_eq!(
+            entitled_requests(&state, &author).await,
+            want,
+            "an identical second edit enqueues nothing more"
+        );
+    }
+
+    /// Rule (3)'s other half — a target lowered beneath a held tier — and
+    /// the subscriber whose held rank still falls short gets nothing.
+    #[tokio::test]
+    async fn tiers_update_rank_lower_fans_only_subscribers_who_now_reach_it() {
+        let state = fixture_state().await;
+        let author = actor_from_seed(0x1f);
+        let gold_fan = actor_from_seed(0x20);
+        let bronze_fan = actor_from_seed(0x21);
+        plain_tier(&state, &author, "bronze", 1, false).await;
+        plain_tier(&state, &author, "gold", 3, false).await;
+        plain_tier(&state, &author, "platinum", 5, false).await;
+        state
+            .db
+            .add_subscriber(&author, &gold_fan, "gold", None)
+            .await
+            .unwrap();
+        state
+            .db
+            .add_subscriber(&author, &bronze_fan, "bronze", None)
+            .await
+            .unwrap();
+
+        tiers_update_handler()(state.clone(), author, rank_update("platinum", Some(2)))
+            .await
+            .expect("rank lower accepted");
+
+        // gold (3) now reaches platinum (2) and, as before, bronze (1); the
+        // bronze holder (1) reaches neither.
+        let after = entitled_requests(&state, &author).await;
+        assert!(
+            after.contains(&(gold_fan.to_vec(), "platinum".to_string())),
+            "the gold holder fans into the lowered platinum: {after:?}"
+        );
+        assert!(
+            !after.iter().any(|(s, _)| s == &bronze_fan.to_vec()),
+            "a held rank that still falls short enqueues nothing: {after:?}"
+        );
+    }
+
+    /// Rule (4), never back: lowering a tier beneath one its subscriber was
+    /// fanned into deletes no `subscribers` row.
+    #[tokio::test]
+    async fn tiers_update_rank_lower_deletes_no_enrolment() {
+        let state = fixture_state().await;
+        let author = actor_from_seed(0x22);
+        let fan = actor_from_seed(0x23);
+        plain_tier(&state, &author, "silver", 2, false).await;
+        plain_tier(&state, &author, "gold", 3, false).await;
+        state
+            .db
+            .add_subscriber(&author, &fan, "gold", None)
+            .await
+            .unwrap();
+        // The fan-out already landed them in silver.
+        state
+            .db
+            .add_subscriber(&author, &fan, "silver", None)
+            .await
+            .unwrap();
+
+        tiers_update_handler()(state.clone(), author, rank_update("gold", Some(1)))
+            .await
+            .expect("rank lower accepted");
+
+        for tier in ["gold", "silver"] {
+            assert!(
+                state.db.is_subscriber(&author, &fan, tier).await.unwrap(),
+                "the {tier} enrolment survives a rank edit that no longer implies it"
+            );
+        }
     }
 
     #[tokio::test]

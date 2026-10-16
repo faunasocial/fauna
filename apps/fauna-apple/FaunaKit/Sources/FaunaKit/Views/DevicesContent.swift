@@ -127,8 +127,8 @@ public struct DevicesContent: View {
     }
 
     // MARK: - Signed-in devices without a matching entry (devices.md § Members
-    // without a matching entry; account-data-taxonomy.md § The generation
-    // machinery → Fleet-scope reclamation, clause (4))
+    // without a matching entry; fleet-scope-reclamation.md
+    // § Fleet-scope reclamation, clause (4))
 
     /// A separately-labelled group below the roster and before the custody
     /// facet, never intermixed with `device-card` rows: one

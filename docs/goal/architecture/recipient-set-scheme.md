@@ -536,11 +536,17 @@ ceremony itself is owned there.
   availability only (the group needs a re-mint), and nothing a root holder
   does not already reach by same-key `Minted`-variant suppression — while
   **dropping a generation KEY never rides an unauthored row**: a consumer
-  may discard a key only on a shred signed by a live authority device
-  (additive `authorization` + `shredder_sig` on the variant, verified by
-  `GroupGenerationMintRecord::shred_is_authored` through the same one
-  check). No key-dropping consumer exists; the first one is built to that
-  call.
+  may discard a key only on a shred signed by a live authority device —
+  the shredder's own **shred cell**, `fauna.group.generation-shred` at
+  `<generation>/<shredder>`, carrying its cert beside its signature and
+  verified through the same one check; never the mint row's `Shredded`,
+  which is the availability marker and attribution only. Why the
+  attestation is a cell of its own and not a field of the marker (a
+  forged marker sorts above an authored one at the single mint cell, and
+  no join rank at one cell can tell them apart) is ruled once for both
+  planes by [`fleet-scope-reclamation.md`](fleet-scope-reclamation.md)
+  § Fleet-scope reclamation → *the shred cell* (2026-10-13). No key-dropping consumer exists;
+  the first one is built to that call.
 - **The membership witness (the admission seam's fourth kind).** The witness
   is the member's `Enrolled` roster entry plus its authoring chain to the
   authority actor root, carried inline in the admission exchange
@@ -570,6 +576,21 @@ ceremony itself is owned there.
 ## Implementation status today
 
 *The entries below were carried verbatim out of [`account-data-taxonomy.md`](account-data-taxonomy.md) § Implementation status today on 2026-09-28 (and before that out of [`account-data-plane.md`](account-data-plane.md)); the generation-machinery and export-confidentiality entries stay there. The scheme's listing in the cross-cutting ledger stays in [`account-data-plane.md`](account-data-plane.md) § Implementation status today.*
+
+- **Ruled and BUILT 2026-10-13 — § The recipient-set scheme →
+  *Severance, per axis*, the shred clause: the shred cell.**
+  `fauna.group.generation-shred`
+  (`fauna_protocol::group_state::KIND_GROUP_GENERATION_SHRED`) carries
+  `fauna_core::group_generation::GroupShredAttestation` — the generation
+  id, the shredder's device id, the stamp, its cert as `authorization` and
+  the signature `sign_group_shred` makes — at
+  `<generation-hex>/<shredder-hex>`; `join_group_generation_shred` ranks
+  (verifies at the cell, bytes) and never consults the cert, and
+  `GroupShredAttestation::is_authored_at` is the reader's check through
+  `GroupAuthority::verify_device_cert`. `GroupGenerationMintRecord::Shredded`
+  is attribution only. Still no consumer drops a group key; the account
+  plane's entry in [`fleet-scope-reclamation.md`](fleet-scope-reclamation.md)
+  § Implementation status today names the shared shape and its tests.
 
 - **Built 2026-09-16 — the bound roster entry.** § The recipient-set scheme →
   *The roster kind* owns the ruling; what is code: the additive
@@ -792,8 +813,15 @@ ceremony itself is owned there.
   `resolve_admissible_group_tip` and the witness door's
   `GroupRosterState::authority`; every production reader builds the line
   from its own rows of the kind (the ceremony's admit from the deliver
-  snapshot, `summarize_group_scope` from the store). The authored shred is
-  `sign_group_shred` + `GroupGenerationMintRecord::shred_is_authored`.
+  snapshot, `summarize_group_scope` from the store) — each feed pinned
+  by its own test, red when that feed alone is cut:
+  `group_ceremony::tests::a_deliver_snapshot_revoking_the_entrys_authority_device_is_refused`
+  (the admit) and `group_scope_view::tests::a_member_enrolled_by_a_revoked_authority_device_is_not_listed`
+  (the listing; the witness door's `an_entry_signed_by_a_revoked_authority_device_is_refused`
+  reds under the same cut, since both fold through `read_group_scope`).
+  The authored shred was then
+  `sign_group_shred` + `GroupGenerationMintRecord::shred_is_authored`; since
+  2026-10-13 it is the shred cell (the entry at the top of this section).
   The publisher this entry left owed — and with it the removal writer, the
   re-mint trigger and the release of the peer witness door — is the
   2026-09-21 entry above.

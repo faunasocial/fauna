@@ -6,30 +6,33 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::apply::{cleanup_stale, download_to_temp, replace_binary};
-use crate::github::check_latest;
+use crate::github::{LatestRelease, check_latest, latest_release};
 use crate::verify::{verify_sha256, verify_signature};
 use crate::{RELEASE_PUBLIC_KEY, UpdateConfig, UpdateStatus};
 
 /// Check GitHub Releases for a newer version.
+///
+/// Reads the newest release's version alone: whether it carries an artifact
+/// for this platform is [`apply`]'s question, so a check-only caller learns of
+/// every release whatever its asset names.
 pub async fn check(config: &UpdateConfig) -> Result<UpdateStatus> {
     let client = reqwest::Client::new();
     let current = Version::parse(config.current_version)?;
+    let latest =
+        latest_release(&client, config.github_repo, config.github_token.as_deref()).await?;
+    Ok(status_for(&current, latest))
+}
 
-    match check_latest(
-        &client,
-        config.github_repo,
-        &current,
-        config.artifact_prefix,
-        env!("TARGET"),
-        config.github_token.as_deref(),
-    )
-    .await?
-    {
-        Some(info) => Ok(UpdateStatus::Available {
-            version: info.version.to_string(),
-            release_url: info.release_url,
-        }),
-        None => Ok(UpdateStatus::UpToDate),
+/// The pure half of [`check`]: the status `latest` means for `current`.
+fn status_for(current: &Version, latest: Option<LatestRelease>) -> UpdateStatus {
+    match latest {
+        Some(latest) if latest.version > *current => UpdateStatus::Available {
+            version: latest.version.to_string(),
+            release_url: latest.release_url,
+        },
+        latest => UpdateStatus::UpToDate {
+            newest: latest.map(|l| l.version.to_string()),
+        },
     }
 }
 
@@ -49,7 +52,7 @@ pub async fn apply(config: &UpdateConfig) -> Result<UpdateStatus> {
     .await?
     {
         Some(info) => info,
-        None => return Ok(UpdateStatus::UpToDate),
+        None => return Ok(UpdateStatus::UpToDate { newest: None }),
     };
 
     tracing::info!(version = %info.version, "downloading update");
@@ -196,9 +199,9 @@ pub fn spawn_update_loop(
                         }));
                     }
                 }
-                Ok(UpdateStatus::UpToDate) => {
+                Ok(status @ UpdateStatus::UpToDate { .. }) => {
                     tracing::debug!("up to date");
-                    let _ = tx.send(Some(UpdateStatus::UpToDate));
+                    let _ = tx.send(Some(status));
                     // Reset backoff on successful up-to-date check
                     backoff_multiplier = 1;
                     interval = tokio::time::interval(config.check_interval);
@@ -217,6 +220,34 @@ pub fn spawn_update_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn latest(version: &str) -> Option<LatestRelease> {
+        Some(LatestRelease {
+            version: Version::parse(version).unwrap(),
+            release_url: format!("https://example.com/v{version}"),
+        })
+    }
+
+    #[test]
+    fn status_for_keeps_the_newest_release_on_every_arm() {
+        let current = Version::parse("0.1.2").unwrap();
+        assert!(matches!(
+            status_for(&current, latest("0.2.0")),
+            UpdateStatus::Available { ref version, .. } if version == "0.2.0"
+        ));
+        // At it, or ahead of it (a development build): up to date, and the
+        // newest release is still what the feed said — never `current`.
+        assert_eq!(
+            status_for(&current, latest("0.1.2")).newest_release(),
+            Some("0.1.2")
+        );
+        let ahead = Version::parse("0.3.0").unwrap();
+        assert_eq!(
+            status_for(&ahead, latest("0.2.0")).newest_release(),
+            Some("0.2.0")
+        );
+        assert_eq!(status_for(&current, None).newest_release(), None);
+    }
 
     #[test]
     fn next_backoff_multiplier_doubles() {

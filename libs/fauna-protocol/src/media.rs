@@ -88,6 +88,14 @@ pub struct MediaItem {
     /// Name of the readable folder this item belongs to (the
     /// `media-folder-filter` key).
     pub folder: String,
+    /// The nest's `folders.id` for [`Self::folder`] — the same value both
+    /// `fauna.folders.list` projections carry. What a by-manifest reader puts
+    /// in its relay hint's ref form (`FolderRef::Local`), so a member's own
+    /// same-named set never shadows the shared set the item came from
+    /// (`file-sync.md` § Relay serving, step (4)). `None` from a producer
+    /// that does not stamp it: the reader falls back to the name forms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     /// Folder-relative path, forward-slash normalized.
     pub path: String,
     /// Stored ciphertext size in bytes (mirrors `SyncFile.size_bytes`).

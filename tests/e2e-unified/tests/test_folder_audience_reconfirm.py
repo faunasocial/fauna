@@ -32,9 +32,13 @@ from helpers.set_names import find_set
 pytestmark = [
     pytest.mark.tier2,
     pytest.mark.tier_3,
-    # tui leads (the slice); the other six join with their trickle-down
+    # tui leads (the slice); the others join with their trickle-down
     # legs — this marker list is the parity ledger.
+    # Still owed: windows, macos, ios, android (android also awaits the audience
+    # controls it does not yet paint).
     pytest.mark.tui,
+    pytest.mark.linux,
+    pytest.mark.web,
 ]
 
 # Generous ceilings, not expectations (convention 14): every wait below is a

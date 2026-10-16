@@ -8,7 +8,7 @@
 
 ## The no-install option: the web app
 
-Every Fauna server (nest) serves the full web app itself at:
+Every Fauna server (nest) serves the full web app itself at the address below, unless its admin has chosen to send that address to the project's hosted web app instead (you then land on the same app, already pointed at that nest):
 
 ```
 https://<the-nest's-domain-or-ip>/app/
@@ -117,6 +117,8 @@ The app tells you when a newer release is out: press **Check for Updates**
 on the Settings page and, if there is one, it names the version and the
 release page to get it from. It also looks once by itself each time you sign
 in, and shows the same note on the Settings page if a newer release is out.
+That look asks only your own server, which keeps track of new releases, so
+signing in contacts no one else.
 It never checks again behind your back, and nothing is downloaded or
 installed for you.
 

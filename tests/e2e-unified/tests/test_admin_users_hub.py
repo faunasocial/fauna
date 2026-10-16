@@ -158,7 +158,7 @@ def test_approve_invite_request_at_tier(admin_app, nest_instance):
     removes the row; the requester then appears in the Users section.
     """
     handle = _fresh_handle("joiner")
-    _submit_invite_request(nest_instance["url"], handle=handle)
+    actor_hex = _submit_invite_request(nest_instance["url"], handle=handle)
 
     admin_app.admin.navigate_users()  # the hub renders all three sections
     # Poll for THIS request to surface — never for a bare count. The section is
@@ -175,23 +175,25 @@ def test_approve_invite_request_at_tier(admin_app, nest_instance):
         f"{admin_app.admin.pending_requests_diagnosis()}"
     )
 
-    users_before = admin_app.admin.user_count()
     row = admin_app.admin.invite_request_row_index(handle)
     admin_app.admin.set_request_tier("personal", index=row)
     admin_app.admin.approve_request(index=row)
 
-    # Refetch the hub; the request is gone and a new user exists.
+    # Refetch the hub; the request is gone and THIS requester has a row. Polled
+    # by identity, never by a row count: the list shows one page, so once the
+    # session nest holds a full page of accounts the count stops growing.
     admin_app.admin.navigate_users()
     deadline = time.monotonic() + 15.0
     while time.monotonic() < deadline:
-        if admin_app.admin.user_count() > users_before:
+        if admin_app.admin.has_user_row(actor_hex):
             break
         time.sleep(0.4)
         admin_app.admin.navigate_users()
-    assert admin_app.admin.user_count() > users_before, (
-        f"approved requester did not appear in the user list. "
+    assert admin_app.admin.has_user_row(actor_hex), (
+        f"approved requester {actor_hex[:12]}… did not appear in the user list. "
         f"{admin_app.admin.pending_requests_diagnosis()}"
     )
+    admin_app.admin.navigate_users()
     assert handle not in admin_app.admin.invite_request_handles()
 
 
@@ -279,6 +281,75 @@ def test_evict_and_cancel_eviction(admin_app, nest_instance):
 
 
 @pytest.mark.feature("admin-users")
+def test_a_row_whose_deletion_has_begun_offers_no_restore(admin_app, nest_instance):
+    """Once an evicted account's deletion has begun it can no longer be restored,
+    and its row offers no restore (`admin.md` § Cutting a user off — Restore "is
+    refused once the ladder has reached `deleting`… The row then offers no
+    restore control").
+
+    `deleting` is reached 28 days into the ladder and is normally finalized in
+    the same tick, so the row is made to stay there the way production holds
+    one: the evictee guards a ward, and the finalize refuses to strand a
+    supervised account. The link is admitted AFTER the eviction starts — evict
+    itself refuses a guardian whose links stand — and the 28 days pass through
+    the `test-hooks` endpoint `/api/v1/test/eviction/advance`, which moves this
+    one account's clock and runs the production eviction tick. The evict is the
+    admin's UI gesture; what is asserted is the row the app paints.
+    """
+    from helpers.admin_wire import (
+        admit_adult,
+        admit_ward_directly,
+        eviction_state,
+        graduate_ward,
+        post_nest_hook,
+    )
+
+    day = 24 * 3600
+    evictee = admit_adult(nest_instance, _fresh_handle("deletingguardian"))["actor_id_hex"]
+    admin_app.admin.navigate_users()
+    row = admin_app.admin.user_row_index(evictee)
+    admin_app.admin.evict_user(row)
+    assert admin_app.admin.user_eviction_active(row), (
+        f"eviction did not start. error: {admin_app.error_text()!r}"
+    )
+
+    ward = admit_ward_directly(nest_instance, evictee, _fresh_handle("deletingward"))["actor_id_hex"]
+    try:
+        assert post_nest_hook(nest_instance, "eviction/advance",
+                              {"actor_id": evictee, "secs": 14 * day + 60})["shifted"]
+        post_nest_hook(nest_instance, "eviction/advance", {"actor_id": evictee, "secs": 14 * day + 60})
+        assert eviction_state(nest_instance, evictee) == "deleting", (
+            "the ladder should stand at deleting with the finalize held by the ward; "
+            f"it reports {eviction_state(nest_instance, evictee)!r}"
+        )
+
+        # The refetched row: no restore, and — the account being on its way out —
+        # no other cut-off entry point either.
+        admin_app.admin.navigate_users()
+        row = admin_app.admin.user_row_index(evictee)
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline and admin_app.admin.user_eviction_active(row):
+            time.sleep(0.4)
+            admin_app.admin.navigate_users()
+            row = admin_app.admin.user_row_index(evictee)
+        assert not admin_app.admin.user_eviction_active(row), (
+            "a row whose deletion has begun must not offer restore "
+            f"(admin-users-cancel-eviction-button). error: {admin_app.error_text()!r}"
+        )
+        assert not admin_app.admin.user_evict_available(row), (
+            "a row whose deletion has begun must not offer evict"
+        )
+        assert not admin_app.admin.user_suspend_available(row), (
+            "a row whose deletion has begun must not offer suspend"
+        )
+    finally:
+        # Release the hold so the shared session nest finishes the deletion
+        # rather than retrying a held finalize for the rest of the run.
+        graduate_ward(nest_instance, ward)
+        post_nest_hook(nest_instance, "eviction/advance", {"actor_id": evictee, "secs": 0})
+
+
+@pytest.mark.feature("admin-users")
 def test_suspend_and_restore_user(admin_app, nest_instance):
     """Users section: a user can be cut off *immediately* and restored.
 
@@ -344,8 +415,9 @@ def test_admin_row_offers_no_cut_off_controls(admin_app, nest_instance):
     """
     admin_hex = bytes(nest_instance["admin"]["signing_key"].verify_key).hex()
     plain_hex = _admit_user(admin_app, nest_instance, "plainuser")
+    # Each row is read straight after its own lookup: the two accounts may sit on
+    # different pages of the list, and a lookup leaves the list on its row's page.
     admin_row = admin_app.admin.admin_row_index(admin_hex)
-    plain_row = admin_app.admin.user_row_index(plain_hex)
 
     assert not admin_app.admin.user_suspend_available(admin_row), (
         "the admin's own row must not offer Suspend — the nest refuses it with "
@@ -355,6 +427,7 @@ def test_admin_row_offers_no_cut_off_controls(admin_app, nest_instance):
         "the admin's own row must not offer Evict either"
     )
     # ...and the guard is specific to the admin, not a blanket hiding of controls.
+    plain_row = admin_app.admin.user_row_index(plain_hex)
     assert admin_app.admin.user_suspend_available(plain_row), (
         f"the plain user's row still offers Suspend. error: {admin_app.error_text()!r}"
     )
@@ -442,6 +515,159 @@ def test_remove_admin_refused_at_last_superadmin(admin_app, nest_instance):
     # Nothing changed — the admin's own row still offers remove-admin.
     assert admin_app.admin.user_remove_admin_available(admin_row), (
         "a refused removal must not alter the row's controls"
+    )
+
+
+def _wait_for_request(admin_app, handle: str) -> int:
+    """Re-open the hub until the pending request for ``handle`` paints; return
+    its row. Polls for THIS request, never a bare count (the section is shared
+    state — see `test_approve_invite_request_at_tier`)."""
+    admin_app.admin.navigate_users()
+    deadline = time.monotonic() + 15.0
+    while (time.monotonic() < deadline
+           and handle not in admin_app.admin.invite_request_handles()):
+        time.sleep(0.4)
+        admin_app.admin.navigate_users()
+    return admin_app.admin.invite_request_row_index(handle)
+
+
+def _requester_status(nest_url: str, actor_hex: str) -> dict:
+    """The requester's own view of their request (`invite_request.status`, the
+    anonymous read the onboarding wizard polls) — what the admin's decision
+    tells the person who asked."""
+    with WsRpcAnonClient(nest_url) as anon:
+        return anon.call("fauna.account.invite_request.status", {"actor_id": actor_hex})
+
+
+@pytest.mark.feature("admin-users")
+def test_deny_invite_request_with_a_reason(admin_app, nest_instance):
+    """Pending requests section: the admin turns a request down from the page,
+    with a reason (`admin.md` § 2. Users — deny attaches the optional reason).
+
+    The row leaves the pending list, and the requester's own status read says
+    denied and carries the reason the admin typed — the reason crossed the UI,
+    the wire and the nest intact."""
+    handle = _fresh_handle("turneddown")
+    actor_hex = _submit_invite_request(nest_instance["url"], handle=handle)
+    row = _wait_for_request(admin_app, handle)
+
+    reason = f"not this time {secrets.token_hex(3)}"
+    admin_app.admin.deny_request(index=row, reason=reason)
+
+    deadline = time.monotonic() + 15.0
+    status = _requester_status(nest_instance["url"], actor_hex)
+    while time.monotonic() < deadline and status.get("status") != "denied":
+        time.sleep(0.4)
+        status = _requester_status(nest_instance["url"], actor_hex)
+    assert status.get("status") == "denied", (
+        f"the request was not denied: {status!r}. page error: "
+        f"{admin_app.admin.users_action_error_text()!r}"
+    )
+    assert status.get("denial_reason") == reason, (
+        f"the requester must see the admin's reason {reason!r}: {status!r}"
+    )
+    admin_app.admin.navigate_users()
+    assert handle not in admin_app.admin.invite_request_handles(), (
+        "a denied request must leave the pending list"
+    )
+
+
+@pytest.mark.feature("admin-users")
+def test_approving_a_request_whose_handle_was_taken_since_fails_on_the_page(
+        admin_app, nest_instance):
+    """Pending requests section: a request whose handle someone else took after
+    it was made fails to approve — the page's own error line says so, and the
+    request stays waiting (`admin.md` § 2. Users — approval re-validates the
+    handle).
+
+    The handle is taken by a direct admission over the admin control plane:
+    the arrangement, not the act under test (convention 8)."""
+    from helpers.admin_wire import admit_adult
+
+    handle = _fresh_handle("snapped")
+    actor_hex = _submit_invite_request(nest_instance["url"], handle=handle)
+    admit_adult(nest_instance, handle)
+
+    row = _wait_for_request(admin_app, handle)
+    admin_app.admin.approve_request(index=row)
+
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline and not admin_app.admin.users_action_error_text():
+        time.sleep(0.3)
+    assert admin_app.admin.users_action_error_text(), (
+        f"approving a request whose handle is taken must fail on "
+        f"admin-users-action-error; global banner: {admin_app.error_text()!r}"
+    )
+    assert not admin_app.has_error(), (
+        f"the failure belongs on the Users page's own line: {admin_app.error_text()!r}"
+    )
+    assert _requester_status(nest_instance["url"], actor_hex).get("status") == "pending", (
+        "the refused approval must leave the request waiting"
+    )
+    admin_app.admin.navigate_users()
+    assert handle in admin_app.admin.invite_request_handles(), (
+        f"the request must stay on the pending list. "
+        f"{admin_app.admin.pending_requests_diagnosis()}"
+    )
+
+
+@pytest.mark.feature("admin-users")
+def test_delete_invite_code(admin_app, nest_instance):
+    """Invite section: a code the admin minted is deleted from its row and
+    leaves the list — on the page and on the nest (`admin.md` § 2. Users)."""
+    from helpers.admin_wire import admin_client
+
+    admin_app.admin.navigate_invite_codes()
+    code = admin_app.admin.create_invite_code(tier="free", uses=1)
+    assert code, f"mint returned no token. error: {admin_app.error_text()!r}"
+
+    admin_app.admin.delete_invite_code(code)
+
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline and code in admin_app.admin.invite_code_values():
+        time.sleep(0.3)
+    assert code not in admin_app.admin.invite_code_values(), (
+        f"the deleted code still lists. page error: "
+        f"{admin_app.admin.users_action_error_text()!r}"
+    )
+    with admin_client(nest_instance) as client:
+        listed = [c.get("code") for c in
+                  client.call("fauna.admin.invite_codes.list", {}).get("invite_codes", [])]
+    assert code not in listed, f"the nest still holds the deleted code: {listed!r}"
+
+
+@pytest.mark.feature("admin-users")
+def test_a_suspended_member_is_never_offered_as_a_guardian(admin_app, nest_instance):
+    """The guardian picker never offers a suspended member (`admin.md` § 2.
+    Users — a picker offers every NON-suspended account).
+
+    Two fresh members; the admin suspends one from its row, then opens the
+    invite form. The picker is read once it paints the other member — proof it
+    reflects the post-suspension roster — and the suspended one is absent."""
+    from helpers.admin_wire import admit_adult
+
+    kept = _fresh_handle("keptguardian")
+    cut = _fresh_handle("cutguardian")
+    admit_adult(nest_instance, kept)
+    cut_hex = admit_adult(nest_instance, cut)["actor_id_hex"]
+
+    admin_app.admin.navigate_users()
+    row = admin_app.admin.user_row_index(cut_hex)
+    admin_app.admin.suspend_user(row)
+    assert admin_app.admin.user_eviction_active(row), (
+        f"the suspension did not take. error: {admin_app.admin.users_action_error_text()!r}"
+    )
+
+    admin_app.admin.navigate_invite_codes()
+    admin_app.admin.open_invite_form()
+    deadline = time.monotonic() + 15.0
+    options = admin_app.admin.invite_guardian_options() or []
+    while time.monotonic() < deadline and kept not in options:
+        time.sleep(0.3)
+        options = admin_app.admin.invite_guardian_options() or []
+    assert kept in options, f"the picker never painted {kept!r}: {options!r}"
+    assert cut not in options, (
+        f"a suspended member must never be offered as a guardian: {options!r}"
     )
 
 

@@ -160,12 +160,23 @@ pub struct ChunkDownloadQuery {
     /// plane).
     #[serde(default)]
     pub folder_hash: Option<String>,
+    /// The same folder's **row**, a `FolderRef` wire string
+    /// (`fauna_nest_http::paths::chunk_store::FOLDER_REF_HINT_PARAM`). When
+    /// present it is the hint, over both name forms: a name finds the
+    /// caller's own same-named set first, so a member who owns a set named
+    /// like the shared set it reads reaches the shared set only this way
+    /// (`file-sync.md` § Relay serving, step (4)). `local:<id>` under a
+    /// session bearer, `foreign:<channel>` under a cross-nest byte-plane
+    /// token; the other pairing, a malformed ref and an unreadable row are
+    /// `404`, never a fall back to the names.
+    #[serde(default)]
+    pub folder_ref: Option<String>,
 }
 
 impl ChunkDownloadQuery {
-    /// Whether the request hints a folder at all — either form arms the relay.
+    /// Whether the request hints a folder at all — any form arms the relay.
     fn hints_a_folder(&self) -> bool {
-        self.folder.is_some() || self.folder_hash.is_some()
+        self.folder.is_some() || self.folder_hash.is_some() || self.folder_ref.is_some()
     }
 }
 
@@ -185,12 +196,15 @@ impl ChunkDownloadQuery {
 /// always did. The hinted arm is actor-scoped — it needs a bearer that names
 /// its caller (`401` without one): a session bearer, whose folder is resolved
 /// owner-or-member through the same `folder_authz::resolve_readable_folder`
-/// every folder read uses; or the byte-plane token a member on another nest
-/// was minted (`crate::auth::relay_reader`), whose folder is resolved through
-/// the cross-nest roster alone, at every request
-/// (`folder_authz::resolve_foreign_readable_folder`). Either way a hint cannot
-/// make the nest probe a stranger's seats for a hash (`404`,
-/// indistinguishable from a plain miss).
+/// every folder read uses — or, by the hint's ref form, by row through the
+/// announce's gate (`resolve_readable_folder_by_ref`), the road a member
+/// owning a same-named set takes to the shared one; or the byte-plane token
+/// a member on another nest was minted (`crate::auth::relay_reader`), whose
+/// folder is resolved through the cross-nest roster alone, at every request
+/// (`folder_authz::resolve_foreign_readable_folder`, by ref
+/// `resolve_foreign_readable_folder_by_ref`). Either way a hint cannot make
+/// the nest probe a stranger's seats for a hash (`404`, indistinguishable
+/// from a plain miss).
 ///
 /// **Withheld digests answer 451 before either arm runs.** This is the blob
 /// store's *third* door, and `moderation.md` § Legal takedown → *The
@@ -291,8 +305,17 @@ async fn relay_chunk_for_folder(
     let Some(reader) = crate::auth::relay_reader(state, token).await else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    // The hash hint wins; a malformed one names no folder (the same `404` as
-    // an unreadable one), never a fall back to the plaintext.
+    // The ref wins over both name forms, and the hash over the plaintext; a
+    // malformed ref or hash names no folder (the same `404` as an unreadable
+    // one), never a fall back to a lesser form — a name finds the caller's
+    // own same-named set, which is exactly the row a ref is sent to avoid.
+    let folder_ref: Option<fauna_core::folder_keys::FolderRef> = match hint.folder_ref.as_deref() {
+        None => None,
+        Some(wire) => match fauna_core::folder_keys::FolderRef::parse(wire) {
+            Some(r) => Some(r),
+            None => return StatusCode::NOT_FOUND.into_response(),
+        },
+    };
     let name_hash: Option<[u8; 32]> = match hint.folder_hash.as_deref() {
         None => None,
         Some(hex_hash) => match parse_hash(hex_hash) {
@@ -305,18 +328,29 @@ async fn relay_chunk_for_folder(
     // never mix: a session reads through the owner-or-member resolver, a
     // cross-nest member's token through the cross-nest roster alone — read
     // here, per request, so a removal ends that member's reads whatever life
-    // its token has left.
-    let resolved = match &reader {
-        crate::auth::RelayReader::Session(actor) => {
+    // its token has left. The ref form takes the same split: a row by id on
+    // the announce's gate for a session, the channel's claimed folder for a
+    // federated token.
+    let resolved = match (&reader, folder_ref) {
+        (crate::auth::RelayReader::Session(actor), Some(folder_ref)) => {
+            crate::folder_authz::resolve_readable_folder_by_ref(&state.db, folder_ref, &actor.0)
+                .await
+        }
+        (crate::auth::RelayReader::Session(actor), None) => {
             crate::folder_authz::resolve_readable_folder(
                 &state.db,
-                name,
-                name_hash.as_ref(),
+                crate::folder_authz::FolderAddress::name(name, name_hash),
                 &actor.0,
             )
             .await
         }
-        crate::auth::RelayReader::ForeignMember(actor) => {
+        (crate::auth::RelayReader::ForeignMember(actor), Some(folder_ref)) => {
+            crate::folder_authz::resolve_foreign_readable_folder_by_ref(
+                &state.db, folder_ref, &actor.0,
+            )
+            .await
+        }
+        (crate::auth::RelayReader::ForeignMember(actor), None) => {
             crate::folder_authz::resolve_foreign_readable_folder(
                 &state.db,
                 name,

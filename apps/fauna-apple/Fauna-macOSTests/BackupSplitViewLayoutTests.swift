@@ -63,7 +63,7 @@ private func populatedVM() throws -> BackupsMachineVM {
         inProgressOp: nil,
         checkResult: nil,
         prunePreview: nil,
-        detail: SnapshotDetail(snapshotId: 1, files: [
+        detail: SnapshotDetail(snapshotId: 1, folder: "documents", folderHash: nil, files: [
             SnapshotFileRow(path: "documents/quarterly-report-final.pdf",
                             sizeBytes: 524_288, fileType: "regular",
                             manifestHash: String(repeating: "ab", count: 32)),

@@ -172,6 +172,10 @@ def delegation_seats(request, app, nest_instance):
     # previous test's assignments (the `ungranted_app` rule).
     _login_app_as(app, request, nest_instance, user, verify_live_actor=True)
     seats = _Seats(request, nest_instance, app, user)
+    # The user's other computer: always a tui seat, whatever app is under test.
+    # Named here, literally, so the prebuild hoist's pin can see it
+    # (`_CROSS_APP_FIXTURE_APPS`).
+    seats.launch_tui = lambda tag: seats.launch("tui", tag)
     try:
         yield seats
     finally:
@@ -614,7 +618,7 @@ def test_on_automatic_the_policy_prefers_the_nest_then_this_desktop_never_a_phon
     seats = delegation_seats
     app, user = seats.observer, seats.user
     if not seats.observer_runs_index:
-        seats.launch("tui", "desktop")
+        seats.launch_tui("desktop")
 
     td = app.task_delegation
     td.navigate()
@@ -943,7 +947,7 @@ def test_a_kind_pinned_to_another_device_waits_for_it_rather_than_moving(
     if seats.observer_runs_index:
         competitor = viewer
     else:
-        competitor, _stop_c = seats.launch("tui", "c")
+        competitor, _stop_c = seats.launch_tui("c")
 
     _pin_to_itself(seat_b, "seat B")
 

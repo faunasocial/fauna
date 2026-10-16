@@ -173,6 +173,22 @@ pub async fn restore_and_wire(
         if !verdict.foreign.is_empty() {
             // Positively another identity's. Replacing it is the DESIGN: the
             // successor's own first save takes the path back by CAS.
+            //
+            // But not before the retired leaf is PARKED, when it is a
+            // predecessor's this device can author: on a device with no local
+            // MLS store this snapshot is the only durable copy of the state the
+            // owed sweep needs, and the first save is what destroys it
+            // (`succession-propagation.md` § Propagation → *Own device fleet*,
+            // *Where the retired leaf rests on a device with no local MLS
+            // store*, rule (1)). Here, before the door returns, because every
+            // save goes through the sync this door just loaded — so
+            // parked-before-replaced is true by construction. A failed park
+            // fails the door (a transient one is retried by the launch loop,
+            // which re-loads and re-parks): wiring the save path past an
+            // unparked leaf would replace it.
+            if sync.predecessor_actor_count() > 0 {
+                sync.park_retired_leaf(provider).await?;
+            }
             tracing::warn!(
                 channels = verdict.foreign.len(),
                 unexaminable = verdict.unexaminable,
@@ -829,7 +845,8 @@ pub async fn save_snapshot(
 mod tests {
     use super::*;
     use crate::store::{
-        MlsReplicaTransport, MlsTransportError, PATH_PROVIDER, PutOutcome, history_path,
+        MlsReplicaClient, MlsReplicaTransport, MlsTransportError, PATH_PROVIDER, PutOutcome,
+        history_path,
     };
     use crate::sync::MlsStateSync;
     use crate::test_conv::{ConvNest, FakeConvNest, block_on};
@@ -846,6 +863,7 @@ mod tests {
     use fauna_core::identity::{ActorId, ActorKeypair};
     use fauna_core::render::RenderDocument;
     use fauna_mls::engine::MlsEngine;
+    use fauna_mls::state_replica::ProviderReplica;
     use fauna_mls::types::{ChannelEnvelope, ChannelMessage, ChannelMessageBody};
     use fauna_protocol::mls_replica::ReplicaBase;
     use std::collections::HashMap;
@@ -2995,6 +3013,161 @@ mod tests {
             "the successor's own snapshot restores into a fresh engine of the successor, \
              seated as itself — the ordinary single-leaf state-sync"
         );
+    }
+
+    /// The successor's launch over a replica a succession left behind: `old`'s
+    /// snapshot at the successor's (seed 3's) `provider` path, the re-sealed
+    /// occupant the restore door meets, and a sync offered `predecessor_actors`
+    /// as an app passes the registry walk's actor half. Returns the launched
+    /// parts and the staged snapshot.
+    #[allow(clippy::type_complexity)]
+    fn launched_successor_over(
+        old: &Arc<MlsEngine>,
+        successor: &Arc<MlsEngine>,
+        conv_nest: &Arc<FakeConvNest>,
+        replica: &MemReplica,
+        predecessor_actors: Vec<ActorId>,
+    ) -> (
+        Arc<FaunaMlsBackend>,
+        Arc<ConversationsManager>,
+        Arc<MlsStateSync>,
+        fauna_mls::state_replica::ProviderReplica,
+    ) {
+        let staged = fauna_mls::state_replica::ProviderReplica::from_engine(old);
+        let seed_sync = MlsStateSync::new(Box::new(replica.clone()), &keypair(3));
+        block_on(seed_sync.publish_provider(&staged))
+            .expect("the predecessor's snapshot lands at the successor's path");
+        let (backend, manager, _) = device(successor, conv_nest, replica, 3);
+        let sync = Arc::new(
+            MlsStateSync::new(Box::new(replica.clone()), &keypair(3))
+                .with_predecessor_actors(predecessor_actors),
+        );
+        block_on(restore_and_wire(Arc::clone(&sync), &backend, &manager))
+            .expect("launch restore ok");
+        (backend, manager, sync, staged)
+    }
+
+    /// The predecessor `old` (seed 1) seated in a group with bob — so its
+    /// snapshot positively seats a leaf the successor's door refuses.
+    fn predecessor_in_a_group() -> Arc<MlsEngine> {
+        let old = Arc::new(MlsEngine::new_in_memory(keypair(1)).unwrap());
+        let bob = MlsEngine::new_in_memory(keypair(2)).unwrap();
+        old.create_group(&bob.generate_key_packages(1).unwrap())
+            .unwrap();
+        old
+    }
+
+    /// **The retired leaf is parked before the successor's first save replaces
+    /// it** — `succession-propagation.md` § Propagation → *Own device fleet*,
+    /// *Where the retired leaf rests on a device with no local MLS store*,
+    /// rule (1). The successor here has no join of its own (a device with no
+    /// local MLS store, launching after the switch): its first flush replaces
+    /// the predecessor's snapshot at `provider` by design, so unless the door
+    /// parked it the only durable copy of the state the owed sweep authors from
+    /// is gone.
+    #[test]
+    fn a_successors_launch_parks_the_retired_leaf_before_its_first_save_replaces_it() {
+        let replica = MemReplica::default();
+        let conv_nest = Arc::new(FakeConvNest::default());
+        let old = predecessor_in_a_group();
+        let old_id = old.identity_actor_id();
+        let successor = Arc::new(MlsEngine::new_in_memory(keypair(3)).unwrap());
+
+        let (backend, manager, sync, staged) =
+            launched_successor_over(&old, &successor, &conv_nest, &replica, vec![old_id]);
+        assert!(
+            !staged.channel_ids().is_empty(),
+            "fixture: the staged snapshot holds the predecessor's group"
+        );
+
+        // The successor's first flush — the save that replaces the occupant.
+        let snapshot = snapshot_replica(&backend, &manager, &sync);
+        assert!(
+            block_on(save_snapshot(&sync, &snapshot)).expect("save ok"),
+            "the successor's first save lands its own provider"
+        );
+
+        let reader = MlsReplicaClient::new(Box::new(replica.clone()), &keypair(3));
+        let (parked, _) = block_on(reader.load_retired_provider(&old_id)).expect("parked read");
+        assert!(
+            parked.as_ref() == Some(&staged),
+            "the predecessor's snapshot is parked at retired/<old>/provider, unchanged, \
+             sealed under the successor's key"
+        );
+        let (current, _) = block_on(reader.load_provider_with_base()).expect("provider read");
+        assert!(
+            current
+                .expect("the successor's provider")
+                .channel_ids()
+                .is_empty(),
+            "provider now holds the successor's own (group-less) state — replaced, as designed"
+        );
+    }
+
+    /// **The park is write-once**: a relaunch over the same stale `provider`
+    /// never overwrites a snapshot already parked, because a partial retry may
+    /// have ratcheted the parked leaf and re-parking the stale one would
+    /// un-ratchet it.
+    #[test]
+    fn a_relaunch_never_overwrites_a_parked_retired_leaf() {
+        let replica = MemReplica::default();
+        let conv_nest = Arc::new(FakeConvNest::default());
+        let old = predecessor_in_a_group();
+        let old_id = old.identity_actor_id();
+
+        // The leaf as a partial retry left it: further along than `provider`.
+        let ratcheted = {
+            let ahead = Arc::new(MlsEngine::new_in_memory(keypair(1)).unwrap());
+            ProviderReplica::from_engine(&old)
+                .restore_into(&ahead)
+                .expect("restore");
+            let carol = MlsEngine::new_in_memory(keypair(4)).unwrap();
+            ahead
+                .create_group(&carol.generate_key_packages(1).unwrap())
+                .unwrap();
+            ProviderReplica::from_engine(&ahead)
+        };
+        let writer = MlsReplicaClient::new(Box::new(replica.clone()), &keypair(3));
+        assert_eq!(
+            block_on(writer.put_retired_provider(&old_id, &ratcheted, ReplicaBase::Absent))
+                .unwrap(),
+            PutOutcome::Stored
+        );
+
+        let successor = Arc::new(MlsEngine::new_in_memory(keypair(3)).unwrap());
+        let (_, _, _, staged) =
+            launched_successor_over(&old, &successor, &conv_nest, &replica, vec![old_id]);
+        assert!(staged != ratcheted, "fixture: the two leaves differ");
+
+        let (parked, _) = block_on(writer.load_retired_provider(&old_id)).unwrap();
+        assert!(
+            parked.as_ref() == Some(&ratcheted),
+            "the ratcheted parked leaf survives the relaunch untouched"
+        );
+    }
+
+    /// **A device whose walk is empty parks nothing** — nor one whose walk
+    /// names no identity the snapshot seats: a device that cannot author that
+    /// leaf has no use for its state.
+    #[test]
+    fn a_device_whose_walk_carries_no_seated_predecessor_parks_nothing() {
+        for walk in [vec![], vec![keypair(9).actor_id()]] {
+            let replica = MemReplica::default();
+            let conv_nest = Arc::new(FakeConvNest::default());
+            let old = predecessor_in_a_group();
+            let successor = Arc::new(MlsEngine::new_in_memory(keypair(3)).unwrap());
+            let (_, _, _, _) =
+                launched_successor_over(&old, &successor, &conv_nest, &replica, walk.clone());
+            assert!(
+                replica
+                    .stored
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .all(|path| !path.starts_with("retired/")),
+                "walk {walk:?}: nothing parked"
+            );
+        }
     }
 
     /// **The SECOND door: a mid-session `resync_provider` refuses a

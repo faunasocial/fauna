@@ -2,20 +2,15 @@ import Foundation
 
 /// Resolves a `LocalizedText`'s template, before argument substitution.
 ///
-/// Rust emits keys without the leading `onboarding.` prefix
-/// (e.g. `handle_check.phase.parsing`); the generated `L` flat table
-/// keys all sit under `onboarding.*`. Try the prefixed lookup first;
-/// fall back to the raw key for keys outside the onboarding namespace.
+/// Rust emits fully qualified catalog keys (`onboarding.handle_check.phase.parsing`),
+/// so the key is looked up as-is — no per-app namespace guessing (pinned on the
+/// Rust side by `fauna-onboarding-machine`'s `i18n_keys_resolve` test).
 /// `nil` for an empty key (machine's default) — shared by
 /// `renderLocalizedText`/`renderLocalizedTextNested`, which differ only in
 /// how they substitute the resolved template's arguments.
 private func resolveLocalizedTemplate(_ lt: LocalizedText) -> String? {
     if lt.key.isEmpty { return nil }
-    var rendered = L.lookup("onboarding." + lt.key)
-    if rendered == "onboarding." + lt.key {
-        rendered = L.lookup(lt.key)
-    }
-    return rendered
+    return L.lookup(lt.key)
 }
 
 /// Renders a `LocalizedText` (key + args dictionary) emitted by the

@@ -500,6 +500,68 @@ async fn ovh_list_is_unfiltered_and_every_row_is_unmarked() {
     );
 }
 
+#[tokio::test]
+async fn ovh_with_no_project_chosen_lists_every_project_in_the_account() {
+    // The retire view builds the adapter from credentials alone (it has no
+    // project picker), so the list must walk every project the credentials
+    // see — and each row's id must carry its project, or the delete that
+    // follows cannot find it.
+    let mock = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/1.0/auth/time"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("1700000000"))
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/1.0/cloud/project"))
+        .and(wiremock::matchers::header_exists("x-ovh-signature"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!(["proj-1", "proj-2"])),
+        )
+        .expect(1)
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/1.0/cloud/project/proj-1/instance"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "id": "inst-a",
+                "name": "alpha-example-com",
+                "ipAddresses": [{ "ip": "198.51.100.7", "version": 4, "type": "public" }]
+            }])),
+        )
+        .expect(1)
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/1.0/cloud/project/proj-2/instance"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "id": "inst-b",
+                "name": "beta-example-com",
+                "ipAddresses": [{ "ip": "198.51.100.8", "version": 4, "type": "public" }]
+            }])),
+        )
+        .expect(1)
+        .mount(&mock)
+        .await;
+
+    let ovh = Ovh::with_base_url(
+        "myAppKey".into(),
+        "myAppSecret".into(),
+        "myConsumerKey".into(),
+        mock.uri(),
+    );
+    let client = reqwest::Client::new();
+    let servers = ovh.list_managed_servers(&client).await.unwrap();
+
+    let ids: Vec<&str> = servers.iter().map(|s| s.server_id.as_str()).collect();
+    assert_eq!(ids, ["proj-1/inst-a", "proj-2/inst-b"]);
+    assert!(servers.iter().all(|s| !s.marked));
+    assert_eq!(servers[1].name, "beta-example-com");
+}
+
 // --------------------------------------------------------------------------
 // `ManagedServer` → `VpsInstance`, the `delete_server` / `get_ptr` take
 // --------------------------------------------------------------------------

@@ -20,7 +20,7 @@
   // `web-settings` page, not here. Lifts the linux lead
   // (apps/fauna-linux/src/settings/admin_web.rs). IDs: ui.yaml § admin-web.
   import { identity } from '$lib/store';
-  import { webGetApexActor, webSetApexActor, adminUsersListAll } from '$lib/rpc';
+  import { webGetApexActor, webSetApexActor, webServingDomain, adminUsersListAll } from '$lib/rpc';
   import { ensureWasm, webApexUrl, hexFull, adminPickerOption } from '$lib/wasm';
   import { toBytes, actorHex } from '$lib/hex';
   import { onMount } from 'svelte';
@@ -68,12 +68,22 @@
   }
 
   let apex = $derived(buildApex());
-  let apexUrl = $derived(webApexUrl($identity?.domain ?? ''));
+  // The nest's own `web_serving_domain` (`fauna.nest.info`, via the shared
+  // `WebClient::serving_domain`) — never the sign-in/handle domain, which can be
+  // a placeholder or differ from the address the nest actually serves at
+  // (admin.md § 7). Empty until read; `webApexUrl('')` renders the no-domain form.
+  let servingDomain = $state('');
+  let apexUrl = $derived(webApexUrl(servingDomain));
 
   // Fetch the current apex + the actor list, then rebuild the picker.
   async function load(): Promise<void> {
     const secretHex = $identity?.secretHex ?? '';
     current = await webGetApexActor(secretHex);
+    try {
+      servingDomain = await webServingDomain(secretHex);
+    } catch {
+      // Non-fatal: the hint stays in its no-domain form.
+    }
     // A failed actor-list read must not break the page — the picker degrades to
     // "None" + any current designation kept visible.
     try {

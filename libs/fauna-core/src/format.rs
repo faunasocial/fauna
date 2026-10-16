@@ -1428,8 +1428,8 @@ pub fn short_nest_id(id: &str) -> String {
 /// single-character ellipsis `…` (`U+2026`), and the last 8 (`3f9a1b2c…c21e9d8f`).
 ///
 /// It is the ONE identity a client holds for a fleet member that no roster
-/// row accounts for (`account-data-taxonomy.md` § The generation machinery →
-/// *Fleet-scope reclamation*, clause (4), *A disagreement is the user's to
+/// row accounts for (`fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (4), *A disagreement is the user's to
 /// settle*): such a member has no nest row, so no device label. The user
 /// settles a removal **by elimination** — every device still in hand shows
 /// its own fingerprint (`device-own-fingerprint`) and the member to remove
@@ -2614,7 +2614,19 @@ where
 /// status's `backlog_count`, with the absent-status baseline of 0 every app
 /// applied by hand. Returns a complete [`LocalizedText`] — no client-side
 /// composition. See value-formatting.md § Backup destination status labels.
-pub fn backup_backlog_label(backlog_count: Option<u32>) -> LocalizedText {
+///
+/// `writer_state` is the row's own `writer_state`: when it reads
+/// [`crate::data::WRITER_STATE_REFUSED`] the destination turns this box away,
+/// and the row says so in place of the count — a refused writer is a state,
+/// never a lag (`backup-destinations.md` § Per-destination status read). The
+/// refusal is read from the state, never inferred from the count.
+pub fn backup_backlog_label(
+    backlog_count: Option<u32>,
+    writer_state: Option<&str>,
+) -> LocalizedText {
+    if writer_state == Some(crate::data::WRITER_STATE_REFUSED) {
+        return LocalizedText::key("backups.backup_destination_writer_refused");
+    }
     LocalizedText::key_arg(
         "backups.backup_destination_backlog",
         "count",
@@ -3398,9 +3410,47 @@ pub fn approval_display_text<'a>(
     }
 }
 
-/// Per-part character cap on a `feed_source` card. Generous: the nest already
-/// length-caps every part at `fauna.family.feed_source.request`; this only
-/// bounds what a row paints.
+/// When a `family-approval-item` row's item arrived, for the kinds whose row
+/// shows it — the second half of a held mail's envelope metadata ("sender
+/// address, timestamp", `family-safety.md` § Guardian policy — the enforcement
+/// split), beside [`approval_display_text`]'s sender.
+///
+/// **Only `mail_hold` carries a time:** the goal names the timestamp for a held
+/// mail alone, and every other kind's row stays exactly as it was. `None` for
+/// every other kind and for a hold whose `created_at` is unset (`<= 0`) — the
+/// row then shows its sender alone, never an invented time.
+///
+/// `created_at_secs` is the entry's own `created_at` (unix **seconds**, the
+/// `guardian_mail_holds` sidecar's clock); the bucketing is the conversation
+/// list's ([`conversation_timestamp_display`]), so a held mail's time reads the
+/// way a message's does on every app. Wasm-safe: the caller supplies `now_ms`
+/// and its local offset, and formats the `absolute_epoch_ms` arm itself.
+pub fn approval_timestamp_display(
+    kind: &str,
+    created_at_secs: i64,
+    now_ms: i64,
+    utc_offset_seconds: i32,
+) -> Option<ConversationTimestampDisplay> {
+    if kind != "mail_hold" || created_at_secs <= 0 {
+        return None;
+    }
+    Some(conversation_timestamp_display(
+        now_ms,
+        created_at_secs.saturating_mul(1_000),
+        utc_offset_seconds,
+    ))
+}
+
+/// The longest feed-source target the nest accepts, in bytes — the one cap
+/// `fauna.bridges.feeds.create` and `fauna.family.feed_source.request` both
+/// enforce, and the length the approval card never cuts a target below (a
+/// character is at least one byte, so a target within this cap is shown whole).
+pub const FEED_SOURCE_TARGET_MAX_LEN: usize = 2048;
+
+/// Character cap on the bridge id, operation and label of a `feed_source`
+/// card. Generous: the nest already length-caps these at
+/// `fauna.family.feed_source.request`; this only bounds what a row paints.
+/// The target is never cut at this — see [`FEED_SOURCE_TARGET_MAX_LEN`].
 const FEED_SOURCE_PART_MAX_CHARS: usize = 512;
 
 /// The `feed_source` arm of [`approval_display_text`]: `bridge · operation ·
@@ -3424,11 +3474,15 @@ pub fn feed_source_display_text(
     label: &str,
 ) -> Option<String> {
     use crate::control_chars::sanitize_plain_line;
-    let key: Vec<String> = [bridge_id, operation, target]
-        .iter()
-        .map(|part| sanitize_plain_line(part, FEED_SOURCE_PART_MAX_CHARS))
-        .filter(|part| !part.is_empty())
-        .collect();
+    let key: Vec<String> = [
+        (bridge_id, FEED_SOURCE_PART_MAX_CHARS),
+        (operation, FEED_SOURCE_PART_MAX_CHARS),
+        (target, FEED_SOURCE_TARGET_MAX_LEN),
+    ]
+    .iter()
+    .map(|(part, max)| sanitize_plain_line(part, *max))
+    .filter(|part| !part.is_empty())
+    .collect();
     if key.is_empty() {
         return None;
     }
@@ -3728,6 +3782,39 @@ mod publish_kind_tests {
 mod approval_display_text_tests {
     use super::*;
 
+    /// 2023-11-14 22:13:20 UTC.
+    const HELD_AT_SECS: i64 = 1_700_000_000;
+
+    #[test]
+    fn mail_hold_time_is_the_conversation_bucket_of_its_created_at() {
+        let now_ms = HELD_AT_SECS * 1_000 + 5 * 60_000;
+        assert_eq!(
+            approval_timestamp_display("mail_hold", HELD_AT_SECS, now_ms, 0),
+            Some(conversation_timestamp_display(
+                now_ms,
+                HELD_AT_SECS * 1_000,
+                0
+            )),
+        );
+        let today = approval_timestamp_display("mail_hold", HELD_AT_SECS, now_ms, 0)
+            .expect("a hold carries its time");
+        assert_eq!(today.clock.as_deref(), Some("22:13"), "seconds, not ms");
+    }
+
+    #[test]
+    fn only_a_mail_hold_with_a_time_shows_one() {
+        let now_ms = HELD_AT_SECS * 1_000;
+        for kind in ["contact", "contact_request", "feed_source", "dm_hold", ""] {
+            assert_eq!(
+                approval_timestamp_display(kind, HELD_AT_SECS, now_ms, 0),
+                None,
+                "{kind}"
+            );
+        }
+        assert_eq!(approval_timestamp_display("mail_hold", 0, now_ms, 0), None);
+        assert_eq!(approval_timestamp_display("mail_hold", -5, now_ms, 0), None);
+    }
+
     #[test]
     fn mail_hold_renders_peer_address_not_the_empty_summary() {
         assert_eq!(
@@ -3847,6 +3934,23 @@ mod approval_display_text_tests {
             approval_display_text("feed_source", "", "", "harmless", "", "", ""),
             None,
         );
+    }
+
+    /// The target is what Approve grants, so the card never cuts it below the
+    /// nest's own cap: two feed URIs that differ only past character 512 must
+    /// not render as the same card.
+    #[test]
+    fn feed_source_target_is_never_cut_below_the_nest_cap() {
+        let pad = "a".repeat(540);
+        let one = format!("https://example.test/videos.xml?x={pad}&channel_id=UC1");
+        let two = format!("https://example.test/videos.xml?x={pad}&channel_id=UC2");
+        let card = |target: &str| {
+            approval_display_text("feed_source", "", "", "", "rss", "feed", target).unwrap()
+        };
+        assert_ne!(card(&one), card(&two));
+        assert!(card(&one).ends_with("channel_id=UC1"));
+        let max = "b".repeat(FEED_SOURCE_TARGET_MAX_LEN);
+        assert_eq!(card(&max), format!("rss · feed · {max}"));
     }
 
     /// Every ward-supplied part is one plain line: a newline cannot forge a
@@ -5657,13 +5761,37 @@ mod value_format_tests {
     #[test]
     fn backup_backlog_label_counts_and_defaults_absent_to_zero() {
         assert_eq!(
-            backup_backlog_label(Some(7)),
+            backup_backlog_label(Some(7), None),
             LocalizedText::key_arg("backups.backup_destination_backlog", "count", "7")
         );
         // No status read yet ⇒ "0 queued" (every app's baseline today).
         assert_eq!(
-            backup_backlog_label(None),
+            backup_backlog_label(None, None),
             LocalizedText::key_arg("backups.backup_destination_backlog", "count", "0")
+        );
+        // An accepted writer is an ordinary row.
+        assert_eq!(
+            backup_backlog_label(Some(7), Some(crate::data::WRITER_STATE_OK)),
+            LocalizedText::key_arg("backups.backup_destination_backlog", "count", "7")
+        );
+    }
+
+    #[test]
+    fn backup_backlog_label_reads_a_refused_writer_from_the_state_never_the_count() {
+        let refused = LocalizedText::key("backups.backup_destination_writer_refused");
+        // The refusal replaces the count, whatever the count is — a refused
+        // box with nothing queued is still refused.
+        for count in [None, Some(0), Some(1), Some(9_999)] {
+            assert_eq!(
+                backup_backlog_label(count, Some(crate::data::WRITER_STATE_REFUSED)),
+                refused
+            );
+        }
+        // And no count, however large, reads as a refusal on its own.
+        assert_ne!(backup_backlog_label(Some(u32::MAX), None), refused);
+        assert_ne!(
+            backup_backlog_label(Some(u32::MAX), Some(crate::data::WRITER_STATE_OK)),
+            refused
         );
     }
 

@@ -67,7 +67,6 @@ use fauna_protocol::discovery::{SetupStatusReply, SetupStatusRequest};
 use crate::FfiError;
 use crate::account::FfiAccountClient;
 use crate::admin::FfiAdminClient;
-use crate::bluesky_client::FfiBlueskyClient;
 use crate::bridges::FfiBridgesClient;
 use crate::caldav_client::{FfiCaldavClient, SchedulingSessionHolder};
 use crate::contacts_client::FfiContactsClient;
@@ -76,6 +75,7 @@ use crate::email_client::FfiEmailClient;
 use crate::family::FfiFamilyClient;
 #[cfg(feature = "value-format")]
 use crate::features::FfiFeaturesClient;
+#[cfg(feature = "feed-client")]
 use crate::feed_client::FfiFeedClient;
 use crate::folders_client::FfiFoldersClient;
 use crate::inbox_client::FfiInboxClient;
@@ -88,6 +88,7 @@ use crate::notifications_client::FfiNotificationsClient;
 use crate::payments_client::FfiPaymentsClient;
 use crate::posts_client::FfiPostsClient;
 use crate::push_client::{FfiPushClient, FfiPushRegistration};
+#[cfg(feature = "search-client")]
 use crate::search_client::FfiSearchClient;
 use crate::snapshots_client::FfiSnapshotsClient;
 use crate::spam::FfiSpamClient;
@@ -524,9 +525,10 @@ pub enum FfiConnectionState {
     Unreachable,
 }
 
-/// UniFFI face of [`fauna_client::SessionEndingVerdict`] — a post-auth verdict
-/// a signed-in session cannot survive, each routed by the apps to the launch
-/// surface rather than a banner (`security.md` § Post-auth surfacing).
+/// UniFFI face of [`fauna_client::SessionEndingVerdict`] — a verdict a
+/// signed-in session cannot survive, each routed by the apps to the launch
+/// surface rather than a banner (`security.md` § Post-auth surfacing;
+/// `version-compatibility.md` § Dimension 4 for [`Self::AppOutdated`]).
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FfiSessionEndingVerdict {
     /// The nest's pinned deployment identity changed.
@@ -535,6 +537,13 @@ pub enum FfiSessionEndingVerdict {
     Superseded,
     /// The nest stopped signing this identity in — suspended or removed.
     SignInRefused,
+    /// The nest refused this app's subprotocol — the app is too old for it.
+    /// The re-run launch lands the needs-update surface.
+    AppOutdated,
+    /// The nest needs updating — restarted into its degraded needs-update mode
+    /// while signed in (`fauna.nest.outdated`). The app re-enters launch, whose
+    /// re-run challenge lands its non-retry update surface.
+    NestOutdated,
 }
 
 impl From<fauna_client::SessionEndingVerdict> for FfiSessionEndingVerdict {
@@ -544,6 +553,8 @@ impl From<fauna_client::SessionEndingVerdict> for FfiSessionEndingVerdict {
             V::NestIdentityChanged => Self::NestIdentityChanged,
             V::Superseded => Self::Superseded,
             V::SignInRefused => Self::SignInRefused,
+            V::AppOutdated => Self::AppOutdated,
+            V::NestOutdated => Self::NestOutdated,
         }
     }
 }
@@ -969,10 +980,26 @@ pub struct FfiStaleSurfaces {
     /// (`StaleSurfaces::family`). The three UniFFI apps fire that read from
     /// their own reconnect triggers today and may serve this flag instead.
     pub family: bool,
+    /// The viewer's own spam/phishing thresholds (`fauna.spam.get_preferences`)
+    /// — reconnect-only, like `family` (`StaleSurfaces::own_thresholds`): the
+    /// login read can lose the socket, and only a re-read restores the
+    /// own-threshold collapse.
+    pub own_thresholds: bool,
     /// The Address Book page's books and open book's cards — page-gated, like
     /// `media`: re-read only while the Address Book is showing, since a contacts
     /// app's first sync is one push per card (`StaleSurfaces::address_book`).
     pub address_book: bool,
+    /// The Spam page's training history — page-gated like `address_book`: an
+    /// undo or a reset on another device lands in the list open here, and a
+    /// mail app's batch Junk move is one push per lesson
+    /// (`StaleSurfaces::mail_spam`).
+    pub mail_spam: bool,
+    /// The Export wizard — page-gated like `mail_spam`: an open export page
+    /// dispatches `Refresh`, and a page holding a run ignores it
+    /// (`StaleSurfaces::mail_export`).
+    pub mail_export: bool,
+    /// The Import wizard — the `mail_export` twin (`StaleSurfaces::mail_import`).
+    pub mail_import: bool,
 }
 
 #[cfg(feature = "push-subscription")]
@@ -988,10 +1015,11 @@ impl From<fauna_protocol::StaleSurfaces> for FfiStaleSurfaces {
             events: s.events,
             media: s.media,
             family: s.family,
+            own_thresholds: s.own_thresholds,
             address_book: s.address_book,
-            // `s.mail_spam` (the spam page's training history) is not carried
-            // yet: no UniFFI app consumes it, and the field lands here together
-            // with the first native consumer, so the tracked bindings move once.
+            mail_spam: s.mail_spam,
+            mail_export: s.mail_export,
+            mail_import: s.mail_import,
         }
     }
 }
@@ -1136,6 +1164,22 @@ impl FfiNestClient {
     }
 }
 
+#[fauna_uniffi_async::export]
+impl FfiNestClient {
+    /// The once-per-sign-in look over this connection
+    /// ([`fauna_client::update_look::look_at_sign_in`]): the newer release this
+    /// nest reports, or `None` — nothing newer, the nest says nothing, or a
+    /// failed read (silent by rule). One read of `fauna.nest.info`; no request
+    /// reaches the release host (`installers/README.md` § Knowing a newer
+    /// version is out → *The nest's newest-release field*). Each app calls it
+    /// from its post-sign-in hook, on the client it just signed in with.
+    pub async fn look_for_newer_release_at_sign_in(&self) -> Option<crate::version::NewerRelease> {
+        fauna_client::update_look::look_at_sign_in(&self.nest, env!("CARGO_PKG_VERSION"))
+            .await
+            .map(crate::version::NewerRelease::from_tag)
+    }
+}
+
 #[cfg(feature = "payments")]
 #[uniffi::export]
 impl FfiNestClient {
@@ -1144,6 +1188,34 @@ impl FfiNestClient {
     /// this connection.
     pub fn payments(&self) -> Arc<FfiPaymentsClient> {
         FfiPaymentsClient::from_nest(Arc::clone(&self.nest))
+    }
+}
+
+// The feed and search planes' thin RPC clients — `feed-client` /
+// `search-client`, both in `store-safe`'s tail, so the kids flavor excises
+// them (`dynamic-features.md` § Compile-time excision, criterion 2: no wire
+// senders). Each its own `impl` block for the same macro reason as
+// `payments()` above: `#[uniffi::export]` does not honour a method-level
+// `cfg`.
+#[cfg(feature = "feed-client")]
+#[uniffi::export]
+impl FfiNestClient {
+    /// Typed-call client for the `fauna.feed.*` kinds (feed CRUD, feed/local
+    /// post queries, discovery contributors) over this connection.
+    pub fn feed(&self) -> Arc<FfiFeedClient> {
+        FfiFeedClient::from_nest(Arc::clone(&self.nest))
+    }
+}
+
+#[cfg(feature = "search-client")]
+#[uniffi::export]
+impl FfiNestClient {
+    /// Typed-call client for the `fauna.search.query` kind (the search bar's
+    /// full-text query) over this connection — the native-client seam onto the
+    /// WS-RPC kind the Rust-native Linux app calls directly, replacing the
+    /// `GET /api/v1/search` HTTP twin.
+    pub fn search(&self) -> Arc<FfiSearchClient> {
+        FfiSearchClient::from_nest(Arc::clone(&self.nest))
     }
 }
 
@@ -1432,16 +1504,6 @@ impl FfiNestClient {
         FfiInboxClient::from_nest(Arc::clone(&self.nest))
     }
 
-    /// Typed-call client for the `bluesky.feed.thread` kind (the one
-    /// protocol-unique consume-side Bluesky surface — the crossposted-post
-    /// thread view the post-detail surface shows) over this connection,
-    /// replacing the deleted `GET /api/v1/bluesky/{feed/thread,thread}` HTTP
-    /// twins. Caller-scoped (the handler restores the caller's Bluesky OAuth
-    /// agent). `User`-gated nest-side.
-    pub fn bluesky(&self) -> Arc<FfiBlueskyClient> {
-        FfiBlueskyClient::from_nest(Arc::clone(&self.nest))
-    }
-
     /// Typed-call client for the client-facing `fauna.moderation.*` kinds
     /// (queue read, training correction, report-/signal-sharing opt-ins) over
     /// this connection. Gated `User | Admin` nest-side.
@@ -1468,12 +1530,6 @@ impl FfiNestClient {
         crate::FfiCarddavClient::from_nest(Arc::clone(&self.nest))
     }
 
-    /// Typed-call client for the `fauna.feed.*` kinds (feed CRUD, feed/local
-    /// post queries, discovery contributors) over this connection.
-    pub fn feed(&self) -> Arc<FfiFeedClient> {
-        FfiFeedClient::from_nest(Arc::clone(&self.nest))
-    }
-
     /// Typed-call client for the `fauna.posts.*` kinds (post create / get /
     /// interact) over this connection.
     pub fn posts(&self) -> Arc<FfiPostsClient> {
@@ -1488,14 +1544,6 @@ impl FfiNestClient {
         {
             FfiPostsClient::from_nest(Arc::clone(&self.nest))
         }
-    }
-
-    /// Typed-call client for the `fauna.search.query` kind (the search bar's
-    /// full-text query) over this connection — the native-client seam onto the
-    /// WS-RPC kind the Rust-native Linux app calls directly, replacing the
-    /// `GET /api/v1/search` HTTP twin.
-    pub fn search(&self) -> Arc<FfiSearchClient> {
-        FfiSearchClient::from_nest(Arc::clone(&self.nest))
     }
 
     /// Typed-call client for the `fauna.push.{vapid_key,subscribe,unsubscribe}`
@@ -1607,6 +1655,83 @@ impl FfiNestClient {
             .supervisor_stop()?
             .session_ending_verdict()
             .map(Into::into)
+    }
+}
+
+// ── the session's self identity (gated `accounts-registry`) ─────────────────
+// Its own `#[uniffi::export]` impl block, gated on the default-on feature whose
+// surface this identity feeds (the account registry's cached handle/domain/tier),
+// so the Go mail-bridge `--no-default-features` binding — which has no account
+// registry and no self address — stays free of it, exactly as the knock seam
+// above stays out under `conversations-session`.
+
+/// Who this session is signed in as — the UniFFI-friendly twin of tui and
+/// linux following [`NestClient::subscribe_self_identity`] directly. Each
+/// [`next`](Self::next) resolves with the identity the session's own bearer
+/// mint confirmed: the *current* one at once if a mint has already landed,
+/// then each change (a server-side handle rename lands at the next hourly
+/// re-mint). It is how an app fills its account cache and self address after
+/// sign-in without a challenge of its own (`transport-connection.md` § The
+/// dial budget); a session-ending verdict from the same mint arrives on
+/// [`FfiNestClient::session_ending_verdict`], never here. Built via
+/// [`FfiNestClient::subscribe_self_identity`]. Single-consumer: serialize
+/// `next()` calls from one task (each call locks the inner receiver).
+#[cfg(feature = "accounts-registry")]
+#[derive(uniffi::Object)]
+pub struct FfiSelfIdentitySubscription {
+    rx: tokio::sync::Mutex<watch::Receiver<Option<fauna_protocol::auth::MintedIdentity>>>,
+}
+
+#[cfg(feature = "accounts-registry")]
+impl FfiSelfIdentitySubscription {
+    pub(crate) fn new(
+        mut rx: watch::Receiver<Option<fauna_protocol::auth::MintedIdentity>>,
+    ) -> Arc<Self> {
+        // Mark the current value unseen so the first `next()` delivers an
+        // identity that has already landed instead of waiting for the next
+        // mint — the session client usually minted before the app subscribed.
+        rx.mark_changed();
+        Arc::new(Self {
+            rx: tokio::sync::Mutex::new(rx),
+        })
+    }
+}
+
+#[cfg(feature = "accounts-registry")]
+#[fauna_uniffi_async::export]
+impl FfiSelfIdentitySubscription {
+    /// Await the next confirmed identity — or `None` once the client is torn
+    /// down (the watch's sender dropped), so the consumer's
+    /// `while let Some(i) = sub.next().await` loop terminates. Never yields a
+    /// "not yet": it waits until a mint has confirmed one.
+    pub async fn next(&self) -> Option<fauna_launch_machine::LaunchIdentity> {
+        let mut rx = self.rx.lock().await;
+        loop {
+            if rx.changed().await.is_err() {
+                return None;
+            }
+            if let Some(minted) = rx.borrow_and_update().clone() {
+                return Some(fauna_launch_machine::LaunchIdentity {
+                    handle: minted.handle,
+                    domain: minted.domain,
+                    tier: minted.tier,
+                });
+            }
+        }
+    }
+}
+
+#[cfg(feature = "accounts-registry")]
+#[uniffi::export]
+impl FfiNestClient {
+    /// Subscribe to who this session is signed in as (see
+    /// [`FfiSelfIdentitySubscription`]). `None` when this client's bearer
+    /// source cannot say — never for the challenge-minting client every app
+    /// builds. Cheap; each call gets its own receiver.
+    pub fn subscribe_self_identity(&self) -> Option<Arc<FfiSelfIdentitySubscription>> {
+        self.nest
+            .subscribe_self_identity()
+            .map(FfiSelfIdentitySubscription::new)
     }
 }
 
@@ -1785,7 +1910,8 @@ impl FfiNestClient {
     /// custody interrupted (`webdav-server.md` § Key model (c)); `None` (the
     /// UniFFI default, so an unwired caller compiles) leaves that walk to the
     /// next serve.
-    #[uniffi::method(default(recording_device = None))]
+    #[uniffi::method(default(recording_device = None, accounts = None))]
+    #[allow(clippy::too_many_arguments)] // the UniFFI surface is positional; a record would break every caller
     pub fn conversations_session(
         &self,
         self_address: String,
@@ -1794,6 +1920,7 @@ impl FfiNestClient {
         index_lease_device: Option<Vec<u8>>,
         predecessor_backup_keys: Vec<Vec<u8>>,
         recording_device: Option<String>,
+        accounts: Option<Arc<crate::accounts_registry::FfiAccountRegistry>>,
     ) -> Result<Arc<ConversationsSession>, FfiError> {
         self.build_conversations_session(
             None,
@@ -1803,6 +1930,7 @@ impl FfiNestClient {
             index_lease_device,
             predecessor_backup_keys,
             recording_device,
+            accounts,
         )
     }
 
@@ -1823,7 +1951,7 @@ impl FfiNestClient {
     ///
     /// `index_lease_device` is the same input [`Self::conversations_session`]
     /// documents; so are `predecessor_backup_keys` and `recording_device`.
-    #[uniffi::method(default(recording_device = None))]
+    #[uniffi::method(default(recording_device = None, accounts = None))]
     #[allow(clippy::too_many_arguments)] // the UniFFI surface is positional; a record would break every caller
     pub fn conversations_session_over_manager(
         &self,
@@ -1834,6 +1962,7 @@ impl FfiNestClient {
         index_lease_device: Option<Vec<u8>>,
         predecessor_backup_keys: Vec<Vec<u8>>,
         recording_device: Option<String>,
+        accounts: Option<Arc<crate::accounts_registry::FfiAccountRegistry>>,
     ) -> Result<Arc<ConversationsSession>, FfiError> {
         self.build_conversations_session(
             Some(manager),
@@ -1843,6 +1972,7 @@ impl FfiNestClient {
             index_lease_device,
             predecessor_backup_keys,
             recording_device,
+            accounts,
         )
     }
 
@@ -1927,6 +2057,7 @@ impl FfiNestClient {
         index_lease_device: Option<Vec<u8>>,
         predecessor_backup_keys: Vec<Vec<u8>>,
         recording_device: Option<String>,
+        accounts: Option<Arc<crate::accounts_registry::FfiAccountRegistry>>,
     ) -> Result<Arc<ConversationsSession>, FfiError> {
         // Validated up front, on every target, and a wrong length **fails the
         // call** rather than silently seating nothing (the same conversion `task_delegation_view_for_device` does).
@@ -1960,6 +2091,32 @@ impl FfiNestClient {
                 .collect::<Result<_, _>>()?;
         let keypair = crate::keypair_from_bytes(&self_secret)?;
         let self_actor = keypair.actor_id();
+        // The account's attested predecessor ids, resolved in Rust off THIS
+        // session's own actor (never the registry's active account) — the one
+        // walk the file seat, the launch resume and the content-index reader
+        // below share (writer-signed change records, ruling (8)(b) source
+        // (ii)). `None` hands none: those seats then prove a retired
+        // identity's link by the statement walk, which is slower, not unsafe.
+        let attested_predecessors: Vec<[u8; 32]> = accounts
+            .as_ref()
+            .map(|a| a.attested_predecessor_ids32(&self_actor.to_hex()))
+            .unwrap_or_default();
+        // The same walk's actor half (`AccountRegistry::
+        // predecessor_backup_keys_by_actor`), for the `__mls` restore door's
+        // park of a retired leaf (`succession-propagation.md` § Propagation →
+        // *Own device fleet*, *Where the retired leaf rests on a device with no
+        // local MLS store*, rule (1)). `None` parks nothing — the native
+        // retry's local store still holds the retired leaf there.
+        let predecessor_actors: Vec<fauna_core::identity::ActorId> = accounts
+            .as_ref()
+            .map(|a| {
+                a.registry()
+                    .predecessor_backup_keys_by_actor(&self_actor.to_hex())
+                    .into_iter()
+                    .map(|(actor, _)| actor)
+                    .collect()
+            })
+            .unwrap_or_default();
         // ── Release BEFORE build: hand the conversations-engine role over ─────
         //
         // Every native app rebuilds this session for the same account on a
@@ -2023,6 +2180,7 @@ impl FfiNestClient {
             Ok(e) => {
                 if let Some(m) = &manager {
                     m.set_engine_served_elsewhere(false);
+                    m.set_engine_state_needs_newer_app(false);
                 }
                 e
             }
@@ -2032,10 +2190,19 @@ impl FfiNestClient {
                         &e,
                         fauna_mls::error::MlsError::ServedElsewhere
                     ));
+                    m.set_engine_state_needs_newer_app(matches!(
+                        &e,
+                        fauna_mls::error::MlsError::SchemaIncompatible { .. }
+                    ));
                 }
-                return Err(FfiError::General {
-                    msg: format!("mls engine init: {e}"),
-                });
+                let msg = format!("mls engine init: {e}");
+                return Err(
+                    if matches!(&e, fauna_mls::error::MlsError::SchemaIncompatible { .. }) {
+                        FfiError::StateNeedsNewerApp { msg }
+                    } else {
+                        FfiError::General { msg }
+                    },
+                );
             }
         };
         let rpc = Arc::new(NestConversationsRpc::new(Arc::clone(&self.nest)));
@@ -2146,6 +2313,11 @@ impl FfiNestClient {
         // stranger, on every UniFFI app (macOS / iOS / Windows / Android) with no
         // per-app glue, exactly like the scheduling + inbox wiring above.
         session.register_folder_gate(Arc::new(NestFolderGate::new(Arc::clone(&self.nest))));
+        // The recipient picker's contacts (`conversations.md` § Where logic lives
+        // → *Recipient suggestions*) — the one shared roster source.
+        session.register_contact_roster(Arc::new(
+            fauna_client_conversations::NestContactRoster::new(Arc::clone(&self.nest)),
+        ));
         // Member content-key custody ingest (Phase 0 — the read leg): on join and
         // on each rotation-commit receipt, the session fetches the owner's sealed
         // content-key envelope, opens it via the group epoch, and folds the
@@ -2157,7 +2329,7 @@ impl FfiNestClient {
         // on `folders-author` (what pulls `fauna-client-folders/mls`, a default).
         // No app hop rides the ingest: its custody write is itself the
         // `state-fleet` nudge the desktop sync agent re-resolves on
-        // (`on-demand-files.md` § Shared sets on a capability host → *One
+        // (`on-demand-files-shared-sets.md` § Shared sets on a capability host → *One
         // mechanism*).
         #[cfg(feature = "folders-author")]
         session.set_folder_custody_sink(Arc::new(NestFolderCustodySink::new(
@@ -2227,8 +2399,10 @@ impl FfiNestClient {
             session.backend(),
             session.manager(),
             predecessor_backup_keys,
+            predecessor_actors,
             Arc::clone(&self.aftermath_sink),
             recording_device,
+            attested_predecessors.clone(),
         );
         #[cfg(not(feature = "recovery-aftermath"))]
         let mls_launcher = crate::mls_sync_launch::mls_sync_launcher(
@@ -2237,7 +2411,9 @@ impl FfiNestClient {
             session.backend(),
             session.manager(),
             predecessor_backup_keys,
+            predecessor_actors,
             recording_device,
+            attested_predecessors.clone(),
         );
         if let Some(launcher) = mls_launcher {
             session.set_mls_sync_launcher(launcher);
@@ -2289,6 +2465,7 @@ impl FfiNestClient {
             Arc::clone(&mail_keys),
             index_lease_seat,
         );
+        index_launcher.set_attested_predecessors(attested_predecessors);
         if crate::index_launch::CLIENT_BUILDS_INDEX {
             // `.clone()` rather than `Arc::clone(&…)`: the setter takes an
             // `Arc<dyn IndexBuilderLauncher>`, and the turbofish-free
@@ -2401,6 +2578,7 @@ mod index_arm_tests {
                 None,
                 Vec::new(),
                 None,
+                None,
             )
             .expect("build session");
 
@@ -2463,6 +2641,7 @@ mod index_arm_tests {
                 db.to_string_lossy().into_owned(),
                 None,
                 Vec::new(),
+                None,
                 None,
             )
             .expect("build session");
@@ -2557,6 +2736,7 @@ mod index_arm_tests {
                 None,
                 Vec::new(),
                 None,
+                None,
             )
             .expect("first login builds");
 
@@ -2571,6 +2751,7 @@ mod index_arm_tests {
             db,
             None,
             Vec::new(),
+            None,
             None,
         );
         assert!(
@@ -2609,6 +2790,7 @@ mod index_arm_tests {
                 None,
                 vec![vec![3u8; 32]],
                 None,
+                None,
             )
             .expect("a well-formed 32-byte predecessor key must not fail the build");
 
@@ -2632,6 +2814,7 @@ mod index_arm_tests {
             dir.join("mls.sqlite").to_string_lossy().into_owned(),
             None,
             vec![vec![1u8; 16]],
+            None,
             None,
         );
         match result {
@@ -2704,6 +2887,7 @@ mod index_arm_tests {
                 dir.join("mls.sqlite").to_string_lossy().into_owned(),
                 None,
                 Vec::new(),
+                None,
                 None,
             )
             .expect("build session");
@@ -3073,6 +3257,86 @@ impl FfiNestClient {
         .await
         .to_string()
     }
+
+    /// The `read_marker_state` e2e reader — the FFI twin of tui's and linux's
+    /// `read_marker_state` arm, the read-state relaunch witness's durability
+    /// barrier (`docs/goal/behavior/conversation-read-state.md` § The
+    /// read-marker record): `{"found": true, "through": N}` or
+    /// `{"found": false}` for `channel_id_hex`, from THIS app's own account
+    /// runtime. Same gate and block as [`Self::device_set_state_json`].
+    pub async fn read_marker_state_json(&self, channel_id_hex: String) -> String {
+        fauna_client_account_runtime::read_marker_state_json(
+            crate::account_runtime::handle().as_ref(),
+            &channel_id_hex,
+        )
+        .await
+        .to_string()
+    }
+}
+
+/// The custody owner's send-again poke — the FFI twin of tui's and linux's
+/// `custody_owner_resend_now` arm (`fauna_e2e_agent::CUSTODY_OWNER_RESEND_NOW`
+/// owns the contract): one
+/// [`fauna_client_custody::spawn_owner_resend`] pass over this connection's
+/// own identity, the session the factory stashed and this app's account
+/// runtime, re-posting every granted ceremony's newest sent step and recording
+/// nothing. `devices` outcome 15's trigger: no gesture re-sends.
+///
+/// **Async only so the spawn has a runtime** — the pass is fire-and-forget,
+/// and the barrier is the HOST's `custody_ceremony_ingest` counts, but
+/// `tokio::spawn` panics outside an entered runtime (the `custody_drive`
+/// incident, `src/custody.rs`). `true` means a pass was spawned; `false` is
+/// the quiet pre-auth no-op (no identity, stashed session or runtime yet),
+/// reported rather than dropped (convention 11).
+///
+/// Own block and gate, like [`Self::device_set_state_json`]: an e2e-only
+/// export (convention 15), present in a release-profile `*-ffi-test` build
+/// through `test-helpers`' weak `fauna-client-custody?/e2e-agent` forward.
+#[cfg(all(
+    feature = "custody",
+    feature = "account-runtime",
+    any(test, feature = "test-helpers")
+))]
+#[fauna_uniffi_async::export]
+impl FfiNestClient {
+    pub async fn custody_owner_resend_now(&self) -> bool {
+        let Some(secret) = self.nest.auth().keypair().map(|k| *k.secret_bytes()) else {
+            tracing::info!("custody_owner_resend_now: no identity on this connection");
+            return false;
+        };
+        let session = self.scheduling_session.lock().unwrap().clone();
+        let store = crate::account_runtime::handle();
+        if session.is_none() || store.is_none() {
+            tracing::info!("custody_owner_resend_now: no session or account store yet (pre-auth)");
+            return false;
+        }
+        fauna_client_custody::spawn_owner_resend(secret, session, store);
+        true
+    }
+}
+
+/// The `custody_ceremony_ingest` e2e state value — this app's leg of the
+/// convention-11 contract `fauna_e2e_agent::CUSTODY_CEREMONY_INGEST_KEY` owns:
+/// what this process's custody ceremony sink did with each received payload.
+/// Five atomic loads (`fauna_client_conversations::custody_ceremony_ingest_counts`),
+/// shaped by the shared `fauna_e2e_contract::custody_ceremony_ingest_json`
+/// that tui and linux publish through, so no blocking I/O on the state path.
+/// Gated on `custody` because only that feature registers the sink — an app
+/// with no sink publishes nothing, never zeros.
+#[cfg(all(feature = "custody", feature = "test-helpers"))]
+#[uniffi::export]
+impl FfiNestClient {
+    pub fn custody_ceremony_ingest_json(&self) -> String {
+        let c = fauna_client_conversations::custody_ceremony_ingest_counts();
+        fauna_e2e_contract::custody_ceremony_ingest_json(
+            c.seen,
+            c.moved,
+            c.duplicate,
+            c.refused,
+            c.uncaptured,
+        )
+        .to_string()
+    }
 }
 
 // Sync half of the account-runtime surface — deliberately NOT in the async block
@@ -3217,6 +3481,73 @@ mod tests {
         }
     }
 
+    /// Both spam-model pushes reach the UniFFI apps as `Other` and flag the
+    /// page-gated Spam history re-read — the flag the native Spam pages read
+    /// (`mail-spam.md` § Undo step 4, § Reset step 6) — and so does a reconnect.
+    #[cfg(feature = "push-subscription")]
+    #[test]
+    fn spam_model_pushes_stale_the_spam_history() {
+        for kind in [
+            "fauna.bridges.push.spam_model_updated",
+            "fauna.bridges.push.spam_model_reset",
+        ] {
+            let ev = FfiPushEvent::Other {
+                kind: kind.to_string(),
+            };
+            assert_eq!(
+                stale_surfaces_for_push_event(&ev),
+                FfiStaleSurfaces {
+                    mail_spam: true,
+                    ..FfiStaleSurfaces::from(fauna_protocol::StaleSurfaces::NONE)
+                },
+                "{kind}"
+            );
+        }
+        assert!(stale_surfaces_on_reconnect().mail_spam);
+    }
+
+    /// The export and import wizards' events reach the UniFFI apps as `Other`
+    /// and stale only their own page (`mail-export.md` § A failed export is a
+    /// record the wizard shows until the user moves on).
+    #[cfg(feature = "push-subscription")]
+    #[test]
+    fn export_and_import_pushes_stale_their_own_wizard_page() {
+        let none = FfiStaleSurfaces::from(fauna_protocol::StaleSurfaces::NONE);
+        for (kinds, want) in [
+            (
+                [
+                    "fauna.bridges.push.export_progress",
+                    "fauna.bridges.push.export_error",
+                    "fauna.bridges.push.export_complete",
+                ],
+                FfiStaleSurfaces {
+                    mail_export: true,
+                    ..none
+                },
+            ),
+            (
+                [
+                    "fauna.bridges.push.import_progress",
+                    "fauna.bridges.push.import_error",
+                    "fauna.bridges.push.import_complete",
+                ],
+                FfiStaleSurfaces {
+                    mail_import: true,
+                    ..none
+                },
+            ),
+        ] {
+            for kind in kinds {
+                let ev = FfiPushEvent::Other {
+                    kind: kind.to_string(),
+                };
+                assert_eq!(stale_surfaces_for_push_event(&ev), want, "{kind}");
+            }
+        }
+        let reconnect = stale_surfaces_on_reconnect();
+        assert!(reconnect.mail_export && reconnect.mail_import);
+    }
+
     /// `fauna.addressbook.changed` reaches the UniFFI apps typed, not as
     /// `Other`, and flags the page-gated Address Book re-read.
     #[cfg(feature = "push-subscription")]
@@ -3322,10 +3653,12 @@ mod tests {
         #[cfg(feature = "zaps")]
         let _ = client.nostr_zap_signers();
         let _ = client.notifications();
+        #[cfg(feature = "feed-client")]
         let _ = client.feed();
         let _ = client.posts();
         let _ = client.snapshots();
         let _ = client.sync();
+        #[cfg(feature = "search-client")]
         let _ = client.search();
         let _ = client.push();
         assert!(!client.actor_id_hex().is_empty());

@@ -232,6 +232,13 @@ public sealed partial class MainPage : Page
             // catch (unchanged), so a reconnect blip cannot clear an
             // already-restored floor — only a SUCCESSFUL re-read ever moves it.
             clients.Rpc!.Reconnected += OnRpcReconnected;
+            // The shared store-change notice's app-wide arm (account-runtime.md § A
+            // runtime's own pump is a source of the notice too, part 4): the hide
+            // list and the succession ledger's filter marks are render sources for
+            // every page, so they re-read on each notice whatever is open. The
+            // open store-backed page re-drives its own load (ViewModelBase
+            // .WatchStoreChange), not this.
+            clients.Rpc!.StoreChanged += OnRpcStoreChanged;
             // Mirror the shell VM's app-global unread-notification count into the
             // e2e state snapshot (`data.notifications.unread_count`). Published from
             // the View, like every other AppDataSnapshot writer (ContactsPage,
@@ -278,8 +285,20 @@ public sealed partial class MainPage : Page
             $"[nav] OnRpcReconnected content={ContentFrame.Content?.GetType().Name} "
             + $"selected={(NavView.SelectedItem as NavigationViewItem)?.Tag}");
         _ = CheckFamilyStatusAsync();
+        // The viewer's own spam thresholds re-read on the same trigger as the
+        // guardian floor above (family-client-enforcement.md § Content policy):
+        // call order only — the two halves are independent by construction.
+        if (_clients?.Rpc is { } rpc)
+            _ = new ContentPolicyPreloader(rpc).RefreshOwnThresholdsAsync();
         // The region relay is asked at every reconnect too, like the apple leg.
         StartRegionRefresh();
+    }
+
+    private void OnRpcStoreChanged()
+    {
+        if (_clients?.Rpc is not { } rpc) return;
+        _ = new ContentPolicyPreloader(rpc).RefreshHiddenContentAsync();
+        _ = FaunaApp.Core.Helpers.InheritedFilterMarks.RefreshAsync(rpc);
     }
 
     private void ContentFrame_Navigated(object sender, NavigationEventArgs e)
@@ -491,7 +510,11 @@ public sealed partial class MainPage : Page
         }
         _guardianNotifyFlushTimer?.Stop();
         _screenTimeTickTimer?.Stop();
-        if (_clients?.Rpc is not null) _clients.Rpc.Reconnected -= OnRpcReconnected;
+        if (_clients?.Rpc is not null)
+        {
+            _clients.Rpc.Reconnected -= OnRpcReconnected;
+            _clients.Rpc.StoreChanged -= OnRpcStoreChanged;
+        }
         base.OnNavigatedFrom(e);
     }
 
@@ -895,6 +918,10 @@ public sealed partial class MainPage : Page
             ShellLog.Warn("MainPage", $"[family-gate] status read failed: {ex.Message}");
         }
     }
+
+    /// <summary>True once the family gate has revealed the <c>family-tab</c> — the
+    /// notification tap-through offers its Family destination only while this holds.</summary>
+    public bool IsFamilyTabAvailable => NavFamily.Visibility == Visibility.Visible;
 
     private void SupervisedIndicatorButton_Click(object sender, RoutedEventArgs e)
         => NavigateToTag("Family");

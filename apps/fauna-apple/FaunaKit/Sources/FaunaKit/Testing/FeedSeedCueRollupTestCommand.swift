@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import Foundation
 
 // Compiled out of release artifacts (testing.md convention 15), like the app
@@ -62,3 +65,4 @@ public enum FeedSeedCueRollupTestCommand {
 }
 
 #endif
+#endif // !FAUNA_KIDS

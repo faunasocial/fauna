@@ -24,6 +24,54 @@ use super::blob_col_to_array;
 /// 30 days — `mailbox-migration.md` § Progress lives nest-side (`expires_at`).
 pub const IMPORT_SESSION_TTL_SECS: i64 = 30 * 24 * 60 * 60;
 
+/// The states the `import_sessions` machine allows — the export twin's
+/// `ExportState` shape (`mail-export.md` § Architectural rules, *Symmetric
+/// session row with imports*). Every write that sets a state takes this type,
+/// never a string, so a spelling the table's `CHECK` would refuse is
+/// unrepresentable at the call site. Rows read back carry the string form
+/// ([`ImportSessionRow::state`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportState {
+    Running,
+    Paused,
+    Errored,
+    Completed,
+    Cancelled,
+}
+
+impl ImportState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Errored => "errored",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// A client-supplied counter as the `INTEGER` column stores it: `u64` above
+/// `i64::MAX` has no exact `i64`, and an `as` cast would store a negative
+/// count that reads back as an enormous `u64`. The handlers refuse such a
+/// value as malformed first; this is the floor under them.
+pub fn import_counter_to_sql(name: &str, value: u64) -> Result<i64> {
+    i64::try_from(value).with_context(|| format!("import {name} {value} exceeds i64::MAX"))
+}
+
+/// `col + param` for a signed fold delta: saturating at `i64::MAX` instead of
+/// overflowing (SQLite turns an overflowing integer sum into a REAL that
+/// [`row_from_sql`] cannot decode), and floored at zero (a re-walk can fold a
+/// negative delta). A non-positive `param` cannot overflow the sum, so only a
+/// positive one takes the saturating arm.
+fn saturating_add_floor_sql(col: &str, param: &str) -> String {
+    let max = i64::MAX;
+    format!(
+        "CASE WHEN {param} > 0 AND {col} > {max} - {param} THEN {max} \
+         ELSE MAX({col} + {param}, 0) END"
+    )
+}
+
 /// One `import_sessions` row. `cursors` maps mailbox → (last processed
 /// source UID, source UIDVALIDITY) — the resume cursor pair.
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +115,145 @@ pub struct ImportSessionRow {
 pub enum CreateImportSessionOutcome {
     Created,
     SourceLocked,
+}
+
+/// How one processed source message counts (`mailbox-migration.md`
+/// § Progress lives nest-side): `QuotaRefused` is the `quota_exceeded` skip,
+/// counted in `skipped_count` like any skip but the one outcome that holds the
+/// resume cursor (§ Failure handling → *Nest-side errors*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportFold {
+    Imported,
+    Skipped,
+    QuotaRefused,
+    Errored,
+}
+
+/// One mailbox's quota hold, resting in the row's `quota_holds` column while
+/// a message the full mailbox turned away is still unresolved — or while a
+/// resumed walk is still re-sending what the hold kept it from passing.
+///
+/// The cursor stands just short of the lowest `QuotaRefused` UID in `seen`, so
+/// a resume after a restart, which reads only the row, takes the import up at
+/// the first message that did not fit (§ Failure handling). `seen` records
+/// every UID folded at or above that hold and how it counted, so the re-walk
+/// the hold forces counts each message once: a message re-sent after it
+/// counted moves no counter, except a turned-away one that now lands
+/// elsewhere, which moves from `skipped_count` to its new counter.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct QuotaHold {
+    /// The UIDVALIDITY every UID here belongs to.
+    pub uid_validity: u32,
+    /// The highest UID folded in this namespace: where the cursor stands once
+    /// the hold lifts.
+    pub high: u32,
+    /// Each UID folded at or above the hold, with how it counted.
+    pub seen: BTreeMap<u32, ImportFold>,
+}
+
+impl QuotaHold {
+    /// The lowest UID still turned away, if any — what holds the cursor.
+    fn held_at(&self) -> Option<u32> {
+        self.seen
+            .iter()
+            .find(|(_, k)| **k == ImportFold::QuotaRefused)
+            .map(|(uid, _)| *uid)
+    }
+}
+
+/// Signed counter moves from one [`fold_mailbox`] call.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FoldDelta {
+    pub imported: i64,
+    pub skipped: i64,
+    pub errored: i64,
+}
+
+impl FoldDelta {
+    fn add(&mut self, kind: ImportFold, by: i64) {
+        match kind {
+            ImportFold::Imported => self.imported += by,
+            ImportFold::Skipped | ImportFold::QuotaRefused => self.skipped += by,
+            ImportFold::Errored => self.errored += by,
+        }
+    }
+}
+
+/// Fold processed messages of one mailbox into its resume cursor and quota
+/// hold (`mailbox-migration.md` § Progress lives nest-side, § Failure handling
+/// → *Nest-side errors*). Both nest paths that move a cursor — a sent
+/// message's outcome and `record_import_outcomes` — come through here, so
+/// neither can carry the cursor past a message the mailbox had no room for.
+///
+/// - **The cursor moves forward only within one UID namespace**: a call that
+///   reports a lower UID than one already folded (the client's skips for a
+///   window are reported after that window's sends) never walks it back. A
+///   different UIDVALIDITY is a rebuilt mailbox and replaces cursor and hold.
+/// - **A `QuotaRefused` UID holds it** one short of the lowest such UID, for
+///   as long as that message stays turned away. The hold lifts when the
+///   message is folded again as anything else: the resume that imports it
+///   once there is room, or the "skip remaining" choice recording it as
+///   skipped for good. The cursor then moves on to `high`.
+/// - **Each message counts once.** A UID in the hold's `seen` already
+///   counted; folded again it moves nothing, except a turned-away message now
+///   landing elsewhere, which moves out of `skipped`. The hold is dropped once
+///   it has lifted and the walk passes its highest seen UID.
+pub fn fold_mailbox(
+    cursor: Option<(u32, u32)>,
+    hold: Option<QuotaHold>,
+    uid_validity: u32,
+    folds: &[(u32, ImportFold)],
+) -> (Option<(u32, u32)>, Option<QuotaHold>, FoldDelta) {
+    let mut delta = FoldDelta::default();
+    let mut hold = hold.filter(|h| h.uid_validity == uid_validity);
+    // The furthest point already processed in this namespace.
+    let mut high = match (&hold, cursor) {
+        (Some(h), _) => Some(h.high),
+        (None, Some((uid, v))) if v == uid_validity => Some(uid),
+        _ => None,
+    };
+    for &(uid, kind) in folds {
+        if hold
+            .as_ref()
+            .is_some_and(|h| h.held_at().is_none() && h.seen.keys().next_back() < Some(&uid))
+        {
+            hold = None;
+        }
+        match hold.as_mut().and_then(|h| h.seen.get_mut(&uid)) {
+            Some(old) => {
+                if *old == ImportFold::QuotaRefused && kind != ImportFold::QuotaRefused {
+                    delta.add(*old, -1);
+                    delta.add(kind, 1);
+                    *old = kind;
+                }
+            }
+            None => {
+                delta.add(kind, 1);
+                let above_hold = hold
+                    .as_ref()
+                    .and_then(QuotaHold::held_at)
+                    .is_some_and(|at| uid >= at);
+                if kind == ImportFold::QuotaRefused || above_hold {
+                    hold.get_or_insert_with(|| QuotaHold {
+                        uid_validity,
+                        ..QuotaHold::default()
+                    })
+                    .seen
+                    .insert(uid, kind);
+                }
+            }
+        }
+        high = Some(high.map_or(uid, |h| h.max(uid)));
+    }
+    if let (Some(h), Some(high)) = (hold.as_mut(), high) {
+        h.high = high;
+    }
+    let cursor = match hold.as_ref().and_then(QuotaHold::held_at) {
+        Some(at) => Some((at.saturating_sub(1), uid_validity)),
+        None => high.map(|h| (h, uid_validity)).or(cursor),
+    };
+    (cursor, hold, delta)
 }
 
 fn row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImportSessionRow> {
@@ -149,6 +336,7 @@ impl crate::db::CacheDb {
         date_from: &str,
         source_sealed: Option<&[u8]>,
     ) -> Result<CreateImportSessionOutcome> {
+        let total_count = import_counter_to_sql("total_count", total_count)?;
         let now = super::now_epoch_secs();
         let conn = self.conn.lock().await;
         // Lazy GC — expired rows must not hold the source lock.
@@ -183,7 +371,7 @@ impl crate::db::CacheDb {
                 &actor[..],
                 source_descriptor,
                 now,
-                total_count as i64,
+                total_count,
                 now + IMPORT_SESSION_TTL_SECS,
                 // The lock companion AND the seal's salt, written at insert so
                 // the partial UNIQUE index constrains a fresh session rather
@@ -252,8 +440,8 @@ impl crate::db::CacheDb {
         &self,
         actor: &[u8; 32],
         session_id: &str,
-        new_state: &str,
-        allowed_from: &[&str],
+        new_state: ImportState,
+        allowed_from: &[ImportState],
         error_reason: Option<&str>,
     ) -> Result<Option<ImportSessionRow>> {
         let now = super::now_epoch_secs();
@@ -273,12 +461,12 @@ impl crate::db::CacheDb {
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
             Box::new(actor.to_vec()),
             Box::new(session_id.to_string()),
-            Box::new(new_state.to_string()),
+            Box::new(new_state.as_str().to_string()),
             Box::new(now),
             Box::new(error_reason.map(str::to_string)),
         ];
         for s in allowed_from {
-            params.push(Box::new(s.to_string()));
+            params.push(Box::new(s.as_str().to_string()));
         }
         let changed = conn
             .execute(
@@ -301,68 +489,99 @@ impl crate::db::CacheDb {
         .context("reread import_session after transition")
     }
 
-    /// Fold one processed message into the session: bump the matching
-    /// counter, advance the per-mailbox resume cursor, refresh
-    /// `last_progress_at`/`expires_at`, and optionally revise `total_count`.
-    /// Returns the post-update row (`None` = no such session for this actor).
-    #[allow(clippy::too_many_arguments)]
+    /// Fold processed messages of one source mailbox into the session: move
+    /// the counters, the mailbox's resume cursor and its quota hold
+    /// ([`fold_mailbox`]), refresh `last_progress_at`/`expires_at`, and
+    /// optionally revise `total_count`. Returns the post-update row (`None` =
+    /// no such session for this actor, or one that is no longer `running` /
+    /// `paused` — the store's own refusal of a fold into a finished session).
     pub async fn record_import_progress(
         &self,
         actor: &[u8; 32],
         session_id: &str,
-        imported_delta: u64,
-        skipped_delta: u64,
-        errored_delta: u64,
-        cursor: Option<(&str, u32, u32)>,
+        mailbox: &str,
+        uid_validity: u32,
+        folds: &[(u32, ImportFold)],
         revised_total_count: Option<u64>,
     ) -> Result<Option<ImportSessionRow>> {
+        let revised_total_count = revised_total_count
+            .map(|v| import_counter_to_sql("total_count", v))
+            .transpose()?;
         let now = super::now_epoch_secs();
         let conn = self.conn.lock().await;
         let existing = conn
             .query_row(
-                "SELECT cursors FROM import_sessions
+                "SELECT cursors, quota_holds FROM import_sessions
                  WHERE actor_id = ?1 AND session_id = ?2",
                 rusqlite::params![&actor[..], session_id],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()
             .context("read import_session cursors")?;
-        let Some(cursors_json) = existing else {
+        let Some((cursors_json, holds_json)) = existing else {
             return Ok(None);
         };
         // Same verified fold as `row_from_sql` above — idempotent via
         // `actor_message_dedup`, so a corrupt blob costs redundant re-scan
-        // work, not duplicate messages.
+        // work, not duplicate messages. A corrupt hold blob costs at most a
+        // counter re-counted on the re-walk it would have absorbed.
         let mut cursors: BTreeMap<String, (u32, u32)> =
             serde_json::from_str(&cursors_json).unwrap_or_default();
-        if let Some((mailbox, uid, uid_validity)) = cursor {
-            cursors.insert(mailbox.to_string(), (uid, uid_validity));
+        let mut holds: BTreeMap<String, QuotaHold> =
+            serde_json::from_str(&holds_json).unwrap_or_default();
+        let (cursor, hold, delta) = fold_mailbox(
+            cursors.get(mailbox).copied(),
+            holds.remove(mailbox),
+            uid_validity,
+            folds,
+        );
+        if let Some(c) = cursor {
+            cursors.insert(mailbox.to_string(), c);
+        }
+        if let Some(h) = hold {
+            holds.insert(mailbox.to_string(), h);
         }
         let cursors_json = serde_json::to_string(&cursors).context("encode cursors")?;
-        conn.execute(
-            &format!(
-                "UPDATE import_sessions
-                 SET imported_count = imported_count + ?3,
-                     skipped_count = skipped_count + ?4,
-                     errored_count = errored_count + ?5,
+        let holds_json = serde_json::to_string(&holds).context("encode quota holds")?;
+        // The state guard rides inside the UPDATE (the export twin's shape): a
+        // cancel or complete landing between the handler's read and this fold
+        // matches no row, so a finished session's window, counters, total and
+        // cursors never move. `None` is the same answer as for a missing row;
+        // the handler's re-read tells them apart.
+        let changed = conn
+            .execute(
+                &format!(
+                    "UPDATE import_sessions
+                 SET imported_count = {imported},
+                     skipped_count = {skipped},
+                     errored_count = {errored},
                      cursors = ?6,
+                     quota_holds = ?9,
                      total_count = COALESCE(?7, total_count),
                      last_progress_at = ?8,
                      expires_at = ?8 + {IMPORT_SESSION_TTL_SECS}
-                 WHERE actor_id = ?1 AND session_id = ?2"
-            ),
-            rusqlite::params![
-                &actor[..],
-                session_id,
-                imported_delta as i64,
-                skipped_delta as i64,
-                errored_delta as i64,
-                cursors_json,
-                revised_total_count.map(|v| v as i64),
-                now,
-            ],
-        )
-        .context("update import_session progress")?;
+                 WHERE actor_id = ?1 AND session_id = ?2
+                   AND state IN ('running','paused')",
+                    imported = saturating_add_floor_sql("imported_count", "?3"),
+                    skipped = saturating_add_floor_sql("skipped_count", "?4"),
+                    errored = saturating_add_floor_sql("errored_count", "?5"),
+                ),
+                rusqlite::params![
+                    &actor[..],
+                    session_id,
+                    delta.imported,
+                    delta.skipped,
+                    delta.errored,
+                    cursors_json,
+                    revised_total_count,
+                    now,
+                    holds_json,
+                ],
+            )
+            .context("update import_session progress")?;
+        if changed == 0 {
+            return Ok(None);
+        }
         conn.query_row(
             &format!(
                 "SELECT {SELECT_COLS} FROM import_sessions
@@ -660,10 +879,16 @@ mod tests {
             CreateImportSessionOutcome::Created
         );
         // Cancelled sessions release the lock.
-        db.transition_import_session(&ACTOR, "s1", "cancelled", &["running", "paused"], None)
-            .await
-            .unwrap()
-            .unwrap();
+        db.transition_import_session(
+            &ACTOR,
+            "s1",
+            ImportState::Cancelled,
+            &[ImportState::Running, ImportState::Paused],
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(
             db.create_import_session(
                 &ACTOR,
@@ -687,10 +912,16 @@ mod tests {
         assert!(db.get_import_session(&other, "s1").await.unwrap().is_none());
         assert!(db.list_import_sessions(&other).await.unwrap().is_empty());
         assert!(
-            db.transition_import_session(&other, "s1", "paused", &["running"], None)
-                .await
-                .unwrap()
-                .is_none()
+            db.transition_import_session(
+                &other,
+                "s1",
+                ImportState::Paused,
+                &[ImportState::Running],
+                None
+            )
+            .await
+            .unwrap()
+            .is_none()
         );
     }
 
@@ -699,34 +930,64 @@ mod tests {
         let db = open_with_session("s1", "src").await;
         // running → paused → running → completed.
         let row = db
-            .transition_import_session(&ACTOR, "s1", "paused", &["running"], None)
+            .transition_import_session(
+                &ACTOR,
+                "s1",
+                ImportState::Paused,
+                &[ImportState::Running],
+                None,
+            )
             .await
             .unwrap()
             .unwrap();
         assert_eq!(row.state, "paused");
         // Pause again: not in allowed_from → None.
         assert!(
-            db.transition_import_session(&ACTOR, "s1", "paused", &["running"], None)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        db.transition_import_session(&ACTOR, "s1", "running", &["paused"], None)
+            db.transition_import_session(
+                &ACTOR,
+                "s1",
+                ImportState::Paused,
+                &[ImportState::Running],
+                None
+            )
             .await
             .unwrap()
-            .unwrap();
+            .is_none()
+        );
+        db.transition_import_session(
+            &ACTOR,
+            "s1",
+            ImportState::Running,
+            &[ImportState::Paused],
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let row = db
-            .transition_import_session(&ACTOR, "s1", "completed", &["running"], None)
+            .transition_import_session(
+                &ACTOR,
+                "s1",
+                ImportState::Completed,
+                &[ImportState::Running],
+                None,
+            )
             .await
             .unwrap()
             .unwrap();
         assert_eq!(row.state, "completed");
         // Terminal: no way back.
         assert!(
-            db.transition_import_session(&ACTOR, "s1", "running", &["paused"], None)
-                .await
-                .unwrap()
-                .is_none()
+            db.transition_import_session(
+                &ACTOR,
+                "s1",
+                ImportState::Running,
+                &[ImportState::Paused],
+                None
+            )
+            .await
+            .unwrap()
+            .is_none()
         );
     }
 
@@ -737,8 +998,8 @@ mod tests {
             .transition_import_session(
                 &ACTOR,
                 "s1",
-                "errored",
-                &["running", "paused"],
+                ImportState::Errored,
+                &[ImportState::Running, ImportState::Paused],
                 Some("auth_failed"),
             )
             .await
@@ -750,9 +1011,10 @@ mod tests {
 
     #[tokio::test]
     async fn progress_updates_counters_cursor_and_total() {
+        use ImportFold::*;
         let db = open_with_session("s1", "src").await;
         let row = db
-            .record_import_progress(&ACTOR, "s1", 1, 0, 0, Some(("INBOX", 44, 7)), None)
+            .record_import_progress(&ACTOR, "s1", "INBOX", 7, &[(44, Imported)], None)
             .await
             .unwrap()
             .unwrap();
@@ -760,7 +1022,14 @@ mod tests {
         assert_eq!(row.cursors.get("INBOX"), Some(&(44, 7)));
 
         let row = db
-            .record_import_progress(&ACTOR, "s1", 0, 1, 2, Some(("INBOX", 45, 7)), Some(250))
+            .record_import_progress(
+                &ACTOR,
+                "s1",
+                "INBOX",
+                7,
+                &[(45, Skipped), (40, Errored), (41, Errored)],
+                Some(250),
+            )
             .await
             .unwrap()
             .unwrap();
@@ -771,12 +1040,252 @@ mod tests {
         assert_eq!(row.cursors.get("INBOX"), Some(&(45, 7)));
         // Second mailbox gets its own cursor.
         let row = db
-            .record_import_progress(&ACTOR, "s1", 1, 0, 0, Some(("Sent", 3, 9)), None)
+            .record_import_progress(&ACTOR, "s1", "Sent", 9, &[(3, Imported)], None)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(row.cursors.len(), 2);
         assert_eq!(row.cursors.get("Sent"), Some(&(3, 9)));
+    }
+
+    /// A finished session takes no fold: the store refuses it inside the
+    /// UPDATE (the export twin's shape), so a cancel or complete landing
+    /// between the handler's state read and the fold cannot re-arm the 30-day
+    /// window or move a counter of a finished row.
+    #[tokio::test]
+    async fn a_finished_session_takes_no_progress_fold() {
+        use ImportFold::*;
+        let db = open_with_session("s1", "src").await;
+        db.transition_import_session(
+            &ACTOR,
+            "s1",
+            ImportState::Completed,
+            &[ImportState::Running],
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        {
+            let conn = db.conn.lock().await;
+            conn.execute("UPDATE import_sessions SET expires_at = 1", [])
+                .unwrap();
+        }
+        let folded = db
+            .record_import_progress(&ACTOR, "s1", "INBOX", 7, &[(1, Imported)], Some(99))
+            .await
+            .unwrap();
+        assert!(folded.is_none(), "a finished session refuses the fold");
+        let row = db.get_import_session(&ACTOR, "s1").await.unwrap().unwrap();
+        assert_eq!(row.expires_at, 1, "the window is not re-armed");
+        assert_eq!(row.imported_count, 0, "the counters do not move");
+        assert_eq!(row.total_count, 100, "the total is not revised");
+        assert!(row.cursors.is_empty(), "the cursor does not move");
+    }
+
+    /// A client counter above `i64::MAX` is refused, never stored as a
+    /// negative number that reads back as an enormous `u64`.
+    #[tokio::test]
+    async fn an_out_of_range_total_is_refused_not_stored() {
+        use ImportFold::*;
+        let db = open_with_session("s1", "src").await;
+        assert!(
+            db.record_import_progress(&ACTOR, "s1", "INBOX", 7, &[(1, Imported)], Some(u64::MAX))
+                .await
+                .is_err()
+        );
+        let row = db.get_import_session(&ACTOR, "s1").await.unwrap().unwrap();
+        assert_eq!(row.total_count, 100);
+        assert_eq!(row.imported_count, 0, "a refused fold moves nothing");
+
+        let created = db
+            .create_import_session(&ACTOR, "s2", "other", u64::MAX, &[], "", None)
+            .await;
+        assert!(created.is_err(), "create refuses it too");
+        assert!(db.get_import_session(&ACTOR, "s2").await.unwrap().is_none());
+    }
+
+    /// The sums saturate at `i64::MAX` instead of overflowing into a REAL the
+    /// row decoder cannot read, and still floor at zero for a negative delta.
+    #[tokio::test]
+    async fn counter_sums_saturate_and_floor() {
+        use ImportFold::*;
+        let db = open_with_session("s1", "src").await;
+        {
+            let conn = db.conn.lock().await;
+            conn.execute(
+                "UPDATE import_sessions SET imported_count = 9223372036854775807",
+                [],
+            )
+            .unwrap();
+        }
+        let row = db
+            .record_import_progress(&ACTOR, "s1", "INBOX", 7, &[(1, Imported)], None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.imported_count, i64::MAX as u64);
+    }
+
+    /// The row's cursor stays short of the first message a full mailbox
+    /// turned away, through the rest of its batch and through a too-large
+    /// report above it (`mailbox-migration.md` § Failure handling), and the
+    /// hold rests on the row for the next process to honour.
+    #[tokio::test]
+    async fn a_quota_refusal_holds_the_rows_cursor_on_both_paths() {
+        use ImportFold::*;
+        let db = open_with_session("s1", "src").await;
+        for (uid, fold) in [(10, Imported), (11, QuotaRefused), (12, Imported)] {
+            db.record_import_progress(&ACTOR, "s1", "INBOX", 7, &[(uid, fold)], None)
+                .await
+                .unwrap();
+        }
+        // `record_import_outcomes`' path, reporting a too-large message above
+        // the refusal after the window's sends.
+        let row = db
+            .record_import_progress(&ACTOR, "s1", "INBOX", 7, &[(13, Skipped)], None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.cursors.get("INBOX"), Some(&(10, 7)));
+        assert_eq!(
+            (row.imported_count, row.skipped_count, row.errored_count),
+            (2, 2, 0)
+        );
+
+        // The resume after room was freed re-walks 11..=13: the turned-away
+        // message lands and moves out of `skipped`, the rest count nothing
+        // again, and the cursor moves on past everything processed.
+        let row = db
+            .record_import_progress(&ACTOR, "s1", "INBOX", 7, &[(11, Imported)], None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.cursors.get("INBOX"), Some(&(13, 7)));
+        db.record_import_progress(&ACTOR, "s1", "INBOX", 7, &[(12, Skipped)], None)
+            .await
+            .unwrap();
+        let row = db
+            .record_import_progress(
+                &ACTOR,
+                "s1",
+                "INBOX",
+                7,
+                &[(13, Skipped), (14, Imported)],
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.cursors.get("INBOX"), Some(&(14, 7)));
+        assert_eq!(
+            (row.imported_count, row.skipped_count, row.errored_count),
+            (4, 1, 0)
+        );
+    }
+
+    /// `ImportFold`'s rule-3 answer is `skip` (`enum_ledger.txt`): a
+    /// `quota_holds` blob this build cannot decode — a fold kind a newer nest
+    /// wrote — folds to no holds, and the progress write still lands rather
+    /// than erroring the import.
+    #[tokio::test]
+    async fn an_undecodable_quota_hold_folds_to_none_and_the_write_lands() {
+        use ImportFold::*;
+        let db = open_with_session("s1", "src").await;
+        db.record_import_progress(&ACTOR, "s1", "INBOX", 7, &[(10, Imported)], None)
+            .await
+            .unwrap();
+        {
+            let conn = db.conn().await;
+            conn.execute(
+                "UPDATE import_sessions SET quota_holds = ?1 WHERE session_id = 's1'",
+                [r#"{"INBOX":{"uid_validity":7,"high":11,"seen":{"11":"a_future_fold"}}}"#],
+            )
+            .unwrap();
+        }
+        let row = db
+            .record_import_progress(&ACTOR, "s1", "INBOX", 7, &[(11, Imported)], None)
+            .await
+            .unwrap()
+            .expect("the fold lands despite the undecodable hold");
+        assert_eq!(row.cursors.get("INBOX"), Some(&(11, 7)));
+        assert_eq!(row.imported_count, 2);
+    }
+
+    #[test]
+    fn fold_holds_at_the_lowest_refusal_and_lifts_when_it_resolves() {
+        use ImportFold::*;
+        let (cursor, hold, delta) = fold_mailbox(
+            Some((9, 7)),
+            None,
+            7,
+            &[(10, QuotaRefused), (11, Imported), (12, QuotaRefused)],
+        );
+        assert_eq!(cursor, Some((9, 7)));
+        assert_eq!(
+            delta,
+            FoldDelta {
+                imported: 1,
+                skipped: 2,
+                errored: 0
+            }
+        );
+        let hold = hold.expect("held");
+        assert_eq!(hold.high, 12);
+
+        // The first refusal resolves; the second still holds.
+        let (cursor, hold, delta) = fold_mailbox(cursor, Some(hold), 7, &[(10, Imported)]);
+        assert_eq!(cursor, Some((11, 7)));
+        assert_eq!(
+            delta,
+            FoldDelta {
+                imported: 1,
+                skipped: -1,
+                errored: 0
+            }
+        );
+
+        // Refused again: nothing counts twice, the hold stays.
+        let (cursor, hold, delta) = fold_mailbox(cursor, hold, 7, &[(12, QuotaRefused)]);
+        assert_eq!(cursor, Some((11, 7)));
+        assert_eq!(delta, FoldDelta::default());
+
+        // "Skip remaining" records it as skipped for good: no counter moves
+        // (it was already a skip), and the cursor moves on.
+        let (cursor, hold, delta) = fold_mailbox(cursor, hold, 7, &[(12, Skipped)]);
+        assert_eq!(cursor, Some((12, 7)));
+        assert_eq!(delta, FoldDelta::default());
+        assert!(hold.is_some(), "kept until the walk passes it");
+
+        // The walk passes the hold's last UID: it is dropped, and new UIDs
+        // count as ever.
+        let (cursor, hold, delta) = fold_mailbox(cursor, hold, 7, &[(13, Imported)]);
+        assert_eq!(cursor, Some((13, 7)));
+        assert!(hold.is_none());
+        assert_eq!(
+            delta,
+            FoldDelta {
+                imported: 1,
+                skipped: 0,
+                errored: 0
+            }
+        );
+    }
+
+    #[test]
+    fn fold_never_walks_back_and_a_new_uidvalidity_replaces_the_hold() {
+        use ImportFold::*;
+        // A lower UID reported late never walks the cursor back.
+        let (cursor, hold, _) = fold_mailbox(Some((50, 7)), None, 7, &[(3, Skipped)]);
+        assert_eq!(cursor, Some((50, 7)));
+        assert!(hold.is_none());
+
+        let (cursor, hold, _) = fold_mailbox(cursor, None, 7, &[(51, QuotaRefused)]);
+        assert_eq!(cursor, Some((50, 7)));
+        // The source mailbox was rebuilt: its old UIDs mean nothing.
+        let (cursor, hold, _) = fold_mailbox(cursor, hold, 8, &[(2, Imported)]);
+        assert_eq!(cursor, Some((2, 8)));
+        assert!(hold.is_none());
     }
 
     #[tokio::test]

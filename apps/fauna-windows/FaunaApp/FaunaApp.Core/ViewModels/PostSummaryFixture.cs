@@ -46,7 +46,8 @@ internal static class PostSummaryFixture
         ContentLabelEntry[]? labels = null,
         UnlockOfferView? unlockOffer = null,
         string? legalTakedownRef = null,
-        TipView? tips = null) =>
+        TipView? tips = null,
+        bool unlockPurchasePending = false) =>
         new PostSummary(
             postId: postId,
             author: author,
@@ -77,7 +78,8 @@ internal static class PostSummaryFixture
             labels: labels ?? System.Array.Empty<ContentLabelEntry>(),
             unlockOffer: unlockOffer,
             legalTakedownRef: legalTakedownRef,
-            tips: tips);
+            tips: tips,
+            unlockPurchasePending: unlockPurchasePending);
 
     private static RenderDocument EmptyDocument() =>
         new RenderDocument(System.Array.Empty<RenderBlock>());

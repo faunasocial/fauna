@@ -423,6 +423,24 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_func_update_channel_description_key()
+		})
+		if checksum != 9127 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_func_update_channel_description_key: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_func_emergency_lockout_outcome_message()
+		})
+		if checksum != 3781 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_func_emergency_lockout_outcome_message: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_func_recovery_entry_outcome_message()
 		})
 		if checksum != 57126 {
@@ -446,6 +464,15 @@ func uniffiCheckChecksums() {
 		if checksum != 40438 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_func_invite_recheck_poll_ms: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_func_retire_step_status()
+		})
+		if checksum != 33780 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_func_retire_step_status: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -581,6 +608,15 @@ func uniffiCheckChecksums() {
 		if checksum != 62104 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_begin_create_identity: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_begin_emergency_lockout_entry()
+		})
+		if checksum != 43414 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_begin_emergency_lockout_entry: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -999,6 +1035,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_fail_emergency_lockout()
+		})
+		if checksum != 17028 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_fail_emergency_lockout: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_fail_recovery_entry()
 		})
 		if checksum != 60724 {
@@ -1388,7 +1433,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_resolve_not_found_recheck()
 		})
-		if checksum != 20711 {
+		if checksum != 16617 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_resolve_not_found_recheck: UniFFI API checksum mismatch")
 		}
@@ -1791,6 +1836,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_submit_emergency_lockout()
+		})
+		if checksum != 51582 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_submit_emergency_lockout: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_onboardingmachine_submit_handle_check_continue()
 		})
 		if checksum != 4462 {
@@ -2187,6 +2241,24 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_nestretiremachine_set_input_error()
+		})
+		if checksum != 38296 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_nestretiremachine_set_input_error: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_onboarding_machine_checksum_method_nestretiremachine_set_remembered_slots_json()
+		})
+		if checksum != 39716 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_method_nestretiremachine_set_remembered_slots_json: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_method_nestretiremachine_snapshot()
 		})
 		if checksum != 6352 {
@@ -2270,7 +2342,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_onboarding_machine_checksum_constructor_nestretiremachine_new()
 		})
-		if checksum != 46407 {
+		if checksum != 62136 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_onboarding_machine: uniffi_fauna_onboarding_machine_checksum_constructor_nestretiremachine_new: UniFFI API checksum mismatch")
 		}
@@ -2324,6 +2396,30 @@ func (FfiConverterUint64) Read(reader io.Reader) uint64 {
 type FfiDestroyerUint64 struct{}
 
 func (FfiDestroyerUint64) Destroy(_ uint64) {}
+
+type FfiConverterInt64 struct{}
+
+var FfiConverterInt64INSTANCE = FfiConverterInt64{}
+
+func (FfiConverterInt64) Lower(value int64) C.int64_t {
+	return C.int64_t(value)
+}
+
+func (FfiConverterInt64) Write(writer io.Writer, value int64) {
+	writeInt64(writer, value)
+}
+
+func (FfiConverterInt64) Lift(value C.int64_t) int64 {
+	return int64(value)
+}
+
+func (FfiConverterInt64) Read(reader io.Reader) int64 {
+	return readInt64(reader)
+}
+
+type FfiDestroyerInt64 struct{}
+
+func (FfiDestroyerInt64) Destroy(_ int64) {}
 
 type FfiConverterBool struct{}
 
@@ -2815,6 +2911,15 @@ type NestRetireMachineInterface interface {
 	// preference (b)) with ones the app read after the page opened — the
 	// same index-paired JSON bags as the constructor. Read at `verify`.
 	SetHeldDnsJson(heldDnsProviderIds []string, heldDnsCredsJson []string)
+	// Show `message` on the page's `error-message` — a live input read the
+	// page could not use (the held DNS credentials' first-listing refusal, as
+	// its reason), set by the app that ran the read.
+	SetInputError(message string)
+	// The binding faces' form of [`NestRetireMachine::set_remembered_slots`]:
+	// the three `fauna.state.dns` memories as JSON objects of the record's own
+	// shape — `{"<domain>": ["<fqdn>", …]}` each. A bag that does not parse is
+	// treated as empty (the arm then visits nothing for that slot).
+	SetRememberedSlotsJson(dkimJson string, atprotoJson string, faunaSelfJson string)
 	Snapshot() RetireSnapshot
 	// A step row's name.
 	StepLabel(step RetireStep) fauna_core.LocalizedText
@@ -2846,9 +2951,9 @@ type NestRetireMachine struct {
 // `held_dns_provider_ids[i]` pairs with `held_dns_creds_json[i]`, one
 // entry per `fauna.state.dns` credential (a pair missing its other half
 // is dropped).
-func NewNestRetireMachine(candidateDomains []string, currentIpv4 *string, heldDnsProviderIds []string, heldDnsCredsJson []string, providerBaseUrl *string) *NestRetireMachine {
+func NewNestRetireMachine(candidateDomains []string, currentIpv4 *string, heldDnsProviderIds []string, heldDnsCredsJson []string, providerBaseUrl *string, dohBaseUrl *string) *NestRetireMachine {
 	return FfiConverterNestRetireMachineINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_fauna_onboarding_machine_fn_constructor_nestretiremachine_new(FfiConverterSequenceStringINSTANCE.Lower(candidateDomains), FfiConverterOptionalStringINSTANCE.Lower(currentIpv4), FfiConverterSequenceStringINSTANCE.Lower(heldDnsProviderIds), FfiConverterSequenceStringINSTANCE.Lower(heldDnsCredsJson), FfiConverterOptionalStringINSTANCE.Lower(providerBaseUrl), _uniffiStatus)
+		return C.uniffi_fauna_onboarding_machine_fn_constructor_nestretiremachine_new(FfiConverterSequenceStringINSTANCE.Lower(candidateDomains), FfiConverterOptionalStringINSTANCE.Lower(currentIpv4), FfiConverterSequenceStringINSTANCE.Lower(heldDnsProviderIds), FfiConverterSequenceStringINSTANCE.Lower(heldDnsCredsJson), FfiConverterOptionalStringINSTANCE.Lower(providerBaseUrl), FfiConverterOptionalStringINSTANCE.Lower(dohBaseUrl), _uniffiStatus)
 	}))
 }
 
@@ -3287,6 +3392,33 @@ func (_self *NestRetireMachine) SetHeldDnsJson(heldDnsProviderIds []string, held
 	})
 }
 
+// Show `message` on the page's `error-message` — a live input read the
+// page could not use (the held DNS credentials' first-listing refusal, as
+// its reason), set by the app that ran the read.
+func (_self *NestRetireMachine) SetInputError(message string) {
+	_pointer := _self.ffiObject.incrementPointer("*NestRetireMachine")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_onboarding_machine_fn_method_nestretiremachine_set_input_error(
+			_pointer, FfiConverterStringINSTANCE.Lower(message), _uniffiStatus)
+		return false
+	})
+}
+
+// The binding faces' form of [`NestRetireMachine::set_remembered_slots`]:
+// the three `fauna.state.dns` memories as JSON objects of the record's own
+// shape — `{"<domain>": ["<fqdn>", …]}` each. A bag that does not parse is
+// treated as empty (the arm then visits nothing for that slot).
+func (_self *NestRetireMachine) SetRememberedSlotsJson(dkimJson string, atprotoJson string, faunaSelfJson string) {
+	_pointer := _self.ffiObject.incrementPointer("*NestRetireMachine")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_onboarding_machine_fn_method_nestretiremachine_set_remembered_slots_json(
+			_pointer, FfiConverterStringINSTANCE.Lower(dkimJson), FfiConverterStringINSTANCE.Lower(atprotoJson), FfiConverterStringINSTANCE.Lower(faunaSelfJson), _uniffiStatus)
+		return false
+	})
+}
+
 func (_self *NestRetireMachine) Snapshot() RetireSnapshot {
 	_pointer := _self.ffiObject.incrementPointer("*NestRetireMachine")
 	defer _self.ffiObject.decrementPointer()
@@ -3557,6 +3689,12 @@ type OnboardingMachineInterface interface {
 	// back-navigation must re-show the SAME key, or a key the user was just
 	// told to write down is silently invalidated.
 	BeginCreateIdentity()
+	// `emergency-lockout-entry-button` on `identity_choice` — the signed-out
+	// lock door (`ui/sessions.md` § Layout & flow → *The signed-out door*).
+	// Routes to the `emergency_lockout_entry` step. Clears the in-flight
+	// recovery intent like [`Self::begin_recovery_entry`]: the door is a
+	// pre-identity ceremony of its own, not a branch of either recovery.
+	BeginEmergencyLockoutEntry()
 	BeginImportIdentity()
 	// [`Self::begin_import_identity`], carrying the reason the user was *sent*
 	// there — for arrivals the user did not ask for.
@@ -3846,6 +3984,9 @@ type OnboardingMachineInterface interface {
 	// claim.
 	EmailEnableRequested() bool
 	ErrorMessage() *string
+	// Log a refused lock and hand the outcome back unchanged. Never logs the
+	// secret — only the outcome variant.
+	FailEmergencyLockout(outcome EmergencyLockoutOutcome) EmergencyLockoutOutcome
 	// Log a refused restore and hand the outcome back unchanged.
 	//
 	// The step is left alone on purpose: every refusal here is something the
@@ -4131,12 +4272,15 @@ type OnboardingMachineInterface interface {
 	// interstitial, mirroring the awaiting-DNS surface's auto-proceed.
 	// - **not registered** → the request is genuinely gone: terminal
 	// `invite.error.not_found`, on which the per-app glue deletes the slot.
-	// - **couldn't tell** (unreachable, degraded nest, unusable secret) → stay
-	// `PendingReview` and let the next poll tick ask again. Deliberately NOT
-	// an `Error` state: `recheck_invite_status` only proceeds from
-	// `PendingReview`, so writing any error here would wedge the poll
-	// permanently — a dropped connection would strand a live request behind a
-	// terminal, slot-deleting screen.
+	// - **couldn't reach the nest** (`Transient` only) → stay `PendingReview`
+	// and let the next poll tick ask again. Deliberately NOT an `Error`
+	// state: `recheck_invite_status` only proceeds from `PendingReview`, so
+	// writing an error for a dropped connection would strand a live request
+	// behind a terminal, slot-deleting screen.
+	// - **a typed verdict** (identity changed, superseded, locked, needs
+	// update, invalid secret) → terminal `Rechecking` error: no retry clears
+	// it, and `security.md` § Pre-claim surfacing says a consumer that
+	// retries without a human must stop.
 	ResolveNotFoundRecheck(nestUrl string, secret string, pendingRequestId string) OnboardingStep
 	// The nest URL a restore connects to, resolved from the account handle's
 	// domain exactly as the handle-check resolves its probe target: the local
@@ -4346,7 +4490,7 @@ type OnboardingMachineInterface interface {
 	// Set the `vps-config-mail-mode-toggle`: whether the box provisions the mail
 	// subsystem. `true` = a mail box (clamd/rspamd scanner sidecars + mail ports
 	// `{25,465,587,993}`; needs a `mem_gb ≥ 2`
-	// plan); `false` = a social-only box (lean nest+watchtower compose, viable on
+	// plan); `false` = a social-only box (lean nest+updater compose, viable on
 	// the 1 GB tier — but it cannot later enable mail without a VPS resize). The
 	// decision must live here at `vps_config`, not the post-claim §3b
 	// enable-email checkbox, because cloud-init must know mail-intent (and the
@@ -4444,6 +4588,24 @@ type OnboardingMachineInterface interface {
 	// orchestrator's pre-flight checks short-circuit completed work.
 	StartProvisioning()
 	Step() OnboardingStep
+	// `sessions-lockout-button` on `emergency_lockout_entry` — lock the account
+	// the pasted identity secret names for the nest's fixed 24 hours
+	// (`devices.md` § The signed-out door).
+	//
+	// `secret_input` is `paste-secret-field` verbatim — the identity-secret
+	// grammar of `identity_import` (a 64-hex secret or a `fauna://identity`
+	// URI), **not** the recovery-kit grammar. The nest is resolved from the
+	// typed account's domain ([`Self::current_handle`], or the URI's `handle=`
+	// when nothing is typed) exactly as `recovery_entry` resolves it.
+	// `confirm_word` is `sessions-lockout-confirm-field`, checked here so all
+	// seven apps refuse a wrong word identically.
+	//
+	// **Persists nothing**: the secret is read, used for one call and dropped;
+	// no identity slot is filled. On [`EmergencyLockoutOutcome::Locked`] the
+	// wizard returns to `identity_choice` with the typed account cleared; every
+	// other outcome stays on the step. The machine holds no string table, so the
+	// client renders [`EmergencyLockoutOutcome::message`].
+	SubmitEmergencyLockout(secretInput string, confirmWord string) EmergencyLockoutOutcome
 	SubmitHandleCheckContinue() OnboardingStep
 	// Wire-up for the `nat-mode-confirm-button`. Commits the admin's NAT-axis
 	// choice via the **mutable** `fauna.setup.nat_mode` kind (pre-identity,
@@ -4842,6 +5004,21 @@ func (_self *OnboardingMachine) BeginCreateIdentity() {
 	defer _self.ffiObject.decrementPointer()
 	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_begin_create_identity(
+			_pointer, _uniffiStatus)
+		return false
+	})
+}
+
+// `emergency-lockout-entry-button` on `identity_choice` — the signed-out
+// lock door (`ui/sessions.md` § Layout & flow → *The signed-out door*).
+// Routes to the `emergency_lockout_entry` step. Clears the in-flight
+// recovery intent like [`Self::begin_recovery_entry`]: the door is a
+// pre-identity ceremony of its own, not a branch of either recovery.
+func (_self *OnboardingMachine) BeginEmergencyLockoutEntry() {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_begin_emergency_lockout_entry(
 			_pointer, _uniffiStatus)
 		return false
 	})
@@ -5591,6 +5768,19 @@ func (_self *OnboardingMachine) ErrorMessage() *string {
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_error_message(
 				_pointer, _uniffiStatus),
+		}
+	}))
+}
+
+// Log a refused lock and hand the outcome back unchanged. Never logs the
+// secret — only the outcome variant.
+func (_self *OnboardingMachine) FailEmergencyLockout(outcome EmergencyLockoutOutcome) EmergencyLockoutOutcome {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterEmergencyLockoutOutcomeINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_fail_emergency_lockout(
+				_pointer, FfiConverterEmergencyLockoutOutcomeINSTANCE.Lower(outcome), _uniffiStatus),
 		}
 	}))
 }
@@ -6444,12 +6634,15 @@ func (_self *OnboardingMachine) Reset() {
 // interstitial, mirroring the awaiting-DNS surface's auto-proceed.
 // - **not registered** → the request is genuinely gone: terminal
 // `invite.error.not_found`, on which the per-app glue deletes the slot.
-// - **couldn't tell** (unreachable, degraded nest, unusable secret) → stay
-// `PendingReview` and let the next poll tick ask again. Deliberately NOT
-// an `Error` state: `recheck_invite_status` only proceeds from
-// `PendingReview`, so writing any error here would wedge the poll
-// permanently — a dropped connection would strand a live request behind a
-// terminal, slot-deleting screen.
+// - **couldn't reach the nest** (`Transient` only) → stay `PendingReview`
+// and let the next poll tick ask again. Deliberately NOT an `Error`
+// state: `recheck_invite_status` only proceeds from `PendingReview`, so
+// writing an error for a dropped connection would strand a live request
+// behind a terminal, slot-deleting screen.
+// - **a typed verdict** (identity changed, superseded, locked, needs
+// update, invalid secret) → terminal `Rechecking` error: no retry clears
+// it, and `security.md` § Pre-claim surfacing says a consumer that
+// retries without a human must stop.
 func (_self *OnboardingMachine) ResolveNotFoundRecheck(nestUrl string, secret string, pendingRequestId string) OnboardingStep {
 	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
 	defer _self.ffiObject.decrementPointer()
@@ -7006,7 +7199,7 @@ func (_self *OnboardingMachine) SetPhase(phase HandleCheckPhase, msgKey string, 
 // Set the `vps-config-mail-mode-toggle`: whether the box provisions the mail
 // subsystem. `true` = a mail box (clamd/rspamd scanner sidecars + mail ports
 // `{25,465,587,993}`; needs a `mem_gb ≥ 2`
-// plan); `false` = a social-only box (lean nest+watchtower compose, viable on
+// plan); `false` = a social-only box (lean nest+updater compose, viable on
 // the 1 GB tier — but it cannot later enable mail without a VPS resize). The
 // decision must live here at `vps_config`, not the post-claim §3b
 // enable-email checkbox, because cloud-init must know mail-intent (and the
@@ -7253,6 +7446,54 @@ func (_self *OnboardingMachine) Step() OnboardingStep {
 				_pointer, _uniffiStatus),
 		}
 	}))
+}
+
+// `sessions-lockout-button` on `emergency_lockout_entry` — lock the account
+// the pasted identity secret names for the nest's fixed 24 hours
+// (`devices.md` § The signed-out door).
+//
+// `secret_input` is `paste-secret-field` verbatim — the identity-secret
+// grammar of `identity_import` (a 64-hex secret or a `fauna://identity`
+// URI), **not** the recovery-kit grammar. The nest is resolved from the
+// typed account's domain ([`Self::current_handle`], or the URI's `handle=`
+// when nothing is typed) exactly as `recovery_entry` resolves it.
+// `confirm_word` is `sessions-lockout-confirm-field`, checked here so all
+// seven apps refuse a wrong word identically.
+//
+// **Persists nothing**: the secret is read, used for one call and dropped;
+// no identity slot is filled. On [`EmergencyLockoutOutcome::Locked`] the
+// wizard returns to `identity_choice` with the typed account cleared; every
+// other outcome stays on the step. The machine holds no string table, so the
+// client renders [`EmergencyLockoutOutcome::message`].
+func (_self *OnboardingMachine) SubmitEmergencyLockout(secretInput string, confirmWord string) EmergencyLockoutOutcome {
+	_pointer := _self.ffiObject.incrementPointer("*OnboardingMachine")
+	defer _self.ffiObject.decrementPointer()
+	res, _ := uniffiRustCallAsync[error](
+		nil,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_fauna_onboarding_machine_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) EmergencyLockoutOutcome {
+			return FfiConverterEmergencyLockoutOutcomeINSTANCE.Lift(ffi)
+		},
+		C.uniffi_fauna_onboarding_machine_fn_method_onboardingmachine_submit_emergency_lockout(
+			_pointer, FfiConverterStringINSTANCE.Lower(secretInput), FfiConverterStringINSTANCE.Lower(confirmWord)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_onboarding_machine_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_onboarding_machine_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	return res
 }
 
 func (_self *OnboardingMachine) SubmitHandleCheckContinue() OnboardingStep {
@@ -8829,6 +9070,14 @@ type InviteRequestSnapshot struct {
 	// nothing, so the shell renders no notice. Args are nested keys —
 	// resolve with `resolve_nested`.
 	AgeNotice *fauna_core.LocalizedText
+	// `invite-code-supervised-notice` — "This account will be supervised by
+	// {guardian}", plus "as a {band} account" when the code was minted with
+	// an age band (`family-safety.md` § App surface → *Age-band surfaces*).
+	// Derived on every `invite_request_snapshot()` read from a `Valid` OOB
+	// code that names a guardian ([`fauna_protocol::age::supervised_notice`]);
+	// `None` = no notice. Args mix data (the handle) and a nested key (the
+	// band) — resolve with `resolve_nested`.
+	SupervisedNotice *fauna_core.LocalizedText
 }
 
 func (r *InviteRequestSnapshot) Destroy() {
@@ -8839,6 +9088,7 @@ func (r *InviteRequestSnapshot) Destroy() {
 	FfiDestroyerOobCodeState{}.Destroy(r.OutOfBandCodeState)
 	fauna_core.FfiDestroyerLocalizedText{}.Destroy(r.OobMessage)
 	FfiDestroyerOptionalLocalizedText{}.Destroy(r.AgeNotice)
+	FfiDestroyerOptionalLocalizedText{}.Destroy(r.SupervisedNotice)
 }
 
 type FfiConverterInviteRequestSnapshot struct{}
@@ -8857,6 +9107,7 @@ func (c FfiConverterInviteRequestSnapshot) Read(reader io.Reader) InviteRequestS
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterOobCodeStateINSTANCE.Read(reader),
 		fauna_core.FfiConverterLocalizedTextINSTANCE.Read(reader),
+		FfiConverterOptionalLocalizedTextINSTANCE.Read(reader),
 		FfiConverterOptionalLocalizedTextINSTANCE.Read(reader),
 	}
 }
@@ -8877,6 +9128,7 @@ func (c FfiConverterInviteRequestSnapshot) Write(writer io.Writer, value InviteR
 	FfiConverterOobCodeStateINSTANCE.Write(writer, value.OutOfBandCodeState)
 	fauna_core.FfiConverterLocalizedTextINSTANCE.Write(writer, value.OobMessage)
 	FfiConverterOptionalLocalizedTextINSTANCE.Write(writer, value.AgeNotice)
+	FfiConverterOptionalLocalizedTextINSTANCE.Write(writer, value.SupervisedNotice)
 }
 
 type FfiDestroyerInviteRequestSnapshot struct{}
@@ -9411,7 +9663,7 @@ type VpsConfigState struct {
 	// `None` = "not chosen — use the handle's real-domain default"
 	// (`OnboardingMachine::provision_mail_mode_enabled`); `Some(true)` = mail box
 	// (scanner sidecars + mail ports, needs `mem_gb ≥ 2`), `Some(false)` =
-	// social-only box (lean nest+watchtower compose, the 1 GB tier). Feeds
+	// social-only box (lean nest+updater compose, the 1 GB tier). Feeds
 	// `CloudInitParams::enable_mail` via `run_provisioning_inner`.
 	// `docs/goal/behavior/onboarding.md` §5.
 	EnableMail *bool
@@ -9847,6 +10099,160 @@ func (FfiConverterCredentialForm) Write(writer io.Writer, value CredentialForm) 
 type FfiDestroyerCredentialForm struct{}
 
 func (_ FfiDestroyerCredentialForm) Destroy(value CredentialForm) {
+}
+
+// What [`OnboardingMachine::submit_emergency_lockout`] produced — one variant
+// per thing the user can do next, each with the `onboarding.emergency_lockout.*`
+// key (or `sessions.lockout_wrong_word`) its [`Self::message`] resolves.
+// `uniffi::Enum` for the same reason as [`RecoveryEntryOutcome`]: it is the
+// return type of an exported method.
+type EmergencyLockoutOutcome interface {
+	Destroy()
+}
+
+// The nest locked the account until `locked_until` (Unix seconds). The
+// wizard is back on `identity_choice`. Key `locked` (arg `until`).
+type EmergencyLockoutOutcomeLocked struct {
+	LockedUntil int64
+}
+
+func (e EmergencyLockoutOutcomeLocked) Destroy() {
+	FfiDestroyerInt64{}.Destroy(e.LockedUntil)
+}
+
+// The confirm field did not hold exactly `LOCK`; nothing was sent.
+type EmergencyLockoutOutcomeWrongConfirmWord struct {
+}
+
+func (e EmergencyLockoutOutcomeWrongConfirmWord) Destroy() {
+}
+
+// The pasted text is not an identity secret (a recovery kit is not one);
+// nothing was sent. Key `invalid_secret`.
+type EmergencyLockoutOutcomeInvalidSecret struct {
+}
+
+func (e EmergencyLockoutOutcomeInvalidSecret) Destroy() {
+}
+
+// Neither the account field nor the pasted payload named an account, so no
+// nest can be found. Key `account_needed`.
+type EmergencyLockoutOutcomeAccountNeeded struct {
+}
+
+func (e EmergencyLockoutOutcomeAccountNeeded) Destroy() {
+}
+
+// The account was named but is not `user@domain`. Key `account_malformed`.
+type EmergencyLockoutOutcomeAccountMalformed struct {
+}
+
+func (e EmergencyLockoutOutcomeAccountMalformed) Destroy() {
+}
+
+// The identity was succeeded: the account already moved to a new key, so
+// there is nothing to lock. Key `superseded`.
+type EmergencyLockoutOutcomeSuperseded struct {
+}
+
+func (e EmergencyLockoutOutcomeSuperseded) Destroy() {
+}
+
+// The nest declined. Key `refused` (arg `reason`).
+type EmergencyLockoutOutcomeRefused struct {
+	Reason string
+}
+
+func (e EmergencyLockoutOutcomeRefused) Destroy() {
+	FfiDestroyerString{}.Destroy(e.Reason)
+}
+
+// The nest could not be reached; a retry is worth offering. Key
+// `unreachable` (arg `reason`).
+type EmergencyLockoutOutcomeUnreachable struct {
+	Reason string
+}
+
+func (e EmergencyLockoutOutcomeUnreachable) Destroy() {
+	FfiDestroyerString{}.Destroy(e.Reason)
+}
+
+type FfiConverterEmergencyLockoutOutcome struct{}
+
+var FfiConverterEmergencyLockoutOutcomeINSTANCE = FfiConverterEmergencyLockoutOutcome{}
+
+func (c FfiConverterEmergencyLockoutOutcome) Lift(rb RustBufferI) EmergencyLockoutOutcome {
+	return LiftFromRustBuffer[EmergencyLockoutOutcome](c, rb)
+}
+
+func (c FfiConverterEmergencyLockoutOutcome) Lower(value EmergencyLockoutOutcome) C.RustBuffer {
+	return LowerIntoRustBuffer[EmergencyLockoutOutcome](c, value)
+}
+
+func (c FfiConverterEmergencyLockoutOutcome) LowerExternal(value EmergencyLockoutOutcome) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[EmergencyLockoutOutcome](c, value))
+}
+func (FfiConverterEmergencyLockoutOutcome) Read(reader io.Reader) EmergencyLockoutOutcome {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return EmergencyLockoutOutcomeLocked{
+			FfiConverterInt64INSTANCE.Read(reader),
+		}
+	case 2:
+		return EmergencyLockoutOutcomeWrongConfirmWord{}
+	case 3:
+		return EmergencyLockoutOutcomeInvalidSecret{}
+	case 4:
+		return EmergencyLockoutOutcomeAccountNeeded{}
+	case 5:
+		return EmergencyLockoutOutcomeAccountMalformed{}
+	case 6:
+		return EmergencyLockoutOutcomeSuperseded{}
+	case 7:
+		return EmergencyLockoutOutcomeRefused{
+			FfiConverterStringINSTANCE.Read(reader),
+		}
+	case 8:
+		return EmergencyLockoutOutcomeUnreachable{
+			FfiConverterStringINSTANCE.Read(reader),
+		}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterEmergencyLockoutOutcome.Read()", id))
+	}
+}
+
+func (FfiConverterEmergencyLockoutOutcome) Write(writer io.Writer, value EmergencyLockoutOutcome) {
+	switch variant_value := value.(type) {
+	case EmergencyLockoutOutcomeLocked:
+		writeInt32(writer, 1)
+		FfiConverterInt64INSTANCE.Write(writer, variant_value.LockedUntil)
+	case EmergencyLockoutOutcomeWrongConfirmWord:
+		writeInt32(writer, 2)
+	case EmergencyLockoutOutcomeInvalidSecret:
+		writeInt32(writer, 3)
+	case EmergencyLockoutOutcomeAccountNeeded:
+		writeInt32(writer, 4)
+	case EmergencyLockoutOutcomeAccountMalformed:
+		writeInt32(writer, 5)
+	case EmergencyLockoutOutcomeSuperseded:
+		writeInt32(writer, 6)
+	case EmergencyLockoutOutcomeRefused:
+		writeInt32(writer, 7)
+		FfiConverterStringINSTANCE.Write(writer, variant_value.Reason)
+	case EmergencyLockoutOutcomeUnreachable:
+		writeInt32(writer, 8)
+		FfiConverterStringINSTANCE.Write(writer, variant_value.Reason)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterEmergencyLockoutOutcome.Write", value))
+	}
+}
+
+type FfiDestroyerEmergencyLockoutOutcome struct{}
+
+func (_ FfiDestroyerEmergencyLockoutOutcome) Destroy(value EmergencyLockoutOutcome) {
+	value.Destroy()
 }
 
 type ErrorContext uint
@@ -11089,13 +11495,18 @@ const (
 	// is needed. On success the identity seed is restored and the wizard
 	// lands on `HandleEntry`, uniform with an import. Distinct from
 	// [`BoxRecoveryEntry`], which names the total-box-loss NEST recovery.
-	OnboardingStepRecoveryEntry       OnboardingStep = 5
-	OnboardingStepHandleEntry         OnboardingStep = 6
-	OnboardingStepDnsConfig           OnboardingStep = 7
-	OnboardingStepVpsConfig           OnboardingStep = 8
-	OnboardingStepNestProvisioning    OnboardingStep = 9
-	OnboardingStepDnsPostInstructions OnboardingStep = 10
-	OnboardingStepInviteRequest       OnboardingStep = 11
+	OnboardingStepRecoveryEntry OnboardingStep = 5
+	// The signed-out lock door (`ui/sessions.md` § Layout & flow → *The
+	// signed-out door*), reached from `identity_choice` via
+	// `emergency-lockout-entry-button`. Pre-identity and **persists nothing**:
+	// a lock returns to `IdentityChoice`, a refusal stays here.
+	OnboardingStepEmergencyLockoutEntry OnboardingStep = 6
+	OnboardingStepHandleEntry           OnboardingStep = 7
+	OnboardingStepDnsConfig             OnboardingStep = 8
+	OnboardingStepVpsConfig             OnboardingStep = 9
+	OnboardingStepNestProvisioning      OnboardingStep = 10
+	OnboardingStepDnsPostInstructions   OnboardingStep = 11
+	OnboardingStepInviteRequest         OnboardingStep = 12
 	// Reached only when handle-check returns
 	// `HandleCheckOutcome::UnregisteredUnclaimedNest` — the nest is
 	// running but `setup-status.claimed == false`. Mutually exclusive
@@ -11103,7 +11514,7 @@ const (
 	// the user's only path forward is the one-time claim code printed
 	// by the nest's bootstrap process. See
 	// `docs/goal/behavior/onboarding.md` §3a.
-	OnboardingStepClaimCode OnboardingStep = 12
+	OnboardingStepClaimCode OnboardingStep = 13
 	// The `nat_mode_choice` page — the **single, terminal** admin-path setup
 	// step: the admin confirms the nest's NAT axis (`public` / `private`).
 	// Reached **directly on claim completion** — there is no storage-mode
@@ -11113,7 +11524,7 @@ const (
 	// kind and exits to `Done` with `wizard_outcome() == LoggedIn`;
 	// `defer_nat_mode_choice` exits the same way keeping the seeded value. Per
 	// `docs/goal/behavior/onboarding.md` § 3b-bis.
-	OnboardingStepNatModeChoice OnboardingStep = 13
+	OnboardingStepNatModeChoice OnboardingStep = 14
 	// The one-tap "trust this box" offer (`onboarding.md` § 3b-ter; ui.yaml
 	// page `onboarding.trust_prompt`) — an **optional interstitial before
 	// LoggedIn, not a setup step**: it configures nothing nest-side, so
@@ -11133,7 +11544,7 @@ const (
 	// parity gap, not drift. A returning `AlreadyOnNest` sign-in is NOT such
 	// a route and never reaches here. Grant and skip both land on
 	// [`Self::Done`] with the same `LoggedIn` outcome.
-	OnboardingStepTrustPrompt OnboardingStep = 14
+	OnboardingStepTrustPrompt OnboardingStep = 15
 	// Total-box-loss recovery hub (`box-recovery.md` § Recovery UI, step 4;
 	// ui.yaml page `nest_recovery`). Lists the admin's custodied boxes
 	// (`fauna.state.deployment-seeds`, read via the shared `deploymentSeeds()`
@@ -11141,18 +11552,18 @@ const (
 	// self-hosted). Reached from two entries: `launch-recover-button` on
 	// `launch_retry` (surviving device) and `recover-lost-box-button` on
 	// `identity_choice` → `identity_import` (recovery intent) → here.
-	OnboardingStepNestRecovery OnboardingStep = 15
+	OnboardingStepNestRecovery OnboardingStep = 16
 	// Self-hosted recovery instructions (`box-recovery.md` § Recovery UI,
 	// step 4; ui.yaml page `recover_selfhosted_instructions`). Shows the
 	// installer invocation / `.env` line carrying `FAUNA_DEPLOYMENT_SEED` (the
 	// client-custodied seed for the selected box) so `docker compose up` boots
 	// the box with the same `nest_actor_id`. An out-of-band step — the box
 	// isn't up yet, so continuing exits the wizard.
-	OnboardingStepRecoverSelfhostedInstructions OnboardingStep = 16
+	OnboardingStepRecoverSelfhostedInstructions OnboardingStep = 17
 	// Sentinel: the wizard finished. App router should swap to the
 	// authenticated UI. Caller may also query `wizard_outcome()` for the
 	// terminal `WizardOutcome` and route to the main app.
-	OnboardingStepDone OnboardingStep = 17
+	OnboardingStepDone OnboardingStep = 18
 )
 
 type FfiConverterOnboardingStep struct{}
@@ -11322,6 +11733,7 @@ func (err ProbeError) Unwrap() error {
 var ErrProbeErrorTransient = fmt.Errorf("ProbeErrorTransient")
 var ErrProbeErrorInvalidResponse = fmt.Errorf("ProbeErrorInvalidResponse")
 var ErrProbeErrorIdentityMismatch = fmt.Errorf("ProbeErrorIdentityMismatch")
+var ErrProbeErrorAppOutdated = fmt.Errorf("ProbeErrorAppOutdated")
 
 // Variant structs
 type ProbeErrorTransient struct {
@@ -11418,6 +11830,44 @@ func (self ProbeErrorIdentityMismatch) Is(target error) bool {
 	return target == ErrProbeErrorIdentityMismatch
 }
 
+// The nest refused this app's subprotocol before the upgrade (HTTP 426):
+// the app is too old for it (`version-compatibility.md` § Dimension 4).
+// Terminal: no retry or poll helps until the app is updated, so it is
+// never rendered as a transient. `reason` is the localized "your app is
+// out of date" text.
+type ProbeErrorAppOutdated struct {
+	Reason string
+}
+
+// The nest refused this app's subprotocol before the upgrade (HTTP 426):
+// the app is too old for it (`version-compatibility.md` § Dimension 4).
+// Terminal: no retry or poll helps until the app is updated, so it is
+// never rendered as a transient. `reason` is the localized "your app is
+// out of date" text.
+func NewProbeErrorAppOutdated(
+	reason string,
+) *ProbeError {
+	return &ProbeError{err: &ProbeErrorAppOutdated{
+		Reason: reason}}
+}
+
+func (e ProbeErrorAppOutdated) destroy() {
+	FfiDestroyerString{}.Destroy(e.Reason)
+}
+
+func (err ProbeErrorAppOutdated) Error() string {
+	return fmt.Sprint("AppOutdated",
+		": ",
+
+		"Reason=",
+		err.Reason,
+	)
+}
+
+func (self ProbeErrorAppOutdated) Is(target error) bool {
+	return target == ErrProbeErrorAppOutdated
+}
+
 type FfiConverterProbeError struct{}
 
 var FfiConverterProbeErrorINSTANCE = FfiConverterProbeError{}
@@ -11450,6 +11900,10 @@ func (c FfiConverterProbeError) Read(reader io.Reader) *ProbeError {
 		return &ProbeError{&ProbeErrorIdentityMismatch{
 			Reason: FfiConverterStringINSTANCE.Read(reader),
 		}}
+	case 4:
+		return &ProbeError{&ProbeErrorAppOutdated{
+			Reason: FfiConverterStringINSTANCE.Read(reader),
+		}}
 	default:
 		panic(fmt.Sprintf("Unknown error code %d in FfiConverterProbeError.Read()", errorID))
 	}
@@ -11466,6 +11920,9 @@ func (c FfiConverterProbeError) Write(writer io.Writer, value *ProbeError) {
 	case *ProbeErrorIdentityMismatch:
 		writeInt32(writer, 3)
 		FfiConverterStringINSTANCE.Write(writer, variantValue.Reason)
+	case *ProbeErrorAppOutdated:
+		writeInt32(writer, 4)
+		FfiConverterStringINSTANCE.Write(writer, variantValue.Reason)
 	default:
 		_ = variantValue
 		panic(fmt.Sprintf("invalid error value `%v` in FfiConverterProbeError.Write", value))
@@ -11481,6 +11938,8 @@ func (_ FfiDestroyerProbeError) Destroy(value *ProbeError) {
 	case ProbeErrorInvalidResponse:
 		variantValue.destroy()
 	case ProbeErrorIdentityMismatch:
+		variantValue.destroy()
+	case ProbeErrorAppOutdated:
 		variantValue.destroy()
 	default:
 		_ = variantValue
@@ -14002,6 +14461,31 @@ func ServerTypeLabel(st fauna_provisioning.ServerTypeInfo) string {
 	}))
 }
 
+// The i18n key of an update-channel row's description at the running product
+// version (`UpdateChannel::description_key`) — apps look the string up by this
+// key rather than choosing per channel themselves
+// (`behavior/onboarding-provisioning.md` § 5 → *The compat line*).
+func UpdateChannelDescriptionKey(channel fauna_provisioning.UpdateChannel) string {
+	return FfiConverterStringINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_func_update_channel_description_key(
+				CFromRustBuffer(fauna_provisioning.FfiConverterUpdateChannelINSTANCE.LowerExternal(channel)), _uniffiStatus),
+		}
+	}))
+}
+
+// [`EmergencyLockoutOutcome::message`] as a free function — the UniFFI door the
+// FFI apps (android, apple, windows) render the signed-out lock's answer
+// through. `unlock_time` is the already-rendered `Locked` time (the shared
+// `format_unix_local`); every other outcome ignores it.
+func EmergencyLockoutOutcomeMessage(outcome EmergencyLockoutOutcome, unlockTime string) fauna_core.LocalizedText {
+	return fauna_core.FfiConverterLocalizedTextINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_func_emergency_lockout_outcome_message(FfiConverterEmergencyLockoutOutcomeINSTANCE.Lower(outcome), FfiConverterStringINSTANCE.Lower(unlockTime), _uniffiStatus),
+		}
+	}))
+}
+
 // [`RecoveryEntryOutcome::message`] as a free function — the UniFFI door the
 // FFI apps (android, apple, windows) render the restore's answer through, so
 // they read the same table tui, linux and web do instead of re-deriving it.
@@ -14026,5 +14510,16 @@ func AwaitingDnsPollMs() uint64 {
 func InviteRecheckPollMs() uint64 {
 	return FfiConverterUint64INSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
 		return C.uniffi_fauna_onboarding_machine_fn_func_invite_recheck_poll_ms(_uniffiStatus)
+	}))
+}
+
+// [`StepState::progress_status`] for the binding faces (the Kotlin / Swift
+// twin of wasm's `stepStatusJson`): the `provisioning-step-row` status a step
+// state renders as.
+func RetireStepStatus(state StepState) fauna_provisioning.StepStatus {
+	return fauna_provisioning.FfiConverterStepStatusINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_fauna_onboarding_machine_fn_func_retire_step_status(FfiConverterStepStateINSTANCE.Lower(state), _uniffiStatus),
+		}
 	}))
 }

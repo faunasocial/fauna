@@ -104,6 +104,13 @@ Removing an account is deliberately a *timed* process, not a trapdoor:
 2. **Restore** cancels the process at any point before the end: same account,
    same keys, same data, no re-onboarding.
 
+The member is told. For the whole warning phase, their app shows a warning banner
+on every page that can't be dismissed. It says when their access ends, when
+their account and data will be deleted, the reason you gave, and that they can
+export everything from **Settings → Account → Export My Data** until access
+ends. If you restore them, the banner goes away on its own the next time their
+app checks.
+
 An immediate **suspend** button — instant cut-off with no deletion timeline,
 for "stop this right now" situations — sits right beside evict on every
 member's row, in every app.
@@ -141,8 +148,8 @@ The two real admin-side levers:
   already fetched may persist beyond your nest's reach. Overturning
   a takedown restores the post on your nest, but deliberately does *not*
   re-publish it to those outside networks — putting it back out there is the
-  author's call to make, not something an overturn does silently. (An appeal
-  mechanism exists server-side; the app screen to use it is still landing.)
+  author's call to make, not something an overturn does silently. (The author
+  can appeal from the Moderation page; an appeal is recorded for an administrator to review, never granted on the spot.)
 
 ## Kids on the nest
 
@@ -196,7 +203,7 @@ Three separate layers, from "automatic" to "yours to set up":
 | Member privacy from the admin (content sealed at rest, no admin read access) | **Available** |
 | User-side moderation (labels, badges, per-user thresholds, training) | **Available** |
 | Admin mail perimeter policy (spam thresholds) | **Available** |
-| Legal takedown (audited tombstone) | **Available** — appeal is server-side only; no app screen to file one yet |
+| Legal takedown (audited tombstone) | **Available** — the author can file an appeal from the Moderation page; it is recorded for an administrator to review |
 | Supervised accounts for kids | **Available** — guardian link, reach controls, and per-category content filters are built and live on the Family page in every app; screen-time hours and daily budgets are rolling out, live on some apps and landing on the rest |
 | Automatic nest database self-backup (hourly + daily) | **Available** |
 | Per-member snapshots & backup destinations | **Available** — your nest does the uploading itself, so it works the same from every app, including the web app, and keeps going with all of them closed |

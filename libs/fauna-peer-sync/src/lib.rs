@@ -54,6 +54,7 @@ pub mod lan;
 pub mod quota;
 pub mod ranged;
 pub mod server;
+pub mod store_serve;
 
 pub use admission::{
     AdmissionVerdict, AdmittedConnection, AdmittedEntry, AdmittedScopes, EvaluatedWitness,
@@ -64,11 +65,11 @@ pub use client::{
     PeerRequester, PullReport, admit_over, admit_over_as, pull_file_chunks, pull_missing_blocks,
 };
 pub use discovery::{
-    PeerDialTarget, bind_carried_endpoints, custodian_dial_targets, dial_target_from,
-    peer_sync_enabled, sibling_dial_targets,
+    CustodianNestTarget, PeerDialTarget, bind_carried_endpoints, custodian_dial_targets,
+    custodian_nest_targets, dial_target_from, peer_sync_enabled, sibling_dial_targets,
 };
 pub use quota::{MeteredPlane, QuotaConfig, QuotaLedger, metered_handler_factory};
 pub use server::{
-    CustodyRevocationFn, DeviceRemovedFn, FileChunkFn, PeerSyncServer, PeerSyncServerConfig,
-    start_peer_sync_node,
+    CustodyRevocationFn, DeviceRemovedFn, FileChunkFn, FolderChangesFn, FolderManifestFn,
+    PeerSyncServer, PeerSyncServerConfig, start_peer_sync_node,
 };

@@ -31,16 +31,38 @@ pub use crate::rpc_router::{RpcHandler, RpcKindMeta};
 /// `FederationRouter`" equivalent to "on the federation kind allowlist" (§4.C).
 pub const FEDERATION_KIND_PREFIX: &str = "fauna.federation.";
 
+/// The writer-plane per-kind throttle budget: events per the channel's 60 s
+/// window, declared by the two grant-gated custody-record kinds
+/// (`backup.changes.record`, `folder.changes.record`) at registration. Ten a
+/// second sustained — the `RECORDS_DOOR_LIMITER_CONFIG` precedent, a plane of
+/// the same shape (grant-gated, quota-charged record door). What it bounds is
+/// the pre-gate cost of an unauthorized caller; an authorized writer's post-gate
+/// cost is owner-charged (`federation.md` § Nest-writer backup plane →
+/// *Throttling* owns the sizing rule).
+pub const WRITER_RECORD_MAX_EVENTS: u32 = 600;
+
 /// Immutable federation-kind-to-meta map. Construct via [`FederationRouter::builder`].
 pub struct FederationRouter {
     kinds: BTreeMap<&'static str, RpcKindMeta>,
+    /// Kinds whose registration named their own throttle budget; every other
+    /// kind takes the channel limiter's default.
+    budgets: BTreeMap<&'static str, u32>,
 }
 
 impl FederationRouter {
     pub fn builder() -> FederationRouterBuilder {
         FederationRouterBuilder {
             kinds: BTreeMap::new(),
+            budgets: BTreeMap::new(),
         }
+    }
+
+    /// The throttle budget `kind` declared at registration
+    /// ([`FederationRouterBuilder::add_with_budget`]), or `None` for a kind that
+    /// takes the channel default (`federation.md` § Security → *Rate limiting
+    /// is the primary DoS defense*: the budget is a property of the kind).
+    pub fn max_events(&self, kind: &str) -> Option<u32> {
+        self.budgets.get(kind).copied()
     }
 
     /// Look up a kind's metadata + handler. `None` ⇒ the kind is not on the
@@ -107,6 +129,7 @@ impl FederationRouter {
 
 pub struct FederationRouterBuilder {
     kinds: BTreeMap<&'static str, RpcKindMeta>,
+    budgets: BTreeMap<&'static str, u32>,
 }
 
 impl FederationRouterBuilder {
@@ -123,8 +146,19 @@ impl FederationRouterBuilder {
         }
     }
 
+    /// [`Self::add`] for a kind that declares its own throttle budget — events
+    /// per the channel's one window, in place of the channel default. Both of
+    /// the channel's checks (per source IP, then per nest) honour it.
+    pub fn add_with_budget(&mut self, kind: &'static str, meta: RpcKindMeta, max_events: u32) {
+        self.add(kind, meta);
+        self.budgets.insert(kind, max_events);
+    }
+
     pub fn build(self) -> FederationRouter {
-        FederationRouter { kinds: self.kinds }
+        FederationRouter {
+            kinds: self.kinds,
+            budgets: self.budgets,
+        }
     }
 }
 

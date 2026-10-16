@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Input;
 using Windows.System;
 using FaunaApp.Core.Helpers;
 using FaunaApp.Core.Models;
+using FaunaApp.Core.Services;
 using S = FaunaApp.Core.Services.Strings;
 
 namespace FaunaApp.Controls;
@@ -45,7 +46,24 @@ public sealed partial class BridgeCard : UserControl
     public BridgeCard()
     {
         this.InitializeComponent();
+        // The ward's asks move off-card (a status read lands, a link/follow is
+        // refused on the page's view model): repaint just the ask rows. The static
+        // event is app-lifetime, so it is held only while the card is in the tree.
+        Loaded += (_, _) =>
+        {
+            WardAsksCache.Changed += OnWardAsksChanged;
+            RenderSourceAsks(Bridge);
+        };
+        Unloaded += (_, _) => WardAsksCache.Changed -= OnWardAsksChanged;
     }
+
+    private void OnWardAsksChanged() => DispatcherQueue.TryEnqueue(() => RenderSourceAsks(Bridge));
+
+    /// <summary>The ward pressed <c>bridge-source-request-button</c> for ONE refused
+    /// triple. Carries that row's own triple and the bridge's display name (display-only
+    /// label — the one still available once the add-follow buffers are cleared); the host
+    /// page dispatches it over <c>BridgesViewModel.AskSourceAsync</c>.</summary>
+    public event EventHandler<SourceAskEventArgs>? SourceAskClick;
 
     /// <summary>The bridge this card renders. A host embedding a single card for a
     /// named provider (the AT Protocol page) may pass a SYNTHETIC unlinked
@@ -93,6 +111,7 @@ public sealed partial class BridgeCard : UserControl
         IdentityRun.Text = bridge.Identity ?? string.Empty;
         ModeRun.Text = bridge.Mode ?? string.Empty;
         RenderSettings(bridge);
+        RenderSourceAsks(bridge);
         ActionText.Text = bridge.Linked
             ? S.Get("bridges/unlink_action")
             : S.Get("bridges/link_action");
@@ -132,6 +151,58 @@ public sealed partial class BridgeCard : UserControl
     private void ActionButton_Click(object sender, RoutedEventArgs e)
     {
         if (Bridge is { } bridge) ActionClick?.Invoke(this, bridge);
+    }
+
+    // ── The ward's feed-source ask (family-safety.md § Feed-source approvals → App
+    //    affordance; tui's bridges.rs `source_ask_rows`, android's `sourceAskRows`).
+    //    Durable rows first, then session-only refusals; a refused triple with a
+    //    durable row is skipped by the shared fold, so an answered ask shows its
+    //    verdict instead of offering the button again. An APPROVED row is a LABEL (the
+    //    "try again" prompt), never a button — the ward redeems the single-use grant by
+    //    repeating the ORIGINAL link / follow (rule (e)).
+
+    private void RenderSourceAsks(BridgeInfo? bridge)
+    {
+        SourceAskPanel.Children.Clear();
+        if (bridge is null)
+        {
+            SourceAskPanel.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        var rows = WardAskFolds.SourceAskRowsFor(
+            WardAsksCache.FeedRequests, WardAsksCache.RefusedFeed, bridge.Id);
+        foreach (var state in rows.States)
+        {
+            // AutomationId ONLY, no static Name: a get_text target — a hardcoded Name
+            // would shadow the label text (reference_windows_flaui_gettext_dynamic_label_no_name).
+            var label = new TextBlock
+            {
+                Text = S.Get(state == uniffi.fauna_ffi.FfiFeedRequestState.Approved
+                    ? "bridges/source_request_approved"
+                    : "bridges/source_request_pending"),
+                Opacity = 0.8,
+                TextWrapping = TextWrapping.Wrap,
+            };
+            AutomationProperties.SetAutomationId(label, FaunaApp.UiIds.Ids.BridgeSourceRequestState);
+            SourceAskPanel.Children.Add(label);
+        }
+        foreach (var triple in rows.Asks)
+        {
+            // Each button captures ITS OWN triple (rule (d)/(f)): keyed on the ask data,
+            // never on the add-follow form's buffers, which dispatch clears.
+            var button = new Button
+            {
+                Content = S.Get("bridges/source_request_button"),
+                HorizontalAlignment = HorizontalAlignment.Left,
+            };
+            AutomationProperties.SetAutomationId(button, FaunaApp.UiIds.Ids.BridgeSourceRequestButton);
+            var asked = triple;
+            button.Click += (_, _) => SourceAskClick?.Invoke(
+                this, new SourceAskEventArgs(asked, bridge.DisplayName));
+            SourceAskPanel.Children.Add(button);
+        }
+        SourceAskPanel.Visibility = rows.IsEmpty ? Visibility.Collapsed : Visibility.Visible;
     }
 
     // ── Metadata-driven settings (bridges.md § Bridge settings) — built imperatively, one row per BridgeSetting, mirroring
@@ -242,6 +313,29 @@ public sealed partial class BridgeCard : UserControl
         row.Children.Add(label);
         row.Children.Add(textBox);
         return row;
+    }
+}
+
+/// <summary>Payload for <see cref="BridgeCard.SourceAskClick"/> — the refused
+/// <c>(bridge_id, operation, target)</c> triple the pressed button carries, plus the
+/// display-only label the ask is filed under.</summary>
+public sealed class SourceAskEventArgs : EventArgs
+{
+    public string BridgeId { get; }
+    /// <summary>The wire spelling of the refused operation (<c>link</c> / <c>follow</c>).</summary>
+    public string Operation { get; }
+    /// <summary>Empty for a <c>link</c>; the follow id otherwise.</summary>
+    public string Target { get; }
+    public string Label { get; }
+
+    internal FeedTriple Triple => new(BridgeId, Operation, Target);
+
+    internal SourceAskEventArgs(FeedTriple triple, string label)
+    {
+        BridgeId = triple.BridgeId;
+        Operation = triple.Operation;
+        Target = triple.Target;
+        Label = label;
     }
 }
 

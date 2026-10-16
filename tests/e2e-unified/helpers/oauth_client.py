@@ -498,24 +498,42 @@ class OAuthClient:
         path = f"/xrpc/{nsid}"
         if params:
             path = f"{path}?{urllib.parse.urlencode(params)}"
+        return self._authed_xrpc("GET", nsid, path, access_token, None)
+
+    def authed_xrpc_post(self, nsid: str, access_token: str, body: dict) -> tuple[int, dict]:
+        """An authenticated XRPC procedure call (a JSON body), made exactly as
+        `authed_xrpc_get` makes a query: DPoP-bound, the nonce re-harvested from
+        every response."""
+        return self._authed_xrpc(
+            "POST", nsid, f"/xrpc/{nsid}", access_token, json.dumps(body).encode()
+        )
+
+    def _authed_xrpc(
+        self, method: str, nsid: str, path: str, access_token: str, data: bytes | None
+    ) -> tuple[int, dict]:
         # `htu` has no query string (RFC 9449 §4.3), and it names the PDS's own
         # published origin rather than the host this client happened to dial.
         htu = f"{self.resource_htu_origin}/xrpc/{nsid}"
+
+        def request():
+            req = urllib.request.Request(
+                f"{self.resource_base}{path}", data=data, method=method
+            )
+            req.add_header("Authorization", f"DPoP {access_token}")
+            req.add_header("DPoP", self.dpop_proof(method, htu, access_token=access_token))
+            if data is not None:
+                req.add_header("Content-Type", "application/json")
+            return req
+
         # `dpop_proof` binds `self.nonce`; hold the authorization server's
         # nonce aside while proving to the resource server, so neither
         # server's nonce is ever presented to the other.
         as_nonce, self.nonce = self.nonce, self.resource_nonce
         try:
-            req = urllib.request.Request(f"{self.resource_base}{path}", method="GET")
-            req.add_header("Authorization", f"DPoP {access_token}")
-            req.add_header("DPoP", self.dpop_proof("GET", htu, access_token=access_token))
-            status, body, headers = self._do(req)
+            status, body, headers = self._do(request())
             if status != 200 and headers.get(NONCE_HEADER):
                 self.nonce = headers[NONCE_HEADER]
-                req = urllib.request.Request(f"{self.resource_base}{path}", method="GET")
-                req.add_header("Authorization", f"DPoP {access_token}")
-                req.add_header("DPoP", self.dpop_proof("GET", htu, access_token=access_token))
-                status, body, headers = self._do(req)
+                status, body, headers = self._do(request())
             if headers.get(NONCE_HEADER):
                 self.nonce = headers[NONCE_HEADER]
         finally:

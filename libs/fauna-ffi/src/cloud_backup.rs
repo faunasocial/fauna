@@ -47,7 +47,8 @@ pub enum FfiCloudBackupExclusion {
     /// **android** — excluded declaratively by the app's own manifest, which no
     /// runtime call can substitute for. `declaration` names the file + rule so
     /// a reviewer can check it exists rather than take the claim; android's is
-    /// `AndroidManifest.xml android:allowBackup="false"`.
+    /// `AndroidManifest.xml android:allowBackup="false" +
+    /// android:dataExtractionRules="@xml/data_extraction_rules"`.
     DeclaredInManifest { declaration: String },
     /// **apple** — excluded imperatively by the shell once the root exists.
     ExcludedByShell {

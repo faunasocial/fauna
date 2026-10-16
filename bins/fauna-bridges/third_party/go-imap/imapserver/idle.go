@@ -21,6 +21,18 @@ func (c *Conn) handleIdle(dec *imapwire.Decoder) error {
 		return err
 	}
 
+	// FAUNA-FORK: a session's optional PrepareIdle runs BEFORE the `+ idling`
+	// continuation is written, so whatever it registers (the MDA's push
+	// subscription) is live by the time the client can act on the
+	// continuation. Without it, a change the client makes right after `+` can
+	// commit before Session.Idle has subscribed, and its push is lost. A
+	// failure refuses the IDLE with a tagged response, no continuation.
+	if p, ok := c.session.(interface{ PrepareIdle() error }); ok {
+		if err := p.PrepareIdle(); err != nil {
+			return err
+		}
+	}
+
 	if err := c.writeContReq("idling"); err != nil {
 		return err
 	}

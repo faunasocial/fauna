@@ -4,7 +4,7 @@ import Testing
 @testable import FaunaKit
 
 /// Headless pins for the macOS **two-root Media-badge fold**
-/// (`on-demand-files.md` § On-Demand Files → Apple File Provider binding, *state
+/// (`on-demand-files-apple.md` § On-Demand Files → Apple File Provider binding, *state
 /// unification* — macOS has two consent domains, and each set's `fsid-<ref>.db`
 /// lives in its HOST's root): the routing decision and the slice replacement are
 /// pure functions; the `fileStates` reads themselves are the live inch.

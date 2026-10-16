@@ -94,6 +94,7 @@
       type="checkbox"
       data-testid={IDS.ADMIN_CONTACTS_CARDDAV_ENABLED_TOGGLE}
       checked={carddavEnabled}
+      data-state={carddavEnabled ? 'on' : 'off'}
       disabled={busy && !snap}
       onchange={handleToggleEnabled}
     />

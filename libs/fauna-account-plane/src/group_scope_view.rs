@@ -363,6 +363,93 @@ mod tests {
         assert!(summarize_group_scope(&scope_id, &rows).is_none());
     }
 
+    /// The LISTING's revocation feed pin: `read_group_scope` builds the line
+    /// from the store's own `fauna.group.authority-revocation` rows. Cut that
+    /// filter to an empty iterator and the revoked device's enrollee is listed.
+    #[test]
+    fn a_member_enrolled_by_a_revoked_authority_device_is_not_listed() {
+        use ed25519_dalek::SigningKey;
+        use fauna_core::data::{Capability, DeviceAuthorization, Timestamp};
+        use fauna_core::encoding::{EmbedAsBytes, canonical_encode, sign_envelope};
+        use fauna_core::group_scope::{
+            RosterEntryCore, roster_cell_key, sign_authority_revocation, sign_roster_enrollment,
+        };
+
+        let authority = ActorKeypair::from_secret([7u8; 32]);
+        let (birth, scope_id) = birth_of(&authority);
+        let revoked_device = SigningKey::from_bytes(&[0x71; 32]);
+        let live_device = SigningKey::from_bytes(&[0x72; 32]);
+        let cert = |device: &SigningKey| {
+            let cert = DeviceAuthorization {
+                actor_id: authority.actor_id(),
+                device_key: device.verifying_key().to_bytes(),
+                capabilities: vec![Capability::RenewBearer],
+                created_at: Timestamp(1_000),
+                expires_at: None,
+            };
+            let (bytes, env) = sign_envelope(&authority, &cert).expect("sign cert");
+            canonical_encode(&EmbedAsBytes::from_signed(bytes, env))
+                .expect("carriage")
+                .to_vec()
+        };
+        let enroll = |device: &SigningKey, member: &ActorKeypair| {
+            let (entry_id, record) = sign_roster_enrollment(
+                device,
+                RosterEntryCore {
+                    scope_id,
+                    member_actor: member.actor_id(),
+                    admission_salt: [0x01; 32],
+                },
+                vec![0xE0; 32],
+                cert(device),
+                2_000,
+            )
+            .expect("entry");
+            entry(
+                KIND_GROUP_ROSTER,
+                &roster_cell_key(&entry_id, &device.verifying_key().to_bytes()),
+                canonical_encode(&record).unwrap().to_vec(),
+            )
+        };
+        let m = ActorKeypair::from_secret([8u8; 32]);
+        let n = ActorKeypair::from_secret([9u8; 32]);
+        let mut rows = vec![
+            entry(
+                KIND_GROUP_BIRTH,
+                GROUP_BIRTH_KEY,
+                canonical_encode(&birth).unwrap().to_vec(),
+            ),
+            enroll(&revoked_device, &m),
+            enroll(&live_device, &n),
+        ];
+
+        // Before any revocation both are listed — the pin's own baseline.
+        let s = summarize_group_scope(&scope_id, &rows).expect("listable");
+        assert!(s.members.contains(&m.actor_id()) && s.members.contains(&n.actor_id()));
+
+        let (key, revocation) = sign_authority_revocation(
+            authority.signing_key(),
+            Vec::new(),
+            scope_id,
+            revoked_device.verifying_key().to_bytes(),
+            5_000,
+        );
+        rows.push(entry(
+            KIND_GROUP_AUTHORITY_REVOCATION,
+            &key,
+            canonical_encode(&revocation).unwrap().to_vec(),
+        ));
+        let s = summarize_group_scope(&scope_id, &rows).expect("listable");
+        assert!(
+            !s.members.contains(&m.actor_id()),
+            "the revoked device's enrollee is not listed"
+        );
+        assert!(
+            s.members.contains(&n.actor_id()),
+            "a member enrolled by a live sibling device still is"
+        );
+    }
+
     #[test]
     fn a_tombstoned_birth_row_stops_the_listing() {
         let authority = ActorKeypair::from_secret([4u8; 32]);

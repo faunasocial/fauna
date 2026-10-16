@@ -78,6 +78,13 @@ impl ConversationsRpc for SilentNest {
             Err(self.unused("keypackage_count"))
         }
     }
+    async fn keypackage_addressable(&self, _a: String) -> Result<bool, ConvRpcError> {
+        if self.permissive {
+            Ok(false)
+        } else {
+            Err(self.unused("keypackage_addressable"))
+        }
+    }
     async fn actor_by_handle(
         &self,
         _h: String,

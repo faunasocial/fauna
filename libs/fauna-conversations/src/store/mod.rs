@@ -8,5 +8,7 @@ pub use attachments::{
     AttachmentStore, MailRecordCoordinates, SealedBlobCoordinates,
 };
 pub use drafts::DraftStore;
-pub use history::{ChannelHistorySlice, HistoryRestoreError, merge_history_slices};
+pub use history::{
+    ChannelHistorySlice, ChannelMismatch, HistoryRestoreError, merge_history_slices,
+};
 pub use threads::ThreadStore;

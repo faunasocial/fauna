@@ -9,7 +9,8 @@
 //!   the entitlement lands through `payment_core` (both rails).
 //! - `claims.mint` — the author mints a code manually for a no-API provider
 //!   (bank transfer, cash, …); `claims.list` — the author's own codes across
-//!   both mint paths, the audit surface for webhook-minted codes too.
+//!   both mint paths, the audit surface for webhook-minted codes too;
+//!   `claims.void` — the author withdraws one of their own codes.
 //!
 //! Webhook ingress is NOT here (providers cannot speak WS-RPC) — see
 //! `payment_routes`.
@@ -24,12 +25,13 @@ use fauna_core::feature_gate::{
 use fauna_core::identity::ActorId;
 use fauna_protocol::payments::{
     ClaimItem, ClaimMintReply, ClaimMintRequest, ClaimRedeemReply, ClaimRedeemRequest,
-    ClaimsListReply, ClaimsListRequest, ProviderItem, ProviderRemoveReply, ProviderRemoveRequest,
-    ProviderSetReply, ProviderSetRequest, ProvidersListReply, ProvidersListRequest,
+    ClaimVoidReply, ClaimVoidRequest, ClaimsListReply, ClaimsListRequest, ProviderItem,
+    ProviderRemoveReply, ProviderRemoveRequest, ProviderSetReply, ProviderSetRequest,
+    ProvidersListReply, ProvidersListRequest,
 };
 use fauna_protocol::{RpcError, Value, decode_strict as decode};
 
-use crate::payment_core::{self, GrantError, RedeemError};
+use crate::payment_core::{self, GrantError, RedeemError, VoidError};
 use crate::rpc_errors::encode_reply;
 use crate::rpc_router::{RpcHandler, RpcKindMeta, RpcRouterBuilder};
 
@@ -443,6 +445,44 @@ fn claims_list_handler() -> RpcHandler {
     })
 }
 
+/// `fauna.payments.claims.void` — the author withdraws one of their own claim
+/// codes (a manually minted code sent in error, a cash payment taken back, a
+/// comp withdrawn). Unredeemed → refused thereafter at `claims.redeem` and the
+/// web redeem door; redeemed → also voids the redeemer's entitlement to the
+/// tier, as a refund does (`payment_core::void_claim`). A code the bearer did
+/// not author answers `claim_not_found`, exactly as an unknown code does.
+///
+/// **Not a gate surface**, deliberately — the `providers.remove` class
+/// (`dynamic-features.md` § Implementation status today, ruling (i):
+/// de-escalation is never gated). A void reaches nothing external and mints
+/// nothing; it only withdraws a credential the author already issued, and a
+/// deny that froze an author's codes in place would turn a restriction into a
+/// trap. Mint and redeem are the gated doors.
+fn claims_void_handler() -> RpcHandler {
+    Box::new(|state, author_id, payload| {
+        Box::pin(async move {
+            let req: ClaimVoidRequest = decode(&payload).map_err(malformed)?;
+            let code = req.code.trim();
+            if code.is_empty() {
+                return Err(malformed("code must not be empty"));
+            }
+
+            let voided_at = payment_core::void_claim(&state, &author_id, code)
+                .await
+                .map_err(|e| match e {
+                    VoidError::NotFound => claim_not_found(),
+                    VoidError::Grant(g) => grant_error(g),
+                })?;
+
+            encode_reply(&ClaimVoidReply {
+                // PaymentClaimRow timestamps are epoch seconds; Timestamp is micros.
+                voided_at: Timestamp((voided_at as u64).saturating_mul(1_000_000)),
+                extra: Default::default(),
+            })
+        })
+    })
+}
+
 /// Register all fauna.payments.* WS-RPC handlers on the builder.
 pub fn register_payment_handlers(b: &mut RpcRouterBuilder) {
     // `forbid_replay: false` audited 2026-08-01 (the money family's pass; the
@@ -532,6 +572,21 @@ pub fn register_payment_handlers(b: &mut RpcRouterBuilder) {
             forbid_replay: false,
             default_deadline: Duration::from_secs(5),
             handler: claims_list_handler(),
+        },
+    );
+    // `forbid_replay: false` — idempotent by construction: a claim already
+    // voided returns its existing stamp before any write
+    // (`payment_core::void_claim`), so a replay neither re-stamps the claim
+    // nor reaches an entitlement the redeemer regained after the first void,
+    // and its reply is identical. Standing evidence:
+    // `conformance_payments::author_void_of_an_unredeemed_claim_refuses_redemption_and_is_idempotent`.
+    // Mirror any change in `KindRegistry::register_payments_kinds`.
+    b.add(
+        "fauna.payments.claims.void",
+        RpcKindMeta {
+            forbid_replay: false,
+            default_deadline: Duration::from_secs(5),
+            handler: claims_void_handler(),
         },
     );
 }

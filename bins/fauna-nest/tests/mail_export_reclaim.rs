@@ -362,3 +362,83 @@ async fn an_expired_blob_that_will_not_unlink_keeps_its_row_for_the_next_tick() 
             .is_empty()
     );
 }
+
+// ── § Expiry — the download route ─────────────────────────────────────────
+
+/// An expired session is gone from the route in its own right, not only once
+/// the tick has swept it: the row and the file are both still there (the tick
+/// has not run), and the door answers 404 anyway. The control on the same
+/// session, before it is aged, proves the route serves a live completed blob.
+#[tokio::test]
+async fn the_download_route_404s_an_expired_blob_the_tick_has_not_swept_yet() {
+    use fauna_core::identity::ActorKeypair;
+    use fauna_nest::db::mail_export::ExportState;
+
+    let (state, data_dir, db_path) = fixture_on_disk().await;
+    let state = Arc::new(AppState {
+        auth: fauna_nest::state::AuthState {
+            token_store: Arc::new(fauna_nest::token_store::TokenStore::new()),
+            ..Default::default()
+        },
+        ..Arc::try_unwrap(state).ok().expect("sole owner")
+    });
+    let app = fauna_nest::build_router(Arc::clone(&state));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+
+    let kp = ActorKeypair::generate();
+    let actor = kp.actor_id().0;
+    user(&state.db, &actor, "carol").await;
+    let token = state.auth.token_store.insert(kp.actor_id(), 3600).await;
+    let blob = session_with_blob(&state.db, data_dir.path(), &actor, "c1").await;
+    state
+        .db
+        .transition_export_session(
+            &actor,
+            "c1",
+            ExportState::Completed,
+            &[ExportState::Running],
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("precondition: the session completes");
+
+    let get = || async {
+        reqwest::Client::new()
+            .get(format!("http://{addr}/api/v1/export/c1"))
+            .header("authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
+    };
+    assert_eq!(get().await, 200, "control: a live completed blob is served");
+
+    expire(&db_path, "c1");
+    assert!(
+        data_dir.path().join(&blob).exists(),
+        "precondition: unswept"
+    );
+    assert_eq!(
+        get().await,
+        404,
+        "an expired blob outlived its window on the download route"
+    );
+    // The refusal is the route's alone: deletion is the tick's (§ Reclaim
+    // rule 2), so neither half is touched here.
+    assert!(data_dir.path().join(&blob).exists());
+    assert!(
+        state
+            .db
+            .get_export_session(&actor, "c1")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}

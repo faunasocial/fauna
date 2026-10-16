@@ -77,4 +77,14 @@ public sealed partial class BridgesPage : Page
         if (_viewModel is null) return;
         await _viewModel.SetSettingAsync(e.BridgeId, e.Value);
     }
+
+    /// <summary>The ward pressed <c>bridge-source-request-button</c> on a card for ONE
+    /// refused link/follow (family-safety.md § Feed-source approvals → App affordance).
+    /// The card hands over that row's own triple; the durable pending row arrives with
+    /// the status re-read the ask triggers, and the card repaints itself.</summary>
+    private async void BridgeSourceAsk_Click(object? sender, SourceAskEventArgs e)
+    {
+        if (_viewModel is null) return;
+        await _viewModel.AskSourceAsync(e.Triple, e.Label);
+    }
 }

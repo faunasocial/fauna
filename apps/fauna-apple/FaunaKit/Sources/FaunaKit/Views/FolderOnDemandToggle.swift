@@ -20,7 +20,7 @@ import SwiftUI
     /// sees the place the presence needs. A device that already holds a place
     /// keeps it untouched. **On a member's row it is hide-only** (`hideOnly`):
     /// the membership is the seat, so no place is read or written — the flip
-    /// only persists the preference and re-plans (`on-demand-files.md` § Shared
+    /// only persists the preference and re-plans (`on-demand-files-shared-sets.md` § Shared
     /// sets on a capability host, decision 3).
     ///
     /// **Arbitration surface:** a set with a bound always-resident folder shows the

@@ -29,7 +29,31 @@ pub struct ReleaseInfo {
     pub sums_url: Option<String>,
 }
 
-/// Check GitHub Releases for a version newer than `current`.
+/// The newest published release, as the release host names it — its version
+/// alone, with no claim about which platforms it carries artifacts for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatestRelease {
+    pub version: Version,
+    pub release_url: String,
+}
+
+/// The newest published release of `repo` — its version only, so a release
+/// counts as known whatever its asset names (resolving this platform's
+/// artifact is [`check_latest`]'s, for the apply step). `None` when the
+/// repository has published none.
+pub async fn latest_release(
+    client: &reqwest::Client,
+    repo: &str,
+    token: Option<&str>,
+) -> Result<Option<LatestRelease>> {
+    fetch_latest(client, repo, token)
+        .await?
+        .map(release_version)
+        .transpose()
+}
+
+/// Check GitHub Releases for a version newer than `current`, resolving this
+/// platform's artifact, signature and sums — what the apply step downloads.
 ///
 /// Returns `None` if the current version is up to date or newer.
 pub async fn check_latest(
@@ -40,6 +64,19 @@ pub async fn check_latest(
     target: &str,
     token: Option<&str>,
 ) -> Result<Option<ReleaseInfo>> {
+    match fetch_latest(client, repo, token).await? {
+        Some(release) => resolve_release_info(release, current, artifact_prefix, target),
+        None => Ok(None),
+    }
+}
+
+/// The release host's "newest release" answer for `repo`, or `None` when the
+/// repository has published none.
+async fn fetch_latest(
+    client: &reqwest::Client,
+    repo: &str,
+    token: Option<&str>,
+) -> Result<Option<Release>> {
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
 
     let mut req = client
@@ -64,9 +101,21 @@ pub async fn check_latest(
         bail!("GitHub API returned {status}: {body}");
     }
 
-    let release: Release = resp.json().await.context("parsing release JSON")?;
+    Ok(Some(resp.json().await.context("parsing release JSON")?))
+}
 
-    resolve_release_info(release, current, artifact_prefix, target)
+/// The version a release tag names (`v1.2.3` or `1.2.3`).
+fn tag_version(tag_name: &str) -> Result<Version> {
+    let tag = tag_name.strip_prefix('v').unwrap_or(tag_name);
+    Version::parse(tag).with_context(|| format!("invalid semver in tag: {tag_name}"))
+}
+
+/// A release's version and page — the pure half of [`latest_release`].
+fn release_version(release: Release) -> Result<LatestRelease> {
+    Ok(LatestRelease {
+        version: tag_version(&release.tag_name)?,
+        release_url: release.html_url,
+    })
 }
 
 /// Decide whether `release` is an upgrade over `current`, and if so resolve
@@ -78,12 +127,7 @@ fn resolve_release_info(
     artifact_prefix: &str,
     target: &str,
 ) -> Result<Option<ReleaseInfo>> {
-    let tag = release
-        .tag_name
-        .strip_prefix('v')
-        .unwrap_or(&release.tag_name);
-    let remote_version = Version::parse(tag)
-        .with_context(|| format!("invalid semver in tag: {}", release.tag_name))?;
+    let remote_version = tag_version(&release.tag_name)?;
 
     // Downgrade protection: only update if strictly newer
     if remote_version <= *current {
@@ -214,6 +258,22 @@ mod tests {
         let r = release("not-a-version", vec![]);
         let err = resolve_release_info(r, &current, PREFIX, TARGET).unwrap_err();
         assert!(err.to_string().contains("invalid semver"));
+    }
+
+    #[test]
+    fn release_version_needs_no_artifact_for_this_platform() {
+        // A release is known whatever its asset names: the published set names
+        // binaries `<package>-<arch>-<os>`, not the apply step's
+        // `<prefix>-v<version>-<target>`.
+        let r = release("v1.2.3", vec![asset("fauna-nest-x86_64-linux")]);
+        assert_eq!(
+            release_version(r).unwrap(),
+            LatestRelease {
+                version: Version::parse("1.2.3").unwrap(),
+                release_url: "https://example.com/releases/latest".to_string(),
+            }
+        );
+        assert!(release_version(release("nightly", vec![])).is_err());
     }
 
     #[test]

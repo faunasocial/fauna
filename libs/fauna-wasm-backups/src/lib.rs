@@ -16,7 +16,7 @@ use fauna_backups_machine::{
     BackupOp, BackupsMachine as InnerMachine, BackupsObserver as InnerObserver, RowIntegrity,
     SnapshotState,
 };
-use fauna_wasm_panic_hook::err_to_js;
+use fauna_wasm_panic_hook::{err_to_js, to_js};
 use wasm_bindgen::prelude::*;
 
 /// `fauna_backups_machine::busy_text` → the `in_progress_op` line for a
@@ -28,7 +28,7 @@ use wasm_bindgen::prelude::*;
 pub fn busy_text(op: JsValue) -> Result<JsValue, JsValue> {
     let op: BackupOp = serde_wasm_bindgen::from_value(op)
         .map_err(|e| JsValue::from_str(&format!("invalid op: {e}")))?;
-    serde_wasm_bindgen::to_value(&fauna_backups_machine::busy_text(op)).map_err(err_to_js)
+    to_js(&fauna_backups_machine::busy_text(op)).map_err(err_to_js)
 }
 
 /// `fauna_backups_machine::snapshot_state_text` → the `snapshot-item[i]`
@@ -44,7 +44,7 @@ pub fn snapshot_state_text(
 ) -> Result<JsValue, JsValue> {
     let state: SnapshotState = serde_wasm_bindgen::from_value(state)
         .map_err(|e| JsValue::from_str(&format!("invalid state: {e}")))?;
-    serde_wasm_bindgen::to_value(&fauna_backups_machine::snapshot_state_text(
+    to_js(&fauna_backups_machine::snapshot_state_text(
         &state,
         formatted_deadline.as_deref(),
     ))
@@ -59,8 +59,7 @@ pub fn snapshot_state_text(
 pub fn snapshot_integrity_text(integrity: JsValue) -> Result<JsValue, JsValue> {
     let integrity: RowIntegrity = serde_wasm_bindgen::from_value(integrity)
         .map_err(|e| JsValue::from_str(&format!("invalid integrity: {e}")))?;
-    serde_wasm_bindgen::to_value(&fauna_backups_machine::snapshot_integrity_text(integrity))
-        .map_err(err_to_js)
+    to_js(&fauna_backups_machine::snapshot_integrity_text(integrity)).map_err(err_to_js)
 }
 
 #[wasm_bindgen]

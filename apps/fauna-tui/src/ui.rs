@@ -405,6 +405,22 @@ fn marker_with_text(marker: &str, text: &str) -> String {
 /// one flat line — that is how a post body gets real emphasis, lists and code
 /// while the registry still reads the single plaintext `text`.
 fn element_lines(elements: &[crate::element::Element], focused: Option<usize>) -> PaintedLines {
+    element_lines_at(elements, focused, None)
+}
+
+/// [`element_lines`] painting into a pane `width` columns wide: a flat text row
+/// longer than the pane is **wrapped** onto continuation lines (same hanging
+/// indent as a multi-row body) rather than left for the `Paragraph` to clip at
+/// the edge. A guardian reading a feed-source approval card must see the whole
+/// target — two long targets can differ only at the end. Wrapping happens HERE,
+/// not in a `Paragraph::wrap`, because `scroll_offset` and `page_hit_regions`
+/// count logical lines: a continuation line pushes its own `element_at_line`
+/// entry, so scroll and hit-testing stay exact. `None` paints unwrapped.
+fn element_lines_at(
+    elements: &[crate::element::Element],
+    focused: Option<usize>,
+    width: Option<usize>,
+) -> PaintedLines {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut focused_line = 0;
     let mut art_spans: Vec<ArtSpan> = Vec::new();
@@ -611,8 +627,23 @@ fn element_lines(elements: &[crate::element::Element], focused: Option<usize>) -
             } else {
                 style
             };
-            lines.push(Line::styled(format!("{prefix}{row}"), row_style));
-            element_at_line.push(element_index);
+            let capacity = width.map_or(usize::MAX, |w| w.saturating_sub(prefix.len()).max(1));
+            let continuation = " ".repeat(prefix.len());
+            let segments = if row.chars().count() > capacity {
+                crate::critical_alerts::wrapped_lines(&[row.to_string()], capacity as u16)
+            } else {
+                vec![row.to_string()]
+            };
+            for (segment_index, segment) in segments.iter().enumerate() {
+                let lead = if segment_index == 0 {
+                    &prefix
+                } else {
+                    &continuation
+                };
+                let segment_style = if segment_index == 0 { row_style } else { style };
+                lines.push(Line::styled(format!("{lead}{segment}"), segment_style));
+                element_at_line.push(element_index);
+            }
         }
     }
     // The gate. Strip control characters from every painted line, HERE and
@@ -1154,7 +1185,11 @@ fn render_screen(frame: &mut Frame, app: &App) -> DrawnFrame {
     let header = lines.len();
 
     let elements = app.page_elements();
-    let painted = element_lines(&elements, app.focused_index());
+    let painted = element_lines_at(
+        &elements,
+        app.focused_index(),
+        Some(body_area.width.saturating_sub(2) as usize),
+    );
     lines.extend(painted.lines);
 
     // error-message (+ the injected warning/info lines): a line only exists
@@ -1375,7 +1410,11 @@ fn render_page(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) -> Dra
     // The page's own elements, from the same list the registry reads. Pages
     // still building out (M4+) contribute none and paint an empty titled pane.
     let elements = app.page_elements();
-    let painted = element_lines(&elements, page_focused_index(app));
+    let painted = element_lines_at(
+        &elements,
+        page_focused_index(app),
+        Some(body_area.width.saturating_sub(2) as usize),
+    );
     let height = body_area.height.saturating_sub(2) as usize; // the block's borders
     let offset = scroll_offset(painted.focused_line, painted.lines.len(), height);
     frame.render_widget(

@@ -716,10 +716,26 @@ pub async fn run_supervisor<C: SupervisedChannel>(
                             report!(ConnectionState::Disconnected);
                             continue; // immediate retry with the fresh bearer
                         }
+                        // The re-mint met a refusal no retry can clear (a nest
+                        // restarted into its needs-update mode answers every
+                        // bearer upgrade `401` and every handshake outdated):
+                        // stop here, as the dial-time test above would on the
+                        // next pass — backing off first only delays the verdict.
+                        Err(re) if cfg.channel.connect_error_is_terminal(&re) => {
+                            tracing::error!(
+                                "bearer refresh after 401 refused terminally: {re}; supervisor exiting"
+                            );
+                            report!(ConnectionState::Disconnected);
+                            return Err(SupervisorError::TerminalRefusal(re));
+                        }
                         Err(re) => {
-                            // Re-mint failed (e.g. the actor is mid-re-claim
-                            // after a factory-reset) — transient; fall through to
-                            // back off and retry, not stop the loop (unlike 4401).
+                            // Re-mint failed without a refusal the channel calls
+                            // terminal (no nest answered, a mint fault) —
+                            // transient; fall through to back off and retry, not
+                            // stop the loop (unlike 4401). A nest that forgot
+                            // this identity in a factory reset answers
+                            // `not_registered`, which `fauna-client`'s channel
+                            // classifies terminal, and stops in the arm above.
                             tracing::warn!("bearer refresh after 401 failed: {re}; backing off");
                         }
                     }
@@ -2161,5 +2177,73 @@ mod tests {
             ConnectionState::Connected,
             "a subscriber attaching after the supervisor served read a stale state"
         );
+    }
+
+    /// A stale-bearer channel whose re-mint is refused terminally — the shape
+    /// `fauna-client` takes on against a nest restarted into its needs-update
+    /// mode: the bearer upgrade answers `401`, the re-mint `fauna.nest.outdated`.
+    struct RefreshRefusedTerminallyChannel {
+        connect_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl SupervisedChannel for RefreshRefusedTerminallyChannel {
+        type Session = ();
+        type Error = TestChannelError;
+
+        async fn connect(&self) -> Result<Box<dyn ConnectedAdapter>, TestChannelError> {
+            self.connect_calls.fetch_add(1, Ordering::SeqCst);
+            Err(TestChannelError("401".into()))
+        }
+
+        async fn on_connect(
+            &self,
+            _dispatcher: &Arc<RpcDispatcher>,
+        ) -> Result<Self::Session, TestChannelError> {
+            Ok(())
+        }
+
+        async fn refresh_auth(&self) -> Result<(), TestChannelError> {
+            Err(TestChannelError("outdated".into()))
+        }
+
+        fn connect_error_is_auth_rejection(err: &TestChannelError) -> bool {
+            err.0 == "401"
+        }
+
+        fn connect_error_is_terminal(&self, err: &TestChannelError) -> bool {
+            err.0 == "outdated"
+        }
+    }
+
+    /// A `401` whose re-mint is refused terminally stops the loop at once,
+    /// carrying the re-mint's refusal — not a back-off and a second dial that
+    /// can only earn the same answer.
+    #[tokio::test]
+    async fn a_401_whose_re_mint_is_refused_terminally_stops_the_supervisor() {
+        let connect_calls = Arc::new(AtomicUsize::new(0));
+        let channel = Arc::new(RefreshRefusedTerminallyChannel {
+            connect_calls: Arc::clone(&connect_calls),
+        });
+        let slot: Arc<RwLock<Option<Arc<RpcDispatcher>>>> = Arc::new(RwLock::new(None));
+        let (tx, _rx) = watch::channel(ConnectionState::Disconnected);
+        let cfg = Supervisor {
+            channel,
+            dispatcher_slot: slot,
+            connection_state_tx: tx,
+            initial_backoff: Duration::from_millis(10),
+            max_backoff: Duration::from_millis(10),
+        };
+
+        // A ceiling, not a timing assertion (convention 14).
+        let outcome = tokio::time::timeout(Duration::from_secs(5), run_supervisor(cfg))
+            .await
+            .expect("the supervisor kept dialling after a terminal re-mint refusal");
+
+        match outcome {
+            Err(SupervisorError::TerminalRefusal(e)) => assert_eq!(e.0, "outdated"),
+            other => panic!("expected the re-mint's terminal refusal, got {other:?}"),
+        }
+        assert_eq!(connect_calls.load(Ordering::SeqCst), 1);
     }
 }

@@ -12,7 +12,7 @@
   import RegionPlaceholder from '$lib/components/RegionPlaceholder.svelte';
   import { notifyBuffer } from '$lib/familyNotify';
   import { syncFeedRoomPosts } from '$lib/conversations';
-  import { decodePost, ensureWasm, processAndSealPublicPost, sealComposeAttachment, logMessage, markdownToDocument, classifySources, parseWeightPermille, formatWeightPermille, ruleTypeOptions, builtinFactorOptions, ruleSummaryLabel, ruleRequiredLabel, canAddRule, legalTakedownTombstone, type RuleTypeOption } from '$lib/wasm';
+  import { decodePost, ensureWasm, processAndSealPublicPost, sealComposeAttachment, logMessage, markdownToDocument, classifySources, type BridgeIdentity, parseWeightPermille, formatWeightPermille, ruleTypeOptions, builtinFactorOptions, ruleSummaryLabel, ruleRequiredLabel, canAddRule, legalTakedownTombstone, type RuleTypeOption } from '$lib/wasm';
   import { consumePendingSearchNav } from '$lib/search';
   import { documentToHtml, documentHasBlockedRemoteImages, quotedPostBlock, mediaImageHash, proxiedPostImage, resolvingLinkPreviewUrls } from '$lib/document';
   import { readProvenanceFromBytes } from '$lib/c2pa';
@@ -22,8 +22,9 @@
   import { trainedTopicsList, webPaywallMintToken, webPublishSet, webPublishUnset, sharedRpcPort, type TrainedTopicRow } from '$lib/rpc';
   import { webPostPageUrl, webTokenedUrl } from '$lib/wasm';
   import { bestEffortCopyToClipboard, siteLink, ensureWebPageHydrated } from '$lib/web-publish';
-  import { resolveKey, resolveLocalized } from '$lib/i18n/localized';
-  import { feedRefusalI18nKey, contentLabelBadgeFor, type ContentLabelEntry, type ContentRender, type RegionPlaceholder as RegionPlaceholderValue } from '$lib/wasm';
+  import { resolveLocalized } from '$lib/i18n/localized';
+  import { verbErrorCopy as verbErrorCopyOf } from '$lib/feed-verb-error';
+  import { feedRefusalI18nKey, postOffersThreadView, threadPostAuthorLabel, contentLabelBadgeFor, type ContentLabelEntry, type ContentRender, type RegionPlaceholder as RegionPlaceholderValue } from '$lib/wasm';
   import { byteSize } from '$lib/value-format';
   import { isSafeNavUrl } from '$lib/safe-url';
   import { createLabelerCatalogMachine } from '$lib/wasm-labeler-catalog';
@@ -35,7 +36,7 @@
   import ProxiedImage from '$lib/components/ProxiedImage.svelte';
   import QuotedPost from '$lib/components/QuotedPost.svelte';
   import TipSurface from '$lib/components/payments/TipSurface.svelte';
-  import { shortActor } from '$lib/feed-utils';
+  import { contactOverlays, contactsRevision } from '$lib/conversations';
   import { sourceGlyphEmoji } from '$lib/source-glyph';
   import { t } from '$lib/i18n/strings';
   import type { WasmFeedManager } from '../../../static/fauna_wasm.js';
@@ -199,6 +200,9 @@
   let snap = $derived<any>($feedSnapshot);
   let feeds = $derived(snap?.feeds ?? []);
   let bridgeFeeds = $derived(snap?.bridge_feeds ?? []);
+  // The bridges roster a post's source token resolves against (`ui/feed.md`
+  // § Implementation status today, `SourceKind::Bridged`).
+  let bridgeRoster = $derived<BridgeIdentity[]>(snap?.bridge_roster ?? []);
   let selectedFeed = $derived<string | null>(snap?.selected_feed ?? null);
   let trendingSelected = $derived<boolean>(snap?.trending_selected ?? false);
   let posts = $derived(snap?.posts ?? []);
@@ -224,7 +228,15 @@
   // The report sheet's own failure line (a failed send, or a block/hide that
   // did not land beside a landed report) paints on the same `error-message`.
   let reportError = $state('');
-  let pageError = $derived(resolveLocalized(snap?.error) || loadError || reportError);
+  // The Bluesky thread page (ui.yaml `feed.sub_pages.thread`, `bridges.md`
+  // § Bluesky-native thread view) — the shared `FeedSnapshot::thread`, open
+  // over the post detail it was opened from; `null` when no page is open.
+  let threadPage = $derived<any | null>(snap?.thread ?? null);
+  // While the thread page is open its own fetch error leads on `error-message`
+  // (tui's `page_error`), ahead of the feed's.
+  let pageError = $derived(
+    resolveLocalized(threadPage?.error) || resolveLocalized(snap?.error) || loadError || reportError,
+  );
 
   // The shared report sheet (`report-sheet`), opened by `feed-post-report-button`.
   let reportTarget = $state<ReportTarget | null>(null);
@@ -624,26 +636,65 @@
   //    a text field + submit, no cancel needed beyond click-outside/Escape. ──
   let replyTargetId = $state<string | null>(null);
   let replyText = $state('');
+  /** The dialog's explicit-public answer (`feed-reply-public-confirm`) —
+   *  unchecked at every open, never remembered (restricted-posts.md § Encryption
+   *  at rest → *Ruling 5's build — the shape*, (e)). */
+  let replyPublicConfirm = $state(false);
+  /** The reply target's manager-derived audience (`reply_audience`, `Some`
+   *  exactly under a restricted post) and its card fields — the dialog states
+   *  them and never decides them. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let replyTarget = $derived.by<any>(() =>
+    replyTargetId ? (posts.find((p: any) => p.post_id === replyTargetId) ?? null) : null,
+  );
+  let replyAudienceCopy = $derived.by<string>(() => {
+    const p = replyTarget;
+    switch (p?.reply_audience) {
+      case 'SealedToRoom':
+        return t.feed.post.reply_audience_room({ room: p.room_label ?? '' });
+      case 'SealedToTier':
+        return t.feed.post.reply_audience_tier({ tier: p.gated_tier ?? '' });
+      case 'PublicByConfirmation':
+        return t.feed.post.reply_audience_public;
+      default:
+        return '';
+    }
+  });
+  /** A post author's name through the private overlay's one resolver — the
+   *  viewer's nickname, else a bridged author's display name / handle, else
+   *  the short id (contacts.md § The private overlay → *Where the nickname
+   *  paints*). Read inside a `$derived` that touches `$contactsRevision`. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function authorName(p: any): string {
+    return contactOverlays().peerLabel(
+      p.author_display?.display_name ?? null,
+      p.author_display?.handle ?? null,
+      p.author,
+    ).primary;
+  }
+
   let replyTargetAuthor = $derived.by<string>(() => {
+    void $contactsRevision;
     if (!replyTargetId) return '';
     const p = posts.find((p: any) => p.post_id === replyTargetId);
-    return p ? shortActor(p.author) : '';
+    return p ? authorName(p) : '';
+  });
+  let detailAuthor = $derived.by<string>(() => {
+    void $contactsRevision;
+    return detailPost ? authorName(detailPost) : '';
   });
 
-  /** A rejected feed verb as `error-message` paints it: a **stated refusal** (words
-   *  under a restricted post — `ui/feed.md` § Encryption at rest → *A reply, quote
-   *  or repost of a restricted post*) reads in the user's language through the
-   *  shared `refusal_i18n_key`; every other failure keeps its own text. The twin of
-   *  tui's `refusal_copy`. */
+  /** A rejected feed verb as `error-message` paints it (`$lib/feed-verb-error`):
+   *  a stated refusal reads in the user's language through the shared
+   *  `refusal_i18n_key`; every other failure keeps its own text. */
   function verbErrorCopy(e: unknown): string {
-    const text = e instanceof Error ? e.message : String(e);
-    const key = feedRefusalI18nKey(text);
-    return key ? resolveKey(key) : text;
+    return verbErrorCopyOf(e, feedRefusalI18nKey);
   }
 
   function closeReplyDialog(): void {
     replyTargetId = null;
     replyText = '';
+    replyPublicConfirm = false;
   }
 
   async function submitReply(): Promise<void> {
@@ -656,9 +707,34 @@
     const text = replyText.trim();
     if (!text) return;
     const postId = replyTargetId;
+    const publicConfirmed =
+      replyPublicConfirm && replyTarget?.reply_audience === 'PublicByConfirmation';
     closeReplyDialog();
     try {
-      await manager.reply(postId, text);
+      if (publicConfirmed) {
+        // The one door that composes words public under a restricted target.
+        await manager.replyPublicConfirmed(postId, text);
+      } else {
+        // The composer's fall-through, reused (restricted-posts.md (c)):
+        // prepare answers the sealed body or nothing to upload; bytes go
+        // through the same upload + submitGatedPost/abortGatedSubmit pair as
+        // the composer's gated post, and null falls through to `reply`.
+        const sealed: Uint8Array | null = await manager.prepareSealedReply(postId, text);
+        if (sealed) {
+          const id = $identity;
+          try {
+            if (!id) throw new Error('no identity for a sealed reply');
+            const sidecar = manager.gatedUploadSidecar();
+            const hash = await uploadBlobMultipart(id.secretHex, sidecar, sealed);
+            await manager.submitGatedPost(hash);
+          } catch (e) {
+            manager.abortGatedSubmit(String(e));
+            throw e;
+          }
+        } else {
+          await manager.reply(postId, text);
+        }
+      }
       loadError = '';
     } catch (e) {
       logMessage('warn', 'fauna_web::feed', `reply error: ${e}`);
@@ -765,6 +841,35 @@
     const deepLinked = snap?.deep_linked_post;
     return deepLinked && deepLinked.post_id === detailPostId ? deepLinked : null;
   });
+
+  // The thread page shows over the post detail it was opened from — only while
+  // the snapshot's page names that post.
+  let threadShown = $derived(!!detailPost && threadPage?.post_id === detailPost.post_id);
+  // `feed-post-view-thread-button` — the shared predicate decides, never a
+  // page-side source check.
+  let detailOffersThread = $derived(!!detailPost && postOffersThreadView(detailPost.source ?? ''));
+
+  /** Open the thread page on the open post detail's post. The page state —
+   *  loading, then loaded or failed — rides the snapshot's `thread`, so the
+   *  manager's notifications repaint it; nothing here awaits the fetch. */
+  function openThread(): void {
+    if (!detailPost) return;
+    if (!manager) { loadError = t.common.still_loading; return; }
+    void manager.openThread(detailPost.post_id);
+    refreshFeed();
+  }
+
+  /** Back from the thread page to the post detail it was opened from. */
+  function closeThread(): void {
+    manager?.closeThread();
+    refreshFeed();
+  }
+
+  /** Close the post detail — and a thread page open over it. */
+  function closeDetail(): void {
+    if (threadPage) closeThread();
+    detailPostId = null;
+  }
 
   /** Shared post_detail opener — a `post-card` click AND a `search-result-item`
    *  deep-link (`SearchNav::Post`, `../search/+page.svelte`'s `openResult`)
@@ -926,9 +1031,10 @@
     // The guard is the snapshot's `media_hash == null` — `== null`, never falsiness: an
     // all-remote post resolves to `media_hash: ""` (render-model.md § D6c — a truthful
     // "resolved, nothing"). `mediaResolving` only dedupes a resolve in flight: once the post
-    // reads resolved its id is forgotten, so a reload that rebuilds the post unresolved
-    // (no fold, `media_hash` absent) resolves it again — as tui and linux do, whose guard is
-    // the snapshot alone. Before, the id stayed for the actor's life and a reload painted the
+    // reads resolved its id is forgotten, so a post a reload lands unresolved (one the shared
+    // manager never resolved — it re-folds every media it did resolve onto the landed page,
+    // so a live card keeps its media and player) resolves it again — as tui and linux do,
+    // whose guard is the snapshot alone. Before, the id stayed for the actor's life and a reload painted the
     // card without its media for good. A resolve that left the post unresolved (the
     // `posts.get` failed) keeps its id: no retry loop.
     if (p.has_media && p.media_hash == null && !mediaResolving.has(id)) {
@@ -946,14 +1052,26 @@
     // Either embed field folds through the same call: a QUOTE embeds its
     // target, a REPOST ROW embeds its original (feed.md § Interaction bar →
     // Repost, ratified 2026-08-10).
+    // The guard is the snapshot: the embed is still unfolded. `quoteResolving`
+    // only dedupes a resolve in flight (the `mediaResolving` shape above): a
+    // reload rebuilds every post unfolded, and the shared manager forgets what it
+    // resolved so the next resolve reads what the nest serves now — a quoted post
+    // taken down since shows the tombstone (feed.md § The read model). Before,
+    // the id stayed for the actor's life and the embed was never asked again.
     const qid = (p.quoted_post_id ?? p.reposted_post_id) as string | undefined;
-    if (qid && !quoteResolving.has(qid)) {
+    if (qid && quotedPostBlock(p.document) === null && !quoteResolving.has(qid)) {
       quoteResolving.add(qid);
       // resolve_quoted_post folds a `QuotedPost` block into the quoting/reposting
       // post's document (render-model.md § D6); refresh to pull the folded block
       // into the snapshot store, where PostCard / the detail read it (like
-      // resolveMedia).
-      void manager!.resolveQuotedPost(qid).then(() => refreshFeed());
+      // resolveMedia). The id is released once the post reads folded; a resolve
+      // that left it unfolded keeps it: no retry loop.
+      void manager!.resolveQuotedPost(qid).then(() => {
+        refreshFeed();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const after = (get(feedSnapshot) as any)?.posts?.find((q: any) => q.post_id === id);
+        if (after && quotedPostBlock(after.document) !== null) quoteResolving.delete(qid);
+      });
     }
     // Link previews (render-model.md § D4): the producer emits a `LinkPreview`
     // block (Resolving) for each bare-url paragraph; resolve_link_preview calls
@@ -970,19 +1088,38 @@
     // pay-to-unlock → the buyer's price read is post-addressed) — fire once
     // per post for a designated `post-unlock-*` tier; refresh to pull the
     // resolved offer into the snapshot store, where PostCard paints it.
+    // `unlockOfferResolving` dedupes only a resolve in flight, the media shape
+    // above: a reload rebuilds every post with `unlock_offer` unset, so an id
+    // kept for the actor's life left a resolved price gone for good after the
+    // reader's own next post (measured 2026-10-09 on web: the offer painted,
+    // the reload dropped it, the guard never fired again). tui and linux guard
+    // on the snapshot alone and re-resolve. A resolve that answered no offer
+    // (the author's own post, an undesignated tier) keeps its id: no retry loop.
     const gatedTier = p.gated_tier as string | undefined;
     if (gatedTier?.startsWith('post-unlock-') && !p.unlock_offer && !unlockOfferResolving.has(id)) {
       unlockOfferResolving.add(id);
-      void manager!.resolvePostUnlockOffer(id).then(() => refreshFeed());
+      void manager!.resolvePostUnlockOffer(id).then(() => {
+        refreshFeed();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const after = (get(feedSnapshot) as any)?.posts?.find((q: any) => q.post_id === id);
+        if (after && after.unlock_offer != null) unlockOfferResolving.delete(id);
+      });
     }
     // The tip surface (monetization.md § Tips). No data trigger exists —
     // nothing in the feed projection says whether a post has tips — so the
     // guard is the resolved field alone, and the resolve is fire-once
     // *because* it writes a view on every outcome (an untipped post resolves
-    // to zeroes).
+    // to zeroes). The id is released once the post reads resolved, as for the
+    // unlock offer above, so a reload that rebuilds the post without its view
+    // resolves it again.
     if (!p.tips && !tipsResolving.has(id)) {
       tipsResolving.add(id);
-      void manager!.resolvePostTips(id).then(() => refreshFeed());
+      void manager!.resolvePostTips(id).then(() => {
+        refreshFeed();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const after = (get(feedSnapshot) as any)?.posts?.find((q: any) => q.post_id === id);
+        if (after && after.tips != null) tipsResolving.delete(id);
+      });
     }
   }
 
@@ -1758,7 +1895,17 @@
     await loadStep(() => m.refreshOwnTiers());
     // Unconditional, and deliberately last-but-guarded: the feed query is the
     // page's whole purpose, so none of the pre-reads above may suppress it.
-    await loadStep(() => m.selectFeed(undefined)); // the nest's local feed
+    //
+    // Re-pull the manager's CURRENT source, never `selectFeed(undefined)`. The
+    // manager is module-level and outlives this route, which remounts on every
+    // nav back to the Feed page: re-selecting Local here dropped the reader out
+    // of the feed they had open (a composed feed, Trending) every time they
+    // visited another page — so a return from Personalization showed the local
+    // feed, unranked by the topic they had just renamed. A fresh manager (first
+    // mount, an actor change) starts on Local, so this is still the nest's local
+    // feed there (`feed.md` § The user's selected feed; the re-pull seam is
+    // `trending.md`'s `refresh_current_feed` row).
+    await loadStep(() => m.refreshCurrentFeed());
     refreshFeed();
   }
 
@@ -2125,7 +2272,7 @@
     {#each bridgeFeeds as sub}
       <div class="feed-entry-row">
         <span class="feed-entry-label bridge-feed-label">
-          {sourceGlyphEmoji(classifySources(sub.bridge)[0]?.glyph ?? 'unknown')} {sub.name}
+          {sourceGlyphEmoji(classifySources(sub.bridge, bridgeRoster)[0]?.glyph ?? 'unknown')} {sub.name}
         </span>
         <button class="icon-btn muted" data-testid={IDS.BRIDGE_FEED_UNSUBSCRIBE_BUTTON} title={t.feed.list.unsubscribe} onclick={() => handleUnsubscribeBridgeFeed(sub.id)}>✕</button>
       </div>
@@ -2188,9 +2335,10 @@
     {:else if posts.length === 0}
       <!-- Not yet authoritative (a read in flight or an error): neither empty state. -->
     {:else}
-      {#each posts as post}
+      {#each posts as post (post.post_id)}
         <PostCard
           {post}
+          {bridgeRoster}
           decoded={decodedPosts[post.post_id]}
           {blobUrl}
           {mediaUrl}
@@ -2255,6 +2403,9 @@
   >
     <div class="compose-dialog" data-testid={IDS.FEED_REPLY_DIALOG}>
       <h3>{t.feed.post.replying_to_user({ user: replyTargetAuthor })}</h3>
+      {#if replyAudienceCopy}
+        <p class="compose-dialog-audience" data-testid={IDS.FEED_REPLY_AUDIENCE}>{replyAudienceCopy}</p>
+      {/if}
       <textarea
         class="compose-dialog-textarea"
         data-testid={IDS.FEED_REPLY_TEXT_FIELD}
@@ -2262,6 +2413,17 @@
         rows="4"
         bind:value={replyText}
       ></textarea>
+      {#if replyTarget?.reply_audience === 'PublicByConfirmation'}
+        <label class="compose-dialog-public-confirm">
+          <input
+            type="checkbox"
+            data-testid={IDS.FEED_REPLY_PUBLIC_CONFIRM}
+            data-checked={replyPublicConfirm ? 'true' : 'false'}
+            bind:checked={replyPublicConfirm}
+          />
+          {t.feed.post.reply_public_confirm}
+        </label>
+      {/if}
       <div class="compose-dialog-actions">
         <button class="btn-secondary" onclick={closeReplyDialog}>{t.common.cancel}</button>
         <button
@@ -2409,15 +2571,44 @@
     aria-label={t.feed.post.post_detail}
     tabindex="-1"
     data-testid={IDS.FEED_POST_DETAIL_DIALOG}
-    onclick={(e) => { if (e.target === e.currentTarget) detailPostId = null; }}
-    onkeydown={(e) => { if (e.key === 'Escape') detailPostId = null; }}
+    onclick={(e) => { if (e.target === e.currentTarget) closeDetail(); }}
+    onkeydown={(e) => {
+      // Escape on the thread page steps back to the post detail (tui's posture —
+      // ui.yaml gives the page no dismiss element); on the detail it closes it.
+      if (e.key === 'Escape') { if (threadShown) closeThread(); else closeDetail(); }
+    }}
   >
     <div class="compose-dialog post-detail-dialog">
+      {#if threadShown}
+        <!-- The Bluesky thread page (ui.yaml `feed.sub_pages.thread`): one
+             `feed-thread-post` per post in thread order — ancestors, the opened
+             post, its replies — the opened post `selected` as the nest named it
+             (`is_focal`). A failed fetch paints no posts; its reason leads on
+             the page's `error-message` (`pageError`). -->
+        <div class="compose-dialog-header">
+          <button class="icon-btn" aria-label={t.common.back} onclick={closeThread}>&larr;</button>
+          <span class="post-detail-author">{t.feed.post.thread}</span>
+          <button class="icon-btn" aria-label={t.common.close} onclick={closeDetail}>&times;</button>
+        </div>
+        <div class="thread-page" data-testid={IDS.FEED_THREAD_PAGE}>
+          {#if threadPage.status === 'Loading'}
+            <p class="thread-status">{t.common.loading}</p>
+          {/if}
+          {#each threadPage.posts ?? [] as p, i (i)}
+            <div
+              class="thread-post"
+              class:thread-post-focal={p.is_focal}
+              data-testid={IDS.FEED_THREAD_POST}
+              data-selected={p.is_focal ? 'true' : 'false'}
+            ><span class="thread-post-author">{threadPostAuthorLabel(p)}</span> {p.text}</div>
+          {/each}
+        </div>
+      {:else}
       <div class="compose-dialog-header">
         {#if !detailPost.legal_takedown_ref}
-          <span class="post-detail-author" data-testid={IDS.FEED_POST_DETAIL_AUTHOR}>{shortActor(detailPost.author)}</span>
+          <span class="post-detail-author" data-testid={IDS.FEED_POST_DETAIL_AUTHOR}>{detailAuthor}</span>
         {/if}
-        <button class="icon-btn" aria-label={t.common.close} onclick={() => { detailPostId = null; }}>&times;</button>
+        <button class="icon-btn" aria-label={t.common.close} onclick={closeDetail}>&times;</button>
       </div>
       {#if detailPost.legal_takedown_ref}
         <!-- Legal-takedown tombstone (moderation.md § Legal takedown — "the
@@ -2504,6 +2695,14 @@
             <TipSurface tips={detailPost.tips} />
           {/key}
         {/if}
+      {/if}
+      {#if detailOffersThread && !detailPost.legal_takedown_ref}
+        <!-- *View Thread* — a Bluesky post has a conversation to open
+             (`bridges.md` § Bluesky-native thread view). -->
+        <div class="post-detail-actions">
+          <button class="btn-secondary" data-testid={IDS.FEED_POST_VIEW_THREAD_BUTTON} onclick={openThread}>{t.feed.post.view_thread}</button>
+        </div>
+      {/if}
       {/if}
     </div>
   </div>
@@ -2832,6 +3031,20 @@
     line-height: 1.5;
   }
   .post-detail-author { font-weight: 600; }
+  .post-detail-actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
+  /* The Bluesky thread page — the opened post marked. */
+  .thread-page { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.5rem 0; }
+  .thread-status { color: var(--text-muted); font-size: 0.85rem; }
+  .thread-post {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 0.9rem;
+    line-height: 1.5;
+    padding: 0.4rem 0.6rem;
+    border-left: 3px solid transparent;
+  }
+  .thread-post-focal { border-left-color: var(--accent); background: var(--bg-surface); }
+  .thread-post-author { font-weight: 600; }
   /* Legal-takedown tombstone (mirrors conversations' `.message-deleted`). */
   .message-legal-takedown { font-style: italic; color: var(--text-muted); }
   .post-tags { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.5rem; }

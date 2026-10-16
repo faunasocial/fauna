@@ -1,6 +1,6 @@
 //! The **always-resident** sync loop: every file kept on disk, local edits watched
 //! and uploaded. The download-only twin is the on-demand hydration host
-//! (`docs/goal/behavior/file-sync.md` § On-Demand Files); this is the half that
+//! (`docs/goal/behavior/on-demand-files.md` § On-Demand Files); this is the half that
 //! *writes*.
 //!
 //! Lifted here from `apps/fauna-linux/src/sync.rs` (2026-07-13) so the Windows
@@ -9,7 +9,7 @@
 //! it). Both apps now multiplex it over the shared
 //! [`engine_host::EngineHost`](crate::engine_host::EngineHost), which is already
 //! "generic over the per-engine loop" exactly so a platform can supply this one
-//! (`file-sync.md` § On-Demand Files — *Hosting multiple on-demand folders*).
+//! (`on-demand-files.md` § On-Demand Files — *Hosting multiple on-demand folders*).
 //!
 //! Nothing here is platform-specific: [`FsWatcher`](crate::watcher::FsWatcher) is
 //! `notify`-backed (inotify / FSEvents / `ReadDirectoryChangesW`) and
@@ -40,7 +40,7 @@
 //! on-demand root that cannot upload no longer compiles — the ratified rule that *a change
 //! to a tracked file MUST be uploaded* is enforced by the type system rather than by a
 //! comment. Both roots therefore share one watcher, one debouncer and one uploader
-//! (priorities #2/#4). `file-sync.md` § On-Demand Files → *Sync direction*.
+//! (priorities #2/#4). `on-demand-files.md` § On-Demand Files → *Sync direction*.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -250,7 +250,10 @@ pub async fn rerecord_under_live_nonce(engine: &SyncEngine, folder: &str) {
 /// unbound set, so re-driving it is safe — skipping it would be the unsafe
 /// option, since an owner who shares a set they already populated would leave
 /// the pre-bind back-catalogue sealed under their `BackupKey`, undecryptable
-/// for every joiner.
+/// for every joiner. Ungated is not unbounded: a seat with no declassification
+/// anchor leaves a plaintext head it did not author in place
+/// ([`SyncEngine::prebind_owed_rows`] — `encryption-at-rest.md` § Readable
+/// classes → *Who may move a plaintext head*).
 pub async fn reseal_pending_under_current(engine: &SyncEngine, folder: &str) {
     match engine.reseal_pending_under_current().await {
         Ok(0) => {}
@@ -282,8 +285,11 @@ pub async fn stamp_sealed_set_name(engine: &SyncEngine, folder: &str) {
 }
 
 /// **The once-per-start corpus passes — every root, whichever mode.** Run once
-/// the control plane is open and the local-write catch-up (`converge`) has
-/// uploaded what the folder holds: the pre-bind re-seal, the audience
+/// the control plane is open, the local-write catch-up (`converge`) has
+/// uploaded what the folder holds, and the start's first pull (the resident
+/// loop's eager pull, the on-demand root's startup fold) has folded what the
+/// nest holds — so a re-seal never reissues a head a peer has since moved
+/// past: the pre-bind re-seal, the audience
 /// convergence (an audience flip made while this seat was down reaches the
 /// back-catalogue here), the post-succession re-seal and the set-name stamp. One home for the
 /// sequence, so the always-resident root and the on-demand hydration root
@@ -315,10 +321,14 @@ pub async fn converge_corpus_at_start(engine: &SyncEngine, folder: &str) {
 /// back-catalogue (the hydration root ran the pair without the refresh for one
 /// e2e cycle on 2026-09-27 and converged nothing). One `meta`-row read each per
 /// tick once converged; a re-seal / declassify / reissue on the tick that first
-/// sees the flip. The always-resident loop runs it at entry and on every rescan
-/// tick — before the pull, so a tick that re-delivers a held tombstone resolves
-/// the seat first (`file-sync.md` § 4); the on-demand hydration loop runs it at
-/// startup and on its rescan tick (see [`converge_corpus_at_start`]).
+/// sees the flip. The always-resident loop runs it on every rescan tick —
+/// before the pull, so a tick that re-delivers a held tombstone resolves the
+/// seat first (`file-sync.md` § 4); at loop ENTRY it runs the refresh alone
+/// ahead of the eager first pull and the pair behind it, because a start's
+/// reissue must read rows that already fold what the nest held
+/// (`mls-group-key-material.md` § M2 → *(B) Reclaim*, property (1)). The
+/// on-demand hydration loop runs it after its startup fold and on its rescan
+/// tick (see [`converge_corpus_at_start`]).
 pub async fn refresh_and_converge_corpus(engine: &SyncEngine, folder: &str) {
     engine.refresh_sync_mode().await;
     converge_corpus_to_audience(engine, folder).await;
@@ -341,7 +351,7 @@ pub enum LocalWrite {
 ///
 /// On-demand and always-resident are the *same* contract on this side: a change to a
 /// tracked file **must** be uploaded, and no mode, folder setting or platform host may
-/// suppress it (`file-sync.md` § On-Demand Files → *Sync direction*, USER-ratified
+/// suppress it (`on-demand-files.md` § On-Demand Files → *Sync direction*, USER-ratified
 /// 2026-07-14 — on-demand is a **storage** choice, never a **direction** one). The two
 /// roots differ only in *how bytes reach the disk*.
 ///
@@ -423,7 +433,7 @@ pub trait LocalWriteHost {
     async fn close_lease_window(&self) {}
 
     /// Re-read the set's content-key floor before this batch seals anything
-    /// (decision 2's pre-seal edge, `on-demand-files.md` § Shared sets on a
+    /// (decision 2's pre-seal edge, `on-demand-files-shared-sets.md` § Shared sets on a
     /// capability host). **Defaults to a no-op**, like the lease window: every
     /// implementor but [`SyncEngine`] is a test double, and the engine's seal-root
     /// resolver refuses a seal behind the floor whichever caller reaches it.
@@ -451,7 +461,7 @@ impl LocalWriteHost for SyncEngine {
     async fn handle_delete(&self, rel: &str) -> anyhow::Result<()> {
         // Under the off-disk placeholder posture a `Remove` for a `Placeholder`
         // row is the provider's own unlink — a dehydrate whose suppression token
-        // was already spent — never a user's delete (`on-demand-files.md` § Linux
+        // was already spent — never a user's delete (`on-demand-files-linux.md` § Linux
         // FUSE binding, the dehydrate rule, obligation 4). The user's delete of a
         // placeholder on that root reaches the inherent `SyncEngine::handle_delete`
         // through the mount's `unlink`, not through this rail.
@@ -501,7 +511,7 @@ impl LocalWriteHost for SyncEngine {
         // Surface the rels whose record landed so an on-demand host can flip them ✅.
         // `unwrap_or_default` preserves the old `let _ = upload_pending(..)` behavior on
         // error (empty flip set, retried on the next converge).
-        match self.upload_pending(MAX_CONCURRENT_FILES).await {
+        let (recorded, uploaded) = match self.upload_pending(MAX_CONCURRENT_FILES).await {
             Ok((recorded, _bytes)) => {
                 // Every step of this pass ran clean and reconcile scanned the
                 // local disk — if nothing is left pending, this device just
@@ -514,17 +524,33 @@ impl LocalWriteHost for SyncEngine {
                 {
                     tracing::warn!(error = ?e, "failed to stamp last_clean_pass_at");
                 }
-                recorded
+                (recorded, true)
             }
-            Err(_) => Vec::new(),
-        }
+            Err(_) => (Vec::new(), false),
+        };
+        // The pass's completion observable. A `clean=true` line means a full
+        // scan of the folder ran inside this pass and every file it took up was
+        // handed to the uploader before the line was written — so for any file
+        // already on disk when the pass began, its absence from the device's
+        // `sync_entries` after this line is a decision, not a delay. That is the
+        // causal anchor an "it never syncs" assertion needs
+        // (`e2e-latency-independent-assertions.md`, the negative-assert
+        // mechanism; consumer: `sync_seats.converge_passes`). `last_clean_pass_at`
+        // cannot serve: it has one-second resolution, so it cannot order a pass
+        // against a write made in the same second.
+        tracing::info!(
+            clean = drained && reconciled && uploaded,
+            "{}: local converge pass complete",
+            fauna_core::log_redact::log_folder_name(folder)
+        );
+        recorded
     }
 }
 
 /// **The local-write half of a two-way root**, reduced to a single `select!` arm.
 ///
 /// Shared, and deliberately so: on-demand and always-resident differ in *how bytes get onto the
-/// disk* and in **nothing else** — a local edit uploads either way (`file-sync.md` § On-Demand
+/// disk* and in **nothing else** — a local edit uploads either way (`on-demand-files.md` § On-Demand
 /// Files → *Sync direction*: on-demand is a **storage** choice, never a **direction** one). So
 /// there is one watcher, one debouncer and one uploader for both roots (priorities #2/#4), not
 /// a second copy grown inside the hydration host.
@@ -695,7 +721,7 @@ impl LocalWrites {
 
 /// Is `path` a **descriptor reach** — `/proc/self/fd/<n>`, a directory named
 /// through a descriptor this process holds open on it? A host that mounts a view
-/// over a directory (the linux on-demand root, `on-demand-files.md` § Linux FUSE
+/// over a directory (the linux on-demand root, `on-demand-files-linux.md` § Linux FUSE
 /// binding) reaches the directory beneath through one; resolving it by text
 /// lands on the view instead, so it must never be canonicalized.
 fn is_descriptor_reach(path: &std::path::Path) -> bool {
@@ -877,12 +903,11 @@ pub enum EngineCommand {
     /// engine's provisional ingest (slice E — the app owns the peer channel,
     /// the engine owns the state writes, and on an out-of-process-agent app
     /// this channel is the boundary between them). `rows` are canonical
-    /// dag-cbor `fauna_protocol::peer_share::PeerShareChange` encodings (an
+    /// dag-cbor `fauna_protocol::peer_row::PeerChangeRow` encodings (an
     /// undecodable row is refused, counted); bodies come from the
     /// caller-populated spool ([`crate::peer_share_store::SpoolFetcher`]).
     /// Advances the per-peer pull cursor to the page's highest sequenced seq
     /// after the ingest, and replies with the report + the new cursor.
-    #[cfg(feature = "p2p-share")]
     ShareIngest {
         proven_actor_hex: String,
         rows: Vec<Vec<u8>>,
@@ -893,7 +918,7 @@ pub enum EngineCommand {
     },
     /// *Free up space* for the file at `rel` — the user's verb on an on-demand
     /// root whose platform keeps no pin or dehydrate of its own (the linux FUSE
-    /// root; `on-demand-files.md` § Linux FUSE binding, the dehydrate rule). The
+    /// root; `on-demand-files-linux.md` § Linux FUSE binding, the dehydrate rule). The
     /// bytes are freed only when that is provably lossless, a pinned file
     /// refuses, and a file already cloud-only answers `Ok` (nothing to lose).
     /// The on-demand loop answers it; a resident root holds every file locally
@@ -926,6 +951,21 @@ pub enum EngineCommand {
         signed_as: Option<[u8; 32]>,
         reply: tokio::sync::oneshot::Sender<anyhow::Result<crate::engine::ResealedVersion>>,
     },
+    /// Take a hydrated copy to a head it is stale behind, by the road the fold's
+    /// own report takes ([`crate::engine::StaleHydratedRow`]) — the local apply
+    /// of a restore this device recorded over a copy it keeps: a pinned file on
+    /// a cfapi root, which the platform will not free, or any file on an
+    /// always-resident root (`file-versions.md` § Restore, ordering 2: the
+    /// restored version is replaced in and the row moves last). Replies `true`
+    /// when the copy now stands at the head — replaced in place, or freed and
+    /// re-pointed — and `false` when it was left as it is (a local edit not yet
+    /// synced, the conflict path's). The on-demand loop answers it through its
+    /// binding, whose log names why a copy was left; a resident root through
+    /// [`SyncEngine::replace_kept_copy`].
+    ApplyStaleHydrated {
+        row: crate::engine::StaleHydratedRow,
+        reply: tokio::sync::oneshot::Sender<anyhow::Result<bool>>,
+    },
 }
 
 /// Answer one [`EngineCommand`] on `engine` and send the reply — the command
@@ -940,7 +980,6 @@ pub async fn answer_engine_command(engine: &SyncEngine, cmd: EngineCommand) {
         EngineCommand::ApplyHeldDeletes { reply } => {
             let _ = reply.send(engine.apply_held_deletes().await);
         }
-        #[cfg(feature = "p2p-share")]
         EngineCommand::ShareIngest {
             proven_actor_hex,
             rows,
@@ -957,6 +996,11 @@ pub async fn answer_engine_command(engine: &SyncEngine, cmd: EngineCommand) {
                 "this folder keeps every file on this device (always-resident): there is \
                  nothing to free and nothing to pin"
             )));
+        }
+        // The on-demand loop intercepts it too: there the copy is its binding's to
+        // replace. Here every file is a copy this device keeps, replaced in place.
+        EngineCommand::ApplyStaleHydrated { row, reply } => {
+            let _ = reply.send(engine.replace_kept_copy(&row).await);
         }
         EngineCommand::ResealInheritedVersion {
             rel,
@@ -986,7 +1030,6 @@ pub async fn answer_engine_command(engine: &SyncEngine, cmd: EngineCommand) {
 /// with the spool-backed fetcher, then advance the per-peer pull cursor to
 /// the page's highest sequenced seq (pending rows carry no coordinate and
 /// never advance it).
-#[cfg(feature = "p2p-share")]
 pub async fn ingest_share_page(
     engine: &SyncEngine,
     proven_actor_hex: &str,
@@ -999,8 +1042,9 @@ pub async fn ingest_share_page(
 /// [`ingest_share_page`] with its landing named: `None` is the resident tree
 /// (every accepted body lands), `Some` an on-demand replica's
 /// (`provider_face::owned_tree::OwnedTree::share_ingest` — rows always,
-/// bodies by policy). One decode, one provenance door, one cursor rule.
-#[cfg(feature = "p2p-share")]
+/// bodies by policy). Decodes the share pump's page (an undecodable row is
+/// refused, counted) and hands it to [`ingest_peer_page_landing`] with the
+/// spool-backed fetcher.
 pub(crate) async fn ingest_share_page_landing(
     engine: &SyncEngine,
     proven_actor_hex: &str,
@@ -1008,13 +1052,13 @@ pub(crate) async fn ingest_share_page_landing(
     spool_dir: PathBuf,
     landing: Option<&crate::engine::OnDemandLanding<'_>>,
 ) -> anyhow::Result<(crate::peer_share_store::PeerIngestReport, i64)> {
-    let mut accepted = Vec::with_capacity(rows.len());
+    let mut decoded = Vec::with_capacity(rows.len());
     let mut undecodable = 0usize;
     for bytes in rows {
-        match fauna_core::encoding::canonical_decode::<fauna_protocol::peer_share::PeerShareChange>(
+        match fauna_core::encoding::canonical_decode::<fauna_protocol::peer_row::PeerChangeRow>(
             bytes,
         ) {
-            Ok(row) => accepted.push(row),
+            Ok(row) => decoded.push(row),
             Err(e) => {
                 tracing::warn!(error = %e, "share ingest: undecodable peer row refused");
                 undecodable += 1;
@@ -1022,10 +1066,58 @@ pub(crate) async fn ingest_share_page_landing(
         }
     }
     let fetcher = crate::peer_share_store::SpoolFetcher::new(spool_dir);
-    let mut report = engine
-        .ingest_peer_share_rows_landing(&accepted, proven_actor_hex, &fetcher, landing)
-        .await?;
+    let origin = crate::peer_share_store::PeerPageOrigin::Share {
+        peer_actor_hex: proven_actor_hex.to_string(),
+    };
+    let (mut report, cursor) =
+        ingest_peer_page_landing(engine, &origin, decoded, &fetcher, landing).await?;
     report.refused += undecodable;
+    Ok((report, cursor))
+}
+
+/// The ONE page ingest both peer legs share (`p2p-shared-set-build.md`
+/// § Build design — the same-account row leg, decision 3): the share pump's
+/// page (through [`ingest_share_page_landing`]) and a sibling's folder page
+/// (the engine's own sibling pull). One range check, one provenance door, one
+/// cursor rule — keyed by
+/// [`crate::peer_share_store::PeerPageOrigin::cursor_key`]. The fetcher is the
+/// caller's: the share pump's spool, or the sibling-first fetcher.
+///
+/// Advances the origin's pull cursor to the page's highest sequenced seq
+/// after the ingest (pending rows carry no coordinate and never advance it),
+/// held below the lowest retry floor, and returns the report + the new cursor.
+pub async fn ingest_peer_page_landing(
+    engine: &SyncEngine,
+    origin: &crate::peer_share_store::PeerPageOrigin,
+    rows: Vec<fauna_protocol::peer_row::PeerChangeRow>,
+    fetcher: &dyn fauna_core::file_download::BlobFetcher,
+    landing: Option<&crate::engine::OnDemandLanding<'_>>,
+) -> anyhow::Result<(crate::peer_share_store::PeerIngestReport, i64)> {
+    let cursor_key = origin.cursor_key();
+    let mut accepted = Vec::with_capacity(rows.len());
+    let mut out_of_range = 0usize;
+    // The peer serves strictly above the `since` it was asked for and a
+    // sequence is positive, so a sequenced row outside that is a protocol
+    // violation, not a row — and its peer-chosen `seq` must never reach the
+    // retry-floor arithmetic below (`i64::MIN - 1` panics under
+    // `overflow-checks`).
+    let since = engine.share_pull_cursor(&cursor_key)?;
+    for row in rows {
+        if row.sequenced && (row.change.seq <= 0 || row.change.seq <= since) {
+            tracing::warn!(
+                seq = row.change.seq,
+                since,
+                "peer ingest: sequenced peer row outside the requested range refused"
+            );
+            out_of_range += 1;
+        } else {
+            accepted.push(row);
+        }
+    }
+    let mut report = engine
+        .ingest_peer_share_rows_landing(&accepted, origin, fetcher, landing)
+        .await?;
+    report.refused += out_of_range;
     let page_max = accepted
         .iter()
         .filter(|r| r.sequenced)
@@ -1041,12 +1133,12 @@ pub(crate) async fn ingest_share_page_landing(
     // fetched twice. The cursor is forward-only, so a floor at or below it
     // simply leaves it where it is.
     let page_max = match (page_max, report.retry_floor) {
-        (Some(max), Some(floor)) => Some(max.min(floor - 1)),
+        (Some(max), Some(floor)) => Some(max.min(floor.saturating_sub(1))),
         (max, _) => max,
     };
     let cursor = match page_max {
-        Some(seq) => engine.advance_share_pull_cursor(proven_actor_hex, seq)?,
-        None => engine.share_pull_cursor(proven_actor_hex)?,
+        Some(seq) => engine.advance_share_pull_cursor(&cursor_key, seq)?,
+        None => engine.share_pull_cursor(&cursor_key)?,
     };
     Ok((report, cursor))
 }
@@ -1115,7 +1207,7 @@ pub async fn run_watch_loop(
     // this pass to find, anything later raises a watcher event. Idempotent: a
     // pass that finds nothing uploads nothing. The window opens on every engine
     // restart, and a content-key re-key restarts the engine
-    // (`on-demand-files.md` § Shared sets on a capability host → *One
+    // (`on-demand-files-shared-sets.md` § Shared sets on a capability host → *One
     // mechanism*), so an edit saved while the set re-keys is exactly what it
     // used to strand.
     let _ = LocalWriteHost::converge(&*engine, &folder).await;
@@ -1136,9 +1228,8 @@ pub async fn run_watch_loop(
     // cross-nest member in `cross_nest_agent_capstone` (300 s because a foreign
     // set's cadence is not readable at all — see that test's notes).
     //
-    // The one-shot (iOS) shape already pulls eagerly right after the same
-    // catch-up (`engine_lifecycle::run_one_shot_pass`); this is the resident
-    // shape agreeing with it instead of being the odd one out.
+    // The on-demand root agrees: its startup fold (`HydrationHost::prepare`)
+    // is the same eager pull, made before it serves a single listing.
     // Idempotent, so an engine restart (key rotation, mode flip) just re-runs it.
     //
     // Resolve THIS seat's sync mode from the authoritative nest rows first —
@@ -1147,18 +1238,15 @@ pub async fn run_watch_loop(
     // owns the failure posture). The rescan tick re-resolves below, which is
     // what carries a role the user changes in the wizard onto a RUNNING engine
     // within a cadence instead of a process restart.
-    // An audience flip or a website toggle the owner made while this seat was
-    // down reaches the back-catalogue here, on the same refresh and for the same
-    // reason: the refresh is what installs the audience/toggle the pair reads,
-    // so the pair runs right after it and before the pull, and the reissues are
-    // in flight when the tick cadence takes over. The caller's catch-up already
-    // ran the audience pass once, off the build-time posture; the refresh can
-    // install a NEWER one, and both passes are convergent, so re-running is free
-    // and never wrong. The same fn the on-demand root runs.
-    refresh_and_converge_corpus(&engine, &folder).await;
+    // ONLY the refresh runs here, not the corpus pair that reads it: the
+    // audience and website passes re-seal, declassify and reissue heads off
+    // this seat's local rows, so they wait behind the pull with the other start
+    // passes (below) — run here they republished whatever head this seat last
+    // saw, ahead of the newer edit the pull was about to fold
+    // (`mls-group-key-material.md` § M2 → *(B) Reclaim*, property (1)).
+    engine.refresh_sync_mode().await;
     // The share leg's cached writer roster rides the same cadence (B2 —
     // `refresh_share_writer_roster` owns the skip/staleness posture).
-    #[cfg(feature = "p2p-share")]
     engine.refresh_share_writer_roster().await;
     // Subscribed here, right after the eager refresh above has had its chance,
     // so a `Connected` transition that lands during startup still reaches the
@@ -1177,13 +1265,31 @@ pub async fn run_watch_loop(
     }
     // A `Placeholder` row on a resident root is a pending download, never a
     // delete — what an on-demand→always flip leaves behind, past the anchor the
-    // pull reads from (`on-demand-files.md` § Linux FUSE binding, the flips
+    // pull reads from (`on-demand-files-linux.md` § Linux FUSE binding, the flips
     // rule). After the pull, so a head it just moved is the one fetched; the
     // tick below retries what failed.
     materialize_placeholder_rows(&engine, &folder_r).await;
     // Third-party deposits parked while this seat was down — after the pull,
     // so an item another seat already adopted is found landed, not re-adopted.
     adopt_parked_deposits(&engine, &folder_r).await;
+    // The once-per-start corpus passes — AFTER the first pull, so every local
+    // row a re-seal reads is the fold of everything the nest held at start. A
+    // pass run ahead of it re-sealed whatever head this seat last saw: a seat
+    // that was offline while a peer recorded a newer edit reissued the OLDER
+    // content as the path's newest head (`mls-group-key-material.md` § M2 →
+    // *(B) Reclaim*, property (1); the nest's source check is the guarantee
+    // that the reissue buries nothing, this ordering is what keeps the head
+    // the newer edit). The on-demand root runs the same fn after its own
+    // startup fold.
+    //
+    // The start passes include the audience convergence, so an audience flip
+    // made while this seat was down reaches the back-catalogue here, off the
+    // posture the refresh above installed. The website convergence — the other
+    // half of the per-tick pair, and a reissue walk like the rest — follows;
+    // a toggle made while this seat was down reaches the back-catalogue here
+    // too, and the tick cadence carries every later flip.
+    converge_corpus_at_start(&engine, &folder).await;
+    converge_corpus_to_website(&engine, &folder).await;
 
     loop {
         tokio::select! {
@@ -1237,7 +1343,6 @@ pub async fn run_watch_loop(
                 // tick that first sees the flip.
                 refresh_and_converge_corpus(&engine, &folder).await;
                 // The cached writer roster re-reads on the same tick (B2).
-                #[cfg(feature = "p2p-share")]
                 engine.refresh_share_writer_roster().await;
                 if let Err(e) = engine.pull_remote_changes().await {
                     tracing::error!("pull ({folder_r}): {e}");
@@ -1288,7 +1393,6 @@ pub async fn run_watch_loop(
                         if let Err(e) = engine.pull_remote_changes().await {
                             tracing::error!("reconnect pull ({folder_r}): {e}");
                         }
-                        #[cfg(feature = "p2p-share")]
                         engine.refresh_share_writer_roster().await;
                     }
                     // The control plane is gone for good. Park the arm rather
@@ -1322,22 +1426,30 @@ pub async fn run_watch_loop(
 }
 
 /// One third-party deposit adoption pass (`SyncEngine::adopt_deposits`,
-/// `file-sync.md` § Third-party deposit ingress), on the resident root's entry,
-/// tick and nudge. Best-effort: a failed pass is retried by the next one, and
-/// nothing is retired that is not durable.
-async fn adopt_parked_deposits(engine: &SyncEngine, folder: &str) {
+/// `folder-deposit.md`) — **every root, whichever
+/// mode**: the resident root runs it after the pull on its entry, tick and
+/// nudge, the on-demand hydration loop after its startup fold and after every
+/// re-pull. Returns the paths the pass retired an item at, which an on-demand
+/// root flips to the platform's in-sync mark. Best-effort: a failed pass is
+/// retried by the next one, and nothing is retired that is not durable.
+pub async fn adopt_parked_deposits(engine: &SyncEngine, folder: &str) -> Vec<String> {
     match engine.adopt_deposits().await {
-        Ok(done) if done != crate::engine::DepositAdoption::default() => {
-            tracing::info!(
-                folder,
-                adopted = done.adopted,
-                already_landed = done.already_landed,
-                deferred = done.deferred,
-                "deposit adoption pass"
-            );
+        Ok(done) => {
+            if done != crate::engine::DepositAdoption::default() {
+                tracing::info!(
+                    folder,
+                    adopted = done.adopted,
+                    already_landed = done.already_landed,
+                    deferred = done.deferred,
+                    "deposit adoption pass"
+                );
+            }
+            done.landed
         }
-        Ok(_) => {}
-        Err(e) => tracing::warn!("deposit adoption ({folder}): {e:#}"),
+        Err(e) => {
+            tracing::warn!("deposit adoption ({folder}): {e:#}");
+            Vec::new()
+        }
     }
 }
 

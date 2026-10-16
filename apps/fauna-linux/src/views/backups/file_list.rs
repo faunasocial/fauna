@@ -51,6 +51,7 @@ pub fn build_snapshot_file_list(
 /// [`FaunaClient::save_snapshot_file`] rather than being hidden client-side.
 pub fn build_backup_file_row(
     file: &fauna_backups_machine::SnapshotFileRow,
+    set: &fauna_client_snapshots::SnapshotSet,
     size: &str,
     client: &Rc<FaunaClient>,
 ) -> gtk::ListBoxRow {
@@ -72,6 +73,7 @@ pub fn build_backup_file_row(
     {
         let c = Rc::clone(client);
         let file = file.clone();
+        let set = set.clone();
         download_btn.connect_clicked(move |btn| {
             let suggested_name = file
                 .path
@@ -98,7 +100,7 @@ pub fn build_backup_file_row(
                 && let Ok(dir) = std::env::var("FAUNA_E2E_DOWNLOAD_DIR")
             {
                 let save_path = std::path::Path::new(&dir).join(&suggested_name);
-                c.save_snapshot_file(file.clone(), &save_path.display().to_string());
+                c.save_snapshot_file(file.clone(), set.clone(), &save_path.display().to_string());
                 return;
             }
 
@@ -109,11 +111,12 @@ pub fn build_backup_file_row(
                 .build();
             let c2 = Rc::clone(&c);
             let file2 = file.clone();
+            let set2 = set.clone();
             dialog.save(parent.as_ref(), gio::Cancellable::NONE, move |result| {
                 if let Ok(gfile) = result
                     && let Some(path) = gfile.path()
                 {
-                    c2.save_snapshot_file(file2.clone(), &path.display().to_string());
+                    c2.save_snapshot_file(file2.clone(), set2.clone(), &path.display().to_string());
                 }
             });
         });
@@ -145,16 +148,20 @@ pub fn populate_snapshot_file_list(
     client: &Rc<FaunaClient>,
 ) {
     // Remove all existing rows.
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(list_box);
 
     let Some(detail) = detail else {
         return;
     };
+    // The set the snapshot names — what the download licenses a plaintext
+    // entry by (`backup-restore.md` § Security Properties → Integrity).
+    let set = fauna_client_snapshots::SnapshotSet::from_named(
+        &detail.folder,
+        detail.folder_hash.as_deref(),
+    );
     for file in &detail.files {
         let size = crate::i18n::byte_size(file.size_bytes.max(0) as u64);
-        let row = build_backup_file_row(file, &size, client);
+        let row = build_backup_file_row(file, &set, &size, client);
         list_box.append(&row);
     }
 }

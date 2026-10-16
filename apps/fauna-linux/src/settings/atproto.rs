@@ -159,6 +159,8 @@ struct AtprotoPageWidgets {
     delete_confirm_card: gtk::Box,
     delete_confirm_lines: gtk::Box,
     delete_confirm_line_labels: RefCell<Vec<gtk::Label>>,
+    delete_retire_check: gtk::CheckButton,
+    delete_retire_reason: gtk::Label,
     delete_confirm_btn: gtk::Button,
     delete_cancel_btn: gtk::Button,
 
@@ -428,6 +430,20 @@ pub fn build_atproto_settings_page() -> adw::PreferencesPage {
     delete_confirm_card.set_visible(false);
     let delete_confirm_lines = gtk::Box::new(gtk::Orientation::Vertical, 4);
     delete_confirm_card.append(&delete_confirm_lines);
+    // The terminal "also permanently retire my identity" opt-in
+    // (`atproto-delete-tombstone`): card state on the machine, not a gesture —
+    // nothing is sent until the confirm. Greyed with the machine's reason
+    // beside it where the identity cannot be retired.
+    let delete_retire_check = gtk::CheckButton::with_label(BS::DELETE_RETIRE_IDENTITY_LABEL);
+    set_test_id(&delete_retire_check, ids::ATPROTO_DELETE_TOMBSTONE);
+    delete_confirm_card.append(&delete_retire_check);
+    let delete_retire_reason = gtk::Label::builder()
+        .wrap(true)
+        .xalign(0.0)
+        .css_classes(["dim-label"])
+        .visible(false)
+        .build();
+    delete_confirm_card.append(&delete_retire_reason);
     let delete_confirm_btn_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     delete_confirm_btn_row.set_halign(gtk::Align::End);
     delete_confirm_btn_row.set_margin_top(8);
@@ -448,6 +464,7 @@ pub fn build_atproto_settings_page() -> adw::PreferencesPage {
     let fullpds_group = adw::PreferencesGroup::builder().visible(false).build();
     let external_apps_toggle = adw::SwitchRow::builder()
         .title(BS::EXTERNAL_APPS_TOGGLE)
+        .subtitle(BS::EXTERNAL_APPS_HINT)
         .active(true)
         .build();
     set_test_id(&external_apps_toggle, ids::ATPROTO_EXTERNAL_APPS_ENABLE);
@@ -527,6 +544,8 @@ pub fn build_atproto_settings_page() -> adw::PreferencesPage {
         delete_confirm_card,
         delete_confirm_lines,
         delete_confirm_line_labels: RefCell::new(Vec::new()),
+        delete_retire_check,
+        delete_retire_reason,
         delete_confirm_btn,
         delete_cancel_btn,
         fullpds_group,
@@ -749,6 +768,16 @@ fn wire_machine(page: &adw::PreferencesPage, mint_btn: gtk::Button, widgets: Atp
         let ctx = Rc::clone(&ctx);
         delete_cancel_btn.connect_clicked(move |_| {
             ctx.machine.cancel_delete(); // fires on_changed → render loop
+        });
+    }
+    {
+        let delete_retire_check = ctx.w.delete_retire_check.clone();
+        let ctx = Rc::clone(&ctx);
+        delete_retire_check.connect_toggled(move |b| {
+            if ctx.guard.get() {
+                return;
+            }
+            ctx.machine.set_delete_retire_identity(b.is_active());
         });
     }
     {
@@ -1001,6 +1030,8 @@ fn render(ctx: &Rc<AtprotoPageCtx>) {
                 w.card_lines.append(&label);
                 labels.push(label);
             }
+            w.history_backfill
+                .set_label(Some(&resolve(&card.history_backfill_label)));
             w.history_backfill.set_visible(card.show_history_backfill);
             w.history_backfill.set_active(snap.history_backfill);
             w.confirm_btn.set_sensitive(!card.in_progress);
@@ -1086,6 +1117,28 @@ fn render(ctx: &Rc<AtprotoPageCtx>) {
                     .build();
                 w.delete_confirm_lines.append(&label);
                 labels.push(label);
+            }
+            let retire = &confirm.retire_identity;
+            w.delete_retire_check.set_active(retire.selected);
+            w.delete_retire_check
+                .set_sensitive(retire.available && !confirm.in_progress);
+            set_test_attr(
+                &w.delete_retire_check,
+                "state",
+                if !retire.available {
+                    "unavailable"
+                } else if retire.selected {
+                    "on"
+                } else {
+                    "off"
+                },
+            );
+            match &retire.unavailable_reason {
+                Some(reason) => {
+                    w.delete_retire_reason.set_label(&resolve(reason));
+                    w.delete_retire_reason.set_visible(true);
+                }
+                None => w.delete_retire_reason.set_visible(false),
             }
             w.delete_confirm_btn.set_sensitive(!confirm.in_progress);
             w.delete_cancel_btn.set_sensitive(!confirm.in_progress);

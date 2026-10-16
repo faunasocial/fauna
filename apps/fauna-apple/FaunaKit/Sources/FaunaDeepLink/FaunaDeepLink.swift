@@ -1,7 +1,7 @@
 import Foundation
 
 /// The `fauna://` deep-link vocabulary for File Provider context actions
-/// (`file-sync.md` § On-Demand Files → Apple File Provider binding — *context
+/// (`on-demand-files-apple.md` § On-Demand Files → Apple File Provider binding — *context
 /// actions*): the FP UI action extension builds these URLs and the app routes
 /// them. Deliberately a tiny FFI-free module: the UI appex links ONLY this (a
 /// FaunaKit dependency would ship the whole Rust xcframework inside a

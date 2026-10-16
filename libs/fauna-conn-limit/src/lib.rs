@@ -5,7 +5,7 @@
 //! # Why dead-peer detection lives in this crate
 //!
 //! A per-IP cap is only as good as the *release* half of its RAII permit. On
-//! 2026-07-31 example.com's `:443` went fully dark for ~7 days' worth of
+//! 2026-07-31 the live nest's `:443` went fully dark for ~7 days' worth of
 //! accumulated traffic: ~261 `ESTABLISHED` sockets from one source IP sat in
 //! `fauna-sni-router` forever, exhausting that IP's 256-slot budget, so every
 //! new connection was shed at accept time — TCP connected, the server sent zero
@@ -553,7 +553,7 @@ mod tests {
         assert_eq!(limit.tracked_ips(), 0, "no zero-count entry left behind");
     }
 
-    /// The regression lock for the 2026-07-31 example.com `:443` outage.
+    /// The regression lock for the 2026-07-31 live-nest `:443` outage.
     ///
     /// The leak was: an accepted socket whose peer vanished without a clean
     /// close stayed `ESTABLISHED` forever, so its permit was never dropped.

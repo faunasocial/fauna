@@ -25,39 +25,39 @@ Stamped 2026-10-01 at e129e78aa0.
 4. [app] Any member can be chosen as the front page, however many members the nest holds — `docs/goal/behavior/admin.md` § 2. Users
    - `tests/e2e-unified/tests/test_admin_picker_all_accounts.py::test_admin_web_apex_picker_offers_an_account_older_than_the_newest_page`
 5. [app] The page shows the address the chosen member's site serves at — `docs/goal/behavior/admin.md` § 7. Web
-   - (none)
+   - `tests/e2e-unified/tests/test_web_authoring.py::test_admin_front_page_shows_the_address_it_serves_at`
 6. [app] Opening the page shows who is the front page now, or that nobody is — `docs/goal/behavior/admin.md` § 7. Web
-   - (none)
+   - `tests/e2e-unified/tests/test_web_authoring.py::test_admin_front_page_opens_on_who_is_the_front_page_now`
 7. [nest] With no front page chosen, and again after the choice is cleared, the bare address shows the nest's own information page — `docs/goal/behavior/web-content-hosting.md` § Admin apex hosting
    - `tests/e2e-unified/tests/api/test_web_apex_hosting.py::test_admin_apex_hosting_serves_then_clears`
 8. [nest] The chosen front page keeps serving after the nest restarts — `docs/goal/behavior/web-content-hosting.md` § Admin apex hosting
-   - (none)
+   - `tests/e2e-unified/tests/api/test_front_page_durability.py::test_the_chosen_front_page_keeps_serving_after_a_nest_restart`
 9. [nest] When the front-page member's account passes to a successor identity, the front page keeps serving that account's site — `docs/goal/behavior/web-content-hosting.md` § Routing, render, serving
-   - (none)
+   - `tests/e2e-unified/tests/api/test_front_page_durability.py::test_the_front_page_follows_its_member_to_a_successor_key`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+00c39e3e.dirty standalone |
-| linux | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| web | ✅ full | 0.1.2-dev+00c39e3e.dirty standalone |
+| linux | ✅ full | 0.1.4-dev+52904896 standalone |
 | windows | ⚠ partial | 0.1.2-dev+c04c2468 standalone |
-| macos | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| ios | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |
+| tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_admin_apex_designate_and_clear` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/api/test_web_apex_hosting.py::test_admin_apex_hosting_serves_then_clears` | nest (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/api/test_web_apex_hosting.py::test_set_apex_actor_is_admin_only` | nest (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_admin_picker_label_collision.py::test_admin_web_apex_picker_stays_injective_when_labels_collide` | web (linux): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_admin_picker_label_collision.py::test_admin_web_apex_picker_stays_injective_when_labels_collide` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_admin_picker_all_accounts.py::test_admin_web_apex_picker_offers_an_account_older_than_the_newest_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | (none) | — |
-| 6 | app | (none) | — |
+| 5 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_admin_front_page_shows_the_address_it_serves_at` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_admin_front_page_opens_on_who_is_the_front_page_now` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/api/test_web_apex_hosting.py::test_admin_apex_hosting_serves_then_clears` | nest (linux): passed |
-| 8 | nest | (none) | — |
-| 9 | nest | (none) | — |
+| 8 | nest | `tests/e2e-unified/tests/api/test_front_page_durability.py::test_the_chosen_front_page_keeps_serving_after_a_nest_restart` | nest (linux): passed |
+| 9 | nest | `tests/e2e-unified/tests/api/test_front_page_durability.py::test_the_front_page_follows_its_member_to_a_successor_key` | nest (linux): passed |
 <!-- features-render:end -->

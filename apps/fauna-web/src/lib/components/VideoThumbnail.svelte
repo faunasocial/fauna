@@ -8,6 +8,7 @@
   // is the headless observable every player test reads; the native player's own error
   // UI is the error surface — no new element.
   import { IDS } from '$lib/generated/uiIds';
+  import { notePlayback } from '$lib/feed-cues';
   interface Props {
     /** The blob URL whose first frame is the poster (`<video preload="metadata">`). Absent for a
      *  bridged `ProxiedVideo` (render-model.md § D6c → *Proxied video*): its first-frame grab
@@ -20,9 +21,12 @@
     /** Resolve the playable URL for this video, `null` when nothing plays. Absent → the
      *  thumbnail stays inert (no host wired the projection). */
     resolveSource?: () => Promise<string | null>;
+    /** The post this player sits on: its progress feeds that post's engagement-cue row
+     *  (`notePlayback`). Absent → the player reports nothing. */
+    postId?: string;
   }
 
-  let { src, caption, alt = 'video', resolveSource }: Props = $props();
+  let { src, caption, alt = 'video', resolveSource, postId }: Props = $props();
 
   type PlayState = 'idle' | 'loading' | 'playing' | 'error';
   let playState = $state<PlayState>('idle');
@@ -45,6 +49,13 @@
     playSrc = url;
   }
 
+  // Every progress report, the end included (an ended player reads as played to its
+  // end), is noted for the cue probe.
+  function notePlayed() {
+    if (!postId || !player) return;
+    notePlayback(postId, player.ended ? player.duration : player.currentTime, player.duration);
+  }
+
   // Start the native player once it is mounted on the resolved source. A refused
   // `play()` (a browser that lost the tap's activation across the await) leaves the
   // native controls up for the user's own press, which fires `playing` all the same.
@@ -65,6 +76,8 @@
       class="video-player"
       aria-label={alt}
       onplaying={() => (playState = 'playing')}
+      ontimeupdate={notePlayed}
+      onended={notePlayed}
       onerror={() => (playState = 'error')}
     >
       <track kind="captions" />

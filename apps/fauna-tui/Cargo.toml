@@ -131,6 +131,8 @@ e2e-agent = [
     # The Nests trust facet's render clock (`trust_clock`) — grant liveness and
     # custody receipt freshness, moved by `trust_facet_advance_clock`.
     "fauna-client-capabilities/e2e-agent",
+    # The custody owner's send-again poke (`custody_owner_resend_now`).
+    "fauna-client-custody/e2e-agent",
     "fauna-sync-engine/e2e-agent",
     # `device_set_state_json` (fleet-removal convergence read) — the
     # release-profile e2e escape hatch; a plain debug build already reaches it
@@ -165,6 +167,18 @@ e2e-agent = [
     # release-profile e2e tui cannot verify the harness's fake IMAP source, and
     # § The two TLS modes leaves no plaintext alternative.
     "fauna-client-mail-settings/test-helpers",
+    # The e2e ACME directory seed (FAUNA_E2E_ACME_*) — `fauna-client-dns`'s
+    # native machine builder installs the pebble `ManualOrderTestSeam` from it.
+    # A debug build reaches it through the crate's own `debug_assertions` arm;
+    # this forward keeps a RELEASE-profile e2e tui able to open a manual order
+    # against the harness CA (`e2e-automation-surface-gating.md` § The ACME
+    # directory seed).
+    "fauna-client-dns/test-helpers",
+    # …and the seed's managed-path mirror sends its RFC 2136 UPDATE through
+    # `fauna_core::authoritative_dns::send_txt_update`, gated the same way;
+    # `fauna-client-dns/test-helpers` cannot forward it (fauna-wasm turns that
+    # feature on for wasm32, where fauna-core's `network` cannot build).
+    "fauna-core/test-helpers",
     # `ArchiveImportMachine::set_test_pause_after_records` — the e2e
     # restart-resume journey's causal anchor (convention 14), armed by the
     # `archive_import_pause_after` automation command. A debug build reaches it
@@ -192,6 +206,7 @@ e2e-agent = [
     "fauna-feed/test-helpers",
     "fauna-onboarding-machine/test-helpers",
     "fauna-onboarding-machine/test-observer",
+    "fauna-ws-substrate/test-helpers",
 ]
 
 [[bin]]
@@ -387,6 +402,7 @@ fauna-labeler-catalog-machine = { path = "../../libs/fauna-labeler-catalog-machi
 # brings the production WS-RPC seam. tui is the lead app — the first consumer.
 fauna-client-connected-apps = { path = "../../libs/fauna-client-connected-apps", features = [
     "rpc-glue",
+    "local-clock",
 ] }
 # The canonical create-feed rule catalog (`rule_type_options`): wire value +
 # localized label + `RuleInputKind` per type, so the rule-builder shows only the
@@ -463,7 +479,7 @@ fauna-client-features = { path = "../../libs/fauna-client-features" }
 # (`agent`) and the seven element texts (`local-clock` for the relative last
 # sync) — consumed whole, never re-derived here (priority #2).
 fauna-client-status = { path = "../../libs/fauna-client-status", features = ["agent", "local-clock"] }
-fauna-client-notifications = { path = "../../libs/fauna-client-notifications" }
+fauna-client-notifications = { path = "../../libs/fauna-client-notifications", features = ["local-clock"] }
 # The Settings → Devices sub-page (`ui/devices.md` § Where logic lives): the
 # shared page-level DevicesMachine (device roster read + remove). `rpc-glue` is
 # the native `build_devices_machine` binding over our own `NestClient`,
@@ -472,6 +488,7 @@ fauna-client-notifications = { path = "../../libs/fauna-client-notifications" }
 # wizard are a separate follow-on (`ui/folders.md`).
 fauna-devices-machine = { path = "../../libs/fauna-devices-machine", features = [
     "rpc-glue",
+    "web",
 ] }
 # The Settings → Folders sub-page (`ui/folders.md` § Where logic lives): the
 # folder creation wizard's value types + catalogs (role/conflict-policy
@@ -537,7 +554,7 @@ fauna-client-moderation = { path = "../../libs/fauna-client-moderation" }
 # The global search page (`ui/search.md`): the typed `fauna.search.query` call
 # + the shared card-render helpers (`content_type_badge`/`clean_snippet`).
 # Shared Rust, consumed directly like linux's `client.rs::search` (priority #2).
-fauna-client-search = { path = "../../libs/fauna-client-search" }
+fauna-client-search = { path = "../../libs/fauna-client-search", features = ["query"] }
 # Web-content-hosting authoring (`behavior/web-content-hosting.md` § Admin apex
 # hosting): the typed `fauna.web.*` `WebClient` plus the pure `subdomain_view` /
 # `apex_view` projections both the admin `admin-web` picker and the user
@@ -601,6 +618,7 @@ fauna-media = { path = "../../libs/fauna-media" }
 fauna-sync-engine = { workspace = true, features = [
     "engine-lifecycle",
     "account-runtime",
+    "web",
 ] }
 # The shared seed-holding-app assembly behind `session::establish`'s W3 account
 # runtime — one implementation of the eleven non-app `AccountRuntimeParams` for
@@ -736,6 +754,9 @@ windows = { workspace = true, features = [
 # Test builds never reach the live OS keyring — see the `no-live-keyring`
 # feature in libs/fauna-credential-store/Cargo.toml (dev-dependencies ONLY).
 fauna-credential-store = { workspace = true, features = ["no-live-keyring"] }
+# `registry_census` — the shared source scan `account_registry_census_test`
+# pins the registry choke point with (same census linux runs).
+fauna-client-accounts = { workspace = true, features = ["test-helpers"] }
 # The feed tests' fake content API (`FakeNestContentApi`/`Verb`). A dev test
 # build gets the fake through fauna-nest-http's own `debug_assertions` arm; this
 # dev-dep feature is what keeps the same tests compiling in a RELEASE test build
@@ -772,6 +793,7 @@ fauna-archive-import-machine = { path = "../../libs/fauna-archive-import-machine
 # machine over the in-memory seam.
 fauna-client-connected-apps = { path = "../../libs/fauna-client-connected-apps", features = [
     "rpc-glue",
+    "local-clock",
     "test-helpers",
 ] }
 fauna-onboarding-machine = { path = "../../libs/fauna-onboarding-machine", features = [
@@ -785,6 +807,12 @@ fauna-devices-machine = { path = "../../libs/fauna-devices-machine", features = 
     "test-helpers",
 ] }
 fauna-conversations = { path = "../../libs/fauna-conversations", features = ["test-helpers"] }
+# `FakeBackupsNestApi` — the Backups page's whole-page op tests run a real
+# `BackupsMachine` over the in-memory seam.
+fauna-backups-machine = { path = "../../libs/fauna-backups-machine", features = [
+    "rpc-glue",
+    "test-helpers",
+] }
 fauna-feed = { workspace = true, features = ["test-helpers"] }
 fauna-client-sync = { path = "../../libs/fauna-client-sync", features = ["test-helpers"] }
 fauna-client-search = { path = "../../libs/fauna-client-search", features = ["test-helpers"] }

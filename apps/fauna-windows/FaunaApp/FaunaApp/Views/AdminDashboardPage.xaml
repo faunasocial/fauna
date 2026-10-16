@@ -6,6 +6,7 @@
     xmlns:local="using:FaunaApp.Views"
     xmlns:loc="using:FaunaApp.Markup"
     xmlns:controls="using:FaunaApp.Controls"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
     Loaded="Page_Loaded"
     xmlns:ids="using:FaunaApp.UiIds">
 
@@ -31,99 +32,41 @@
                 Visibility="Collapsed"
                 HorizontalAlignment="Left" />
 
-            <!-- Stat cards grid -->
-            <Grid x:Name="StatsGrid" RowSpacing="12" ColumnSpacing="12">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-
-                <!-- Users stat card -->
-                <Border Grid.Row="0" Grid.Column="0" CornerRadius="8" Padding="16"
-                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
-                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCard}"
-                        AutomationProperties.Name="{loc:Localize Key=admin/view/registered_users}">
-                    <StackPanel Spacing="4">
-                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardLabel}"
-                                   Opacity="0.7" FontSize="13"
-                                   Text="{loc:Localize Key=admin/view/registered_users}" />
-                        <TextBlock x:Name="UsersValue"
-                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardValue}"
-                                   Text="--" FontSize="28" FontWeight="SemiBold" />
-                    </StackPanel>
-                </Border>
-
-                <!-- Storage stat card -->
-                <Border Grid.Row="0" Grid.Column="1" CornerRadius="8" Padding="16"
-                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
-                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCard}"
-                        AutomationProperties.Name="{loc:Localize Key=admin/view/total_storage_used}">
-                    <StackPanel Spacing="4">
-                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardLabel}"
-                                   Opacity="0.7" FontSize="13"
-                                   Text="{loc:Localize Key=admin/view/total_storage_used}" />
-                        <TextBlock x:Name="StorageValue"
-                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardValue}"
-                                   Text="--" FontSize="28" FontWeight="SemiBold" />
-                    </StackPanel>
-                </Border>
-
-                <!-- Inbox messages stat card -->
-                <Border Grid.Row="1" Grid.Column="0" CornerRadius="8" Padding="16"
-                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
-                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCard}"
-                        AutomationProperties.Name="{loc:Localize Key=admin/view/total_inbox_messages}">
-                    <StackPanel Spacing="4">
-                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardLabel}"
-                                   Opacity="0.7" FontSize="13"
-                                   Text="{loc:Localize Key=admin/view/total_inbox_messages}" />
-                        <TextBlock x:Name="InboxValue"
-                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardValue}"
-                                   Text="--" FontSize="28" FontWeight="SemiBold" />
-                    </StackPanel>
-                </Border>
-
-                <!-- Sessions stat card -->
-                <Border Grid.Row="1" Grid.Column="1" CornerRadius="8" Padding="16"
-                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
-                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCard}"
-                        AutomationProperties.Name="{loc:Localize Key=admin/view/active_sessions}">
-                    <StackPanel Spacing="4">
-                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardLabel}"
-                                   Opacity="0.7" FontSize="13"
-                                   Text="{loc:Localize Key=admin/view/active_sessions}" />
-                        <TextBlock x:Name="SessionsValue"
-                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardValue}"
-                                   Text="--" FontSize="28" FontWeight="SemiBold" />
-                    </StackPanel>
-                </Border>
-
-                <!-- Server version stat card. Mirrors linux's server-version row +
-                     web's version card; value comes from node-info, not /admin/api/stats. -->
-                <Border Grid.Row="2" Grid.Column="0" CornerRadius="8" Padding="16"
-                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
-                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCard}"
-                        AutomationProperties.Name="{loc:Localize Key=admin/dashboard/version}">
-                    <StackPanel Spacing="4">
-                        <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardLabel}"
-                                   Opacity="0.7" FontSize="13"
-                                   Text="{loc:Localize Key=admin/dashboard/version}" />
-                        <TextBlock x:Name="VersionValue"
-                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardValue}"
-                                   Text="--" FontSize="28" FontWeight="SemiBold" />
-                    </StackPanel>
-                </Border>
-            </Grid>
+            <!-- The shared card set (admin.md § 1. Dashboard → The card set):
+                 one card per entry of AdminDashboardViewModel.Cards, in the
+                 fold's order — windows chooses no card of its own. indexed:
+                 true in ui.yaml; the literal AutomationIds repeat per card
+                 (the e2e driver's index= picks the Nth occurrence).
+                 AutomationProperties.Name on the card Border is load-bearing:
+                 without it a DataTemplate Border is not surfaced to FlaUI. The
+                 label/value leaves carry an AutomationId only, so get_text
+                 reads their (dynamic) Text. A non-virtualizing StackPanel
+                 keeps every card realized, below the fold included. -->
+            <ItemsControl x:Name="CardsList">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Spacing="12" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:AdminStatCardVm">
+                        <Border CornerRadius="8" Padding="16"
+                                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCard}"
+                                AutomationProperties.Name="{x:Bind Label}">
+                            <StackPanel Spacing="4">
+                                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardLabel}"
+                                           Opacity="0.7" FontSize="13"
+                                           Text="{x:Bind Label}" />
+                                <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminStatCardValue}"
+                                           Text="{x:Bind Value}" FontSize="28" FontWeight="SemiBold"
+                                           TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
 
             <!-- TextBlock mirrors for E2E -->
             <TextBlock x:Name="ErrorTextMirror"

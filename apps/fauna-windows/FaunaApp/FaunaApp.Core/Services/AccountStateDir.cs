@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using FaunaApp.Core.Logs;
 using uniffi.fauna_ffi;
 
@@ -135,6 +136,22 @@ public static class AccountStateDir
         // `account_state_erase_all_scopes`' doc comment for the measured failure.
         try { FaunaFfiMethods.AccountStateEraseScope(Base, actorIdHex, null); }
         catch (Exception ex) { ShellLog.Warn("AccountStateDir", $"erase scope failed: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// <see cref="Erase"/>, behind every account-runtime stop still in flight — the
+    /// remove-account erase's own order (<c>account-scoping.md</c> § Erasure follows scope:
+    /// stop, then erase). The account being removed is never the one this window serves,
+    /// but it can be the one it served a moment ago: a switch starts the outgoing
+    /// account's stop without waiting for it, and windows cannot delete the store that
+    /// stop has yet to close (<c>os error 32</c>). Bounded by
+    /// <see cref="AccountRuntimeStops.StopBudget"/>; on a lapse it erases anyway, and the
+    /// failure is logged by both the barrier and the erase.
+    /// </summary>
+    public static async Task EraseWhenStoppedAsync(string actorIdHex)
+    {
+        await AccountRuntimeStops.Process.BarrierAsync("remove-account").ConfigureAwait(false);
+        Erase(actorIdHex);
     }
 
     /// <summary>

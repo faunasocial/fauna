@@ -34,12 +34,22 @@
 //! (`folder_member_access`; absent row = reader). There is **no admin
 //! override on writes** (the admin read grant is discovery-metadata only).
 //! Every other write surface (share / evict / rotate / supersede / config /
-//! snapshot / serve / paywall) keeps strict owner-equality and is *not* routed
-//! through this module. All resolvers fold *absent* and *exists-but-not-yours*
-//! to `None` per ST-RES-1 (the caller maps it to `not_found` — no
-//! folder-name existence oracle).
+//! snapshot / serve / paywall) keeps strict owner-equality, through
+//! [`resolve_owned_folder`]. All resolvers fold *absent* and
+//! *exists-but-not-yours* to `None` per ST-RES-1 (the caller maps it to
+//! `not_found` — no folder-name existence oracle).
+//!
+//! ## One address, three gates
+//!
+//! Each of the three same-nest resolvers takes the request's
+//! [`FolderAddress`] (`set-addressing.md` § The row form): a **row** is loaded
+//! by id and admitted under the resolver's gate alone — no owner-first search,
+//! no fall-through to the name forms — and a **name** (with its hash) runs the
+//! owner-first search, so a member who owns a same-named set reaches the
+//! shared one only by its row.
 
 use crate::db::{CacheDb, FolderRow};
+use fauna_core::folder_keys::FolderRef;
 use fauna_mls::types::ChannelId;
 
 /// **Why** a caller may read a set — the same three arms
@@ -138,42 +148,96 @@ pub(crate) async fn can_read_folder(
     Ok(None)
 }
 
-/// Resolve the folder named `name` that `caller` may **read** — their own set
-/// (the `(name, actor_id)`-unique owner row), else a group-bound shared set of
-/// that name whose derived channel has `caller` on its roster.
+/// The address a per-set request resolves by on this nest — the nest-side
+/// form of [`fauna_protocol::folders::SetAddress`], its hash validated
+/// (`crate::routes::parse_set_address`; this module stays free of
+/// `RpcError`). `set-addressing.md` § The row form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FolderAddress<'a> {
+    /// `folders.id` — names exactly one row; the row wins, and the name forms
+    /// are not consulted beside it.
+    Row(i64),
+    /// The plaintext name (empty on a hash-addressed request) and the
+    /// validated `name_hash`, which wins over the name when present.
+    Name {
+        name: &'a str,
+        name_hash: Option<[u8; 32]>,
+    },
+}
+
+impl<'a> FolderAddress<'a> {
+    /// A by-name address — `name_hash` wins over `name` when present.
+    pub(crate) fn name(name: &'a str, name_hash: Option<[u8; 32]>) -> Self {
+        Self::Name { name, name_hash }
+    }
+}
+
+/// The caller's **own** row at `address` — the owner-only lookup every
+/// owner-gated per-set kind shares (`set-addressing.md` § The row form,
+/// *Three resolvers, one address*). A row is admitted iff `caller` owns it; a
+/// name resolves on the `(name, actor_id)`-unique owner row (hash-first).
+/// `None` folds *absent* and *not yours* (ST-RES-1).
+pub(crate) async fn resolve_owned_folder(
+    db: &CacheDb,
+    address: FolderAddress<'_>,
+    caller: &[u8; 32],
+) -> anyhow::Result<Option<FolderRow>> {
+    Ok(match address {
+        FolderAddress::Row(id) => db
+            .get_folder_by_id(id)
+            .await?
+            .filter(|fs| fs.actor_id.as_slice() == caller.as_slice()),
+        FolderAddress::Name { name, name_hash } => match name_hash {
+            Some(h) => db.get_folder_for_actor_by_name_hash(&h, caller).await?,
+            None => db.get_folder_for_actor(name, caller).await?,
+        },
+    })
+}
+
+/// Resolve the folder at `address` that `caller` may **read**.
 ///
-/// `None` ⇒ "no set of this name is readable by you", folding *absent* and
+/// **By row:** the row is loaded by id and admitted on [`can_read_folder`]'s
+/// owner and member arms alone — never the admin discovery grant, which holds
+/// no keys and reads no bytes. A member who owns a set of the same name as a
+/// shared set it reads reaches the shared set this way, where both name forms
+/// resolve its own.
+///
+/// **By name:** their own set (the `(name, actor_id)`-unique owner row), else
+/// a group-bound shared set of that name whose derived channel has `caller`
+/// on its roster. The owner row wins first, so a member cannot reach a shared
+/// set by a name that collides with one of their own — safe (no cross-user
+/// leak); the row form is the address that lifts it.
+///
+/// `None` ⇒ "no such set is readable by you", folding *absent* and
 /// *exists-but-not-yours* together so the caller's `not_found` closes the
 /// **ST-RES-1** name-existence oracle.
 ///
-/// **Addressing note (Slice 2):** the owner row wins first, so if `caller` *owns*
-/// a set named `name` they always resolve to their own — even if a same-named
-/// shared set also exists. That is safe (no cross-user leak), but means a member
-/// cannot reach a shared set by a name that collides with one of their own; the
-/// robust fix (addressing shared reads by the global `folder_id`) is a future
-/// refinement and is unnecessary for the gate's security property (the membership
-/// check is the boundary regardless of how the row is addressed).
-///
 /// **`name_hash` (S5b, `file-sync.md` § Sealed names & paths):** when present,
-/// resolves hash-first on BOTH arms (the owner row via
+/// resolves hash-first on BOTH name arms (the owner row via
 /// `get_folder_for_actor_by_name_hash`, the group-bound candidates via
 /// `get_group_bound_folders_by_name_hash`) — the address that survives once
-/// the nest's plaintext `name` column scrubs post-flip. Callers validate the
-/// hash is exactly 32 bytes before calling in (this module stays free of
-/// `RpcError`); a malformed hash is the caller's problem, never silently
-/// downgraded to the name arm here.
+/// the nest's plaintext `name` column scrubs post-flip.
 pub(crate) async fn resolve_readable_folder(
     db: &CacheDb,
-    name: &str,
-    name_hash: Option<&[u8; 32]>,
+    address: FolderAddress<'_>,
     caller: &[u8; 32],
 ) -> anyhow::Result<Option<FolderRow>> {
-    // Owner fast-path: the `(name, actor_id)`-scoped unique row.
-    let owned = match name_hash {
-        Some(h) => db.get_folder_for_actor_by_name_hash(h, caller).await?,
-        None => db.get_folder_for_actor(name, caller).await?,
+    let (name, name_hash) = match address {
+        FolderAddress::Row(id) => {
+            let Some(fs) = db.get_folder_by_id(id).await? else {
+                return Ok(None);
+            };
+            return Ok(matches!(
+                can_read_folder(db, &fs, caller).await?,
+                Some(FolderReadGrant::Owner | FolderReadGrant::Member)
+            )
+            .then_some(fs));
+        }
+        FolderAddress::Name { name, name_hash } => (name, name_hash),
     };
-    if let Some(fs) = owned {
+    let name_hash = name_hash.as_ref();
+    // Owner fast-path: the `(name, actor_id)`-scoped unique row.
+    if let Some(fs) = resolve_owned_folder(db, address, caller).await? {
         return Ok(Some(fs));
     }
     // Member path: any group-bound set of this name whose derived channel admits
@@ -191,6 +255,63 @@ pub(crate) async fn resolve_readable_folder(
         }
     }
     Ok(None)
+}
+
+/// [`resolve_readable_folder`] for a [`FolderRef`] — the ref form of the
+/// chunk GET's relay hint (`file-sync.md` § Relay serving, step (4)), whose
+/// gate is the one the announce admits a seat on. Only a
+/// [`FolderRef::Local`] names a row on this nest (resolved as
+/// [`FolderAddress::Row`]); a `foreign:` ref under a session is `None` — a
+/// session actor's cross-nest sets have no row here, and their bytes are read
+/// on the home nest under a byte-plane token
+/// ([`resolve_foreign_readable_folder_by_ref`]).
+pub(crate) async fn resolve_readable_folder_by_ref(
+    db: &CacheDb,
+    folder_ref: FolderRef,
+    caller: &[u8; 32],
+) -> anyhow::Result<Option<FolderRow>> {
+    let FolderRef::Local(id) = folder_ref else {
+        return Ok(None);
+    };
+    resolve_readable_folder(db, FolderAddress::Row(id), caller).await
+}
+
+/// [`resolve_foreign_readable_folder`] by ref: the folder `folder_ref`'s
+/// channel binds, for a caller named by a **federated byte-plane token**.
+/// Only a [`FolderRef::Foreign`] has meaning under such a token — the
+/// channel is what the token's actor is a member of, and the one roster read
+/// is the same `channel_foreign_members` row, at every call; a `local:` ref
+/// is `None`, since a federated token names no row of this nest directly.
+/// The row is the one its channel's claimant owns, exactly as the name form
+/// requires (`claimed_folder_for_channel`), so a folder bound to a channel
+/// somebody else claimed is never reached through that channel's roster.
+pub(crate) async fn resolve_foreign_readable_folder_by_ref(
+    db: &CacheDb,
+    folder_ref: FolderRef,
+    caller: &[u8; 32],
+) -> anyhow::Result<Option<FolderRow>> {
+    let FolderRef::Foreign(channel_id) = folder_ref else {
+        return Ok(None);
+    };
+    if db
+        .foreign_member_home_nest(&channel_id, caller)
+        .await?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let Some(claimant) = db.folder_channel_claimed_by(&channel_id).await? else {
+        return Ok(None);
+    };
+    Ok(db
+        .get_folders_for_actor_full(&claimant)
+        .await?
+        .into_iter()
+        .find(|fs| {
+            fs.mls_group_id
+                .as_deref()
+                .is_some_and(|g| ChannelId::from_group_id(g).0 == channel_id)
+        }))
 }
 
 /// Resolve the hinted folder for a caller named by a **federated byte-plane
@@ -247,56 +368,69 @@ pub(crate) async fn resolve_foreign_readable_folder(
     Ok(None)
 }
 
-/// Resolve the folder named `name` that `caller` may **write** — their own
-/// set (any mode, exactly the old `owned_folder` behavior), else a
-/// group-bound shared set of that name where `caller` is a current roster
-/// member **and** holds an explicit `writer` grant on the derived channel
-/// (`folder_member_access`; absent row = reader ⇒ `None`).
+/// Resolve the folder at `address` that `caller` may **write** — the owner
+/// (any mode), or a roster member of a group-bound set's derived channel
+/// holding an explicit `writer` grant (`folder_member_access`; absent row =
+/// reader ⇒ `None`). No admin arm by design.
 ///
 /// The write-plane twin of [`resolve_readable_folder`], with the same
-/// ST-RES-1 `None` fold and the same owner-row-wins addressing note. Gates
-/// exactly `fauna.sync.changes.record`, `fauna.folders.lease.{acquire,
-/// release}`, and `fauna.sync.conflicts.report` (`file-sync.md` § Multi-writer
-/// shared sets); no admin arm by design.
-///
-/// `name_hash`: see [`resolve_readable_folder`]'s doc — same hash-first
-/// contract on both the owner and group-bound arms.
+/// ST-RES-1 `None` fold and the same two address arms: **by row**, the row is
+/// loaded by id and admitted on those two arms alone, so a writer who owns a
+/// same-named set reaches the shared set it writes (`media.md` § Encryption at
+/// rest → *The filter and the upload target address the row*, (e)); **by
+/// name**, the owner row wins first, then a group-bound set of that name the
+/// caller writes. Gates exactly `fauna.sync.changes.record`,
+/// `fauna.folders.lease.{acquire, release}`, and `fauna.sync.conflicts.report`
+/// (`file-sync.md` § Multi-writer shared sets).
 pub(crate) async fn resolve_writable_folder(
     db: &CacheDb,
-    name: &str,
-    name_hash: Option<&[u8; 32]>,
+    address: FolderAddress<'_>,
     caller: &[u8; 32],
 ) -> anyhow::Result<Option<FolderRow>> {
-    // Owner fast-path: the `(name, actor_id)`-scoped unique row.
-    let owned = match name_hash {
-        Some(h) => db.get_folder_for_actor_by_name_hash(h, caller).await?,
-        None => db.get_folder_for_actor(name, caller).await?,
+    let (name, name_hash) = match address {
+        FolderAddress::Row(id) => {
+            let Some(fs) = db.get_folder_by_id(id).await? else {
+                return Ok(None);
+            };
+            return Ok((fs.actor_id.as_slice() == caller.as_slice()
+                || is_writer_member(db, &fs, caller).await?)
+                .then_some(fs));
+        }
+        FolderAddress::Name { name, name_hash } => (name, name_hash),
     };
-    if let Some(fs) = owned {
+    // Owner fast-path: the `(name, actor_id)`-scoped unique row.
+    if let Some(fs) = resolve_owned_folder(db, address, caller).await? {
         return Ok(Some(fs));
     }
-    // Writer-member path: a group-bound set of this name whose derived channel
-    // has `caller` on the roster with an explicit `writer` role row. Both checks
-    // are required — the roster admits readers too, and a stale role row without
-    // roster membership (should not exist; evict deletes it) must not admit.
+    // Writer-member path: a group-bound set of this name `caller` writes
+    // ([`is_writer_member`]).
     let candidates = match name_hash {
-        Some(h) => db.get_group_bound_folders_by_name_hash(h).await?,
+        Some(h) => db.get_group_bound_folders_by_name_hash(&h).await?,
         None => db.get_group_bound_folders_by_name(name).await?,
     };
     for fs in candidates {
-        if let Some(group_id) = &fs.mls_group_id {
-            let channel_id = ChannelId::from_group_id(group_id).0;
-            if db.is_actor_in_channel(caller, &channel_id).await?
-                && db
-                    .get_folder_member_role(&channel_id, caller)
-                    .await?
-                    .is_some_and(|role| role.access == "writer")
-            {
-                return Ok(Some(fs));
-            }
+        if is_writer_member(db, &fs, caller).await? {
+            return Ok(Some(fs));
         }
     }
     Ok(None)
+}
+
+/// The writer-member arm both of [`resolve_writable_folder`]'s address forms share: `fs` is group-bound and
+/// its derived channel has `caller` on the roster with an explicit `writer`
+/// role row. Both checks are required — the roster admits readers too, and a
+/// stale role row without roster membership (should not exist; evict deletes
+/// it) must not admit.
+async fn is_writer_member(db: &CacheDb, fs: &FolderRow, caller: &[u8; 32]) -> anyhow::Result<bool> {
+    let Some(group_id) = &fs.mls_group_id else {
+        return Ok(false);
+    };
+    let channel_id = ChannelId::from_group_id(group_id).0;
+    Ok(db.is_actor_in_channel(caller, &channel_id).await?
+        && db
+            .get_folder_member_role(&channel_id, caller)
+            .await?
+            .is_some_and(|role| role.access == "writer"))
 }
 
 /// Enumerate **every** folder `caller` may read — their own sets (owner rows,
@@ -495,12 +629,12 @@ mod tests {
         let group_id = vec![0x33u8; 32];
         bind_and_add_members(&db, "shared", &owner, &group_id, &[member]).await;
 
-        let owner_row = resolve_readable_folder(&db, "shared", None, &owner)
+        let owner_row = resolve_readable_folder(&db, FolderAddress::name("shared", None), &owner)
             .await
             .unwrap();
         assert!(owner_row.is_some(), "owner resolves their set");
 
-        let member_row = resolve_readable_folder(&db, "shared", None, &member)
+        let member_row = resolve_readable_folder(&db, FolderAddress::name("shared", None), &member)
             .await
             .unwrap();
         assert_eq!(
@@ -510,7 +644,7 @@ mod tests {
         );
 
         assert!(
-            resolve_readable_folder(&db, "shared", None, &outsider)
+            resolve_readable_folder(&db, FolderAddress::name("shared", None), &outsider)
                 .await
                 .unwrap()
                 .is_none(),
@@ -550,12 +684,12 @@ mod tests {
             .await
             .unwrap();
 
-        let owner_row = resolve_writable_folder(&db, "shared", None, &owner)
+        let owner_row = resolve_writable_folder(&db, FolderAddress::name("shared", None), &owner)
             .await
             .unwrap();
         assert!(owner_row.is_some(), "owner always writable");
 
-        let writer_row = resolve_writable_folder(&db, "shared", None, &writer)
+        let writer_row = resolve_writable_folder(&db, FolderAddress::name("shared", None), &writer)
             .await
             .unwrap();
         assert_eq!(
@@ -571,7 +705,7 @@ mod tests {
             (&admin, "admin (no write override)"),
         ] {
             assert!(
-                resolve_writable_folder(&db, "shared", None, who)
+                resolve_writable_folder(&db, FolderAddress::name("shared", None), who)
                     .await
                     .unwrap()
                     .is_none(),
@@ -595,7 +729,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            resolve_writable_folder(&db, "shared", None, &member)
+            resolve_writable_folder(&db, FolderAddress::name("shared", None), &member)
                 .await
                 .unwrap()
                 .is_some(),
@@ -606,14 +740,14 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            resolve_writable_folder(&db, "shared", None, &member)
+            resolve_writable_folder(&db, FolderAddress::name("shared", None), &member)
                 .await
                 .unwrap()
                 .is_none(),
             "writer→reader edit revokes the write gate"
         );
         assert!(
-            resolve_readable_folder(&db, "shared", None, &member)
+            resolve_readable_folder(&db, FolderAddress::name("shared", None), &member)
                 .await
                 .unwrap()
                 .is_some(),
@@ -633,7 +767,7 @@ mod tests {
         // B owns their own (owner-only) "docs".
         db.create_folder("docs", &b).await.unwrap();
 
-        let row = resolve_readable_folder(&db, "docs", None, &b)
+        let row = resolve_readable_folder(&db, FolderAddress::name("docs", None), &b)
             .await
             .unwrap()
             .unwrap();
@@ -676,14 +810,14 @@ mod tests {
         // for a hash arm that resolves nothing at all. The plaintext name is
         // deliberately `""`: post-flip that is what a client sends.
         assert!(
-            resolve_readable_folder(&db, "", Some(&private_hash), &owner)
+            resolve_readable_folder(&db, FolderAddress::name("", Some(private_hash)), &owner)
                 .await
                 .unwrap()
                 .is_some(),
             "owner resolves their owner-only set by hash alone"
         );
         assert_eq!(
-            resolve_readable_folder(&db, "", Some(&shared_hash), &member)
+            resolve_readable_folder(&db, FolderAddress::name("", Some(shared_hash)), &member)
                 .await
                 .unwrap()
                 .map(|r| r.actor_id),
@@ -693,14 +827,14 @@ mod tests {
 
         // The negatives: another actor's hash is not an address they may use.
         assert!(
-            resolve_readable_folder(&db, "", Some(&private_hash), &outsider)
+            resolve_readable_folder(&db, FolderAddress::name("", Some(private_hash)), &outsider)
                 .await
                 .unwrap()
                 .is_none(),
             "B supplying A's owner-only name_hash resolves None (owner scope holds on the hash arm)"
         );
         assert!(
-            resolve_readable_folder(&db, "", Some(&shared_hash), &outsider)
+            resolve_readable_folder(&db, FolderAddress::name("", Some(shared_hash)), &outsider)
                 .await
                 .unwrap()
                 .is_none(),
@@ -730,14 +864,14 @@ mod tests {
 
         // Positive controls (see the read-plane twin for why they are here).
         assert!(
-            resolve_writable_folder(&db, "", Some(&shared_hash), &owner)
+            resolve_writable_folder(&db, FolderAddress::name("", Some(shared_hash)), &owner)
                 .await
                 .unwrap()
                 .is_some(),
             "owner writes their set addressed by hash alone"
         );
         assert!(
-            resolve_writable_folder(&db, "", Some(&shared_hash), &writer)
+            resolve_writable_folder(&db, FolderAddress::name("", Some(shared_hash)), &writer)
                 .await
                 .unwrap()
                 .is_some(),
@@ -749,12 +883,193 @@ mod tests {
             (&outsider, "non-member outsider"),
         ] {
             assert!(
-                resolve_writable_folder(&db, "", Some(&shared_hash), who)
+                resolve_writable_folder(&db, FolderAddress::name("", Some(shared_hash)), who)
                     .await
                     .unwrap()
                     .is_none(),
                 "{label} must NOT resolve writable via the hash arm"
             );
+        }
+    }
+
+    /// The write twin addresses the **row**: a writer member W who also owns
+    /// a same-named set reaches the shared row by id (where both name forms
+    /// resolve its own); a reader member, the owner of the other same-named
+    /// row, a writer naming its non-writable neighbour, and a `foreign:` ref
+    /// all get `None` (`media.md` § Encryption at rest → *The filter and the
+    /// upload target address the row*, (e)).
+    #[tokio::test]
+    async fn writable_by_ref_resolver_addresses_the_row() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let shared_owner = [0xa1u8; 32];
+        let writer = [0xb2u8; 32];
+        let reader = [0xc3u8; 32];
+        let group_id = vec![0x77u8; 32];
+        // W owns its own "photos" AND writes shared_owner's "photos".
+        db.create_folder("photos", &writer).await.unwrap();
+        bind_and_add_members(&db, "photos", &shared_owner, &group_id, &[writer, reader]).await;
+        let channel_id = ChannelId::from_group_id(&group_id).0;
+        db.set_folder_member_access(&channel_id, &writer, "writer", None)
+            .await
+            .unwrap();
+        db.set_folder_member_access(&channel_id, &reader, "reader", None)
+            .await
+            .unwrap();
+        let own_id = db
+            .get_folder_for_actor("photos", &writer)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let shared_id = db
+            .get_folder_for_actor("photos", &shared_owner)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        assert_ne!(own_id, shared_id);
+
+        let by_ref = |id, who| {
+            let db = &db;
+            async move {
+                resolve_writable_folder(db, FolderAddress::Row(id), who)
+                    .await
+                    .unwrap()
+                    .map(|r| r.id)
+            }
+        };
+        assert_eq!(
+            by_ref(shared_id, &writer).await,
+            Some(shared_id),
+            "writer member reaches the shared row"
+        );
+        assert_eq!(
+            by_ref(own_id, &writer).await,
+            Some(own_id),
+            "owner reaches its own row"
+        );
+        assert_eq!(
+            by_ref(shared_id, &shared_owner).await,
+            Some(shared_id),
+            "owner of the shared row"
+        );
+        assert_eq!(
+            by_ref(shared_id, &reader).await,
+            None,
+            "reader member must not write"
+        );
+        assert_eq!(
+            by_ref(own_id, &shared_owner).await,
+            None,
+            "another actor's owner-only row"
+        );
+        assert_eq!(
+            by_ref(own_id, &reader).await,
+            None,
+            "outsider to the owner-only row"
+        );
+        assert_eq!(by_ref(424_242, &writer).await, None, "absent row");
+        // The name forms still resolve W's own row — the shadow the row lifts.
+        assert_eq!(
+            resolve_writable_folder(&db, FolderAddress::name("photos", None), &writer)
+                .await
+                .unwrap()
+                .map(|r| r.id),
+            Some(own_id)
+        );
+    }
+
+    /// The row arm of each of the three resolvers admits under that
+    /// resolver's own gate and nothing else (`set-addressing.md` § The row
+    /// form, *The row wins*): the owner-only lookup admits the owner alone;
+    /// the reader admits owner and roster member but never the admin
+    /// discovery grant; the writer is pinned by
+    /// `writable_by_ref_resolver_addresses_the_row`. A stranger and an absent
+    /// row are `None` on every arm, and a member who owns a same-named set
+    /// reaches the shared row by id while both name forms resolve its own.
+    #[tokio::test]
+    async fn row_address_resolves_under_each_resolvers_gate() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let owner = [0xa1u8; 32];
+        let member = [0xb2u8; 32];
+        let stranger = [0xeeu8; 32];
+        let admin = [0xadu8; 32];
+        let group_id = vec![0x99u8; 32];
+        db.create_folder("photos", &member).await.unwrap();
+        bind_and_add_members(&db, "photos", &owner, &group_id, &[member]).await;
+        db.add_admin_actor(&admin).await.unwrap();
+        let shared = db
+            .get_folder_for_actor("photos", &owner)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let own = db
+            .get_folder_for_actor("photos", &member)
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+
+        let owned = |id, who| {
+            let db = &db;
+            async move {
+                resolve_owned_folder(db, FolderAddress::Row(id), who)
+                    .await
+                    .unwrap()
+                    .map(|r| r.id)
+            }
+        };
+        let readable = |id, who| {
+            let db = &db;
+            async move {
+                resolve_readable_folder(db, FolderAddress::Row(id), who)
+                    .await
+                    .unwrap()
+                    .map(|r| r.id)
+            }
+        };
+
+        assert_eq!(owned(shared, &owner).await, Some(shared), "owner owns it");
+        assert_eq!(owned(own, &member).await, Some(own));
+        assert_eq!(
+            owned(shared, &member).await,
+            None,
+            "a member is not the owner"
+        );
+        assert_eq!(owned(shared, &stranger).await, None);
+        assert_eq!(owned(424_242, &owner).await, None, "absent row");
+
+        assert_eq!(readable(shared, &owner).await, Some(shared));
+        assert_eq!(
+            readable(shared, &member).await,
+            Some(shared),
+            "roster member"
+        );
+        assert_eq!(
+            readable(shared, &admin).await,
+            None,
+            "the admin discovery grant reads no row by id"
+        );
+        assert_eq!(readable(shared, &stranger).await, None);
+        assert_eq!(
+            readable(own, &owner).await,
+            None,
+            "another's owner-only row"
+        );
+        assert_eq!(readable(424_242, &member).await, None, "absent row");
+
+        // The shadow the row lifts: by name the member reaches its own set on
+        // the reader and the owner-only lookup alike.
+        for resolved in [
+            resolve_readable_folder(&db, FolderAddress::name("photos", None), &member)
+                .await
+                .unwrap(),
+            resolve_owned_folder(&db, FolderAddress::name("photos", None), &member)
+                .await
+                .unwrap(),
+        ] {
+            assert_eq!(resolved.map(|r| r.id), Some(own));
         }
     }
 }

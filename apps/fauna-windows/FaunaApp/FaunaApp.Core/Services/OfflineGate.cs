@@ -240,6 +240,33 @@ internal sealed class OfflineGate
     }
 
     /// <summary>
+    /// Withdraw the declaration on <paramref name="control"/>: the control stops
+    /// being gated and gets back what the PAGE last asked of it (the recorded
+    /// page intent, never the gate's own verdict), with our reason caption
+    /// cleared. For a control whose ceremony is conditional — the new-thread
+    /// send, which is the room-founding kind only while the home-nest choice
+    /// makes the room a community one — so the declaration can follow the paint
+    /// both ways, not only into the gated state. A control with no declaration
+    /// is left alone.
+    /// </summary>
+    internal void Retract(object identity)
+    {
+        Prune();
+        for (var i = _declared.Count - 1; i >= 0; i--)
+        {
+            var old = _declared[i];
+            // By IDENTITY, never by wrapper reference — see IGatedControl.Identity.
+            if (!ReferenceEquals(old.Control.Identity, identity)) continue;
+            old.Superseded = true;
+            old.Control.EnabledChanged -= old.Handler;
+            old.Control.Detach();
+            _declared.RemoveAt(i);
+            if (old.ReasonIsOurs) old.Control.GateReason = null;
+            if (old.Control.IsEnabled != old.PageEnabled) old.Control.IsEnabled = old.PageEnabled;
+        }
+    }
+
+    /// <summary>
     /// The link's state changed — re-decide every live declaration.
     ///
     /// <para>Called from <c>MainViewModel.OnConnectionStateChanged</c>, the one

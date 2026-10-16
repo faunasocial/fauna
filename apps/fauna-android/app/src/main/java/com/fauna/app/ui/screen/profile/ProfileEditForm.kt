@@ -12,6 +12,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.app.core.ExifStripper
 import com.fauna.app.ui.navigation.LocalAppMessages
@@ -62,17 +63,25 @@ fun ProfileEditFormSection(
     // Real content picker for each picture field (mirrors FeedComposeScreen's
     // compose-file launcher): read bytes via ContentResolver, EXIF-strip, then
     // upload immediately so a Save later that day only signs the resulting hash.
+    // [stagePicked] is the one pick path — both picker callbacks and the
+    // debug agent's `compose.file` arms call it.
+    val stagePicked: (String, ByteArray, String) -> Unit = remember(vm) {
+        { target, rawBytes, mimeType ->
+            val bytes = ExifStripper.strip(rawBytes, mimeType)
+            if (target == Ids.PROFILE_EDIT_BANNER) vm.stageBanner(bytes) else vm.stageAvatar(bytes)
+        }
+    }
     val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri ?: return@rememberLauncherForActivityResult
         val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
         val rawBytes = context.contentResolver.openInputStream(uri)?.readBytes() ?: return@rememberLauncherForActivityResult
-        vm.stageAvatar(ExifStripper.strip(rawBytes, mimeType))
+        stagePicked(Ids.PROFILE_EDIT_AVATAR, rawBytes, mimeType)
     }
     val bannerPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri ?: return@rememberLauncherForActivityResult
         val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
         val rawBytes = context.contentResolver.openInputStream(uri)?.readBytes() ?: return@rememberLauncherForActivityResult
-        vm.stageBanner(ExifStripper.strip(rawBytes, mimeType))
+        stagePicked(Ids.PROFILE_EDIT_BANNER, rawBytes, mimeType)
     }
 
     when (val s = state) {
@@ -81,7 +90,25 @@ fun ProfileEditFormSection(
                 modifier = Modifier.fillMaxWidth().padding(16.dp),
                 contentAlignment = Alignment.Center,
             ) { CircularProgressIndicator() }
-        is ProfileEditVM.State.Ready ->
+        is ProfileEditVM.State.Ready -> {
+            // The OS picker gives UiAutomator nothing to drive, so while the
+            // populated form is shown it registers [stagePicked] on
+            // `TestAgent.profileEditImagePick`, where the `compose.file`
+            // [profile-edit-avatar|-banner] arms stand in for the picker's
+            // result (`profile.md` § UI elements: the value is a settable
+            // path). Keyed to the form, not the VM: the VM is scoped to the
+            // profile screen and outlives the form. `BuildConfig.DEBUG`-gated
+            // so the release shrinker folds it away (convention 15).
+            if (BuildConfig.DEBUG) {
+                DisposableEffect(stagePicked) {
+                    com.fauna.app.testing.TestAgent.profileEditImagePick = stagePicked
+                    onDispose {
+                        if (com.fauna.app.testing.TestAgent.profileEditImagePick === stagePicked) {
+                            com.fauna.app.testing.TestAgent.profileEditImagePick = null
+                        }
+                    }
+                }
+            }
             ProfileEditFormContent(
                 initialDisplayName = s.displayName,
                 initialBio = s.bio,
@@ -96,6 +123,7 @@ fun ProfileEditFormSection(
                 onPickBanner = { bannerPicker.launch("image/*") },
                 onClearBanner = vm::clearBanner,
             )
+        }
     }
 }
 

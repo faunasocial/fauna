@@ -35,7 +35,15 @@ class LabelerCatalogActions:
         })
 
     def navigate_catalog(self) -> None:
-        """Navigate to the Community-labelers catalog Settings sub-page."""
+        """Navigate to the Community-labelers catalog Settings sub-page.
+
+        Always a real arrival, by way of the feed, as a user re-opening the
+        page: the catalog re-reads on arrival (linux on map, web on mount, tui
+        on the nav edge), so a labeler published since the last visit shows. A
+        navigation to the page already open is no arrival on web or linux, and
+        neither is the Settings root on linux, whose sidebar keeps the last
+        sub-page showing — the just-published row never loaded there."""
+        self.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
         self.driver.set_state({
             "nav": {"stack": [{"view": "settings"}, {"view": "settings", "id": "labeler-catalog"}]},
         })
@@ -153,6 +161,14 @@ class LabelerCatalogActions:
     def is_unsubscribe_visible(self, index: int = 0) -> bool:
         return not self.driver.is_absent(
             "labeler-catalog-item-unsubscribe-button", scope=f"labeler-catalog-item[{index}]"
+        )
+
+    def is_subscribe_enabled(self, index: int = 0) -> bool:
+        """Whether row `index`'s subscribe button is enabled — disabled while
+        the open inspect panel shows that labeler failing the shared
+        ``LabelerInspectView::subscribable`` predicate."""
+        return self.driver.is_enabled(
+            "labeler-catalog-item-subscribe-button", scope=f"labeler-catalog-item[{index}]"
         )
 
     def subscribe(self, index: int = 0) -> None:

@@ -15,7 +15,7 @@ namespace FaunaApp.Core.Services;
 /// VM onto it, so the page renders and dispatches over a deterministic fake instead of a
 /// live agent: the real add flow opens a native OS folder picker the drivers can't drive.
 /// Only wired when the TestAgent is active; production never uses it.
-/// (file-sync.md § On-Demand Files; ui.yaml § folders.)
+/// (on-demand-files.md § On-Demand Files; ui.yaml § folders.)
 ///
 /// <para><b>A pure render fixture.</b> The page pairs it with a throwaway
 /// <c>FfiLocationBindingsModel</c>, so nothing here reaches the session model that

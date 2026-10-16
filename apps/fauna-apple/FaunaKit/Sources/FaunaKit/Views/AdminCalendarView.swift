@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The flat admin **`admin-calendar`** page (`docs/goal/behavior/admin.md` § 8
@@ -149,3 +152,4 @@ public struct AdminCalendarView: View {
         .disabled(vm.isBusy)
     }
 }
+#endif // !FAUNA_KIDS

@@ -19,7 +19,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use ed25519_dalek::SigningKey;
 use fauna_account_plane::principal_succession as generic;
-use fauna_account_store::sqlite::SqliteBackend;
+use fauna_account_store::sqlite::{ReplicaSealKey, SqliteBackend};
+use fauna_core::crypto::BackupKey;
 use fauna_core::identity::ActorKeypair;
 use fauna_credential_store::CredentialStore;
 use fauna_protocol::{RpcErrorClass, RpcRequester};
@@ -64,7 +65,14 @@ where
         credentials,
         actor_id_hex,
         &MigrationSection::from(store_dir.to_path_buf()),
-        || std::future::ready(SqliteBackend::open(store_dir)),
+        // A keyed reader (the replica seal): the rotation reads the replica's rows, which
+        // rest sealed; the posture stays the runtime's open to settle.
+        || {
+            std::future::ready(SqliteBackend::open_with_key(
+                store_dir,
+                ReplicaSealKey::derive(&BackupKey::derive(seed.secret_bytes())),
+            ))
+        },
         seed,
         held_writer,
         slot,

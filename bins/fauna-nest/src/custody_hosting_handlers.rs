@@ -262,9 +262,14 @@ async fn remove_hosting_row_and_store(
         return Ok((false, false));
     };
 
-    let removed = state
+    // One transaction drops the row and, with the owner's last hosting row on
+    // this nest, the owner's custodied-fleet register — so the serve door's
+    // `CustodiedFleet` class ends at the very next dispatch, never outliving
+    // the hosting it serves (`account-replica-posture.md` § the custodian-NEST
+    // serve door, ruling 3).
+    let (removed, pair_rows_left) = state
         .db
-        .delete_custody_hosting(host, grant_id)
+        .delete_custody_hosting_and_fleet(host, grant_id, &row.owner_actor_id)
         .await
         .map_err(internal)?;
 
@@ -272,12 +277,7 @@ async fn remove_hosting_row_and_store(
     // for the same (host, owner) still reads it.
     let mut store_dropped = false;
     if removed
-        && state
-            .db
-            .count_custody_hosting_for_host_owner(host, &row.owner_actor_id)
-            .await
-            .map_err(internal)?
-            == 0
+        && pair_rows_left == 0
         && let Some(root) = state.custody_hosting_root.as_ref()
     {
         let owner: Option<[u8; 32]> = row.owner_actor_id.as_slice().try_into().ok();

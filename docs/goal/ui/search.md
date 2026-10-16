@@ -88,7 +88,9 @@ before it, every app grew its limit past the ceiling unaware, so the third click
 was a no-op that then hid the button by accident — see § Implementation status
 today. Raising the ceiling is a wire-behavior change, not a constant tweak —
 the skew consequences and the bump precondition live on `MAX_LIMIT`'s doc in
-`fauna_protocol::search` (the file a bump must touch).
+`fauna_protocol::search` (the file a bump must touch). `offset` is clamped the
+same silent way into `[0, MAX_OFFSET]` (10 000, same file) so no single query can
+make the nest fetch the whole corpus; the client's paging never reaches it.
 - Result rows (component `search-result-card`) — `search-result-item` indexed.
 
 ## Element IDs

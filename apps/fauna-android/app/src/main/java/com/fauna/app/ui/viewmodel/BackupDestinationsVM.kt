@@ -6,9 +6,12 @@ import com.fauna.app.core.AccountStores
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.ApiException
 import com.fauna.app.core.SecureStorage
+import com.fauna.app.ui.util.loadFailureText
 import com.fauna.ffi.FfiBackupDestinationStatus
 import com.fauna.ffi.FfiBackupDestinationView
 import com.fauna.ffi.FfiDestinationAuditRow
+import com.fauna.ffi.FfiReseedResult
+import com.fauna.ffi.destinationRowIsAClientDevice
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -87,6 +90,42 @@ class BackupDestinationsVM @Inject constructor(
     private val _orphanedStoreBytes = MutableStateFlow<ULong?>(null)
     val orphanedStoreBytes: StateFlow<ULong?> = _orphanedStoreBytes.asStateFlow()
 
+    /**
+     * A restore (re-seed) is running: every `backup-destination-reseed-button`
+     * is disarmed until it ends, so one tap cannot start two ceremonies, and
+     * `backup-destination-reseed-result` carries the running line.
+     */
+    private val _reseedRunning = MutableStateFlow(false)
+    val reseedRunning: StateFlow<Boolean> = _reseedRunning.asStateFlow()
+
+    /**
+     * How the last restore ended, or `null` before a first run. The record is
+     * the shared face's own (`FfiReseedResult`): the view resolves its lines
+     * and its two failure sentences, because i18n stays in the view — this VM
+     * never re-reads the verdict from the lines.
+     */
+    private val _reseedResult = MutableStateFlow<FfiReseedResult?>(null)
+    val reseedResult: StateFlow<FfiReseedResult?> = _reseedResult.asStateFlow()
+
+    /**
+     * The `destination_id` whose `backup-audit-recover-confirm-modal` is open,
+     * or `null` (`ui/backups.md` § Audit-alert surface, the fifth reason).
+     */
+    private val _recoverConfirming = MutableStateFlow<String?>(null)
+    val recoverConfirming: StateFlow<String?> = _recoverConfirming.asStateFlow()
+
+    /**
+     * A recovery is running: every `backup-audit-recover-button` is disarmed
+     * until it ends, so one tap cannot start two runs, and
+     * `backup-audit-recover-result` carries the running line.
+     */
+    private val _recoverRunning = MutableStateFlow(false)
+    val recoverRunning: StateFlow<Boolean> = _recoverRunning.asStateFlow()
+
+    /** How the last recovery ended, or `null` before a first run. */
+    private val _recoverResult = MutableStateFlow<RecoverResult?>(null)
+    val recoverResult: StateFlow<RecoverResult?> = _recoverResult.asStateFlow()
+
     /** True while a list/add/edit/remove round-trip is in flight (disables controls). */
     private val _working = MutableStateFlow(false)
     val working: StateFlow<Boolean> = _working.asStateFlow()
@@ -103,7 +142,7 @@ class BackupDestinationsVM @Inject constructor(
      * when the user picks the client-device kind.
      *
      * The device id is read **here** rather than in the composable, and it must
-     * be the sync device id [SecureStorage.deviceId] holds — the same one this
+     * be the sync device id [SecureStorage.resolveDeviceId] returns — the same one this
      * phone's file-sync engines present — or the source nest keys the
      * custodian's status row on a device nothing drives. Its absence is
      * surfaced, never defaulted: passing the blank string reaches the shared
@@ -115,7 +154,7 @@ class BackupDestinationsVM @Inject constructor(
      */
     fun enrollCustodian(name: String, capacityCapBytes: ULong?) = run {
         api.backupDestinationEnrollCustodian(
-            secureStorage.deviceId.orEmpty(), name.trim(), capacityCapBytes,
+            secureStorage.resolveDeviceId().orEmpty(), name.trim(), capacityCapBytes,
         )
     }
 
@@ -197,6 +236,108 @@ class BackupDestinationsVM @Inject constructor(
     }
 
     /**
+     * Where `backup-destination-reseed-button` paints: `null` for the orphaned
+     * store's row, a `destination_id` for a destination row. The shared
+     * `backupReseedRows` decides (the rule linux's and tui's `reseed_rows` and
+     * apple's `reseedRows` apply) over what this VM already caches — the list
+     * and the orphaned verdict — so it costs no round trip. No device id claims
+     * no destination row; a failed call offers nothing.
+     */
+    fun reseedRows(
+        destinations: List<FfiBackupDestinationView>,
+        orphanedStoreBytes: ULong?,
+    ): List<String?> = runCatching {
+        com.fauna.ffi.backupReseedRows(
+            destinations, secureStorage.resolveDeviceId().orEmpty(), orphanedStoreBytes != null,
+        )
+    }.getOrDefault(emptyList())
+
+    /**
+     * The confirmed restore (`backups.md` § Restore after losing the nest).
+     *
+     * Nothing about the ceremony's order is decided here: the shared in-process
+     * face pauses this device's backup, runs the ceremony and re-enrolls this
+     * device when the outcome is whole; this only records how it ended, as
+     * linux's `render_reseed` and apple's `applyReseed` do. A thrown failure is
+     * folded into a stop — nothing was made live either way.
+     *
+     * Re-lists only when nothing is left to say: the re-enrolled row appears and
+     * the orphaned verdict is re-measured against it. A stop or a re-enrollment
+     * failure keeps its message.
+     */
+    fun reseed() {
+        if (_reseedRunning.value) return
+        val deviceId = secureStorage.resolveDeviceId()
+        viewModelScope.launch {
+            _reseedRunning.value = true
+            _reseedResult.value = null
+            val result = try {
+                if (deviceId.isNullOrBlank()) throw ApiException("no device id")
+                api.reseedCustodianStore(deviceId, dataDir())
+            } catch (e: Exception) {
+                reseedStopped(e.message ?: "error")
+            } finally {
+                _reseedRunning.value = false
+            }
+            _reseedResult.value = result
+            if (result.stopped == null && result.reenrollError == null) {
+                refresh()
+            }
+        }
+    }
+
+    /** `backup-audit-recover-button[i]`: arm the confirm for [destinationId]. */
+    fun armRecover(destinationId: String) {
+        if (_recoverRunning.value) return
+        _recoverConfirming.value = destinationId
+    }
+
+    /** `backup-audit-recover-cancel-button`: close the confirm, no side effect. */
+    fun cancelRecover() {
+        _recoverConfirming.value = null
+    }
+
+    /**
+     * `backup-audit-recover-confirm-button`: run the shared recovery once, then
+     * re-run the audit pass so the cleared notice is read back from the store,
+     * never assumed. The run goes through the shared FFI face; a thrown
+     * failure is folded into the result as its reason, and re-running is safe
+     * (nothing is recovered twice).
+     */
+    fun confirmRecover() {
+        val destinationId = _recoverConfirming.value ?: return
+        if (_recoverRunning.value) return
+        val deviceId = secureStorage.resolveDeviceId()
+        _recoverConfirming.value = null
+        viewModelScope.launch {
+            _recoverRunning.value = true
+            _recoverResult.value = null
+            val result = try {
+                if (deviceId.isNullOrBlank()) throw ApiException("no device id")
+                // The row's kind decides the leg (the shared predicate, never a
+                // raw compare): a nest runs the network leg; this device's own
+                // custodian row — the only client-device row `recoverOffered`
+                // answers yes for — runs the store leg in this process.
+                val ownRow = _destinations.value.any {
+                    it.destinationId == destinationId && destinationRowIsAClientDevice(it)
+                }
+                val ran = if (ownRow) {
+                    api.recoverCustodianStore(deviceId, dataDir())
+                } else {
+                    api.backupRecoverFromDestination(deviceId, destinationId)
+                }
+                RecoverResult(lines = ran.lines, failure = null)
+            } catch (e: Exception) {
+                RecoverResult(lines = emptyList(), failure = e.message ?: "error")
+            } finally {
+                _recoverRunning.value = false
+            }
+            _recoverResult.value = result
+            refreshAudit()
+        }
+    }
+
+    /**
      * Re-derive the orphaned-store verdict — mount, and after every mutation.
      *
      * Both halves come from shared Rust and neither is re-implemented here: the
@@ -209,7 +350,7 @@ class BackupDestinationsVM @Inject constructor(
      * to delete the owner's only offline copy.
      */
     private suspend fun refreshOrphanedStore() {
-        val deviceId = secureStorage.deviceId
+        val deviceId = secureStorage.resolveDeviceId()
         if (deviceId.isNullOrBlank()) {
             _orphanedStoreBytes.value = null
             return
@@ -246,7 +387,9 @@ class BackupDestinationsVM @Inject constructor(
                 refreshOrphanedStore()
                 triggerAudit()
             } catch (e: Exception) {
-                errorMessage.value = e.message ?: "error"
+                // The unwrapped line, so the first-listing gate's refusal reads
+                // as `common.needs_nest`, not the generated `"msg=…"` form.
+                errorMessage.value = e.loadFailureText() ?: "error"
             } finally {
                 _working.value = false
             }
@@ -313,12 +456,18 @@ class BackupDestinationsVM @Inject constructor(
      * record standing rather than clearing a notice on a failed read.
      */
     private suspend fun ownCustodian(): com.fauna.ffi.FfiOwnCustodianStore? {
-        val deviceId = secureStorage.deviceId
+        val deviceId = secureStorage.resolveDeviceId()
         if (deviceId.isNullOrBlank()) return null
         val info = runCatching { api.custodianStoreFootprint(dataDir()) }.getOrNull()
             ?: return null
         return com.fauna.ffi.FfiOwnCustodianStore(deviceId, info.sourceRegressions)
     }
+
+    /**
+     * How a recovery ended: the shared face's resolved `lines` (verdict first),
+     * or the [failure] reason when the run never reached the shared driver's end.
+     */
+    data class RecoverResult(val lines: List<String>, val failure: String?)
 
     companion object {
         /** Mirror of `fauna_ffi::backup_destinations::EDIT_DIFFERENT_NEST_ERR`. */
@@ -332,5 +481,10 @@ class BackupDestinationsVM @Inject constructor(
          * i18n.
          */
         const val RECLAIM_STILL_HOSTING = "backup-reclaim-still-hosting"
+
+        /** A stopped restore in the shared record's own shape. */
+        internal fun reseedStopped(reason: String) = FfiReseedResult(
+            stopped = reason, resultLines = emptyList(), isWhole = false, reenrollError = null,
+        )
     }
 }

@@ -42,14 +42,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use fauna_conversations::store::history::ChannelHistorySlice;
-use fauna_core::identity::ActorKeypair;
+use fauna_core::identity::{ActorId, ActorKeypair};
 use fauna_mls::engine::MlsEngine;
 use fauna_mls::error::MlsError;
 use fauna_mls::state_replica::ProviderReplica;
 use fauna_mls::types::ChannelId;
 use fauna_protocol::mls_replica::ReplicaBase;
 
-use crate::store::{MlsReplicaClient, MlsReplicaClientError, MlsReplicaTransport};
+use crate::store::{MlsReplicaClient, MlsReplicaClientError, MlsReplicaTransport, PutOutcome};
 
 /// One channel [`MlsStateSync::adopt_sibling_groups`] put into the engine this
 /// pass or an earlier one, with the `history/<ch>` slice to bind a thread from
@@ -148,6 +148,12 @@ pub struct MlsStateSync {
     /// identity that never succeeded, which is what makes the pass free for
     /// them: [`Self::load`] skips it entirely rather than paying a round trip.
     predecessors: Vec<crate::BackupKey>,
+    /// The retired identities this device can author — the actor half of the
+    /// registry walk (`AccountRegistry::predecessor_backup_keys_by_actor`) —
+    /// for the restore door's park of a retired leaf
+    /// ([`Self::park_retired_leaf`]). Empty for every identity that never
+    /// succeeded, and then the door parks nothing.
+    predecessor_actors: Vec<ActorId>,
     /// Where the re-seal pass reports what it did, so the surface
     /// § Re-key scope requires ("surfaced with progress") is fed from the one
     /// place the work provably happens. `None` on a build with no UI to tell.
@@ -162,6 +168,7 @@ impl MlsStateSync {
         Self {
             client: MlsReplicaClient::new(nest, keypair),
             predecessors: Vec::new(),
+            predecessor_actors: Vec::new(),
             reseal_sink: None,
             state: Mutex::new(State::default()),
         }
@@ -187,6 +194,21 @@ impl MlsStateSync {
         self
     }
 
+    /// Offer the retired identities this device can author, so the restore
+    /// door can name the predecessor whose leaf a foreign `provider` snapshot
+    /// seats and park it at `retired/<predecessor_hex>/provider` before the
+    /// successor's first save replaces it (`succession-propagation.md`
+    /// § Propagation → *Own device fleet*, *Where the retired leaf rests on a
+    /// device with no local MLS store*, rule (1)). The ids come off the same
+    /// registry walk as [`Self::with_predecessors`]' keys
+    /// (`AccountRegistry::predecessor_backup_keys_by_actor`), so "a predecessor
+    /// whose keys this identity's registry walk carries" is literally the set
+    /// offered here. Empty costs nothing.
+    pub fn with_predecessor_actors(mut self, actors: Vec<ActorId>) -> Self {
+        self.predecessor_actors = actors;
+        self
+    }
+
     /// Where the re-seal pass reports its [`crate::ReplicaResealProgress`].
     ///
     /// The sink hangs off the pass rather than off an app-side hook because the
@@ -209,6 +231,68 @@ impl MlsStateSync {
     #[must_use]
     pub fn predecessor_count(&self) -> usize {
         self.predecessors.len()
+    }
+
+    /// How many retired identities [`Self::park_retired_leaf`] may name — the
+    /// per-app call-site pin's handle, like [`Self::predecessor_count`].
+    #[must_use]
+    pub fn predecessor_actor_count(&self) -> usize {
+        self.predecessor_actors.len()
+    }
+
+    /// **Park a predecessor's leaf before anything can replace it** — the
+    /// restore door's foreign-seat arm (`orchestration::restore_and_wire`),
+    /// rule (1) of `succession-propagation.md` § Propagation → *Own device
+    /// fleet*, *Where the retired leaf rests on a device with no local MLS
+    /// store*.
+    ///
+    /// `provider` is the snapshot [`Self::load`] just returned from this
+    /// identity's own `provider` path and the door refused as another
+    /// identity's. After a succession that is the predecessor's whole crypto
+    /// state (ownership moved with the actor, the re-seal re-keyed it), and the
+    /// successor's first save replaces it by design — on native that loses
+    /// nothing, the retired SQLite store still holds it; on a device with no
+    /// local store it is the only durable copy the owed sweep can author from.
+    /// So it is written **unchanged** to `retired/<predecessor_hex>/provider`
+    /// first. Parked-before-replaced holds by construction: every save goes
+    /// through this sync, and the door calls this before it returns.
+    ///
+    /// The predecessor is the offered actor ([`Self::with_predecessor_actors`])
+    /// whose seating verdict over the snapshot is clean — the direct hop, by
+    /// construction. No offered actor seats it → `Ok(None)`, nothing written:
+    /// a device that cannot author that leaf has no use for its state.
+    ///
+    /// **Write-once.** The put's base is `Absent`; a conflict means a snapshot
+    /// is already parked and is answered `Ok(Some(_))` without touching it — a
+    /// partial retry may have ratcheted the parked leaf, and re-parking the
+    /// stale `provider` over it would un-ratchet it.
+    pub async fn park_retired_leaf(
+        &self,
+        provider: &ProviderReplica,
+    ) -> Result<Option<ActorId>, MlsReplicaClientError> {
+        let Some(predecessor) = self
+            .predecessor_actors
+            .iter()
+            .find(|actor| provider.seating_verdict(actor).is_clean())
+        else {
+            return Ok(None);
+        };
+        match self
+            .client
+            .put_retired_provider(predecessor, provider, ReplicaBase::Absent)
+            .await?
+        {
+            PutOutcome::Stored => tracing::info!(
+                predecessor = %predecessor.to_hex(),
+                "mls-sync: parked the retired leaf a succession left at this identity's \
+                 provider path, before this engine's first save replaces it"
+            ),
+            PutOutcome::Conflict => tracing::debug!(
+                predecessor = %predecessor.to_hex(),
+                "mls-sync: a retired leaf is already parked for this predecessor — left as is"
+            ),
+        }
+        Ok(Some(*predecessor))
     }
 
     /// Fetch + unseal the `provider` snapshot and every stored `history/<ch>`

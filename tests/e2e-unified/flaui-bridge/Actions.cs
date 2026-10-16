@@ -398,17 +398,16 @@ class Actions
         {
             while (DateTime.UtcNow < scanDeadline && match is null)
             {
-                foreach (var candidate in el.FindAllDescendants(
-                    cf.ByControlType(FlaUI.Core.Definitions.ControlType.ListItem)))
-                {
-                    string name;
-                    try { name = candidate.Name ?? ""; } catch { name = ""; }
-                    if (name == value)
-                    {
-                        match = candidate;
-                        break;
-                    }
-                }
+                // An option is named by its Name or by its AutomationId. Most pickers
+                // carry their stable key as the Name; one whose Name is the label it
+                // paints (`feed-factor-select` — a trained topic reads by the name the
+                // user gave it) carries the key as the item's AutomationId instead, so
+                // `select(id, key)` names the same thing on every picker. The key is
+                // tried first across the scan: a key names one item, a label may not.
+                var candidates = el.FindAllDescendants(
+                    cf.ByControlType(FlaUI.Core.Definitions.ControlType.ListItem));
+                match = candidates.FirstOrDefault(c => SafeItemAutomationId(c) == value)
+                    ?? candidates.FirstOrDefault(c => SafeItemName(c) == value);
                 if (match is null) Thread.Sleep(100);
             }
             if (match is not null) break;
@@ -436,7 +435,12 @@ class Actions
             // EVERY failure regardless of what was actually painted.
             var visible = string.Join(", ", el.FindAllDescendants(
                 cf.ByControlType(FlaUI.Core.Definitions.ControlType.ListItem))
-                .Select(c => { try { return c.Name ?? ""; } catch { return "?"; } }));
+                .Select(c =>
+                {
+                    var name = SafeItemName(c);
+                    var key = SafeItemAutomationId(c);
+                    return key.Length == 0 || key == name ? name : $"{name} [{key}]";
+                }));
             el.Patterns.ExpandCollapse.Pattern.Collapse();
             throw new InvalidOperationException(
                 $"Select target '{value}' not found in '{id}' (visible items: {visible})");
@@ -446,6 +450,16 @@ class Actions
             match.Patterns.SelectionItem.Pattern.Select();
         else
             SendPhysicalInput(() => match.Click(), $"physical click on option '{value}' of {Describe(el)}");
+    }
+
+    private static string SafeItemName(AutomationElement item)
+    {
+        try { return item.Name ?? ""; } catch { return ""; }
+    }
+
+    private static string SafeItemAutomationId(AutomationElement item)
+    {
+        try { return item.AutomationId ?? ""; } catch { return ""; }
     }
 
     public void Clear(string id, int index = 0, IReadOnlyList<ScopeStep>? scope = null)
@@ -747,7 +761,10 @@ class Actions
     ///   * <c>"options"</c> — a ComboBox's items as a JSON array of their Names,
     ///     in model order (<see cref="OptionsJson"/>); <c>null</c> on a non-ComboBox.
     ///   * any other key — <c>AutomationProperties.HelpText</c> (UIA exposes
-    ///     a single application-supplied free-text channel per element).
+    ///     a single application-supplied free-text channel per element). An element
+    ///     publishing several attributes packs them there as <c>key=value</c> pairs
+    ///     joined by <c>;</c>, and the key's own value is answered
+    ///     (<see cref="PackedAttr"/>; <c>checked</c> reads a pack the same way).
     /// Returns <c>null</c> when the element isn't found or the property
     /// isn't set, so test-side <c>get_attr</c> can distinguish "absent"
     /// from "false".
@@ -967,7 +984,13 @@ class Actions
                     try
                     {
                         var help = el.Properties.HelpText.ValueOrDefault;
-                        if (!string.IsNullOrEmpty(help)) return help;
+                        if (!string.IsNullOrEmpty(help))
+                        {
+                            // A pack that names `checked` answers it; a pack that does
+                            // not leaves the question to the toggle, like no HelpText.
+                            if (!PackedAttr.TryRead(help, "checked", out var packed)) return help;
+                            if (packed is not null) return packed;
+                        }
                         if (!el.Patterns.Toggle.IsSupported) return null;
                         return el.Patterns.Toggle.Pattern.ToggleState.Value switch
                         {
@@ -985,11 +1008,14 @@ class Actions
                 // with zero options". An explicit case for the same reason as
                 // `in-viewport`: the `default` arm would answer HelpText instead.
                 //
-                // Each option reads as its ListItem's Name — the exact membership set
-                // `Select` matches against, so "offered" and "selectable" can never
-                // disagree on this bridge (a picker whose items carry a stable-key
-                // AutomationProperties.Name reports those keys; the action layer
-                // normalizes them onto the same keys as the painted labels).
+                // Each option reads as its ListItem's Name, and `Select` matches that
+                // Name (or the item's AutomationId), so every offered option is
+                // selectable on this bridge. A picker whose items carry a stable-key
+                // AutomationProperties.Name reports those keys (the action layer
+                // normalizes them onto the same keys as the painted labels); one whose
+                // Name is the painted label and whose AutomationId is the key
+                // (`feed-factor-select`) reports what it paints, as `option_texts`
+                // promises.
                 try { return el.ControlType == FlaUI.Core.Definitions.ControlType.ComboBox ? OptionsJson(el) : null; }
                 catch (AppExitedException) { throw; }
                 catch { return null; }
@@ -997,7 +1023,13 @@ class Actions
                 try { return el.Properties.Name.ValueOrDefault; }
                 catch { return null; }
             default:
-                try { return el.Properties.HelpText.ValueOrDefault; }
+                // One value, or several packed `key=value;…` (PackedAttr): a pack
+                // answers this attribute's own value, never the whole string.
+                try
+                {
+                    var help = el.Properties.HelpText.ValueOrDefault;
+                    return PackedAttr.TryRead(help, attr.ToLowerInvariant(), out var packed) ? packed : help;
+                }
                 catch { return null; }
         }
     }

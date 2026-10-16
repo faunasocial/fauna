@@ -75,14 +75,17 @@ pub fn landing_fits(free: Option<u64>, needed: u64) -> bool {
 
 /// The bytes available to this process on the filesystem holding `path`, or
 /// `None` where that cannot be measured (a platform without `statvfs`, or a
-/// path that does not exist yet).
+/// path that does not exist yet). The measurement rides `p2p-share` with its
+/// `statvfs` dependency: the landing judge compiles without the feature (the
+/// same-account leg ingests through it, resident), and a build without it
+/// answers "unknown", as a platform without `statvfs` does.
 pub fn free_space(path: &Path) -> Option<u64> {
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "p2p-share"))]
     {
         let stat = rustix::fs::statvfs(path).ok()?;
         Some(stat.f_bavail.saturating_mul(stat.f_frsize))
     }
-    #[cfg(not(unix))]
+    #[cfg(not(all(unix, feature = "p2p-share")))]
     {
         let _ = path;
         None

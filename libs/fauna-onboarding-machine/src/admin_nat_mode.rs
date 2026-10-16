@@ -138,13 +138,16 @@ impl AdminNatModeMachine {
                 s.submit_enabled = true;
             }),
             Err(e) => {
+                // A nest too new for this app (its 426) is the one probe
+                // failure no retry clears (version-compatibility.md Dim 4).
+                let transient = !matches!(e, ProbeError::AppOutdated { .. });
                 let cause = match e {
-                    ProbeError::Transient { reason } => reason,
+                    ProbeError::Transient { reason } | ProbeError::AppOutdated { reason } => reason,
                     other => format!("{other:?}"),
                 };
                 self.set_snap(|s| {
                     s.state = NatModeState::Error {
-                        transient: true,
+                        transient,
                         cause: cause.clone(),
                     };
                     s.message = text_with_cause("admin.nest_page.nat_mode_error_load", cause);

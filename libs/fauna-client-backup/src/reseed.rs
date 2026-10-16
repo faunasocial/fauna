@@ -521,8 +521,11 @@ impl SetRefusal {
     }
 
     /// The i18n key of the remedy this refusal names: each refusal is distinct
-    /// because its next step is (the enum's own docs).
-    fn remedy_key(&self) -> &'static str {
+    /// because its next step is (the enum's own docs). The recovery's result
+    /// reads the same table ([`crate::recover::result_lines`]): the nest
+    /// answers its verb from the same refusal catalogue, with the same next
+    /// steps.
+    pub(crate) fn remedy_key(&self) -> &'static str {
         match self {
             Self::TargetNotFresh => "backups.reseed_refused_target_not_fresh",
             Self::CustodyIncomplete => "backups.reseed_refused_custody_incomplete",
@@ -544,18 +547,31 @@ pub const FOLDER_UNNAMED_CODE: &str = "folder_unnamed";
 /// the nest never sees it.
 pub const REHOME_UNSIGNED_CODE: &str = "rehome_unsigned";
 
-/// How a delivered set is named to the owner. `__mail` is "Mail"; a covered
-/// folder is its display name; any other set shows its set name, which reaches
-/// the owner only for a folder this device could not name.
+/// How a delivered set is named to the owner: a reserved segment set by
+/// [`segment_set_label`]; a covered folder by its display name, else its set
+/// name, which reaches the owner only for a folder this device could not name.
 fn set_label(set: &DeliveredSet) -> String {
-    match (set.axis, set.set_name.as_str()) {
-        (SetAxis::Segment, "__mail") => "backups.reseed_set_mail".to_string(),
-        (SetAxis::Folder, _) => set
+    match set.axis {
+        SetAxis::Segment => segment_set_label(&set.set_name),
+        SetAxis::Folder => set
             .folder_display_name
             .clone()
             .unwrap_or_else(|| set.set_name.clone()),
-        _ => set.set_name.clone(),
     }
+}
+
+/// How a reserved segment set is named to the owner, as an i18n key ("Mail",
+/// "Posts", "Calendar", "Contacts") — shared by the re-seed's and the
+/// recovery's result lines. Any other name shows as itself.
+pub(crate) fn segment_set_label(set_name: &str) -> String {
+    match set_name {
+        "__mail" => "backups.reseed_set_mail",
+        "__post" => "backups.reseed_set_post",
+        "__calendar" => "backups.reseed_set_calendar",
+        "__card" => "backups.reseed_set_card",
+        other => return other.to_string(),
+    }
+    .to_string()
 }
 
 /// The `backup-destination-reseed-result` view's text: the verdict first, then
@@ -1574,5 +1590,37 @@ mod shared_view_tests {
                 && lines[2].contains(&lookup("backups.reseed_refused_folder_unnamed").unwrap()),
             "{lines:?}"
         );
+    }
+
+    /// Every kind the sweep backs up must be named to the owner: a kind added to
+    /// `BACKED_UP_KINDS` without a label would leak its raw `__<kind>` set name.
+    #[test]
+    fn every_backed_up_kind_is_named_to_the_owner_never_by_its_set_name() {
+        for kind in fauna_protocol::segments::BACKED_UP_KINDS {
+            let set = DeliveredSet {
+                set_name: format!("__{kind}"),
+                axis: SetAxis::Segment,
+                folder_display_name: None,
+                folder_label: None,
+            };
+            let outcome = ReseedOutcome {
+                delivered: DeliveredCorpus {
+                    sets: vec![set.clone()],
+                    ..Default::default()
+                },
+                sets: vec![SetResult {
+                    set,
+                    outcome: SetOutcome::Materialized {
+                        segments: vec![],
+                        records: 3,
+                    },
+                }],
+            };
+            let lines = rendered(&outcome);
+            assert!(
+                lines.iter().all(|l| !l.contains("__")),
+                "kind {kind} leaks its set name: {lines:?}"
+            );
+        }
     }
 }

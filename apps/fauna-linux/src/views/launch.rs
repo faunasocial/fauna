@@ -14,7 +14,9 @@
 //! - TransientRetry: title, error description (`launch-transient-error`),
 //!   Retry (`launch-retry-button`), "Use a different nest"
 //!   (`launch-fallthrough-button`), and (conditionally) "Recover a lost box"
-//!   (`launch-recover-button`). Shown when the silent challenge hits
+//!   (`launch-recover-button`), and — always, it needs only a cloud token —
+//!   "Retire a server" (`launch-retire-button`, opens the `nest_retire` page
+//!   over this window: `nest-retirement.md` § Layout & flow). Shown when the silent challenge hits
 //!   a retryable network failure; the user can retry, fall through to
 //!   the wizard at handle_entry to pick a different domain, or — when the
 //!   saved nest is reachable and custodies ≥1 deployment seed — enter box
@@ -51,6 +53,14 @@
 //!   reveal, no machine round trip) — the documented floor
 //!   (`long-term-store.md` § Cleanup contract). Mirrors
 //!   `apps/fauna-tui/src/launch.rs`'s `LaunchSurface::AccountIndexUnreadable`.
+//!
+//! - AccountLocked / IdentityStolenEntry: the locked launch surface
+//!   (`devices.md` § The locked state; `ui/sessions.md` § Layout & flow → *The
+//!   locked surface (leg 2)*), read off the snapshot's `locked_until_secs` side
+//!   channel. The notice (`launch-account-locked-notice`) and its one action
+//!   (`launch-account-locked-stolen-button`) — no retry, no fallthrough — and the
+//!   `identity_stolen_entry` step over the existing recovery ids, which runs the
+//!   stolen-identity ceremony with no session. Twin of tui's `locked.rs`.
 //!
 //! The 404-unregistered, decommissioned, and authenticated outcomes do
 //! NOT use this view; they navigate immediately to the wizard at
@@ -114,6 +124,15 @@ pub enum LaunchPhase {
     /// *dead* Retry button (`retry_silent_challenge()` is a no-op outside
     /// `Offline{transient:true}`) over a raw Rust debug dump.
     IdentityChanged { error: String },
+    /// The fork variant of `launch_identity_changed` (`box-recovery.md`
+    /// § Client acceptance — re-pin on a verified chain): the machine reported
+    /// rotation-chain fork evidence (`LaunchSnapshot::identity_fork`). `warning`
+    /// is the localized sentence naming BOTH heads, painted in
+    /// `nest-identity-fork-warning`. **No trust button** — the machine refuses
+    /// the re-trust on a fork, and an affordance that refuses is a lie; the
+    /// fallthrough is the only way out. Twin of tui's
+    /// `LaunchSurface::IdentityForked`.
+    IdentityForked { warning: String },
     /// The saved account index is present and this build cannot use it
     /// (`version-compatibility.md` § 5 item 9). Show
     /// `account-index-refusal-warning` with the verdict's message; the
@@ -129,6 +148,20 @@ pub enum LaunchPhase {
         /// for the `NewerBuild` verdict, which offers no action at all.
         confirming: bool,
     },
+    /// The machine is parked on `fauna.auth.account_locked` until
+    /// `locked_until_secs` (the snapshot's side channel). Show
+    /// `launch-account-locked-notice` — the lock sentence, the unlock time
+    /// through the shared `format_unix_local`, and that a lock the owner did
+    /// not set means somebody holds the secret key — and
+    /// `launch-account-locked-stolen-button`. Never a retry or a fallthrough:
+    /// nothing clears the lock before its time, and the machine runs the one
+    /// refresh at that time itself.
+    AccountLocked { locked_until_secs: u64 },
+    /// `identity_stolen_entry`: the stolen-identity ceremony from outside a
+    /// session, over the existing ids — `recovery-entry-phrase-field`,
+    /// `identity-stolen-confirm-field`, `identity-stolen-button`,
+    /// `recovery-entry-back-button`, and `error-message`.
+    IdentityStolenEntry { locked_until_secs: u64 },
 }
 
 /// The `retry_box`'s title text for the three phases that show it — chrome,
@@ -141,7 +174,11 @@ fn retry_title_text(phase: &LaunchPhase) -> &'static str {
         LaunchPhase::Launching | LaunchPhase::TransientRetry { .. } => i18n::launch::RETRY_TITLE,
         LaunchPhase::NeedsUpdate { .. } => i18n::launch::NEEDS_UPDATE_TITLE,
         LaunchPhase::SignInRefused { .. } => i18n::onboarding::launch::SIGN_IN_REFUSED_TITLE,
-        LaunchPhase::IdentityChanged { .. } => i18n::launch::IDENTITY_CHANGED_TITLE,
+        LaunchPhase::IdentityChanged { .. } | LaunchPhase::IdentityForked { .. } => {
+            i18n::launch::IDENTITY_CHANGED_TITLE
+        }
+        LaunchPhase::AccountLocked { .. } => i18n::onboarding::launch::ACCOUNT_LOCKED_TITLE,
+        LaunchPhase::IdentityStolenEntry { .. } => i18n::settings::recovery_kit::STOLEN,
         LaunchPhase::AccountIndexUnreadable { refusal, .. } => match refusal {
             fauna_launch_machine::AccountIndexRefusal::NewerBuild { .. } => {
                 i18n::onboarding::launch::INDEX_NEWER_BUILD_TITLE
@@ -171,6 +208,24 @@ pub struct LaunchView {
     /// Per `OnboardingResult` convention: exposed so `start_test_agent_if_enabled`
     /// can mirror it into the test-agent JSON payload.
     pub error_label: Label,
+    /// The phase on screen — read by the locked notice's follower, which acts
+    /// only while the notice itself shows (`main.rs::follow_lock_snapshot`).
+    pub phase: Rc<RefCell<LaunchPhase>>,
+    /// Settle `identity-stolen-button`'s ceremony: re-arm the step and show
+    /// `message` on `error-message` (`None` clears it — the success arm, whose
+    /// account switch replaces this window).
+    pub settle_stolen: Rc<dyn Fn(Option<String>)>,
+}
+
+/// What the locked surface's two gestures hand the caller.
+pub struct LockedHooks {
+    /// `identity-stolen-button` pressed with the confirm word typed: run the
+    /// ceremony over the pasted kit and answer through
+    /// [`LaunchView::settle_stolen`].
+    pub on_stolen: Box<dyn Fn(String)>,
+    /// `recovery-entry-back-button`: the notice is back on screen; re-read the
+    /// machine, which may have left the lock while the user was on the step.
+    pub on_back: Box<dyn Fn()>,
 }
 
 /// Build the launch window. Initial phase is `Launching`.
@@ -183,11 +238,16 @@ pub struct LaunchView {
 ///   window or onboarding wizard) when the silent challenge resolves.
 ///   `close()` fires `connect_close_request`, which calls `app.quit()`
 ///   for the user-clicked-X case; programmatic teardown must bypass that.
-pub fn build_launch_window<F, G, H, T, I>(
+#[allow(clippy::too_many_arguments)] // one callback per launch-surface exit; grouping them would only add a struct to unpack at the one call site
+pub fn build_launch_window<F, G, H, R, T, I>(
     app: &adw::Application,
     on_retry: F,
     on_fallthrough: G,
     on_recover: H,
+    // `launch-retire-button`: open the `nest_retire` page over this window
+    // (`nest-retirement.md` § Layout & flow). Always offered on the
+    // transient-retry surface — it needs no custodied seed, only a cloud token.
+    on_retire: R,
     // `nest-identity-changed-trust-button`: the explicit re-trust
     // (`LaunchMachine::trust_nest_identity()` — forget the pin, re-TOFU,
     // re-challenge). The ONLY path that forgets a pin.
@@ -198,6 +258,7 @@ pub fn build_launch_window<F, G, H, T, I>(
     // from the `Malformed` verdict's confirm; a no-op call site would be a
     // bug (`views::launch` guards it, not the caller).
     on_reset: I,
+    locked: LockedHooks,
 ) -> LaunchView
 where
     F: Fn() + 'static,
@@ -206,6 +267,7 @@ where
     // (`recoverableBoxes` on web) so the wizard can seed identity + push the
     // boxes into the recovery machine.
     H: Fn(Vec<String>) + 'static,
+    R: Fn() + 'static,
     T: Fn() + 'static,
     I: Fn() + 'static,
 {
@@ -294,6 +356,16 @@ where
     identity_warning.set_visible(false);
     set_test_id(&identity_warning, ids::NEST_IDENTITY_CHANGED_WARNING);
     retry_box.append(&identity_warning);
+
+    // The fork variant of the same page: its own element naming both heads, so
+    // an e2e asserting "the user was told the nest's identity chain forked"
+    // cannot be satisfied by the ordinary changed-identity warning.
+    let fork_warning = Label::new(None);
+    fork_warning.set_wrap(true);
+    fork_warning.add_css_class("error");
+    fork_warning.set_visible(false);
+    set_test_id(&fork_warning, ids::NEST_IDENTITY_FORK_WARNING);
+    retry_box.append(&fork_warning);
 
     // `launch_sign_in_refused` (ui.yaml): the nest no longer signs this identity
     // in. Its own element, like the identity warning, so an e2e asserting "the
@@ -399,8 +471,95 @@ where
     }
     buttons.append(&recover_btn);
 
+    // Retire a server (`nest-retirement.md` § Layout & flow): an unreachable
+    // nest is the commonest reason to want the box gone, so this is shown on the
+    // transient-retry surface unconditionally (set_phase below).
+    let retire_btn = Button::with_label(i18n::onboarding::launch::RETIRE_SERVER);
+    retire_btn.add_css_class("flat");
+    retire_btn.set_visible(false);
+    set_test_id(&retire_btn, ids::LAUNCH_RETIRE_BUTTON);
+    {
+        let on_retire = Rc::new(on_retire);
+        retire_btn.connect_clicked(move |_| on_retire());
+    }
+    buttons.append(&retire_btn);
+
     retry_box.append(&buttons);
     center.append(&retry_box);
+
+    // ── The locked surface (leg 2) ───────────────────────────────────────
+    let locked_box = gtk::Box::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(12)
+        .halign(gtk::Align::Center)
+        .build();
+    locked_box.set_visible(false);
+    locked_box.set_width_request(420);
+
+    let locked_title = Label::new(None);
+    locked_title.add_css_class("title-3");
+    locked_box.append(&locked_title);
+
+    // `launch_account_locked`: the standing notice and its one action.
+    let locked_notice_box = gtk::Box::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(12)
+        .build();
+    let locked_notice = Label::new(None);
+    locked_notice.set_wrap(true);
+    locked_notice.add_css_class("error");
+    set_test_id(&locked_notice, ids::LAUNCH_ACCOUNT_LOCKED_NOTICE);
+    locked_notice_box.append(&locked_notice);
+    // The Settings section's own label: one name for the action wherever it is
+    // offered.
+    let locked_stolen_btn = Button::with_label(i18n::settings::recovery_kit::STOLEN);
+    locked_stolen_btn.add_css_class("destructive-action");
+    locked_stolen_btn.set_halign(gtk::Align::Center);
+    set_test_id(&locked_stolen_btn, ids::LAUNCH_ACCOUNT_LOCKED_STOLEN_BUTTON);
+    locked_notice_box.append(&locked_stolen_btn);
+    locked_box.append(&locked_notice_box);
+
+    // `identity_stolen_entry`: existing elements only. The Settings section's
+    // own warning describes the irreversible act — one sentence everywhere.
+    let stolen_box = gtk::Box::builder()
+        .orientation(Orientation::Vertical)
+        .spacing(8)
+        .build();
+    let stolen_warning = Label::new(Some(i18n::settings::recovery_kit::STOLEN_WARNING));
+    stolen_warning.set_wrap(true);
+    stolen_warning.add_css_class("dim-label");
+    stolen_box.append(&stolen_warning);
+    let stolen_phrase = gtk::PasswordEntry::builder().hexpand(true).build();
+    stolen_phrase.set_show_peek_icon(true);
+    stolen_phrase.set_property(
+        "placeholder-text",
+        i18n::settings::recovery_kit::KIT_PHRASE_PLACEHOLDER,
+    );
+    set_test_id(&stolen_phrase, ids::RECOVERY_ENTRY_PHRASE_FIELD);
+    stolen_box.append(&stolen_phrase);
+    let stolen_confirm = gtk::Entry::builder()
+        .hexpand(true)
+        .placeholder_text(i18n::settings::recovery_kit::STOLEN_CONFIRM_PLACEHOLDER)
+        .build();
+    set_test_id(&stolen_confirm, ids::IDENTITY_STOLEN_CONFIRM_FIELD);
+    stolen_box.append(&stolen_confirm);
+    let stolen_actions = gtk::Box::builder()
+        .orientation(Orientation::Horizontal)
+        .spacing(8)
+        .halign(gtk::Align::End)
+        .build();
+    let stolen_back = Button::with_label(i18n::common::BACK);
+    set_test_id(&stolen_back, ids::RECOVERY_ENTRY_BACK_BUTTON);
+    stolen_actions.append(&stolen_back);
+    let stolen_btn = Button::with_label(i18n::settings::recovery_kit::STOLEN);
+    stolen_btn.add_css_class("destructive-action");
+    stolen_btn.set_sensitive(false);
+    set_test_id(&stolen_btn, ids::IDENTITY_STOLEN_BUTTON);
+    stolen_actions.append(&stolen_btn);
+    stolen_box.append(&stolen_actions);
+    locked_box.append(&stolen_box);
+
+    center.append(&locked_box);
 
     // ── Window ────────────────────────────────────────────────────────
     let window = adw::ApplicationWindow::builder()
@@ -432,8 +591,10 @@ where
         let transient_error = transient_error.clone();
         let retry_btn = retry_btn.clone();
         let recover_btn = recover_btn.clone();
+        let retire_btn = retire_btn.clone();
         let error_label = error_label.clone();
         let identity_warning = identity_warning.clone();
+        let fork_warning = fork_warning.clone();
         let sign_in_refused_notice = sign_in_refused_notice.clone();
         let trust_btn = trust_btn.clone();
         let fallthrough_btn = fallthrough_btn.clone();
@@ -441,10 +602,51 @@ where
         let account_index_reset_btn = account_index_reset_btn.clone();
         let account_index_confirm_btn = account_index_confirm_btn.clone();
         let phase_state = phase_state.clone();
+        let locked_box = locked_box.clone();
+        let locked_title = locked_title.clone();
+        let locked_notice = locked_notice.clone();
+        let locked_notice_box = locked_notice_box.clone();
+        let stolen_box = stolen_box.clone();
+        let stolen_phrase = stolen_phrase.clone();
+        let stolen_confirm = stolen_confirm.clone();
         Rc::new(move |phase: LaunchPhase| {
+            // The locked surface owns the whole centre: neither the spinner nor
+            // the retry box (and so no retry and no fallthrough) shows with it.
+            let locked = match &phase {
+                LaunchPhase::AccountLocked { locked_until_secs } => {
+                    Some((*locked_until_secs, false))
+                }
+                LaunchPhase::IdentityStolenEntry { locked_until_secs } => {
+                    Some((*locked_until_secs, true))
+                }
+                _ => None,
+            };
+            locked_box.set_visible(locked.is_some());
+            if let Some((locked_until_secs, entry)) = locked {
+                launching_box.set_visible(false);
+                retry_box.set_visible(false);
+                locked_title.set_text(retry_title_text(&phase));
+                locked_notice.set_text(&locked_notice_text(locked_until_secs));
+                locked_notice_box.set_visible(!entry);
+                stolen_box.set_visible(entry);
+                if !entry {
+                    // Leaving the step drops what was typed: the kit outranks
+                    // the seed. `error-message` is kept on purpose — one arm of
+                    // the ceremony puts the successor seed in it as the only way
+                    // back in (`StolenOutcome::carries_the_only_seed`).
+                    stolen_phrase.set_text("");
+                    stolen_confirm.set_text("");
+                }
+                *phase_state.borrow_mut() = phase;
+                return;
+            }
             // Each arm sets every property it cares about — set_phase may be
             // called repeatedly (Launching → … → terminal), so a stale property
             // from a prior phase must never leak through.
+            retire_btn.set_visible(matches!(phase, LaunchPhase::TransientRetry { .. }));
+            // Only the fork arm shows the fork warning; hiding it here keeps
+            // every other arm from having to know it exists.
+            fork_warning.set_visible(false);
             match &phase {
                 LaunchPhase::Launching => {
                     launching_box.set_visible(true);
@@ -565,6 +767,29 @@ where
                     trust_btn.set_visible(true);
                     retry_box.set_visible(true);
                 }
+                LaunchPhase::IdentityForked { warning } => {
+                    // The hard warning naming both heads and the fallthrough
+                    // ONLY: no retry, no trust button, no recover.
+                    launching_box.set_visible(false);
+                    retry_title.set_text(retry_title_text(&phase));
+                    retry_title.set_visible(true);
+                    transient_error.set_visible(false);
+                    retry_btn.set_visible(false);
+                    error_label.set_visible(false);
+                    sign_in_refused_notice.set_visible(false);
+                    identity_warning.set_visible(false);
+                    trust_btn.set_visible(false);
+                    account_index_warning.set_visible(false);
+                    account_index_reset_btn.set_visible(false);
+                    account_index_confirm_btn.set_visible(false);
+                    recover_btn.set_visible(false);
+                    fork_warning.set_text(warning);
+                    fork_warning.set_visible(true);
+                    fallthrough_btn.set_visible(true);
+                    retry_box.set_visible(true);
+                }
+                // Painted above; unreachable here.
+                LaunchPhase::AccountLocked { .. } | LaunchPhase::IdentityStolenEntry { .. } => {}
                 LaunchPhase::AccountIndexUnreadable {
                     refusal,
                     confirming,
@@ -669,12 +894,140 @@ where
         })
     };
 
+    // ── The locked surface's gestures ────────────────────────────────────
+    // A busy ceremony holds the step: the button stays disabled and Back is
+    // inert, so a second press cannot mint a second successor.
+    let stolen_busy = Rc::new(std::cell::Cell::new(false));
+    let arm_stolen: Rc<dyn Fn()> = {
+        let stolen_btn = stolen_btn.clone();
+        let stolen_confirm = stolen_confirm.clone();
+        let stolen_back = stolen_back.clone();
+        let stolen_busy = stolen_busy.clone();
+        Rc::new(move || {
+            let idle = !stolen_busy.get();
+            stolen_btn.set_sensitive(
+                idle && stolen_confirm.text()
+                    == fauna_client_recovery::ceremony::STOLEN_CONFIRM_WORD,
+            );
+            stolen_back.set_sensitive(idle);
+        })
+    };
+    {
+        let arm_stolen = arm_stolen.clone();
+        stolen_confirm.connect_changed(move |_| arm_stolen());
+    }
+    {
+        let phase_state = phase_state.clone();
+        let set_phase = set_phase.clone();
+        let error_label = error_label.clone();
+        locked_stolen_btn.connect_clicked(move |_| {
+            let shown = match &*phase_state.borrow() {
+                LaunchPhase::AccountLocked { locked_until_secs } => Some(*locked_until_secs),
+                _ => None,
+            };
+            if let Some(locked_until_secs) = shown {
+                error_label.set_visible(false);
+                set_phase(LaunchPhase::IdentityStolenEntry { locked_until_secs });
+            }
+        });
+    }
+    let LockedHooks { on_stolen, on_back } = locked;
+    {
+        let phase_state = phase_state.clone();
+        let stolen_busy = stolen_busy.clone();
+        let stolen_phrase = stolen_phrase.clone();
+        let stolen_confirm = stolen_confirm.clone();
+        let error_label = error_label.clone();
+        let arm_stolen = arm_stolen.clone();
+        stolen_btn.connect_clicked(move |_| {
+            // Re-checked here and not only in the render: an agent driving the
+            // id directly reaches this with the button disabled.
+            if !matches!(
+                &*phase_state.borrow(),
+                LaunchPhase::IdentityStolenEntry { .. }
+            ) || stolen_busy.get()
+            {
+                return;
+            }
+            let refusal =
+                if stolen_confirm.text() != fauna_client_recovery::ceremony::STOLEN_CONFIRM_WORD {
+                    Some(i18n::settings::recovery_kit::STOLEN_CONFIRM_PLACEHOLDER)
+                } else if stolen_phrase.text().trim().is_empty() {
+                    Some(i18n::settings::recovery_kit::KIT_PHRASE_REQUIRED)
+                } else {
+                    None
+                };
+            if let Some(refusal) = refusal {
+                crate::settings::render_error_label(&error_label, Some(refusal));
+                return;
+            }
+            crate::settings::render_error_label(&error_label, None);
+            stolen_busy.set(true);
+            arm_stolen();
+            on_stolen(stolen_phrase.text().to_string());
+        });
+    }
+    {
+        let phase_state = phase_state.clone();
+        let set_phase = set_phase.clone();
+        let stolen_busy = stolen_busy.clone();
+        stolen_back.connect_clicked(move |_| {
+            let shown = match &*phase_state.borrow() {
+                LaunchPhase::IdentityStolenEntry { locked_until_secs } => Some(*locked_until_secs),
+                _ => None,
+            };
+            let Some(locked_until_secs) = shown else {
+                return;
+            };
+            if stolen_busy.get() {
+                return;
+            }
+            set_phase(LaunchPhase::AccountLocked { locked_until_secs });
+            on_back();
+        });
+    }
+    let settle_stolen: Rc<dyn Fn(Option<String>)> = {
+        let stolen_busy = stolen_busy.clone();
+        let error_label = error_label.clone();
+        let stolen_phrase = stolen_phrase.clone();
+        let stolen_confirm = stolen_confirm.clone();
+        Rc::new(move |message: Option<String>| {
+            stolen_busy.set(false);
+            if message.is_none() {
+                // Landed: both secrets die here — the pasted kit outranks the
+                // seed, and the successor seed is in the registry.
+                stolen_phrase.set_text("");
+                stolen_confirm.set_text("");
+            }
+            crate::settings::render_error_label(&error_label, message.as_deref());
+            arm_stolen();
+        })
+    };
+
     LaunchView {
         window,
         set_phase,
         set_recover_boxes,
         error_label,
+        phase: phase_state,
+        settle_stolen,
     }
+}
+
+/// `launch-account-locked-notice`: the shared lock sentence, the unlock time
+/// through the shared `format_unix_local`, and the REQUIRED sentence that a lock
+/// the owner did not set means somebody holds the secret key (`devices.md` § The
+/// two panic buttons, point 5). The same three strings, in the same order, as
+/// tui's `locked::notice_text`.
+fn locked_notice_text(locked_until_secs: u64) -> String {
+    let time =
+        fauna_core::format::format_unix_local(i64::try_from(locked_until_secs).unwrap_or(i64::MAX));
+    format!(
+        "{} {} {}",
+        i18n::onboarding::launch::ACCOUNT_LOCKED,
+        i18n::onboarding::launch::account_locked_until(&time),
+        i18n::onboarding::launch::ACCOUNT_LOCKED_NOT_YOURS
+    )
 }
 
 #[cfg(test)]
@@ -709,6 +1062,13 @@ mod tests {
                 error: "x".to_string()
             }),
             i18n::launch::IDENTITY_CHANGED_TITLE
+        );
+        assert_eq!(
+            retry_title_text(&LaunchPhase::IdentityForked {
+                warning: "x".to_string()
+            }),
+            i18n::launch::IDENTITY_CHANGED_TITLE,
+            "the fork variant is the same page, same title"
         );
     }
 

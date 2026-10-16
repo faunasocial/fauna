@@ -59,6 +59,10 @@ fauna-mls = { path = "../fauna-mls", default-features = false }
 # forwarded on wasm below. Path form required to override defaults (see fauna-core
 # above). Mirrors fauna-client-bridges.
 fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# The shared string table: the import's own pause and connection-failure
+# sentences reach `error-message` the way fauna-protocol's error-code sentences
+# do, so every app paints them with no per-app mapping.
+fauna-i18n = { path = "../fauna-i18n" }
 # `aliases` + `role-overrides` features only — the pure, WASM-safe per-account
 # alias validators (`validate_exact_local_part` / `validate_wildcard_prefix` /
 # `AliasValidationError` + the kind consts) the user-aliases machine reuses for
@@ -172,6 +176,13 @@ getrandom = { workspace = true }
 fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
 # Forward fauna-mls's `js` (openmls/js) on wasm.
 fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"] }
+# `blob-fetch-wasm` is the browser `WasmPublicChunkFetcher` the wasm `rpc_glue`
+# fetches sealed chunks over. `fauna-wasm` turns it on for the whole core graph,
+# so this adds no weight there — it declares the dependency this crate actually
+# has, so a chunk that builds this crate's wasm glue without `fauna-wasm` (the
+# connected-apps chunk) compiles under `feature-unification = "selected"`.
+# Mirrors fauna-client-pair.
+fauna-core = { path = "../fauna-core", default-features = false, features = ["blob-fetch-wasm"] }
 # Wasm concrete `…Nest` seam (`rpc_glue::wasm::build_*_machine`) — the browser
 # `WsRpcClient` (`RpcRequester` over gloo-net) the web admin pages drive through
 # `libs/fauna-wasm`. Optional + pulled by `rpc-glue` (the wasm seam module that
@@ -219,9 +230,6 @@ fauna-client-pair = { path = "../fauna-client-pair", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
-# `forwarding`'s guard that every `LocalizedText` key it emits resolves in the
-# shared string table.
-fauna-i18n = { path = "../fauna-i18n" }
 # `role_address_options`'s guard pins the serialized `kind` tag, because that
 # tag — not just the storage key — is what every app's picker hands back in the
 # `SetRoleAddress` action and matches `role_address_overrides[].role` against.

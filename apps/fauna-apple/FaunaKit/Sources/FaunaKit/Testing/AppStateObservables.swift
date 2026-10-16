@@ -20,6 +20,15 @@ import Foundation
 /// merges those into the dict this returns; dictionary key order carries no
 /// meaning, so the merge order need not match `serializeState`'s original
 /// source order.
+/// The feed manager `commonState` reads `feed_reloads` off. The Fauna Kids
+/// build compiles the feed out, so there the slot can only ever be `nil` — one
+/// signature for both builds, since a parameter list cannot carry an `#if`.
+#if FAUNA_KIDS
+public typealias StateFeedManager = Never
+#else
+public typealias StateFeedManager = FfiFeedManager
+#endif
+
 @MainActor
 public enum AppStateObservables {
     public static func commonState(
@@ -27,7 +36,7 @@ public enum AppStateObservables {
         isAdmin: Bool,
         liveClient: FaunaClient?,
         conversationsSession: ConversationsSession?,
-        feedManager: FfiFeedManager?,
+        feedManager: StateFeedManager?,
         devicesMachine: DevicesMachine?,
         inboxMode: String?
     ) -> [String: Any] {
@@ -56,10 +65,12 @@ public enum AppStateObservables {
 
         // Convention 14's `alert_sweep_passes` observable — a straight
         // read off the shared `CriticalAlerts` registry.
+        #if !FAUNA_KIDS
         state["alert_sweep_passes"] = [
             "started": criticalAlertsRegistry().sweepPassesStarted(),
             "completed": criticalAlertsRegistry().sweepPassesCompleted(),
         ]
+        #endif
 
         // Convention 14's `mls_folded_commits` + `conv_receive_cycles`
         // observables — UniFFI reads off the logged-in
@@ -99,10 +110,12 @@ public enum AppStateObservables {
         // Convention 14's `feed_reloads` observable — a UniFFI read
         // off the live `FeedVM.manager`. No manager (never authenticated)
         // publishes no key.
+        #if !FAUNA_KIDS
         if let data = feedManager?.feedReloadsJson().data(using: .utf8),
            let reloads = try? JSONSerialization.jsonObject(with: data) {
             state["feed_reloads"] = reloads
         }
+        #endif
 
         // The Devices/Folders refresh barrier (`fauna_e2e_agent::
         // DEVICES_REFRESHES_KEY`, the `feed_reloads` twin) — a UniFFI read off
@@ -122,10 +135,12 @@ public enum AppStateObservables {
         // per-actor run-record shape (`{started, completed, runs: [...]}`)
         // starts empty pre-auth rather than absent, and `runs` is what apple's
         // `MailEnableGlue.applyPostClaimServingEnablement` leg now feeds.
+        #if !FAUNA_KIDS
         if let data = servingEnablementJson().data(using: .utf8),
            let enablement = try? JSONSerialization.jsonObject(with: data) {
             state["serving_enablement"] = enablement
         }
+        #endif
 
         #if DEBUG
         // Every new-message OS banner this app process actually raised, plus the

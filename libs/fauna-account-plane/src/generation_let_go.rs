@@ -1,6 +1,6 @@
 //! **The let-go** — a dead generation's rows are retired by the user, and by
-//! nothing else (`account-data-taxonomy.md` § The generation machinery →
-//! *Fleet-scope reclamation*, clause (3)(j); the surface is
+//! nothing else (`fleet-scope-reclamation.md`
+//! § *Fleet-scope reclamation*, clause (3)(j); the surface is
 //! `docs/goal/ui/settings.md` § Recovery kit).
 //!
 //! A generation is **dead** when no device keys it and no holder wraps it. The
@@ -48,7 +48,7 @@ use anyhow::Result;
 use ed25519_dalek::SigningKey;
 use fauna_account_store::{backend::StoreBackend, store::AccountStore};
 use fauna_protocol::generation_escrow::{EscrowGetReply, EscrowGetRequest, KIND_ESCROW_GET};
-use fauna_protocol::merge_policy::{KIND_ESCROW_RECEIPT, KIND_GENERATION_MINT};
+use fauna_protocol::merge_policy::{KIND_ESCROW_RECEIPT, KIND_ESCROW_WRAP, KIND_GENERATION_MINT};
 use fauna_protocol::{ByteBuf, RpcErrorClass, RpcRequester};
 
 use crate::account_state_plane::{AccountStatePlane, RetireOutcome, withheld_by_gate};
@@ -283,7 +283,8 @@ where
         }
         // 2. Its machinery behind the dataless belt — the mint rows where this
         // device's schedule names them (a predecessor's stays, bound (α)) and
-        // any receipt of it, whose belt also takes the nest's wraps.
+        // any receipt of it, whose belt also takes the nest's wraps, and the
+        // fleet plane's copy of those wraps.
         if dataless {
             let g_hex = fauna_core::hex32::encode(&g);
             let mut machinery: Vec<(&str, String, bool)> =
@@ -291,6 +292,13 @@ where
             for receipt in live_rows(store, KIND_ESCROW_RECEIPT).await? {
                 if receipt_generation(&receipt.key) == Some(g) {
                     machinery.push((KIND_ESCROW_RECEIPT, receipt.key, true));
+                }
+            }
+            // The fleet plane's copy of the wrap, whose lifecycle is the
+            // receipt's (*Escrow custody*, ruling (3)).
+            for wrap in live_rows(store, KIND_ESCROW_WRAP).await? {
+                if receipt_generation(&wrap.key) == Some(g) {
+                    machinery.push((KIND_ESCROW_WRAP, wrap.key, false));
                 }
             }
             for (kind, key, sweep) in machinery {

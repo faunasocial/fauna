@@ -332,6 +332,15 @@ public partial class App : Application
         set { if (Current is App app) app._offlineShareSeat = value; }
     }
 
+#if DEBUG || FAUNA_E2E_AGENT
+    /// <summary>The signed-in identity secret, for the e2e agent's
+    /// <c>offline_share_probe_set</c> arm only (the FFI door is keyed by the owner
+    /// secret like the ceremony's own doors). Compiled out of release artifacts —
+    /// convention 15: a secret accessor is never a runtime-gated production face.</summary>
+    internal static byte[]? CurrentCryptoSecretForTest =>
+        (Current as App)?._cryptoService is { HasKey: true } c ? c.SecretBytes : null;
+#endif
+
     /// <summary>Which offline-share panel is open, alongside <see cref="CurrentOfflineShareSeat"/>
     /// for the same navigation-survival reason.</summary>
     internal static uniffi.fauna_client_capabilities.OfflineSharePanel CurrentOfflineSharePanel
@@ -377,24 +386,75 @@ public partial class App : Application
     private NestRpcClient? _rpcClient;
 
     /// <summary>
-    /// The account-runtime teardown <see cref="DisposeNestClients"/> most recently
-    /// started, so an erase that FOLLOWS a dispose can wait for the store to close
-    /// (<see cref="ReleaseAccountScopedStoresBeforeErase"/>). The dispose itself stays
-    /// fire-and-forget — no other caller wants to block on a teardown — which is
-    /// exactly why the task has to be recorded somewhere the erase can find it.
+    /// How long a session teardown waits for <see cref="FlushDraftRailsAsync"/> before
+    /// it disposes the transport anyway. Same reasoning as
+    /// <see cref="Core.Services.AccountRuntimeStops.StopBudget"/>: a healthy flush is one sealed PUT per
+    /// changed rail and lands in well under a second, so only a dead connection
+    /// spends this — and a sign-out that hung on one would be worse than one that
+    /// loses the last edit.
     /// </summary>
-    private static Task _accountRuntimeTeardown = Task.CompletedTask;
+    private static readonly TimeSpan TeardownDraftFlushBudget = TimeSpan.FromSeconds(5);
 
     /// <summary>
-    /// How long <see cref="ClearCredentialNamespace"/> waits for the account
-    /// runtime to stop before erasing anyway. Named and generous (e2e convention
-    /// 14): the stop awaits the pump's in-flight pass, so a healthy teardown
-    /// resolves in well under a second and pays nothing here — only a wedged pump
-    /// spends the budget, and spending it is still better than hanging a sign-out
-    /// forever. Erasing anyway on timeout is the pre-fix behaviour, which fails
-    /// loudly in the log rather than silently doing nothing.
+    /// The leave-flush (<c>reserved-folders.md</c> § The leave-flush promise): hand every
+    /// draft rail's not-yet-saved edit to the nest NOW instead of at the end of its
+    /// debounce. The one body behind every leave door — the tray quit and the
+    /// session-end (<see cref="Services.TrayIconService.QuitApplication"/>,
+    /// <see cref="Services.RestartManagerService"/>), sign-out, the account switch, and
+    /// the e2e <c>reset</c>/<c>logout</c> arms (the last three through
+    /// <see cref="SignOutHandler"/> and <see cref="DisposeNestClients"/>) — so no door can
+    /// flush two rails and forget the third.
+    ///
+    /// <para>Each rail reads its snapshot synchronously, inside this call, before its
+    /// first await: a caller that drops the managers or clears a composer right after
+    /// it still flushes what the user left. What the caller owes in return is the
+    /// transport — the PUTs ride the session's live client, so the client must outlive
+    /// the returned task. A teardown that disposed it first is what lost the last edit:
+    /// the debounce fired on a disposed client ("The connection to the nest was lost"),
+    /// and the next sign-in restored the draft from before it.</para>
+    ///
+    /// <para>Never faults: each rail swallows its own failure (best-effort, like the
+    /// debounced save it stands in for).</para>
     /// </summary>
-    private static readonly TimeSpan AccountRuntimeStopBudget = TimeSpan.FromSeconds(30);
+    internal static Task FlushDraftRailsAsync()
+    {
+        var flushes = new List<Task>(3);
+        void Start(Func<Task?> flush)
+        {
+            try
+            {
+                if (flush() is { } started) flushes.Add(started);
+            }
+            catch (Exception ex)
+            {
+                ShellLog.Warn("App", $"[drafts] leave-flush could not start a rail: {ex.Message}");
+            }
+        }
+        Start(() => ConvDrafts?.SaveNowAsync());
+        Start(() => FeedDrafts?.FlushIfPendingAsync());
+        Start(() => EventDrafts?.FlushIfPendingAsync());
+        return Task.WhenAll(flushes);
+    }
+
+    /// <summary>Wait for a started <see cref="FlushDraftRailsAsync"/>, bounded by
+    /// <see cref="TeardownDraftFlushBudget"/> — the teardown's half of the contract
+    /// above: the transport goes only after this returns.</summary>
+    private static async Task AwaitDraftFlushAsync(Task flush)
+    {
+        try
+        {
+            await flush.WaitAsync(TeardownDraftFlushBudget).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            ShellLog.Warn("App", "[drafts] leave-flush did not finish within "
+                + $"{TeardownDraftFlushBudget.TotalSeconds:F0}s — tearing the session down anyway");
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("App", $"[drafts] leave-flush failed: {ex.Message}");
+        }
+    }
     private CryptoService? _cryptoService;
     // The post-onboarding hand-off (assigned in OnLaunched once the closure over
     // account / rootFrame / window exists). Held as a field so the e2e
@@ -447,6 +507,9 @@ public partial class App : Application
     // who dropped what.
 #if DEBUG || FAUNA_E2E_AGENT
     private uniffi.fauna_conversations.ConversationsSession? _e2eRealConvSession;
+    // The recording device that session was built under — the one the e2e
+    // serve action hands `FoldersServeSetAsync`, as the production page does.
+    private string? _e2eRealConvDeviceIdHex;
 #endif
     // E2E-only: the in-flight build of the above, kicked off on authentication and
     // awaited by the nav actions so ServiceClients.ConvSession carries a REAL session
@@ -467,7 +530,7 @@ public partial class App : Application
     // DisposeNestClients. Replaces the once-at-login ProvisionCapability push — a
     // restarted agent re-provisions within one tick, and the e2e set_state seam can
     // reach the spawn→provision→hydration chain (apps/windows.md § On-demand
-    // hydration host; file-sync.md § On-Demand Files).
+    // hydration host; on-demand-files.md § On-Demand Files).
     // The shared-Rust provisioner (sync-agent.md § Consumers) plus its pushed-event
     // listener, which the C# convergence twin retired onto. Its sync-complete toast
     // consumer is started/stopped with the session itself.
@@ -713,7 +776,34 @@ public partial class App : Application
     internal static string? CurrentErrorMessage
     {
         get => _currentErrorMessage;
-        set => _currentErrorMessage = value;
+        set
+        {
+            // Pages rewrite the mirror on every tick of a machine they observe, mostly
+            // with the value it already holds — only a CHANGE is news.
+            if (string.Equals(_currentErrorMessage, value, System.StringComparison.Ordinal)) return;
+            // "Which page erased the error the page on screen just set" is a recurring
+            // question with one mirror and every page writing it: under the e2e agent
+            // log each change names its writer (the first frames past this setter).
+            if (Core.Logs.E2eTrace.Enabled)
+            {
+                var frames = new System.Diagnostics.StackTrace(1, false).GetFrames()
+                    .Take(3)
+                    .Select(f => f.GetMethod() is { } m ? $"{m.DeclaringType?.Name}.{m.Name}" : "?");
+                Core.Logs.E2eTrace.Write(
+                    $"[error-mirror] {(_currentErrorMessage is null ? "null" : "set")} -> {(value is null ? "null" : $"\"{value}\"")} by {string.Join(" < ", frames)}");
+            }
+            _currentErrorMessage = value;
+#if DEBUG || FAUNA_E2E_AGENT
+            // `messages.error` is what `error_text()` reads with no wait, and the agent
+            // otherwise publishes state only after a command or on its ~1 s idle push.
+            // An error a machine tick raises after a bridge CLICK (no command at all —
+            // the labeler catalog's refused subscribe) then read back as the stale
+            // pre-click "" for up to a second after the page showed it. A change pushes
+            // now, so the published mirror trails the screen by one POST, not one idle
+            // tick.
+            Testing.TestAgent.Instance?.RequestPush();
+#endif
+        }
     }
 
     // Return value of the most recent call_machine_method (the value-returning
@@ -992,6 +1082,11 @@ public partial class App : Application
         }
 #endif
         this.InitializeComponent();
+
+        // The private contact overlay's one door reads over whichever manager the
+        // app holds NOW (a thunk, so an actor-change swap is followed;
+        // FaunaApp.Core.Services.ContactOverlayNames).
+        FaunaApp.Core.Services.ContactOverlayNames.UseManager(() => FaunaApp.Conversations.ConversationsManagerHost.Instance);
 
         // A crash must SAY what it was. WinUI's XAML-generated handler only breaks
         // into an *attached* debugger (`App.g.i.cs`), so with none attached — which
@@ -2134,11 +2229,16 @@ public partial class App : Application
             // below, for the same reason the switch arm counts where it does
             // (`Core.Services.E2eSessionCounters.RecordSessionTeardown`).
             Core.Services.E2eSessionCounters.RecordSessionTeardown();
+            // The leave-flush, before DropActorScopedState drops the managers its
+            // snapshots read; the erase below waits for it, because the erase retires
+            // this machine's enrollment and the PUTs ride that session
+            // (FlushDraftRailsAsync's own contract).
+            var draftsFlushed = FlushDraftRailsAsync();
             // The leaving identity, read before anything below rebinds it: its push
             // row is dropped on its own still-live client before the erase.
             var leavingRpc = _rpcClient;
             var leavingActor = _cryptoService is { HasKey: true } leavingCrypto ? leavingCrypto.ActorIdHex : null;
-            var leavingDevice = account.DeviceId;
+            var leavingDevice = account.ResolveDeviceId();
             // Sign-out is local-only (credentials wiped below), but nothing the
             // outgoing account converged on may survive into whatever account signs
             // in next. ONE call, no list — DropActorScopedState.
@@ -2165,8 +2265,12 @@ public partial class App : Application
             // starts.
             _ = Task.Run(async () =>
             {
+                // The draft PUTs started above land before anything below retires
+                // the session they ride.
+                await AwaitDraftFlushAsync(draftsFlushed);
+
                 // Unprovision the out-of-app sync agent on the sign-out teardown path
-                // (file-sync.md § Multi-account × File Provider, consequence 1: every
+                // (on-demand-files-apple.md § Multi-account × File Provider, consequence 1: every
                 // out-of-app sync host is unprovisioned on every session-teardown
                 // path), AWAITED before the erase — Core.Services.ErasePrecondition's
                 // own doc explains why (gated like the provision path so an e2e run
@@ -2256,7 +2360,7 @@ public partial class App : Application
             // UnprovisionSyncAgentAsync below then found nothing to unprovision and
             // returned a completed task, so the agent kept serving the SIGNED-OUT
             // account's on-demand engines under its still-valid capability —
-            // exactly what file-sync.md § Multi-account × File Provider,
+            // exactly what on-demand-files-apple.md § Multi-account × File Provider,
             // consequence 1 forbids. Doing it first is safe: unprovision() stops
             // the convergence loop before it tears the capability down, so no tick
             // can re-provision from the still-loaded crypto and undo it (that
@@ -3038,6 +3142,38 @@ public partial class App : Application
                 return;
             }
 
+            // The saved nest no longer signs this identity in (a claimed nest
+            // answered the silent challenge not_registered — onboarding.md §
+            // App-launch routing, the previously-signed-in row). The machine
+            // projects it to Offline { transient: false } with the verdict on
+            // the `sign_in_refused` side channel, so it is checked AHEAD of the
+            // generic Offline arm below (which would paint the needs-update
+            // surface: no Retry, and a misleading "update" framing). Same
+            // position as linux's main.rs; Retry is the way back in once the
+            // admin restores the account.
+            case LaunchPhase.Offline when snap.@signInRefused:
+            {
+                ShellLog.Warn("App", $"[launch] phase=Offline(sign-in-refused): {snap.@lastError}");
+                var ctx = new Views.LaunchSignInRefusedContext(
+                    Message: snap.@lastError ?? string.Empty,
+                    Retry: async () =>
+                    {
+                        await machine.RetrySilentChallenge();
+                        await DispatchLaunchSnapshotAsync(
+                            machine, machine.Snapshot(), rootFrame, account, secretHex, baseUrl,
+                            onOnboardingCompleted);
+                    },
+                    Fallthrough: () =>
+                    {
+                        rootFrame.Navigate(typeof(OnboardingPage), new ServiceClients(
+                            _nestClient, _cryptoService, account,
+                            SeedSecret: secretHex,
+                            OnOnboardingCompleted: onOnboardingCompleted));
+                    });
+                rootFrame.Navigate(typeof(Views.LaunchSignInRefusedPage), ctx);
+                return;
+            }
+
             case LaunchPhase.Offline o when o.@transient:
             {
                 // Reachability failure (5xx, timeout, DNS, refused, …) the
@@ -3207,9 +3343,9 @@ public partial class App : Application
 
     /// <summary>
     /// Run the deployment-seed custody leg (<c>DeploymentSeedCustody.SelfHealAsync</c>)
-    /// over the session's connection and, when custody is unconfirmed — the
-    /// fetch/store failed, the call threw, or the BR-2 mismatch refusal — raise the
-    /// recovery-custody warning on the landing page's WarningBar via the canonical
+    /// over the session's connection and, when it answers a warning (custody
+    /// unconfirmed — the shared Rust mapping chose which), render it through
+    /// <c>Strings.Resolve</c> onto the landing page's WarningBar via the canonical
     /// message-bar setter (android's <c>AppMessages.showWarning</c> precedent).
     /// Continuations stay on the captured UI context (no <c>ConfigureAwait(false)</c>
     /// anywhere in the chain). A result for a session that has since been replaced
@@ -3219,15 +3355,8 @@ public partial class App : Application
     {
         if (rpc is null) return;
         var custody = await Core.Helpers.DeploymentSeedCustody.SelfHealAsync(rpc);
-        var custodyWarning = custody switch
-        {
-            Core.Helpers.RecoveryCustodyOutcome.NotProtectedMismatch =>
-                Core.Services.Strings.Get("launch/recovery_custody_mismatch"),
-            Core.Helpers.RecoveryCustodyOutcome.NotProtectedFailed =>
-                Core.Services.Strings.Get("launch/recovery_custody_failed"),
-            _ => null,
-        };
-        if (custodyWarning is null || !ReferenceEquals(rpc, _rpcClient)) return;
+        if (custody is null || !ReferenceEquals(rpc, _rpcClient)) return;
+        var custodyWarning = Core.Services.Strings.Resolve(custody);
         _currentWarningMessage = custodyWarning;
         Views.MainPage.Current?.UpdateTestMessages(
             _currentErrorMessage, custodyWarning, _currentInfoMessage);
@@ -3327,7 +3456,7 @@ public partial class App : Application
         // ReleaseAccountScopedStoresBeforeErase, or a factory-reset's own wipe) —
         // this is stale-client cleanup before a fresh login, never the erase itself,
         // so retiring the enrollment again here would find nothing to retire.
-        if (_rpcClient is { } oldRpcClient) _accountRuntimeTeardown = StopAccountRuntimeThenDisposeAsync(oldRpcClient);
+        if (_rpcClient is { } oldRpcClient) Core.Services.AccountRuntimeStops.Process.Track(StopAccountRuntimeThenDisposeAsync(oldRpcClient));
         if (_nestClient is { } oldNestClient) _ = oldNestClient.DisposeAsync();
         _nestClient = new DirectNestClient(dialUrl, _cryptoService!, machine);
         _rpcClient = NewRpcClient(dialUrl, _cryptoService!);
@@ -3408,7 +3537,7 @@ public partial class App : Application
         // caller — and re-arm this install's ws-device row when it opted in, never
         // opting it in. Every login and switch-in funnels through here, so the
         // incoming identity re-arms with no Settings visit. Best-effort.
-        _ = Core.Services.PushSession.OnSessionStartAsync(_rpcClient, ActiveActorHex, account.DeviceId);
+        _ = Core.Services.PushSession.OnSessionStartAsync(_rpcClient, ActiveActorHex, account.ResolveDeviceId());
 
         // NO in-app backup upload driver: the SOURCE NEST is the segment-backup writer
         // (message-segment-store.md § Cross-location backup protocol — nest-side writer
@@ -3431,7 +3560,7 @@ public partial class App : Application
         // and off the UI thread, so it never disrupts login. Gated so deterministic
         // e2e (FAUNA_E2E_BRIDGE without FAUNA_E2E_REAL_SYNC_AGENT) never spawns or
         // provisions a real agent — an onboarding e2e that reaches this path must
-        // not write into the box's installed fauna-sync-agent.exe. file-sync.md
+        // not write into the box's installed fauna-sync-agent.exe. on-demand-files.md
         // § On-Demand Files; windows.md § On-demand hydration host.
         if (HydrationSessionEnabled)
         {
@@ -3454,7 +3583,7 @@ public partial class App : Application
                     if (machineForHydration.Snapshot().@token is not TokenStatus.Valid tv) return null;
                     return (token, tv.@expiresAtSecs);
                 },
-                rpc: _rpcClient, deviceId: account.DeviceId ?? "");
+                rpc: _rpcClient, deviceId: account.ResolveDeviceId() ?? "");
         }
 
         NotificationService.Initialize();
@@ -3473,7 +3602,7 @@ public partial class App : Application
         // account plane a host. account-data-plane.md § The account store →
         // *The client-side lifecycle*.
         await _rpcClient.StartAccountRuntimeAsync(
-            Core.Services.AccountStateDir.Base, account.DeviceId);
+            Core.Services.AccountStateDir.Base, account.ResolveDeviceId());
 
         // Conversations: build the shared-Rust ConversationsSession OVER the
         // process-wide ConversationsManagerHost.Instance (never a fresh internal
@@ -3512,7 +3641,7 @@ public partial class App : Application
                     // → *The `index` kind under the lease*). Read from the store rather
                     // than `_deviceId` so the value is the persisted one on EVERY login
                     // path into here, including the ones that never set the field.
-                    deviceIdHex: account.DeviceId);
+                    deviceIdHex: account.ResolveDeviceId());
                 if (convSession is not null)
                 {
                     // Give the session an owner that outlives this local, so the
@@ -3574,7 +3703,7 @@ public partial class App : Application
             // FAUNA_E2E_REAL_CONVERSATIONS) — mirrors linux
             // conv_backend::start_conversations_session, which runs the real
             // session under e2e for EVERY login, seeded or not.
-            convSession = await BuildE2eConvSessionAsync(_rpcClient, account.DeviceId);
+            convSession = await BuildE2eConvSessionAsync(_rpcClient, account.ResolveDeviceId());
             if (convSession is not null)
             {
                 // Same two wires the production branch above sets — teardown
@@ -3682,10 +3811,82 @@ public partial class App : Application
             _ = RunAutoRenewCadenceAsync(_rpcClient);
         }
 
+        // The blessed-nests trust auto-renew loop (nests.md § Expiry / renewal →
+        // Duration and blessing): app start, then every AUTO_RENEW_CHECK_SECS,
+        // whichever page the user sits on. Unlike the DNS cadence above it rides
+        // the session's shared WS-RPC connection (no second socket), so it also
+        // runs under the E2E bridge — the blessed-renewal journey reads its effect.
+        _ = RunNestsAutoRenewLoopAsync(_rpcClient);
+
         var navParam = new ServiceClients(
             _nestClient, _cryptoService, account, convSession,
             Launch: machine, Rpc: _rpcClient);
         rootFrame.Navigate(typeof(MainPage), navParam);
+    }
+
+    /// <summary>
+    /// The trust facet's auto-renew loop (<c>nests.md</c> § Expiry / renewal →
+    /// <i>Duration and blessing</i>): one hydrate at app start — its refresh runs
+    /// the renew sweep, so a blessed nest's due grants renew as the app comes up —
+    /// then <c>LinkedNestsAction.AutoRenew</c> every
+    /// <c>AUTO_RENEW_CHECK_SECS</c> (the desktop rule; iOS dispatches at
+    /// foreground only). Best-effort and silent, like the shared tick itself: a
+    /// failure is logged and retried next cycle.
+    ///
+    /// <para>Actor-scoped like <see cref="RunAutoRenewCadenceAsync"/>: it holds an
+    /// <see cref="Core.Services.ActorScope.BeginBackgroundLoop"/> lease, exits on
+    /// the next actor change, and disposes the machine it owns.</para>
+    /// </summary>
+    private static async Task RunNestsAutoRenewLoopAsync(Core.Services.INestRpcClient rpc)
+    {
+        using var lease = Core.Services.ActorScope.BeginBackgroundLoop();
+        var actorGone = lease.Token;
+
+        uniffi.fauna_client_pair.LinkedNestsMachine machine;
+        try
+        {
+            machine = await rpc.BuildLinkedNestsMachineWithMailRelayAndTrustAsync();
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("NestsAutoRenew", $"could not start: {ex.Message}");
+            return;
+        }
+
+        var interval = TimeSpan.FromSeconds(
+            uniffi.fauna_client_pair.FaunaClientPairMethods.AutoRenewCheckSecs());
+        try
+        {
+            try
+            {
+                await machine.Hydrate();
+            }
+            catch (Exception hx)
+            {
+                // The WS-RPC connection may not be up yet; the first tick retries.
+                ShellLog.Warn("NestsAutoRenew", $"start hydrate failed: {hx.Message}");
+            }
+            while (!actorGone.IsCancellationRequested)
+            {
+                await Task.Delay(interval, actorGone);
+                try
+                {
+                    await machine.Dispatch(new uniffi.fauna_client_pair.LinkedNestsAction.AutoRenew());
+                }
+                catch (Exception tx)
+                {
+                    ShellLog.Warn("NestsAutoRenew", $"tick failed: {tx.Message}");
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The actor changed — the only way out of the loop; not an error.
+        }
+        finally
+        {
+            machine.Dispose();
+        }
     }
 
     /// <summary>
@@ -3779,7 +3980,7 @@ public partial class App : Application
     /// <see cref="CapabilityProvisioner"/> derives the <c>BackupKey</c> via the
     /// <c>backup_key_derive</c> FFI export and sends only that
     /// (key-material-hierarchy.md rule #7). Stopped in <see cref="DisposeNestClients"/>
-    /// (logout / reset / nest re-point). Per file-sync.md § On-Demand Files;
+    /// (logout / reset / nest re-point). Per on-demand-files.md § On-Demand Files;
     /// windows.md § On-demand hydration host.
     /// </summary>
     /// <summary>
@@ -3809,12 +4010,15 @@ public partial class App : Application
         _offlineSharePanel = uniffi.fauna_client_capabilities.OfflineSharePanel.Closed;
         _offlineShareStatus = uniffi.fauna_client_capabilities.CeremonyStatus.Idle;
         _offlineShareExpectingFrom = null;
+        // The account runtime's teardown forgets the plane's cell; re-read so the
+        // peer-transfer surface disappears with the session it belonged to.
+        FaunaApp.Core.Services.SharePlaneModel.Shared.Refresh();
 #endif
     }
 
     /// <summary>
     /// Stop the loop and tell the agent to drop its capability — the sign-out /
-    /// account-switch / factory-reset teardown (file-sync.md § Multi-account ×
+    /// account-switch / factory-reset teardown (on-demand-files-apple.md § Multi-account ×
     /// File Provider, consequence 1). The shared provisioner stops the loop
     /// before it unprovisions, so no tick can re-provision from still-loaded
     /// crypto and undo it. Best-effort: an unreachable or never-started agent is
@@ -3929,8 +4133,19 @@ public partial class App : Application
                     // which pushes every binding recorded during the start-up window above.
                     bindings.AttachChannel(session.LocationControl);
                     ShellLog.Info("App", "[sync-agent] session INSTALLED");
+#if P2P_SHARE
+                    // The peer-transfer plane (p2p.md § Cross-user shared-set transfer),
+                    // fired detached from where the provisioner starts — exactly as macOS
+                    // does from startSyncAgentProvisioner. No ordering against
+                    // StartAccountRuntimeAsync / BuildConversationsSessionAsync: shared Rust
+                    // waits (bounded) for both. Best-effort: SharePlaneModel logs a failure
+                    // and the surface stays absent.
+                    _ = FaunaApp.Core.Services.SharePlaneModel.Shared.StartAsync(
+                        rpc, session.Provisioner,
+                        System.IO.Path.Combine(BackupPaths.DataDir, "share-spool"));
+#endif
                     // No content-key push: the agent resolves every set's keys from the
-                    // account's custody itself (on-demand-files.md § Shared sets on a
+                    // account's custody itself (on-demand-files-shared-sets.md § Shared sets on a
                     // capability host → One mechanism).
                 });
         });
@@ -4240,7 +4455,7 @@ public partial class App : Application
                 // Wake the hydration session loop so the agent gets the
                 // freshly-minted bearer now rather than at its next tick (the loop
                 // owns all pipe pushes — RefreshBearer and, when the agent reports
-                // no capability, the full re-provision). file-sync.md § On-Demand
+                // no capability, the full re-provision). on-demand-files.md § On-Demand
                 // Files; windows.md § On-demand hydration host.
                 onBearerRefreshed?.Invoke();
             }
@@ -4366,6 +4581,7 @@ public partial class App : Application
             RetireConvSession(null, _e2eRealConvSession);
             // Hold the Arc alive so the receive loop's liveness Weak stays upgradeable.
             _e2eRealConvSession = convSession;
+            _e2eRealConvDeviceIdHex = deviceIdHex;
 
             // The DM OS-toast observer the production login block attaches — the
             // witness for conversations outcome 11 reads what it fires, and the seeded
@@ -4605,7 +4821,7 @@ public partial class App : Application
                 ["node_url"] = nestUrl ?? account.NestUrl,
                 ["secret_hex"] = secretHex ?? account.SecretHex,
                 ["handle"] = _handle,
-                ["device_id"] = _deviceId ?? account.DeviceId,
+                ["device_id"] = _deviceId ?? account.StoredDeviceId,
                 ["actor_id"] = _cryptoService?.HasKey == true ? _cryptoService.ActorIdHex : null,
             },
             ["nav"] = new Dictionary<string, object?>
@@ -4701,6 +4917,14 @@ public partial class App : Application
             // omitted key, which would read as "this app has no leg" and windows
             // HAS one.
             ["serving_enablement"] = ServingEnablementForSerialization(),
+#if P2P_SHARE
+            // What this process's share plane has served to peers
+            // (`fauna_e2e_agent::SHARE_SERVE_TALLY_KEY`), top-level like tui's — the
+            // witness for the offline-sharing resume/serve journeys. A plain
+            // lock-and-clone on the FFI side (convention 11's corollary), legal on
+            // the state path.
+            ["share_serve_tally"] = ShareServeTallyForSerialization(),
+#endif
             // The new-message OS banners this process actually fired, plus the diff-tick
             // counter pair that makes a negative read of them sound — conversations
             // outcome 11's only observable (`fauna_e2e_agent::MESSAGE_BANNERS_KEY`), same
@@ -5038,6 +5262,23 @@ public partial class App : Application
             };
     }
 
+#if P2P_SHARE
+    /// <summary>The <c>share_serve_tally</c> observable: <c>{manifests: {path: n},
+    /// chunks: {path: n}, parked: n, held: b}</c>, the FFI mirror of the shared
+    /// recorder's snapshot. Windows HAS this leg, so the key is always published.</summary>
+    private static object ShareServeTallyForSerialization()
+    {
+        var tally = uniffi.fauna_ffi.FaunaFfiMethods.ShareServeTally();
+        return new Dictionary<string, object?>
+        {
+            ["manifests"] = tally.manifests,
+            ["chunks"] = tally.chunks,
+            ["parked"] = tally.parked,
+            ["held"] = tally.held,
+        };
+    }
+#endif
+
     /// <summary>
     /// The <c>message_banners</c> observable as the state serializer publishes it:
     /// the DECODED <c>{"started": N, "completed": M, "fired": [{"thread_id",
@@ -5151,6 +5392,16 @@ public partial class App : Application
         ?? Task.FromResult<string?>(null);
 
     /// <summary>
+    /// The <c>read_marker_state</c> e2e reader on the live client — the raw JSON
+    /// from <c>NestRpcClient.ReadMarkerStateJsonAsync</c>, or <c>null</c> when no
+    /// client is connected (pre-auth), which <c>TestAgent</c> reports as
+    /// <c>{"found":false}</c>. The <see cref="DeviceSetStateForTest"/> shape.
+    /// </summary>
+    internal static Task<string?> ReadMarkerStateForTest(string channelIdHex) =>
+        (Current as App)?._rpcClient?.ReadMarkerStateJsonAsync(channelIdHex)
+        ?? Task.FromResult<string?>(null);
+
+    /// <summary>
     /// The <c>reconnect_backoff</c> seam on the live client
     /// (<c>NestRpcClient.SetReconnectBackoffForTest</c>). <c>false</c> when there
     /// is no client to pace, which <c>TestAgent</c> refuses loudly (convention 11).
@@ -5199,9 +5450,9 @@ public partial class App : Application
             {
                 await rpc.FoldersCreateAsync(folder).ConfigureAwait(false);
             }
-            var served = await rpc.FoldersServeSetAsync(convSession, folder, null, true).ConfigureAwait(false);
+            var served = await rpc.FoldersServeSetAsync(convSession, folder, null, true, app?._e2eRealConvDeviceIdHex).ConfigureAwait(false);
             // Serving moves the set's key; the agent re-keys on the custody write's
-            // account-state change itself (on-demand-files.md § Shared sets on a capability
+            // account-state change itself (on-demand-files-shared-sets.md § Shared sets on a capability
             // host → One mechanism).
             return (true, served, null);
         }
@@ -5395,6 +5646,15 @@ public partial class App : Application
     /// reconcile*).</param>
     private void DisposeNestClients(bool signOut = false, bool sameIdentity = false)
     {
+        // The leave-flush, FIRST: its snapshots are taken here, before the session
+        // retire and DropActorScopedState below drop the managers they read, and the
+        // deferred disposal at the bottom waits for its PUTs before the client they
+        // ride goes (FlushDraftRailsAsync's own contract). Every caller is a session's
+        // transport going away — the account switch, the e2e reset/logout arms, a
+        // nest re-point — and an edit still inside its debounce would otherwise fire
+        // on the disposed client and be lost.
+        var draftsFlushed = FlushDraftRailsAsync();
+
 #if DEBUG || FAUNA_E2E_AGENT
         // The e2e conversations session is built ON the WS-RPC client being disposed
         // here, so it dies with it: drop both the in-flight build and the held Arc.
@@ -5448,12 +5708,19 @@ public partial class App : Application
         // The departing session's refresh context — a stale machine here would let
         // TriggerSilentSignInForTestAsync drive a dead LaunchMachine after logout.
         _liveTtlRefreshContext = null;
-        // Recorded, not awaited: the teardown stays fire-and-forget for every
-        // caller that only wants the client replaced, but an erase running right
-        // behind this one (the e2e `reset`/`logout` arms call
-        // ClearCredentialNamespace on the very next line) has to be able to wait
-        // for the store to close — see ReleaseAccountScopedStoresBeforeErase.
-        if (oldRpc is not null) _accountRuntimeTeardown = StopAccountRuntimeThenDisposeAsync(oldRpc, signOut);
+        // Tracked, not awaited: the teardown stays fire-and-forget for every
+        // caller that only wants the client replaced, but every erase that runs
+        // while it is still going has to wait for the store to close — the e2e
+        // `reset`/`logout` arms' ClearCredentialNamespace on the very next line,
+        // and a remove-account of the identity a switch just left
+        // (AccountStateDir.EraseWhenStoppedAsync). Tracked in a set, never one
+        // field: two switches in a row leave two stops running, and the erase
+        // waits for both (Core.Services.AccountRuntimeStops).
+        if (oldRpc is not null)
+        {
+            Core.Services.AccountRuntimeStops.Process.Track(
+                StopAccountRuntimeThenDisposeAsync(oldRpc, signOut, draftsFlushed));
+        }
         if (oldNest is not null) _ = oldNest.DisposeAsync();
     }
 
@@ -5476,8 +5743,15 @@ public partial class App : Application
     /// <param name="rpc">The departing client whose runtime to stop, then dispose.</param>
     /// <param name="signOut">See <see cref="DisposeNestClients"/>'s own parameter of the
     /// same name — selects the sign-out-shaped stop over the switch-shaped one.</param>
-    private static async Task StopAccountRuntimeThenDisposeAsync(NestRpcClient rpc, bool signOut = false)
+    /// <param name="draftsFlushed">The leave-flush <see cref="DisposeNestClients"/> started
+    /// over this client — its PUTs ride it, so it is waited for (bounded) before anything
+    /// here stops or disposes. <c>null</c> from the stale-client cleanup in
+    /// <c>StartMainAppAsync</c>, which runs after its session's erase: nothing is left to
+    /// flush there.</param>
+    private static async Task StopAccountRuntimeThenDisposeAsync(
+        NestRpcClient rpc, bool signOut = false, Task? draftsFlushed = null)
     {
+        if (draftsFlushed is not null) await AwaitDraftFlushAsync(draftsFlushed).ConfigureAwait(false);
         if (signOut)
         {
             await rpc.StopAccountRuntimeForSignOutAsync().ConfigureAwait(false);
@@ -5528,7 +5802,10 @@ public partial class App : Application
     /// by a live <c>_rpcClient</c>; the e2e <c>reset</c>/<c>logout</c> arms call
     /// <see cref="DisposeNestClients"/> first, which nulls that field and starts the
     /// stop fire-and-forget — so by the time the erase runs there is nothing left to
-    /// ask, only a task to wait for. Covering one and not the other would leave half
+    /// ask, only a stop in flight to wait for. Both kinds go through ONE barrier
+    /// (<see cref="Core.Services.AccountRuntimeStops"/>), the same one the
+    /// remove-account erase waits behind, and it holds while any stop is in flight —
+    /// an earlier switch's included. Covering one and not the other would leave half
     /// the callers racing, which is how a single-site fix here re-breaks.</para>
     ///
     /// <para>Best-effort and bounded: a sign-out that hung on a wedged pump would be
@@ -5577,8 +5854,7 @@ public partial class App : Application
         // reports this.
         try
         {
-            var live = app?._rpcClient;
-            var pending = new List<Task> { _accountRuntimeTeardown };
+            var stops = Core.Services.AccountRuntimeStops.Process;
             // Sign-out-shaped, not the switch stop: the only two callers that
             // reach this branch with a still-live `_rpcClient` are the real
             // sign-out (`SignOutHandler`) and the unreadable-index "start over"
@@ -5587,24 +5863,20 @@ public partial class App : Application
             // (`NestRpcClient.StopAccountRuntimeForSignOutAsync`'s own doc). The
             // e2e `reset`/`logout` arms never reach this `if`: they call
             // `DisposeNestClients` first, which already nulls `_rpcClient` and
-            // kicks off its own (separately classified) stop into
-            // `_accountRuntimeTeardown` above.
-            if (live is not null) pending.Add(live.StopAccountRuntimeForSignOutAsync());
-            if (live is not null) pending.Add(live.ReleaseAccountScopedStoresAsync());
-            if (!Task.WhenAll(pending).Wait(AccountRuntimeStopBudget))
+            // tracks its own (separately classified) stop.
+            if (app?._rpcClient is { } live)
             {
-                ShellLog.Warn("App", "[account-runtime] stop did not finish within "
-                    + $"{AccountRuntimeStopBudget.TotalSeconds:F0}s — erasing anyway; "
-                    + "a still-open store will fail its remove_dir_all (os error 32)");
+                stops.Track(live.StopAccountRuntimeForSignOutAsync());
+                stops.Track(live.ReleaseAccountScopedStoresAsync());
             }
+            // Blocking is this method's contract (its callers erase on the next
+            // line, synchronously); the barrier never throws, reports its own
+            // lapse, and every await inside it is ConfigureAwait(false).
+            stops.BarrierAsync("sign-out").GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {
             ShellLog.Warn("App", $"[account-runtime] stop-before-erase failed: {ex.Message}");
-        }
-        finally
-        {
-            _accountRuntimeTeardown = Task.CompletedTask;
         }
     }
 
@@ -6102,7 +6374,7 @@ public partial class App : Application
                             RetireConvSession(_e2eConvSessionTask, null);
                             // The set_state patch above already persisted this login's
                             // device_id, so the store is the same source production reads.
-                            _e2eConvSessionTask = BuildE2eConvSessionAsync(rpc, account.DeviceId);
+                            _e2eConvSessionTask = BuildE2eConvSessionAsync(rpc, account.ResolveDeviceId());
                             Core.Logs.E2eTrace.Write("[cmd-session] BuildE2eConvSessionAsync kicked off (returned to caller)");
                         }
 
@@ -6118,7 +6390,7 @@ public partial class App : Application
                         // e2e (`account-data-plane.md` § Implementation status today).
                         if (rpc is not null)
                         {
-                            _ = rpc.StartAccountRuntimeAsync(Core.Services.AccountStateDir.Base, account.DeviceId);
+                            _ = rpc.StartAccountRuntimeAsync(Core.Services.AccountStateDir.Base, account.ResolveDeviceId());
                         }
 
                         // Author-side subscriptions reconciliation for the e2e login
@@ -6241,7 +6513,7 @@ public partial class App : Application
                         if (rpc is not null && crypto.HasKey)
                         {
                             _ = Core.Services.PushSession.OnSessionStartAsync(
-                                rpc, crypto.ActorIdHex, account.DeviceId);
+                                rpc, crypto.ActorIdHex, account.ResolveDeviceId());
                         }
                         EnsureAgentAttachment();
 
@@ -6326,7 +6598,7 @@ public partial class App : Application
                             StartHydrationSession(
                                 bearerSource: () => Volatile.Read(ref cachedBearer) is { } b ? (b.Item1, b.Item2) : null,
                                 rpc: hydrationRpc,
-                                deviceId: account.DeviceId ?? "");
+                                deviceId: account.ResolveDeviceId() ?? "");
                         }
                     }
                 }

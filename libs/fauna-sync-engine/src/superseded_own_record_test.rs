@@ -31,6 +31,7 @@ fn head_moved_to(manifest: ContentHash, size: usize) -> StaleHydratedRow {
         content_key_version: None,
         remote_mtime: 0,
         version_num: 1,
+        signed_as: None,
     }
 }
 

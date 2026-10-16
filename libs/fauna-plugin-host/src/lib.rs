@@ -18,7 +18,9 @@
 //! runtime's two caps (`fauna_labeler`), applied here per instance. An
 //! exhausted budget terminates the call as [`PluginFault::OutOfFuel`] and
 //! poisons the instance; the host survives, and the embedder decides whether
-//! to re-instantiate. A refused memory growth is observed by the plugin as a
+//! to re-instantiate. A call yields to the async executor every
+//! [`PLUGIN_FUEL_YIELD_INTERVAL`] units of fuel, so a runaway call holds no
+//! worker thread for its whole budget. A refused memory growth is observed by the plugin as a
 //! failed `memory.grow`, never as a host fault.
 //!
 //! **The holder key never enters the sandbox.** [`HolderKey`] is minted by the
@@ -60,6 +62,14 @@ pub const PLUGIN_MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 /// runtime's per-item bound. Deterministic termination: the budget, not a wall
 /// clock, is what ends a runaway plugin.
 pub const PLUGIN_FUEL_PER_CALL: u64 = 1_000_000_000;
+
+/// Fuel spent between two yields to the async executor — about ten
+/// milliseconds of CPU. A long call is cooperative: it hands its worker back
+/// at this interval, so a runaway plugin spending its whole
+/// [`PLUGIN_FUEL_PER_CALL`] never stalls the other tasks sharing that worker.
+/// Yielding spends no fuel and moves no budget: the call still ends exactly
+/// where the budget runs out.
+pub const PLUGIN_FUEL_YIELD_INTERVAL: u64 = 10_000_000;
 
 /// Ceiling on a compiled component's binary, in bytes — what the install
 /// leg's fetch is capped at and what [`PluginEngine::compile`] refuses above.

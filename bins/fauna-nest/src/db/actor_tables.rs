@@ -790,6 +790,106 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
                      actor endpoint already serves it to the world unauthenticated.",
         },
     },
+    // The oracle's ActivityPub class (TP11, `activitypub/oracle.rs`): one row
+    // per (account, third-party principal) a request was signed for — the
+    // audit counters and the rate ceiling's window, never the authority.
+    // Burned at succession for the `nostr_oracle_clients` reason: a principal
+    // minted under the thief's authority must not keep speaking as the actor,
+    // and nothing here is the successor's to audit that the roster and the
+    // grant log do not already show. The export rides it: counters only, the
+    // owner's own ledger of what the principal did.
+    ActorTable {
+        table: "ap_oracle_principals",
+        column: "actor_id",
+        key: ActorKey::Hex,
+        policy: Policy::Purge,
+        succession: Succession::Burn(
+            "an oracle principal's standing window to have requests signed AS the fediverse \
+             actor — a principal minted under the thief's authority keeps speaking for the \
+             user after the ceremony",
+        ),
+        export: Export::Verbatim,
+    },
+    // The oracle's per-operation record for the ActivityPub class — the audit
+    // half the custodian keeps (`key-material-hierarchy.md` § *The oracle*,
+    // the audit split): which class, when, and `<method> <host>`. Burned with
+    // its principal rows; the owner's own audit trail, so it rides the export.
+    ActorTable {
+        table: "ap_oracle_ops",
+        column: "actor_id",
+        key: ActorKey::Hex,
+        policy: Policy::Purge,
+        succession: Succession::Burn(
+            "the operation record of a burned oracle principal — rows naming a window that no \
+             longer exists",
+        ),
+        export: Export::Verbatim,
+    },
+    // The oracle's posting class (TP11, `post_author_oracle.rs`): one row per
+    // (account, third-party principal) a post was authored or retracted for —
+    // the audit counters and the rate ceiling's window, never the authority.
+    // Burned at succession for the `ap_oracle_principals` reason; the
+    // delegation it signs with dies with the old identity anyway
+    // (`atproto-pds-full.md` § D10, Revocation).
+    ActorTable {
+        table: "post_author_principals",
+        column: "actor_id",
+        key: ActorKey::Hex,
+        policy: Policy::Purge,
+        succession: Succession::Burn(
+            "an oracle principal's standing window to author posts AS the actor — a principal \
+             minted under the thief's authority keeps posting for the user after the ceremony",
+        ),
+        export: Export::Verbatim,
+    },
+    // The posting class's per-operation record and authorship ledger: which
+    // post was authored or retracted, when. Burned with its principal rows;
+    // the owner's own audit trail, so it rides the export.
+    ActorTable {
+        table: "post_author_ops",
+        column: "actor_id",
+        key: ActorKey::Hex,
+        policy: Policy::Purge,
+        succession: Succession::Burn(
+            "the operation record of a burned oracle principal — rows naming a window that no \
+             longer exists",
+        ),
+        export: Export::Verbatim,
+    },
+    // The oracle's ATProto class (TP11, `atproto_oracle.rs`): one row per
+    // (account, third-party principal) a service token was minted for — the
+    // audit counters and the rate ceiling's window, never the authority.
+    // Burned at succession for the `ap_oracle_principals` reason: a principal
+    // minted under the thief's authority must not keep obtaining tokens that
+    // speak as the DID. The export rides it: counters only, the owner's own
+    // ledger of what the principal did.
+    ActorTable {
+        table: "atproto_oracle_principals",
+        column: "actor_id",
+        key: ActorKey::Hex,
+        policy: Policy::Purge,
+        succession: Succession::Burn(
+            "an oracle principal's standing window to have service tokens minted AS the \
+             account's DID — a principal minted under the thief's authority keeps speaking \
+             for the user after the ceremony",
+        ),
+        export: Export::Verbatim,
+    },
+    // The oracle's per-operation record for the ATProto class — the audit
+    // half (`key-material-hierarchy.md` § *The oracle*, the audit split):
+    // which class, when, and `<aud> <lxm>`. Burned with its principal rows;
+    // the owner's own audit trail, so it rides the export.
+    ActorTable {
+        table: "atproto_oracle_ops",
+        column: "actor_id",
+        key: ActorKey::Hex,
+        policy: Policy::Purge,
+        succession: Succession::Burn(
+            "the operation record of a burned oracle principal — rows naming a window that no \
+             longer exists",
+        ),
+        export: Export::Verbatim,
+    },
     ActorTable {
         table: "ap_follows",
         column: "local_actor_id",
@@ -1240,6 +1340,27 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
              credential, per the rotate-on-use family-kill design). Bearer \
              material never rides an export",
         ),
+    },
+    // The oracle's per-operation record at the `atproto.commit` door
+    // (`key-material-hierarchy.md` § *The oracle* → *The ATProto classes ride
+    // the protocol's own door*): one row per external write a PDS session
+    // applied. Burned with the sessions it names.
+    ActorTable {
+        table: "atproto_external_write_ops",
+        column: "actor_id",
+        key: ActorKey::Blob,
+        policy: Policy::Purge,
+        succession: Succession::Burn(
+            "the write record of the burned `atproto_sessions` families — rows naming \
+             sessions that no longer exist, written under the predecessor's authority",
+        ),
+        export: Export::Redacted {
+            omit: &["session_id"],
+            reason: "the owner's own ledger of what external apps wrote to their repo rides -- \
+                     when, which action, which collection and record key. `session_id` is the \
+                     refresh family's initial jti, the bearer value `atproto_sessions` withholds \
+                     (presenting it IS the refresh credential), so it never rides an export",
+        },
     },
     // The per-sender "already auto-replied recently" ledger. It follows the
     // mailbox because it is what stops a vacation responder answering the same
@@ -2437,6 +2558,30 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
              archive through the owner's own sealed plane; this buffer is \
              re-earned within a day by the custodian nest's own attestation \
              cadence",
+        ),
+    },
+    ActorTable {
+        table: "custody_hosting_fleet",
+        column: "owner_actor_id",
+        key: ActorKey::Blob,
+        policy: Policy::Purge,
+        succession: Succession::Burn(
+            "a derived register of which of the custodied owner's devices handshook at \
+             this custodian nest's serve door — rewritten at every \
+             `fauna.auth.custodied_fleet_handshake` and dropped with the owner's last \
+             hosting row. A succession re-mints the ceremony (and the successor's devices \
+             carry certs under the successor's root), so a moved row would point a register \
+             at an identity whose certs it does not hold; the successor's next handshake \
+             writes its own. Deleting loses nothing a handshake does not recreate",
+        ),
+        // EXPORT RULING. The custodied owner holds no account on this nest, and
+        // the register is serve-door bookkeeping derived from the device's own
+        // cert, which the owner's fleet already holds: nothing here is the
+        // owner's data or recreatable only from here.
+        export: Export::WithheldOperational(
+            "the custodian-NEST serve door's derived device register -- each row is a \
+             device's own root-signed cert the owner's fleet already holds, rewritten at \
+             every handshake and dropped with the owner's last hosting row",
         ),
     },
     // Despite reading as a device row this is the SUBSCRIPTION plane's:
@@ -4011,6 +4156,26 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         // having settled it.
         export: Export::Verbatim,
     },
+    // The in-flight marker of a re-seed's flip (`db/materialize_in_flight.rs`;
+    // `backup-destinations.md` § *the in-flight marker*): one row per
+    // (actor, kind) between materialize's first observable write and its
+    // commit. It names the account's own corpus and moves with the scope it
+    // names — the segment and journal areas rename with the actor — so a flip
+    // interrupted across a succession is still completed by the successor's
+    // retry rather than refused as a lived-in account.
+    ActorTable {
+        table: "materialize_in_flight",
+        column: "actor_id",
+        key: ActorKey::Blob,
+        policy: Policy::Purge,
+        succession: Succession::Move(MoveShape::Plain),
+        export: Export::WithheldOperational(
+            "the durable decision point of an interrupted restore ceremony on this box: which \
+             custody set it was flipping and which segment ids it named. It is about this \
+             box's own half-finished write, meaningless off it, and holds nothing of the \
+             owner's that the archive does not already carry as mail, events or cards",
+        ),
+    },
     // The per-message scan record for mail this account was DELIVERED. Its own
     // per-actor consumer is what rules it: `seed_factor_backlog` selects on
     // `delivered_to_actor` to enumerate "the owner's mail item universe" and seed
@@ -4130,7 +4295,7 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         key: ActorKey::Hex,
         policy: Policy::Purge,
         succession: Succession::Move(MoveShape::Bespoke(
-            "moves AND revokes in one statement (`status = 'revoked'`, `secret_hash = NULL`). The rows re-point so the successor's Connected-apps page shows exactly which apps held standing authority, and are revoked because a thief-minted connection signs as the npub silently and forever (`ui/nostr.md` § Key succession and rotation). A plain move would carry the thief's authority to the successor.",
+            "moves AND burns in one statement (`status = 'burned'` unless already `revoked`, `secret_hash = NULL`). The rows re-point so the successor's Connected-apps page lists exactly which apps held standing authority (as not connected, like a burned mail password), and are burned because a thief-minted connection signs as the npub silently and forever (`ui/nostr.md` § Key succession and rotation). A plain move would carry the thief's authority to the successor.",
         )),
         // The roster IS the user-meaningful half, and the succession ruling
         // beside this says why: the rows exist so the owner's Connected-apps
@@ -5901,11 +6066,12 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         // it to whoever presents it, consulting the retired identity nowhere.
         // A seed thief could mint an unbounded supply at
         // `fauna.payments.claims.mint` (a plain User-class gesture) and hold
-        // the codes through the ceremony, and NO app can revoke one — there is
-        // no `claims.void` gesture; `void_payment_claim` is reachable only from
-        // the refund path. Carried live, that is `nest_pairings`' shape exactly:
-        // standing authority the thief could have minted, invisible to the
-        // refusal plane and unrevocable from every app. Voiding costs the
+        // the codes through the ceremony. The successor could void any one of
+        // them (`claims.void`), but cannot tell a thief's code from a buyer's —
+        // both are bare `manual` rows on the moved ledger — so carried live,
+        // that is `nest_pairings`' shape exactly: standing authority the thief
+        // could have minted, invisible to the refusal plane, revocable only by
+        // guessing which rows to void. Voiding costs the
         // honest buyer nothing a `Stay` would not cost them anyway (their code
         // was dead either way) and leaves the row — `external_ref` intact — so
         // the successor can verify the payment in the provider dashboard and
@@ -5923,8 +6089,8 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
              but every UNREDEEMED, un-voided claim is stamped `voided_at` as it moves: \
              a claim code is a bearer credential `redeem_claim` binds to whoever \
              presents it, a seed thief could have minted a supply at `claims.mint`, \
-             and no app can revoke one (there is no `claims.void` gesture), so the \
-             ceremony is the only place it can die. The row survives with its \
+             and the successor cannot tell those codes from a buyer's to void them \
+             one by one, so the ceremony voids them all. The row survives with its \
              `external_ref`, which is what lets the successor honour a real buyer. \
              Redeemed rows move untouched -- completed sales, and the refund path \
              resolves through them. The row rule is owned by `successions::tests::\
@@ -5933,14 +6099,14 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         // The succession ruling above already did this verdict's hard thinking
         // and said it in as many words: **a claim code is a BEARER credential**
         // — `redeem_claim` finds it by code alone and binds it to whoever
-        // presents it — and no app can revoke one, because there is no
-        // `claims.void` gesture. That is why the ceremony voids the unredeemed
-        // half rather than carrying it.
+        // presents it — and it stays live until something voids it. That is why
+        // the ceremony voids the unredeemed half rather than carrying it.
         //
         // An export is the same exposure through a different door, and a
         // weaker one: the archive is retrievable with an eviction export token
         // and outlives every session that produced it, while the ceremony at
-        // least ends in a row the successor can see. So `code` does not ride,
+        // least ends in a row the successor can see — and an author who never
+        // learns of a leak never voids the leaked code. So `code` does not ride,
         // and unlike the ceremony there is no voiding step to soften it.
         //
         // Everything else is the author's sales ledger and rides — including
@@ -5952,7 +6118,7 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         export: Export::Redacted {
             omit: &["code"],
             reason: "`code` is a bearer credential -- `redeem_claim` binds it to whoever \
-                     presents it and no app can revoke one -- so it must not rest in an \
+                     presents it until its author voids it -- so it must not rest in an \
                      archive retrievable with an eviction token, which is the same exposure \
                      the succession ruling above voids unredeemed codes to prevent, minus the \
                      voiding. The sales ledger rides: `external_ref` is the dashboard audit \
@@ -6085,6 +6251,23 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
     // the back catalogue readable while making post-ceremony broadcasts dark to
     // the thief. (The nest mints no period key; it holds only the wrapped
     // distributions the author's client uploads.)
+    ActorTable {
+        table: "subscriber_encaps_keys",
+        column: "actor_id",
+        key: ActorKey::Blob,
+        policy: Policy::Purge,
+        succession: Succession::Stay(
+            "COMPROMISE, not history: the encapsulation key derives from the identity seed the \
+             thief read, and the successor's apps publish their own on its first session. Left \
+             on the retired identity, the row wraps nothing for the successor",
+        ),
+        // EXPORT RULING (the subscription plane). The account's own published
+        // ML-KEM-768 **encapsulation** key — the public half, exactly
+        // `subscribers.mlkem_encaps_key`'s clearance below, and published to be
+        // handed out (`post-quantum.md` § surface B). The decapsulation half is
+        // derived on the account's devices and has never rested here.
+        export: Export::Verbatim,
+    },
     ActorTable {
         table: "subscribers",
         column: "author_id",
@@ -7916,11 +8099,10 @@ pub const SUCCESSION_REFERENCES: &[(&str, &str, Succession)] = &[
         // INVITER's column only; the row belongs to `invitee_id`, which moves.
         //
         // Declared HERE rather than in the census walk's `EXCLUDED`, on
-        // purpose. `room_members.invited_by` is an exclusion, and this list's
-        // own charter settles the difference: the column names an actor the
-        // row does not belong to, so a succession must rule it, and `EXCLUDED`
-        // carries no verdict at all. (The retired plane's
-        // `group_members.invited_by` was the `Stay` precedent followed.)
+        // purpose: this list's own charter settles it — the column names an
+        // actor the row does not belong to, so a succession must rule it, and
+        // `EXCLUDED` carries no verdict at all. `room_members.invited_by`
+        // (below) took the same ruling.
         Succession::Stay(
             "history/attribution, and CONTRADICTABLE if re-pointed, \
              `room_generations.minted_by`'s reason: the row's `signed_invite` is \
@@ -7938,6 +8120,30 @@ pub const SUCCESSION_REFERENCES: &[(&str, &str, Succession)] = &[
              row and under its own signature: the invitation is the invitee's \
              record of who asked, the `room_members.invited_by` residue one step \
              earlier",
+        ),
+    ),
+    (
+        "room_members",
+        "invited_by",
+        // Moved here from the census walk's `EXCLUDED` (which carries no
+        // verdict) to sit beside `room_invites.inviter_id`, the column it is
+        // copied from. ⚠ Rules the INVITER's column only; the row belongs to
+        // `principal_id`, which moves.
+        Succession::Stay(
+            "history/attribution (`room-invitations.md` § Join rules and \
+             invites: the inviter is attribution, on the invitation and on the \
+             seat acceptance writes), and nothing resolves through it: a seat's \
+             authority is its live `role`, read off the floor roster, never who \
+             seated it — the only readers are the floor leg's copy below and the \
+             census. The ceremony's floor leg \
+             (`successions.rs::rule_the_floor_roster_seats`) copies the \
+             predecessor's `invited_by` UNCHANGED onto the successor's fresh \
+             seat and leaves it on the predecessor's `Removed`-absorbed row, so \
+             the successor's seat keeps naming who originally seated the \
+             identity and the retired row keeps the record as written. \
+             Re-pointing it would also rewrite the value `room_invites.inviter_id` \
+             is `Stay`-ruled to keep. A DELETED inviter's id likewise stays: \
+             the seat is the member's record of who asked",
         ),
     ),
     (
@@ -8433,6 +8639,8 @@ mod tests {
     const FEATURE_GATED_ELSEWHERE: &[&str] = &[
         "ap_accounts",
         "ap_follows",
+        "ap_oracle_ops",
+        "ap_oracle_principals",
         "ap_post_map",
         "bluesky_accounts",
         "bluesky_interactions",
@@ -8794,12 +9002,26 @@ mod tests {
         // names why the column is NOT "this row belongs to that actor".
         const EXCLUDED: &[(&str, &str, &str)] = &[
             (
+                "custody_hosting",
+                "owner_refused_at",
+                "an INTEGER unix-seconds mark (when the custodied owner's nest last refused \
+                 the row's custody handshake), named for the owner but holding no actor id",
+            ),
+            (
                 "third_party_principals",
                 "principal_id",
                 "a nest-minted 16-byte handle for a third-party principal -- an \
                  external app's roster row, not an account. `principal` is the \
                  OAuth/trust-model word for that app (`third-party.md` § The \
                  principal model); the row's own actor is `actor_id`, registered",
+            ),
+            (
+                "third_party_principals",
+                "declared_activitypub_peers",
+                "a JSON array of fediverse HOSTNAMES the app's signed manifest declared \
+                 (`third-party.md` § The manifest, `activitypub_peers`) -- server names \
+                 the oracle may sign requests to, never an actor id; `peer` is the \
+                 fediverse word for another server",
             ),
             // The same roster handle on the three tables that hang off a
             // principal and belong to no account. `hosted_plugins` and
@@ -8829,6 +9051,36 @@ mod tests {
                  (`third_party_principals.principal_id`) -- an app, never an account. \
                  The table has no actor column: an item is its folder's \
                  (`folder_id`, ON DELETE CASCADE) and leaves with it",
+            ),
+            // The oracle's posting class (the row's own actor is `actor_id`,
+            // registered); its principal is an app, as on the other two
+            // custodians' tables.
+            (
+                "post_author_principals",
+                "principal_id",
+                "the third-party principal the posting custodian served -- a roster \
+                 handle (`third_party_principals.principal_id`) -- an app, never an \
+                 account; the row is the account's and goes with its `actor_id`",
+            ),
+            (
+                "post_author_ops",
+                "principal_id",
+                "the third-party principal a post was authored or retracted for -- the \
+                 same roster handle as `post_author_principals.principal_id`",
+            ),
+            // The oracle's ATProto class, the same way.
+            (
+                "atproto_oracle_principals",
+                "principal_id",
+                "the third-party principal the oracle minted service tokens for -- its \
+                 roster handle (`third_party_principals.principal_id`), an app, never an \
+                 account; deleted with the principal's revoke",
+            ),
+            (
+                "atproto_oracle_ops",
+                "principal_id",
+                "the third-party principal an operation was performed for -- the same \
+                 roster handle, an app, never an account",
             ),
             // Added 2026-10-03 with the bridged-conversation family's
             // registration (the row's own actor is `actor_id`, registered).
@@ -8964,14 +9216,14 @@ mod tests {
                  only because the root list matches substrings; the row's person \
                  column is `invitee_id`, which IS registered",
             ),
-            // The inviter on a room's floor roster — an agentive `…_by`: it
-            // records WHO seated this member, not whose row it is. The row
-            // belongs to `principal_id`.
+            // A vocabulary FALSE POSITIVE (`peer` root): the DNS domain of the
+            // remote mail domain a DMARC aggregate report was sent to.
             (
-                "room_members",
-                "invited_by",
-                "the member who seated this one, not the row's own principal — \
-                 the row belongs to `principal_id`, which IS registered",
+                "dmarc_outbound_aggregate_reports",
+                "peer_domain",
+                "the remote mail domain the report was addressed to (a DNS name, TEXT), \
+                 matched only because the root list matches substrings; no actor id, \
+                 and the table is 7-day deployment telemetry no account owns",
             ),
             // Added 2026-08-20 with `region_sequence_floor` (the anti-replay floor). ⚠ **A vocabulary FALSE POSITIVE, and the
             // first one on record** — every other entry in this list is a real
@@ -9730,6 +9982,19 @@ mod tests {
         /// false positive here is the common case — `blob` is in the name of
         /// plenty of columns that hold bytes, sizes, paths and digests.
         const NON_ACTOR_BLOB_COLUMNS: &[(&str, &str, &str)] = &[
+            (
+                "dmarc_inbound_aggregate_reports",
+                "source_envelope_blob",
+                "the DAG-CBOR SMTP context of a peer MTA's report mail (client IP, \
+                 HELO, MAIL FROM, auth verdicts) — remote infrastructure, never an \
+                 account or any actor",
+            ),
+            (
+                "dmarc_inbound_forensic_reports",
+                "source_envelope_blob",
+                "the same DAG-CBOR SMTP context, of a peer MTA's forensic report mail \
+                 — remote infrastructure, never an account or any actor",
+            ),
             ("export_sessions", "blob_bytes", "an INTEGER byte count"),
             (
                 "export_sessions",
@@ -9770,6 +10035,13 @@ mod tests {
                  so nothing in the bytes says whose they are -- ownership is the row's \
                  `actor_id` alone, which is registered and moves. The plaintext is word \
                  statistics over text the owner trained on; the nest never holds it",
+            ),
+            (
+                "tlsrpt_inbound_reports",
+                "source_envelope_blob",
+                "the DAG-CBOR SMTP context of a peer MTA's TLS report mail (client \
+                 IP, HELO, MAIL FROM, auth verdicts) — remote infrastructure, never \
+                 an account or any actor",
             ),
         ];
 
@@ -10605,8 +10877,22 @@ mod tests {
         // signing key and three credential-shaped BLOBs), so a typo here is
         // exactly the failure this list exists to keep visible rather than
         // implicit.
-        const ABSENT_FROM_DEFAULT_BUILD: &[&str] =
-            &["ap_accounts", "bluesky_accounts", "nostr_bunker_apps"];
+        //
+        // ⚠ Each gated table is listed WITH the feature that brings its schema
+        // in (`apply_available_bridge_schemas` applies it under that feature),
+        // and the expected absent set is the entries whose feature is NOT
+        // compiled — so every flavor (default, one bridge, all three) asserts
+        // exactly the tables it cannot see, still by name, never by count.
+        const GATED_REDACTED_TABLES: &[(&str, bool)] = &[
+            ("ap_accounts", cfg!(feature = "activitypub")),
+            ("bluesky_accounts", cfg!(feature = "bluesky")),
+            ("nostr_bunker_apps", cfg!(feature = "nostr")),
+        ];
+        let absent_from_this_build: Vec<&str> = GATED_REDACTED_TABLES
+            .iter()
+            .filter(|(_, compiled)| !compiled)
+            .map(|(table, _)| *table)
+            .collect();
 
         let db = CacheDb::open_in_memory().unwrap();
         let conn = db.conn.blocking_lock();
@@ -10652,25 +10938,17 @@ mod tests {
         }
 
         skipped.sort_unstable();
-        // ⚠ Under a bridge-feature build the gated tables ARE present, so
-        // `skipped` is legitimately empty and the assertion below must not
-        // read that as drift (the same
-        // skip-on-absence-not-on-name correction the secret-shaped-column belt
-        // took). An empty skip set means every Redacted verdict was checked,
-        // which is strictly the stronger outcome.
-        if !skipped.is_empty() {
-            assert_eq!(
-                skipped,
-                ABSENT_FROM_DEFAULT_BUILD,
-                "the set of Redacted tables this build's schema cannot see has changed. \
+        assert_eq!(
+            skipped,
+            absent_from_this_build,
+            "the set of Redacted tables this build's schema cannot see has changed. \
              Nothing verifies their `omit` names, so a typo in one would emit the \
              column it claims to drop: either a Redacted verdict landed on a \
-             feature-gated table (name it above, deliberately) or a gated table \
-             became unconditional (drop it from the list). Checked {checked} of {} \
-             Redacted verdicts",
-                checked + skipped.len(),
-            );
-        }
+             feature-gated table (list it in `GATED_REDACTED_TABLES` with its \
+             feature, deliberately) or a gated table became unconditional (drop \
+             it from the list). Checked {checked} of {} Redacted verdicts",
+            checked + skipped.len(),
+        );
     }
 
     /// An [`Export::Shaped`] verdict asserts its named domain carries the
@@ -10939,6 +11217,12 @@ mod tests {
              DID's is `atproto_identity_key_blobs`, both WithheldSecret",
         ),
         (
+            "atproto_external_write_ops",
+            "rkey",
+            "the same ATProto RECORD KEY as `atproto_native_records.rkey` -- the path \
+             segment the recorded write landed at. It names a record and opens nothing",
+        ),
+        (
             "bridge_audit_events",
             "credential_id",
             "an IDENTIFIER the reporting bridge chooses and `report_auth_event_handler` passes \
@@ -11150,6 +11434,13 @@ mod tests {
             "mlkem_encaps_key",
             "the same public encapsulation half, carried on the request that precedes the \
              roster row",
+        ),
+        (
+            "subscriber_encaps_keys",
+            "mlkem_encaps_key",
+            "the same public encapsulation half, published by the account's own apps as its \
+             registry entry (`post-quantum.md` § surface B) -- handed out by design, the \
+             decapsulation half never here",
         ),
         (
             "backup_custody",

@@ -12,7 +12,8 @@ internal static class FfiCustodianStoreInfoFixture
     internal static FfiCustodianStoreInfo Make(
         ulong generations = 1,
         ulong files = 3,
-        ulong bytes = 0) =>
+        ulong bytes = 0,
+        FfiCustodianSourceRegression[]? sourceRegressions = null) =>
         new FfiCustodianStoreInfo(
-            generations, files, bytes, Array.Empty<FfiCustodianSourceRegression>());
+            generations, files, bytes, sourceRegressions ?? Array.Empty<FfiCustodianSourceRegression>());
 }

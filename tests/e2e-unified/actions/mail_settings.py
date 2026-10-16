@@ -24,7 +24,9 @@ class MailSettingsActions:
     #: red in three windows runs of the DAV witnesses (2026-09-25 — each passed
     #: on re-run, and the error surface read '' every time). A ceiling only a
     #: wedge can reach, never a timing assertion: a green run still returns the
-    #: moment the state is true.
+    #: moment the state is true. Every post-enable credential wait names this
+    #: one budget (2026-10-11 sweep); the tui baseline (13 mail-settings tests,
+    #: 16–23 s each end to end, Linux dev box) sits far inside it.
     ENABLE_SETTLE_S = 60.0
 
     def __init__(self, driver: PlatformDriver):
@@ -126,6 +128,23 @@ class MailSettingsActions:
             self.driver.wait_for("mail-settings-mua-webdav-url", timeout=timeout)
             return True
         except TimeoutError:
+            return False
+
+    def mua_webdav_url_hidden(self, timeout: float = 15.0) -> bool:
+        """True once the WebDAV URL row is OFF screen — the negative twin of
+        ``mua_webdav_url_visible``, which must never stand in for it: that
+        returns the moment the row shows, so a row still painted from the
+        pre-gesture snapshot would answer "visible" before the re-hydrate could
+        hide it (the 2026-10-12 sweep's unserve red). Returns False on timeout."""
+        from helpers.waiting import wait_until
+
+        try:
+            wait_until(
+                lambda: not self.driver.is_visible("mail-settings-mua-webdav-url"),
+                timeout,
+            )
+            return True
+        except AssertionError:
             return False
 
     def enable_mail(self, display_name: str = "Default") -> None:
@@ -407,24 +426,14 @@ class MailSettingsActions:
         self.driver.click("mail-add-credential-submit-button")
 
     # ── The app-password rows ─────────────────────────────────────────────
-    # On an app whose Connected apps page is built, the rows are rows of that
-    # page's roster and no longer render here (docs/goal/ui/mail-settings.md
-    # § Credentials list) — the move is a lift, never a duplication. Every
-    # helper below therefore reads the rows where the app under test shows
-    # them: this page, or one visit to Connected apps and back. Callers stay
-    # written against "the user's app passwords" and never branch on the app.
-    # A row is addressed by `index` among the mail app passwords only — the
-    # roster is mixed-class, and the Connected apps actions pick the mail rows
-    # out by the leaves only they carry.
-
-    def _roster(self):
-        """The Connected apps actions when this app lists the app passwords
-        there, else None."""
-        from actions.connected_apps import ConnectedAppsActions, mail_rows_on_connected_apps
-
-        if not mail_rows_on_connected_apps(self.driver):
-            return None
-        return ConnectedAppsActions(self.driver)
+    # The rows are rows of the Connected apps roster on every app and no longer
+    # render here (docs/goal/ui/mail-settings.md § Where the credential rows
+    # render) — the move is a lift, never a duplication. Every helper below
+    # therefore reads them with one visit to Connected apps and back, so callers
+    # stay written against "the user's app passwords". A row is addressed by
+    # `index` among the mail app passwords only — the roster is mixed-class, and
+    # the Connected apps actions pick the mail rows out by the leaves only they
+    # carry.
 
     @contextlib.contextmanager
     def _on_roster(self, *, must_load: bool = True):
@@ -435,7 +444,9 @@ class MailSettingsActions:
 
         `must_load` fails the visit when its read never returned: an instant
         read off an unread roster would answer 0 for "how many passwords"."""
-        roster = self._roster()
+        from actions.connected_apps import ConnectedAppsActions
+
+        roster = ConnectedAppsActions(self.driver)
         loaded = roster.visit()
         try:
             assert loaded or not must_load, (
@@ -448,24 +459,16 @@ class MailSettingsActions:
 
     def credential_count(self) -> int:
         """How many app-password rows the user's list currently holds."""
-        if self._roster() is None:
-            return self.driver.count("mail-settings-credential-item-name")
         with self._on_roster() as roster:
             return roster.mail_row_count()
 
     def credential_name(self, index: int = 0) -> str:
         """The display name on row `index`."""
-        if self._roster() is None:
-            return self.driver.get_text("mail-settings-credential-item-name", index).strip()
         with self._on_roster() as roster:
             return roster.mail_name(index)
 
     def credential_created_at(self, index: int = 0) -> str:
         """When row `index` says its password was made (`YYYY-MM-DD HH:MM`)."""
-        if self._roster() is None:
-            return self.driver.get_text(
-                "mail-settings-credential-item-created-at", index
-            ).strip()
         with self._on_roster() as roster:
             return roster.mail_created(index)
 
@@ -473,10 +476,6 @@ class MailSettingsActions:
         """The exact MUA username rendered on row `index`:
         `<handle>+<credential_id>@<domain>`, or bare `<handle>@<domain>` for
         the `default` credential."""
-        if self._roster() is None:
-            return self.driver.get_text(
-                "mail-settings-credential-item-username", index
-            ).strip()
         with self._on_roster() as roster:
             return roster.mail_login(index)
 
@@ -489,10 +488,6 @@ class MailSettingsActions:
         from helpers.copy_button import read_clipboard_or_copied
 
         app = types.SimpleNamespace(driver=self.driver)
-        if self._roster() is None:
-            button = "mail-settings-credential-item-copy-username"
-            self.driver.click(button, index)
-            return read_clipboard_or_copied(app, button, index)
         with self._on_roster():
             button = "connected-apps-item-copy-username"
             self.driver.click(button, index)
@@ -502,16 +497,12 @@ class MailSettingsActions:
         """The kind badge rendered on row `index`: the human auth-kind label
         from shared-Rust `credential_kind_badge` — "Password" / "Bearer token"
         (i18n `settings.mail.kind_{password,bearer}`)."""
-        if self._roster() is None:
-            return self.driver.get_text(
-                "mail-settings-credential-item-type", index
-            ).strip()
         with self._on_roster() as roster:
             return roster.mail_kind(index)
 
     def revoked_credential_count(self) -> int:
         """How many credential rows render the succession burn's *Compromised —
-        access revoked* state (`mail-settings-credential-item-revoked`).
+        access revoked* state (the roster item's `revoked` attr).
 
         A **count**, not a per-row predicate, deliberately: the burn is total by
         construction (`mail-credentials.md` § Rotation and recovery →
@@ -526,75 +517,30 @@ class MailSettingsActions:
         list of which mail apps to set up again — so `credential_count()` says
         nothing about whether any of those passwords still work. Only this does.
         """
-        if self._roster() is None:
-            return self.driver.count("mail-settings-credential-item-revoked")
         with self._on_roster() as roster:
             return roster.mail_revoked_count()
 
     def reveal_credential_secret(self, index: int = 0, timeout: float = 8.0) -> str:
-        """Click the reveal toggle on credential row `index` and return the
-        secret once `mail-settings-credential-item-secret` populates. The reveal
-        is an async mail-state read (MailSettingsMachine::reveal_credential_secret),
-        so poll until the hidden secret label shows a value.
-
-        Every app keeps the secret element on every row, EMPTY until the reveal
-        lands (web, tui, windows, and linux since 2026-09-15), so `index` names
-        the same row for the reveal button and the secret. linux used to build
-        the label `.visible(false)`, which its automation walk prunes, so the
-        secret list held only the revealed rows and `index=i` 404'd for every
-        row past the first revealed one. The `LookupError` tolerance stays for
-        a read that lands mid re-render.
-        """
-        import time
-
-        if self._roster() is not None:
-            with self._on_roster() as roster:
-                return roster.reveal_mail_secret(index, timeout)
-        self.driver.click("mail-settings-credential-item-reveal-secret", index)
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                s = self.driver.get_text(
-                    "mail-settings-credential-item-secret", index
-                ).strip()
-            except LookupError:
-                s = ""
-            if s:
-                return s
-            time.sleep(0.25)
-        return self.driver.get_text(
-            "mail-settings-credential-item-secret", index
-        ).strip()
+        """Click reveal on app-password row `index` and return the secret once
+        it shows. The reveal is an async mail-state read
+        (`ConnectedAppsMachine::reveal_secret` → the mail machine's
+        `reveal_credential_secret`); every app keeps the secret leaf present and
+        EMPTY until it lands, so `index` names the same row for the reveal button
+        and the secret."""
+        with self._on_roster() as roster:
+            return roster.reveal_mail_secret(index, timeout)
 
     def wait_for_credential_count(self, expected: int, timeout: float = 10.0) -> bool:
-        """Poll until the credentials list holds exactly `expected` rows. Returns
+        """Poll until the user's app passwords number exactly `expected`. Returns
         whether it reached the count before the timeout (the dispatch → snapshot
         → re-render round-trip is async)."""
-        import time
+        with self._on_roster(must_load=False) as roster:
+            return roster.wait_for_mail_rows(lambda n: n == expected, timeout)
 
-        if self._roster() is not None:
-            with self._on_roster(must_load=False) as roster:
-                return roster.wait_for_mail_rows(lambda n: n == expected, timeout)
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if self.credential_count() == expected:
-                return True
-            time.sleep(0.3)
-        return self.credential_count() == expected
-
-    def wait_for_credential_count_at_least(self, n: int, timeout: float = 10.0) -> bool:
-        """Poll until the credentials list holds at least `n` rows."""
-        import time
-
-        if self._roster() is not None:
-            with self._on_roster(must_load=False) as roster:
-                return roster.wait_for_mail_rows(lambda have: have >= n, timeout)
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if self.credential_count() >= n:
-                return True
-            time.sleep(0.3)
-        return self.credential_count() >= n
+    def wait_for_credential_count_at_least(self, n: int, timeout: float = ENABLE_SETTLE_S) -> bool:
+        """Poll until the user's app passwords number at least `n`."""
+        with self._on_roster(must_load=False) as roster:
+            return roster.wait_for_mail_rows(lambda have: have >= n, timeout)
 
     # `mail-settings-enabled-toggle`'s own on/off, carried via the `state` attr
     # — same idiom as `SERVE_HERE_ID` above (`driver.get_attr(id, "state")`).
@@ -676,12 +622,12 @@ class MailSettingsActions:
         self.driver.wait_for(self.ENABLED_TOGGLE_ID, timeout=10.0)
         if not self.wait_for_enabled_toggle_state("on", timeout=15.0):
             self.enable_mail("Default")
-            assert self.wait_for_enabled_toggle_state("on", timeout=15.0), (
+            assert self.wait_for_enabled_toggle_state("on", timeout=self.ENABLE_SETTLE_S), (
                 "enabling mail should flip the enabled toggle to on; "
                 f"status={self.status_text()!r}, "
                 f"error: {self.page_error_text(timeout=2.0)!r}"
             )
-        self.wait_for_credential_count_at_least(1, timeout=10.0)
+        self.wait_for_credential_count_at_least(1, timeout=self.ENABLE_SETTLE_S)
 
     def rotate_keys(self, exclude: tuple[str, ...] = ()) -> None:
         """Rotate the MSEK (hard revoke) via the rotate-keys confirm form
@@ -732,48 +678,11 @@ class MailSettingsActions:
         return not self.driver.is_visible("mail-rotate-keys-confirm-button")
 
     def revoke_credential(self, index: int = 0) -> None:
-        """Soft-revoke the credential at `index` (mail-settings.md § User actions
-        → "Revoke a credential").
-
-        Per-app the revoke gesture differs, so this is **adaptive** rather than
-        a fixed two-click:
-
-        - **linux** uses a two-click inline confirm (no modal; no ui.yaml ID for a
-          separate confirm button — `apps/fauna-linux/src/settings/mail.rs`): the
-          first click ARMS (label → "Confirm?", count unchanged, auto-disarms
-          after 4 s), the second dispatches `RevokeCredential`.
-        - **web** revokes on a SINGLE click (`MailSettingsSection.svelte`'s revoke
-          button dispatches `RevokeCredential` directly — no arm step).
-
-        A blind second click is wrong on web: once the list re-renders (the row
-        gone, count dropped), the button at `index` now binds the *next*
-        credential, so a second click revokes a SECOND credential — the bug that
-        left the session actor with zero credentials and broke a later test's
-        `ensure_mail_enabled`. So: click once, then click again ONLY if the count
-        hasn't dropped within a short window (< linux's 4 s auto-disarm). On web
-        the count drops and we return with no second click; on linux it stays put
-        (armed) and the second click confirms. If web is slow and the count hasn't
-        dropped yet, the row hasn't re-rendered either, so the second click
-        re-targets the SAME credential — an idempotent no-op, never an over-revoke.
-        """
-        import time
-
-        # On the Connected apps roster the revoke is that page's own gesture:
-        # Revoke opens an inline confirm with its own button.
-        if self._roster() is not None:
-            with self._on_roster() as roster:
-                roster.revoke_mail_row(index)
-            return
-        before = self.credential_count()
-        self.driver.click("mail-settings-credential-item-revoke-button", index)
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:  # deadline-ok: documented below — the timeout branches to the confirm click, it isn't a failure to signal
-            if self.credential_count() < before:
-                return  # single-click revoke landed (web) — no confirm click
-            time.sleep(0.2)
-        # Count unchanged within the window → linux's armed inline-confirm; the
-        # second click (still within the 4 s arm) dispatches RevokeCredential.
-        self.driver.click("mail-settings-credential-item-revoke-button", index)
+        """Revoke app-password row `index` (mail-settings.md § User actions →
+        "Revoke a credential"): on the Connected apps roster the revoke is that
+        page's own gesture — Revoke opens an inline confirm with its own button."""
+        with self._on_roster() as roster:
+            roster.revoke_mail_row(index)
 
     def disable_mail(self) -> None:
         """Disable mail entirely via the destructive confirmation dialog

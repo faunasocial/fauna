@@ -12,13 +12,29 @@ use serde_json::json;
 pub struct ApiError {
     pub status: StatusCode,
     pub message: String,
+    /// A typed `fauna.{ns}.{family}` wire code a WS-RPC caller carries through
+    /// verbatim (`rpc_errors::rpc_error_from_api_ns`); `None` maps by status.
+    /// The HTTP body never shows it.
+    pub code: Option<&'static str>,
 }
 
 impl ApiError {
+    /// A `400` refusal carrying its typed wire code — one code per remedy
+    /// (`feed.md` § Interaction bar → *Reply and quote on a bridged post*).
+    /// `msg` is the log-only reason, carried in the RPC error's `details`.
+    pub fn refused(code: &'static str, msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: msg.into(),
+            code: Some(code),
+        }
+    }
+
     pub fn bad_request(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: msg.into(),
+            code: None,
         }
     }
 
@@ -26,6 +42,7 @@ impl ApiError {
         Self {
             status: StatusCode::NOT_FOUND,
             message: msg.into(),
+            code: None,
         }
     }
 
@@ -33,6 +50,7 @@ impl ApiError {
         Self {
             status: StatusCode::FORBIDDEN,
             message: msg.into(),
+            code: None,
         }
     }
 
@@ -40,6 +58,7 @@ impl ApiError {
         Self {
             status: StatusCode::UNAUTHORIZED,
             message: msg.into(),
+            code: None,
         }
     }
 
@@ -47,6 +66,7 @@ impl ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: msg.into(),
+            code: None,
         }
     }
 
@@ -54,6 +74,7 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             message: msg.into(),
+            code: None,
         }
     }
 
@@ -61,6 +82,7 @@ impl ApiError {
         Self {
             status: StatusCode::GONE,
             message: msg.into(),
+            code: None,
         }
     }
 
@@ -68,6 +90,7 @@ impl ApiError {
         Self {
             status: StatusCode::TOO_MANY_REQUESTS,
             message: msg.into(),
+            code: None,
         }
     }
 
@@ -75,6 +98,7 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_GATEWAY,
             message: msg.into(),
+            code: None,
         }
     }
 
@@ -82,6 +106,7 @@ impl ApiError {
         Self {
             status: StatusCode::NOT_IMPLEMENTED,
             message: msg.into(),
+            code: None,
         }
     }
 
@@ -89,6 +114,7 @@ impl ApiError {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             message: msg.into(),
+            code: None,
         }
     }
 }

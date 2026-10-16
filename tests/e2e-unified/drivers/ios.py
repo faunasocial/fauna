@@ -972,7 +972,7 @@ class IosInProcessDriver(InProcessAgentDriver):
             f"  xcrun simctl launch --console {udid} {self.BUNDLE_ID}"
         )
 
-    def teardown(self) -> None:
+    def _stop_app(self) -> None:
         """Terminate the app in the Simulator (best-effort). A no-op `terminate`
         on an already-`kill_uncleanly()`-killed PID is harmless (best-effort,
         `check=False`) — mirrors the Popen drivers tolerating a dead child."""

@@ -103,6 +103,15 @@ pub(crate) fn production_lines(src: &str) -> Vec<&str> {
         let Some(head) = lines.get(item).copied() else {
             break;
         };
+        // A one-line field or struct-literal field (`precheck_gate: …,`) ends
+        // on its own head: searching on for a `{` would blank production
+        // lines up to some unrelated close — and past the next real
+        // `#[cfg(test)]`, which then goes unseen.
+        if head.trim_end().ends_with(',') {
+            lines[i..=item].fill("");
+            i = item + 1;
+            continue;
+        }
         // A signature may span lines: the item opens (`{`) or ends (`;`)
         // on the first line that closes it.
         let opener = (item..lines.len())
@@ -406,7 +415,7 @@ pub(crate) fn assert_gates_hold(served: &[(&str, &str, &Gate)]) {
 
 #[cfg(test)]
 mod tests {
-    use super::calls_any;
+    use super::{calls_any, production_lines};
 
     #[test]
     fn a_definition_is_not_a_call() {
@@ -442,5 +451,36 @@ mod tests {
     #[test]
     fn a_primitive_opening_on_punctuation_matches_after_an_identifier() {
         assert!(calls_any("let body = db.get_post(&id)", &[".get_post("]));
+    }
+
+    /// A `#[cfg(test)]` struct field ends on its own line. Before, the scan
+    /// searched on for a `{`, blanked production code up to an unrelated
+    /// close, and stepped over the real `#[cfg(test)] mod tests` after it.
+    #[test]
+    fn a_cfg_test_field_blanks_only_its_own_line() {
+        let src = "\
+fn open() -> Self {
+    Self {
+        conn,
+        #[cfg(test)]
+        gate: None,
+    }
+}
+
+pub fn production() {
+    probe_call(x);
+}
+
+#[cfg(test)]
+mod tests {
+    fn t() {
+        probe_call(y);
+    }
+}
+";
+        let lines = production_lines(src);
+        assert_eq!(lines[4], "");
+        assert_eq!(lines[9], "    probe_call(x);");
+        assert!(lines[13..].iter().all(|l| l.is_empty()), "{lines:?}");
     }
 }

@@ -48,10 +48,21 @@
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <FontIcon Grid.Column="0" Glyph="&#xE77B;" FontSize="40" Opacity="0.6" VerticalAlignment="Center" />
-                <TextBlock Grid.Column="1" x:Name="HandleText"
-                           AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileHandle}"
-                           Style="{StaticResource SubtitleTextBlockStyle}"
-                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                <!-- Two names (profile.md § The private section → The header shows
+                     both names): profile-handle is the shared resolver's primary line
+                     (the viewer's nickname, else the display name, else the short id);
+                     profile-public-name carries the public name a nickname replaced and
+                     is Collapsed (absent from UIA) while no nickname is the primary. -->
+                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                    <TextBlock x:Name="HandleText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileHandle}"
+                               Style="{StaticResource SubtitleTextBlockStyle}"
+                               TextTrimming="CharacterEllipsis" />
+                    <TextBlock x:Name="PublicNameText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfilePublicName}"
+                               Visibility="Collapsed" Opacity="0.7"
+                               TextTrimming="CharacterEllipsis" />
+                </StackPanel>
                 <Button Grid.Column="2" x:Name="CopyActorIdButton"
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileActorIdCopyBtn}"
                         Click="CopyActorId_Click" VerticalAlignment="Center"
@@ -80,19 +91,30 @@
                  toggle (label flips on the viewed actor's contact_status, over
                  fauna.knocks.block / fauna.knocks.unblock — the latter the guarded
                  clear-the-edge; ApplyBlockLabel renders Block ⇄ Unblock).
-                 profile-request-contact-button is parked on the product-wide
-                 knock-send gap, so it is not
-                 rendered (ratified-but-unbuilt). ApplyProfileMode shows this row on
-                 another's profile (is_self=false) only. -->
+                 Beside them: profile-request-contact-button (the knock, routed by the
+                 shared knock_recipient_nest_url over the profile this open already
+                 fetched; profile.md § Where logic lives → Request contact routing) and
+                 the supervised ward's guardian-ask pair. ApplyProfileMode shows this
+                 row on another's profile (is_self=false) only. -->
             <StackPanel x:Name="SecondaryActions" Orientation="Horizontal" Spacing="8"
                         Visibility="Collapsed">
                 <Button x:Name="StartDmButton"
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileStartDmButton}"
                         Click="StartDm_Click"
                         Content="{loc:Localize Key=profile/start_dm}" />
+                <!-- The knock. Reads "Request contact" → "Request sent" once the nest
+                     accepts it and stays disabled; the TYPED guardian refusal re-enables
+                     it and offers the ask pair below, the refusal STAYING on
+                     error-message. AutomationId only, no static Name: the label is a
+                     get_text target (reference_windows_flaui_gettext_dynamic_label_no_name). -->
+                <Button x:Name="RequestContactButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileRequestContactButton}"
+                        Click="RequestContact_Click"
+                        Content="{loc:Localize Key=profile/request_contact}" />
                 <Button x:Name="BlockButton"
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileBlockButton}"
                         Click="Block_Click"
+                        IsEnabled="False"
                         Content="{loc:Localize Key=profile/block}" />
                 <!-- Report the account (moderation.md § User-initiated reporting →
                      App surface): beside block, OTHER profile only — this row is
@@ -102,6 +124,63 @@
                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileReportButton}"
                         Click="Report_Click"
                         Content="{loc:Localize Key=profile/report}" />
+                <!-- The supervised ward's in-place ask (family-safety.md § Child-initiated
+                     contact requests → App affordance): CONDITIONAL and mutually
+                     exclusive, both Collapsed (absent from UIA) until PaintAsk shows one
+                     from the VM's render verdict — the button only after the TYPED
+                     refusal this open saw, the label once an ask is outstanding (durable,
+                     from status.contact_requests). No supervision test here (rule (h)). -->
+                <Button x:Name="AskGuardianButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactRequestGuardianButton}"
+                        Click="AskGuardian_Click" Visibility="Collapsed"
+                        Content="{loc:Localize Key=contacts/ask_guardian}" />
+                <TextBlock x:Name="AskPendingText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.ContactRequestPending}"
+                           VerticalAlignment="Center" Opacity="0.7" Visibility="Collapsed"
+                           Text="{loc:Localize Key=contacts/contact_request_pending}" />
+            </StackPanel>
+
+            <!-- ════ Private section · OTHER only ════
+                 profile.md § The private section: the viewer's own nickname, notes and
+                 labels on this person, visibly private, below the relationship actions
+                 and above the tab strip. A dumb renderer of ProfilePrivateViewModel over
+                 the shared FfiOverlayEditor: every gesture only STAGES, one explicit Save
+                 writes only the registers the user changed, a refusal lands on the page's
+                 error-message with the staged edits kept. The label chips are built in
+                 code (RenderPrivateLabels) as flat-indexed non-virtualized rows, so FlaUI
+                 count-all sees every chip and each carries its Name. Collapsed on SELF. -->
+            <StackPanel x:Name="PrivateSection" Spacing="6" MaxWidth="420" Visibility="Collapsed"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfilePrivateSection}"
+                        AutomationProperties.Name="profile-private-section">
+                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}"
+                           Text="{loc:Localize Key=profile/private_title}" />
+                <TextBox x:Name="PrivateNicknameBox"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileNicknameField}"
+                         Header="{loc:Localize Key=profile/private_nickname}"
+                         TextChanged="PrivateNickname_TextChanged" />
+                <TextBox x:Name="PrivateNotesBox"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileNotesField}"
+                         Header="{loc:Localize Key=profile/private_notes}"
+                         AcceptsReturn="True" TextWrapping="Wrap" MinHeight="72"
+                         TextChanged="PrivateNotes_TextChanged" />
+                <TextBlock Opacity="0.7" FontSize="12"
+                           Text="{loc:Localize Key=profile/private_labels}" />
+                <StackPanel x:Name="PrivateLabelList"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileLabelList}"
+                            AutomationProperties.Name="profile-label-list" Spacing="4" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBox x:Name="PrivateLabelBox" MinWidth="220"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileLabelField}"
+                             PlaceholderText="{loc:Localize Key=profile/private_label_add}" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfileLabelAddButton}"
+                            Click="PrivateLabelAdd_Click"
+                            Content="{loc:Localize Key=profile/private_label_add}" />
+                </StackPanel>
+                <Button x:Name="PrivateSaveButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.ProfilePrivateSaveButton}"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Click="PrivateSave_Click"
+                        Content="{loc:Localize Key=profile/private_save}" />
             </StackPanel>
 
             <!-- ════ Edit form (display-name / bio / repeatable links) ════

@@ -60,6 +60,7 @@ pub enum FakeCall {
     ResolveConsent {
         consent_id: Vec<u8>,
         approved: bool,
+        folder: Option<i64>,
     },
     MintGrant {
         grant_blob: Vec<u8>,
@@ -120,6 +121,7 @@ struct IntegrationStatusState {
     handle_domain: String,
     handle_preview: String,
     identity: Option<NestIdentitySummary>,
+    public_post_count: u64,
 }
 
 impl Default for IntegrationStatusState {
@@ -132,6 +134,7 @@ impl Default for IntegrationStatusState {
             handle_domain: "example.com".into(),
             handle_preview: "alice.example.com".into(),
             identity: None,
+            public_post_count: 0,
         }
     }
 }
@@ -290,7 +293,13 @@ impl FakeAtprotoSettingsNestApi {
             handle_domain: handle_domain.into(),
             handle_preview: handle_preview.into(),
             identity,
+            public_post_count: s.status.public_post_count,
         };
+    }
+
+    /// Script the caller's public-post count (the history opt-in's N).
+    pub fn set_public_post_count(&self, count: u64) {
+        self.state.lock().unwrap().status.public_post_count = count;
     }
 
     pub fn set_link(&self, link: Option<LinkSummary>) {
@@ -482,6 +491,7 @@ impl AtprotoSettingsNestApi for FakeAtprotoSettingsNestApi {
             handle_domain: s.status.handle_domain.clone(),
             handle_preview: s.status.handle_preview.clone(),
             identity: s.status.identity.clone(),
+            public_post_count: s.status.public_post_count,
         })
     }
 
@@ -495,8 +505,8 @@ impl AtprotoSettingsNestApi for FakeAtprotoSettingsNestApi {
         let mut s = self.state.lock().unwrap();
         s.calls.push(FakeCall::SetIntegrationLevel {
             target_level: target_level.clone(),
-            did_method,
-            user_rotation_pub_did_key,
+            did_method: did_method.clone(),
+            user_rotation_pub_did_key: user_rotation_pub_did_key.clone(),
             history_backfill,
         });
         if let Some(e) = s.fail_set_level.clone() {
@@ -511,6 +521,47 @@ impl AtprotoSettingsNestApi for FakeAtprotoSettingsNestApi {
             .expect("tests script ratified levels");
         let current = fauna_protocol::atproto::IntegrationLevel::from_wire(&s.status.level)
             .expect("fake state holds ratified levels");
+        // The handler's real-domain gate: a climb into or up the hosted rungs
+        // on a box whose status says `hosted_allowed: false` is refused before
+        // any effect, whatever the client staged.
+        if target.is_hosted() && target > current && !s.status.hosted_allowed {
+            return Err(AtprotoSettingsApiError::Transient {
+                detail: "fauna.bridges.atproto.domain_not_public".into(),
+            });
+        }
+        // The handler's mint-parameter validation: the plan is recomputed from
+        // THIS side's state (a retired identity is not a restorable one), so a
+        // client whose view lags — still hosted after another device retired
+        // the identity — meets `malformed` unless it sent the parameters.
+        let has_identity = s
+            .status
+            .identity
+            .as_ref()
+            .is_some_and(|i| i.status != "tombstoned");
+        let plan = fauna_protocol::atproto::TransitionPlan::for_move(
+            current,
+            target,
+            fauna_protocol::atproto::LevelContext {
+                has_external_link: s.link.is_some(),
+                has_identity,
+            },
+        );
+        if plan.mints_identity {
+            let ok = match did_method.as_str() {
+                "plc" => user_rotation_pub_did_key.starts_with("did:key:"),
+                "web" => user_rotation_pub_did_key.is_empty(),
+                _ => false,
+            };
+            if !ok {
+                return Err(AtprotoSettingsApiError::Transient {
+                    detail: format!(
+                        "malformed: entering a hosted level needs did_method plc|web, got: {did_method:?}"
+                    ),
+                });
+            }
+            // A mint replaces a retired identity outright.
+            s.status.identity = None;
+        }
         if target.is_hosted() {
             s.link = None;
             match &mut s.status.identity {
@@ -700,11 +751,13 @@ impl AtprotoSettingsNestApi for FakeAtprotoSettingsNestApi {
         &self,
         consent_id: Vec<u8>,
         approved: bool,
+        folder: Option<i64>,
     ) -> Result<bool, AtprotoSettingsApiError> {
         let mut s = self.state.lock().unwrap();
         s.calls.push(FakeCall::ResolveConsent {
             consent_id: consent_id.clone(),
             approved,
+            folder,
         });
         if let Some(e) = s.fail_resolve_consent.clone() {
             return Err(e);

@@ -6,10 +6,10 @@
 //! - [`run_custody_leg`] — the custody leg over the bound nest, run at the
 //!   second of the post-auth and store-ready edges and at every later
 //!   post-auth edge (*(c) The writes*). Answers the warning the host owes the
-//!   admin, in the one shared wording.
+//!   admin as one shared [`LocalizedText`].
 //! - [`rotate_deployment_seed`] — the plane rotation drive behind the admin
-//!   surface's "Rotate deployment identity" action: custody before dispatch,
-//!   one [`LocalizedText`] verdict.
+//!   surface's "Rotate deployment identity" action: custody before dispatch
+//!   over the host's per-call store resolver, one [`LocalizedText`] verdict.
 //! - [`recoverable_box_ids`] / [`selfhosted_command`] — the pre-login reads
 //!   (*(b) The reads*): this device's own store joined with a cold read from
 //!   the nest at `nest_url` when one is given, never either-or.
@@ -25,8 +25,9 @@ use fauna_account_plane::deployment_seed_recovery::{
 };
 use fauna_client::NestClient;
 use fauna_client_config::{
-    DeploymentSeedCustody, DeploymentSeedStore, SupersessionMarks, custody_leg_warning,
-    rotate_deployment_seed_on_plane, run_deployment_seed_custody_leg, seed_rotation_verdict,
+    DeploymentSeedCustody, DeploymentSeedStore, ResolvingLedgerStore, SupersessionMarks,
+    custody_leg_unattempted_warning, custody_leg_warning, rotate_deployment_seed_on_plane,
+    run_deployment_seed_custody_leg, seed_rotation_verdict,
 };
 use fauna_core::data::DeploymentSeedEntry;
 use fauna_core::identity::{ActorId, ActorKeypair};
@@ -45,20 +46,17 @@ pub async fn bound_nest_id(nest: &Arc<NestClient>) -> Result<ActorId, String> {
         .map_err(|_| "the nest reported an identity that is not 32 bytes".to_string())
 }
 
-/// The warning [`run_custody_leg`] answers when the bound id cannot be
-/// resolved — custody cannot even be attempted.
-const UNRESOLVED_WARNING: &str =
-    "could not confirm this nest's identity — total-box-loss recovery is not yet protected";
-
 /// **The custody leg** over the bound nest (`fauna_client_config::
 /// run_deployment_seed_custody_leg`), logged, answering the warning the host
-/// surfaces on its existing warning surface — `None` when nothing is owed.
+/// renders through its own `LocalizedText` resolver onto its existing warning
+/// surface — `None` when nothing is owed. A bound id that does not resolve
+/// answers [`custody_leg_unattempted_warning`].
 ///
 /// The host calls it at whichever of its post-auth edge and its store-ready
 /// edge lands second, and at every later post-auth edge; the steady state
 /// makes no round trip. `store` is the account-store handle, or the host's
 /// per-call resolver over it (`fauna_client_config::ResolvingLedgerStore`).
-pub async fn run_custody_leg<S>(nest: &Arc<NestClient>, store: &S) -> Option<String>
+pub async fn run_custody_leg<S>(nest: &Arc<NestClient>, store: &S) -> Option<LocalizedText>
 where
     S: DeploymentSeedStore + ?Sized,
 {
@@ -66,7 +64,7 @@ where
         Ok(id) => id,
         Err(e) => {
             tracing::warn!("deployment-seed custody leg: bound nest id unresolved: {e}");
-            return Some(UNRESOLVED_WARNING.to_string());
+            return Some(custody_leg_unattempted_warning());
         }
     };
     let report = run_deployment_seed_custody_leg(&**nest, bound, store).await;
@@ -107,9 +105,17 @@ where
 /// `rotate_seed_failed` key otherwise — so every host renders it through the
 /// same resolver. There is no fan-out step: the plane carries the successor's
 /// row.
-pub async fn rotate_deployment_seed<S>(nest: &Arc<NestClient>, store: Option<&S>) -> LocalizedText
+///
+/// `resolve` is the host's own account-store accessor (`account_runtime::handle`
+/// on linux and fauna-ffi, tui's settings slot), read **per call** through
+/// [`ResolvingLedgerStore`]: a confirm clicked while the store is still
+/// assembling waits out `fauna_client_config::LEDGER_READY_WAIT`, and only a
+/// store that never comes is refused — plainly, before any dispatch. One
+/// shape on every host, web's `rotateDeploymentSeed` included.
+pub async fn rotate_deployment_seed<F, H>(nest: &Arc<NestClient>, resolve: F) -> LocalizedText
 where
-    S: DeploymentSeedStore + ?Sized,
+    F: Fn() -> Option<H> + Send + Sync,
+    H: DeploymentSeedStore,
 {
     let failed = |cause: String| {
         LocalizedText::key_arg("admin.nest_page.rotate_seed_failed", "cause", cause)
@@ -118,7 +124,8 @@ where
         Ok(id) => id,
         Err(e) => return failed(e),
     };
-    match rotate_deployment_seed_on_plane(&**nest, bound, store).await {
+    let store = ResolvingLedgerStore::new(resolve);
+    match rotate_deployment_seed_on_plane(&**nest, bound, &store).await {
         Ok(outcome) => seed_rotation_verdict(&outcome),
         Err(e) => failed(e.to_string()),
     }

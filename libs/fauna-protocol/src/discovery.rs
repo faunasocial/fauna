@@ -186,6 +186,19 @@ pub mod capability {
     /// the `p2p` page, and this is the fleet brake.
     pub const P2P_SHARE: &str = "p2p-share";
 
+    /// This nest build carries the `zaps` gated-feature member — the Lightning
+    /// zap plane, a SUBSET member of `payments` (`architecture/dynamic-features.md`
+    /// § Charter members; § Wire & data shape → *Capability tokens per gated
+    /// feature*).
+    ///
+    /// **Conditional, on the [`SUBSCRIPTIONS`] shape:** advertised iff the build
+    /// compiles the member (the nest's `zaps` cargo feature), because a nest built
+    /// with `payments` and without `zaps` is otherwise indistinguishable from a
+    /// full one and no surface could hide the zap affordances on that basis. The
+    /// constant itself is unconditional — only the *advertisement* is cfg-gated.
+    /// Never a human knob.
+    pub const ZAPS: &str = "zaps";
+
     /// Hidden subscription tiers are honored end to end (`monetization.md`
     /// § The unifying model → *A tier may be hidden*, ruled 2026-09-06): a
     /// `hidden` tier is excluded from every offer surface AND
@@ -343,6 +356,21 @@ pub struct NestInfoReply {
     /// takes.
     #[serde(default)]
     pub room_read_pubkey: Option<String>,
+    /// **The newest published Fauna release this nest knows of** (`"0.2.0"`,
+    /// no `v`) — what an app's once-per-sign-in look compares its own version
+    /// against, so that look contacts no third party
+    /// (`installers/README.md` § Knowing a newer version is out → *The nest's
+    /// newest-release field*). The newest release the nest's own update check
+    /// learned, **whether or not the nest runs it**: never the nest's own
+    /// version (which this anonymous reply coarsens to `major.minor`), and
+    /// never present only when the nest is behind — that would tell any
+    /// anonymous reader which nests are unpatched.
+    ///
+    /// `#[serde(default)]` → `None` from an older nest, a nest whose update
+    /// check is off, or one that has had no answer since it started; an app
+    /// reads `None` as "nothing to tell" and asks nobody else.
+    #[serde(default)]
+    pub newest_release: Option<String>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -519,7 +547,12 @@ pub struct DkimRecord {
 /// Setup-wizard progress. The HTTP twin nests `dns`/`tls`/`email`/`admin` as
 /// single-field objects; the typed wire flattens them to booleans (same
 /// information).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// `Default` exists so fixtures can be written struct-update style, as for
+/// [`NestInfoReply`]; it is not the decode default — the `default_true` /
+/// `default_serving_port` fields decode to `true` / 443 when absent, while the
+/// derived `Default` zeroes them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SetupStatusReply {
     /// The configured node domain (`"unknown"` when unset).
     pub domain: String,
@@ -837,6 +870,10 @@ mod tests {
         assert!(
             decoded.iroh_relay_url.is_none(),
             "a reply omitting `iroh_relay_url` must decode to None, not error"
+        );
+        assert!(
+            decoded.newest_release.is_none(),
+            "a reply omitting `newest_release` must decode to None — nothing to tell"
         );
         assert!(
             decoded.web_serving_domain.is_none(),

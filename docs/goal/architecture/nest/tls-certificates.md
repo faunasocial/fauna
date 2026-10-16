@@ -458,17 +458,74 @@ domainless design:
   provisioned box exposes — its cloud-init opens `80/tcp`,
   [`../installers/vps.md`](../installers/vps.md)), requesting the `shortlived`
   profile.
-- **When (derived, bucket-1 — never a knob).** Enabled iff the nest finds a
-  **global-unicast address directly attached to one of its own interfaces**
-  (`fauna_core::resolve::is_global_ip` over the interface table — the only case
-  an IP identifier can validate, since the CA must reach `:80` on that address);
-  a NAT/LAN box has none and is unchanged. The order is placed from first boot,
-  before any domain exists, independent of the domain-derived `[acme]` enable of
-  § B (`build_acme_config` gains an IP arm; the private-NAT-axis gate still wins).
+- **When (derived, bucket-1 — never a knob).** Enabled iff the derive finds a
+  **global-unicast address the box holds**, from either of two sources, both
+  filtered through `fauna_core::resolve::is_global_ip` (the only case an IP
+  identifier can validate, since the CA must reach `:80` on that address) and
+  both outranked by the private-NAT-axis gate: **(1) the nest's own interface
+  table** — a bare-metal or host-networked nest sees its address directly; **(2)
+  the host-published address set** a deployment artifact writes for a nest it
+  runs in a container (ratified 2026-10-09). A
+  provisioned VPS runs the nest behind published ports, so the container's own
+  interfaces carry only a bridge-network RFC 1918 address and source (1) is
+  empty on exactly the box this section names first; the cloud-init artifact
+  therefore publishes the **host's** global-unicast interface addresses into the
+  root-owned, read-only host→nest channel it already maintains (`host-addresses`
+  beside `host-status` — owner [`../installers/vps.md`](../installers/vps.md)
+  § Host OS Maintenance → 3, which fixes the file's format, writer and timing),
+  and the nest unions that set with its own table before the filter. The set is
+  **bucket 1 on both sides**: the artifact auto-detects it on the host (no human
+  types an address — the retired `FAUNA_PUBLIC_IP` env stays retired, and no
+  compose or env knob replaces it), and the nest treats the file as it treats
+  `host-status`, a host-written fact parsed defensively, never a request: a
+  stale or wrong address only fails validation under § Keeping the cert alive's
+  pacing, because the CA, not the file, proves possession. A NAT/LAN box has no
+  global address in either source and is unchanged. The order is placed from
+  first boot, before any domain exists, independent of the domain-derived
+  `[acme]` enable of § B (`build_acme_config` gains an IP arm).
+
+  *Sources weighed and rejected 2026-10-09 (the same ruling):* **host networking**
+  for the provisioned container — the public compose's bridge networking is
+  deliberate (the image binds `8080` as uid 1000 behind the `80→8080` map, the
+  SNI router fronts `:443`, the scan sidecars are dialled by compose DNS), and the
+  host-networked bundle is the LAN shape, built around binding a LAN address
+  ([`../installers/home-relay.md`](../installers/home-relay.md) § Networking);
+  **a self-probe or public reflector** — from inside a bridge network the nest's
+  sockets carry only the private address, and the self-hosted invariant wires no
+  public STUN ([`domains-and-tls-bootstrap.md`](domains-and-tls-bootstrap.md)
+  § Host-address acquisition); **the provider metadata service** — per-provider
+  knowledge belongs to the client-side provisioning crate, never the nest binary;
+  **writing the address into the compose at render time** — `build_cloud_init`
+  runs before `create_server` returns the address, and reserving one first is
+  per-provider, paid on some, and one more orchestrator step; **the
+  client-reported `nest_host_address`** — it arrives at the claim, after the
+  pre-claim window the bridge exists for, and the web client cannot reach the box
+  to report it until the bridge exists; and **anything read off a request**
+  (`Host`) — attacker-chosen input must never drive a CA order. A hand-deployed
+  `docker-compose.yml` box has no coordinator and so no `host-addresses`: it
+  keeps the fallback of *When it cannot be had* unless it runs host-networked or
+  bare-metal; the install scripts may adopt the same publication later, a
+  follow-on this ruling permits but does not require.
 - **Lifetime — a bridge, not a permanent identity.** Renewed at one third of the
   remaining validity (~every 4 days) **for as long as the deployment has no
   trusted cert for its primary domain**; once the domain cert is live the IP cert
-  is left to lapse, and the floor serves IP dials again. The IP is never the
+  is left to lapse, and the floor serves IP dials again. **Left to lapse means
+  exactly that (ruled 2026-10-09): the installed
+  bridge keeps being served to no-SNI dials until its own `notAfter`, is never
+  renewed or re-ordered past that point, and is never dropped early by policy —
+  not when the domain cert goes live, not when the address set leaves the
+  derive.** The domain cert goes live the moment the *CA's* resolver sees the
+  record, hours before a user's resolver may, and the web session's reach hint
+  dials `https://<ip>` for exactly that gap
+  ([`../../behavior/onboarding-provisioning.md`](../../behavior/onboarding-provisioning.md)
+  § Reach hint); dropping the bridge on that tick would hand the one browser
+  still on the hint the floor. The carry is bounded by the `shortlived` profile
+  (≤ 160 h, nothing new in CT), the resolver already stops serving an expired
+  bridge on its own (*Serving*), and the SPKI rebind native apps pay is one
+  either way — at expiry instead of at the drop. A still-valid chain found on
+  disk at boot is installed and served out on the same terms; an expired one is
+  neither installed nor re-ordered. Should the domain cert later lapse, the
+  derive's own predicate re-enables ordering. The IP is never the
   deployment's identity ([`domains-and-tls-bootstrap.md`](domains-and-tls-bootstrap.md)
   § Goal); a cert for it is worth carrying only while it is the one address a
   browser can trust. Rate budget: ~2 successful orders per box-week while
@@ -479,7 +536,7 @@ domainless design:
   channel-binding SPKI (`ServedCertSpki`) follows **the cert a no-SNI dial is
   served** — so it is the bridge while one is installed and the default
   otherwise — and native apps re-bind across the bridge's ~4-day rotation and
-  once more when it is dropped (§ A: SPKI churn is tolerable for them). The
+  once more when it lapses (§ A: SPKI churn is tolerable for them). The
   floor stays beneath it, unconditionally (§ A).
 
   *Corrected 2026-09-02: this bullet previously said the SPKI "follows the default cert as
@@ -543,7 +600,17 @@ domainless design:
 - **Testing.** Pebble implements RFC 8738 IP identifiers, so the tier_4
   acceptance that already runs the nest against pebble can order an IP cert for
   the container's own address; the LE staging environment issues IP certs under
-  the same profile for the live suite.
+  the same profile for the live suite. The harness's container address is
+  RFC 1918, which the derive's filter refuses, so the file→order→serve flow of
+  source (2) is witnessed under a widening **bound to the pebble directory
+  override** (`[acme] directory_url` set — `FAUNA_ACME_DIRECTORY_URL`,
+  [`../installers/docker.md`](../installers/docker.md) § Environment Variables;
+  ruled 2026-10-09): under that override alone a
+  host-published non-loopback, non-link-local address passes, and the bound is
+  pinned by the same test (no override → the same file orders nothing). The
+  widening can reach no public CA, since the override is what selects a test
+  CA. The live run keeps only the last inch — a real browser at `https://<ip>`
+  on a real provisioned box.
 
 ---
 
@@ -600,6 +667,8 @@ other limits the design respects (always test against LE **staging**):
 duplicate-certificate 5 / week / exact SAN set (protected by the re-issue-only
 conditions above) and new-orders 300 / account / 3 h.
 
+**The admin sees why issuance is failing (ratified 2026-10-11).** Beside the failed-attempt log, `acme-retry-state.json` keeps the **last error of each order the nest places** — one entry for the domain order (one order over the whole desired SAN set) and one for the IP bridge order (§ B-IP), each tagged with which order failed, the CA-supplied text (the failing identifier plus the challenge's problem type and detail) and when it failed. An entry is replaced on that order's next failure and cleared when that **same** order succeeds, or when that order is no longer wanted (the domain set is already covered; the bridge has retired; the nest boots without HTTP-01 — a restart-applied choice, so boot clears both); one order's success never clears the other's, even though they share one budget. `fauna.tls.cert_status` carries the entries at **deployment level** (`CertStatusReply.issuance_errors`, beside `desired_sans`), never per domain — one order covers every SAN, so a per-domain copy would repeat one error on every row. The `admin-dns` cert-status row (§ C mitigation 4) shows them through the shared `DnsManagementMachine` snapshot, the CA text rendered as **data** inside an app-owned i18n wrapper, identically on all 7 apps. A client-driven DNS-01 failure is not stored here: the app that issued it already holds its error (`DnsSnapshot.error`).
+
 **Wake accelerators (within budget).** Two admin actions expedite the
 self-heal by waking the lifecycle task (`AppState::acme_retry_notify`) instead
 of waiting out the steady poll: `fauna.bridges.restore_real_tls_cert` (the
@@ -654,7 +723,13 @@ no file, variable or flag stands in for it. This reverses the earlier
 recording of both as admin choices awaiting an admin page; staging is not a
 choice either (it is a CA nobody trusts, useful only to a test).
 
-One piece of test wiring remains by design: `[acme] directory_url`, which the
+The apps' own DNS-01 orders, manual and managed, have a test twin that is compiled out, not
+set: a test-capable app build's e2e ACME directory seed points the order at the
+harness's pebble, and a release build neither reads nor names it
+([`e2e-automation-surface-gating.md`](../e2e-automation-surface-gating.md)
+§ The ACME directory seed).
+
+On the nest, one piece of test wiring remains by design: `[acme] directory_url`, which the
 Docker entrypoint writes from `FAUNA_ACME_DIRECTORY_URL`, points the HTTP-01
 client at the in-network `pebble` of the tier_4 acceptance. It is
 artifact-set IPC for the harness — no deployment path sets it — in the same
@@ -730,6 +805,8 @@ mitigations, in order — and why this is safe without weakening the invariant:
    `valid-trusted` / `on-floor — renew needed` / `expiring`. (This resolves the
    "ACME/cert-health status badge whose home is deferred" note in
    `dns-management.md` § App surface — its home is the `admin-dns` page.)
+   When a nest-placed order is failing, the row also shows the CA's last error
+   for it (§ Keeping the cert alive, *The admin sees why issuance is failing*).
 5. **~~Always-on scoped acme-dns hands-off renewal~~ — DEFERRED (user decision
    2026-06-05).** A challenge-only credential (an acme-dns responder, or a
    challenge-scoped delegation the relay nest holds) would let a mobile-only admin
@@ -738,6 +815,8 @@ mitigations, in order — and why this is safe without weakening the invariant:
    the floor + reminders (mitigations 1–4). **Do not build this in this track.**
    It is recorded here as an explicitly-deferred future option, to revisit only if
    real usage shows mobile-only admins are common; it is **not** a TODO.
+
+**No cadence knob — and one compile-gated tick seam for mitigation 4 (ruled 2026-10-13).** The nudge loop (`cert_nudge.rs`) ticks once at spawn and then every `CERT_NUDGE_INTERVAL_SECS` (24 h); the binary gains no environment variable, flag or setting to shorten that cadence or move its clock ([`../../principles.md`](../../principles.md) § One configuration surface), and the loop's unit tests drive the loop body directly. The one wire-reachable way to run a tick is a `test-hooks` endpoint, `POST /api/v1/test/tls/cert-nudge/tick` with `{"shift_days": N}` (`0` when omitted), compiled only into the harness nest — the `test-hooks` feature is a build flavor the release image never carries ([`../e2e-automation-surface-gating.md`](../e2e-automation-surface-gating.md) § The convention), so the shipped nest keeps nothing of this — in the shape the removed-domain GC and the MTA-STS advance already have (`POST /api/v1/test/mail-domains/gc/run`, `POST /api/v1/test/mail-domains/mta-sts/advance`; [`../../behavior/mail-multidomain.md`](../../behavior/mail-multidomain.md) § Per-domain MTA-STS → *The advance* → *No clock knob — and one compile-gated clock seam*). It runs **one whole production tick at `now + N days`** — the live-identity-domain gate, the issuer-shared SAN gates, the served-cert read, the persisted de-dup and the per-admin, per-device push decision, through the same body the loop calls (the loop body is lifted into one function both callers share, never a second copy) — and replies with what the tick decided: `{"apex": <domain or null>, "at_risk": [<domain>, …], "nudged": <bool>, "dialled": <n>}`, `apex: null` meaning the domain gate was closed and nothing was evaluated. Three decisions: **(1) the de-dup is honoured, never bypassed** — there is no `ignore_dedup` flag; `shift_days` is the one lever, exactly as the sibling seams, so a second call inside the window witnesses the de-dup and a call a day on witnesses the re-nudge, and a nudge the seam sends persists its shifted `now` as the last-nudge stamp (harness-only state; production never calls the seam). **(2) The de-dup records attention given, not a tick taken:** the tick persists `last_nudge_unix` only when its push decisions dialled or delivered to at least one device of any admin (`DispatchOutcome.dialled + delivered > 0`, summed over the admins); a tick that found every admin device-less or present sends nothing and burns nothing, so an admin who registers a phone later that day is reminded at the next tick or restart instead of waiting out a day nobody was told about. The de-dup's purpose is that a restart loop cannot *spam* the admin, and spam needs a send. **(3) The seam refuses with an error where the loop would not have been spawned or would have returned at once** — ACME HTTP-01 on, no served-cert resolver, no push service — so a mis-set fixture fails loud instead of witnessing nothing. The seam exists for the one outcome no harness venue can otherwise reach — the renewal reminder itself, outcome 5 of the certificates-by-themselves page: the image carries no `test-hooks`, so a docker nest refuses the loopback push sink, and a standalone nest's only tick fires at spawn, before any admin device could subscribe — and no production path or app ever calls it. Two alternatives were refused: a `test-hooks` cadence environment variable (the `FAUNA_EXPIRY_INTERVAL_SECS` shape; a knob that still cannot order the tick after the subscription, and a second mechanism beside the hook shape that exists) and a pre-aged `cert-nudge-state.json` fixture (it can backdate a nudge but cannot make the first one fire on demand). Build status: § Implementation status today, the *At-risk renewal push* row.
 
 ---
 
@@ -924,14 +1003,26 @@ acquisition it is in the path for, and **never** the DNS-provider credential.
 
 ## Implementation status today
 
-**The IP bridge cert (§ B-IP) is BUILT and CA-proven** (ratified 2026-08-29; the
-order landed 2026-09-02). A domainless box on a public
-address orders, installs and renews the bridge from first boot, and serves it to
-no-SNI dials. The order is proven on the wire against a real ACME CA
+**The IP bridge cert (§ B-IP) is BUILT and CA-proven, from both address sources** (ratified 2026-08-29; the
+order landed 2026-09-02; source (2) built 2026-10-10). A domainless nest
+that sees a public address **on its own interfaces, or in the host-published `host-addresses` file**, orders, installs and
+renews the bridge from first boot, and serves it to no-SNI dials. The order is proven on the wire against a real ACME CA
 (`libs/fauna-acme-http01/tests/pebble_http01.rs::ip_identifier_flow_issues_a_real_certificate_against_pebble`,
-green 2026-09-02 against pebble 2.9.0). What remains is a **live** witness — a
-real provisioned box actually reached at `https://<ip>` by a browser — which
-rides the live runs, not this section:
+green 2026-09-02 against pebble 2.9.0). **Source (2), the provisioned-VPS case:** every client-provisioned VPS runs the nest
+in a container with **published ports** (`libs/fauna-provisioning/src/cloud_init.rs`, `ports: 80:8080, 443:443`), so the
+container's interface table holds only its bridge-network RFC 1918 address (found 2026-10-09) — the cloud-init coordinator script therefore publishes the host's global-unicast addresses into the root-owned
+host→nest channel (`fauna_host_address_lines` / `fauna_publish_host_addresses`, its `publish-addresses` entry point called
+from `runcmd` before `docker compose up`, and every timer run; file owner `installers/vps.md` § Host OS Maintenance → 3),
+the nest reads it with `host_maintenance::read_host_addresses` (the `:ro` root-owned dir only) and
+`acme::ip_bridge_addresses` filters the union of both sources, the § B-IP *Testing* widening bound to `directory_url`
+(unit pins `acme::tests::ip_bridge_*`, `host_maintenance::tests::*host_addresses*`, `cloud_init::tests::*host_address*`).
+The file→order→serve flow is witnessed end to end through the packaged image under pebble by
+`tests/e2e-unified/tests/platform/docker/test_acme_ip_bridge_host_published.py::test_host_published_address_orders_and_serves_the_ip_bridge`.
+A hand-deployed `docker-compose.yml` box has no coordinator and so no file (§ B-IP *When*). **The lapse rule is built:** once the domain cert is live `ip_bridge_pass_inner` places no
+order, renews nothing and never drops the installed bridge by policy (`clear_ip_cert` is off the policy path) — it is served
+to its own `notAfter` (a still-valid chain on disk is re-installed after a restart, an expired one is not), which keeps
+the post-claim reach hint's `https://<ip>` dial working until the user's resolver sees the domain. What also remains is a **live** witness — a real provisioned box actually reached at `https://<ip>` by a browser —
+which rides the live runs, not this section:
 
 - **Built.** The derived enable — `acme::ip_bridge_addresses` (global-unicast
   addresses attached to this box's own interfaces via
@@ -940,8 +1031,10 @@ rides the live runs, not this section:
   knob of any kind, and independent of the domain-derived `[acme]` enable). The
   lifetime rule — `acme::ip_cert_needs_renewal` (one third of the *observed*
   validity, so a CA issuing something other than LE's 160 h `shortlived` gets a
-  proportionate lead) and `acme::ip_bridge_should_renew` (the bridge is dropped
-  once a trusted primary-domain cert is live). The serving rule —
+  proportionate lead) and `acme::ip_bridge_should_renew` (no renewal once a
+  trusted primary-domain cert is live; the installed bridge is left to lapse,
+  never dropped early). The
+  serving rule —
   `MultiDomainCertResolver::{set_ip_cert, clear_ip_cert, current_ip_cert}`: the
   no-SNI default while valid, falling through to the floor/default otherwise,
   with named SNIs and the channel-binding SPKI deliberately untouched. The CSR
@@ -965,7 +1058,8 @@ rides the live runs, not this section:
   to v4-only instead), installs it into the resolver directly, reconciles a
   still-fresh chain across a restart without respending the CA's
   duplicate-certificate budget, re-orders when the interface set changes, and
-  drops the bridge once the primary-domain cert is trusted. It shares the domain
+  stops ordering once the primary-domain cert is trusted (the installed bridge
+  is left to lapse). It shares the domain
   arm's `RetryState` — one owner of `acme-retry-state.json`, per § B-IP
   *Lifetime*'s "no second budget".
 - **Fixed 2026-09-02 — settling after a
@@ -1009,23 +1103,24 @@ configuration surface (bottom of this section) and the live-issuance gap below. 
 
 | Mechanism | Symbols (anchor) | Proven by |
 |---|---|---|
-| Self-signed floor — unconditional, stable key, auto-renew, per-SNI valid-else-floor (§ A) | `write_self_signed_bootstrap`, `load_or_create_floor_key` (`floor-privkey.pem`), `floor_renew_task` (spawned on every nest), `MultiDomainCertResolver::cert_for_sni` / `cert_valid_and_covers` / `floor_for_sni` / `mint_floor_cert` (`bins/fauna-nest/src/{self_signed_cert,acme}.rs`) | resolver + floor unit tests; the per-SNI floor never changes the channel-binding SPKI (apex-only — unit-pinned) |
+| Self-signed floor — unconditional, stable key, auto-renew, per-SNI valid-else-floor (§ A) | `write_self_signed_bootstrap`, `load_or_create_floor_key` (`floor-privkey.pem`), `floor_renew_task` (spawned on every nest), `MultiDomainCertResolver::cert_for_sni` / `cert_valid_and_covers` / `floor_for_sni` / `mint_floor_cert` (`bins/fauna-nest/src/{self_signed_cert,acme}.rs`). **The default path too (fixed 2026-10-09):** the nest's own apex and `mail.<apex>` ride the *default* cert, not a per-domain entry, and until then a lapsed CA-issued default was served as-is and read `Expiring`, never on-floor — so the floor-coupled records of § D stayed in their trusted shape while an expired cert was served. `floor_if_lapsed_trusted` now serves a floor naming the SNI when the lapsed default named it exactly, else the default's own first name (no mint for a name the nest does not serve). **The sealed ports too (fixed 2026-10-13):** the mail and calendar ports serve the bridges' sealed `TlsCertBlob` and the relay sidecar its own sealed copy, both built by one read of the on-disk chain (`storage::read_served_tls_pem`), which substitutes a floor on the stable key naming the requester's domain (else the chain's own first name, the same `lapsed_trusted_floor_name` rule) whenever that chain is CA-issued and outside its window; `floor_renew_task` sleeps no later than the on-disk chain's `notAfter` and, on the edge into lapse, bumps the relay's cert generation and pushes `config_changed` (`tls`) to every approved bridge, so the floor is served within seconds rather than at the bridges' 12 h re-fetch, which stays the fallback. The way back is the issuance's own fan-out. | resolver + floor unit tests (`expired_trusted_default_falls_through_to_the_floor`, `expired_trusted_default_never_mints_a_floor_for_a_foreign_sni`); the sealed-port substitution and its edge by `seal_on_read_serves_the_floor_when_the_on_disk_trusted_chain_has_expired`, `seal_read_leaves_a_valid_trusted_chain_and_the_floor_itself_as_is` and `on_disk_trusted_chain_lapse_is_read_off_the_chain` (`storage/mod.rs`), the wake at `notAfter` by `floor_check_wakes_at_the_trusted_chain_lapse` (`self_signed_cert.rs`; the push itself has no test of its own); the default path end to end on the image by `tests/e2e-unified/tests/platform/docker/test_expired_trusted_cert_serves_floor.py` (an expired CA-issued chain landed in `acme_dir` → the handshake for the nest's own name and `mail.<apex>` serves the floor key, `fauna.tls.cert_status` reads on-floor, the floor-MX TLSA is offered again); the per-SNI floor never changes the channel-binding SPKI (apex-only — unit-pinned) |
 | Domainless-capable bootstrap (no domain → SANs `localhost`, `127.0.0.1`, CN `fauna-nest`) | `prepare_listener_tls` calls the bootstrap unconditionally; `synthesize_self_signed_pem_with_key`; test-only escape `FAUNA_INSECURE_DISABLE_TLS` | when/why owned by `domains-and-tls-bootstrap.md` |
 | HTTP-01 acquisition + hot-reload + issuance lifecycle (§ Keeping the cert alive) | `acme_http01.rs` (30-day lead; generic order/challenge/retry-budget machinery now lives in shared `libs/fauna-acme-http01`, re-exported unchanged — lifted 2026-08-21, `front-door.md`; the finalize/CSR/poll tail once the challenge is satisfied is now shared further, in `libs/fauna-acme-core::finalize_order_and_fetch_certificate` — lifted 2026-08-26, also consumed by the DNS-01 driver below), `web_content/cert.rs` (per-domain web-content loop), `cert_lifecycle_task`, `cert_watcher_task`, `store_acme_material`, `acme-retry-state.json` rate budget, `acme_retry_notify` + `provision_should_wake_acme` wakes, `restore_real_tls_cert` switch-back | unit tests; tier_4 `test_acme_http01_pebble_issuance.py` (a real pebble-CA issuance through the image's own client + challenge listener + watcher); the shared crate's own real-wire proof is `libs/fauna-acme-http01/tests/pebble_http01.rs` (`just e2e-pebble-http01`) |
 | ACME enable is **derived**, never configured (no `[acme].enabled` field) | `build_acme_config` — enabled iff public NAT axis ∧ a real orderable domain; a private or domainless/`localhost` box serves only the floor | unit-pinned |
 | CA-agnostic directory override | `[acme].directory_url` → `acme_http01::acme_directory_url` (the override, else Let's Encrypt production); Docker maps `FAUNA_ACME_DIRECTORY_URL`; trusts via system roots (`SSL_CERT_FILE`) | `directory_url_override_else_lets_encrypt_production`, `build_acme_config_reads_toml_directory_url` |
 | REUSED-AUTHORIZATION skip + infra/secondary SAN gates (§ B) | `obtain_certificate` skips non-`Pending` authorizations (fixed 2026-07-02); `desired_san_domains` over `InfraSans`, `relay_san_included` / `pds_san_included` → `infra_host_resolves`, `reachable_mail_domains` vs the persisted `nest_host_address` | unit tests; tier_4 assert-4 XPASS; gates shared with the at-risk nudge |
-| DNS-01 order core — client-side, **both drivers** (§ B tier 2) | `fauna_client_dns::obtain_certificate_dns01`; native `acme_order` (instant-acme + rcgen, finalize/CSR/poll tail shared with the HTTP-01 driver via `libs/fauna-acme-core` since 2026-08-26) and wasm-safe `acme_pure` (RustCrypto ES256 JWS + `x509-cert` CSR + reqwest via the credential-blind `proxy.fauna.social` CORS proxy); shared `acme_shared` — which owns the **propagation gate** (2026-07-24): an active `Dns01ResolvabilityProbe` poll of the publish zone's authoritative NS (45-min deadline then best-effort) replaces the fixed wait before CA validation. **One mechanism, two transports (2026-08-22):** the query is `fauna_core::authoritative_dns::authoritative_txt_visible` (raw non-recursive hickory over UDP, every authoritative NS must serve the exact value), run in-process by `AuthoritativeNsProbe` on the 5 native apps + tui, and one Admin RPC hop away by `NestRelayedProbe` → `fauna.dns.probe_txt_visible` on **web**, which has no raw DNS in the browser. Web is deliberately not given a recursive/DoH approximation: a recursive resolver negative-caches the miss the gate's own polling plants. A nest that predates the kind errors the call, which the probe contract reads as "not visible yet", so such a pairing degrades to poll-to-deadline-then-best-effort with no version branch. The gate runs on **both** order paths — managed via `with_published_challenges` (publish → gate → CA dance), and **manual via `complete_dns01_order`** (`PropagationGate::manual`, gate → CA dance; nothing to publish or tear down, and the gate's zone is the admin's own domain). Extended to manual 2026-07-29: it had validated immediately on the admin's say-so, which is a claim about their registrar's *control plane*, not about what the authoritative NS serves — see § Live issuance | S4 unit tests + behavioural fake-probe gate tests (`acme_shared::tests::gate_*`, `manual_gate_*`); probe responder tests (`resolvability::tests`); S4b pebble acceptance `libs/fauna-client-dns/tests/pebble_dns01.rs` — all four flows (managed fresh, managed account-reuse D6, manual two-phase, CNAME-delegated) × both drivers + cross-driver D6 account interop (`just e2e-pebble-dns01`, pebble 2.9.0 pin) |
+| DNS-01 order core — client-side, **both drivers** (§ B tier 2) | `fauna_client_dns::obtain_certificate_dns01`; native `acme_order` (instant-acme + rcgen, finalize/CSR/poll tail shared with the HTTP-01 driver via `libs/fauna-acme-core` since 2026-08-26) and wasm-safe `acme_pure` (RustCrypto ES256 JWS + `x509-cert` CSR + reqwest via the credential-blind `proxy.fauna.social` CORS proxy); shared `acme_shared` — which owns the **propagation gate** (2026-07-24): an active `Dns01ResolvabilityProbe` poll of the publish zone's authoritative NS (45-min deadline then best-effort) replaces the fixed wait before CA validation. **One mechanism, two transports (2026-08-22):** the query is `fauna_core::authoritative_dns::authoritative_txt_visible` (raw non-recursive hickory, UDP first with one TCP retry — § The browser's arm of the propagation gate → **Transport**; every authoritative NS must serve the exact value), run in-process by `AuthoritativeNsProbe` on the 5 native apps + tui, and one Admin RPC hop away by `NestRelayedProbe` → `fauna.dns.probe_txt_visible` on **web**, which has no raw DNS in the browser. Web is deliberately not given a recursive/DoH approximation: a recursive resolver negative-caches the miss the gate's own polling plants. A nest that predates the kind errors the call, which the probe contract reads as "not visible yet", so such a pairing degrades to poll-to-deadline-then-best-effort with no version branch. The gate runs on **both** order paths — managed via `with_published_challenges` (publish → gate → CA dance), and **manual via `complete_dns01_order`** (`PropagationGate::manual`, gate → CA dance; nothing to publish or tear down, and the gate's zone is the admin's own domain). Extended to manual 2026-07-29: it had validated immediately on the admin's say-so, which is a claim about their registrar's *control plane*, not about what the authoritative NS serves — see § Live issuance | S4 unit tests + behavioural fake-probe gate tests (`acme_shared::tests::gate_*`, `manual_gate_*`); probe responder tests (`resolvability::tests`); S4b pebble acceptance `libs/fauna-client-dns/tests/pebble_dns01.rs` — all four flows (managed fresh, managed account-reuse D6, manual two-phase, CNAME-delegated) × both drivers + cross-driver D6 account interop (`just e2e-pebble-dns01`, pebble 2.9.0 pin) |
 | DNS-01 managed orchestration | `DnsAction::IssueCert { domain, target_nest_id }`; persisted ACME account `DnsConfig.acme_account` (tip-sealed `fauna.state.dns`, D6 — every synced device renews the same account); seal `seal_lan_tls_cert_entry` + deliver over `fauna.tls.publish_cert` | machine unit tests |
 | DNS-01 manual two-phase (S6a) + CNAME renewal-delegation (S6b) | `begin_dns01_order` / `complete_dns01_order` (the latter runs the propagation gate before the CA dance — row above); `BeginManualIssueCert` → `snapshot.pending_cert` (plain `admin-dns-record` rows) → `CompleteManualIssueCert` / `CancelManualIssueCert`; `DelegateRenewal { domain, target_zone }` → persisted `CnameDelegation`, `resolve_issuance_target` + `Dns01OrderConfig::challenge_publish_names` | pebble manual + delegation phases, both drivers (the manual phase injects a late-visible probe, asserting the gate polled before signalling ready) |
-| Interrupted manual issuance survives a machine rebuild (§ Surviving an interrupted manual issuance) — built 2026-07-29, real-CA-verified 2026-08-19 | `DnsConfig.pending_manual_issue` (`PendingManualIssue` + `PendingChallengeRecord`, additive `#[serde(default)]`) **and** `DnsConfig.acme_account`, both written by `persist_pending_manual_issue` at **begin** time (not only on completion — the account must survive the same gap the breadcrumb does, or a resume can never even be offered the same challenge); `apply_config` re-projects the breadcrumb onto `snapshot.pending_cert` whenever the machine holds no live order; `resume_manual_issue` re-opens a fresh order against the restored account and gates on `challenge_values_match`; a failed completion keeps card + breadcrumb, and the freshly re-opened order stays live for the next completion attempt | machine tests (`a_fresh_machine_resurfaces_the_interrupted_paste_card`, `a_refresh_clears_a_card_whose_issuance_ended_elsewhere`, `cancel_manual_issue_clears_the_persisted_breadcrumb`, `persisting_an_in_flight_issuance_records_the_record_to_paste`, `resuming_a_breadcrumb_with_a_bad_target_errors_before_any_ca_work`, `challenge_values_match_*`) + `fauna-core` at-rest round-trip / decodes-without-the-field + the pebble real-wire proof (S4b) `manual_resume_survives_a_machine_rebuild_against_pebble` — begins through a `DnsManagementMachine` carrying `ManualOrderTestSeam`, DROPS it, REBUILDS a fresh one over the same config store, and completes against a real CA, which is what found the missing-account-persistence gap this row's mechanism column now describes |
+| Interrupted manual issuance survives a machine rebuild (§ Surviving an interrupted manual issuance) — built 2026-07-29, real-CA-verified 2026-08-19 | `DnsConfig.pending_manual_issue` (`PendingManualIssue` + `PendingChallengeRecord`, additive `#[serde(default)]`) **and** `DnsConfig.acme_account`, both written by `persist_pending_manual_issue` at **begin** time (not only on completion — the account must survive the same gap the breadcrumb does, or a resume can never even be offered the same challenge); `apply_config` re-projects the breadcrumb onto `snapshot.pending_cert` whenever the machine holds no live order; `resume_manual_issue` re-opens a fresh order against the restored account and gates on `challenge_values_match`; a failed completion keeps card + breadcrumb, and the freshly re-opened order stays live for the next completion attempt | machine tests (`a_fresh_machine_resurfaces_the_interrupted_paste_card`, `a_refresh_clears_a_card_whose_issuance_ended_elsewhere`, `cancel_manual_issue_clears_the_persisted_breadcrumb`, `persisting_an_in_flight_issuance_records_the_record_to_paste`, `resuming_a_breadcrumb_with_a_bad_target_errors_before_any_ca_work`, `challenge_values_match_*`) + `fauna-core` at-rest round-trip / decodes-without-the-field + the pebble real-wire proof (S4b) `manual_resume_survives_a_machine_rebuild_against_pebble` — begins through a `DnsManagementMachine` carrying `AcmeOrderTestSeam`, DROPS it, REBUILDS a fresh one over the same config store, and completes against a real CA, which is what found the missing-account-persistence gap this row's mechanism column now describes |
 | Client-issued cert install — one installer, both topologies (§ B tier 2) | client producer `seal_lan_tls_cert_entry` → `fauna.tls.publish_cert`; nest `lan_cert::install_client_issued_cert` (opens with its **own** identity x25519 secret ⇒ installs; cannot open a peer's blob ⇒ stores it opaquely) called from BOTH `tls_handlers::publish_cert_handler` (standalone) and `nest_sync_worker` on the namespace-sync pull (relay→private). No NAT-axis gate — the seal target authorizes the nest, and the installer itself requires the **signer** to be an admin of this nest, on both routes (built 2026-09-21 — the relayed route had no signer check at all). `PublishCertReply.installed` reports which happened | tier_3 `conformance_tls_publish_cert` (self-install on the sealed-to nest; relay stores-but-does-not-install; forged sig rejected; non-admin denied) + `conformance_cross_nest_lan_cert` (admin-signed relay install; a paired non-admin's entry pulled but not installed; a nest with no admin installs nothing until its admin publishes; forged sig rejected) |
-| Client order covers the nest's listener SAN set (§ B tier 2) | nest `tls_handlers::desired_listener_sans` (reuses `acme_http01::desired_san_domains`, flag-gated not resolve-gated) → `CertStatusReply.desired_sans`; client `fauna_client_dns::order_san_set` filters to credential-covered zones and stays single-name when delegated | unit `order_san_set_covers_the_listener_but_only_what_the_credential_can_publish` + `issue_cert_reads_the_listener_san_set_before_ordering` |
+| Client order covers the nest's listener SAN set (§ B tier 2) | nest `tls_handlers::desired_listener_sans` (reuses `acme_http01::desired_san_domains`, flag-gated not resolve-gated) → `CertStatusReply.desired_sans`; client `fauna_client_dns::order_san_set` filters to credential-covered zones and stays single-name when delegated | unit `order_san_set_covers_the_listener_but_only_what_the_credential_can_publish` + `issue_cert_reads_the_listener_san_set_before_ordering`; tier_2 tui walk `test_admin_dns_cert_issue_covers_listener.py` (issue from a second domain's row → a pebble-issued installed leaf carrying exactly `desired_sans`, 2026-10-14). and the catalog witness of the client-kept `[nest]` outcome (`feature-catalog.md` § The two surfaces), the app-less tier_2 `tests/api/test_dns_cert_issue_covers_listener_api.py` through the harness's `fauna_harness_dns_dispatch` (the same assertion, no app) |
 | Live app-UI DNS-01 renewal against a real CA + real DNS | `tests/e2e-unified/tests/live/test_dns01_cert_renewal_hetzner.py` — admin types the token into `admin-dns-add-credential-*`, flips `admin-dns-domain-mode`, clicks `admin-dns-cert-issue-button`, and the `admin-dns-cert-status` badge's expiry must **advance**; credential + mode flip are undone in a `finally` | tier_4, opt-in (`FAUNA_E2E_LIVE=1` + `HETZNER_API_TOKEN`) |
 | Cert-status read + client projection (§ C.4) | `fauna.tls.cert_status` (Admin-only, `tls_handlers.rs`); `served_cert_facts` → `cert_health_state` (three wire states over the shared `CERT_RENEWAL_LEAD_SECS`); client seam `DnsNest::cert_status` → `DnsAction::RefreshCertStatus` → `snapshot.cert_statuses` (crosses UniFFI + wasm) | resolver unit tests; tier_3 `conformance_tls_cert_status.rs`; `refresh_cert_status_*` machine tests |
-| At-risk renewal push (§ C.4) | `cert_nudge::cert_at_risk_nudge_task` — shares the issuer's SAN gates; gated to HTTP-01-off ∧ real public domain ∧ configured `PushService`; 24 h de-dup persisted in `acme_dir` | `cert_nudge` unit + loop tests (web-push generic-content caveat; an admin whose only device is android, linux, windows or a terminal has no push transport *built* yet — [`../apps/common.md`](../apps/common.md) § Push Notifications ruled theirs 2026-09-26 (`ws-device` through the sync agent for the desktops; android over UnifiedPush on the existing `web-push` transport, embedded-FCM fallback), so the nudge reaches them once those build rows land; this nudge is push-only with no WS twin, which is why the desktop stand-in is a real transport rather than the agent reading existing events) |
+| Last issuance error on the cert-status row (§ Keeping the cert alive, *The admin sees why issuance is failing*) — **nest, wire and shared snapshot built; per-app rendering NOT YET** | `RetryState.last_errors` (`fauna-acme-http01`, `#[serde(default)]` in `acme-retry-state.json`) set by `cert_lifecycle_loop`'s domain arm and by `ip_bridge_pass`'s `IpBridgeOutcome::Failed`, each cleared only by its own order's success or retirement; served as `CertStatusReply.issuance_errors` (`IssuanceOrder` open enum) by `cert_status_handler` from `AppState::acme_dir`; client seam → `DnsSnapshot.cert_issuance_errors` (UniFFI + wasm). No app renders it yet: the `admin-dns` display needs a user-approved ui.yaml description change and i18n wrapper first | `RetryState` per-order unit tests; `ip_bridge_pass` outcome tests; handler test; `refresh_cert_status` machine test |
+| At-risk renewal push (§ C.4) | `cert_nudge::cert_at_risk_nudge_task` — shares the issuer's SAN gates; spawned on every HTTP-01-off nest, the real-public-domain half of the gate read **per tick** from the live identity domain (`handle_domain_if_set`), and a configured `PushService`; 24 h de-dup persisted in `acme_dir`. *Fixed 2026-10-09:* the domain gate had read the boot-time seed at spawn, and every real nest boots domainless, so the reminder never started on one | `cert_nudge` unit + loop tests, `loop_learns_a_domain_claimed_after_boot` and `a_device_less_tick_persists_nothing_and_a_later_tick_nudges` among them. **Built:** the loop body is one `cert_nudge::tick_once` the loop and the `test-hooks` tick seam (`cert_nudge_test_hook.rs`, `POST /api/v1/test/tls/cert-nudge/tick`; § C → *No cadence knob — and one compile-gated tick seam for mitigation 4*) share, with one push constructor `admin_nudge_push`; the de-dup stamp persists only when the tick's dispatches dialled or delivered to a device. **Wire witness (standalone, tier_3):** `test_cert_nudge_reminder.py` — a TLS-serving nest claimed onto a public-looking domain on the floor: a device-less tick nudges nobody and burns no day, the admin's closed web-push device then receives one readable reminder, a second tick that day is held back, and a tick a day on reminds again (web-push generic-content caveat; an admin whose only device is android, linux, windows or a terminal has no push transport *built* yet — [`../apps/common.md`](../apps/common.md) § Push Notifications ruled theirs 2026-09-26 (`ws-device` through the sync agent for the desktops; android over UnifiedPush on the existing `web-push` transport, embedded-FCM fallback), so the nudge reaches them once those build rows land; this nudge is push-only with no WS twin, which is why the desktop stand-in is a real transport rather than the agent reading existing events) |
 | Auto-renew setting + auto-issue decision (§ C.3) | opt-out set `DnsConfig.auto_renew_off` (default **on**, managed/delegated only), `DnsAction::SetAutoRenew`, shared decision `DnsSnapshot::domains_needing_auto_renew` (+ the machine-level FFI wrapper the native cadences reuse) | machine tests (default-on, opt-out persists, manual-non-delegated never auto-renews) |
-| The background auto-renew **tick** itself (§ C.3) — shared, not per-app glue | `auto_renew_poll_secs` (6 h), `DnsManagementMachine::auto_renew_scan` / `::auto_renew_issue` (`libs/fauna-client-dns`), exported over UniFFI. **Consumed by tui + linux today; windows / macOS / iOS / android still run their own hand-rolled copy of the tick** and are owed the swap (their loops are behaviourally identical today — this is drift-prevention, not a live bug) | `fauna-client-dns` machine tests: scan refreshes health before deciding; empty scan when nothing at risk; the issue loop attempts every domain after a failure; the trailing re-read reaches the snapshot even when every domain failed. All three mechanism assertions mutation-verified |
+| The background auto-renew **tick** itself (§ C.3) — shared, not per-app glue | `auto_renew_poll_secs` (6 h), `DnsManagementMachine::auto_renew_scan` / `::auto_renew_issue` (`libs/fauna-client-dns`), exported over UniFFI. **Consumed by all seven apps** (tui and linux directly; windows `App.xaml.cs`, the shared apple `DnsAutoRenewCadence.swift` for macOS and iOS, and android's `KidsExcisedApi.kt` each call `autoRenewScan` / `autoRenewIssue`; no hand-rolled copy of the tick remains) | `fauna-client-dns` machine tests: scan refreshes health before deciding; empty scan when nothing at risk; the issue loop attempts every domain after a failure; the trailing re-read reaches the snapshot even when every domain failed. All three mechanism assertions mutation-verified. **App witness (tui, 2026-10-14):** `test_admin_dns_cert_auto_renew_tick.py` — a managed domain on the floor, the tick woken by `auto_renew_wake` (its wait only — [`../e2e-automation-surface-gating.md`](../e2e-automation-surface-gating.md) § The ACME directory seed), a real managed order against pebble with the challenge published by the fake provider into the stack's name server; the pass's own `AUTO_RENEW_PASS_LOG_LINE` names the domain issued and the nest's installed `acme/fullchain.pem` then holds a CA-issued leaf covering it (the badge's own "valid" needs a TLS-serving nest, which the session nest is not — the served-cert fold is `conformance_tls_cert_status.rs`'s). **linux (2026-10-14)** runs the same walk green, its tick's wait a `LoopWake` minted where `start_ws_rpc` spawns the loop; **android (2026-10-14)** has its leg — the loop's wait from `TestAgent.autoRenewWaiter` (the debug `AutoRenewWake`; the shipping twin a bare `delay`), pinned by `AutoRenewWakeTest` — with its emulator walk still to run. The windows, macos and ios legs are NOT YET BUILT |
 | MTA-STS↔cert coupling + multi-domain live-route serving (§ D) | shared pure `MtaStsMode::coupled_to_cert` (`libs/fauna-mail`); `mta_sts_handler` (`lib.rs`) matches Host against active `mail_domains`, reads stored `mta_sts_mode`, downgrades `enforce → testing` while the MX serves the floor | `coupled_to_cert` + handler unit tests; tier_3 `conformance_mta_sts_serving.rs`; tier_4 `test_mta_sts_serving.py` |
 | Self-signed-MX DANE/TLSA — emit, verify, managed reconcile, continuous withdraw (§ D) | nest `append_floor_mx_tlsa` (`dns_handlers.rs`) gated on `served_cert_facts(...).is_floor`, SPKI via `served_cert_spki_sha256`; shared `fauna_mail::dns::host::build_mail_tlsa_record` + `verify::compare_tlsa`; client `reconcile_floor_mx_tlsa` (primary-only, best-effort, per-provider TLSA: Cloudflare structured body, Hetzner/Porkbun/Gandi verbatim, Namecheap unsupported) + `withdraw_floor_mx_tlsa_on_trust` (edge-triggered on the cert-status observation, regardless of who issued) | unit + per-provider conformance tests; tier_3 `conformance_dns_dane_coupling.rs`; tier_4 `test_dane_tlsa_cert_coupling.py` |
 | Per-app `admin-dns` cert UI — **all 7 apps complete** (tui 2026-07-29, the last) | badge `admin-dns-cert-status`; issue `admin-dns-cert-issue-button` (managed/delegated → `IssueCert`, manual → two-phase paste flow); delegation `admin-dns-cert-delegate-*` / `-remove-delegation-button`; auto-renew `admin-dns-domain-auto-renew`; native background auto-issue cadences (the tick is the shared `auto_renew_scan` / `auto_renew_issue` on the shared `auto_renew_poll_secs` — see the row above for which apps have adopted it; web issues natively on page-open — a browser SPA runs no background timer); per-page `DnsManagementMachine` — **held** for the page's lifetime on linux, **rebuilt per navigation** on windows (`AdminDnsPage` sets no `NavigationCacheMode`), which is no longer load-bearing now that an in-flight manual issuance is persisted (§ Surviving an interrupted manual issuance); `target_nest_id` = `LinkedNestsMachine::this_nest()` passthrough — on **tui** the machine is held for the session (built credentialed at `admin::init`), the badge/issue/delegate/auto-renew affordances are per-row inline reveals (a terminal has no modal), and the native cadence is `admin::spawn_auto_renew_cadence`, which (like linux's) now only schedules the shared tick | `test_admin_dns_cert{,_issue,_delegate,_auto_renew}.py` per app (android e2e host-emulator-gated; Robolectric 24 green); Linux is the ratified prior art the fan-out lifted |
@@ -1039,12 +1134,12 @@ option, not a TODO), and the transient `_acme-challenge` TXT is deliberately
 between renewals is correct). But see the live-issuance gap below.
 
 **Live client-driven DNS-01 issuance: CONFIRMED 2026-07-24** — the live tier_4
-renewal test passed end to end against production example.com (46 min run, ~37 of
+renewal test passed end to end against the production live nest (46 min run, ~37 of
 them the propagation gate absorbing Hetzner's zone-publish batch): the linux
 app drove the whole flow through `admin-dns` UI gestures, Let's Encrypt
 validated, and the nest installed + hot-reloaded the renewed cert (badge and
 served `notAfter` advanced 2026-08-28 → 2026-10-22, SAN set intact
-`[example.com, mail.example.com]`, challenge TXT torn down clean). History of the
+(the apex and its `mail.` name), challenge TXT torn down clean). History of the
 failure it closed: both prior live runs (2026-07-23) went `Invalid` at CA
 validation; the order core had been CA-proven only against pebble (all flows,
 both drivers — the S4b acceptance above — plus the failure-path reproduction
@@ -1054,7 +1149,7 @@ The root cause was **two stacked defects**, both fixed 2026-07-24:
 fully-qualified owner names to the provider adapters whose contract is
 zone-relative owners (`DnsProvider::record_names_relative_to_zone`), so
 Hetzner's Cloud RRset API stored/served every record at a **doubled name**
-(`_acme-challenge.example.com.example.com.`) — API-GET-visible, never resolvable at
+(`_acme-challenge.example.org.example.org.`) — API-GET-visible, never resolvable at
 the name the CA queries; fixed by relativizing in the seam (the orchestrator
 always did), with wiremock wire-shape pins; (2) **fixed propagation waits can't
 cover Hetzner's zone publish**, which is batchy and irregular (measured 15 min
@@ -1093,13 +1188,15 @@ driver that could not detect it.
 
 Closed by making the probe's *mechanism* uniform and only its *transport*
 per-target. `fauna_core::authoritative_dns::authoritative_txt_visible` — the raw
-non-recursive per-NS UDP query, requiring every authoritative NS of the publish
+non-recursive per-NS query, requiring every authoritative NS of the publish
 zone to serve the exact value — is the single implementation. The 5 native apps
 and the tui reach it in-process through `AuthoritativeNsProbe`; **web** reaches
 it through `NestRelayedProbe`, which asks the nest over the Admin kind
 `fauna.dns.probe_txt_visible`, whose handler runs that same function. Both wasm
 order paths (`with_published_challenges` and `complete_dns01_order`) now carry a
 probe, so neither can signal ready blind.
+
+**Transport (ruled 2026-10-14): the query is UDP first, with one TCP retry — RFC 7766, the shape every resolver and every CA has.** The UDP leg goes out on a *connected* socket, so a far end with nothing listening is reported as an error at once rather than waited out; a truncated answer (`TC`), a UDP transport error or the UDP timeout (5 s) each retry the same query once over TCP, two-byte length framing, under the same timeout; a UDP answer that is not the value is a definitive not-visible and retries nothing; a TCP failure is "not visible yet" as every other failure is. Both arms get it, since the function is one: the native in-process probe and the nest's `fauna.dns.probe_txt_visible` handler. A real authoritative server must answer TCP (RFC 7766 § 1), so the retry is a fidelity gain and never a loosening — and it is also what lets the e2e android venue, whose device reaches a harness name server over a TCP-only reverse, run the production probe with no test-only transport ([`../e2e-automation-surface-gating.md`](../e2e-automation-surface-gating.md) § The ACME directory seed → *The name server's reach*). **Built 2026-10-14:** `txt_served_by` runs `udp_exchange` then, on its `RetryOverTcp`, `tcp_exchange`; the probe's unit tests cover a TCP-only responder, a truncating one, a wrong-value UDP answer that must not retry, and a closed UDP port, which returns in milliseconds. That last test caught a trap worth keeping: the port-unreachable on a connected socket is a pending socket *error*, not data, so a bare `recv` future waits out the whole 5 s timeout (measured: 5.03 s). The UDP leg therefore waits for ERROR readiness as well as READABLE and takes the error with `SO_ERROR`.
 
 Three properties worth stating, because each was a live fork in the design:
 

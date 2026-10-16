@@ -2,8 +2,8 @@
 //! completes, the grant of every roster row whose principal merged state reads
 //! `Removed` is revoked, by key.
 //!
-//! Authority: `docs/goal/architecture/account-data-taxonomy.md` § The
-//! generation machinery → *Fleet-scope reclamation*, clause (4) → *The nest
+//! Authority: `docs/goal/architecture/fleet-scope-reclamation.md`
+//! § *Fleet-scope reclamation*, clause (4) → *The nest
 //! half follows merged state*; the secondary leg's step is
 //! `account-sync-plane.md` § The bind leg, ruling 8.
 //!

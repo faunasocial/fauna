@@ -18,6 +18,7 @@ use imap_proto::types::{
     AttributeValue, Capability, MailboxDatum, NameAttribute, Response, ResponseCode, Status,
 };
 
+use super::session::SpecialUse;
 use super::transport::ImapTransport;
 use super::{ImapClientError, MAX_RESPONSE_BUFFER};
 
@@ -44,7 +45,11 @@ pub(crate) enum ServerEvent {
     /// `* CAPABILITY …`, uppercased for case-insensitive membership tests.
     Capabilities(Vec<String>),
     /// `* LIST (…) "/" "INBOX"`.
-    List { name: String, selectable: bool },
+    List {
+        name: String,
+        selectable: bool,
+        special_use: Option<SpecialUse>,
+    },
     /// `* n EXISTS`.
     Exists(u32),
     /// `* SEARCH 1 2 3`.
@@ -64,6 +69,13 @@ pub(crate) enum ServerEvent {
     },
     /// `+ …` — the server wants a continuation (AUTHENTICATE, literal upload).
     Continue,
+    /// `* STATUS <mailbox> (MESSAGES n SIZE n)` — the two items the import's
+    /// Confirm estimate reads; any other item is dropped. Parsed here, not by
+    /// [`imap_proto`], which refuses RFC 8438's `SIZE` item ([`parse_status`]).
+    Status {
+        messages: Option<u32>,
+        size: Option<u64>,
+    },
     /// A well-formed response the import path does not use.
     Ignored,
 }
@@ -136,15 +148,19 @@ impl<T: ImapTransport> Connection<T> {
                 Parsed(usize, ServerEvent),
                 NeedMore,
             }
-            let step = match parse_response(&self.buf) {
-                Ok((rest, response)) => {
-                    let consumed = self.buf.len() - rest.len();
-                    Step::Parsed(consumed, project(response))
-                }
-                Err(nom::Err::Incomplete(_)) => Step::NeedMore,
-                Err(e) => {
-                    return Err(ImapClientError::Protocol(describe_parse_error(&e)));
-                }
+            let step = match parse_status(&self.buf)? {
+                StatusLine::Parsed(consumed, event) => Step::Parsed(consumed, event),
+                StatusLine::Incomplete => Step::NeedMore,
+                StatusLine::NotStatus => match parse_response(&self.buf) {
+                    Ok((rest, response)) => {
+                        let consumed = self.buf.len() - rest.len();
+                        Step::Parsed(consumed, project(response))
+                    }
+                    Err(nom::Err::Incomplete(_)) => Step::NeedMore,
+                    Err(e) => {
+                        return Err(ImapClientError::Protocol(describe_parse_error(&e)));
+                    }
+                },
             };
 
             if let Step::Parsed(consumed, event) = step {
@@ -261,6 +277,142 @@ fn describe_parse_error(e: &nom::Err<nom::error::Error<&[u8]>>) -> String {
     }
 }
 
+/// What [`parse_status`] made of the front of the read buffer.
+enum StatusLine {
+    /// The buffer does not start with an untagged `STATUS` response.
+    NotStatus,
+    /// It does, and the rest of the line has not arrived yet.
+    Incomplete,
+    /// The whole response, `consumed` bytes long.
+    Parsed(usize, ServerEvent),
+}
+
+/// An untagged `STATUS` response, read here rather than by
+/// [`parse_response`]: the version of the parser this crate uses knows only
+/// RFC 3501's status items and refuses a line carrying RFC 8438's `SIZE` as
+/// not IMAP at all, which would end the session over the one item a
+/// `STATUS=SIZE` server answers best. Strict where it reads — mailbox name
+/// (atom, quoted string or literal), then a parenthesised list of
+/// `item number` pairs, then CRLF — and tolerant of items it does not use.
+fn parse_status(buf: &[u8]) -> Result<StatusLine, ImapClientError> {
+    const PREFIX: &[u8] = b"* STATUS ";
+    let bad = |why: &str| ImapClientError::Protocol(format!("STATUS: {why}"));
+    let head = buf.len().min(PREFIX.len());
+    if !buf[..head].eq_ignore_ascii_case(&PREFIX[..head]) {
+        return Ok(StatusLine::NotStatus);
+    }
+    if buf.len() < PREFIX.len() {
+        return Ok(StatusLine::Incomplete);
+    }
+    let mut i = PREFIX.len();
+    // The mailbox name, which the estimate never reads: the caller asked
+    // about one mailbox and the reply is about that one.
+    match buf.get(i) {
+        None => return Ok(StatusLine::Incomplete),
+        Some(b'"') => {
+            i += 1;
+            loop {
+                match buf.get(i) {
+                    None => return Ok(StatusLine::Incomplete),
+                    Some(b'\\') => i += 2,
+                    Some(b'"') => {
+                        i += 1;
+                        break;
+                    }
+                    Some(b'\r' | b'\n') => return Err(bad("unterminated mailbox name")),
+                    Some(_) => i += 1,
+                }
+            }
+        }
+        Some(b'{') => {
+            let Some(close) = buf[i..].iter().position(|&b| b == b'}') else {
+                return Ok(StatusLine::Incomplete);
+            };
+            let len: usize = std::str::from_utf8(&buf[i + 1..i + close])
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|&n| n <= MAX_RESPONSE_BUFFER)
+                .ok_or_else(|| bad("bad literal length"))?;
+            i += close + 1;
+            match buf.get(i..i + 2) {
+                None => return Ok(StatusLine::Incomplete),
+                Some(b"\r\n") => i += 2 + len,
+                Some(_) => return Err(bad("literal not followed by CRLF")),
+            }
+        }
+        Some(_) => loop {
+            match buf.get(i) {
+                None => return Ok(StatusLine::Incomplete),
+                Some(b' ') => break,
+                Some(b'\r' | b'\n') => return Err(bad("no status list")),
+                Some(_) => i += 1,
+            }
+        },
+    }
+    match buf.get(i..i + 2) {
+        None => return Ok(StatusLine::Incomplete),
+        Some(b" (") => i += 2,
+        Some(_) => return Err(bad("no status list")),
+    }
+    let start = i;
+    loop {
+        match buf.get(i) {
+            None => return Ok(StatusLine::Incomplete),
+            Some(b')') => break,
+            Some(b'\r' | b'\n') => return Err(bad("unterminated status list")),
+            Some(_) => i += 1,
+        }
+    }
+    let items = &buf[start..i];
+    i += 1;
+    match buf.get(i..i + 2) {
+        None => return Ok(StatusLine::Incomplete),
+        Some(b"\r\n") => i += 2,
+        Some(_) => return Err(bad("trailing bytes")),
+    }
+    let items = std::str::from_utf8(items).map_err(|_| bad("non-ASCII status list"))?;
+    let mut words = items.split_ascii_whitespace();
+    let (mut messages, mut size) = (None, None);
+    while let Some(name) = words.next() {
+        let value: u64 = words
+            .next()
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| bad("status item without a number"))?;
+        if name.eq_ignore_ascii_case("MESSAGES") {
+            messages = Some(u32::try_from(value).map_err(|_| bad("MESSAGES out of range"))?);
+        } else if name.eq_ignore_ascii_case("SIZE") {
+            size = Some(value);
+        }
+    }
+    Ok(StatusLine::Parsed(
+        i,
+        ServerEvent::Status { messages, size },
+    ))
+}
+
+/// One `LIST` name attribute's special-use role, if it is one. Gmail's
+/// `\Important` is no RFC 6154 attribute, so it arrives as an extension —
+/// matched case-insensitively, with or without its backslash.
+fn special_use(attr: &NameAttribute<'_>) -> Option<SpecialUse> {
+    Some(match attr {
+        NameAttribute::All => SpecialUse::All,
+        NameAttribute::Archive => SpecialUse::Archive,
+        NameAttribute::Drafts => SpecialUse::Drafts,
+        NameAttribute::Flagged => SpecialUse::Flagged,
+        NameAttribute::Junk => SpecialUse::Junk,
+        NameAttribute::Sent => SpecialUse::Sent,
+        NameAttribute::Trash => SpecialUse::Trash,
+        NameAttribute::Extension(ext)
+            if ext
+                .trim_start_matches('\\')
+                .eq_ignore_ascii_case("important") =>
+        {
+            SpecialUse::Important
+        }
+        _ => return None,
+    })
+}
+
 /// Project a borrowed `Response` into an owned [`ServerEvent`].
 fn project(response: Response<'_>) -> ServerEvent {
     match response {
@@ -282,6 +434,7 @@ fn project(response: Response<'_>) -> ServerEvent {
             selectable: !name_attributes
                 .iter()
                 .any(|a| matches!(a, NameAttribute::NoSelect)),
+            special_use: name_attributes.iter().find_map(special_use),
         },
         Response::MailboxData(MailboxDatum::Exists(n)) => ServerEvent::Exists(n),
         Response::MailboxData(MailboxDatum::Search(uids)) => ServerEvent::Search(uids),
@@ -496,15 +649,125 @@ mod tests {
             block_on(c.next_event()).unwrap(),
             ServerEvent::List {
                 name: "[Gmail]".into(),
-                selectable: false
+                selectable: false,
+                special_use: None,
             }
         );
         assert_eq!(
             block_on(c.next_event()).unwrap(),
             ServerEvent::List {
                 name: "INBOX".into(),
-                selectable: true
+                selectable: true,
+                special_use: None,
             }
         );
+    }
+
+    /// `mailbox-migration.md` § Wizard steps step 3: the discard and
+    /// duplicate mailboxes are recognised by the role the source advertises,
+    /// whatever the name — a localized Gmail lists none of the English ones.
+    #[test]
+    fn special_use_attributes_are_projected_whatever_the_name() {
+        let script = concat!(
+            "* LIST (\\HasNoChildren \\Trash) \"/\" \"[Gmail]/Papierkorb\"\r\n",
+            "* LIST (\\HasNoChildren \\Junk) \"/\" \"[Gmail]/Spam\"\r\n",
+            "* LIST (\\All \\HasNoChildren) \"/\" \"[Gmail]/Alle Nachrichten\"\r\n",
+            "* LIST (\\Flagged \\HasNoChildren) \"/\" \"[Gmail]/Markiert\"\r\n",
+            "* LIST (\\HasNoChildren \\Important) \"/\" \"[Gmail]/Wichtig\"\r\n",
+            "* LIST (\\HasNoChildren \\Sent) \"/\" \"[Gmail]/Gesendet\"\r\n",
+        );
+        let mut c = Connection::new(ScriptedTransport::new([script.as_bytes()]));
+        let mut got = Vec::new();
+        for _ in 0..6 {
+            match block_on(c.next_event()).unwrap() {
+                ServerEvent::List { special_use, .. } => got.push(special_use),
+                other => panic!("expected LIST, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            got,
+            [
+                Some(SpecialUse::Trash),
+                Some(SpecialUse::Junk),
+                Some(SpecialUse::All),
+                Some(SpecialUse::Flagged),
+                Some(SpecialUse::Important),
+                Some(SpecialUse::Sent),
+            ]
+        );
+    }
+
+    fn status_of(wire: &[u8]) -> Result<ServerEvent, ImapClientError> {
+        let mut c = Connection::new(ScriptedTransport::new([wire.to_vec()]));
+        block_on(c.next_event())
+    }
+
+    #[test]
+    fn a_status_reply_with_rfc8438_size_is_read_not_refused() {
+        // The line the response parser would reject as not IMAP.
+        assert_eq!(
+            status_of(b"* STATUS INBOX (MESSAGES 3 SIZE 12345)\r\n").unwrap(),
+            ServerEvent::Status {
+                messages: Some(3),
+                size: Some(12345)
+            }
+        );
+    }
+
+    #[test]
+    fn a_status_reply_reads_any_mailbox_form_and_skips_unused_items() {
+        for wire in [
+            &b"* STATUS \"Sent Items\" (UIDNEXT 9 MESSAGES 3)\r\n"[..],
+            &b"* status \"a \\\"q\\\" box\" (MESSAGES 3 UNSEEN 1)\r\n"[..],
+            &b"* STATUS {5}\r\nIN)BX (MESSAGES 3)\r\n"[..],
+        ] {
+            assert_eq!(
+                status_of(wire).unwrap(),
+                ServerEvent::Status {
+                    messages: Some(3),
+                    size: None
+                },
+                "{}",
+                String::from_utf8_lossy(wire)
+            );
+        }
+    }
+
+    #[test]
+    fn a_status_reply_split_across_reads_is_reassembled() {
+        let t = ScriptedTransport::new([
+            &b"* STA"[..],
+            &b"TUS {5}\r\nIN"[..],
+            &b"BOX (MESSAGES 4 SI"[..],
+            &b"ZE 99)\r\nA0001 OK done\r\n"[..],
+        ]);
+        let mut c = Connection::new(t);
+        assert_eq!(
+            block_on(c.next_event()).unwrap(),
+            ServerEvent::Status {
+                messages: Some(4),
+                size: Some(99)
+            }
+        );
+        assert!(matches!(
+            block_on(c.next_event()).unwrap(),
+            ServerEvent::Done { .. }
+        ));
+    }
+
+    #[test]
+    fn a_malformed_status_reply_is_a_protocol_error() {
+        for wire in [
+            &b"* STATUS INBOX (MESSAGES)\r\n"[..],
+            &b"* STATUS INBOX (MESSAGES many)\r\n"[..],
+            &b"* STATUS INBOX\r\n"[..],
+            &b"* STATUS INBOX (MESSAGES 1) x\r\n"[..],
+        ] {
+            assert!(
+                matches!(status_of(wire), Err(ImapClientError::Protocol(_))),
+                "{}",
+                String::from_utf8_lossy(wire)
+            );
+        }
     }
 }

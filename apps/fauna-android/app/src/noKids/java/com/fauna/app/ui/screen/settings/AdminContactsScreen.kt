@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.settings
 
+import com.fauna.app.ui.navigation.exitAdminToPrimary
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -53,7 +54,7 @@ fun AdminContactsScreen(
     AdminContactsContent(
         carddavEnabled = snapshot.carddavEnabled,
         working = snapshot.status == CarddavPolicyStatus.WORKING,
-        onBack = { navController.popBackStack() },
+        onBack = { navController.exitAdminToPrimary() },
         onSetCarddavEnabled = vm::setCarddavEnabled,
     )
 }

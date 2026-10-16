@@ -34,7 +34,8 @@ from helpers.mail_aliases import add_exact_alias
 from helpers.mail_wire import header_value
 from helpers.waiting import wait_until
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui]
+pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.web,
+    pytest.mark.windows]
 
 # Routed to the stub external MX by the fixture's `mta_mx_override`.
 MEMBER_DOMAIN = "external.test"

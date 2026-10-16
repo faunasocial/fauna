@@ -1608,7 +1608,10 @@ impl<R: RpcRequester> CalDavClient<R> {
 // crate-backed parser, or it belongs above.
 impl<R: RpcRequester> CalDavClient<R> {
     /// One calendar's events in the WASM-safe [`FlatEvent`] view; `None` when the
-    /// calendar row does not exist.
+    /// calendar row does not exist. A row that will not unseal or parse fails the
+    /// read with [`ReadEventsError::Decode`] — never a silently shorter list, which
+    /// would render as an empty calendar with no error. This is web's Events read
+    /// too, so every app names the same cause.
     ///
     /// Deliberately **not** [`Self::query_events_decoded`]. Everything the
     /// inbound `REQUEST` / `CANCEL` / `REPLY` chain reads off a stored row is its
@@ -1617,7 +1620,7 @@ impl<R: RpcRequester> CalDavClient<R> {
     /// crate-backed `fauna_mail::parse_icalendar` would build a rich VEVENT tree
     /// only to drop it, and would pin the whole chain to native for no gain.
     /// [`decode_event_entry_flat`] gives both fields on every target.
-    async fn events_flat_in_calendar(
+    pub async fn events_flat_in_calendar(
         &self,
         actor_id: &[u8; 32],
         calendar_id: &[u8; 32],

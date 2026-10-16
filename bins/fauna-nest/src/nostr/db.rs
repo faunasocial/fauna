@@ -269,7 +269,9 @@ pub const CREATE_TABLES_SQL: &str = "
     -- capability_grants — the nest is the enforcement point; § Why a
     -- nest-enforced roster). status: pending (invite secret outstanding,
     -- secret_hash set, app_pubkey NULL) / active (app_pubkey pinned,
-    -- secret_hash cleared) / revoked (tombstone). expires_at is the invite
+    -- secret_hash cleared) / revoked (tombstone) / burned (the identity-
+    -- succession burn: listed as not connected, revoke turns it into a
+    -- tombstone). expires_at is the invite
     -- TTL while pending and the sliding idle expiry once active.
     CREATE TABLE IF NOT EXISTS nostr_bunker_apps (
         id           INTEGER PRIMARY KEY,
@@ -929,11 +931,11 @@ pub fn insert_zap(
     amount_msats: Option<i64>,
     created_at: i64,
     purchased_tier: Option<&str>,
-) -> Result<()> {
+) -> Result<bool> {
     // `created_at` is the receipt's own claim; `inserted_at` is this box's
     // arrival fact, stamped here so no caller can forge it from the wire.
     let now = crate::db::now_epoch_secs();
-    conn.execute(
+    let inserted = conn.execute(
         "INSERT OR IGNORE INTO nostr_zaps
          (zap_event_id, target_event_id, target_pubkey, sender_pubkey, amount_msats, created_at, inserted_at, purchased_tier)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -948,7 +950,10 @@ pub fn insert_zap(
             purchased_tier
         ],
     )?;
-    Ok(())
+    // `true` only for the first arrival: a redelivered receipt is ignored by
+    // the primary key, and its consequences (the tip notification) must not
+    // fire twice.
+    Ok(inserted == 1)
 }
 
 /// Returns `(total_msats, zap_count)` for a given target event ID.

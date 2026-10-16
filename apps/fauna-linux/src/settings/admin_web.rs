@@ -39,10 +39,13 @@ struct AdminWebCtx {
     error_label: gtk::Label,
 }
 
-/// One render's data: the current apex designation + the pickable actors.
+/// One render's data: the current apex designation + the pickable actors + the
+/// nest's own serving domain (`fauna.nest.info`'s `web_serving_domain`, the
+/// only source for the apex-URL hint — admin.md § 7).
 struct Snapshot {
     current: Option<Vec<u8>>,
     actors: Vec<(Vec<u8>, String)>,
+    serving_domain: String,
     error: Option<String>,
 }
 
@@ -103,11 +106,16 @@ pub fn build_admin_web_page() -> adw::PreferencesPage {
     error_row.add_suffix(&error_label);
     group.add(&error_row);
 
-    wire(picker_box, info_marker, error_label);
+    wire(&page, picker_box, info_marker, error_label);
     page
 }
 
-fn wire(picker_box: gtk::Box, info_marker: gtk::Label, error_label: gtk::Label) {
+fn wire(
+    page: &adw::PreferencesPage,
+    picker_box: gtk::Box,
+    info_marker: gtk::Label,
+    error_label: gtk::Label,
+) {
     let client = match crate::settings::get_client() {
         Some(c) => c,
         None => return,
@@ -121,6 +129,12 @@ fn wire(picker_box: gtk::Box, info_marker: gtk::Label, error_label: gtk::Label) 
         error_label,
     });
     hydrate(&ctx);
+    // The admin Stack builds this page once and keeps it, so re-entering it
+    // must re-read the designation — another admin may have changed it since
+    // (`admin.md` § 7: opening the page shows who is the front page *now*).
+    // Same refresh-on-show as `views::admin`'s dashboard and `mail_export`.
+    let on_map = Rc::clone(&ctx);
+    page.connect_map(move |_| hydrate(&on_map));
 }
 
 /// Fetch the current apex + the actor list (retrying while the WS comes up), then
@@ -143,15 +157,20 @@ fn hydrate(ctx: &Rc<AdminWebCtx>) {
                         .await
                         .map(|users| fauna_client_admin::actor_picker_options(&users))
                         .unwrap_or_default();
+                    // A failed read leaves the hint in its no-domain form
+                    // rather than failing the page.
+                    let serving_domain = web.serving_domain().await.unwrap_or_default();
                     Snapshot {
                         current,
                         actors,
+                        serving_domain,
                         error: None,
                     }
                 }
                 Err(e) => Snapshot {
                     current: None,
                     actors: Vec::new(),
+                    serving_domain: String::new(),
                     error: Some(e.to_string()),
                 },
             }
@@ -218,10 +237,9 @@ fn render(ctx: &Rc<AdminWebCtx>, snap: Snapshot) {
     }
     ctx.picker_box.append(&picker);
 
-    // Apex-URL explainer (uses the admin's own domain = the node domain).
-    let (_handle, domain, _) = crate::client::load_account_cache();
-    let domain = domain.unwrap_or_default();
-    let apex_url = fauna_core::web::apex_url(&domain);
+    // Apex-URL explainer: the nest's own serving domain, never the account
+    // cache's sign-in/handle domain (admin.md § 7).
+    let apex_url = fauna_core::web::apex_url(&snap.serving_domain);
     ctx.info_marker.set_text(&WP::apex_info(&apex_url));
     ctx.info_marker.set_visible(true);
 

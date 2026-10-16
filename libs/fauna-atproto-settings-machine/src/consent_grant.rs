@@ -24,6 +24,16 @@
 //! deposited in order before the resolve. The same seam names the folder on
 //! the card ([`consent_folder_names`]).
 //!
+//! A `fauna:folder:deposit:<id>` scope's keyless `deposit` tuple rides the
+//! consent's one grant (`docs/goal/behavior/file-sync.md` § Third-party
+//! deposit ingress) and needs no seam. A row carrying a BARE folder-plane
+//! scope is approved with the card's chosen folder
+//! (`docs/goal/behavior/authorization-server.md` § Consent → *The card
+//! chooses the folder*): the approve plans over the row's scopes qualified
+//! by it (`ext_consent::approved_scopes`) and resolves with it; a bare row
+//! with no choice, or a choice on a row that takes none, is refused before
+//! anything is minted.
+//!
 //! A request naming no twin-bearing scope, and every decline, resolve exactly
 //! as they always have. A twin-bearing approve on a machine built without
 //! [`ConsentGrantSeams`] — or a folder read on one built without the folder
@@ -36,8 +46,8 @@ use std::sync::Arc;
 
 pub use fauna_client_capabilities::ext_consent::ConsentFolder;
 use fauna_client_capabilities::ext_consent::{
-    ExtConsentError, ExtConsentOwner, PreparedExtGrant, folder_read_ids, names_twin_scope,
-    prepare_ext_consent_grant,
+    ExtConsentError, ExtConsentOwner, PreparedExtGrant, approved_scopes, folder_read_ids,
+    names_twin_scope, prepare_ext_consent_grant,
 };
 use fauna_client_capabilities::grant_log::{self, GrantEventSigner, KeypairGrantEventSigner};
 use fauna_core::crypto::{BackupKey, DelegableSchedule};
@@ -64,6 +74,11 @@ pub struct ConsentGrantSeams {
     /// The owner's folder custody, for a `folder:read` scope's twin and the
     /// card's folder name — `None` refuses a folder read (`Unwired`).
     pub folders: Option<Arc<dyn ConsentFolderSeam>>,
+    /// The account's D10 authoring-delegation doors, for a
+    /// `fauna:identity:op:post.author` scope — approving the class provisions
+    /// the delegation when the account has none ([`ensure_post_delegation`]).
+    /// `None` refuses that class (`Unwired`).
+    pub authoring: Option<Arc<dyn crate::nest_api::AtprotoSettingsNestApi>>,
 }
 
 /// The owner's folder custody as the consent machine asks it — the folder
@@ -106,7 +121,7 @@ pub fn consent_folder_from(
 /// The shared [`ConsentFolderSeam`]: the owner's folder-key custody plus the
 /// owner-scoped `fauna.folders.list`, read fresh per ask — what the Media
 /// page and the engine binding resolve a set from. `R` is the host's nest
-/// transport (native `Arc<NestClient>`).
+/// transport (native `Arc<NestClient>`, wasm `WsRpcClient`).
 pub struct CustodyConsentFolders<R> {
     /// The account's folder-key custody.
     pub keys: Arc<dyn fauna_client_folders::FolderKeyStore>,
@@ -114,23 +129,54 @@ pub struct CustodyConsentFolders<R> {
     pub nest: R,
 }
 
+/// [`ConsentFolderSeam::folder_for_consent`] over any host transport `R`:
+/// custody, then the owner-scoped folder list, folded by
+/// [`consent_folder_from`]. Both targets' impls call it.
+#[cfg(feature = "rpc-glue")]
+async fn folder_for_consent_over<R: fauna_protocol::RpcRequester>(
+    keys: &dyn fauna_client_folders::FolderKeyStore,
+    nest: R,
+    id: i64,
+) -> Option<ConsentFolder> {
+    let custody = keys
+        .load()
+        .await
+        .inspect_err(|e| tracing::warn!(target: "fauna_atproto_settings", error = %e, "consent folder: custody unreadable"))
+        .ok()?;
+    let rows = fauna_client_folders::FoldersClient::new(nest)
+        .list_wire()
+        .await
+        .inspect_err(|e| tracing::warn!(target: "fauna_atproto_settings", error = %e, "consent folder: folder list unreadable"))
+        .ok()?
+        .folders;
+    consent_folder_from(rows, custody, id)
+}
+
 #[cfg(all(feature = "rpc-glue", not(target_arch = "wasm32")))]
 #[async_trait::async_trait]
 impl ConsentFolderSeam for CustodyConsentFolders<Arc<fauna_client::NestClient>> {
     async fn folder_for_consent(&self, id: i64) -> Option<ConsentFolder> {
-        let custody = self
-            .keys
-            .load()
-            .await
-            .inspect_err(|e| tracing::warn!(target: "fauna_atproto_settings", error = %e, "consent folder: custody unreadable"))
-            .ok()?;
-        let rows = fauna_client_folders::FoldersClient::new(self.nest.clone())
-            .list_wire()
-            .await
-            .inspect_err(|e| tracing::warn!(target: "fauna_atproto_settings", error = %e, "consent folder: folder list unreadable"))
-            .ok()?
-            .folders;
-        consent_folder_from(rows, custody, id)
+        folder_for_consent_over(&*self.keys, self.nest.clone(), id).await
+    }
+}
+
+/// The SPA's twin: the same custody fold over the browser session
+/// (`WsRpcClient`), the shape `CustodyOwnedSetNames` has on both targets.
+#[cfg(all(feature = "rpc-glue", target_arch = "wasm32"))]
+#[async_trait::async_trait(?Send)]
+impl ConsentFolderSeam for CustodyConsentFolders<fauna_rpc_wasm::WsRpcClient> {
+    async fn folder_for_consent(&self, id: i64) -> Option<ConsentFolder> {
+        folder_for_consent_over(&*self.keys, self.nest.clone(), id).await
+    }
+}
+
+#[cfg(all(feature = "rpc-glue", target_arch = "wasm32"))]
+#[async_trait::async_trait(?Send)]
+impl fauna_client_capabilities::OwnedSetNames
+    for CustodyConsentFolders<fauna_rpc_wasm::WsRpcClient>
+{
+    async fn owned_set_names(&self) -> Option<Vec<String>> {
+        fauna_client_folders::read_owned_set_names(&*self.keys, self.nest.clone()).await
     }
 }
 
@@ -163,6 +209,7 @@ impl ConsentGrantSeams {
             ledger,
             signer: Arc::new(KeypairGrantEventSigner::new(keypair)),
             folders: None,
+            authoring: None,
         }
     }
 
@@ -173,12 +220,169 @@ impl ConsentGrantSeams {
         self.folders = Some(folders);
         self
     }
+
+    /// These seams with the account's D10 delegation doors wired — what lets
+    /// an approve of the `post.author` class provision the delegation.
+    #[must_use]
+    pub fn with_authoring(mut self, api: Arc<dyn crate::nest_api::AtprotoSettingsNestApi>) -> Self {
+        self.authoring = Some(api);
+        self
+    }
+
+    /// These seams with both nest-backed doors wired over a native session:
+    /// the owner's folder custody (`keys`) plus `nest`'s folder list, and the
+    /// D10 delegation doors. The one call tui, linux and the four UniFFI apps
+    /// make, so none carries its own copy of the pair — the native twin of
+    /// [`consent_grant_seams_over_port`].
+    #[cfg(all(feature = "rpc-glue", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn with_nest_custody(
+        self,
+        keys: Arc<dyn fauna_client_folders::FolderKeyStore>,
+        nest: Arc<fauna_client::NestClient>,
+    ) -> Self {
+        let authoring = crate::nest_api::ws_rpc::WsRpcAtprotoSettingsNest::new(Arc::clone(&nest));
+        self.with_folders(Arc::new(CustodyConsentFolders { keys, nest }))
+            .with_authoring(Arc::new(authoring))
+    }
+}
+
+/// web's consent seams, wired over the tab's account port: the seams both
+/// wasm consent machines (the AT Protocol page's and the Connected apps
+/// tray's) take, each in its own chunk with no reach into the core chunk's
+/// runtime but through `port` (`account-client-lifecycle.md` § The account
+/// port). The grant log and the kind-manifest rows ride the port's forwarders
+/// (`succession_ledger_port`, `kind_manifest_port`), the folder custody its
+/// `PortFolderKeys`, and the folder list and the D10 delegation doors the
+/// chunk's own `client` — the seams `apps/fauna-tui` and `apps/fauna-linux`
+/// wire natively, over the one set of forwarders every web consumer shares.
+///
+/// # Errors
+/// `port` is not a `SharedAccountPort` — refused by name, where it was wired.
+#[cfg(all(feature = "rpc-glue", feature = "account-port", target_arch = "wasm32"))]
+pub fn consent_grant_seams_over_port(
+    keypair: &ActorKeypair,
+    client: fauna_rpc_wasm::WsRpcClient,
+    port: &fauna_account_port::JsAccountPort,
+) -> Result<ConsentGrantSeams, fauna_account_port::PortFault> {
+    // `JsAccountPort` is not `Clone`: each forwarder wraps its own handle on
+    // the one JS port object.
+    let again = || fauna_account_port::JsAccountPort::from((**port).clone());
+    let ledger =
+        fauna_client_config::succession_ledger_port::from_js_port(again(), keypair.actor_id())?;
+    let manifests = fauna_client_config::kind_manifest_port::from_js_port(again())?;
+    let keys = fauna_client_folders::port::PortFolderKeys::new(
+        fauna_account_port::JsAccountTransport::new(again().into())?,
+    );
+    let authoring = crate::nest_api::ws_rpc::WsRpcAtprotoSettingsNest::new(client.clone());
+    let folders = CustodyConsentFolders {
+        keys: Arc::new(keys),
+        nest: client,
+    };
+    Ok(ConsentGrantSeams::from_keypair(keypair, manifests, ledger)
+        .with_folders(Arc::new(folders))
+        .with_authoring(Arc::new(authoring)))
+}
+
+/// Why the D10 delegation could not be provisioned.
+#[derive(Debug, thiserror::Error)]
+pub enum ProvisionDelegationError {
+    /// A nest call of the ceremony failed.
+    #[error("{}", .0.detail())]
+    Nest(crate::nest_api::AtprotoSettingsApiError),
+    /// The cert could not be built.
+    #[error("{0}")]
+    Cert(String),
+}
+
+/// The D10 mint ceremony (`atproto-pds-full.md` § D10 → *Mint ceremony*):
+/// fetch `K_pub` (minting `K`), sign the cert over THAT key under the
+/// account's `identity`, upload it — three nest calls in a fixed order, since
+/// the nest refuses a cert naming any key but the one it minted. The cert
+/// grants the enumerated authoring set for `DELEGATION_WINDOW_SECS` from
+/// `now` (time-bounded by construction). The one ceremony both the AT
+/// Protocol page's authorize gesture and the consent of the `post.author`
+/// class run; re-running it renews a lapsed delegation in place.
+pub async fn provision_delegation(
+    api: &dyn crate::nest_api::AtprotoSettingsNestApi,
+    identity: &ActorKeypair,
+    now: fauna_core::data::Timestamp,
+) -> Result<(), ProvisionDelegationError> {
+    use fauna_client_bridges::atproto_delegation::{
+        AUTHORING_CAPABILITIES, DELEGATION_WINDOW_SECS, build_authoring_delegation_cert,
+    };
+    let k_pub = api
+        .fetch_authoring_key()
+        .await
+        .map_err(ProvisionDelegationError::Nest)?;
+    // MICROSECONDS on both sides: `Timestamp` is micros and the window
+    // constant is seconds.
+    let expires_at = fauna_core::data::Timestamp(now.0 + DELEGATION_WINDOW_SECS * 1_000_000);
+    let cert = build_authoring_delegation_cert(
+        identity,
+        k_pub,
+        &AUTHORING_CAPABILITIES,
+        now,
+        Some(expires_at),
+    )
+    .map_err(|e| ProvisionDelegationError::Cert(e.to_string()))?;
+    api.provision_authoring_delegation(cert)
+        .await
+        .map_err(ProvisionDelegationError::Nest)
+}
+
+/// Make sure the account holds a live delegation carrying `Capability::Post`
+/// before a `post.author` grant is minted (`authorization-server.md` § Scope
+/// grammar → *The planes ruled 2026-10-02*: approving the class provisions
+/// the delegation when the account has none). The stored cert is verified
+/// under the account's OWN identity key — a cert it did not sign is no
+/// delegation — and a missing, foreign, Post-less or lapsed one is replaced
+/// by [`provision_delegation`]. Returns whether it provisioned.
+pub async fn ensure_post_delegation(
+    api: &dyn crate::nest_api::AtprotoSettingsNestApi,
+    identity: &ActorKeypair,
+    now: fauna_core::data::Timestamp,
+) -> Result<bool, ProvisionDelegationError> {
+    use fauna_client_bridges::atproto_delegation::{
+        DelegationLiveness, delegation_liveness, parse_delegation_cert,
+    };
+    let state = api
+        .fetch_authoring_delegation()
+        .await
+        .map_err(ProvisionDelegationError::Nest)?;
+    let live = state.cert.as_deref().is_some_and(|cert| {
+        parse_delegation_cert(cert, &identity.actor_id()).is_ok_and(|summary| {
+            summary
+                .capabilities
+                .contains(&fauna_core::data::Capability::Post)
+                && delegation_liveness(summary.expires_at, now) != DelegationLiveness::Expired
+        })
+    });
+    if live {
+        return Ok(false);
+    }
+    provision_delegation(api, identity, now).await?;
+    Ok(true)
+}
+
+/// Whether `row` names the `post.author` oracle class.
+fn names_post_author(row: &NestConsentRow) -> bool {
+    row.scopes.iter().any(|s| {
+        fauna_bridge_atproto::fauna_scope::identity_op_qualifier(s)
+            == Some(fauna_core::identity_op::IdentityOpClass::PostAuthor)
+    })
 }
 
 /// Whether answering `row` with an approve mints a consent-time grant — it
-/// names a twin-bearing scope (`records` or `folder:read`).
+/// names a twin-bearing scope (`records`, `folder:read`, `folder:deposit` or
+/// `personalization:rw`; a bare folder-plane scope once the card's choice
+/// qualifies it). **An admin's install card never does**: its scopes
+/// are the ceiling each user may later grant the plugin, and installing
+/// grants nothing over anyone's data — each user's own bind card mints
+/// theirs (`third-party.md` § The runner contract → *The install-approval
+/// leg*).
 pub fn names_twin(row: &NestConsentRow) -> bool {
-    row.scopes.iter().any(|s| names_twin_scope(s))
+    row.install.is_none() && row.scopes.iter().any(|s| names_twin_scope(s))
 }
 
 /// The owner's own name for every folder `rows`' `folder:read` scopes name,
@@ -251,6 +455,9 @@ pub enum ConsentGrantError {
     /// The shared entry point refused (manifest, kinds, keys, store, sign).
     #[error(transparent)]
     Refused(#[from] ExtConsentError),
+    /// The `post.author` class's delegation could not be provisioned.
+    #[error(transparent)]
+    Delegation(#[from] ProvisionDelegationError),
 }
 
 /// Why [`answer_consent`] did not resolve the request.
@@ -278,14 +485,18 @@ fn now_epoch_secs() -> u64 {
 
 /// Answer `row`: for an approve naming a twin-bearing scope, prepare its
 /// grants, `deposit` each in order, then `resolve`; otherwise just `resolve`.
-/// Returns `resolve`'s own answer (`false` = nothing live was resolved).
-/// Grants an approve began — every deposited one it did not re-mint in place
-/// — are withdrawn through `revoke` and signed `Revoke` events, best-effort,
-/// when a deposit fails partway or the resolve does not answer `Ok(true)`.
+/// `folder` is the card's choice for a row carrying a bare folder-plane
+/// scope — the approve's grants plan over the row qualified by it, and
+/// `resolve` is sent it; a decline sends none. Returns `resolve`'s own answer
+/// (`false` = nothing live was resolved). Grants an approve began — every
+/// deposited one it did not re-mint in place — are withdrawn through `revoke`
+/// and signed `Revoke` events, best-effort, when a deposit fails partway or
+/// the resolve does not answer `Ok(true)`.
 pub async fn answer_consent<E, D, DF, R, RF, V, VF>(
     seams: Option<&ConsentGrantSeams>,
     row: &NestConsentRow,
     approved: bool,
+    folder: Option<i64>,
     mut deposit: D,
     resolve: R,
     revoke: V,
@@ -294,11 +505,25 @@ where
     E: std::fmt::Display,
     D: FnMut(Vec<u8>) -> DF,
     DF: Future<Output = Result<(), E>>,
-    R: FnOnce(Vec<u8>, bool) -> RF,
+    R: FnOnce(Vec<u8>, bool, Option<i64>) -> RF,
     RF: Future<Output = Result<bool, E>>,
     V: FnMut([u8; 16]) -> VF,
     VF: Future<Output = Result<(), E>>,
 {
+    // An install card's ceiling scopes are not the user's grant: they pass to
+    // the nest as handed.
+    let folder = folder.filter(|_| approved);
+    let approved_row;
+    let row = if approved && row.install.is_none() {
+        approved_row = NestConsentRow {
+            scopes: approved_scopes(&row.scopes, folder)
+                .map_err(|e| AnswerError::Grant(e.into()))?,
+            ..row.clone()
+        };
+        &approved_row
+    } else {
+        row
+    };
     let (seams, prepared) = if approved && names_twin(row) {
         let seams = seams.ok_or(AnswerError::Grant(ConsentGrantError::Unwired))?;
         let mut folders = BTreeMap::new();
@@ -313,6 +538,23 @@ where
                     folders.insert(id, folder);
                 }
             }
+        }
+        // The posting class's custodian signs with the account's delegated
+        // authoring sub-key: provision it first, so the grant is never minted
+        // over a class nothing can perform (mint before resolve still holds —
+        // this precedes both).
+        if names_post_author(row) {
+            let api = seams
+                .authoring
+                .as_ref()
+                .ok_or(AnswerError::Grant(ConsentGrantError::Unwired))?;
+            ensure_post_delegation(
+                api.as_ref(),
+                &seams.owner_keypair,
+                fauna_core::data::Timestamp::now(),
+            )
+            .await
+            .map_err(|e| AnswerError::Grant(e.into()))?;
         }
         let owner = ExtConsentOwner {
             actor_id: seams.actor_id,
@@ -345,7 +587,7 @@ where
         }
         deposited.push(grant);
     }
-    let resolved = resolve(row.consent_id.clone(), approved).await;
+    let resolved = resolve(row.consent_id.clone(), approved, folder).await;
     if let Some(seams) = seams
         && !matches!(resolved, Ok(true))
     {
@@ -555,10 +797,25 @@ mod tests {
         resolved: bool,
         fail_deposit: Option<usize>,
     ) -> Result<bool, AnswerError<String>> {
+        answer_in(seams, row, true, None, calls, resolved, fail_deposit).await
+    }
+
+    /// Answer `row` with `approved` and the card's `folder` choice; the
+    /// resolve logs the folder it was sent.
+    async fn answer_in(
+        seams: Option<&ConsentGrantSeams>,
+        row: &NestConsentRow,
+        approved: bool,
+        folder: Option<i64>,
+        calls: &Calls,
+        resolved: bool,
+        fail_deposit: Option<usize>,
+    ) -> Result<bool, AnswerError<String>> {
         answer_consent(
             seams,
             row,
-            true,
+            approved,
+            folder,
             |blob| async move {
                 let n = calls.1.lock().unwrap().len();
                 if fail_deposit == Some(n) {
@@ -569,8 +826,11 @@ mod tests {
                 calls.1.lock().unwrap().push(blob);
                 Ok(())
             },
-            |_, _| async move {
-                calls.0.lock().unwrap().push("resolve".into());
+            |_, _, folder| async move {
+                calls.0.lock().unwrap().push(match folder {
+                    None => "resolve".into(),
+                    Some(id) => format!("resolve in {id}"),
+                });
                 Ok(resolved)
             },
             |grant_id| async move {
@@ -619,6 +879,190 @@ mod tests {
         assert_eq!(calls.log(), ["deposit", "resolve"]);
         let hash = fauna_core::path_crypto::set_name_hash("photos");
         assert_eq!(calls.blobs()[0].scope, [ScopeTuple::folder_read(&hash)]);
+    }
+
+    /// A bare deposit row approved with the card's folder deposits the keyless
+    /// `deposit` tuple over THAT folder before resolving, and resolves with
+    /// the choice (`folder-deposit.md`;
+    /// `authorization-server.md` § Consent → *The card chooses the folder*).
+    #[tokio::test]
+    async fn approving_a_bare_deposit_mints_over_the_chosen_folder() {
+        let seams = seams(None);
+        let calls = Calls::default();
+        let row = consent(&["fauna:folder:deposit"]);
+        assert!(
+            answer_in(Some(&seams), &row, true, Some(7), &calls, true, None)
+                .await
+                .unwrap()
+        );
+        assert_eq!(calls.log(), ["deposit", "resolve in 7"]);
+        let blob = &calls.blobs()[0];
+        assert_eq!(blob.scope, [ScopeTuple::folder_deposit(7)]);
+        assert!(blob.wrapped_keys.is_empty(), "deposit is keyless");
+    }
+
+    /// A qualified deposit row (the re-consent path) takes no choice and
+    /// deposits over the folder it names.
+    #[tokio::test]
+    async fn approving_a_qualified_deposit_mints_over_its_folder() {
+        let seams = seams(None);
+        let calls = Calls::default();
+        let row = consent(&["fauna:folder:deposit:9"]);
+        assert!(approve(Some(&seams), &row, &calls).await.unwrap());
+        assert_eq!(calls.log(), ["deposit", "resolve"]);
+        assert_eq!(calls.blobs()[0].scope, [ScopeTuple::folder_deposit(9)]);
+    }
+
+    /// A bare row approved with no folder, and a qualified row approved with
+    /// one, are refused before anything is minted or resolved; a decline
+    /// sends no folder whatever it was handed.
+    #[tokio::test]
+    async fn a_mismatched_folder_choice_is_refused_before_anything() {
+        let seams = seams(None);
+        for (scope, folder) in [
+            ("fauna:folder:deposit", None),
+            ("fauna:folder:deposit:9", Some(9)),
+        ] {
+            let calls = Calls::default();
+            let err = answer_in(
+                Some(&seams),
+                &consent(&[scope]),
+                true,
+                folder,
+                &calls,
+                true,
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(err, AnswerError::Grant(ConsentGrantError::Refused(_))),
+                "{scope}"
+            );
+            assert!(calls.log().is_empty(), "{scope}: {:?}", calls.log());
+        }
+        assert!(seams.ledger.load().await.unwrap().grant_events.is_empty());
+
+        let calls = Calls::default();
+        let row = consent(&["fauna:folder:deposit"]);
+        assert!(
+            answer_in(Some(&seams), &row, false, Some(7), &calls, true, None)
+                .await
+                .unwrap()
+        );
+        assert_eq!(calls.log(), ["resolve"]);
+    }
+
+    /// Approving the `post.author` class on an account with no delegation
+    /// runs the D10 ceremony FIRST — fetch, then provision a cert signed by
+    /// the owner over the minted key, carrying `Post` — and only then
+    /// deposits the keyless `identity.op` grant and resolves.
+    #[tokio::test]
+    async fn approving_post_author_provisions_the_delegation_before_the_grant() {
+        use crate::nest_api::{FakeAtprotoSettingsNestApi, FakeCall};
+        use fauna_core::identity_op::IdentityOpClass;
+        let api = Arc::new(FakeAtprotoSettingsNestApi::new());
+        let seams = seams(None).with_authoring(api.clone());
+        let calls = Calls::default();
+        let row = consent(&["fauna:identity:op:post.author"]);
+
+        assert!(approve(Some(&seams), &row, &calls).await.unwrap());
+
+        let d10: Vec<FakeCall> = api
+            .calls()
+            .into_iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    FakeCall::FetchAuthoringDelegation
+                        | FakeCall::FetchAuthoringKey
+                        | FakeCall::ProvisionAuthoringDelegation { .. }
+                )
+            })
+            .collect();
+        assert!(matches!(
+            d10.as_slice(),
+            [
+                FakeCall::FetchAuthoringDelegation,
+                FakeCall::FetchAuthoringKey,
+                FakeCall::ProvisionAuthoringDelegation { .. }
+            ]
+        ));
+        let cert = api.delegation().cert.expect("provisioned");
+        let summary = fauna_client_bridges::atproto_delegation::parse_delegation_cert(
+            &cert,
+            &seams.owner_keypair.actor_id(),
+        )
+        .expect("signed by the owner");
+        assert_eq!(
+            summary.device_key, [0xA5; 32],
+            "over the key the nest minted"
+        );
+        assert!(
+            summary
+                .capabilities
+                .contains(&fauna_core::data::Capability::Post)
+        );
+        assert_eq!(calls.log(), ["deposit", "resolve"]);
+        assert_eq!(
+            calls.blobs()[0].scope,
+            [fauna_client_capabilities::identity_op_scope(
+                IdentityOpClass::PostAuthor
+            )]
+        );
+
+        // A second consent finds the live delegation and provisions nothing.
+        let again = Calls::default();
+        assert!(approve(Some(&seams), &row, &again).await.unwrap());
+        let provisions = api
+            .calls()
+            .into_iter()
+            .filter(|c| matches!(c, FakeCall::ProvisionAuthoringDelegation { .. }))
+            .count();
+        assert_eq!(provisions, 1);
+    }
+
+    /// Without the delegation doors wired, approving the class is refused
+    /// before anything is deposited or resolved — never a grant over a class
+    /// nothing can perform.
+    #[tokio::test]
+    async fn approving_post_author_unwired_is_refused() {
+        let seams = seams(None);
+        let calls = Calls::default();
+        let row = consent(&["fauna:identity:op:post.author"]);
+        assert!(matches!(
+            approve(Some(&seams), &row, &calls).await,
+            Err(AnswerError::Grant(ConsentGrantError::Unwired))
+        ));
+        assert!(calls.log().is_empty());
+    }
+
+    /// An oracle class with no custodian prerequisite mints its keyless
+    /// grant and provisions nothing.
+    #[tokio::test]
+    async fn approving_another_oracle_class_mints_without_a_ceremony() {
+        let seams = seams(None);
+        let calls = Calls::default();
+        let row = consent(&["fauna:identity:op:nostr.sign_event"]);
+        assert!(approve(Some(&seams), &row, &calls).await.unwrap());
+        assert_eq!(calls.log(), ["deposit", "resolve"]);
+    }
+
+    /// An admin's install card names the plugin's `records` ceiling but
+    /// approving it mints nothing: the install grants nothing over the
+    /// admin's data, and it resolves even with no seams wired.
+    #[tokio::test]
+    async fn approving_an_install_card_mints_no_grant() {
+        let calls = Calls::default();
+        let mut row = consent(&["atproto", "fauna:records:rw:ext.plugins.example.*"]);
+        row.holder_x25519 = None;
+        row.install = Some(crate::NestConsentInstall {
+            execution_form: "wasm".into(),
+            ..Default::default()
+        });
+        assert!(!names_twin(&row));
+        assert!(approve(None, &row, &calls).await.unwrap());
+        assert_eq!(calls.log(), ["resolve"]);
     }
 
     /// Two folders are two grants, each deposited in order before the

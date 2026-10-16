@@ -123,13 +123,15 @@ fn build_sort_dropdown() -> gtk::DropDown {
 
 /// Display labels for filter values whose value is NOT its own label.
 ///
-/// A followed browse scope's option carries a machine-minted **opaque** value
-/// (`ui/media.md` § Followed public folders — hand it back, never parse it) and a
-/// separate display label that already includes the owner disambiguator. The
-/// GTK `StringList` model holds the VALUES, because that is what
-/// `set_filter`/`select_followed_scope` take, so the label expression needs a
-/// side map to render them. Rebuilt from `snapshot().followed` on every render,
-/// before the model is swapped.
+/// Every option — a set's (`folder_options`) or a followed scope's — carries a
+/// machine-minted **opaque** value (`ui/media.md` § Followed public folders,
+/// § Encryption at rest → *The filter and the upload target address the row*:
+/// hand it back, never parse it) and a separate display label that already
+/// includes the owner disambiguator. The GTK `StringList` model holds the
+/// VALUES, because that is what `set_filter`/`select_followed_scope` take, so
+/// the label expression needs a side map to render them. Rebuilt from
+/// `snapshot().folder_options` + `followed` on every render, before the model
+/// is swapped.
 type FilterLabels = Rc<RefCell<std::collections::HashMap<String, String>>>;
 
 /// What one `media-folder-filter` option should DISPLAY, given its value.
@@ -398,6 +400,12 @@ pub fn build_media_view(fauna_client: &Rc<FaunaClient>) -> (gtk::Box, MediaHandl
         observer,
         Some(resolver),
     );
+    // The B3 member-row join-filter, the same seam and the same answer the
+    // Folders page wires: unwired, every shared set's row is dropped
+    // (fail-safe) and a shared set is offered only as an item-only option by
+    // name, never as the row-addressed option (`media.md` § The filter and the
+    // upload target address the row). MUST precede the first refresh.
+    machine.set_mls_query(Arc::new(crate::views::devices_folders::LinuxMlsQuery));
     // Write-side label custody for the delete/restore gestures (S8 D2): the
     // same per-actor owner key the upload gesture seals with, injected once so
     // those records seal instead of resting plaintext-only.
@@ -669,16 +677,20 @@ fn render_page(machine: &Arc<MediaMachine>, ctx: &Rc<RenderCtx>) {
     // Filter select: rebuild options (all-media sentinel + the readable sets
     // the client knows, empty ones included), then reflect the active filter.
     let mut filter_values: Vec<&str> = vec![FILTER_ALL_VALUE];
-    filter_values.extend(snap.folders.iter().map(String::as_str));
-    // The followed browse scopes ride AFTER the own-set options
-    // (`ui/media.md` § Followed public folders). Both halves are shared-Rust
-    // minted: the value is opaque and disjoint from every set name, the label
-    // already carries the owner disambiguator. Refresh the label side-map
-    // BEFORE swapping the model, so the expression can resolve the new values
-    // the moment GTK asks.
+    filter_values.extend(snap.folder_options.iter().map(|o| o.value.as_str()));
+    // Every option is a shared-Rust-minted value/label pair: an own set's value
+    // is its name, a shared set's the row-addressed `local:<id>`, so a
+    // same-named pair is two options. The followed browse scopes ride AFTER
+    // them (`ui/media.md` § Followed public folders); their value is opaque and
+    // disjoint from every set name, their label carries the owner
+    // disambiguator. Refresh the label side-map BEFORE swapping the model, so
+    // the expression can resolve the new values the moment GTK asks.
     {
         let mut labels = ctx.filter_labels.borrow_mut();
         labels.clear();
+        for o in &snap.folder_options {
+            labels.insert(o.value.clone(), o.label.clone());
+        }
         for f in &snap.followed {
             labels.insert(f.value.clone(), f.label.clone());
         }
@@ -814,6 +826,24 @@ mod tests {
             filter_display_label("my-photos", &labels),
             "my-photos",
             "an own set's value IS its name and passes through",
+        );
+    }
+
+    /// A shared set's option value is its row (`local:<id>`), its label
+    /// `<name> (<owner>)`; an own set of the same name keeps value == name. The
+    /// map is rebuilt from every `folder_options` pair, so the namesakes render
+    /// as two distinct labels instead of merging on the name.
+    #[test]
+    fn a_same_named_shared_set_renders_its_owner_label_beside_the_own_set() {
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("photos".to_string(), "photos".to_string());
+        labels.insert("local:42".to_string(), "photos (alice)".to_string());
+
+        assert_eq!(filter_display_label("photos", &labels), "photos");
+        assert_eq!(
+            filter_display_label("local:42", &labels),
+            "photos (alice)",
+            "a shared set paints its minted label, never its row value",
         );
     }
 

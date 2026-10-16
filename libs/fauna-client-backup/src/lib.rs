@@ -40,6 +40,8 @@ pub mod custodian;
 pub mod generations;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_store;
+pub mod recover;
+pub mod recover_leg;
 pub mod reseed;
 #[cfg(feature = "local-clock")]
 pub mod row_text;
@@ -996,6 +998,7 @@ mod tests {
             size_bytes: 900,
             stored_at: 0,
             deleted: false,
+            pinned: false,
         }];
         // Live bytes alone exceed the cap: nothing may be reclaimed, so the
         // custodian stops pulling.

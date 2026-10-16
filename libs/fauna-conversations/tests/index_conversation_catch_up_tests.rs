@@ -183,6 +183,9 @@ impl ConversationsRpc for ScriptedNest {
     async fn keypackage_count(&self, _a: String) -> Result<u64, ConvRpcError> {
         Err(unused("keypackage_count"))
     }
+    async fn keypackage_addressable(&self, _a: String) -> Result<bool, ConvRpcError> {
+        Err(unused("keypackage_addressable"))
+    }
     async fn actor_by_handle(
         &self,
         _h: String,

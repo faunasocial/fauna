@@ -40,15 +40,47 @@ pub fn age_band_from_age_range(lower: Option<u32>, upper: Option<u32>) -> Option
     fauna_protocol::age::AgeBand::from_age_range(lower, upper).map(|b| b.as_str().to_string())
 }
 
-/// `fauna_protocol::age::FAUNA_IOS_APP_ID` — the team-prefixed App ID the iOS
-/// store-age arm passes as `age_claim_digest`'s `application_id`, and nothing
-/// more: whether an attestation is worth attaching is the addressed nest's
+/// This build's team-prefixed iOS App ID — `fauna_protocol::age::FAUNA_IOS_APP_ID`,
+/// or `FAUNA_IOS_KIDS_APP_ID` in the kids flavor (`kids-floor`), because App
+/// Attest signs under the running bundle's App ID — which the iOS store-age
+/// arm passes as `age_claim_digest`'s `application_id`, and nothing more:
+/// whether an attestation is worth attaching is the addressed nest's
 /// `attestation_platforms` list (`AgeNoncePlain`), never this build's arming
 /// (`family-safety.md` § The account age band → *An attestation the nest
 /// cannot check*). `None` only means the signed message cannot be formed.
 #[uniffi::export]
 pub fn ios_age_attestation_app_id() -> Option<String> {
-    fauna_protocol::age::FAUNA_IOS_APP_ID.map(str::to_string)
+    Some(ios_app_id_for_this_flavor().to_string())
+}
+
+#[cfg(not(feature = "kids-floor"))]
+fn ios_app_id_for_this_flavor() -> &'static str {
+    fauna_protocol::age::FAUNA_IOS_APP_ID
+}
+
+#[cfg(feature = "kids-floor")]
+fn ios_app_id_for_this_flavor() -> &'static str {
+    fauna_protocol::age::FAUNA_IOS_KIDS_APP_ID
+}
+
+/// Each flavor signs over its own bundle's App ID, and that ID is one the
+/// nest's iOS verifier pins — run once plain and once with `--features
+/// kids-floor`.
+#[cfg(test)]
+mod ios_age_attestation_app_id_tests {
+    use fauna_protocol::age::{FAUNA_IOS_APP_ID, FAUNA_IOS_APP_IDS, FAUNA_IOS_KIDS_APP_ID};
+
+    #[test]
+    fn the_flavor_signs_over_its_own_pinned_app_id() {
+        let expected = if cfg!(feature = "kids-floor") {
+            FAUNA_IOS_KIDS_APP_ID
+        } else {
+            FAUNA_IOS_APP_ID
+        };
+        let got = super::ios_age_attestation_app_id().expect("an App ID");
+        assert_eq!(got, expected);
+        assert!(FAUNA_IOS_APP_IDS.contains(&got.as_str()));
+    }
 }
 
 // ── Reach-policy option catalogs (client-consumption) ──────────────────
@@ -558,6 +590,29 @@ pub fn approval_display_text(entry: FfiFamilyApprovalEntry) -> Option<String> {
     .map(std::borrow::Cow::into_owned)
 }
 
+/// `fauna_core::format::approval_timestamp_display` → when a held mail arrived,
+/// beside [`approval_display_text`]'s sender on a `family-approval-item` row:
+/// `{ clock, localized, absolute_epoch_ms }` (exactly one `Some`, the
+/// conversation-timestamp buckets over the entry's `created_at`), or `None` for
+/// every kind but `mail_hold` and for a hold with no stamp — the row then shows
+/// its sender alone. The shell renders `clock` / resolves `localized` / formats
+/// `absolute_epoch_ms` as for a message timestamp. `value-format`-gated: it
+/// returns a `fauna_core` record (the Go-binding reason documented above).
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn approval_timestamp_display(
+    entry: FfiFamilyApprovalEntry,
+    now_ms: i64,
+    utc_offset_seconds: i32,
+) -> Option<fauna_core::format::ConversationTimestampDisplay> {
+    fauna_core::format::approval_timestamp_display(
+        &entry.kind,
+        entry.created_at,
+        now_ms,
+        utc_offset_seconds,
+    )
+}
+
 // ── Screen-time faces (v1.x screen-time pillar, Slice E) ───────────────
 //
 // The native twins of the web `screenLockMessage` / `usageTodayLine` /
@@ -671,6 +726,22 @@ pub fn parse_daily_minutes(input: String) -> Result<Option<u16>, FfiError> {
     fauna_core::screen_time::parse_daily_minutes(&input).map_err(|msg| FfiError::General {
         msg: msg.to_string(),
     })
+}
+
+/// `fauna_core::screen_time::ScreenTimePolicy::validate` → the cross-field write
+/// rule the nest refuses by at `policy.update` (half-set bounds, `start == end`,
+/// an out-of-range bound or budget), run on the parsed editor values BEFORE the
+/// RPC. The parsers above judge one field each; only this sees the pair, so
+/// without it a half-set window reaches the guardian as a generic transport
+/// failure instead of its reason. See [`parse_time_of_day`] for the `Err` shape.
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+pub fn validate_screen_time(policy: FfiScreenTimePolicy) -> Result<(), FfiError> {
+    ScreenTimePolicy::from(policy)
+        .validate()
+        .map_err(|msg| FfiError::General {
+            msg: msg.to_string(),
+        })
 }
 
 /// `fauna_core::screen_time::UsageHeartbeat` → the ward client's screen-time

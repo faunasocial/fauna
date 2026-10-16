@@ -1,5 +1,6 @@
 """A folder that keeps no bytes on the nest refuses to also be served out —
-all three serving surfaces, **both orders**, on a real ``fauna-nest`` binary.
+all three serving surfaces and the ``public`` audience, **both orders**, on a
+real ``fauna-nest`` binary.
 
 Owner doc: ``docs/goal/behavior/file-sync.md`` § Content residency — *"v1 scope
 cuts (pairwise refusals, both directions, each refutable): metadata-only ⊕
@@ -9,7 +10,8 @@ the owner's laptop is on is a broken serving promise; refuse whichever side
 moves second"*, and ``ui/folders.md`` § Audience and website serving — *"the
 refusal text names the repair"*.
 
-**Six refusals, not three.** "Whichever side moves second" is two distinct
+**Six serving refusals, not three** (the ``public`` pair adds two more, in
+``test_a_public_folder_is_never_metadata_only_in_either_order`` below). "Whichever side moves second" is two distinct
 code paths per surface, in two different handlers: the ``metadata_only``-moves-
 second arms live in ``folder_handlers.rs``'s residency branch of
 ``fauna.folders.update``, the serving-moves-second arms in that same handler's
@@ -25,10 +27,11 @@ is the right venue for the ``[app]`` promise and the wrong one for this
 cannot reach the paywall surface at all, and an app-surface test cannot witness
 a nest refusal the app never offers a button for.
 
-Every refusal is checked for **both** halves of the promise: the typed code
-(so a client can branch on it) and the repair named in the free-form detail
-(so the user is told what to turn off). The detail is where the repair lives —
-the code says only *that* it refused.
+Every refusal is checked for **both** halves of the promise: its own typed
+code — one per remedy, which every app's ``RpcError::localized()`` renders as
+the sentence naming the repair (the detail is log-only and never shown) — and
+the repair named in the log-only detail, so the nest's own log says which arm
+fired.
 """
 
 import pytest
@@ -43,7 +46,13 @@ from tests.api.test_web_paywall_folder import _actor_client
 pytestmark = pytest.mark.tier_3
 
 TIER = "residency-tier"
-REFUSED = "fauna.folders.invalid_request"
+# One code per remedy (`RpcError::CODE_FOLDERS_*`, `libs/fauna-protocol`).
+BLOCKED_BY_WEBSITE = "fauna.folders.residency_blocked_by_website"
+BLOCKED_BY_WEBDAV = "fauna.folders.residency_blocked_by_webdav"
+BLOCKED_BY_PAYWALL = "fauna.folders.residency_blocked_by_paywall"
+CANNOT_SERVE = "fauna.folders.metadata_only_cannot_serve"
+BLOCKED_BY_PUBLIC = "fauna.folders.residency_blocked_by_public"
+CANNOT_GO_PUBLIC = "fauna.folders.metadata_only_cannot_go_public"
 
 
 def _create(ws, name: str) -> None:
@@ -73,9 +82,9 @@ def _refusal(ws, kind: str, payload: dict) -> RpcCallError:
     return err.value
 
 
-def _assert_named_repair(err: RpcCallError, repair: str, what: str) -> None:
+def _assert_named_repair(err: RpcCallError, code: str, repair: str, what: str) -> None:
     """Both halves of every pairwise refusal: the typed code and the repair."""
-    assert err.code == REFUSED, f"{what}: expected {REFUSED}, got {err.code}"
+    assert err.code == code, f"{what}: expected {code}, got {err.code}"
     detail = (err.details or "").lower()
     assert repair in detail, (
         f"{what}: the refusal must name what to change — expected {repair!r} "
@@ -120,6 +129,7 @@ def test_a_no_rest_folder_refuses_to_be_served_whichever_moves_second(nest_insta
                 "fauna.folders.update",
                 {"name": "site-then-residency", "residency": "metadata_only"},
             ),
+            BLOCKED_BY_WEBSITE,
             "turn off website serving first",
             "website serving on, residency second",
         )
@@ -139,6 +149,7 @@ def test_a_no_rest_folder_refuses_to_be_served_whichever_moves_second(nest_insta
                 "fauna.folders.update",
                 {"name": "residency-then-site", "website_enabled": True},
             ),
+            CANNOT_SERVE,
             "set residency back to full first",
             "residency metadata-only, website second",
         )
@@ -153,6 +164,7 @@ def test_a_no_rest_folder_refuses_to_be_served_whichever_moves_second(nest_insta
                 "fauna.folders.update",
                 {"name": "dav-then-residency", "residency": "metadata_only"},
             ),
+            BLOCKED_BY_WEBDAV,
             "turn off webdav serving first",
             "WebDAV serving on, residency second",
         )
@@ -166,6 +178,7 @@ def test_a_no_rest_folder_refuses_to_be_served_whichever_moves_second(nest_insta
                 "fauna.folders.update",
                 {"name": "residency-then-dav", "webdav_enabled": True},
             ),
+            CANNOT_SERVE,
             "set residency back to full first",
             "residency metadata-only, WebDAV second",
         )
@@ -191,6 +204,7 @@ def test_a_no_rest_folder_refuses_to_be_served_whichever_moves_second(nest_insta
                 "fauna.folders.update",
                 {"name": "paywall-then-residency", "residency": "metadata_only"},
             ),
+            BLOCKED_BY_PAYWALL,
             "clear the paywall first",
             "paywall set, residency second",
         )
@@ -210,6 +224,7 @@ def test_a_no_rest_folder_refuses_to_be_served_whichever_moves_second(nest_insta
                 "fauna.folders.set_web_paywall",
                 {"name": "residency-then-paywall", "tier": TIER},
             ),
+            CANNOT_SERVE,
             "set residency back to full first",
             "residency metadata-only, paywall second",
         )
@@ -225,3 +240,54 @@ def test_a_no_rest_folder_refuses_to_be_served_whichever_moves_second(nest_insta
         # and the same flip that was refused in (a) goes through.
         assert _update(ws, "site-then-residency", website_enabled=False)["ok"]
         assert _update(ws, "site-then-residency", residency="metadata_only")["ok"]
+
+
+@pytest.mark.feature("folders")
+def test_a_public_folder_is_never_metadata_only_in_either_order(nest_instance):
+    """`file-sync.md` § Content residency, the fifth refusal: public ⊕ metadata-only."""
+    url = nest_instance["url"]
+    port = nest_instance["port"]
+    admin_sk = nest_instance["admin"]["signing_key"]
+
+    owner = create_actor_and_register(port, admin_signing_key=admin_sk)
+
+    with _actor_client(url, owner) as ws:
+        # (g) residency moves second: a public folder cannot go metadata-only.
+        _create(ws, "public-then-residency")
+        _update(ws, "public-then-residency", audience="public")
+        _assert_named_repair(
+            _refusal(
+                ws,
+                "fauna.folders.update",
+                {"name": "public-then-residency", "residency": "metadata_only"},
+            ),
+            BLOCKED_BY_PUBLIC,
+            "make the folder private or shared first",
+            "public audience, residency second",
+        )
+        row = _folder(ws, "public-then-residency")
+        assert row.get("residency", "") in ("", "full"), row
+        assert row["audience"] == "public", row
+
+        # (h) audience moves second: a metadata-only folder cannot go public.
+        _create(ws, "residency-then-public")
+        _update(ws, "residency-then-public", residency="metadata_only")
+        _assert_named_repair(
+            _refusal(
+                ws,
+                "fauna.folders.update",
+                {"name": "residency-then-public", "audience": "public"},
+            ),
+            CANNOT_GO_PUBLIC,
+            "set residency back to full first",
+            "residency metadata-only, public second",
+        )
+        row = _folder(ws, "residency-then-public")
+        assert row["residency"] == "metadata_only", row
+        assert row["audience"] != "public", row
+
+        # The repairs work.
+        assert _update(ws, "public-then-residency", audience="private")["ok"]
+        assert _update(ws, "public-then-residency", residency="metadata_only")["ok"]
+        assert _update(ws, "residency-then-public", residency="full")["ok"]
+        assert _update(ws, "residency-then-public", audience="public")["ok"]

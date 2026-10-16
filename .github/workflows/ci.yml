@@ -258,6 +258,22 @@ jobs:
       # shrinks every one of them. The `df` line each reclaim step prints first
       # is the end-of-half reading -- the peak each half reached.
       #
+      # The budget of that shape, from run 37492792207's own `df` lines
+      # (2026-10-06, the first green run of the split):
+      #
+      #   after this step                        43 GB free
+      #   after `Test (fauna-nest)`              11 GB free   (-32 GB)
+      #   after the reclaim between the halves   33 GB free   (+22 GB)
+      #   after `Test (rest of the workspace)`   24 GB free   (-9 GB)
+      #
+      # So the fauna-nest half is the PEAK that matters: ~32 GB of build on the
+      # freshest disk, while its tests need the blob store's 2 GiB floor still
+      # free. The rest of the workspace starts from the ~10 GB the mid reclaim
+      # leaves behind (dependency artifacts, not executables) and needs only
+      # ~9 GB more, so it is not the binding half. Test growth eats the
+      # fauna-nest half's margin first -- that run cleared the ~10 GB target
+      # by 1 GB.
+      #
       # The additions below are the rest of the image's large unused trees
       # (Swift, GHCup, miniconda, PowerShell, global npm, the Azure CLI) plus an
       # apt cache clean, worth roughly another 10-14 GB on the standard image.
@@ -283,12 +299,17 @@ jobs:
           # no report at all. A run that cannot fit should say so in the forty
           # seconds it takes to measure.
           #
-          # 36, from the budget above: ~30 GB for a cold `cargo test
-          # --workspace` plus the 2 GiB the nest blob store must STILL see free
-          # at the build's peak, plus margin for a tree that grows. If this ever
-          # fires on a healthy run the tree outgrew the runner -- raise it only
-          # together with a fresh `df` that justifies the new number, never to
-          # make a red go away.
+          # 42, from the split's budget above: ~32 GB for the cold fauna-nest
+          # half (the binding peak), plus the 2 GiB the nest blob store must
+          # STILL see free at that peak, plus 8 GB of margin for a tree that
+          # grows -- the ~10 GB free each half should end with. Run 37492792207
+          # had 43 GB here, so this is expected to fire at the next growth
+          # increment of the fauna-nest tests. That is its job: when it fires on
+          # a healthy run, split the fauna-nest half further (or reclaim more
+          # image) and re-measure. Raise the number only together with a fresh
+          # `df` that justifies it; never lower it to make a red go away -- below
+          # 42 the run is merely spending its margin, and the margin is what the
+          # 2026-10-06 reds ran out of.
           #
           # It lives inside this step rather than beside it so that the check
           # and the reclaim it grades cannot drift apart, and because a separate
@@ -300,14 +321,15 @@ jobs:
           # stores the same build in a third of the bytes), which is exactly why
           # this belongs to the runner-only step.
           avail=$(df --output=avail --block-size=1G / | tail -1 | tr -dc '0-9')
-          echo "free after reclaim: ${avail}G (need 36G)"
-          if [ "${avail:-0}" -lt 36 ]; then
+          echo "free after reclaim: ${avail}G (need 42G)"
+          if [ "${avail:-0}" -lt 42 ]; then
             echo "::error::Only ${avail}G free after reclaiming the runner image." \
-                 "A cold 'cargo test --workspace' of this tree needs ~30GB and the" \
-                 "nest blob store refuses writes below a 2GiB floor, so the suite" \
-                 "would run for ~108 minutes and then report a wave of storage" \
-                 "failures that are this disk, not the code under test. Free more" \
-                 "of the runner image above."
+                 "The cold fauna-nest test half of this tree needs ~32GB, the nest" \
+                 "blob store refuses writes below a 2GiB floor, and the budget keeps" \
+                 "8GB of margin for growth, so the suite would run on a disk with" \
+                 "no headroom and risk a wave of storage failures that are this" \
+                 "disk, not the code under test. Split the fauna-nest test half" \
+                 "further or free more of the runner image above, then re-measure."
             exit 1
           fi
 
@@ -613,7 +635,7 @@ jobs:
       # it. Measured on the first sync PR's run (2026-09-11, run
       # 34608182467): this job had never executed on a runner before that day.
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+        run: bash scripts/install-uv.sh
       # The Go suite this job exists to run includes `internal/atprotorepo`'s
       # five video tests, which shell out to ffmpeg and FAIL rather than skip
       # when it is absent ("ffmpeg is required by the video projection and by
@@ -668,10 +690,10 @@ jobs:
         with:
           deno-version: v2.x
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+        run: bash scripts/install-uv.sh
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
       - name: Install wasm-pack
-        run: cargo install wasm-pack
+        run: cargo install wasm-pack@0.15.0
       # The SPA build runs under bubblewrap (scripts/deno-sandbox.ts fails
       # closed on Linux without it); the probe fails here, by name, if the
       # runner's kernel refuses the unprivileged namespaces. The Ubuntu 24.04
@@ -746,7 +768,7 @@ jobs:
           rustflags: ""
           cache: false
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+        run: bash scripts/install-uv.sh
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
       # `mac-app release` builds the host darwin FFI slice, the SwiftPM
       # FaunaMacOS product and the sync agent, then assembles + ad-hoc signs
@@ -772,7 +794,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+        run: bash scripts/install-uv.sh
       # Three unrelated linters over three unrelated surfaces: a red in one
       # carries no information about the other two, so each reports on its own.
       # Without this the job answered only "the FIRST of three lints", and a
@@ -857,7 +879,7 @@ jobs:
         with:
           go-version: '1.26'
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+        run: bash scripts/install-uv.sh
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
       # Every leg, through the recipe itself — never a leg list restated here.
       # Two of them reach `mail-bridge-ffi` (`mail-bridge-ffi-check` directly,
@@ -887,7 +909,7 @@ jobs:
         with:
           fetch-depth: 0  # need merge-base for diff against origin/main
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+        run: bash scripts/install-uv.sh
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
         with:
           rustflags: ""
@@ -960,7 +982,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+        run: bash scripts/install-uv.sh
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
       # The recipe guards on `command -v pytest` and SKIPS loudly when it is
       # absent — correct for a dev box that has not set one up, and a silent

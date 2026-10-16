@@ -224,7 +224,7 @@ public sealed partial class MailExportPanel : UserControl
         {
             _cancelArmed = true;
             var baseLabel = CancelButton.Content;
-            CancelButton.Content = "Confirm?";
+            CancelButton.Content = S.Get("common/confirm_q");
             await Task.Delay(4000);
             if (_cancelArmed)
             {

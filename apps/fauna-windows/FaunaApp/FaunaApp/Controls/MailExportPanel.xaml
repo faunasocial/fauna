@@ -143,6 +143,9 @@
             <TextBlock x:Name="ConfirmSummary"
                        AutomationProperties.AutomationId="{x:Bind ids:Ids.MailExportConfirmSummary}"
                        TextWrapping="Wrap" />
+            <TextBlock Text="{loc:Localize Key=mail_export/confirm_estimate_unavailable}"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       TextWrapping="Wrap" />
             <StackPanel Orientation="Horizontal" Spacing="8">
                 <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.WizardBackButton}"
                         Content="{loc:Localize Key=mail_export/back}" Click="Back_Click" />

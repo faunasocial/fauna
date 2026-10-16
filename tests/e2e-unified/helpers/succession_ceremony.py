@@ -126,7 +126,35 @@ def wait_for_successor_actor(
         app.driver, new_actor, budget_s=SUCCESSION_AND_RELAUNCH_S,
         what="the switch to the successor",
     )
+    _assert_no_moved_wasm_handle(app)
     return new_actor
+
+
+#: What a JS call on a wasm object whose handle was already moved into Rust (or
+#: freed) throws — wasm-bindgen's null-pointer check, in release and debug
+#: builds respectively. Always a defect: some caller still holds the husk.
+_MOVED_HANDLE_MARKERS = ("null pointer passed to rust", "Attempt to use a moved value")
+
+
+def _assert_no_moved_wasm_handle(app) -> None:
+    """On web, fail when the page threw on a moved wasm handle during the
+    ceremony. The ceremony once took the conversations manager BY VALUE, which
+    zeroed the SPA's handle, so the leave-door drafts flush threw
+    ``null pointer passed to rust`` on every succession — invisible to every DOM
+    probe, since the throw escapes as a ``pageerror`` and the journey goes on.
+    """
+    if not app.driver.is_web():
+        return
+    try:
+        lines = app.driver.console_log()
+    except Exception:  # a driver mid-teardown is not this check's finding
+        return
+    hits = [ln for ln in lines if any(m in ln for m in _MOVED_HANDLE_MARKERS)]
+    assert not hits, (
+        "the page threw on a moved/freed wasm handle around the succession — a "
+        "caller still holds a JS object Rust consumed:\n" + "\n".join(hits[:6])
+        + closing_act_console(app)
+    )
 
 
 def kit_on_screen(app) -> str:

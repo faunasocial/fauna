@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The shared "Community labelers" Settings sub-page (macOS + iOS, one
@@ -280,3 +283,4 @@ struct LabelerCatalogRow: View {
         .automationScope(Ids.labelerCatalogItem, index: index)
     }
 }
+#endif // !FAUNA_KIDS

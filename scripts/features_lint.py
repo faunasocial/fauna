@@ -14,7 +14,9 @@ The rules, in the doc's own numbering:
    outcome to one that launches none;
 5. the committed `MATRIX.md`, every `## Status` block and `matrix.json` equal a fresh
    render;
-6. no declared-absent app has a *passing* record for the feature — nor, for a
+6. the ledger holds no record under a feature that no longer maps its test (re-marked,
+   renamed, deleted — `just features-prune` removes them); no declared-absent app has
+   a *passing* record for the feature — nor, for a
    per-outcome absence, for a witness of that outcome (the declaration is
    stale), and a page whose outcomes are all `[nest]` says so in its
    `What a user gets`.
@@ -224,13 +226,26 @@ def _rule_5(features: Path, repo: Path = REPO) -> list:
 
 def _rule_6(pages: list, ledger: dict) -> list:
     problems = []
+    # The ledger holds no record under a feature that no longer maps its test (§ The
+    # ledger, *Stale records*). Reported per app file and feature, with the one fix.
+    stale: dict = {}
+    for app, slug, node_id in fc.stale_records(pages, ledger):
+        stale.setdefault((app, slug), []).append(node_id)
+    for (app, slug), node_ids in sorted(stale.items()):
+        problems.append(
+            f"ledger/{app}.json: {len(node_ids)} record(s) under `{slug}` for test(s) its "
+            f"contract no longer maps (e.g. `{node_ids[0]}`) — run `just features-prune` "
+            "and commit the ledger")
     for page in pages:
+        mapped = fc.mapped_tests(page)
         for app, citation in sorted(page.absences.items()):
             records = ((ledger.get(app) or {}).get(page.slug) or {}).get("tests") or {}
             # A test now carries one record per platform (§ The ledger, *Platform
-            # keying*); the declaration is stale if it passed on ANY of them.
+            # keying*); the declaration is stale if it passed on ANY of them. Only a
+            # MAPPED test speaks for the feature (a stale record is reported above).
             passing = sorted(t for t, by_platform in records.items()
-                              if any(r.get("outcome") in fc.PASSING for r in by_platform.values()))
+                              if t in mapped
+                              and any(r.get("outcome") in fc.PASSING for r in by_platform.values()))
             if passing:
                 problems.append(
                     f"{page.path.name}: `{app}` is declared absent ({citation}) but "

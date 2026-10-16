@@ -1,7 +1,7 @@
 //! Are a file's bytes actually **on this disk**?
 //!
 //! On an on-demand root (Windows cfapi today; a macOS File Provider or a Linux FUSE host
-//! tomorrow — `docs/goal/behavior/file-sync.md` § On-Demand Files) a *tracked* file can exist
+//! tomorrow — `docs/goal/behavior/on-demand-files.md` § On-Demand Files) a *tracked* file can exist
 //! with the right name, size and mtime while its content lives only on the nest. That
 //! **cloud-only placeholder** is `present-but-unreadable`, and getting the distinction wrong
 //! breaks the engine in two opposite directions — both of which have bitten (2026-07-14):

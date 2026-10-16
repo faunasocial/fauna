@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from helpers import sync_agent_ipc as ipc
-from helpers.windows_sync_agent import running_agent
+from helpers.windows_sync_agent import provision, running_agent
 
 pytestmark = [
     pytest.mark.tier_3,
@@ -97,8 +97,8 @@ def test_provision_drives_nest_url_without_device_toml(nest_instance, sync_agent
     nest_url = nest_instance["url"]
 
     with running_agent(sync_agent_binary, pipe, data_dir, log_path):
-        ipc.provision(
-            pipe, 1,
+        provision(
+            pipe,
             backup_key=bytes(32),
             actor_id=bytes(32),
             nest_url=nest_url,
@@ -155,8 +155,8 @@ def test_two_pipe_isolation(nest_instance, sync_agent_binary, tmp_path):
 
     with running_agent(sync_agent_binary, pipe_a, da, la), \
          running_agent(sync_agent_binary, pipe_b, db, lb):
-        ipc.provision(
-            pipe_a, 1,
+        provision(
+            pipe_a,
             backup_key=bytes(32),
             actor_id=bytes(32),
             nest_url=url_a,
@@ -164,8 +164,8 @@ def test_two_pipe_isolation(nest_instance, sync_agent_binary, tmp_path):
             bearer_token="t",
             bearer_expires_at=4102444800,
         )
-        ipc.provision(
-            pipe_b, 1,
+        provision(
+            pipe_b,
             backup_key=bytes(32),
             actor_id=bytes(32),
             nest_url=url_b,

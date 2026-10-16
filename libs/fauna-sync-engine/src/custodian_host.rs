@@ -193,9 +193,35 @@ impl CustodianHost {
         &self.destination_id
     }
 
+    /// The identity the source connection is bound to — the login's pin, else
+    /// a possession proof over it, never the box's own claim
+    /// (`fauna_client::trust::connection_bound_identity`, the one native
+    /// door). Read once per drive: a source rotation drops the connection, the
+    /// drive returns, and the next drive reads the successor — so the first
+    /// pull bound to it re-keys the held mirror sets
+    /// ([`CustodianPull::bound_source`]). A failed read re-keys nothing and is
+    /// logged; the pass otherwise runs as ever.
+    async fn bound_source(&self) -> Option<[u8; 32]> {
+        let ws = self.backup.transport();
+        let url = ws.nest_url();
+        match fauna_client::trust::connection_bound_identity(ws.as_ref(), &url).await {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(
+                    destination_id = %self.destination_id,
+                    "custodian: bound identity of {url} unproven ({e}); held mirror sets are not re-keyed this drive"
+                );
+                None
+            }
+        }
+    }
+
     /// Borrow one pass's view. Private: every drive goes through the methods
     /// below, so no caller can assemble a pass with a mismatched scope or cap.
-    fn pull(&self) -> CustodianPull<'_, SourceBinding, Arc<fauna_client::NestClient>> {
+    fn pull(
+        &self,
+        bound_source: Option<[u8; 32]>,
+    ) -> CustodianPull<'_, SourceBinding, Arc<fauna_client::NestClient>> {
         CustodianPull {
             source: &self.source,
             store: &self.store,
@@ -211,6 +237,7 @@ impl CustodianHost {
             // coverage).
             folder_source: Some(&self.source),
             not_assigned: Some(&self.not_assigned),
+            bound_source,
         }
     }
 
@@ -218,7 +245,9 @@ impl CustodianHost {
     /// cadence an OS scheduler owns (android `WorkManager`, iOS
     /// `BGProcessingTask`).
     pub async fn run_all_kinds(&self, now: i64) -> Vec<PullReport> {
-        self.pull().run_all_kinds(now).await
+        self.pull(self.bound_source().await)
+            .run_all_kinds(now)
+            .await
     }
 
     /// The push-debounce loop only — the foreground wake for a scheduler-owned
@@ -229,7 +258,9 @@ impl CustodianHost {
     /// Cancel on teardown: this loop does not self-exit when the source
     /// disconnects, because with no periodic tick nothing wakes it to notice.
     pub async fn run_push_debounce(&self, cancel: CancellationToken) -> Result<()> {
-        self.pull().run_push_debounce(cancel).await
+        self.pull(self.bound_source().await)
+            .run_push_debounce(cancel)
+            .await
     }
 
     /// This store's standing self-audit verdict — what the *next* check-in will
@@ -249,7 +280,9 @@ impl CustodianHost {
     /// Periodic **and** push — the always-on desktop driver, where one driver
     /// owns both cadences.
     pub async fn run_forever(&self, cancel: CancellationToken) -> Result<()> {
-        self.pull().run_forever(cancel).await
+        self.pull(self.bound_source().await)
+            .run_forever(cancel)
+            .await
     }
 }
 

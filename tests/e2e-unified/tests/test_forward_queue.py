@@ -60,7 +60,7 @@ pytestmark = [
 
 # The apps whose Nests page renders `nests-forward-*`. Each trickle-down adds
 # itself here.
-_DRIVING_APPS = {"tui", "linux", "web", "android", "macos", "ios"}
+_DRIVING_APPS = {"tui", "linux", "web", "windows", "android", "macos", "ios"}
 
 # The outbox worker polls every 5 s when idle and backs off 30 s after the
 # first refusal, so the first attempt — and with it the recorded reason — lands
@@ -142,7 +142,20 @@ def home_behind_refusing_relay(nest_binary, tmp_path_factory):
 def _sign_in_to_home(app, request, world):
     from conftest import _login_app_as
 
-    _login_app_as(app, request, world["home"], world["user"], verify_live_actor=True)
+    # Web reaches a nest only through a CORS-bearing SPA proxy, and the session
+    # `spa_url` fronts the SHARED nest — where this user is unregistered — so web
+    # needs a proxy over the HOME nest. Native drivers ignore it, and must not
+    # request it: `spa_proxy_for` needs the web SPA build (`static_dir`), which a
+    # native-only machine (win, mac) never has, so asking skips the whole journey.
+    spa_url = (
+        request.getfixturevalue("spa_proxy_for")(world["home"]["url"])
+        if app_name(app.driver) == "web"
+        else None
+    )
+    _login_app_as(
+        app, request, world["home"], world["user"],
+        verify_live_actor=True, spa_url=spa_url,
+    )
 
 
 def _queue_on_reentered_page(app):

@@ -15,7 +15,7 @@ pub(crate) const AVG_CHUNK: u32 = 2 * 1024 * 1024;
 /// nest transport can be sized once for it (the `/chunks` HTTP body limit).
 /// Chunk size is tier-*independent* — a tier-dependent max would fork the chunk
 /// boundaries of the same file per tier and break content-addressed dedup.
-pub(crate) const MAX_CHUNK: u32 = 8 * 1024 * 1024;
+pub const MAX_CHUNK: u32 = 8 * 1024 * 1024;
 /// The largest body the content-addressed store ever holds under one chunk
 /// store key: a [`MAX_CHUNK`] plaintext, framed uncompressed (one prefix byte —
 /// `compress::compress_chunk_framed` stores raw whenever zstd would not shrink
@@ -32,6 +32,14 @@ pub(crate) const MAX_CHUNK: u32 = 8 * 1024 * 1024;
 /// hold. `chunk_seal`'s tests pin the arithmetic against a real sealed
 /// maximum-size chunk. A Rust constant — never a knob.
 pub const MAX_STORED_CHUNK_BODY: u64 = MAX_CHUNK as u64 + 1 + 16;
+/// The largest manifest reply a reader buffers. A manifest lists one entry per
+/// chunk (a chunk is at least `MIN_CHUNK`, 512 KiB), so even a multi-GiB file's
+/// manifest is a few MiB; this is twice [`MAX_CHUNK`], far past any honest one.
+/// A reader of a manifest from a nest it does not run (a followed foreign home)
+/// refuses a reply past it rather than let the responder choose how much memory
+/// the client allocates (`security.md` § Transport trust). A Rust constant —
+/// never a knob.
+pub const MAX_MANIFEST_BODY: u64 = 2 * MAX_CHUNK as u64;
 /// Files smaller than this are stored as a single blob, not chunked. Held equal
 /// to `MAX_CHUNK` so the single-chunk path can never produce a chunk larger than
 /// `MAX_CHUNK` either — the size invariant holds across both chunking paths.

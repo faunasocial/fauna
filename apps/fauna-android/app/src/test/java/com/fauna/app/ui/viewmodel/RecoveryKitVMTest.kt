@@ -1,11 +1,16 @@
 package com.fauna.app.ui.viewmodel
 
 import androidx.test.core.app.ApplicationProvider
+import com.fauna.app.core.AccountStores
+import com.fauna.app.core.AftermathProgressStore
 import com.fauna.app.core.ApiClient
+import com.fauna.app.core.InheritedFilterMarks
 import com.fauna.app.core.StolenCeremonyHold
 import com.fauna.app.core.SuccessionHandoff
 import com.fauna.app.testing.FaunaRobolectricTestRunner
+import com.fauna.ffi.FfiDeadGenerations
 import com.fauna.ffi.FfiLandedSuccession
+import com.fauna.ffi.FfiLetGoOutcome
 import com.fauna.ffi.FfiMintedKit
 import com.fauna.ffi.FfiOwedSweepAnswer
 import com.fauna.ffi.FfiRecoveryKitStatus
@@ -66,7 +71,11 @@ class RecoveryKitVMTest {
     )
 
     private fun makeVm(api: ApiClient = mock(ApiClient::class.java)) =
-        RecoveryKitVM(api, context, StolenCeremonyHold()) to api
+        RecoveryKitVM(
+            api, context, StolenCeremonyHold(),
+            InheritedFilterMarks(api, mock(AccountStores::class.java)),
+            AftermathProgressStore(mock(AccountStores::class.java)),
+        ) to api
 
     @Before
     fun clearHandoff() = SuccessionHandoff.clearOnFactoryReset()
@@ -527,5 +536,146 @@ class RecoveryKitVMTest {
 
         assertNull(vm.state.value.mintedSecretHex)
         assertNull(vm.state.value.status)
+    }
+
+    // ── The let-go of a dead generation (`settings.md` § Recovery kit, the
+    // fifth act; apple's `letGo`, ported) ──────────────────────────────────
+
+    private val letGoWord = "LET GO"
+    private val letGoPrompt = context.getString(com.fauna.app.R.string.settings_recovery_kit_let_go_confirm_placeholder)
+    private val deadIds = listOf(ByteArray(32) { 1 }, ByteArray(32) { 2 })
+    private val dead = FfiDeadGenerations(
+        generationIds = deadIds,
+        unreadableStatus = LocalizedText(
+            key = "settings.recovery_kit.unreadable_status_undated",
+            args = mapOf("rows" to "11"),
+        ),
+    )
+    private val nothingDead = FfiDeadGenerations(generationIds = emptyList(), unreadableStatus = null)
+
+    private fun letGoVm(): Pair<RecoveryKitVM, ApiClient> {
+        val (vm, api) = makeVm()
+        whenever(api.recoveryLetGoConfirmWord()).thenReturn(letGoWord)
+        return vm to api
+    }
+
+    @Test
+    fun theDeadReadIsTakenAtHydrateAndIsTheTriosRenderGate() = runTest {
+        val (vm, api) = letGoVm()
+        whenever(api.recoveryKitStatus()).thenReturn(registered)
+        whenever(api.recoveryDeadGenerations()).thenReturn(dead)
+
+        vm.hydrate("aa".repeat(32))
+
+        assertEquals(dead.unreadableStatus, vm.state.value.letGoStatus)
+        whenever(api.recoveryDeadGenerations()).thenReturn(nothingDead)
+        vm.loadDeadGenerations()
+        assertNull(vm.state.value.letGoStatus)
+    }
+
+    @Test
+    fun theLetGoArmsOnTheSharedWordAlone() = runTest {
+        val (vm, api) = letGoVm()
+        whenever(api.recoveryDeadGenerations()).thenReturn(dead)
+        vm.loadDeadGenerations()
+
+        assertFalse(vm.state.value.letGoArmed)
+        // Case matters: the gate is shared Rust's literal, never localized.
+        vm.onLetGoConfirmChange("let go")
+        assertFalse(vm.state.value.letGoArmed)
+        vm.onLetGoConfirmChange(letGoWord)
+        assertTrue(vm.state.value.letGoArmed)
+    }
+
+    @Test
+    fun anUnreadConfirmWordNeverArms() {
+        // A state that never read the shared word arms on nothing — not even
+        // on an empty field matching an empty word.
+        assertFalse(RecoveryKitUiState(letGoConfirmInput = "").letGoArmed)
+        assertFalse(RecoveryKitUiState(letGoConfirmInput = "LET GO").letGoArmed)
+    }
+
+    @Test
+    fun theLetGoRefusesAWrongWordOutLoudBeforeAnyAct() = runTest {
+        val (vm, api) = letGoVm()
+        whenever(api.recoveryDeadGenerations()).thenReturn(dead)
+        vm.loadDeadGenerations()
+        vm.onLetGoConfirmChange("LET G")
+
+        vm.letGo()
+
+        assertEquals(letGoPrompt, vm.errorMessage.value)
+        org.mockito.Mockito.verify(api, org.mockito.Mockito.never()).recoveryLetGo(deadIds)
+    }
+
+    @Test
+    fun aConfirmedLetGoRetiresTheListedIdsAndTheRefreshedReadReplacesTheList() = runTest {
+        val (vm, api) = letGoVm()
+        whenever(api.recoveryDeadGenerations()).thenReturn(dead)
+        vm.loadDeadGenerations()
+        whenever(api.recoveryLetGo(deadIds)).thenReturn(
+            FfiLetGoOutcome(retired = 11uL, kept = false, dead = nothingDead),
+        )
+        vm.onLetGoConfirmChange(letGoWord)
+
+        vm.letGo()
+
+        assertNull(vm.state.value.letGoStatus)
+        assertEquals("", vm.state.value.letGoConfirmInput)
+        assertFalse(vm.state.value.busy)
+        assertEquals("11 unreadable items were let go.", vm.errorMessage.value)
+    }
+
+    @Test
+    fun aGenerationReadableAgainIsNamedAsKept() = runTest {
+        val (vm, api) = letGoVm()
+        whenever(api.recoveryDeadGenerations()).thenReturn(dead)
+        vm.loadDeadGenerations()
+        whenever(api.recoveryLetGo(deadIds)).thenReturn(
+            FfiLetGoOutcome(retired = 3uL, kept = true, dead = nothingDead),
+        )
+        vm.onLetGoConfirmChange(letGoWord)
+
+        vm.letGo()
+
+        assertEquals(
+            "3 unreadable items were let go. Some of this data became readable again and was kept.",
+            vm.errorMessage.value,
+        )
+    }
+
+    @Test
+    fun aFailedLetGoSaysSoAndDisarms() = runTest {
+        val (vm, api) = letGoVm()
+        whenever(api.recoveryDeadGenerations()).thenReturn(dead)
+        vm.loadDeadGenerations()
+        whenever(api.recoveryLetGo(deadIds)).thenThrow(RuntimeException("nest unreachable"))
+        vm.onLetGoConfirmChange(letGoWord)
+
+        vm.letGo()
+
+        assertEquals("Couldn't let the data go: nest unreachable", vm.errorMessage.value)
+        assertEquals("", vm.state.value.letGoConfirmInput)
+        // The list is untouched: nothing is known to have been retired.
+        assertEquals(dead.unreadableStatus, vm.state.value.letGoStatus)
+        assertFalse(vm.state.value.busy)
+    }
+
+    @Test
+    fun leavingThePageOrChangingIdentityDropsTheArmedWordAndTheDeadRead() = runTest {
+        val (vm, api) = letGoVm()
+        whenever(api.recoveryKitStatus()).thenReturn(registered)
+        whenever(api.recoveryDeadGenerations()).thenReturn(dead)
+        vm.hydrate("aa".repeat(32))
+        vm.onLetGoConfirmChange(letGoWord)
+
+        vm.clearHeldSecrets()
+        assertEquals("", vm.state.value.letGoConfirmInput)
+
+        // The next account's dead read answers nothing: the previous one's
+        // list must not stand in for it.
+        whenever(api.recoveryDeadGenerations()).thenReturn(nothingDead)
+        vm.hydrate("bb".repeat(32))
+        assertNull(vm.state.value.letGoStatus)
     }
 }

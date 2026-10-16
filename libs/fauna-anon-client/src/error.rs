@@ -1,10 +1,11 @@
 //! [`AnonClientError`] — the error type of [`AnonymousNestClient`](crate::AnonymousNestClient).
 //!
 //! A focused subset of `fauna-client`'s `NestClientError`: the anonymous
-//! connector never does HTTP (`Http`/`Api`), authenticates nothing (`Auth`),
-//! and carries no reconnect supervisor (`SubprotocolMismatch` is a supervisor
-//! signal), so only the five RPC/transport variants the dispatch path can
-//! actually produce are kept. `Display` for the two shared variants reuses the
+//! connector never does HTTP (`Http`/`Api`), authenticates nothing (`Auth`)
+//! and carries no reconnect supervisor, so only the RPC/transport variants the
+//! connect and dispatch paths can actually produce are kept — among them
+//! `SubprotocolMismatch`, the nest's pre-upgrade 426 or post-upgrade 4426 close
+//! to an app too old to speak to it. `Display` for the two shared variants reuses the
 //! same `fauna-i18n` strings the former `NestClientError` did, so user-visible
 //! error text is unchanged after the extraction.
 
@@ -33,6 +34,15 @@ pub enum AnonClientError {
     /// match the pre-resolved root. The connection must be torn down; never
     /// retried as a transient (security.md § Connection-teardown rule).
     Trust(crate::trust::TrustError),
+    /// The nest refused this app's subprotocol — at the WebSocket upgrade (HTTP
+    /// `426`, no Fauna token offered), or by completing it and closing at once
+    /// with `4426` (a `fauna.v<N>` it does not serve): the app is too old to
+    /// speak to it. No retry can fix it, so it is
+    /// typed rather than folded into [`Self::WebSocket`], and every consumer
+    /// lands it on the needs-update surface (`version-compatibility.md`
+    /// § Dimension 4). `fauna-client`'s `NestClientError::SubprotocolMismatch`
+    /// is the authenticated connection's twin and shares its string.
+    SubprotocolMismatch,
 }
 
 impl fmt::Display for AnonClientError {
@@ -53,6 +63,9 @@ impl fmt::Display for AnonClientError {
             }
             Self::RpcTimeout => write!(f, "{}", fauna_i18n::strings::error::protocol::TIMEOUT),
             Self::Trust(e) => write!(f, "nest trust: {e}"),
+            Self::SubprotocolMismatch => {
+                write!(f, "{}", fauna_i18n::strings::errors::SUBPROTOCOL_MISMATCH)
+            }
         }
     }
 }
@@ -73,6 +86,10 @@ impl fauna_protocol::RpcErrorClass for AnonClientError {
 
     fn is_rejection(&self) -> bool {
         self.as_rpc_error().is_some()
+    }
+
+    fn is_subprotocol_mismatch(&self) -> bool {
+        matches!(self, AnonClientError::SubprotocolMismatch)
     }
 }
 

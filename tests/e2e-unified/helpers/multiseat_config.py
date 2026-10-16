@@ -37,7 +37,7 @@ from pathlib import Path
 
 from helpers import live_handle
 
-DEFAULT_NEST_URL = "https://example.com"
+DEFAULT_NEST_URL = "https://dev.fauna.build"
 DEFAULT_WINDOW_SECS = 180.0
 SET_NAME = "e2e-multiseat"
 

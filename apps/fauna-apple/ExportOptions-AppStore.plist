@@ -9,8 +9,11 @@
   * destination = export — the upload is a separate act from a recorded public
     commit; it uses its OWN options file (or an -exportOptionsPlist override),
     never an edit of this one.
-  * signingStyle = manual with the four App Store profiles named below — no
-    account session, so nothing can create or refresh a profile.
+  * signingStyle = manual with the App Store profiles named below — no
+    account session, so nothing can create or refresh a profile. The one file
+    serves both iOS archives: the main app's four bundles, and the Fauna Kids
+    app (`social.fauna.faunakids`, its own record — installers/ios.md); an
+    export signs only the bundles its archive holds.
   * manageAppVersionAndBuildNumber = false — true makes the exporter query App
     Store Connect for build numbers; CFBundleVersion is pinned at 1 anyway.
   * uploadSymbols = false — symbols only matter to an upload.
@@ -34,6 +37,8 @@
 		<string>Fauna AppStore social.fauna.fauna.FileProviderUI</string>
 		<key>social.fauna.fauna.Widget</key>
 		<string>Fauna AppStore social.fauna.fauna.Widget</string>
+		<key>social.fauna.faunakids</key>
+		<string>Fauna AppStore social.fauna.faunakids</string>
 	</dict>
 	<key>signingCertificate</key>
 	<string>Apple Distribution</string>

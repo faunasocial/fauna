@@ -393,6 +393,15 @@ const ACTOR_BEARING_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
          that fails closed at the owner-side handshake until the host's reconcile stops it",
     ),
     (
+        "custody_hosting_fleet",
+        "witness",
+        "the verbatim root-signed `DeviceAuthorization` an owner device presented at the \
+         custodian-NEST serve door: it names `actor_id` -- the row's OWN actor, also the plain \
+         column `owner_actor_id` -- and the device key that is the row's key. FOLLOWS THE ROW: \
+         Purge on deletion; Burn on succession, where a cert under the retired root admits \
+         nothing and the successor's devices handshake afresh",
+    ),
+    (
         "custody_receipts_staged",
         "receipt",
         "the verbatim custodian-signed `CustodyReceipt`: it names `owner` -- the row's OWN actor \
@@ -579,6 +588,15 @@ const ACTOR_BEARING_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
          deletion purges the row whole",
     ),
     (
+        "subscriber_encaps_keys",
+        "mlkem_encaps_key",
+        "a PUBLIC KEY OF THE ROW'S OWN ACTOR: the account's subscriber ML-KEM-768 encapsulation \
+         key (1184 bytes, identity-seed-derived, published by its own apps at session start -- \
+         the registry entry `post-quantum.md` § surface B names). FOLLOWS THE ROW: Purge on \
+         deletion; Stay on succession, the key deriving from the seed the thief read while the \
+         successor publishes its own",
+    ),
+    (
         "subscribers",
         "mlkem_encaps_key",
         "the SUBSCRIBER's ML-KEM-768 encapsulation key, derived from the subscriber's identity \
@@ -703,6 +721,60 @@ const ACTOR_BEARING_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
 /// structured value says what was read to establish it.
 const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
     (
+        "dmarc_outbound_aggregate_reports",
+        "payload_xml_gz",
+        "the gzipped RFC 7489 aggregate report this nest sent a peer about mail claiming \
+         its domain: source IPs, counts and domains, written by the daily DMARC pass; no \
+         account or actor appears in the schema",
+    ),
+    (
+        "dmarc_inbound_aggregate_reports",
+        "payload_xml_gz",
+        "a peer MTA's gzipped RFC 7489 aggregate report about one of our domains: \
+         source IPs, counts and domains, written by `ingest_dmarc_report`; \
+         no account or actor appears in the schema",
+    ),
+    (
+        "dmarc_inbound_aggregate_reports",
+        "parsed_summary_cbor",
+        "the DAG-CBOR `DmarcAggregateSummary` computed from that report: counts, top \
+         source IPs and header-from domains, never an actor",
+    ),
+    (
+        "dmarc_inbound_forensic_reports",
+        "payload_sha256",
+        "a 32-byte SHA-256 digest of the report mail as received, the re-send \
+         dedupe key",
+    ),
+    (
+        "dmarc_inbound_forensic_reports",
+        "payload_raw_gz",
+        "a peer MTA's gzipped RFC 5965 auth-failure report mail about a message \
+         claiming one of our domains, written by `ingest_dmarc_report`: a third \
+         party's message headers and its remote recipients, never an account or \
+         actor of this nest",
+    ),
+    (
+        "dmarc_inbound_forensic_reports",
+        "parsed_summary_cbor",
+        "the DAG-CBOR `DmarcForensicSummary` extracted from that report: failure \
+         mechanism, source IP, the forged sender's addresses and domains, never an \
+         actor",
+    ),
+    (
+        "tlsrpt_inbound_reports",
+        "payload_json_gz",
+        "a peer MTA's gzipped RFC 8460 TLS report about delivery to one of our \
+         domains: session counts, failure types, sending IPs and MX host names, \
+         written by `ingest_tlsrpt_report`; no account or actor appears in the schema",
+    ),
+    (
+        "tlsrpt_inbound_reports",
+        "parsed_summary_cbor",
+        "the DAG-CBOR `TlsrptReportSummary` computed from that report: session \
+         counts, top failure types, sending IPs and MX hosts, never an actor",
+    ),
+    (
         "nest_replica",
         "replica_id",
         "the singleton 16-byte id `seed_genesis_rows` mints once from `getrandom` \
@@ -749,6 +821,27 @@ const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
          the deposit door to the folder owner's registered recipient key -- ciphertext \
          only the owner's client opens; it names no actor. The depositor is the column \
          beside it, a principal handle the census excludes",
+    ),
+    (
+        "folder_deposit_inbox",
+        "upload_token",
+        "the depositor's random upload token for a staged multi-message deposit, minted \
+         by the depositing client and matched back on each part and the commit; it \
+         names no actor (the depositor is the principal handle beside it, which the \
+         census excludes)",
+    ),
+    (
+        "folder_deposit_parts",
+        "sealed",
+        "one HPKE-sealed part of a staged multi-message deposit, sealed to the folder \
+         owner's registered recipient key -- ciphertext only the owner's client opens; \
+         it names no actor, and the part rows go with their deposit row",
+    ),
+    (
+        "post_author_ops",
+        "post_id",
+        "the 32-byte content digest of a post the posting custodian authored or retracted \
+         -- a content address, naming no actor (the author is the row's own `actor_id`)",
     ),
     (
         "third_party_principals",
@@ -851,6 +944,12 @@ const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
         "current_refresh_jti",
         "16 CSPRNG bytes, rotated on refresh. The JWT that carries it names the DID and \
          the actor; that token is the client's and never rests in this column",
+    ),
+    (
+        "atproto_external_write_ops",
+        "session_id",
+        "the `atproto_sessions.session_id` the write was made under -- the same 16 CSPRNG \
+         bytes, naming a session family, never an actor",
     ),
     // ── The DAV plane's ids and digests.
     (
@@ -1546,6 +1645,12 @@ const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
         "the superseded custody row's path hash",
     ),
     (
+        "materialize_in_flight",
+        "segment_ids",
+        "the dag-cbor list of a restored corpus's content segment ids -- small integers this box's \
+         own segment store numbered, naming no actor",
+    ),
+    (
         "generation_escrow_wraps",
         "generation_id",
         "`derive_key` over the canonical mint core -- whose member and minter fields are DEVICE \
@@ -1686,6 +1791,13 @@ const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
         "sealed",
         "nonce + AEAD over the set's content-key generations `{version, key, rotated_at}`, keyed \
          by the group's epoch export -- which the nest never holds. No associated data, no index",
+    ),
+    (
+        "folder_content_keys",
+        "digest",
+        "blake3 over the `sealed` blob above, as stored: a content hash of ciphertext the nest cannot \
+         open, echoed to members as `envelope_digest` so they re-fetch a moved envelope. It names no \
+         actor and goes with its row",
     ),
     (
         "generation_escrow_wraps",
@@ -1880,6 +1992,12 @@ const NON_ACTOR_OPAQUE_COLUMNS: &[(&str, &str, &str)] = &[
         "revoked_device_grants",
         "auth_device_key",
         "a revoked renewal key -- a tombstone exists to be matched and refused",
+    ),
+    (
+        "custody_hosting_fleet",
+        "device_key",
+        "an owner device's principal public key -- the key its `DeviceAuthorization` names \
+         and the custodied-fleet session's bearer actor; a machine seat, not an account",
     ),
     (
         "sync_signer_certs",

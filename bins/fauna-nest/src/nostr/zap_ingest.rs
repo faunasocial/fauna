@@ -165,8 +165,8 @@ pub fn classify_incoming_zap(conn: &Connection, event: &Event) -> ZapVerdict {
 /// the witness, and the write reads the zap's own event id and timestamp from
 /// the witness rather than a separately-passed event, so an event/receipt
 /// mismatch is unrepresentable.
-pub fn record_zap(conn: &Connection, zap: &TrustedZap) {
-    record_zap_as(conn, zap, None);
+pub fn record_zap(conn: &Connection, zap: &TrustedZap) -> bool {
+    record_zap_as(conn, zap, None)
 }
 
 /// [`record_zap`]'s full form: record the believed zap, naming the tier it
@@ -177,9 +177,14 @@ pub fn record_zap(conn: &Connection, zap: &TrustedZap) {
 /// reached, and no reader re-derives it — the same discipline the trust gate
 /// follows one layer up. That is why the tip surface can exclude purchases
 /// without re-judging anything: it reads a class that was decided once.
-pub fn record_zap_as(conn: &Connection, zap: &TrustedZap, purchased_tier: Option<&str>) {
+///
+/// Returns `true` only when this call wrote the row — the receipt's first
+/// arrival. A redelivery (the same event from a second relay, a sweep replay)
+/// answers `false`, so a consequence keyed on it fires once; a write error
+/// also answers `false`, because nothing was recorded to announce.
+pub fn record_zap_as(conn: &Connection, zap: &TrustedZap, purchased_tier: Option<&str>) -> bool {
     let receipt = zap.receipt();
-    let _ = db::insert_zap(
+    db::insert_zap(
         conn,
         zap.zap_event_id(),
         receipt.target_event_id.as_deref(),
@@ -188,7 +193,128 @@ pub fn record_zap_as(conn: &Connection, zap: &TrustedZap, purchased_tier: Option
         receipt.amount_msats.map(|a| a as i64),
         zap.created_at() as i64,
         purchased_tier,
-    );
+    )
+    .unwrap_or(false)
+}
+
+/// The localized sentence a tip notification carries
+/// (`notifications.md` § Localized body): the key names who tipped — a
+/// display handle, or nobody the receipt identifies — and how much, with the
+/// unit split decided once by [`fauna_core::format::tip_amount`] so a sub-sat
+/// tip keeps its msats rather than reading "0 sats". The args are data.
+pub fn tip_notification_body(
+    sender: Option<&str>,
+    amount_msats: Option<i64>,
+) -> fauna_protocol::LocalizedText {
+    let who = if sender.is_some() {
+        "row_tip"
+    } else {
+        "row_tip_anonymous"
+    };
+    let amount = amount_msats.map(fauna_core::format::tip_amount);
+    let key = match amount.as_ref().map(|a| a.key.as_str()) {
+        Some("tips.sats") => format!("notifications.{who}_sats"),
+        Some(_) => format!("notifications.{who}_msats"),
+        None => format!("notifications.{who}"),
+    };
+    let mut body = fauna_protocol::LocalizedText::new(key);
+    if let Some(sender) = sender {
+        body = body.with_arg("sender", sender);
+    }
+    if let Some(value) = amount.as_ref().and_then(|a| a.args.get("value")) {
+        body = body.with_arg("value", value);
+    }
+    body
+}
+
+/// Ring the post's author for a credited tip (`monetization.md` § Tips — a
+/// tip's consequence is attribution, display and notification, never a
+/// grant): one `tip` row on the notifications surface plus its push twin.
+///
+/// Both ingress points call this right after [`record_zap_as`], with what they
+/// already hold, so the decision of *whether* a receipt notifies lives here
+/// once and the two doors cannot drift. It notifies only when all three hold:
+///
+/// * the receipt was **newly recorded** — a redelivery rings nobody twice;
+/// * it named a Fauna post ([`resolve_zap_subject`] answered) — a profile zap
+///   or a zap on an event this box never published has no post to open;
+/// * it stayed a **tip** — a receipt the split classed as a purchase is a
+///   grant, which the subscriber flow announces, not a tip.
+///
+/// Call it with no SQLite connection held: the notification write takes the
+/// same mutex. A failed write is logged and dropped — the tip itself is
+/// already recorded and attributed, which is what the sender is owed.
+pub async fn notify_tip(
+    state: &std::sync::Arc<crate::AppState>,
+    zap: &TrustedZap,
+    subject: Option<&ZapSubject>,
+    purchased_tier: Option<&str>,
+    newly_recorded: bool,
+) {
+    let Some(subject) = subject else { return };
+    if !newly_recorded || purchased_tier.is_some() {
+        return;
+    }
+    let (Ok(fauna_core::identity::ActorId(payee)), Ok(post_id)) = (
+        fauna_core::identity::ActorId::from_hex(&subject.payee_actor_id),
+        hex::decode(&subject.fauna_post_id),
+    ) else {
+        return;
+    };
+    let receipt = zap.receipt();
+    let sender_actor = subject
+        .sender_actor_id
+        .as_deref()
+        .and_then(|hex_id| hex::decode(hex_id).ok());
+    // Who to name: the tipper's local actor when this box knows them, else
+    // the Nostr key their zap request was signed with — the same
+    // mechanism-native fallback the tip list renders. Short hex, the like
+    // row's precedent.
+    let sender_handle = subject
+        .sender_actor_id
+        .as_deref()
+        .or(receipt.sender_pubkey.as_deref())
+        .map(|id| id.chars().take(8).collect::<String>());
+    let text = crate::db::notifications::NotificationText::localized(tip_notification_body(
+        sender_handle.as_deref(),
+        receipt.amount_msats.map(|a| a as i64),
+    ));
+    let notif_type = fauna_protocol::notifications::NotifType::Tip;
+    let now = fauna_core::data::Timestamp::now().as_i64();
+    let inserted = state
+        .db
+        .insert_notification_undeduped(
+            &payee,
+            &notif_type,
+            "fauna",
+            sender_actor.as_deref(),
+            Some(&post_id),
+            &text,
+            now,
+        )
+        .await;
+    match inserted {
+        Ok(notification_id) => state.ws.notify_push(
+            &payee,
+            fauna_protocol::PushEvent::Notification(
+                fauna_protocol::push_events::NotificationPayload {
+                    notification_id,
+                    notif_type,
+                    source: "fauna".into(),
+                    sender_id: subject.sender_actor_id.clone(),
+                    content_id: Some(subject.fauna_post_id.clone()),
+                    summary: text.summary().to_string(),
+                    body: text.body().cloned(),
+                    timestamp: fauna_core::data::Timestamp::now_secs() as u64,
+                    extra: std::collections::BTreeMap::new(),
+                },
+            ),
+        ),
+        Err(e) => tracing::warn!(
+            zap_event_id = %zap.zap_event_id(),
+            "tip notification not written: {e}"
+        ),
+    }
 }
 
 /// The Fauna coordinates a believed zap names, resolved from Nostr ones.
@@ -349,6 +475,7 @@ pub async fn apply_zap_purchase(
         // The zap's own event id — a stable, mechanism-supplied identifier, so
         // a redelivered receipt is the same payment to the waist.
         external_ref: zap.zap_event_id().to_string(),
+        return_ref: None,
     };
 
     // **Gate surface `payments.unlock.purchase`**, the payments-plane half of a
@@ -410,5 +537,56 @@ pub async fn apply_zap_purchase(
             );
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tip_notification_body;
+
+    /// Every key the tip notification can name exists in the English catalog
+    /// with exactly the placeholders it is given — a key the catalog lacks
+    /// would render the bare key on every app.
+    #[test]
+    fn every_tip_body_names_a_catalog_sentence_with_its_args() {
+        for sender in [Some("abcd1234"), None] {
+            for amount in [Some(21_000), Some(500), None] {
+                let body = tip_notification_body(sender, amount);
+                let sentence = fauna_i18n::strings::lookup(&body.key)
+                    .unwrap_or_else(|| panic!("no catalog entry for {}", body.key));
+                for name in body.args.keys() {
+                    assert!(
+                        sentence.contains(&format!("{{{name}}}")),
+                        "{} lacks {{{name}}}",
+                        body.key
+                    );
+                }
+                assert_eq!(
+                    sentence.matches('{').count(),
+                    body.args.len(),
+                    "{}",
+                    body.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_unit_split_is_tip_amounts() {
+        let sats = tip_notification_body(Some("abcd1234"), Some(21_000));
+        assert_eq!(sats.key, "notifications.row_tip_sats");
+        assert_eq!(sats.args.get("value").map(String::as_str), Some("21"));
+        assert_eq!(
+            sats.args.get("sender").map(String::as_str),
+            Some("abcd1234")
+        );
+        // A sub-sat tip keeps its msats rather than reading "0 sats".
+        let msats = tip_notification_body(None, Some(500));
+        assert_eq!(msats.key, "notifications.row_tip_anonymous_msats");
+        assert_eq!(msats.args.get("value").map(String::as_str), Some("500"));
+        // An amount-less receipt is still a tip, with no figure invented.
+        let bare = tip_notification_body(Some("abcd1234"), None);
+        assert_eq!(bare.key, "notifications.row_tip");
+        assert!(!bare.args.contains_key("value"));
     }
 }

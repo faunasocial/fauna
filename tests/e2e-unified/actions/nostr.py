@@ -124,6 +124,17 @@ class NostrActions:
         self.driver.wait_for("nostr-link-button", timeout=10.0)
         self.driver.click("nostr-link-button")
 
+    def link_import(self, nsec: str) -> None:
+        """Link a key the user already has: pick the import mode on
+        `nostr-link-mode` (which reveals `nostr-nsec-input`), paste the nsec,
+        then `nostr-link-button` (nostr.md § Layout & flow item 1). The link
+        is async like `link_generate`; poll `wait_for_linked`."""
+        self.driver.wait_for("nostr-link-mode", timeout=10.0)
+        self.driver.select("nostr-link-mode", "import")
+        self.driver.wait_for("nostr-nsec-input", timeout=10.0)
+        self.driver.clear_and_type("nostr-nsec-input", nsec)
+        self.driver.click("nostr-link-button")
+
     def wait_for_linked(self, timeout: float = 20.0) -> bool:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:

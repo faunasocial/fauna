@@ -166,6 +166,26 @@ def _assert_feed_block(app) -> None:
     assert app.driver.count("feed-post-text", scope="post-card[0]") >= 1
 
 
+def _assert_block_render_witness(app, where: str) -> None:
+    """Convention 17's `region-block-never-silent`, read MID-journey: the
+    post-frame sampler sees only a test's last frame, which here follows the
+    `finally` relaunch. An app that publishes no `region_block_render` is
+    skipped, exactly as the sampler does (`n/a`)."""
+    counts = (app.driver.get_state() or {}).get("region_block_render")
+    if counts is None:
+        return
+    blocked, placeholders = counts.get("blocked"), counts.get("placeholders")
+    assert isinstance(blocked, int) and isinstance(placeholders, int), (
+        f"{where}: region_block_render is malformed: {counts!r}"
+    )
+    assert blocked >= 1, (
+        f"{where}: a block is on screen but region_block_render counts none: {counts!r}"
+    )
+    assert placeholders >= blocked, (
+        f"{where}: a blocked item rendered silently (placeholders < blocked): {counts!r}"
+    )
+
+
 def test_region_policy_reaches_the_render_and_the_settings_surface(logged_in_app, nest_instance):
     app = logged_in_app
     if app_name(app.driver) not in BUILT:
@@ -201,6 +221,7 @@ def test_region_policy_reaches_the_render_and_the_settings_surface(logged_in_app
         # 2. The feed: block on the exact card, collapse with a reveal.
         _seed_feed(app)
         _assert_feed_block(app)
+        _assert_block_render_witness(app, "feed block")
         collapsed = "post-card[2]"
         assert app.driver.get_text("region-blocked-notice", scope=collapsed) == (
             S.region.collapsed_notice(region=REGION, authority=AUTHORITY)
@@ -230,6 +251,7 @@ def test_region_policy_reaches_the_render_and_the_settings_surface(logged_in_app
         )
         assert app.driver.get_text("region-blocked-reason", index=0) == DM_REASON
         assert app.driver.count("dm-message-text") == 1, "only the clean body renders"
+        _assert_block_render_witness(app, "DM block")
 
         # 4. The relay forgets; a cold relaunch still blocks from the device store.
         _region_hook(nest_instance["url"], "content-policy/retire", {"region": REGION})

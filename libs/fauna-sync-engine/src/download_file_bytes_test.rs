@@ -93,7 +93,7 @@ pub(crate) fn test_sync_engine_as(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_test_engine_as(
+pub(crate) fn build_test_engine_as(
     server_uri: &str,
     watch_dir: std::path::PathBuf,
     mls: Option<Arc<MlsEngine>>,
@@ -102,7 +102,49 @@ fn build_test_engine_as(
     content_keys: Option<FolderContentKeys>,
     identity: ActorKeypair,
 ) -> SyncEngine {
-    let db = SyncDb::open_in_memory().unwrap();
+    build_test_engine_over(
+        server_uri,
+        watch_dir,
+        mls,
+        backup_key,
+        mls_group_id,
+        content_keys,
+        identity,
+        SyncDb::open_in_memory().unwrap(),
+    )
+}
+
+/// [`test_sync_engine`] over a caller-supplied state DB — a file DB, for a
+/// test that reads it on a second connection as a body source does.
+pub(crate) fn test_sync_engine_over_db(
+    server_uri: &str,
+    watch_dir: std::path::PathBuf,
+    backup_key: Option<BackupKey>,
+    db: SyncDb,
+) -> SyncEngine {
+    build_test_engine_over(
+        server_uri,
+        watch_dir,
+        None,
+        backup_key,
+        None,
+        None,
+        ActorKeypair::generate(),
+        db,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_test_engine_over(
+    server_uri: &str,
+    watch_dir: std::path::PathBuf,
+    mls: Option<Arc<MlsEngine>>,
+    backup_key: Option<BackupKey>,
+    mls_group_id: Option<Vec<u8>>,
+    content_keys: Option<FolderContentKeys>,
+    identity: ActorKeypair,
+    db: SyncDb,
+) -> SyncEngine {
     let client = test_sync_client(server_uri);
     let device_id = [0u8; 32];
     let format_registry = FormatRegistry::new();
@@ -3095,6 +3137,10 @@ async fn fast_forward_applies_incoming_without_conflict() {
 // ─────────────────────────────────────────────────────────────────────
 
 use crate::engine::{RestoreSummary, SnapshotFileToRestore};
+use fauna_client_snapshots::{SnapshotEntryReader, SnapshotSet};
+use fauna_client_sync::SetNonceSource;
+use fauna_client_sync::row_judge::ReaderSeat;
+use fauna_client_testkit::RejectingRequester;
 
 /// A fresh engine holding only the owner `BackupKey` derived from `seed` — the
 /// same shape `engine_lifecycle::build_restore_engine` produces in production
@@ -3131,6 +3177,11 @@ async fn seal_and_capture(
         .expect("upload_file must have POSTed a manifest")
 }
 
+/// A sealed snapshot restores end to end — the owner's bytes, sealed under
+/// the `BackupKey` derived from the seed, land byte-identical — with every
+/// entry licensed by the owner's signed row naming it under its path, read
+/// once and judged once per entry before any byte: the seal
+/// alone licenses nothing.
 #[tokio::test]
 async fn restore_snapshot_files_to_dir_restores_a_sealed_snapshot() {
     let server = MockServer::start().await;
@@ -3160,20 +3211,27 @@ async fn restore_snapshot_files_to_dir_restores_a_sealed_snapshot() {
         SnapshotFileToRestore {
             relative_path: "notes/hello.txt".into(),
             manifest_hash: m_small,
-            content_key_version: None,
         },
         SnapshotFileToRestore {
             relative_path: "data/large.bin".into(),
             manifest_hash: m_large,
-            content_key_version: None,
         },
     ];
 
+    let owner = ActorKeypair::generate();
+    let nest = scripted_history(vec![
+        signed_version(&owner, "notes/hello.txt", &m_small),
+        signed_version(&owner, "data/large.bin", &m_large),
+    ]);
     let out = tempfile::tempdir().unwrap();
-    let summary = restore_engine(&server.uri(), &seed)
-        .restore_snapshot_files_to_dir(&files, out.path())
-        .await
-        .expect("restore_snapshot_files_to_dir");
+    let summary = walk_with_history(
+        &restore_engine(&server.uri(), &seed),
+        &nest,
+        &owner,
+        &files,
+        out.path(),
+    )
+    .await;
 
     assert_eq!(
         summary,
@@ -3183,6 +3241,16 @@ async fn restore_snapshot_files_to_dir_restores_a_sealed_snapshot() {
             skipped: 0,
             ..Default::default()
         }
+    );
+    assert_eq!(
+        nest.kinds(),
+        [
+            "fauna.files.versions.list",
+            fauna_protocol::folders::KIND_FOLDERS_LIST,
+            "fauna.files.versions.list",
+            fauna_protocol::folders::KIND_FOLDERS_LIST,
+        ],
+        "one history read, judged over the folder list, per sealed entry"
     );
     assert_eq!(
         std::fs::read(out.path().join("notes/hello.txt")).unwrap(),
@@ -3218,20 +3286,24 @@ async fn restore_snapshot_files_to_dir_skips_unsafe_paths() {
         SnapshotFileToRestore {
             relative_path: "../escape.txt".into(),
             manifest_hash: m_good,
-            content_key_version: None,
         },
         SnapshotFileToRestore {
             relative_path: "safe.txt".into(),
             manifest_hash: m_good,
-            content_key_version: None,
         },
     ];
 
+    let owner = ActorKeypair::generate();
+    let nest = scripted_history(vec![signed_version(&owner, "safe.txt", &m_good)]);
     let out = tempfile::tempdir().unwrap();
-    let summary = restore_engine(&server.uri(), &seed)
-        .restore_snapshot_files_to_dir(&files, out.path())
-        .await
-        .expect("restore succeeds, skipping the unsafe entry");
+    let summary = walk_with_history(
+        &restore_engine(&server.uri(), &seed),
+        &nest,
+        &owner,
+        &files,
+        out.path(),
+    )
+    .await;
 
     assert_eq!(
         summary,
@@ -3243,6 +3315,11 @@ async fn restore_snapshot_files_to_dir_skips_unsafe_paths() {
         }
     );
     assert_eq!(
+        nest.kinds().len(),
+        2,
+        "the unsafe entry is skipped before its licence is even asked for"
+    );
+    assert_eq!(
         std::fs::read(out.path().join("safe.txt")).unwrap(),
         good,
         "the safe file restored despite the sibling unsafe entry"
@@ -3251,6 +3328,392 @@ async fn restore_snapshot_files_to_dir_skips_unsafe_paths() {
     assert!(
         !escaped.exists(),
         "the `..`-escaping entry must never be written outside the output dir"
+    );
+}
+
+// ── The snapshot entry reader's licence, on the walk ──────────────────
+//
+// The walk reads every entry through the ONE snapshot entry reader
+// (`fauna_client_snapshots::entry_reader`): licensed, before any byte, by the
+// judged change row of the snapshot's set that named exactly that manifest
+// under the entry's path — sealed or plaintext, since the seal is not a
+// licence (`backup-restore.md` § Security Properties → Integrity). The history is a scripted WS-RPC requester here, so the licence
+// is exercised over the real judge with no nest; the composed production path
+// over a real nest is `fauna-nest`'s `conformance_ffi_snapshot_restore_client`.
+
+const SNAPSHOT_SET: &str = "site";
+const SET_NONCE: [u8; 32] = [7; 32];
+const PUBLIC_PATH: &str = "site/index.html";
+
+/// The owner's signed row naming `manifest` under `path` in [`SNAPSHOT_SET`],
+/// as the version-history projection serves it.
+fn signed_version(
+    owner: &ActorKeypair,
+    path: &str,
+    manifest: &ContentHash,
+) -> fauna_protocol::files::FileVersionInfo {
+    let mut row = fauna_protocol::sync::SyncChange {
+        seq: 3,
+        path_hash: fauna_core::hex32::encode(&fauna_core::sync::path_hash(path)),
+        manifest_hash: Some(fauna_core::hex32::encode(&manifest.digest())),
+        size_bytes: 10,
+        change_type: "create".into(),
+        created_at: 1_000,
+        device_id: Some(fauna_core::hex32::encode(&[4; 32])),
+        author_actor_id: Some(owner.actor_id().to_hex()),
+        ..Default::default()
+    };
+    fauna_protocol::sync_writer_sig::ChangeSigner::direct(owner)
+        .sign_row(&mut row, SET_NONCE)
+        .unwrap();
+    fauna_protocol::files::FileVersionInfo {
+        path_hash: fauna_core::sync::path_hash(path).to_vec().into(),
+        version_num: row.seq,
+        manifest_hash: manifest.digest().to_vec().into(),
+        size_bytes: row.size_bytes,
+        created_at: row.created_at,
+        folder: Some(SNAPSHOT_SET.into()),
+        author_actor_id: owner.actor_id().to_hex(),
+        device_id: Some([4; 32].to_vec().into()),
+        change_type: Some("create".into()),
+        signature: row.signature.clone(),
+        signer_key: row.signer_key.clone(),
+        ..Default::default()
+    }
+}
+
+/// A nest whose folder list owns [`SNAPSHOT_SET`] and whose version history
+/// for any path is `versions`.
+fn scripted_history(versions: Vec<fauna_protocol::files::FileVersionInfo>) -> RejectingRequester {
+    RejectingRequester::new()
+        .reply(
+            fauna_protocol::folders::KIND_FOLDERS_LIST,
+            &fauna_protocol::folders::FoldersListReply {
+                folders: vec![fauna_protocol::folders::FolderSummary {
+                    name: SNAPSHOT_SET.into(),
+                    role: Some("owner".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .reply(
+            "fauna.files.versions.list",
+            &fauna_protocol::files::FilesVersionsListReply {
+                versions,
+                ..Default::default()
+            },
+        )
+}
+
+fn owner_seat(owner: &ActorKeypair) -> ReaderSeat {
+    ReaderSeat {
+        own: Some(owner.actor_id().0),
+        nonces: Some(SetNonceSource::by_folder(
+            [(SNAPSHOT_SET.to_string(), SET_NONCE)]
+                .into_iter()
+                .collect(),
+        )),
+        ..Default::default()
+    }
+}
+
+/// Seed a **plaintext** blob (a public-era file as it rests, or a forgery the
+/// nest built) into the mock nest's blob plane and return its manifest hash.
+fn seed_plaintext(store: &crate::test_support::BlobStore, bytes: &[u8]) -> ContentHash {
+    let blob = fauna_core::blob_seal::seal_blob(bytes, None).unwrap();
+    assert!(blob.manifest.stored_hashes.is_none(), "plaintext");
+    store.seed_manifest(blob.manifest_hash, blob.manifest_bytes.clone());
+    for (key, body) in &blob.chunks {
+        store.seed_chunk(*key, body.clone());
+    }
+    blob.manifest_hash
+}
+
+/// Drive the walk over `engine`'s blob plane and keys, the history `nest`
+/// serves, judged as `owner`'s seat.
+async fn walk_with_history(
+    engine: &SyncEngine,
+    nest: &RejectingRequester,
+    owner: &ActorKeypair,
+    files: &[SnapshotFileToRestore],
+    out: &std::path::Path,
+) -> RestoreSummary {
+    let sync = fauna_client_sync::SyncClient::new(nest);
+    let seat = owner_seat(owner);
+    let set = SnapshotSet {
+        folder: SNAPSHOT_SET.into(),
+        folder_hash: None,
+    };
+    let reader = SnapshotEntryReader::new(&sync, &seat, &set);
+    crate::engine::restore_snapshot_walk(
+        &engine.blob_fetcher(),
+        &engine.download_keys(),
+        &reader,
+        files,
+        out,
+        |_, _, _| {},
+    )
+    .await
+    .expect("the walk completes, naming what it refused")
+}
+
+/// A snapshot entry's `manifest_hash` is the home nest's unsigned
+/// word, so a nest serving a self-built **plaintext** manifest + chunk at an
+/// address it lists — self-consistent, so the address and whole-file checks
+/// both pass — must not be restored. A history holding no judged row naming
+/// the manifest licenses nothing: the forged file is named in `unverified`
+/// (which the FFI restore turns into a loud error) and never written — its
+/// manifest is never even fetched — while the genuine sealed sibling, which
+/// the owner's row names, still restores.
+#[tokio::test]
+async fn restore_snapshot_files_to_dir_refuses_a_plaintext_manifest_the_nest_built() {
+    let server = MockServer::start().await;
+    let store = MockNest::new().with_blob_plane().mount(&server).await;
+
+    let seed = [0x45u8; 32];
+    let watch = tempfile::tempdir().unwrap();
+    let uploader = test_sync_engine(
+        &server.uri(),
+        watch.path().to_path_buf(),
+        Some(BackupKey::derive(&seed)),
+    );
+    let good = b"the owner's sealed bytes".to_vec();
+    let m_good = seal_and_capture(&uploader, watch.path(), &store, "good.txt", &good).await;
+    let forged = seed_plaintext(&store, b"bytes the home nest made up");
+
+    let files = vec![
+        SnapshotFileToRestore {
+            relative_path: "forged.txt".into(),
+            manifest_hash: forged,
+        },
+        SnapshotFileToRestore {
+            relative_path: "good.txt".into(),
+            manifest_hash: m_good,
+        },
+    ];
+
+    let owner = ActorKeypair::generate();
+    let nest = scripted_history(vec![signed_version(&owner, "good.txt", &m_good)]);
+    let out = tempfile::tempdir().unwrap();
+    let summary = walk_with_history(
+        &restore_engine(&server.uri(), &seed),
+        &nest,
+        &owner,
+        &files,
+        out.path(),
+    )
+    .await;
+
+    // `unverified` carries redacted path tokens, never the raw path.
+    assert_eq!(
+        summary.unverified.len(),
+        1,
+        "the forged file is named refused"
+    );
+    assert_eq!(summary.files_restored, 1);
+    assert!(
+        !out.path().join("forged.txt").exists(),
+        "a plaintext manifest at a nest-chosen address is never written"
+    );
+    assert_eq!(std::fs::read(out.path().join("good.txt")).unwrap(), good);
+    // Both entries asked the history and were judged; the forged one was
+    // refused there, so its manifest was never fetched.
+    assert_eq!(
+        nest.kinds(),
+        [
+            "fauna.files.versions.list",
+            fauna_protocol::folders::KIND_FOLDERS_LIST,
+            "fauna.files.versions.list",
+            fauna_protocol::folders::KIND_FOLDERS_LIST,
+        ]
+    );
+    assert!(
+        !store
+            .fetched_manifests()
+            .contains(&hex::encode(forged.digest())),
+        "an unlicensed entry costs no byte"
+    );
+}
+
+/// A **public-era** file rests unsealed, so its snapshot entry is
+/// plaintext the seal refuses — and the owner's own signed change row naming
+/// exactly that manifest under the entry's path licenses it: the walk reads
+/// the history, judges the row, and writes the file.
+#[tokio::test]
+async fn restore_snapshot_files_to_dir_licenses_a_public_era_plaintext_entry_by_its_judged_row() {
+    let server = MockServer::start().await;
+    let store = MockNest::new().with_blob_plane().mount(&server).await;
+    let seed = [0x46u8; 32];
+    let page = b"<html>published while the folder was public</html>";
+    let manifest = seed_plaintext(&store, page);
+
+    let owner = ActorKeypair::generate();
+    let nest = scripted_history(vec![signed_version(&owner, PUBLIC_PATH, &manifest)]);
+    let files = vec![SnapshotFileToRestore {
+        relative_path: PUBLIC_PATH.into(),
+        manifest_hash: manifest,
+    }];
+    let out = tempfile::tempdir().unwrap();
+    let summary = walk_with_history(
+        &restore_engine(&server.uri(), &seed),
+        &nest,
+        &owner,
+        &files,
+        out.path(),
+    )
+    .await;
+
+    assert_eq!(
+        summary,
+        RestoreSummary {
+            files_restored: 1,
+            bytes_written: page.len() as u64,
+            ..Default::default()
+        }
+    );
+    assert_eq!(std::fs::read(out.path().join(PUBLIC_PATH)).unwrap(), page);
+    assert_eq!(
+        nest.kinds(),
+        [
+            "fauna.files.versions.list",
+            fauna_protocol::folders::KIND_FOLDERS_LIST
+        ],
+        "one history read, judged over the folder list"
+    );
+}
+
+/// A judged row of the same path naming ANOTHER manifest licenses
+/// nothing — the nest cannot launder a self-built manifest under a genuine
+/// row's path — and neither does a row the owner signed under another set's
+/// nonce (ruling (3): a row that does not verify is not a row).
+#[tokio::test]
+async fn restore_snapshot_files_to_dir_refuses_a_plaintext_entry_no_judged_row_names() {
+    let server = MockServer::start().await;
+    let store = MockNest::new().with_blob_plane().mount(&server).await;
+    let seed = [0x47u8; 32];
+    let genuine = seed_plaintext(&store, b"the owner's own page");
+    let forged = seed_plaintext(&store, b"the nest's substitute");
+    let owner = ActorKeypair::generate();
+    let files = vec![SnapshotFileToRestore {
+        relative_path: PUBLIC_PATH.into(),
+        manifest_hash: forged,
+    }];
+
+    // A genuine row of the path, naming the genuine manifest: no licence for
+    // the forged one.
+    let nest = scripted_history(vec![signed_version(&owner, PUBLIC_PATH, &genuine)]);
+    let out = tempfile::tempdir().unwrap();
+    let summary = walk_with_history(
+        &restore_engine(&server.uri(), &seed),
+        &nest,
+        &owner,
+        &files,
+        out.path(),
+    )
+    .await;
+    assert_eq!(summary.files_restored, 0);
+    assert_eq!(summary.unverified.len(), 1);
+    assert!(!out.path().join(PUBLIC_PATH).exists());
+
+    // A row naming the forged manifest, but signed as a stranger: the judge
+    // refuses it (not this set's owner, not a roster writer), so it licenses
+    // nothing either.
+    let stranger = ActorKeypair::generate();
+    let nest = scripted_history(vec![signed_version(&stranger, PUBLIC_PATH, &forged)]);
+    let out = tempfile::tempdir().unwrap();
+    let summary = walk_with_history(
+        &restore_engine(&server.uri(), &seed),
+        &nest,
+        &owner,
+        &files,
+        out.path(),
+    )
+    .await;
+    assert_eq!(summary.files_restored, 0);
+    assert_eq!(summary.unverified.len(), 1);
+    assert!(!out.path().join(PUBLIC_PATH).exists());
+}
+
+/// The seal is not a licence. A hostile home nest listing one
+/// owner-sealed manifest of the owner's in place of another — another path's
+/// file under this path, or a version no row of this path names — has the
+/// substitute refused unopened, its manifest never fetched, while the entry
+/// the owner's row names under its own path still restores. Every refusal is
+/// named in `unverified`, so the FFI restore fails loudly.
+#[tokio::test]
+async fn restore_snapshot_files_to_dir_refuses_a_sealed_entry_no_judged_row_names() {
+    let server = MockServer::start().await;
+    let store = MockNest::new().with_blob_plane().mount(&server).await;
+
+    let seed = [0x48u8; 32];
+    let watch = tempfile::tempdir().unwrap();
+    let uploader = test_sync_engine(
+        &server.uri(),
+        watch.path().to_path_buf(),
+        Some(BackupKey::derive(&seed)),
+    );
+    let secret = b"the owner's private notes".to_vec();
+    let m_secret =
+        seal_and_capture(&uploader, watch.path(), &store, "notes/secret.txt", &secret).await;
+    let older = b"the version the nest would rather restore".to_vec();
+    let m_older =
+        seal_and_capture(&uploader, watch.path(), &store, "notes/public.txt", &older).await;
+    let current = b"the version the owner wrote last".to_vec();
+    let m_current = seal_and_capture(
+        &uploader,
+        watch.path(),
+        &store,
+        "notes/public.txt",
+        &current,
+    )
+    .await;
+
+    let files = vec![
+        // Another path's sealed file, listed under this path.
+        SnapshotFileToRestore {
+            relative_path: "notes/public.txt".into(),
+            manifest_hash: m_secret,
+        },
+        // A manifest no row of the path names.
+        SnapshotFileToRestore {
+            relative_path: "notes/public.txt".into(),
+            manifest_hash: m_older,
+        },
+        // The entry the owner's row names under its own path.
+        SnapshotFileToRestore {
+            relative_path: "notes/public.txt".into(),
+            manifest_hash: m_current,
+        },
+    ];
+
+    let owner = ActorKeypair::generate();
+    let nest = scripted_history(vec![
+        signed_version(&owner, "notes/secret.txt", &m_secret),
+        signed_version(&owner, "notes/public.txt", &m_current),
+    ]);
+    let out = tempfile::tempdir().unwrap();
+    let summary = walk_with_history(
+        &restore_engine(&server.uri(), &seed),
+        &nest,
+        &owner,
+        &files,
+        out.path(),
+    )
+    .await;
+
+    assert_eq!(summary.files_restored, 1, "{summary:?}");
+    assert_eq!(summary.unverified.len(), 2, "{summary:?}");
+    assert_eq!(
+        std::fs::read(out.path().join("notes/public.txt")).unwrap(),
+        current,
+        "the licensed version is what rests on disk"
+    );
+    let fetched = store.fetched_manifests();
+    assert!(
+        !fetched.contains(&hex::encode(m_secret.digest()))
+            && !fetched.contains(&hex::encode(m_older.digest())),
+        "a substituted sealed manifest is never fetched: {fetched:?}"
     );
 }
 
@@ -3305,13 +3768,18 @@ async fn restore_snapshot_files_to_dir_does_not_follow_a_dangling_final_symlink(
     let files = vec![SnapshotFileToRestore {
         relative_path: "note.txt".into(),
         manifest_hash: m,
-        content_key_version: None,
     }];
 
-    let summary = restore_engine(&server.uri(), &seed)
-        .restore_snapshot_files_to_dir(&files, &out)
-        .await
-        .expect("restore_snapshot_files_to_dir");
+    let owner = ActorKeypair::generate();
+    let nest = scripted_history(vec![signed_version(&owner, "note.txt", &m)]);
+    let summary = walk_with_history(
+        &restore_engine(&server.uri(), &seed),
+        &nest,
+        &owner,
+        &files,
+        &out,
+    )
+    .await;
 
     assert!(
         !planted.exists(),
@@ -3333,11 +3801,14 @@ async fn restore_snapshot_files_to_dir_does_not_follow_a_dangling_final_symlink(
     );
 }
 
-/// The **production** restore builder end-to-end: `build_restore_engine` re-derives
-/// the owner `BackupKey` from the identity-seed hex and decrypts a sealed snapshot
-/// — the exact path the FFI `restore_snapshot_to_dir` drives for `MacRestoreView`.
-/// Gated on `engine-lifecycle` (the FFI enables it); the non-gated tests above
-/// cover the walk itself.
+/// The **production** restore builder: `build_restore_engine` re-derives the
+/// owner `BackupKey` from the identity-seed hex and its blob fetcher + keys
+/// decrypt a sealed snapshot — the key path the FFI `restore_snapshot_to_dir`
+/// drives for `MacRestoreView`. The licence read is scripted (the mock serves
+/// no control plane); the composed path over a real nest, seat and custody is
+/// `fauna-nest`'s `conformance_ffi_snapshot_restore_client`. Gated on
+/// `engine-lifecycle` (the FFI enables it); the non-gated tests above cover
+/// the walk itself.
 #[cfg(feature = "engine-lifecycle")]
 #[tokio::test]
 async fn build_restore_engine_restores_a_sealed_snapshot() {
@@ -3370,34 +3841,24 @@ async fn build_restore_engine_restores_a_sealed_snapshot() {
         fauna_client::NestClient::new(server.uri(), ActorKeypair::generate()),
         [0u8; 32],
         &secret_hex,
+        None,
     );
 
     let files = vec![SnapshotFileToRestore {
         relative_path: "doc.txt".into(),
         manifest_hash: m,
-        content_key_version: None,
     }];
+    let owner = ActorKeypair::generate();
+    let nest = scripted_history(vec![signed_version(&owner, "doc.txt", &m)]);
     let out = tempfile::tempdir().unwrap();
-    let summary = engine
-        .restore_snapshot_files_to_dir(&files, out.path())
-        .await
-        .expect("build_restore_engine restore");
+    let summary = walk_with_history(&engine, &nest, &owner, &files, out.path()).await;
 
-    assert_eq!(summary.files_restored, 1);
+    assert_eq!(summary.files_restored, 1, "{summary:?}");
     assert_eq!(std::fs::read(out.path().join("doc.txt")).unwrap(), content);
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// The raw-AEAD Library plane — the post-succession re-seal's SECOND arm
-//
-// A Media-page upload's blob-store primary is a single framed
-// `decrypt_backup_chunk` blob under the BARE `BackupKey` (`Audience::Library`),
-// never the convergent chunk root — so `FileDownloadKeys` does not reach it and
-// it did NOT move with the chunk plane. Its hash nonetheless lands in the same
-// `manifest_hash` column, and resolving it through the chunk-manifest route
-// (a different store) is what used to leave such an entry owed forever, which
-// is why `list_pending_current_root_reseal` could not drain at all on any
-// account holding one (`sync-agent.md` § Implementation status → A8).
+// The post-succession re-seal's failure containment and its thumbnail move
 //
 // ⚠ These assert the BYTE plane. Every engine test in this module runs an
 // unconnected `NestClient`, so `changes.record` never lands and the sentinel —
@@ -3405,9 +3866,8 @@ async fn build_restore_engine_restores_a_sealed_snapshot() {
 // to the tier_3 journey, exactly as the chunk plane's split already is.
 // ─────────────────────────────────────────────────────────────────────
 
-/// Seal `plaintext` as a Media-page upload's blob-store primary would be —
-/// framed `encrypt_backup_chunk` under the bare key — store it in the mock's
-/// BLOB store, and return the hash the change row would carry.
+/// Seal `plaintext` as a thumbnail rests — framed `encrypt_backup_chunk` under
+/// the bare key — store it in the mock's BLOB store, and return its hash.
 fn store_library_blob(
     store: &crate::test_support::BlobStore,
     plaintext: &[u8],
@@ -3419,260 +3879,10 @@ fn store_library_blob(
     ContentHash::from_digest_raw(fauna_core::hex32::decode(&hex).expect("hex32"))
 }
 
-/// A successor's inherited Library blob is re-sealed under the successor's own
-/// bare key — the piece that actually unblocks `sync-agent.md` bound (3).
-///
-/// ⚠ Non-vacuity: the assertion is not "a blob was POSTed" but "the POSTed blob
-/// opens under the SUCCESSOR key and its plaintext is the original", which a
-/// pass that merely re-uploaded the inherited ciphertext would fail. Deleting
-/// the blob arm from `reseal_one_entry` turns this red at the first assert
-/// (nothing is POSTed at all — the manifest fetch just errors).
+/// A manifest the nest cannot serve is contained to its entry: the pass
+/// survives, nothing is POSTed, and the entry stays owed.
 #[tokio::test]
-async fn post_succession_reseal_moves_a_library_blob_off_the_retired_root() {
-    let server = MockServer::start().await;
-    let store = MockNest::new().with_blob_plane().mount(&server).await;
-
-    let predecessor = BackupKey::from_bytes([0x7au8; 32]);
-    let successor = BackupKey::from_bytes([0x8bu8; 32]);
-
-    let watch = tempfile::tempdir().unwrap();
-    let mut engine = test_sync_engine(
-        &server.uri(),
-        watch.path().to_path_buf(),
-        Some(successor.clone()),
-    );
-    engine.set_predecessor_backup_keys(vec![predecessor.clone().into()]);
-
-    // A Media-page upload the predecessor made: the blob is sealed under the
-    // retired bare key, and nothing is materialized on this device.
-    let original: Vec<u8> = (0..30_000u32).map(|i| (i % 241) as u8).collect();
-    let rel = "media/holiday.jpg";
-    let blob_hash = store_library_blob(&store, &original, &predecessor);
-    seed_synced_entry(&engine, rel, &original, blob_hash);
-
-    engine
-        .reseal_predecessor_sealed()
-        .await
-        .expect("re-seal pass");
-
-    let posted = store
-        .last_blob_hash
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("the Library-blob arm must have POSTed a re-sealed primary");
-    assert_ne!(
-        posted,
-        hex::encode(blob_hash.digest()),
-        "a re-seal under a different root changes the ciphertext, so it changes the hash"
-    );
-    let stored = store.blobs.lock().unwrap().get(&posted).cloned().unwrap();
-    assert_eq!(
-        fauna_core::crypto::decrypt_backup_chunk(&successor, &stored).expect(
-            "the re-sealed primary must open under the SUCCESSOR's bare key — the whole point"
-        ),
-        original,
-        "…and carry the original plaintext, byte for byte"
-    );
-    assert!(
-        fauna_core::crypto::decrypt_backup_chunk(&predecessor, &stored).is_err(),
-        "the retired root must no longer open it, or the seed stays load-bearing"
-    );
-}
-
-/// A blob failing its content address is never re-sealed, re-recorded or marked.
-///
-/// The backup-chunk frame carries no AAD, so a tag proves only
-/// *sealed-under-some-root-we-hold*, never *these bytes* — the address is the
-/// only anchor this plane has. Without it a malicious nest serves any blob it
-/// holds under a retired root and this pass re-seals it under the CURRENT key
-/// and re-records it at the victim's path, making the substitution the
-/// account's own authenticated content.
-///
-/// ⚠ Non-vacuity, verified by mutation: the substituted blob IS validly sealed
-/// under a root this device holds, so deleting the address check turns this red
-/// — the pass adopts the attacker's bytes.
-///
-/// ⚠ **What this test does NOT pin, deliberately: the check's ORDERING relative
-/// to the candidate opens.** Moving the check after the candidate loop keeps
-/// every assertion here green, because the check still bails before anything is
-/// uploaded or recorded — at this call site the ordering has no observable. It
-/// is load-bearing on the *read* plane (`MediaMachine::open_library_blob`),
-/// where the plaintext reaches the user; here it is defense-in-depth. Recorded
-/// so a later session does not read this test as the ordering's guard and
-/// "confirm" a property nothing checks.
-#[tokio::test]
-async fn post_succession_reseal_rejects_a_substituted_library_blob() {
-    let server = MockServer::start().await;
-    let store = MockNest::new().with_blob_plane().mount(&server).await;
-
-    let predecessor = BackupKey::from_bytes([0x11u8; 32]);
-    let successor = BackupKey::from_bytes([0x22u8; 32]);
-
-    let watch = tempfile::tempdir().unwrap();
-    let mut engine = test_sync_engine(
-        &server.uri(),
-        watch.path().to_path_buf(),
-        Some(successor.clone()),
-    );
-    engine.set_predecessor_backup_keys(vec![predecessor.clone().into()]);
-
-    let wanted: Vec<u8> = (0..20_000u32).map(|i| (i % 233) as u8).collect();
-    let other: Vec<u8> = (0..20_000u32).map(|i| (i % 199) as u8).collect();
-    let rel = "media/receipt.jpg";
-
-    // The row names `wanted`'s hash, but the nest serves a DIFFERENT blob —
-    // validly sealed under the predecessor root, so the candidate loop alone
-    // would accept it.
-    let wanted_hash = store_library_blob(&store, &wanted, &predecessor);
-    let substituted =
-        fauna_core::crypto::encrypt_backup_chunk(&predecessor, &other).expect("seal other");
-    store
-        .blobs
-        .lock()
-        .unwrap()
-        .insert(hex::encode(wanted_hash.digest()), substituted);
-    seed_synced_entry(&engine, rel, &wanted, wanted_hash);
-
-    engine
-        .reseal_predecessor_sealed()
-        .await
-        .expect("the pass reports per-entry failures without aborting");
-
-    assert!(
-        store.last_blob_hash.lock().unwrap().is_none(),
-        "nothing may be re-sealed or re-recorded from a blob that failed its content address"
-    );
-    assert!(
-        !engine
-            .db()
-            .get_entry(rel)
-            .unwrap()
-            .unwrap()
-            .current_root_sealed,
-        "and the entry stays owed — a rejected substitution is not progress"
-    );
-}
-
-/// Ruling (10)(c), the stamp binds the root, on the engine's Library-blob arm:
-/// an entry whose record carries a `content_key_version` is never opened under
-/// an owner key — current or retired — so a stamped row naming a blob primary
-/// (which an honest writer records unstamped) is neither re-sealed nor
-/// re-recorded, and stays owed rather than being adopted. The same blob named
-/// unstamped moves ([`post_succession_reseal_moves_a_library_blob_off_the_retired_root`]).
-#[tokio::test]
-async fn post_succession_reseal_never_opens_a_stamped_entrys_library_blob() {
-    let server = MockServer::start().await;
-    let store = MockNest::new().with_blob_plane().mount(&server).await;
-
-    let predecessor = BackupKey::from_bytes([0x7au8; 32]);
-    let successor = BackupKey::from_bytes([0x8bu8; 32]);
-    let watch = tempfile::tempdir().unwrap();
-    let mut engine = test_sync_engine(
-        &server.uri(),
-        watch.path().to_path_buf(),
-        Some(successor.clone()),
-    );
-    engine.set_predecessor_backup_keys(vec![predecessor.clone().into()]);
-
-    let original: Vec<u8> = (0..30_000u32).map(|i| (i % 241) as u8).collect();
-    let rel = "media/stamped.jpg";
-    let blob_hash = store_library_blob(&store, &original, &predecessor);
-    engine
-        .db()
-        .upsert_entry(
-            rel,
-            Some(ContentHash::of_raw(&original)),
-            Some(ContentHash::of_raw(&original)),
-            Some(blob_hash),
-            SyncState::Synced,
-            1,
-            1,
-            original.len() as i64,
-            1,
-            Some(3),
-        )
-        .expect("seed a stamped entry");
-    engine.stamp_own_head_for_test(rel);
-
-    engine
-        .reseal_predecessor_sealed()
-        .await
-        .expect("the pass reports per-entry failures without aborting");
-
-    assert!(
-        store.last_blob_hash.lock().unwrap().is_none(),
-        "a stamped entry's blob is never opened under an owner key, so nothing is re-sealed"
-    );
-    assert!(
-        !engine
-            .db()
-            .get_entry(rel)
-            .unwrap()
-            .unwrap()
-            .current_root_sealed,
-        "and the entry stays owed"
-    );
-}
-
-/// A Library blob already under the successor's own key is marked without being
-/// re-uploaded.
-///
-/// The filter's real job on this plane: a successor's media corpus is a mixture,
-/// and everything uploaded after the ceremony is already current. Re-uploading
-/// those would turn a one-time repair into a full re-upload of the library on
-/// every catch-up.
-///
-/// ⚠ This is also the one arm whose SENTINEL is assertable at tier_1: the
-/// already-current path marks directly, with no change record to gate it.
-#[tokio::test]
-async fn post_succession_reseal_marks_an_already_current_library_blob_without_reuploading() {
-    let server = MockServer::start().await;
-    let store = MockNest::new().with_blob_plane().mount(&server).await;
-
-    let successor = BackupKey::from_bytes([0x33u8; 32]);
-    let watch = tempfile::tempdir().unwrap();
-    let mut engine = test_sync_engine(
-        &server.uri(),
-        watch.path().to_path_buf(),
-        Some(successor.clone()),
-    );
-    engine.set_predecessor_backup_keys(vec![BackupKey::from_bytes([0x44u8; 32]).into()]);
-
-    let original: Vec<u8> = (0..15_000u32).map(|i| (i % 251) as u8).collect();
-    let rel = "media/after-the-ceremony.jpg";
-    let blob_hash = store_library_blob(&store, &original, &successor);
-    seed_synced_entry(&engine, rel, &original, blob_hash);
-
-    engine
-        .reseal_predecessor_sealed()
-        .await
-        .expect("re-seal pass");
-
-    assert!(
-        store.last_blob_hash.lock().unwrap().is_none(),
-        "nothing was re-uploaded"
-    );
-    assert!(
-        engine
-            .db()
-            .get_entry(rel)
-            .unwrap()
-            .unwrap()
-            .current_root_sealed,
-        "…but it IS marked, so the check is paid once and the observable can drain"
-    );
-}
-
-/// A hash in NEITHER store surfaces the manifest failure, not a blob-shaped one,
-/// and leaves the entry owed.
-///
-/// The blob arm is reached by a manifest MISS, so it must not swallow a real
-/// manifest error: an entry whose chunk manifest is genuinely missing (or whose
-/// fetch failed) has to keep reporting that, or the diagnosis for a broken
-/// chunk-plane entry silently becomes "not a blob either".
-#[tokio::test]
-async fn post_succession_reseal_reports_the_manifest_failure_when_neither_store_has_it() {
+async fn post_succession_reseal_leaves_an_unservable_manifest_owed() {
     let server = MockServer::start().await;
     let store = MockNest::new().with_blob_plane().mount(&server).await;
 
@@ -3687,7 +3897,7 @@ async fn post_succession_reseal_reports_the_manifest_failure_when_neither_store_
 
     let original: Vec<u8> = (0..9_000u32).map(|i| (i % 211) as u8).collect();
     let rel = "docs/vanished.bin";
-    // A hash neither store holds.
+    // A hash the nest holds no manifest for.
     let orphan = ContentHash::of_raw(b"neither-store-holds-this");
     seed_synced_entry(&engine, rel, &original, orphan);
 
@@ -3714,24 +3924,12 @@ async fn post_succession_reseal_reports_the_manifest_failure_when_neither_store_
 // ── The recorded thumbnail MOVES with its file ────────────────────────
 //
 // The last piece of the raw-AEAD Library plane's write half
-// (`identity-succession.md` § Implementation status today). A re-seal that
-// regenerates the thumbnail from plaintext it holds moves that seal for free —
-// but `maybe_upload_thumbnail` / `process_and_seal` yield **nothing** when this
-// build cannot render one, and recording `None` over a head that names a
-// thumbnail DROPS the pointer: the blob stays at rest under the root the
-// aftermath is about to retire, referenced by nothing. It does not block the
-// drain (the entry still records and still marks) — it silently costs the user
-// a tile. So: open the existing thumbnail and re-seal those same pixels, which
-// needs no thumbnailer at all.
-//
-// ⚠ **How these tests induce "cannot regenerate", and why it is the same
-// branch.** The test build has `process_media` ON (default features), so a real
-// image WOULD regenerate. The payloads here are therefore non-image bytes, for
-// which `process_media` yields `thumbnail_bytes: None` — the identical
-// `regenerated.is_none()` branch a thumbnailer-less build takes for an image.
-// The distinction the code makes is never "is this build a producer" but "did
-// the producer yield something, and does the recorded head name a thumbnail
-// anyway", and both causes reach it the same way.
+// (`identity-succession.md` § Implementation status today). Recording `None`
+// over a head that names a thumbnail DROPS the pointer: the blob stays at rest
+// under the root the aftermath is about to retire, referenced by nothing. It
+// does not block the drain (the entry still records and still marks) — it
+// silently costs the user a tile. So: open the existing thumbnail and re-seal
+// those same pixels, which needs no thumbnailer at all.
 //
 // ⚠ These assert the BYTE plane, like every sibling above: the record cannot
 // land on an unconnected `NestClient`.
@@ -3743,9 +3941,8 @@ async fn post_succession_reseal_reports_the_manifest_failure_when_neither_store_
 /// ⚠ Non-vacuity: the assertion is not "a blob was POSTed" but "a blob was
 /// POSTed that opens under the SUCCESSOR key and carries the ORIGINAL thumbnail
 /// pixels" — which a pass that re-uploaded the inherited ciphertext, or that
-/// invented a thumbnail, would both fail. Deleting the move (returning
-/// `regenerated` unchanged from `thumbnail_hash_for_reseal`) turns it red at the
-/// first assert: nothing is POSTed to the blob store at all, because the chunk
+/// invented a thumbnail, would both fail. Deleting the move (returning `None`
+/// from `thumbnail_hash_for_reseal`) turns it red at the first assert: nothing is POSTed to the blob store at all, because the chunk
 /// plane's own bytes go to `/chunks`.
 #[tokio::test]
 async fn post_succession_reseal_moves_a_recorded_thumbnail_it_cannot_regenerate() {
@@ -3947,9 +4144,7 @@ async fn post_succession_reseal_keeps_an_already_current_thumbnail_unmoved() {
 /// A head that never named a thumbnail is never even LOOKED UP — the
 /// discriminator this leg turns on.
 ///
-/// `regenerated == None` has two causes that are indistinguishable at the call
-/// site — "this file has no thumbnail" and "this build cannot render one" — and
-/// only the recorded head tells them apart.
+/// Only the recorded head says whether the file has a thumbnail to move.
 ///
 /// ⚠ **Assert the FETCH, not the outcome — the outcome is vacuous here, and was
 /// caught being so.** The first version of this test asserted "no blob was
@@ -4998,7 +5193,7 @@ impl OwnedIf for SyncEngine {
 /// The owner's bound on-demand engine still hydrates a pre-bind file — the
 /// record carries no stamp and rests under the owner root — while a member's
 /// bound engine holding the same generation cannot open it (decision 4 of
-/// `on-demand-files.md` § Shared sets on a capability host: every file stays
+/// `on-demand-files-shared-sets.md` § Shared sets on a capability host: every file stays
 /// openable on the owner's device through the share).
 #[tokio::test]
 async fn the_owners_bound_engine_still_hydrates_an_unstamped_prebind_file() {
@@ -5173,6 +5368,105 @@ async fn a_members_pass_leaves_an_unstamped_placeholder_alone() {
         store.last_manifest_hash.lock().unwrap().is_none(),
         "nothing was re-sealed"
     );
+}
+
+/// The one unstamped head a non-owner seat MATERIALIZES is a plaintext
+/// (public-window) record — here another writer's, the owner's declassified
+/// file — and a seat with no declassification anchor has no verdict on the
+/// folder's audience, so it is not its to move (`encryption-at-rest.md` §
+/// Readable classes → *Who may move a plaintext head*, 2026-10-13): the pass
+/// leaves it, moves nothing, and succeeds. The anchored twin below moves the
+/// same row. The gate's genuine head verdict is pinned against a real nest
+/// (`conformance_shared_folders::an_anchorless_writer_members_prebind_pass_leaves_an_owner_declassified_head_plaintext`);
+/// this harness admits every head, so what it pins is the selector alone.
+#[tokio::test]
+async fn an_anchorless_seats_pass_leaves_an_unstamped_head_another_writer_signed() {
+    let server = MockServer::start().await;
+    let store = MockNest::new().with_blob_plane().mount(&server).await;
+    let watch = tempfile::tempdir().unwrap();
+    // No reader-binding owner: the sync agent's member seat, which holds no
+    // MLS-recorded owner for the set.
+    let member = bound_engine_for(&server.uri(), watch.path(), None, [0x7bu8; 32], false);
+    let rel = "shared/index.html";
+    seed_materialized_head_signed_by(&member, watch.path(), rel, &[0x7cu8; 32]);
+
+    assert_eq!(
+        member
+            .reseal_pending_under_current()
+            .await
+            .expect("the member's pass succeeds"),
+        0,
+        "another writer's plaintext head is not an anchor-less seat's to move"
+    );
+    assert!(
+        store.last_manifest_hash.lock().unwrap().is_none(),
+        "nothing was re-sealed"
+    );
+    let row = member.db().get_entry(rel).unwrap().expect("row kept");
+    assert_eq!(row.content_key_version, None, "the row stays unstamped");
+}
+
+/// The twin: the same row on a member seat that HOLDS an anchor (its reader
+/// binding names the channel's MLS-recorded owner) is moved — the seat's
+/// verifier judges the audience itself, so its flip-back re-seal of a
+/// public-window head is a verdict-backed act (the engine-level arm the
+/// 2026-10-04 ruling kept). The record cannot land in this harness (see
+/// `expect_unrecorded`); the bytes moving is what the twin pins.
+#[tokio::test]
+async fn an_anchored_member_seats_pass_moves_an_unstamped_head_another_writer_signed() {
+    let server = MockServer::start().await;
+    let store = MockNest::new().with_blob_plane().mount(&server).await;
+    let watch = tempfile::tempdir().unwrap();
+    let member = bound_engine_for(&server.uri(), watch.path(), None, [0x7du8; 32], false);
+    let other_writer = [0x7cu8; 32];
+    member.set_reader_binding(fauna_protocol::sync_row_verify::ReaderBinding {
+        owner: Some(other_writer),
+        ..Default::default()
+    });
+    let rel = "shared/index.html";
+    seed_materialized_head_signed_by(&member, watch.path(), rel, &other_writer);
+
+    expect_unrecorded(member.reseal_pending_under_current().await, 1);
+    assert!(
+        store.last_manifest_hash.lock().unwrap().is_some(),
+        "the anchored seat re-sealed the head under the set's generation"
+    );
+}
+
+/// Seed what a non-owner seat holds after pulling another writer's plaintext
+/// head: the bytes on this disk, a `Synced` row whose recorded head carries no
+/// generation, and the head's signer persisted the way the pull's verify step
+/// persists it (`SyncDb::set_head_signed_as`).
+fn seed_materialized_head_signed_by(
+    engine: &SyncEngine,
+    watch: &std::path::Path,
+    rel: &str,
+    signer: &[u8; 32],
+) {
+    let content: Vec<u8> = (0..30_000u32)
+        .map(|i| (i.wrapping_mul(23) % 251) as u8)
+        .collect();
+    let full = watch.join(rel);
+    std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+    std::fs::write(&full, &content).unwrap();
+    let local_hash = ContentHash::of_raw(&content);
+    let head = ContentHash::of_raw(b"the other writer's plaintext manifest");
+    engine
+        .db()
+        .upsert_entry(
+            rel,
+            Some(local_hash),
+            Some(local_hash),
+            Some(head),
+            SyncState::Synced,
+            0,
+            0,
+            content.len() as i64,
+            1,
+            None, // a plaintext head carries no generation
+        )
+        .unwrap();
+    assert!(engine.db().set_head_signed_as(rel, &head, signer).unwrap());
 }
 
 /// A nest that serves bytes which do not address the recorded head gets

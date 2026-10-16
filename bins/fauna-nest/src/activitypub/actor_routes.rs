@@ -901,7 +901,7 @@ mod tests {
     /// `"ActivityPub not configured"` and every other AP route served
     /// `https://localhost/...` URLs, until a restart baked the domain into
     /// `nest.toml`. Federation was dead on every provisioned+claimed nest;
-    /// example.com only worked because it was configured with a domain *before*
+    /// the live nest only worked because it was configured with a domain *before*
     /// boot. Exactly the split-brain `domains-and-tls-bootstrap.md` § *Claim:
     /// the handle domain IS the deployment's identity domain* forbids.
     ///

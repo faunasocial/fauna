@@ -28,7 +28,8 @@ fn the_agent_consumes_the_apps_pins_and_can_never_mint_or_drop_one() {
     // (or e2e) launch must never read or write the box's real install-scoped
     // store — testing.md § conventions point 10, the same branch the apple
     // side takes in `NestTrust.installPinStore()`.
-    let trust = fauna_sync_agent::trust::trust_dir(Some(data_dir));
+    let trust = fauna_sync_agent::trust::trust_dir(Some(data_dir))
+        .expect("an override root always resolves");
     assert_eq!(trust, data_dir.join("trust"));
 
     // The interactive app — the sole minter — pins a TOFU-rooted nest.
@@ -38,7 +39,7 @@ fn the_agent_consumes_the_apps_pins_and_can_never_mint_or_drop_one() {
     app.set("pi.local", pi);
 
     // Agent startup.
-    fauna_sync_agent::trust::install_consumer_pin_store(Some(data_dir));
+    fauna_sync_agent::trust::install_consumer_pin_store(&trust);
 
     // Rule 1 — the agent reads the pin the app minted, so a TOFU-rooted nest is
     // reachable from an agent process at all (it was not, before this).

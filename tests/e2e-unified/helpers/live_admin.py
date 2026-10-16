@@ -1,4 +1,4 @@
-"""Shared UI-only admin steps for the `live_box` tests (tier_4, example.com).
+"""Shared UI-only admin steps for the `live_box` tests (tier_4, the live nest).
 
 Every live-box test reaches the admin shell the same way — import the admin
 secret, type a handle, run the REAL handle check, then branch on what the

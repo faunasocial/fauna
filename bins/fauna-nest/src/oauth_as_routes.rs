@@ -1703,7 +1703,7 @@ async fn record_and_issue(
             manifest: match crate::oauth_as_client::verified_manifest(client) {
                 Ok(manifest) => manifest
                     .as_ref()
-                    .map(crate::db::third_party_principals::PrincipalManifest::of),
+                    .and_then(crate::db::third_party_principals::PrincipalManifest::of),
                 Err(deny) => return oauth_error_response(&deny),
             },
         },

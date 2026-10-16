@@ -240,6 +240,12 @@ pub struct AccountGetRequest {
     pub extra: BTreeMap<String, Value>,
 }
 
+/// [`AccountEviction::status`] while the member still has full access — the
+/// warning (export) window, the one phase the member's own app raises its
+/// eviction critical alert for (`admin.md` § Cutting a user off → *The member
+/// is told*). The later phases are `suspended` and `deleting`.
+pub const EVICTION_STATUS_WARNING: &str = "warning";
+
 /// Eviction state — present (the HTTP twin's non-null `eviction` object) only
 /// when the account is under eviction (`UserRow.eviction_status` non-empty).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -247,7 +253,8 @@ pub struct AccountEviction {
     pub status: String,
     pub reason: String,
     pub category: String,
-    /// Micros since epoch; absent when not yet set.
+    /// Unix **seconds** (the nest's `start_eviction` stamps `now_epoch_secs`
+    /// and the two deadlines from it); absent when not yet set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warned_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

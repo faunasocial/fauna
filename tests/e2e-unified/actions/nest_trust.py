@@ -289,18 +289,17 @@ class NestTrustActions:
         time.sleep(1)
 
     # ── duration + blessing (nests.md § Expiry / renewal → Duration and
-    # blessing). Built on tui, linux, web, android, macOS and iOS; windows mints
-    # the standard window with no picker and no toggle until its lift.
+    # blessing). Built on every app.
 
     ONE_OFF_LABEL = S.nests.mint_duration_one_off
     STANDARD_LABEL = S.nests.mint_duration_standard
 
     def _has_duration_and_blessing(self) -> bool:
         """tui led; linux, web and android followed (2026-09-28), then macOS
-        and iOS. windows still mints the standard window with neither control."""
+        and iOS, then windows — every app renders both controls."""
         d = self.driver
         return (d.is_tui() or d.is_linux() or d.is_web() or d.is_android()
-                or d.is_macos() or d.is_ios())
+                or d.is_macos() or d.is_ios() or d.is_windows())
 
     def require_duration_and_blessing_supported(self) -> None:
         """Skip unless this app renders `nest-trust-mint-duration-select` and
@@ -434,14 +433,13 @@ class NestTrustActions:
         platform check lives in the action layer, not the test body).
 
         The clock itself is shared Rust and already feeds every native leg's
-        fold (and web's grant fold); tui, linux, web, android, macOS and iOS
-        expose the command (the apple pair through the shared FaunaKit
-        `TrustFacetClockTestCommand`). windows still owes its agent arm over
-        the UniFFI `set_trust_clock_offset_secs` door (testing.md § Default
-        app and nest mode)."""
+        fold (and web's grant fold); tui, linux, web, android, macOS, iOS and
+        windows expose the command (the apple pair through the shared FaunaKit
+        `TrustFacetClockTestCommand`; windows through its `TestAgent` arm over
+        the UniFFI `set_trust_clock_offset_secs` door)."""
         d = self.driver
         if not (d.is_tui() or d.is_linux() or d.is_web() or d.is_android()
-                or d.is_macos() or d.is_ios()):
+                or d.is_macos() or d.is_ios() or d.is_windows()):
             from helpers.app_surface import skip_unbuilt
 
             skip_unbuilt(
@@ -466,8 +464,8 @@ class NestTrustActions:
         )
 
     # ── custody rows + the escrow-holder badge (nests.md § Trust facet —
-    # custody rows; participants.md § The participant model). Rendered on tui,
-    # linux, web and android (nests.md § Implementation status today); the one
+    # custody rows; participants.md § The participant model). Rendered on every
+    # app (nests.md § Implementation status today); the one
     # journey that reads them mints its custody through the Devices-page
     # ceremony, so it gates through `CustodyActions.require_supported()` AND
     # `require_custody_rows_supported()` below — an app can drive the ceremony
@@ -478,14 +476,14 @@ class NestTrustActions:
         (`nest-trust-custody-*`) and the escrow-holder badge on its Nests page
         (e2e convention 7 — the platform check lives in the action layer).
 
-        tui, linux, web, android, macOS and iOS render them (apple via the
-        shared FaunaKit Nests page, 2026-09-29). windows drives the custody
-        ceremony (pieces 1 + 3 and the mint, 2026-09-28) but its Nests page does
-        not render the custodian-nest rows yet."""
+        tui, linux, web, android, macOS, iOS and windows render them (apple via
+        the shared FaunaKit Nests page, 2026-09-29). An app can drive the custody
+        ceremony before it renders the custodian-nest row it produces, so this
+        gate stays separate from `CustodyActions.require_supported()`."""
         d = self.driver
         if not (
             d.is_tui() or d.is_linux() or d.is_web() or d.is_android()
-            or d.is_macos() or d.is_ios()
+            or d.is_macos() or d.is_ios() or d.is_windows()
         ):
             from helpers.app_surface import skip_unbuilt
 

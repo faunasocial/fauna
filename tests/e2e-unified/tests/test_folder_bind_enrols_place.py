@@ -23,15 +23,18 @@ import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from helpers.folder_content import bind_location_under_set
+from helpers.set_names import addressed
 from helpers.waiting import wait_until
 
 pytestmark = [
     pytest.mark.tier_3,
-    # tui leads. linux and windows bind through the SAME agent seam, so their
-    # legs are a run, not a build; apple and android join when their
-    # on-demand toggle calls the enrol. Grow this list and the parametrization
-    # below together.
+    # tui leads. linux and windows joined once their confirmed bind repaints
+    # the expanded row (windows: OnBindingsChanged re-runs LoadPlaceRowsAsync);
+    # apple and android join when their on-demand toggle calls the enrol. Grow
+    # this list and the parametrization below together.
     pytest.mark.tui,
+    pytest.mark.linux,
+    pytest.mark.windows,
 ]
 
 # Generous ceiling (convention 14): the bind's agent round trip, the agent's
@@ -39,7 +42,7 @@ pytestmark = [
 _SEAT_WINDOW_SECS = 60.0
 
 
-@pytest.mark.parametrize("folder_share_owner_app", ["tui"], indirect=True)
+@pytest.mark.parametrize("folder_share_owner_app", ["tui", "linux", "windows"], indirect=True)
 @pytest.mark.real_conversations
 # The bind must reach a real agent — the seam under test lives there.
 @pytest.mark.real_sync_agent
@@ -60,7 +63,7 @@ def test_binding_a_location_gives_a_placeless_device_its_seat(
 
     def roster() -> list:
         with client:
-            return client.call("fauna.folders.members.list", {"name": name})["members"]
+            return client.call("fauna.folders.members.list", addressed(name))["members"]
 
     app.backups.navigate_folders()
     app.backups.create_folder_via_wizard(name)  # no device checked

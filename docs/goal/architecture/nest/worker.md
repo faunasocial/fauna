@@ -192,6 +192,13 @@ inbound frame of any kind re-arms the deadline within `liveness_timeout`; produc
 pair as the actual liveness signal (2026-08-01, `bins/fauna-nest/src/nest_link/proxy.rs`) — those
 wire messages stay in the protocol only for rolling-upgrade compatibility (§ Wire Protocol).
 
+Because the loop is one task, a `send` parked on a full TCP buffer would stop the dead arm from being
+polled. So every proxy send (the Ping and each command frame) is bounded by `liveness_timeout`, and
+one that cannot finish in that window ends the link exactly as a missed heartbeat does; a caller's
+enqueue (`cmd_tx`) and its reply wait are each bounded at 30 s. Pinned by
+`bins/fauna-nest/tests/nest_link_ws_server_heartbeat.rs` (two oversized `Store`s in flight, a worker
+that never reads).
+
 | Mechanism | Detail |
 |-----------|--------|
 | Auto-reconnect | Worker retries connection every 5 seconds on disconnect (`nest_link/client.rs`) |

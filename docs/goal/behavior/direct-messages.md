@@ -22,7 +22,7 @@ message flow diagrams.
 
 The entire surface is WS-RPC. Same-nest request/reply rides
 `fauna.conversations.channel.{send,fetch}`,
-`fauna.conversations.keypackage.{upload,fetch,count}`, and
+`fauna.conversations.keypackage.{upload,fetch,count,addressable}`, and
 `fauna.conversations.welcome.deliver` (the legacy HTTP twins are deleted).
 Cross-nest legs ride the nest↔nest `fauna.federation.{keypackage.fetch,
 welcome.deliver, channel.fetch}` channel — a client reaches only its *home*
@@ -321,11 +321,12 @@ Clients should maintain a pool of pre-published key packages so that peers can a
 | WS-RPC kind | Purpose |
 |-------------|---------|
 | `fauna.conversations.keypackage.upload` | Publish packages — an array of hex-encoded MLS key packages (`last_resort: bool` marks the reusable last-resort package) |
-| `fauna.conversations.keypackage.count` | Check how many valid packages remain |
+| `fauna.conversations.keypackage.count` | Check how many valid packages remain — **the caller's own only**; a request naming another actor is refused (`../architecture/federation.md` § Key packages — privacy & exhaustion owns the rule) |
+| `fauna.conversations.keypackage.addressable` | Whether a bare actor id can be reached — a boolean, never their count (owner: `../architecture/federation.md` § Key packages — privacy & exhaustion) |
 
 **Guidelines:**
 - Publish multiple packages at registration time (see `onboarding.md` — post-registration setup step).
-- **Replenish model (unified, ruling 2026-07-10):** the shared `ConversationsSession` tops the pool up to `KEYPACKAGE_TARGET = 20` (`libs/fauna-conversations/src/session.rs`) — the one replenish mechanism. The former per-app page-load floors (apple/android Settings→Encryption "count < 5 → publish 10") are deleted (android 2026-07-14, apple 2026-07-16) — both Settings pages now show a read-only count with an optional manual refresh that calls `ensure_keypackages` on the shared session; the "count < 5" state survives only as a read-only "low" display flag, never an auto-mint trigger.
+- **Replenish model (unified, ruling 2026-07-10):** the shared `ConversationsSession` tops the pool up to `KEYPACKAGE_TARGET = 20` (`libs/fauna-conversations/src/session.rs`) — the one replenish mechanism. The former per-app page-load floors (apple/android Settings→Encryption "count < 5 → publish 10") are deleted (android 2026-07-14, apple 2026-07-16) — both Settings pages now show a read-only count with an optional manual refresh that calls `ensure_keypackages` on the shared session; the "count < 5" state survives only as a read-only "low" display flag, never an auto-mint trigger — one threshold for all seven apps, `KEYPACKAGE_LOW_THRESHOLD = 5` beside the target, read through the shared `keypackages_low` (UniFFI; `keypackagesLow` in `fauna-wasm`), never a per-app literal (unified 2026-10-09: linux and tui had warned below ten, and web had published on merely opening the page). On the Settings → Encryption page the three surfaces carry the ids `encryption-keypackage-count`, `encryption-keypackage-refresh-button` and `encryption-keypackage-low-warning` (the last present only when low); the page is placed by [`../ui/settings.md`](../ui/settings.md) § Encryption page.
 - Each one-time package is consumed exactly once (FIFO). If the one-time pool empties, the nest serves the actor's reusable **last-resort** package without consuming it (§ Technical Flow — Same Nest → *1. Key Package Fetch* owns the rule), so the actor stays reachable; only when neither a one-time nor a last-resort package is on file can peers not initiate new DMs to this actor until more are published.
 - Packages expire after 30 days; the nest discards expired packages automatically.
 

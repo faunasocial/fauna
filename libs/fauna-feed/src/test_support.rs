@@ -104,6 +104,14 @@ pub struct TestPostSpec {
     /// `own_rooms` with the same id.
     #[serde(default)]
     pub gated_room: Option<String>,
+    /// On a repost row, the TARGET's tier and room (`PostSummary`'s
+    /// `reposted_gated_*`) — the card paints the target's `gated-post-badge`.
+    /// The room's label follows `gated_room`'s rule: seed `own_rooms` to paint
+    /// a member's card. Default `None` = a public target.
+    #[serde(default)]
+    pub reposted_gated_tier: Option<String>,
+    #[serde(default)]
+    pub reposted_gated_room: Option<String>,
     /// Web-publish slug driving the ⋯ overflow's own-post web verbs; default
     /// `None` = not published to the web.
     #[serde(default)]
@@ -284,11 +292,14 @@ impl TestPostSpec {
             reposted_post_id: self.reposted_post_id,
             gated_tier: self.gated_tier,
             gated_room: self.gated_room,
+            reposted_gated_tier: self.reposted_gated_tier,
+            reposted_gated_room: self.reposted_gated_room,
             web_slug: self.web_slug,
             gated_unlocked: false,
             labels: self.labels,
             unlock_offer: self.unlock_offer,
             tips: self.tips,
+            unlock_purchase_pending: false,
             // No spec field: a taken-down post has no body/author/tags to
             // specify, so a test wanting one mints it with the single-purpose
             // `PostSummary::taken_down` rather than by hollowing out a spec.

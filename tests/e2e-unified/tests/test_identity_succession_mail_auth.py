@@ -65,11 +65,6 @@ pytestmark = pytest.mark.tier_3
 # a-zA-Z0-9 only: pastes cleanly through SASL PLAIN.
 _PASSWORD = "SuccessionBurnPlainPw0007Kx"  # gitleaks:allow
 
-# The mailbox must exist before the ceremony can take it away: enable-mail mints
-# the credential, provisions the recipient pubkey, and (nest-side) writes the
-# canonical `<handle>@<domain>` alias. One client round trip on a loaded box.
-_ENABLE_S = 30.0
-
 
 def _require_mail_settings(app) -> None:
     """Skip, declaring the class, on an app with no mail-settings page."""
@@ -145,13 +140,16 @@ def test_a_succession_stops_the_predecessors_mail_password_authenticating(
     user = _make_user(nest)
     address = f"{user['handle']}@{domain}"
     app.driver.reset()
-    _login_app_as(app, request, nest, user)
+    # A web seat must reach THIS nest through its own SPA proxy; the default
+    # proxies the session nest, where this actor is unregistered.
+    _login_app_as(app, request, nest, user,
+                  spa_url_fixture="dedicated_mail_handle_domain_spa_url")
 
     # ── Precondition 1: a real mailbox with a known password ─────────────────
     app.mail_settings.navigate()
     _require_mail_settings(app)
     app.mail_settings.enable_mail_plain(_PASSWORD)
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=_ENABLE_S), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "enabling mail must mint the 'default' credential — the one the bridge's "
         "AUTH PLAIN path looks up — and the ceremony has nothing to take away "
         "without it; page error: "

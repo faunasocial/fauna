@@ -6,7 +6,7 @@ import Testing
 #if canImport(FileProvider)
 
     /// Headless pins for the actor-scoped device identity
-    /// (`on-demand-files.md` § Apple File Provider binding, *the actor-scoped
+    /// (`on-demand-files-apple.md` § Apple File Provider binding, *the actor-scoped
     /// device identity*): the three device registries the File Provider
     /// binding keeps per set — the domain identifier, the staging root and
     /// the on-demand-toggle preference — are keyed by the set's ref scoped to

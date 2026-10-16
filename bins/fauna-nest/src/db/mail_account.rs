@@ -132,6 +132,47 @@ impl CacheDb {
         )?;
         Ok(())
     }
+
+    /// The actor's receive and send switches (`mail.account.receive_enabled`
+    /// / `mail.account.send_enabled`, `mail-policy-config.md` § Tier 3) as
+    /// `(receive_enabled, send_enabled)`. An actor with no settings row has
+    /// both on — the catalog default.
+    pub async fn get_mail_switches(&self, actor_id: &[u8; 32]) -> Result<(bool, bool)> {
+        let conn = self.conn.lock().await;
+        let value: Option<(bool, bool)> = conn
+            .query_row(
+                "SELECT receive_enabled, send_enabled FROM mail_account_settings
+                 WHERE actor_id = ?1",
+                rusqlite::params![actor_id.as_slice()],
+                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?)),
+            )
+            .optional()?;
+        Ok(value.unwrap_or((true, true)))
+    }
+
+    /// Overwrite whichever of the two switches is `Some`, leaving the other
+    /// and every sibling column as they are (a fresh row takes the column
+    /// defaults for the rest).
+    pub async fn set_mail_switches(
+        &self,
+        actor_id: &[u8; 32],
+        receive_enabled: Option<bool>,
+        send_enabled: Option<bool>,
+    ) -> Result<()> {
+        let now = now_epoch_millis();
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO mail_account_settings
+                (actor_id, receive_enabled, send_enabled, updated_at)
+             VALUES (?1, COALESCE(?2, 1), COALESCE(?3, 1), ?4)
+             ON CONFLICT(actor_id) DO UPDATE SET
+                receive_enabled = COALESCE(?2, receive_enabled),
+                send_enabled = COALESCE(?3, send_enabled),
+                updated_at = excluded.updated_at",
+            rusqlite::params![actor_id.as_slice(), receive_enabled, send_enabled, now],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -215,5 +256,29 @@ mod tests {
             Some(2),
             "clearing the forward target must not clear the spam override"
         );
+    }
+
+    #[tokio::test]
+    async fn mail_switches_default_on_and_set_one_leaves_the_other() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let actor = [11u8; 32];
+        assert_eq!(db.get_mail_switches(&actor).await.unwrap(), (true, true));
+        db.set_mail_switches(&actor, Some(false), None)
+            .await
+            .unwrap();
+        assert_eq!(db.get_mail_switches(&actor).await.unwrap(), (false, true));
+        db.set_mail_switches(&actor, None, Some(false))
+            .await
+            .unwrap();
+        assert_eq!(db.get_mail_switches(&actor).await.unwrap(), (false, false));
+        db.set_mail_switches(&actor, Some(true), None)
+            .await
+            .unwrap();
+        assert_eq!(db.get_mail_switches(&actor).await.unwrap(), (true, false));
+        // A sibling upsert never clobbers the switches.
+        db.set_forward_all_to(&actor, Some("a@example.net"))
+            .await
+            .unwrap();
+        assert_eq!(db.get_mail_switches(&actor).await.unwrap(), (true, false));
     }
 }

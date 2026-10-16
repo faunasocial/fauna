@@ -146,7 +146,7 @@ pub const CLASS_CONTENT_WRITE: &str = "content.write";
 
 /// The **`deposit`** class — a holder may post files into one folder's inbox
 /// segment, which the nest seals on the owner's behalf to the owner's
-/// recipient key (`file-sync.md` § Third-party deposit ingress). Keyless: the
+/// recipient key (`folder-deposit.md`). Keyless: the
 /// holder writes blind and reads nothing, so the tuple is the owner-signed
 /// audit + revocation record alone (`encryption-at-rest.md` § Capability
 /// tiering → *Third-party holders*). The tuple's `set` names the folder by

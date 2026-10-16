@@ -31,11 +31,19 @@ struct Inner {
     state: State,
     token: TokenStatus,
     last_error: Option<String>,
-    /// Last identity the LAUNCH's silent challenge confirmed. Survives token
-    /// refreshes and offline dips — a refresh ignores its reply's metadata (the
-    /// launch owns the cached identity), so the last confirmed one stands until
-    /// the next launch replaces it.
+    /// Last identity a successful silent challenge confirmed — the launch's or
+    /// any later refresh's (each `VerifyReply` carries it). Survives offline
+    /// dips of the SAME account; cleared when a launch starts, when a verdict
+    /// says the identity no longer holds (`IdentityChanged`, `Superseded`),
+    /// and on an `Offline` whose persisted account is no longer the one it
+    /// was confirmed for. Mirrored on [`LaunchMachine::identity_tx`] by
+    /// [`LaunchMachine::transition`].
     identity: Option<LaunchIdentity>,
+    /// The account `identity` was confirmed for: the public key of the secret
+    /// the confirming challenge signed with — a fingerprint, never a second
+    /// copy of the secret. `None` when the secret was not a 32-byte key
+    /// (nothing to compare, so the `Offline` guard clears).
+    identity_account: Option<[u8; 32]>,
     /// The account-index refusal `start` read, if any — see
     /// `LaunchSnapshot::account_index_refusal`.
     account_index_refusal: Option<crate::AccountIndexRefusal>,
@@ -82,6 +90,16 @@ pub struct LaunchMachine {
     /// connection); tests inject a `MockAuthConnector` via
     /// `new_with_connector`.
     connector: Arc<dyn AuthConnector>,
+    /// [`Inner::identity`] as a watch — the source of
+    /// `fauna_nest_http::LaunchMachineBearer`'s
+    /// `BearerSource::subscribe_self_identity`, so a session client built over
+    /// this machine's bearer learns who it is signed in as without a challenge
+    /// of its own (`transport-connection.md` § The dial budget). Written only
+    /// by [`Self::transition`], so it can never disagree with the snapshot.
+    /// Native only: the wasm build has no tokio, and web reads its identity on
+    /// its own path.
+    #[cfg(not(target_arch = "wasm32"))]
+    identity_tx: tokio::sync::watch::Sender<Option<fauna_protocol::auth::MintedIdentity>>,
 }
 
 #[cfg_attr(feature = "uniffi", uniffi::export)]
@@ -150,6 +168,19 @@ impl LaunchMachine {
 // fact, and keeping it out leaves the UniFFI surface (and its generated
 // bindings) untouched.
 impl LaunchMachine {
+    /// Whether the machine is parked on the nest's needs-update verdict
+    /// (`fauna.nest.outdated`, the degraded boot — `version-compatibility.md`
+    /// § Dimension 4), from the launch arm or a mid-session refresh alike.
+    ///
+    /// The phase alone reads as a generic terminal offline; this is the seam
+    /// `fauna_nest_http::LaunchMachineBearer` reads to carry the verdict to the
+    /// reconnect supervisor typed. Out of the UniFFI surface for the reason
+    /// [`Self::bearer_actor_id`] is: apps render the phase and `last_error`,
+    /// which already say it.
+    pub fn needs_update(&self) -> Option<crate::auth::OutdatedSide> {
+        self.inner.lock().unwrap().state.needs_update()
+    }
+
     /// The actor id the bearer this machine mints names — i.e. *who the nest
     /// will think the caller is*. `None` before the machine holds a secret
     /// (Boot/Hydrating/Offline/wizard states), or if the held secret is not
@@ -309,6 +340,7 @@ impl LaunchMachine {
                 token: TokenStatus::None,
                 last_error: None,
                 identity: None,
+                identity_account: None,
                 account_index_refusal: None,
                 own_token_ids: Default::default(),
                 lock_refresh_spent_for: None,
@@ -316,7 +348,19 @@ impl LaunchMachine {
             persistence,
             observer,
             connector,
+            #[cfg(not(target_arch = "wasm32"))]
+            identity_tx: tokio::sync::watch::Sender::new(None),
         })
+    }
+
+    /// Subscribe to the identity the latest successful silent challenge
+    /// confirmed ([`Self::identity_tx`]): `None` until one lands, replaced by
+    /// every later launch or refresh, untouched by a failure.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn subscribe_identity(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<fauna_protocol::auth::MintedIdentity>> {
+        self.identity_tx.subscribe()
     }
 
     /// Construct with an injected [`AuthConnector`] — tests pass a
@@ -339,6 +383,11 @@ impl LaunchMachine {
     /// nest_url) runs the silent challenge inline over the [`AuthConnector`].
     pub async fn start(&self) {
         self.transition(|inner| {
+            // A launch confirms its own identity: whatever an earlier launch of
+            // this machine (an in-process account switch reuses it) left standing
+            // must not read as this account's until this challenge lands.
+            inner.identity = None;
+            inner.identity_account = None;
             inner.state = State::Hydrating;
         });
 
@@ -768,13 +817,20 @@ impl LaunchMachine {
             .await;
         match outcome {
             SilentChallengeOutcome::Success(v) => {
-                // The verify reply's cached metadata (`handle`/`domain`/`tier`)
-                // is ignored on a refresh: the launch phase owns the persisted
-                // identity, and a mid-session rename shows on the next launch —
-                // the behaviour the handshake refresh (which carried no metadata)
-                // already had.
+                // The verify reply's identity (`handle`/`domain`/`tier`) is
+                // published, not persisted: the launch phase owns the stored
+                // identity, but the live channel (`LaunchSnapshot::identity`,
+                // the session client's identity watch) carries every re-mint's
+                // reply, so a mid-session rename reaches the app at the next
+                // hourly refresh (`transport-connection.md` § The dial budget).
                 let expires_at_secs = Self::deadline_on_own_clock(v.expires_in, v.expires_at);
                 self.transition(|inner| {
+                    inner.identity = Some(LaunchIdentity {
+                        handle: v.handle,
+                        domain: v.domain,
+                        tier: v.tier,
+                    });
+                    inner.identity_account = Self::account_fingerprint(&secret);
                     inner.last_error = None;
                     inner.lock_refresh_spent_for = None;
                     inner.token = TokenStatus::Valid { expires_at_secs };
@@ -818,14 +874,14 @@ impl LaunchMachine {
                     Self::set_last_error(inner, error);
                 });
             }
-            SilentChallengeOutcome::NeedsUpdate { message } => {
+            SilentChallengeOutcome::NeedsUpdate { message, outdated } => {
                 // The nest is in degraded "needs-update" mode. Land in the
                 // non-transient offline state (no retry spin) and paint the
                 // localized, actionable update banner — distinguishable from a
                 // transient connectivity blip (version-compatibility.md Dim 4).
                 self.transition(|inner| {
                     inner.token = TokenStatus::Expired;
-                    inner.state = State::Offline { transient: false };
+                    inner.state = State::NeedsUpdate { outdated };
                     Self::set_last_error(inner, message);
                 });
             }
@@ -1079,6 +1135,7 @@ impl LaunchMachine {
                         domain: v.domain,
                         tier: v.tier,
                     });
+                    inner.identity_account = Self::account_fingerprint(secret);
                     inner
                         .own_token_ids
                         .record(v.token_id.clone(), expires_at_secs);
@@ -1154,12 +1211,12 @@ impl LaunchMachine {
                     Self::set_last_error(inner, error);
                 });
             }
-            SilentChallengeOutcome::NeedsUpdate { message } => {
+            SilentChallengeOutcome::NeedsUpdate { message, outdated } => {
                 // Degraded nest — non-transient offline + actionable update
                 // banner (the silent-challenge twin of the token-refresh arm).
                 self.transition(|inner| {
                     inner.token = TokenStatus::Expired;
-                    inner.state = State::Offline { transient: false };
+                    inner.state = State::NeedsUpdate { outdated };
                     Self::set_last_error(inner, message);
                 });
             }
@@ -1219,11 +1276,68 @@ impl LaunchMachine {
         }
     }
 
+    /// The public key of a 32-byte account secret — the non-secret fingerprint
+    /// `Inner::identity_account` records. `None` for any other length.
+    fn account_fingerprint(secret: &[u8]) -> Option<[u8; 32]> {
+        let arr = <[u8; 32]>::try_from(secret).ok()?;
+        Some(
+            ed25519_dalek::SigningKey::from_bytes(&arr)
+                .verifying_key()
+                .to_bytes(),
+        )
+    }
+
     fn transition<F: FnOnce(&mut Inner)>(&self, f: F) {
-        {
+        // `Some(confirmed account)` when the state landed `Offline` holding an
+        // identity: only then is the persisted account worth reading.
+        let offline_check = {
             let mut inner = self.inner.lock().unwrap();
             f(&mut inner);
+            // The verdicts that say the confirmed identity no longer holds.
+            if matches!(
+                inner.state,
+                State::IdentityChanged { .. } | State::Superseded { .. }
+            ) {
+                inner.identity = None;
+                inner.identity_account = None;
+            }
+            match (&inner.state, &inner.identity) {
+                (State::Offline { .. }, Some(_)) => Some(inner.identity_account),
+                _ => None,
+            }
+        };
+        // `Offline` keeps the identity only for the account it was confirmed
+        // for; the persisted account is read outside the lock.
+        if let Some(confirmed) = offline_check {
+            let current = self
+                .persistence
+                .load_identity()
+                .and_then(|s| Self::account_fingerprint(&s));
+            if confirmed.is_none() || confirmed != current {
+                let mut inner = self.inner.lock().unwrap();
+                if matches!(inner.state, State::Offline { .. })
+                    && inner.identity_account == confirmed
+                {
+                    inner.identity = None;
+                    inner.identity_account = None;
+                }
+            }
         }
+        #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+        let identity = self.inner.lock().unwrap().identity.clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.identity_tx.send_if_modified(|current| {
+            let next = identity.map(|i| fauna_protocol::auth::MintedIdentity {
+                handle: i.handle,
+                domain: i.domain,
+                tier: i.tier,
+            });
+            if *current == next {
+                return false;
+            }
+            *current = next;
+            true
+        });
         self.observer.on_changed();
     }
 

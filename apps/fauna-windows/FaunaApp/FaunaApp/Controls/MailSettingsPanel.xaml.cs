@@ -8,6 +8,9 @@ using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
+using FaunaApp.Helpers;
+using FaunaApp.Core.Helpers;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
 using uniffi.fauna_ffi;
@@ -60,16 +63,36 @@ public sealed partial class MailSettingsPanel : UserControl
     /// page surfaces it through its own page-level <c>error-message</c> element.</summary>
     public event Action<string?>? ErrorChanged;
 
+    // The Forwarding section's view-model (plain RPC reads/writes, not a machine action).
+    private MailForwardingViewModel? _forwarding;
+    private bool _forwardingLoading;
+
     public MailSettingsPanel()
     {
         this.InitializeComponent();
+        Unloaded += (_, _) => AftermathSettled.Settled -= OnAftermathSettled;
+        // Both set_forward_* kinds are OnlineOnly (offline_class.rs); the commit paths
+        // are the Enter handlers on these inputs.
+        ForwardAllToInput.FaunaGate("fauna.bridges.set_forward_all_to");
+        ForwardPerHourInput.FaunaGate("fauna.bridges.set_forward_per_hour");
     }
 
     /// <summary>Supplied by the host page (SettingsMailPage.OnNavigatedTo) before Loaded
     /// fires — carries the secrets used to build the WS client.</summary>
     internal void Configure(ServiceClients clients) => _clients = clients;
 
-    private async void Panel_Loaded(object sender, RoutedEventArgs e) => await LoadAsync();
+    private async void Panel_Loaded(object sender, RoutedEventArgs e)
+    {
+        AftermathSettled.Settled -= OnAftermathSettled;
+        AftermathSettled.Settled += OnAftermathSettled;
+        await LoadAsync();
+    }
+
+    /// <summary>The succession aftermath's mail burn has settled while this page is on
+    /// screen (succession-aftermath.md § MSEK leg): re-read through the same load path
+    /// so the burned credentials stop painting as live. Raised off the UI thread.</summary>
+    private void OnAftermathSettled() =>
+        DispatcherQueue.TryEnqueue(async () => await LoadAsync());
 
     private async Task EnsureMachineAsync()
     {
@@ -116,9 +139,27 @@ public sealed partial class MailSettingsPanel : UserControl
     private async Task DispatchAsync(MailSettingsAction action)
     {
         if (_machine is null) return;
-        try { await _machine.Dispatch(action); }
+        // The snapshot is only folded when the dispatch returns, so a change that is
+        // still running would never show its live status (mail-settings.md § Status
+        // indicator): poll the machine's own status while the dispatch is in flight.
+        var machine = _machine;
+        var live = new Microsoft.UI.Xaml.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+        live.Tick += (_, _) => PaintLiveStatus(machine.Snapshot());
+        live.Start();
+        try { await machine.Dispatch(action); }
         catch (Exception) { /* surfaced via snapshot.error below */ }
-        RenderSnapshot(_machine.Snapshot());
+        finally { live.Stop(); }
+        RenderSnapshot(machine.Snapshot());
+    }
+
+    /// <summary>Paint the machine's live non-idle status (syncing / rotating) and gate
+    /// the rotate button on it, without folding the rest of the snapshot.</summary>
+    private void PaintLiveStatus(MailSettingsSnapshot snap)
+    {
+        if (snap.status is SettingsStatus.Idle) return;
+        StatusIndicator.Text =
+            S.Resolve(FaunaClientMailSettingsMethods.SettingsStatusLabel(snap.status, snap.enabled));
+        RotateKeysButton.IsEnabled = false;
     }
 
     private void RenderSnapshot(MailSettingsSnapshot snap)
@@ -173,6 +214,11 @@ public sealed partial class MailSettingsPanel : UserControl
         ManageGroup.Visibility = mailbox ? Visibility.Visible : Visibility.Collapsed;
         RotateKeysButton.Visibility =
             snap.credentials.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        // One rotation at a time (mail-settings.md § Architectural rules 5): disabled
+        // while one is pending (interrupted, awaiting Resume) or running. The shared
+        // machine already refuses a second StartRotation — this is the visible half.
+        RotateKeysButton.IsEnabled =
+            snap.pendingRotation is null && snap.status is not SettingsStatus.RotationInProgress;
         // keys-info explainer: visible alongside the manage group (mailbox provisioned).
         KeysInfoText.Visibility = mailbox ? Visibility.Visible : Visibility.Collapsed;
 
@@ -214,6 +260,59 @@ public sealed partial class MailSettingsPanel : UserControl
         ServeHereGroup.Visibility = mailbox ? Visibility.Visible : Visibility.Collapsed;
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
             ServeHereToggle, snap.servingEnabled ? "on" : "off");
+
+        // Forwarding fields: shown while mail is enabled; first shown → read the persisted
+        // values (the load is a plain RPC read, not part of the machine snapshot).
+        ForwardingGroup.Visibility = snap.enabled ? Visibility.Visible : Visibility.Collapsed;
+        if (snap.enabled && _forwarding is null) _ = LoadForwardingAsync();
+    }
+
+    // ── Forwarding (forward-all address + hourly limit) ──
+
+    private async Task LoadForwardingAsync()
+    {
+        if (_clients?.Rpc is not { } rpc || _forwardingLoading) return;
+        _forwardingLoading = true;
+        try
+        {
+            var vm = new MailForwardingViewModel(rpc);
+            await vm.LoadAsync();
+            _forwarding = vm;
+            PaintForwarding(repaintAddress: true, repaintLimit: true);
+        }
+        finally { _forwardingLoading = false; }
+    }
+
+    /// <summary>Repaint the persisted values (each half only when it was just
+    /// confirmed, so committing one field never wipes the other's draft) and surface
+    /// the section's error on the page's <c>error-message</c>.</summary>
+    private void PaintForwarding(bool repaintAddress, bool repaintLimit)
+    {
+        if (_forwarding is not { } vm) return;
+        if (repaintAddress) ForwardAllToInput.Text = vm.ForwardAllToText;
+        if (repaintLimit)
+        {
+            ForwardPerHourInput.Text = vm.ForwardPerHourText;
+            ForwardPerHourHint.Text = vm.ForwardPerHourHint;
+        }
+        ErrorChanged?.Invoke(vm.Error);
+    }
+
+    /// <summary>Save-on-Enter. A refused draft repaints nothing (the field keeps what the
+    /// user typed, next to the reason); a nest-confirmed write repaints the persisted
+    /// value. On a nest refusal the field is re-read so it shows what the account kept.</summary>
+    private async void ForwardAllToInput_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != Windows.System.VirtualKey.Enter || _forwarding is not { } vm) return;
+        await vm.CommitForwardAllToAsync(ForwardAllToInput.Text);
+        PaintForwarding(repaintAddress: vm.Error is null, repaintLimit: false);
+    }
+
+    private async void ForwardPerHourInput_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != Windows.System.VirtualKey.Enter || _forwarding is not { } vm) return;
+        await vm.CommitForwardPerHourAsync(ForwardPerHourInput.Text);
+        PaintForwarding(repaintAddress: false, repaintLimit: vm.Error is null);
     }
 
     // ── Enable toggle ──
@@ -475,6 +574,8 @@ public sealed partial class MailSettingsPanel : UserControl
         foreach (var cred in _machine.Snapshot().credentials)
         {
             var cb = new CheckBox { Content = cred.displayName };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(
+                cb, FaunaApp.UiIds.Ids.MailRotateKeysExcludeItem);
             RotateExcludeList.Children.Add(cb);
             _rotateChecks.Add((cred.credentialId, cb));
         }

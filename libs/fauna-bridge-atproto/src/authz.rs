@@ -673,16 +673,8 @@ fn implicit_grant(class: LexiconClass, dm: bool, dm_allowed: bool) -> AuthzVerdi
         | LexiconClass::Dm
         | LexiconClass::AppView
         | LexiconClass::ServiceAuthMint => AuthzVerdict::Allow,
-        LexiconClass::AccountMutation => AuthzVerdict::deny(
-            ERR_INVALID_TOKEN,
-            "account and credential management happens in your Fauna app, not over \
-             the ATProto API",
-        ),
-        LexiconClass::Migration => AuthzVerdict::deny(
-            ERR_NOT_IMPLEMENTED,
-            "account migration is not yet served by this PDS; repo export via \
-             com.atproto.sync.getRepo is already public",
-        ),
+        LexiconClass::AccountMutation => fauna_surface_refusal(),
+        LexiconClass::Migration => migration_refusal(),
         LexiconClass::Unknown => AuthzVerdict::deny(
             ERR_INVALID_TOKEN,
             "this method is not covered by the PDS authorization policy",
@@ -716,12 +708,39 @@ fn authorize_oauth(input: &AuthzInput, class: LexiconClass, dm: bool) -> AuthzVe
     // Prefer the transition arm's refusal when there was one: it names the
     // actual reason (a missing DM class, a refused account op) where the
     // granular fallback can only say "nothing covered it".
-    transition.unwrap_or_else(|| {
-        AuthzVerdict::deny(
+    //
+    // And the two classes NO scope can ever cover answer their own refusal on
+    // every grant, not only on one holding a transition scope: "no granted
+    // scope covers this" would send a narrow grant's client off to ask for a
+    // wider one, which could never help (D6's fauna-surface refusal says
+    // where to go instead — `atproto-pds-full.md` § Problem 4).
+    transition.unwrap_or_else(|| match class {
+        LexiconClass::AccountMutation => fauna_surface_refusal(),
+        LexiconClass::Migration => migration_refusal(),
+        _ => AuthzVerdict::deny(
             ERR_INVALID_TOKEN,
             "no granted scope covers this method and audience",
-        )
+        ),
     })
+}
+
+/// D6's *fauna-surface* refusal: the capability exists, only in Fauna apps,
+/// and the message says so.
+fn fauna_surface_refusal() -> AuthzVerdict {
+    AuthzVerdict::deny(
+        ERR_INVALID_TOKEN,
+        "account and credential management happens in your Fauna app, not over \
+         the ATProto API",
+    )
+}
+
+/// D6's *deferred* refusal: planned, not yet built — never policy.
+fn migration_refusal() -> AuthzVerdict {
+    AuthzVerdict::deny(
+        ERR_NOT_IMPLEMENTED,
+        "account migration is not yet served by this PDS; repo export via \
+         com.atproto.sync.getRepo is already public",
+    )
 }
 
 /// The classes **no** granular OAuth scope reaches, whatever it names.
@@ -1367,6 +1386,41 @@ mod tests {
             ))),
             ERR_INVALID_TOKEN
         );
+    }
+
+    /// D6's sub-typed refusals hold on EVERY OAuth grant, not only one carrying
+    /// a transition scope: a narrow grant asking for an app password must be
+    /// told where that lives, never "no granted scope covers this" — no scope
+    /// ever could, so that answer would send its client off to ask for a
+    /// wider grant for nothing.
+    #[test]
+    fn a_narrow_grant_gets_the_sub_typed_refusal_for_account_and_migration_lexicons() {
+        for scopes in [&["atproto"][..], &["atproto", "repo:*", "rpc:*?aud=*"][..]] {
+            for lxm in [
+                "com.atproto.server.createAppPassword",
+                "com.atproto.server.listAppPasswords",
+                "com.atproto.server.revokeAppPassword",
+                "com.atproto.server.requestAccountDelete",
+                "com.atproto.server.deleteAccount",
+            ] {
+                let v = authorize(oauth(scopes, lxm));
+                let AuthzVerdict::Deny { message, .. } = &v else {
+                    panic!("{lxm} under {scopes:?}: expected a Deny, got {v:?}")
+                };
+                assert!(
+                    message.contains("your Fauna app"),
+                    "{lxm} under {scopes:?} must name where it lives: {message:?}"
+                );
+            }
+            assert_eq!(
+                deny_name(&authorize(oauth(
+                    scopes,
+                    "com.atproto.server.activateAccount"
+                ))),
+                ERR_NOT_IMPLEMENTED,
+                "migration stays DEFERRED under {scopes:?}, never policy",
+            );
+        }
     }
 
     #[test]

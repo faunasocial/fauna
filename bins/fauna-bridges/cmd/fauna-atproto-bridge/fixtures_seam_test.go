@@ -107,3 +107,14 @@ func TestPermissionSetFixtureSeamServesOnlyTheMappedSets(t *testing.T) {
 }
 
 func atprotolexResolver(r *seamProbeResolver) atprotolex.DocumentResolver { return r }
+
+func TestCrawlRelaySeamNamesOnlyTheFixtureRelay(t *testing.T) {
+	t.Setenv(crawlRelayEnv, "")
+	if got := crawlRelays(); len(got) != 0 {
+		t.Fatalf("an e2e bridge with no fixture relay must announce to nobody, got %v", got)
+	}
+	t.Setenv(crawlRelayEnv, " http://127.0.0.1:4321 ")
+	if got := crawlRelays(); len(got) != 1 || got[0] != "http://127.0.0.1:4321" {
+		t.Fatalf("the fixture relay must be the only relay, got %v", got)
+	}
+}

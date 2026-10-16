@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.fauna.app.R
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.SecureStorage
+import com.fauna.app.ui.util.loadFailureText
 import com.fauna.ffi.FfiHeavyTaskCapability
 import com.fauna.ffi.FfiPinOption
 import com.fauna.ffi.FfiTaskDelegationRow
@@ -74,7 +75,7 @@ class TaskDelegationVM @Inject constructor(
      * NestClient RPC (transport.md § Request lifecycle step 3's note).
      */
     fun load() {
-        val deviceIdHex = secureStorage.deviceId
+        val deviceIdHex = secureStorage.resolveDeviceId()
         if (deviceIdHex == null) {
             errorMessage.value = context.getString(R.string.task_delegation_error_device_id)
             return
@@ -90,7 +91,7 @@ class TaskDelegationVM @Inject constructor(
                         loadDeviceLabels()
                         return@launch
                     } catch (e: Exception) {
-                        errorMessage.value = e.message
+                        errorMessage.value = e.loadFailureText()
                     }
                 }
                 delay(HYDRATE_RETRY_MS)
