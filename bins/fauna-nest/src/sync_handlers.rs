@@ -37,8 +37,9 @@ use fauna_protocol::sync::{
 use fauna_protocol::{RpcError, decode_strict as decode, encode_canonical};
 
 use crate::db::sync_storage::{DeviceQuotaError, StorageQuotaError};
-use crate::routes::{AppState, parse_32_bytes as parse_device_id};
+use crate::routes::{AppState, SetGate, parse_32_bytes as parse_device_id};
 use crate::rpc_router::{RpcHandler, RpcKindMeta, RpcRouterBuilder};
+use fauna_protocol::folders::SetAddressed;
 
 /// Error namespace for the `fauna.sync.*` kinds.
 const SYNC: &str = "sync";
@@ -130,23 +131,15 @@ use crate::bridge_method_allowlist::require_permission_default as require_permis
 /// `crate::folder_authz::resolve_readable_folder`; the three write-plane
 /// kinds a `writer` member may reach resolve through
 /// [`crate::folder_authz::resolve_writable_folder`].
+///
+/// The request's address is read through the trait — its row when carried,
+/// else its name/hash (`set-addressing.md` § The row form).
 async fn owned_folder(
     state: &AppState,
     actor_id: &[u8; 32],
-    name: &str,
-    name_hash: Option<&[u8; 32]>,
+    req: &impl SetAddressed,
 ) -> Result<crate::db::FolderRow, RpcError> {
-    let row = match name_hash {
-        Some(h) => {
-            state
-                .db
-                .get_folder_for_actor_by_name_hash(h, actor_id)
-                .await
-        }
-        None => state.db.get_folder_for_actor(name, actor_id).await,
-    };
-    row.map_err(internal)?
-        .ok_or_else(|| coded("not_found", "folder not found"))
+    crate::routes::resolve_set(&state.db, SYNC, req, SetGate::Owner, actor_id).await
 }
 
 /// The write gate — the owner, or a roster member with an explicit `writer`
@@ -194,23 +187,29 @@ async fn owned_folder(
 ///    the owner's own live set on their own nest, and is refused rather than
 ///    written into — the same typed refusal, for the same reason, as the
 ///    federated arm's.
+///
+/// 5. **Never by row**: a request carrying `folder_id` names an existing row
+///    by construction, so an unresolved row is `not_found` and never mints
+///    (`set-addressing.md` § The row form, *The row wins*).
 async fn writable_or_provisioned_backup_set(
     state: &AppState,
     actor_id: &[u8; 32],
-    name: &str,
-    name_hash: Option<&[u8; 32]>,
+    req: &impl SetAddressed,
 ) -> Result<crate::db::FolderRow, RpcError> {
-    if let Some(fs) =
-        crate::folder_authz::resolve_writable_folder(&state.db, name, name_hash, actor_id)
-            .await
-            .map_err(internal)?
+    let address = crate::routes::parse_set_address(req, |msg| coded("invalid_request", msg))?;
+    if let Some(fs) = crate::folder_authz::resolve_writable_folder(&state.db, address, actor_id)
+        .await
+        .map_err(internal)?
     {
         return Ok(fs);
     }
 
     // Nothing resolved. Mint only if the *declared* name is one the shared
     // derivation produces — a hash-addressed request cannot be, since a hash
-    // names no set this nest has ever seen.
+    // names no set this nest has ever seen, and a row-addressed one never is.
+    let crate::folder_authz::FolderAddress::Name { name, .. } = address else {
+        return Err(coded("not_found", "folder not found"));
+    };
     let segment_axis =
         fauna_sync_engine::segment_backup::parse_reserved_backup_set_name(name).is_some();
     let folder_axis = fauna_core::data::parse_folder_backup_set_name(name).is_some();
@@ -266,13 +265,9 @@ async fn writable_or_provisioned_backup_set(
 async fn readable_folder(
     state: &AppState,
     actor_id: &[u8; 32],
-    name: &str,
-    name_hash: Option<&[u8; 32]>,
+    req: &impl SetAddressed,
 ) -> Result<crate::db::FolderRow, RpcError> {
-    crate::folder_authz::resolve_readable_folder(&state.db, name, name_hash, actor_id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| coded("not_found", "folder not found"))
+    crate::routes::resolve_set(&state.db, SYNC, req, SetGate::Reader, actor_id).await
 }
 
 /// Map a stored `SyncChangeRow` into the wire `SyncChange` (hex-encoding the
@@ -613,7 +608,7 @@ fn require_pop_triple_or_none<'a>(
 ///   reconcile's nest-side revoke (§ Credential model, *Not in scope,
 ///   deliberately*) has been waiting for, and the arm a runtime revokes a
 ///   removed member's grant with at every nest it completes
-///   (`account-data-taxonomy.md` § Fleet-scope reclamation, clause (4) → *The
+///   (`fleet-scope-reclamation.md` § Fleet-scope reclamation, clause (4) → *The
 ///   nest half follows merged state*). It refuses the key a guardian-marked
 ///   row carries while the account is supervised, as that row's deletion is
 ///   refused.
@@ -808,8 +803,23 @@ async fn verify_device_key_pop(
 fn changes_list_handler() -> RpcHandler {
     Box::new(|state, actor_id, payload| {
         Box::pin(async move {
-            require_permission(&state, &actor_id, "fauna.sync.changes.list").await?;
+            let class = crate::bridge_method_allowlist::require_permission(
+                &state.db,
+                &actor_id,
+                "fauna.sync.changes.list",
+                crate::rpc_errors::internal,
+            )
+            .await?;
             let req: SyncChangesListRequest = decode(&payload).map_err(malformed)?;
+
+            // The custodian-NEST serve door (`account-replica-posture.md` §
+            // the custodian-NEST serve door, ruling 1): an owner-fleet device
+            // reads the copy this nest HOLDS for its owner, answered from the
+            // custodied store — before every branch below, so a fleet bearer
+            // never reaches the nest's own tables or the federation relay.
+            if class == crate::bridge_method_allowlist::CallerClass::CustodiedFleet {
+                return crate::custody_fleet::serve_changes_list(&state, &actor_id, &req).await;
+            }
 
             // Parsed unconditionally, like every other `name_hash`-accepting kind
             // — a malformed hash refuses here rather than being skipped on the
@@ -895,11 +905,12 @@ fn changes_list_handler() -> RpcHandler {
             // stop sending the cleartext name. Reading it only inside the
             // `folder.is_some()` arm answered a one-set question with every set
             // the caller owns.
-            let changes = if req.folder.is_some() || name_hash.is_some() {
+            let changes = if req.folder.is_some() || name_hash.is_some() || req.folder_id.is_some()
+            {
                 // Read (S2-P3): the owner OR a member of a group-bound shared set.
-                // Hash-first when present, so the empty name is never read.
-                let name = req.folder.as_deref().unwrap_or("");
-                let fs = readable_folder(&state, &actor_id, name, name_hash.as_ref()).await?;
+                // The row when carried, else hash-first, so the empty name is
+                // never read.
+                let fs = readable_folder(&state, &actor_id, &req).await?;
                 let exclude = req.device_id.as_deref().and_then(parse_device_id);
                 state
                     .db
@@ -935,19 +946,24 @@ fn changes_list_handler() -> RpcHandler {
     })
 }
 
-/// `fauna.sync.changes.list` for a principal session — the `records` arm's
-/// read door (`third-party-kinds.md` § The record doors). It serves exactly
-/// the class-2 feed of an `ext:<kind>` scope the session's grant covers, on
-/// the account's own feed, and refuses every other selector the actor door
-/// takes: a folder, a cross-nest route, a custody `of_owner`, another item
-/// class — so a principal lists `state`, `state-fleet` or a content scope by
-/// no spelling.
+/// `fauna.sync.changes.list` for a principal session — a *scope-dispatched*
+/// kind (`apps/bridges.md` § Capability-allowlist enforcement, rule (c)'s
+/// first refinement): the request's scope names the arm. An `ext:<kind>`
+/// scope is the `records` arm's read door (`third-party-kinds.md` § The
+/// record doors) — served when one of the session's `records` qualifiers
+/// covers the kind; the scope `state` is the `fauna:personalization:rw` arm's
+/// read-only list of the delegable cluster (`authorization-server.md` § Scope
+/// grammar → *The fifth arm*) — served when the session holds that arm. Every
+/// other spelling refuses, so a principal lists `state-fleet` or a content
+/// scope by none. On the account's own feed, refusing every other selector
+/// the actor door takes: a folder, a cross-nest route, a custody `of_owner`,
+/// another item class.
 pub(crate) fn principal_changes_list_handler() -> crate::principal_handlers::PrincipalHandler {
     Box::new(|state, caller, payload| {
         Box::pin(async move {
             use fauna_protocol::account_state::ItemClass;
             let mut req: SyncChangesListRequest = decode(&payload).map_err(malformed)?;
-            principal_ext_scope(&caller, req.scope.as_deref().unwrap_or_default(), SYNC)?;
+            principal_list_scope(&caller, req.scope.as_deref().unwrap_or_default())?;
             let state_feed = ItemClass::StateEntry.as_wire();
             if req.item_class.as_deref() != Some(state_feed)
                 || req.folder.is_some()
@@ -957,7 +973,7 @@ pub(crate) fn principal_changes_list_handler() -> crate::principal_handlers::Pri
             {
                 return Err(coded(
                     "invalid_request",
-                    format!("a connected app lists only its own ext:<kind> {state_feed:?} feed"),
+                    format!("a connected app lists only a granted scope's {state_feed:?} feed"),
                 ));
             }
             // A principal is not one of the account's replicas: it marks no
@@ -1068,8 +1084,8 @@ pub(crate) async fn serve_account_state_feed(
         });
     };
 
-    // The retention gate's mark (`account-data-taxonomy.md` § The generation
-    // machinery → *Fleet-scope reclamation*, clause (1)): a walker that names
+    // The retention gate's mark (`fleet-scope-reclamation.md`
+    // § *Fleet-scope reclamation*, clause (1)): a walker that names
     // itself beside the watermark it banked is recording "I hold every row at
     // or below this seq" — the claim `fauna.account.state.retire` consults.
     // Only the actor's OWN scope is marked: a custody-session pull of another
@@ -1464,6 +1480,31 @@ pub(crate) fn principal_account_state_put_handler() -> crate::principal_handlers
     })
 }
 
+/// The list's scope dispatch (rule (c)'s first refinement): `state` is the
+/// fifth arm's, read only — refused unless the session holds
+/// `fauna:personalization:rw`; every other spelling is the `records` arm's
+/// per-kind check below.
+fn principal_list_scope(
+    caller: &crate::principal_handlers::PrincipalCaller,
+    scope: &str,
+) -> Result<(), RpcError> {
+    use fauna_bridge_atproto::fauna_scope::{FaunaScopeArm, arm_of};
+    if scope == fauna_protocol::account_state::ACCOUNT_STATE_SCOPE {
+        if caller
+            .scopes
+            .iter()
+            .any(|s| arm_of(s) == Some(FaunaScopeArm::PersonalizationRw))
+        {
+            return Ok(());
+        }
+        return Err(crate::rpc_errors::permission_denied_ns(
+            SYNC,
+            "this connection's grant does not cover the state scope",
+        ));
+    }
+    principal_ext_scope(caller, scope, SYNC).map(|_| ())
+}
+
 /// The `records` arm's per-kind reach check (`third-party-kinds.md` § The
 /// record doors): `scope` must spell `ext:<kind>` and one of the session's
 /// `records` qualifiers must cover the kind — structurally, by the parsed
@@ -1530,7 +1571,7 @@ async fn serves_state_scope(
 /// Validate and record one sealed class-2 entry on `account`'s scope feed —
 /// the put every door shares once its caller is authorized: the account's own
 /// devices (the connection actor) and a principal writing its own kinds.
-async fn put_state_entry(
+pub(crate) async fn put_state_entry(
     state: &AppState,
     account: &[u8; 32],
     req: &fauna_protocol::account_state::AccountStatePutRequest,
@@ -1678,8 +1719,8 @@ async fn put_state_entry(
 
 /// The class-2 feed's own compaction — mark one live row superseded without
 /// inserting anything, behind the retention gate and the generation belt
-/// (`CacheDb::retire_account_state_entry` owns both; `account-data-taxonomy.md`
-/// § The generation machinery → *Fleet-scope reclamation*, clause (1)).
+/// (`CacheDb::retire_account_state_entry` owns both; `fleet-scope-reclamation.md`
+/// § *Fleet-scope reclamation*, clause (1)).
 /// Authorization is the connection actor, exactly like the put: the request
 /// carries no actor id and a caller can only ever compact their own scope.
 fn account_state_retire_handler() -> RpcHandler {
@@ -1924,14 +1965,13 @@ fn changes_record_handler() -> RpcHandler {
             // Multi-writer Phase 1: the owner OR a `writer`-granted roster member
             // records (file-sync.md § Multi-writer shared sets — this is one of
             // the exactly-three widened kinds).
-            let name_hash = parse_name_hash(&req.name_hash)?;
-            let fs = writable_or_provisioned_backup_set(
-                &state,
-                &actor_id,
-                &req.folder,
-                name_hash.as_ref(),
-            )
-            .await?;
+            //
+            // A carried `folder_id` names the row: resolved under the write
+            // gate alone, never falling through to the name forms and never
+            // provisioning (a row names an existing row by construction), so a
+            // same-named own set cannot shadow the shared set the writer meant
+            // (`set-addressing.md` § The row form).
+            let fs = writable_or_provisioned_backup_set(&state, &actor_id, &req).await?;
 
             // The metering + floor + backup/web routing is IDENTICAL to the
             // cross-nest federated record relay (`federation.md` § Cross-nest…):
@@ -2470,7 +2510,9 @@ pub(crate) fn notify_owner_sync_changed(state: &AppState, fs: &crate::db::Folder
 /// the head manifest it has **verified retrievable + decryptable end-to-end**;
 /// the DB marks older rows only if that hash equals the live head, so the head
 /// is structurally unmarkable and a stale verify can't unpin live data
-/// (`webdav-server.md` § Architectural rules "deletes nothing until verified").
+/// (`webdav-server.md` § Architectural rules "deletes nothing until verified"),
+/// and only if the row directly below the head carries the manifest the
+/// caller's re-seal sourced from, so a stale reissue can't bury a newer edit.
 /// Owner-only + write-capable device (the `changes.record` gates): supersede is
 /// a write, and the owner is the sole writer of a shared set.
 fn changes_supersede_handler() -> RpcHandler {
@@ -2497,8 +2539,7 @@ fn changes_supersede_handler() -> RpcHandler {
                 None => return Err(coded("device_unregistered", "device not registered")),
             }
 
-            let name_hash = parse_name_hash(&req.name_hash)?;
-            let fs = owned_folder(&state, &actor_id, &req.folder, name_hash.as_ref()).await?;
+            let fs = owned_folder(&state, &actor_id, &req).await?;
 
             // A reserved (`__*`) backup destination set never enters
             // `sync_changes` — its custody projection is latest-per-path
@@ -2515,10 +2556,23 @@ fn changes_supersede_handler() -> RpcHandler {
             let path_hash: [u8; 32] = fauna_core::sync::path_hash(&req.path);
             let manifest_hash = parse_device_id(&req.manifest_hash)
                 .ok_or_else(|| coded("invalid_request", "invalid manifest_hash hex"))?;
+            let source_manifest_hash = req
+                .source_manifest_hash
+                .as_deref()
+                .map(|h| {
+                    parse_device_id(h)
+                        .ok_or_else(|| coded("invalid_request", "invalid source_manifest_hash hex"))
+                })
+                .transpose()?;
 
             match state
                 .db
-                .supersede_sync_changes_for_path(fs.id, &path_hash, &manifest_hash)
+                .supersede_sync_changes_for_path(
+                    fs.id,
+                    &path_hash,
+                    &manifest_hash,
+                    source_manifest_hash.as_ref(),
+                )
                 .await
                 .map_err(internal)?
             {
@@ -2534,6 +2588,15 @@ fn changes_supersede_handler() -> RpcHandler {
                 crate::db::sync_storage::SupersedeOutcome::HeadMismatch => Err(coded(
                     "supersede_head_mismatch",
                     "manifest is not the path's live head; re-verify and retry",
+                )),
+                // Deferred, not a fault: the head is not a reissue of the row
+                // directly below it (a stale re-seal recorded after a newer
+                // edit, or a caller that named no source). Marking would bury
+                // the newer edit, so nothing is marked; the client logs and
+                // defers exactly as for a head mismatch.
+                crate::db::sync_storage::SupersedeOutcome::SourceNotHead => Err(coded(
+                    "supersede_source_not_head",
+                    "the head is not a reissue of the row below it; nothing marked",
                 )),
             }
         })
@@ -2585,8 +2648,7 @@ fn status_handler() -> RpcHandler {
             // even for a shared set — members read content, not topology. Reuse
             // the owner-scoped row rather than re-fetching name-only (which could
             // resolve a same-named row owned by another user).
-            let name_hash = parse_name_hash(&req.name_hash)?;
-            let fs = owned_folder(&state, &actor_id, &req.folder, name_hash.as_ref()).await?;
+            let fs = owned_folder(&state, &actor_id, &req).await?;
 
             // The folder's content reachability — the same verdict
             // `fauna.media.list` stamps on each item (`file-sync.md`
@@ -2615,8 +2677,7 @@ fn files_handler() -> RpcHandler {
             let req: SyncFilesRequest = decode(&payload).map_err(malformed)?;
 
             // Read (S2-P3): the owner OR a member of a group-bound shared set.
-            let name_hash = parse_name_hash(&req.name_hash)?;
-            let fs = readable_folder(&state, &actor_id, &req.folder, name_hash.as_ref()).await?;
+            let fs = readable_folder(&state, &actor_id, &req).await?;
             let files = state
                 .db
                 .get_files_for_folder(fs.id)

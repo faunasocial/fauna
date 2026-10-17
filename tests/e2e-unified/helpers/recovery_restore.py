@@ -1,7 +1,9 @@
 """The phrase-only restore, as the kit journeys drive it — shared steps.
 
-Shared by ``tests/test_recovery_kit_restore.py`` and
-``tests/test_recovery_kit_ceremonies.py``: every journey that ends "…and the
+Shared by ``tests/test_recovery_kit_restore.py``,
+``tests/test_recovery_kit_ceremonies.py`` and
+``tests/test_custody_recovery_copy_journey.py`` (the restore at a custodian
+nest): every journey that ends "…and the
 phrase brings the account back" takes the same steps — name the account, lose
 every device, open ``recovery_entry``, wait for the ceremony to land, prove the
 seed is the account's — and two copies of them would drift apart.
@@ -12,7 +14,7 @@ refusals) and ``docs/goal/behavior/identity-succession.md`` § Seed escrow →
 """
 from __future__ import annotations
 
-from helpers.app_surface import skip_unbuilt
+from helpers.app_surface import skip_environment, skip_unbuilt
 from helpers.waiting import wait_until
 
 #: How long a restore may take to land or refuse: challenge, sign, fetch, unseal
@@ -55,6 +57,34 @@ def qualified_account(app, nest_instance) -> str:
     bare_handle = app.driver.get_state("session.handle")
     assert bare_handle, "the fixture must be signed in with a real nest handle"
     return f"{bare_handle}@{nest_instance['url'].split('//', 1)[1]}"
+
+
+def copy_the_shown_kit(app, phrase: str) -> str:
+    """Press copy on the kit on screen and return what reached the clipboard.
+
+    Asserts it is the same kit in its account-naming form — the
+    ``fauna://recovery`` URI — without ever putting the secret in a message.
+    """
+    try:
+        before = app.driver.get_clipboard_text()
+    except NotImplementedError:
+        skip_environment(
+            f"the {app.driver.__class__.__name__} driver cannot read what the "
+            "app copies, so the copied kit cannot be carried to the restore"
+        )
+    app.settings.copy_recovery_kit()
+    wait_until(
+        lambda: app.driver.get_clipboard_text() not in (None, before),
+        10.0,
+        diagnose=lambda: "pressing copy put nothing new on the clipboard",
+    )
+    copied = app.driver.get_clipboard_text()
+    assert copied.startswith("fauna://recovery"), (
+        "copy carries the kit's URI form, which names the account; the "
+        "clipboard holds something else"
+    )
+    assert phrase in copied, "the copied kit must be the kit on screen"
+    return copied
 
 
 def point_the_restore_at(app, nest_instance) -> None:

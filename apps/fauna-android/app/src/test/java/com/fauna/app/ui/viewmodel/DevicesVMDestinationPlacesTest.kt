@@ -86,7 +86,7 @@ class DevicesVMDestinationPlacesTest {
         whenever(api.folderChangedTick).thenReturn(tick)
         whenever(api.reconnectTick).thenReturn(MutableSharedFlow())
         whenever(api.storeChangedTick).thenReturn(MutableSharedFlow())
-        val vm = DevicesVM(api, resolveService, secureStorage, appContext, OfflineShareHost(appContext))
+        val vm = DevicesVM(api, resolveService, secureStorage, appContext, OfflineShareHost(appContext), FakeOnDemandToggle())
         return Fixture(vm, api)
     }
 

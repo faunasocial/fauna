@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The feed post card's ⋯ overflow: the trained-topic-factor training verbs
@@ -515,3 +518,4 @@ public struct FeedPostMutedPlaceholder: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
+#endif // !FAUNA_KIDS

@@ -103,12 +103,18 @@ class FakeCloud:
         self._h = httpserver
         # Per-backend handler classes installed in install_default_routes.
         self.hetzner_cloud = HetznerCloudHandlers(httpserver, "/hetzner-cloud")
+        # OVH, reached through the retire view's `vps` override when a test
+        # picks it (`ovh.base_url()`): the one provider whose rows are unmarked.
+        self.ovh = OvhHandlers(httpserver, "/ovh")
         self.cloudflare = CloudflareHandlers(httpserver, "/cloudflare")
         self.hetzner_dns = HetznerDnsHandlers(httpserver, "/hetzner-dns")
         self.nest = NestHandlers(httpserver, "/nest")
         # The bundled-provider reference server (fake_bundled.py) — reached by
         # the base URL the test TYPES into the wizard, not by an override.
         self.bundled = BundledHandlers(httpserver, "/bundled")
+        # The public resolver the retire view's attribution falls back to when
+        # no DNS credential covers a domain's zone (DNS-over-HTTPS JSON).
+        self.doh = DohHandlers(httpserver, "/doh")
 
     def url_map(self) -> dict[str, str]:
         base = self._h.url_for("").rstrip("/")
@@ -116,6 +122,7 @@ class FakeCloud:
             "vps": f"{base}/hetzner-cloud",
             "dns": f"{base}/cloudflare",
             "nest": f"{base}/nest",
+            "doh": f"{base}/doh",
         }
 
     # `nest_only_url_map()` — `{"nest": <this fake's /nest>}` — is DELETED, not
@@ -150,10 +157,47 @@ class FakeCloud:
             re.compile(r".*"), method="OPTIONS"
         ).respond_with_data("", status=200, headers=_CORS)
         self.hetzner_cloud.install_defaults()
+        self.ovh.install_defaults()
         self.cloudflare.install_defaults()
         self.hetzner_dns.install_defaults()
         self.nest.install_defaults()
         self.bundled.install_defaults()
+        self.doh.install_defaults()
+
+
+class DohHandlers:
+    """A DNS-over-HTTPS JSON resolver — the shape the retire view's public-DNS
+    read (`fauna_provisioning::probe::dns_a_lookup_with_base_url`) asks for:
+    ``GET <base>/dns-query?name=<n>&type=A`` answering ``{"Status", "Answer"}``.
+
+    ``a_records`` is the whole zone file: a name that is absent answers
+    NXDOMAIN, so a domain no test points at the box never verifies."""
+
+    def __init__(self, httpserver: HTTPServer, prefix: str) -> None:
+        self._h = httpserver
+        self._prefix = prefix
+        self.a_records: dict[str, list[str]] = {}
+
+    def install_defaults(self) -> None:
+        self._h.expect_request(
+            f"{self._prefix}/dns-query", method="GET"
+        ).respond_with_handler(self._query)
+
+    def _query(self, request):
+        name = request.args.get("name", "").rstrip(".").lower()
+        addresses = self.a_records.get(name, []) if request.args.get("type") == "A" else []
+        body = {
+            "Status": 0 if addresses else 3,
+            "Answer": [
+                {"name": name, "type": 1, "TTL": 60, "data": ip} for ip in addresses
+            ],
+        }
+        return _Resp(
+            json.dumps(body),
+            status=200,
+            content_type="application/json",
+            headers=list(_CORS.items()),
+        )
 
 
 class HetznerCloudHandlers:
@@ -301,8 +345,15 @@ class HetznerCloudHandlers:
             for s in self.managed_servers
             if s.get("labels", {}).get(key) == value
         ]
+        # Paged like the real API (`page`/`per_page`, `meta.pagination.next_page`
+        # null on the last page), so a list longer than one page can only be
+        # complete if the adapter walks every page.
+        page = int(request.args.get("page", "1"))
+        per_page = int(request.args.get("per_page", "50"))
+        window = out[(page - 1) * per_page : page * per_page]
+        next_page = page + 1 if page * per_page < len(out) else None
         return _Resp(
-            json.dumps({"servers": out, "meta": {"pagination": {"next_page": None}}}),
+            json.dumps({"servers": window, "meta": {"pagination": {"next_page": next_page}}}),
             status=200,
             content_type="application/json",
             headers=list(_CORS.items()),
@@ -365,6 +416,104 @@ class HetznerCloudHandlers:
         )
 
 
+class OvhHandlers:
+    """Stubs for the OVH Cloud API the retire view reads
+    (libs/fauna-provisioning/src/vps/ovh.rs): the signing clock, the project
+    list, each project's instance list, the instance delete, and the reverse
+    (PTR) read the attribution makes. Signatures are not checked — only that a
+    signed request carries one.
+
+    OVH instance-create has no label field, so nothing here is marked: every
+    instance a project holds is listed, and the retire view shows each behind
+    the unmarked note (nest-retirement.md § Layout & flow)."""
+
+    def __init__(self, httpserver: HTTPServer, prefix: str) -> None:
+        self._h = httpserver
+        self._prefix = prefix
+        # project id → the instances `GET .../instance` answers.
+        self.projects: dict[str, list[dict]] = {}
+        # (project, instance id) per DELETE, in order.
+        self.deleted: list[tuple[str, str]] = []
+        # ipv4 → the reverse name; an address absent here answers 404 (unset).
+        self.reverse: dict[str, str] = {}
+
+    def base_url(self) -> str:
+        return self._h.url_for("").rstrip("/") + self._prefix
+
+    def seed_instance(
+        self, project: str, instance_id: str, name: str, ipv4: str
+    ) -> dict:
+        instance = {
+            "id": instance_id,
+            "name": name,
+            "created": "2026-01-02T03:04:05+00:00",
+            "ipAddresses": [{"ip": ipv4, "version": 4, "type": "public"}],
+        }
+        self.projects.setdefault(project, []).append(instance)
+        return instance
+
+    @staticmethod
+    def _json(body, status: int = 200):
+        return _Resp(
+            json.dumps(body),
+            status=status,
+            content_type="application/json",
+            headers=list(_CORS.items()),
+        )
+
+    def _signed(self, request) -> bool:
+        return bool(request.headers.get("X-Ovh-Signature"))
+
+    def _project_list(self, request):
+        if not self._signed(request):
+            return self._json({"message": "unsigned"}, 401)
+        return self._json(sorted(self.projects))
+
+    def _instances(self, request):
+        if not self._signed(request):
+            return self._json({"message": "unsigned"}, 401)
+        project = request.path.split("/")[-2]
+        if project not in self.projects:
+            return self._json({"message": "no such project"}, 404)
+        return self._json(self.projects[project])
+
+    def _delete(self, request):
+        parts = request.path.split("/")
+        project, instance_id = parts[-3], parts[-1]
+        self.deleted.append((project, instance_id))
+        held = self.projects.get(project, [])
+        kept = [i for i in held if i["id"] != instance_id]
+        status = 204 if len(kept) < len(held) else 404
+        if project in self.projects:
+            self.projects[project] = kept
+        return _Resp(b"", status=status, headers=list(_CORS.items()))
+
+    def _reverse(self, request):
+        ip = request.path.split("/")[-1]
+        name = self.reverse.get(ip)
+        if name is None:
+            return self._json({"message": "no reverse"}, 404)
+        return self._json({"ipReverse": ip, "reverse": name})
+
+    def install_defaults(self) -> None:
+        p = re.escape(self._prefix)
+        self._h.expect_request(f"{self._prefix}/1.0/auth/time", method="GET").respond_with_data(
+            "1700000000", headers=_CORS
+        )
+        self._h.expect_request(
+            f"{self._prefix}/1.0/cloud/project", method="GET"
+        ).respond_with_handler(self._project_list)
+        self._h.expect_request(
+            re.compile(rf"^{p}/1\.0/cloud/project/[^/]+/instance$"), method="GET"
+        ).respond_with_handler(self._instances)
+        self._h.expect_request(
+            re.compile(rf"^{p}/1\.0/cloud/project/[^/]+/instance/[^/]+$"), method="DELETE"
+        ).respond_with_handler(self._delete)
+        self._h.expect_request(
+            re.compile(rf"^{p}/1\.0/ip/[^/]+/reverse/[^/]+$"), method="GET"
+        ).respond_with_handler(self._reverse)
+
+
 class CloudflareHandlers:
     """Stubs for the Cloudflare API endpoints the orchestrator hits.
     See libs/fauna-provisioning/src/dns/cloudflare.rs."""
@@ -415,6 +564,22 @@ class CloudflareHandlers:
         )
 
 
+def zone_file_txt(value: str) -> str:
+    """A bare TXT value in the zone-file form Hetzner Cloud DNS stores and
+    returns: one or more ``"…"`` character-strings of at most 255 octets,
+    joined by spaces — a DKIM key is longer than one. The adapter quotes on
+    write and on delete and unquotes on read
+    (``HetznerDns::to_zone_file_txt`` / ``from_zone_file_txt`` in
+    ``libs/fauna-provisioning/src/dns/hetzner.rs``), so a TXT seeded bare is a
+    record no real zone holds, and its value-scoped delete never matches."""
+    if value.startswith('"'):
+        return value
+    raw = value.encode()
+    return " ".join(
+        f'"{raw[i : i + 255].decode()}"' for i in range(0, max(len(raw), 1), 255)
+    )
+
+
 class HetznerDnsHandlers:
     """Stubs for Hetzner DNS via the **Hetzner Cloud API** (RRset model,
     ``api.hetzner.cloud/v1``). The standalone ``dns.hetzner.com/api/v1`` went
@@ -459,6 +624,14 @@ class HetznerDnsHandlers:
         """Put one record value in the zone, under its zone-relative ``name``
         (``@`` at the apex) — what the RRset read then reports."""
         self.rrsets.setdefault((str(zone_id), name, record_type), []).append(value)
+
+    def seed_txt(self, name: str, value: str, zone_id: int = 42) -> str:
+        """Put one TXT value in the zone in the form the real API stores it —
+        :func:`zone_file_txt` — and return that stored form (what ``records``
+        then reports)."""
+        stored = zone_file_txt(value)
+        self.seed_record(name, "TXT", stored, zone_id)
+        return stored
 
     def records(self, zone_id: int = 42) -> list[tuple[str, str, str]]:
         """Every ``(name, type, value)`` still in the zone."""

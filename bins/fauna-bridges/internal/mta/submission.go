@@ -151,9 +151,13 @@ type submissionSession struct {
 	authenticated bool
 
 	// Set by D.2 AUTH:
-	actorID         []byte
-	credentialID    string
-	authedLocalPart string
+	actorID      []byte
+	credentialID string
+	// authedHandle is the actor's canonical handle as validate_recipient
+	// reported it at AUTH — "" when the actor has none. NOT the login's
+	// local part: a login may be an exact alias, owned only on its own
+	// domain, where the handle is owned on every active local domain.
+	authedHandle string
 	// submissionToken holds the unwrapped policy payload — quotas,
 	// expiry, max-recipients — that D.3 (MAIL FROM + RCPT TO +
 	// quota) and D.7 (per-credential lockout) consume. Holds no
@@ -244,6 +248,11 @@ type resolvedLocalRcpt struct {
 	forward          bool
 	forwardTarget    string
 	forwarderActorID []byte
+
+	// processor marks a reserved role address a nest processor consumes
+	// (dmarc-report@ / tlsrpt@ → their report ingests): Data hands the
+	// message to it via dispatchProcessor, no local copy, no seal key.
+	processor string
 }
 
 // now is a session-level convenience that forwards to the backend's
@@ -316,9 +325,10 @@ func (s *submissionSession) Auth(mech string) (sasl.Server, error) {
 //     is closed-relay; we don't accept submission for non-local domains).
 //     A non-local domain returns 553 5.7.1.
 //   - The MAIL FROM local-part MUST resolve to an address the
-//     authenticated actor owns. The authenticated login handle
-//     (s.authedLocalPart) is always owned, so it takes a cheap fast-path
-//     with no RPC. Any OTHER local-part (an alias the user chose in their
+//     authenticated actor owns. The actor's handle (s.authedHandle, as
+//     the nest reported it at AUTH — not the login, which may be an alias)
+//     is always owned, so it takes a cheap fast-path with no RPC. Any OTHER
+//     local-part (an alias the user chose in their
 //     MUA's "From" selector — e.g. macOS Mail lets the user pick any of
 //     their addresses) is resolved via fauna.bridges.resolve_recipient
 //     and accepted only when it resolves to the authenticated actor
@@ -358,7 +368,7 @@ func (s *submissionSession) Mail(from string, _ *gosmtp.MailOptions) error {
 	}
 	s.mu.Lock()
 	authed := s.authenticated
-	authedLocal := s.authedLocalPart
+	handle := s.authedHandle
 	actorID := s.actorID
 	s.mu.Unlock()
 
@@ -396,12 +406,12 @@ func (s *submissionSession) Mail(from string, _ *gosmtp.MailOptions) error {
 	// Local-part ownership — the one sender-ownership predicate, shared
 	// with Data()'s From: header check (mail-multidomain.md § Cross-domain
 	// submission policy → Required invariants).
-	if err := s.assertSenderOwned(localPart, domain, authedLocal, actorID); err != nil {
+	if err := s.assertSenderOwned(localPart, domain, handle, actorID); err != nil {
 		return err
 	}
 
 	s.mu.Lock()
-	s.envelopeFrom = localPart + "@" + strings.ToLower(domain)
+	s.envelopeFrom = localPart + "@" + strings.ToLower(strings.TrimRight(domain, "."))
 	s.recipientCount = 0
 	s.recipients = nil
 	s.localResolved = nil
@@ -417,13 +427,14 @@ func (s *submissionSession) Mail(from string, _ *gosmtp.MailOptions) error {
 //   - domain is an ACTIVE local domain, exactly — a subdomain the signer would
 //     key under its parent hosts no mailbox, so nothing on it can be owned
 //     (550 5.7.1); and
-//   - localPart is the authenticated login handle, compared
-//     case-insensitively (the handle is owned on every active local domain —
-//     mail-multidomain.md § Multi-domain handles — and validate_recipient
-//     returned it canonical at AUTH time, so no RPC is needed); or
+//   - localPart is the actor's HANDLE, compared case-insensitively (the
+//     handle is owned on every active local domain — mail-multidomain.md
+//     § Multi-domain handles — and validate_recipient reported it at AUTH
+//     time, so no RPC is needed). Never the login's local part: a login may
+//     be an exact alias, owned only on the domain it names; or
 //   - localPart is an alias resolve_recipient attributes to this actor
 //     (assertMailFromOwned; 550 5.7.1 when not, 451 4.7.1 when unverifiable).
-func (s *submissionSession) assertSenderOwned(localPart, domain, authedLocal string, actorID []byte) error {
+func (s *submissionSession) assertSenderOwned(localPart, domain, handle string, actorID []byte) error {
 	if !containsFoldDomain(s.backend.cfg.current().localDomains, domain) {
 		return &gosmtp.SMTPError{
 			Code:         550,
@@ -431,14 +442,14 @@ func (s *submissionSession) assertSenderOwned(localPart, domain, authedLocal str
 			Message:      "Sender not authorized for this address",
 		}
 	}
-	if strings.EqualFold(localPart, authedLocal) {
+	if handle != "" && strings.EqualFold(localPart, handle) {
 		return nil
 	}
 	return s.assertMailFromOwned(localPart, domain, actorID)
 }
 
 // assertMailFromOwned verifies that a sender address whose local-part differs
-// from the authenticated login handle is nonetheless an address the
+// from the actor's handle is nonetheless an address the
 // authenticated actor owns, by resolving it through
 // fauna.bridges.resolve_recipient and comparing the owning actor_id
 // with actorID (mail-multidomain.md § Cross-domain submission policy). The
@@ -466,11 +477,11 @@ func (s *submissionSession) assertMailFromOwned(localPart, domain string, actorI
 	// mirror the RCPT resolver and pass the primary-domain anchor.
 	senderDomain := s.backend.cfg.current().primaryDomain
 	ctx, cancel := context.WithTimeout(context.Background(), auth.RPCTimeout)
-	// Empty sender_address: this resolves the MAIL FROM address itself, to check
+	// An ownership probe: this resolves the MAIL FROM address itself, to check
 	// the authenticated actor owns it — it is not a delivery to a recipient, so
-	// the nest's guardian mail gate must not weigh in (an empty address reads as
-	// a known sender and is never rejected).
-	res, err := wsrpc.ResolveRecipient(ctx, client, localPart, domain, senderDomain, "")
+	// neither the nest's guardian mail gate nor the owner's receive switch may
+	// weigh in (an account with receiving off still sends from its addresses).
+	res, err := wsrpc.ResolveRecipientOwner(ctx, client, localPart, domain, senderDomain)
 	cancel()
 	if err != nil {
 		if s.backend.logger != nil {
@@ -586,6 +597,16 @@ func (s *submissionSession) Rcpt(to string, _ *gosmtp.RcptOptions) error {
 		ctx, cancel := context.WithTimeout(context.Background(), auth.RPCTimeout)
 		allowed, _, err := wsrpc.CheckSubmissionQuota(ctx, client, actorID, rc, recipientIsLocal)
 		cancel()
+		if code, ok := wsrpc.RpcErrorCode(err); ok && code == wsrpc.CodeSendDisabled {
+			// The sender's own send switch is off (mail-policy-config.md
+			// § Tier 3): permanent until they turn it back on, so a 5xx.
+			s.revertLastRecipient()
+			return &gosmtp.SMTPError{
+				Code:         550,
+				EnhancedCode: gosmtp.EnhancedCode{5, 7, 1},
+				Message:      "Sending is turned off for this account",
+			}
+		}
 		if err != nil {
 			if s.backend.logger != nil {
 				s.backend.logger.Warn("mta: check_submission_quota transport error",
@@ -682,6 +703,11 @@ func (s *submissionSession) resolveLocalRecipient(addr, localPart, domain string
 			forwardTarget:    res.ForwardTarget,
 			forwarderActorID: res.ForwarderActorID,
 		}, nil
+	case wsrpc.ResolveProcessor:
+		// A processor role address (dmarc-report@, tlsrpt@): no mailbox, no seal key.
+		// Data hands the message to the processor, as the inbound MX path does
+		// (dmarc-reporting.md § Envelope-time routing).
+		return &resolvedLocalRcpt{addr: addr, processor: res.Processor}, nil
 	case wsrpc.ResolveResolved:
 		// fall through to the MLS-pubkey confirmation below.
 	default:
@@ -804,8 +830,12 @@ func (s *submissionSession) revertLastRecipient() {
 func (s *submissionSession) Data(r io.Reader) error {
 	s.mu.Lock()
 	authed := s.authenticated
-	authedLocal := s.authedLocalPart
+	handle := s.authedHandle
 	actorID := s.actorID
+	var submissionToken []byte
+	if s.submissionToken != nil {
+		submissionToken = append([]byte(nil), s.submissionToken.CanonicalBytes...)
+	}
 	rcpts := append([]string(nil), s.recipients...)
 	localResolved := append([]resolvedLocalRcpt(nil), s.localResolved...)
 	// The outbound envelope sender is the address the session validated as
@@ -929,7 +959,7 @@ func (s *submissionSession) Data(r io.Reader) error {
 	}
 	fromMailbox := fromMailboxes[0]
 	if _, signsFor := mailfauna.SelectSigningDomain(fromMailbox.Host, s.backend.cfg.current().localDomains); signsFor {
-		if err := s.assertSenderOwned(fromMailbox.Mailbox, fromMailbox.Host, authedLocal, actorID); err != nil {
+		if err := s.assertSenderOwned(fromMailbox.Mailbox, fromMailbox.Host, handle, actorID); err != nil {
 			if s.backend.logger != nil {
 				s.backend.logger.Info("mta: submission rejected — From: header not owned by the authenticated actor",
 					"from", fromMailbox.Mailbox+"@"+fromMailbox.Host,
@@ -962,7 +992,7 @@ func (s *submissionSession) Data(r io.Reader) error {
 	// rejects an EMPTY original_msgid, so a Message-ID-less submission used
 	// to die at DATA with a misleading transient 451 ("Outbound enqueue
 	// temporarily unavailable") that no retry can ever clear — root-caused
-	// live 2026-07-09 against example.com + the :latest image. Stamped BEFORE
+	// live 2026-07-09 against the live nest + the :latest image. Stamped BEFORE
 	// the enqueue so the DKIM signature covers it and the Sent copy carries it.
 	if extractMessageID(raw) == "" {
 		idDomain := s.backend.cfg.current().primaryDomain
@@ -1064,11 +1094,15 @@ func (s *submissionSession) Data(r io.Reader) error {
 	// — redirect to an external target, no local copy). A local user emailing a
 	// forwarder address (e.g. info@<our-domain>) reaches the external destination
 	// through the same shared forward dispatch the inbound MX path uses.
-	var forwarders []resolvedLocalRcpt
+	var forwarders, processors []resolvedLocalRcpt
 	localMailboxes := make([]resolvedLocalRcpt, 0, len(localResolved))
 	for _, r := range localResolved {
 		if r.forward {
 			forwarders = append(forwarders, r)
+			continue
+		}
+		if r.processor != "" {
+			processors = append(processors, r)
 			continue
 		}
 		localMailboxes = append(localMailboxes, r)
@@ -1095,6 +1129,19 @@ func (s *submissionSession) Data(r io.Reader) error {
 			return tempErr
 		}
 	}
+	// Processor recipients (dmarc-report@, tlsrpt@), in the same before-any-local-copy
+	// position for the same reason. The sender is an authenticated local user,
+	// so no inbound authentication ran: the verdicts are "none".
+	for _, p := range processors {
+		env := wsrpc.ReportSourceEnvelope{
+			ClientIP:    s.sourceIP,
+			MailFrom:    sender,
+			AuthResults: noAuthVerdicts(),
+		}
+		if tempErr := dispatchProcessor(s.backend.client, s.backend.logger, p.processor, raw, env, s.now().Unix()); tempErr != nil {
+			return tempErr
+		}
+	}
 
 	if err := s.dispatchFaunaRecipients(raw, &parsed, faunaActors, senderDomain, envelopeFrom); err != nil {
 		return err
@@ -1103,16 +1150,20 @@ func (s *submissionSession) Data(r io.Reader) error {
 	if len(externalRcpts) > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), auth.RPCTimeout)
 		defer cancel()
-		// nil onBehalfOfActor: the MTA submission path is sender-unconstrained
-		// (nest trusts the AUTH'd submitter); only the MDA auto-schedule gateway
-		// passes a caller-scope actor. When the body was staged above, the inline
-		// raw is empty and the reference carries it (mutually exclusive: nest
-		// recovers the identical bytes from the staged ciphertext).
+		// onBehalfOfActor is the AUTH'd submitter: nest holds the From: header
+		// to it a second time, nest-side, because the nest's DKIM signature is
+		// what vouches for that header (mail-multidomain.md § From: header
+		// ownership). The submission token AUTH unwrapped rides beside it as the
+		// proof — nest takes no MTA's word for whom it submits (§ *Per door,
+		// nest-side*). When the body was staged above, the inline raw is empty
+		// and the reference carries it (mutually exclusive: nest recovers the
+		// identical bytes from the staged ciphertext).
 		outboundRaw := raw
 		if stagedRef != nil {
 			outboundRaw = nil
 		}
-		if _, err := wsrpc.EnqueueOutboundMail(ctx, s.backend.client, msgID, sender, externalRcpts, outboundRaw, nil, stagedRef); err != nil {
+		submitter := append([]byte(nil), actorID...)
+		if _, err := wsrpc.EnqueueOutboundMail(ctx, s.backend.client, msgID, sender, externalRcpts, outboundRaw, &submitter, submissionToken, stagedRef); err != nil {
 			// Surface the decoded RpcError (mirrors dispatchFaunaRecipients'
 			// deliverOne site): the opaque "ok=false (payload N bytes)" form
 			// cost a multi-hour live root-cause 2026-07-09 — the payload
@@ -1120,10 +1171,37 @@ func (s *submissionSession) Data(r io.Reader) error {
 			// whole time.
 			if s.backend.logger != nil {
 				if code, detail, ok := wsrpc.RpcErrorDetail(err); ok {
-					s.backend.logger.Warn("mta: enqueue_outbound_mail failed (→451)",
+					s.backend.logger.Warn("mta: enqueue_outbound_mail failed",
 						"err", err, "rpc_code", code, "rpc_details", detail)
 				} else {
 					s.backend.logger.Warn("mta: enqueue_outbound_mail failed", "err", err)
+				}
+			}
+			// The nest's permanent refusals are 5xx: a retry of the same
+			// message can never succeed, so a tempfail would make the mail
+			// app retry for ever (smtp-server.md § Recipient handling on
+			// submission, DATA-time residual). Everything else — the nest's
+			// `fauna.bridges.internal` and transport errors — stays 451.
+			if code, ok := wsrpc.RpcErrorCode(err); ok {
+				switch code {
+				case wsrpc.CodeListSubmissionRequiresSendRPC:
+					return &gosmtp.SMTPError{
+						Code:         550,
+						EnhancedCode: gosmtp.EnhancedCode{5, 7, 1},
+						Message:      "Mailing-list addresses can only send through the list's send action, not from a mail app",
+					}
+				case wsrpc.CodeSenderNotOwned, wsrpc.CodeSubmitterNotProven:
+					return &gosmtp.SMTPError{
+						Code:         550,
+						EnhancedCode: gosmtp.EnhancedCode{5, 7, 1},
+						Message:      "Sender not authorized for this address",
+					}
+				case wsrpc.CodeProtocolMalformed:
+					return &gosmtp.SMTPError{
+						Code:         554,
+						EnhancedCode: gosmtp.EnhancedCode{5, 6, 0},
+						Message:      "Message refused as malformed",
+					}
 				}
 			}
 			return &gosmtp.SMTPError{
@@ -1157,10 +1235,10 @@ func (s *submissionSession) Data(r io.Reader) error {
 // Caller MUST hold s.mu.
 func (s *submissionSession) authedFromAddress() string {
 	primaryDomain := s.backend.cfg.current().primaryDomain
-	if s.authedLocalPart == "" || primaryDomain == "" {
+	if s.authedHandle == "" || primaryDomain == "" {
 		return ""
 	}
-	return s.authedLocalPart + "@" + primaryDomain
+	return s.authedHandle + "@" + primaryDomain
 }
 
 // extractMessageID scans the message header block for the Message-ID:

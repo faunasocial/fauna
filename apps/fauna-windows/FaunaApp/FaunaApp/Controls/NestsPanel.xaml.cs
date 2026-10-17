@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using FaunaApp.Core.Helpers;
 using FaunaApp.Core.Services;
+using FaunaApp.Core.ViewModels;
 using FaunaApp.Helpers;
 using uniffi.fauna_ffi;
 using uniffi.fauna_client_pair;
@@ -171,6 +172,48 @@ public sealed class NestRowItem
     // public member — reference_windows_bindgen…/the FeedPostItemTests precedent).
     // Only code-behind (BuildMintFlow) reads it; XAML binds MintFlowVisibility only.
     internal TrustMintOption[] MintOptions { get; init; } = Array.Empty<TrustMintOption>();
+    // internal for the same CS0053 reason as MintOptions: TrustGrantDuration is a
+    // UniFFI-internal enum. Read only by BuildMintFlow (the duration select's
+    // pre-selection — the standing window on a blessed nest, hours otherwise).
+    internal TrustGrantDuration MintDefaultDuration { get; init; }
+
+    /// <summary>The escrow-holder role badge (<c>participant-escrow-holder-badge</c>,
+    /// participants.md § The participant model → Roles): Visible only on the row
+    /// whose nest holds this account's generation-key escrow, Collapsed (absent
+    /// to UIA) otherwise.</summary>
+    public Visibility EscrowBadgeVisibility { get; init; } = Visibility.Collapsed;
+    public string EscrowBadgeText { get; init; } = string.Empty;
+
+    /// <summary><c>nest-trust-blessed-toggle</c> — the per-nest blessing, home
+    /// row + Now lens only (nests.md § Expiry / renewal → Duration and blessing).
+    /// <see cref="BlessedState"/> (<c>on</c>/<c>off</c>) rides HelpText, the
+    /// toggle convention's <c>state</c> attribute.</summary>
+    public Visibility BlessedVisibility { get; init; } = Visibility.Collapsed;
+    public bool Blessed { get; init; }
+    public string BlessedState { get; init; } = "off";
+    public string BlessedLabel { get; init; } = string.Empty;
+}
+
+/// <summary>
+/// One custodian-NEST row (<c>nests-item</c> carrying the
+/// <c>nest-trust-custody-*</c> family), OneTime x:Bind-projected from the Core
+/// <see cref="NestCustodyRow"/>. <see cref="GrantId"/>/<see cref="Holder"/>
+/// round-trip unchanged into <c>custody_revoke</c> — the whole item rides the
+/// revoke button's <c>Tag</c>, never a row index a refold can re-point.
+/// </summary>
+public sealed class NestCustodyItem
+{
+    public byte[] GrantId { get; init; } = Array.Empty<byte>();
+    public byte[]? Holder { get; init; }
+    public string Label { get; init; } = string.Empty;
+    public string Scope { get; init; } = string.Empty;
+    public string ReceiptStatus { get; init; } = string.Empty;
+    public Microsoft.UI.Xaml.Media.Brush? ReceiptStatusBrush { get; init; }
+    public string HeldBytes { get; init; } = string.Empty;
+    public string BoundNote { get; init; } = string.Empty;
+    public string RevokeLabel { get; init; } = string.Empty;
+    /// <summary>Disabled while the ceremony is <c>Pending</c>: nothing is minted to revoke yet.</summary>
+    public bool RevokeEnabled { get; init; }
 }
 
 /// <summary>
@@ -198,6 +241,10 @@ public sealed partial class NestsPanel : UserControl
     private ServiceClients? _clients;
     private LinkedNestsMachine? _machine;
     private readonly ObservableCollection<NestRowItem> _nests = new();
+    // The custodian-NEST rows + the escrow-holder badge's source, read on this
+    // page's own hydrate edge (ViewModels/NestsCustodyView).
+    private readonly NestsCustodyView _custody = new();
+    private readonly ObservableCollection<NestCustodyItem> _custodyNests = new();
 
     /// <summary>Raised with the machine's error message (or null to clear) so the
     /// host page can surface it through its own page-level <c>error-message</c> element.</summary>
@@ -207,11 +254,16 @@ public sealed partial class NestsPanel : UserControl
     {
         this.InitializeComponent();
         NestsList.ItemsSource = _nests;
+        CustodyNestsList.ItemsSource = _custodyNests;
         // Pairing a nest genuinely needs the nest (W4 (account-data-plane.md § Workstreams) phase 4). Revealing the form
         // (`AddButton`) and dismissing it (`CancelButton`) are pure local UI and
         // declare nothing — greying them would strand the user in a form they
         // cannot leave, which is the over-claim rulings 1-3 exist to prevent.
         SubmitButton.FaunaGate("fauna.pair.add");
+        // Retry/Discard act on the nest's queue (both OnlineOnly). The block is
+        // absent when the queue is empty, so these only ever grey while shown.
+        ForwardRetryButton.FaunaGate("fauna.pair.forward_retry");
+        ForwardDiscardButton.FaunaGate("fauna.pair.forward_discard");
     }
 
     /// <summary>Supplied by the host page (SettingsLinkedNestsPage.OnNavigatedTo) before the
@@ -254,7 +306,15 @@ public sealed partial class NestsPanel : UserControl
             // single RPC (transport.md § Request lifecycle step 3) — no app-level
             // retry needed here.
             await _machine!.Hydrate();
+            // The custodian-nest rows and the escrow-holder badge read on the
+            // same hydrate edge (best-effort — a failure keeps the previous set).
+            await _custody.LoadAsync(_clients.Rpc!);
             RenderSnapshot(_machine!.Snapshot());
+            // The shared store-change notice (account-runtime.md § A runtime's own
+            // pump is a source of the notice too): while this panel is on screen
+            // its store-backed halves re-read on each notice.
+            _clients.Rpc!.StoreChanged -= OnStoreChanged;
+            _clients.Rpc!.StoreChanged += OnStoreChanged;
         }
         catch (Exception ex)
         {
@@ -264,6 +324,71 @@ public sealed partial class NestsPanel : UserControl
         {
             LoadingRing.IsActive = false;
             LoadingRing.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private void Panel_Unloaded(object sender, RoutedEventArgs e)
+    {
+        if (_clients?.Rpc is { } rpc) rpc.StoreChanged -= OnStoreChanged;
+    }
+
+    private bool _storeResyncing;
+    private bool _storeResyncAgain;
+
+    /// <summary>The store-change re-read of the open Nests page: the linked-nests
+    /// machine's own hydrate (the pairing list), the custody fold and the escrow
+    /// holders. Level-safe: it waits out a machine mutation in flight, repaints
+    /// only when the rows the page paints from changed (so a standing error and any
+    /// armed control stay put for an answer the page already shows), and a failed
+    /// read keeps the painted rows.</summary>
+    private async void OnStoreChanged()
+    {
+        if (_machine is null || _clients?.Rpc is null) return;
+        if (_storeResyncing)
+        {
+            _storeResyncAgain = true;
+            return;
+        }
+        _storeResyncing = true;
+        try
+        {
+            do
+            {
+                _storeResyncAgain = false;
+                if (_machine.Snapshot().status == LinkedNestStatus.Working) break;
+                var before = RowsSignature(_machine.Snapshot());
+                try
+                {
+                    await _machine.Hydrate();
+                }
+                catch (Exception ex)
+                {
+                    FaunaApp.Core.Logs.ShellLog.Warn("NestsPanel",
+                        $"[store-change] hydrate failed: {ex.GetType().Name}");
+                }
+                var custodyChanged = await _custody.ReloadAsync(_clients.Rpc);
+                var after = _machine.Snapshot();
+                if (custodyChanged || before != RowsSignature(after)) RenderSnapshot(after);
+            }
+            while (_storeResyncAgain);
+        }
+        finally
+        {
+            _storeResyncing = false;
+        }
+    }
+
+    // What the machine's rows paint from (not its standing error or status).
+    private static string RowsSignature(LinkedNestsSnapshot snap)
+    {
+        try
+        {
+            return System.Text.Json.JsonSerializer.Serialize(
+                new { snap.home, snap.pairings, snap.forwardQueue, snap.restoreOutcome });
+        }
+        catch (Exception)
+        {
+            return Guid.NewGuid().ToString("N");
         }
     }
 
@@ -290,7 +415,27 @@ public sealed partial class NestsPanel : UserControl
         // A mutation in flight disables the add button so it can't double-fire.
         AddButton.IsEnabled = snap.status != LinkedNestStatus.Working;
 
-        ErrorChanged?.Invoke(string.IsNullOrEmpty(snap.error) ? null : snap.error);
+        // A custody revoke's soft failure rides the same error-message the
+        // machine's does (never a silent drop — e2e convention 11).
+        var error = !string.IsNullOrEmpty(snap.error) ? snap.error : _custody.Error;
+        ErrorChanged?.Invoke(string.IsNullOrEmpty(error) ? null : error);
+
+        // Forward queue: painted only while non-empty (ForwardQueueFormat owns
+        // the projection; ForwardReason is a plain TextBlock — the relay-chosen
+        // text never reaches a markup or link-detecting control).
+        if (ForwardQueueFormat.IsVisible(snap.forwardQueue))
+        {
+            var queue = snap.forwardQueue!;
+            ForwardSummary.Text = ForwardQueueFormat.Summary(queue);
+            var reason = ForwardQueueFormat.Reason(queue);
+            ForwardReason.Text = reason ?? string.Empty;
+            ForwardReason.Visibility = reason is null ? Visibility.Collapsed : Visibility.Visible;
+            ForwardBlock.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            ForwardBlock.Visibility = Visibility.Collapsed;
+        }
 
         // The home nest row (nests.md § Layout — the connected nest) renders
         // first, then the pairings.
@@ -298,19 +443,48 @@ public sealed partial class NestsPanel : UserControl
         // restoreOutcome is snapshot-level (the page's LAST restore action, not
         // any one row's), so it is threaded into ToItem only for the home row —
         // mirrors linux's `if row.is_home` gate on nest-trust-generation-notice.
-        if (snap.home is { } home) _nests.Add(ToItem(home, snap.restoreOutcome));
+        if (snap.home is { } home) _nests.Add(ToItem(home, snap.restoreOutcome, _custody.HoldsEscrow(home.nestId)));
         foreach (var row in snap.pairings)
         {
-            _nests.Add(ToItem(row, null));
+            _nests.Add(ToItem(row, null, _custody.HoldsEscrow(row.nestId)));
         }
-        EmptyText.Visibility = _nests.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        // Custodian nests (nests.md § Trust facet — custody rows): one nests-item
+        // per NEST-anchored custody, after the linked rows. Device-anchored
+        // custody stays on the Devices page.
+        _custodyNests.Clear();
+        foreach (var c in _custody.Rows)
+        {
+            _custodyNests.Add(ToCustodyItem(c));
+        }
+        EmptyText.Visibility = _nests.Count == 0 && _custodyNests.Count == 0
+            ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private static NestRowItem ToItem(LinkedNestRow row, TrustRestoreOutcome? restoreOutcome)
+    private static NestCustodyItem ToCustodyItem(NestCustodyRow c) => new()
+    {
+        GrantId = c.GrantId,
+        Holder = c.Holder,
+        Label = c.Label,
+        Scope = c.Scope,
+        ReceiptStatus = c.ReceiptStatusText,
+        // Three receipt states, three different words — a stale receipt reads
+        // critical, never the same as "no confirmation yet" (matches the Devices card).
+        ReceiptStatusBrush = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources[
+            c.Stale ? "SystemFillColorCriticalBrush" : "TextFillColorSecondaryBrush"],
+        HeldBytes = c.HeldBytesText,
+        // REQUIRED honest-bound copy (nests.md § Honest bound) — the bound stated
+        // beside the control. A pending ceremony has nothing to revoke, so the
+        // note would over-promise there (matches the Devices card).
+        BoundNote = c.Pending ? string.Empty : S.Get("devices/custody_revoke_bound_note"),
+        RevokeLabel = S.Get("devices/custody_revoke"),
+        RevokeEnabled = c.RevokeEnabled,
+    };
+
+    private static NestRowItem ToItem(LinkedNestRow row, TrustRestoreOutcome? restoreOutcome, bool holdsEscrow)
     {
         var abbreviated = Abbreviate(row.nestId);
         var label = string.IsNullOrEmpty(row.label) ? abbreviated : row.label!;
-        var caps = string.Join(", ", row.capabilities);
+        var caps = string.Join(", ", row.capabilityLabels.Select(S.Resolve));
         var expiry = row.expiresAt.HasValue
             ? S.Get("nests/expiry_label")
             : S.Get("nests/expiry_never");
@@ -368,13 +542,21 @@ public sealed partial class NestsPanel : UserControl
             MintFlowVisibility = isNowLens && row.mintOptions.Length > 0
                 ? Visibility.Visible : Visibility.Collapsed,
             MintOptions = row.mintOptions,
+            MintDefaultDuration = row.mintDefaultDuration,
+            // Derived from recorded escrow receipts, never asserted by the nest.
+            EscrowBadgeVisibility = holdsEscrow ? Visibility.Visible : Visibility.Collapsed,
+            EscrowBadgeText = S.Get("nests/escrow_holder_badge"),
+            BlessedVisibility = isNowLens && row.isHome ? Visibility.Visible : Visibility.Collapsed,
+            Blessed = row.blessed,
+            BlessedState = row.blessed ? "on" : "off",
+            BlessedLabel = S.Get("nests/blessed_toggle"),
         };
     }
 
     private static TrustGrantItem ToGrantItem(TrustGrantRow g) => new()
     {
         GrantId = g.grantId,
-        Scope = $"{S.Get("nests/trusted_to_read")} {NestTrustFormat.ScopeLine(g.scope)}",
+        Scope = $"{S.Get("nests/trusted_to_read")} {NestTrustFormat.ScopeLine(g.scope, g.folder)}",
         LastsUntil = $"{S.Get("nests/lasts_until")} {FaunaFfiMethods.FormatUnixLocal(g.lastsUntil)}",
         Status = NestTrustFormat.StatusLabel(g.liveness),
         // REQUIRED honest-bound copy (nests.md § Honest bound) — never
@@ -512,6 +694,12 @@ public sealed partial class NestsPanel : UserControl
         }
     }
 
+    private async void ForwardRetry_Click(object sender, RoutedEventArgs e) =>
+        await DispatchAsync(new LinkedNestsAction.RetryForwards());
+
+    private async void ForwardDiscard_Click(object sender, RoutedEventArgs e) =>
+        await DispatchAsync(new LinkedNestsAction.DiscardForwards());
+
     private async void ViewNow_Click(object sender, RoutedEventArgs e)
     {
         if (sender is Button btn && btn.Tag is string nestId)
@@ -542,6 +730,31 @@ public sealed partial class NestsPanel : UserControl
         {
             await DispatchAsync(new LinkedNestsAction.Revoke(grantId));
         }
+    }
+
+    /// <summary><c>nest-trust-custody-revoke-button</c> — the same revoke the
+    /// Devices card runs (<c>custody_revoke</c>), keyed by the row's grant id +
+    /// accept-bound custodian key off the item on <c>Tag</c>, then a refold of the
+    /// custody rows.</summary>
+    private async void RevokeCustody_Click(object sender, RoutedEventArgs e)
+    {
+        if (_clients?.Rpc is null || sender is not Button { Tag: NestCustodyItem item }) return;
+        await _custody.RevokeAsync(_clients.Rpc, item.GrantId, item.Holder);
+        if (_machine is not null) RenderSnapshot(_machine.Snapshot());
+    }
+
+    /// <summary><c>nest-trust-blessed-toggle</c> — bless / un-bless a nest
+    /// (<c>SetBlessed</c>, a synced account-state write; offline-safe). FlaUI
+    /// drives a CheckBox via the Toggle pattern (Checked/Unchecked, not Click),
+    /// and the render-time x:Bind echo also raises the event — so a change that
+    /// merely matches the row's current value is ignored (AdminDnsPage's
+    /// AutoRenew_Toggled idiom).</summary>
+    private async void Blessed_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (sender is not CheckBox { DataContext: NestRowItem item } cb) return;
+        var blessed = cb.IsChecked == true;
+        if (blessed == item.Blessed) return; // render-time binding echo, not a user action
+        await DispatchAsync(new LinkedNestsAction.SetBlessed(item.NestIdFull, blessed));
     }
 
     /// <summary><c>nest-trust-grant-keep-button</c> — the Keep half of Keep/Revoke
@@ -651,6 +864,22 @@ public sealed partial class NestsPanel : UserControl
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(holderCombo, Ids.NestTrustMintHolderSelect);
         form.Children.Add(holderCombo);
 
+        // How long the new trust lasts (nests.md § Expiry / renewal → Duration and
+        // blessing): the shared option list labeled through the shared
+        // duration_label, pre-selecting the row's mint_default_duration (the
+        // standing window on a blessed nest, hours otherwise). ComboBoxItem.Content
+        // is the label, which is the item's UIA Name the driver selects by — like
+        // the scope select above.
+        var durations = FaunaClientPairMethods.MintDurationOptions();
+        var durationCombo = new ComboBox { MinWidth = 160 };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(durationCombo, Ids.NestTrustMintDurationSelect);
+        foreach (var d in durations)
+        {
+            durationCombo.Items.Add(new ComboBoxItem { Content = S.Resolve(FaunaClientPairMethods.DurationLabel(d)) });
+        }
+        durationCombo.SelectedIndex = Math.Max(0, Array.IndexOf(durations, row.MintDefaultDuration));
+        form.Children.Add(durationCombo);
+
         var confirmBtn = new Button
         {
             Content = S.Get("nests/mint_confirm"),
@@ -703,9 +932,11 @@ public sealed partial class NestsPanel : UserControl
             {
                 holderBridgeId = option.holderCandidates[0];
             }
-            // The standard window until the duration picker + blessing toggle lift
-            // here (nests.md § Expiry / renewal → Duration and blessing).
-            await DispatchAsync(new LinkedNestsAction.Mint(row.NestIdFull, holderBridgeId, option.scope, TrustGrantDuration.Standard));
+            // The owner's pick — the row's default until they choose.
+            var duration = durationCombo.SelectedIndex >= 0 && durationCombo.SelectedIndex < durations.Length
+                ? durations[durationCombo.SelectedIndex]
+                : row.MintDefaultDuration;
+            await DispatchAsync(new LinkedNestsAction.Mint(row.NestIdFull, holderBridgeId, option.scope, duration));
         };
 
         return mintBox;

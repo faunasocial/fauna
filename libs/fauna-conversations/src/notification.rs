@@ -119,6 +119,9 @@ struct TrackerState {
     /// Flips on the first **non-empty** snapshot (see module docs); empty
     /// pre-login snapshots neither seed nor notify.
     seeded: bool,
+    /// The threads of the snapshot that seeded the tracker — the batch rule 1
+    /// keeps silent ([`MessageNotificationTracker::seeded_with`]).
+    seeded_with: Vec<ThreadId>,
 }
 
 /// Decides which threads warrant a new-message OS toast by diffing successive
@@ -182,6 +185,10 @@ impl MessageNotificationTracker {
         }
         let mut state = self.state.lock().expect("tracker mutex poisoned");
         let was_seeded = state.seeded;
+        if !was_seeded {
+            state.seeded_with = threads.iter().map(|t| t.thread_id.clone()).collect();
+            record_seed(state.seeded_with.clone());
+        }
         let mut to_notify = Vec::new();
         for t in threads {
             // A first-seen thread "rises" from zero: a brand-new thread with
@@ -212,6 +219,25 @@ impl MessageNotificationTracker {
         }
         state.seeded = true;
         to_notify
+    }
+}
+
+// Kept out of the exported block above, so the UniFFI face (and the generated
+// bindings every native app tracks) is unchanged: the native apps read the
+// batch through the shared banner log (`message_banners_json`), and only the
+// wasm binding — whose release-gated log is a no-op — reads it here.
+impl MessageNotificationTracker {
+    /// The threads of the snapshot that seeded this tracker — empty until a
+    /// non-empty snapshot has. Rule 1 keeps exactly these silent, and a reader
+    /// cannot infer them from a thread list it read itself: the rails load
+    /// asynchronously, so a list read before the login load landed looks empty
+    /// while the load seeds the tracker a moment later.
+    pub fn seeded_with(&self) -> Vec<ThreadId> {
+        self.state
+            .lock()
+            .expect("tracker mutex poisoned")
+            .seeded_with
+            .clone()
     }
 }
 
@@ -251,7 +277,30 @@ mod banner_log {
     pub(super) static STARTED: AtomicU64 = AtomicU64::new(0);
     pub(super) static COMPLETED: AtomicU64 = AtomicU64::new(0);
     pub(super) static FIRED: Mutex<Vec<(ThreadId, String)>> = Mutex::new(Vec::new());
+    pub(super) static SEEDED_WITH: Mutex<Vec<ThreadId>> = Mutex::new(Vec::new());
 }
+
+/// Record the threads of the snapshot that seeded a tracker — the batch rule 1
+/// keeps silent. Called from [`MessageNotificationTracker::diff`] itself, so no
+/// app owes a call and nothing crosses UniFFI.
+///
+/// **Why the batch is published.** The rails load asynchronously, so a reader
+/// cannot tell from the thread list it read at sign-in which snapshot the
+/// tracker seeded on: a list read before the login load landed looks empty, and
+/// the next thread the reader plants is then genuinely new — rightly bannered —
+/// although the reader took it for the seeding batch. Naming the batch lets the
+/// silent-seed rule be asserted against what the tracker actually saw.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+fn record_seed(thread_ids: Vec<ThreadId>) {
+    *banner_log::SEEDED_WITH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = thread_ids;
+}
+
+/// Release twin of [`record_seed`] — same signature, no surface.
+#[cfg(not(any(test, debug_assertions, feature = "test-helpers")))]
+#[inline]
+fn record_seed(_thread_ids: Vec<ThreadId>) {}
 
 // The UniFFI face of the four calls below — the apple leg's whole obligation
 // (`docs/goal/ui/conversations.md` § Where logic lives). linux consumes this
@@ -329,7 +378,9 @@ pub fn record_fired_banner(thread_id: ThreadId, label: String) {
 pub fn record_fired_banner(_thread_id: ThreadId, _label: String) {}
 
 /// Build `fauna_e2e_agent::MESSAGE_BANNERS_KEY`'s value —
-/// `{"started": N, "completed": M, "fired": [{"thread_id", "label"}, …]}`.
+/// `{"started": N, "completed": M, "fired": [{"thread_id", "label"}, …],
+/// "seeded_with": [thread_id, …]}` — the last is the snapshot the tracker
+/// seeded on, empty until it has (see `record_seed`).
 ///
 /// `fired` is append-only for the process lifetime and ordered by firing, so the
 /// reader's assertions are latency-independent (convention 14): a positive test
@@ -352,6 +403,12 @@ pub fn message_banners_json() -> serde_json::Value {
         "started": banner_log::STARTED.load(Ordering::SeqCst),
         "completed": banner_log::COMPLETED.load(Ordering::SeqCst),
         "fired": fired,
+        "seeded_with": banner_log::SEEDED_WITH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|id| id.0.clone())
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -402,6 +459,34 @@ mod tests {
         // unread or not.
         let r = tracker.diff(vec![t("a", 100, 2), t("b", 200, 0)], None, 0);
         assert!(r.is_empty());
+    }
+
+    #[test]
+    fn seeded_with_is_the_first_non_empty_snapshot_only() {
+        let tracker = MessageNotificationTracker::new();
+        tracker.diff(vec![], None, 0); // pre-login: neither seeds nor names
+        assert!(tracker.seeded_with().is_empty());
+        tracker.diff(vec![t("a", 100, 0), t("b", 200, 1)], None, 0);
+        tracker.diff(
+            vec![t("a", 100, 0), t("b", 200, 1), t("c", 300, 1)],
+            None,
+            0,
+        );
+        let ids: Vec<String> = tracker.seeded_with().into_iter().map(|id| id.0).collect();
+        assert_eq!(ids, ["a", "b"], "a later thread is never part of the seed");
+    }
+
+    #[test]
+    fn the_banner_log_names_the_seeding_batch() {
+        // The log is process-global and the other tests here seed trackers in
+        // parallel, so only the field's shape and a batch's membership are
+        // asserted — never which batch won.
+        let tracker = MessageNotificationTracker::new();
+        tracker.diff(vec![t("seed-shape", 100, 1)], None, 0);
+        let seeded = message_banners_json()["seeded_with"].clone();
+        let ids = seeded.as_array().expect("seeded_with is an array");
+        assert!(!ids.is_empty(), "a seeded tracker leaves a non-empty batch");
+        assert!(ids.iter().all(|v| v.is_string()), "thread ids: {seeded}");
     }
 
     #[test]

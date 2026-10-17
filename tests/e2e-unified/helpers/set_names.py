@@ -54,3 +54,14 @@ def addressed(name: str, **fields) -> dict:
     no plaintext name, so a ``{"name": ...}`` request finds nothing
     (``fauna.folders.not_found``)."""
     return {"name_hash": set_name_hash(name), **fields}
+
+
+def audience_update(name: str, audience: str, **fields) -> dict:
+    """A ``fauna.folders.update`` payload setting the audience of the set called
+    ``name``. A →``public`` flip carries the plaintext name beside the hash: the
+    nest restores it as the URL segment and refuses the flip without it
+    (``docs/goal/behavior/path-sealing.md`` § the set-name plane)."""
+    payload = addressed(name, audience=audience, **fields)
+    if audience == "public":
+        payload["name"] = name
+    return payload

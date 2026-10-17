@@ -131,6 +131,61 @@ public partial class AdminNestViewModel : ObservableObject
     /// (true exactly while a region is declared).</summary>
     [ObservableProperty] private bool _regionCanWithdraw;
 
+    // ── Web-app origin (admin-nest-web-app-origin-*, admin.md § N Nest →
+    //    Web-app origin) ──────────────────────────────────────────────────────
+    //
+    // Every rendering decision is the shared `admin_web_app_origin_view` fold;
+    // this VM holds its answer plus the local radio draft. The draft is a private
+    // FFI enum (uniffi-bindgen-cs `internal` types stay out of public members —
+    // CS0053) folded into the two bools below.
+
+    /// The answered view, or <c>null</c> until the read lands (or if it failed —
+    /// best-effort, like <see cref="LoadOauthKeysAsync"/>: a failed read leaves
+    /// the section unloaded, never the page failed).
+    private FfiAdminWebAppOriginView? _webAppOriginView;
+
+    /// The marked radio — the local selection the save commits.
+    private FfiWebAppOrigin? _webAppOriginDraft;
+
+    /// <summary>Whether the read has landed. The radios stay unmarked and disabled
+    /// until it has — pre-marking bundled would state a choice the nest may not
+    /// hold.</summary>
+    public bool WebAppOriginLoaded => _webAppOriginView is not null;
+
+    /// <summary>Whether the radios are live — the view's <c>can_set</c> verbatim,
+    /// withheld while a save is in flight (re-tap guard).</summary>
+    public bool WebAppOriginCanSet => _webAppOriginView is { canSet: true } && !WebAppOriginWorking;
+
+    /// <summary>Whether <c>admin-nest-web-app-origin-save-button</c> is enabled —
+    /// live radios and a marked one.</summary>
+    public bool WebAppOriginCanSave => WebAppOriginCanSet && _webAppOriginDraft is not null;
+
+    /// <summary><c>admin-nest-web-app-origin-bundled-radio</c> is marked.</summary>
+    public bool WebAppOriginBundledSelected => _webAppOriginDraft == FfiWebAppOrigin.Bundled;
+
+    /// <summary><c>admin-nest-web-app-origin-central-radio</c> is marked.</summary>
+    public bool WebAppOriginCentralSelected => _webAppOriginDraft == FfiWebAppOrigin.Central;
+
+    /// <summary><c>admin-nest-web-app-origin-status</c> — the view's line, or the
+    /// loading caption until the read lands.</summary>
+    public string WebAppOriginStatus => _webAppOriginView is { } v
+        ? Strings.Resolve(v.status)
+        : Strings.Get("admin/nest_page/web_app_origin_loading");
+
+    /// <summary><c>admin-nest-web-app-origin-central-radio</c>'s label — the
+    /// view's (it names the central origin), or the loading caption.</summary>
+    public string WebAppOriginCentralLabel => _webAppOriginView is { } v
+        ? Strings.Resolve(v.centralLabel)
+        : Strings.Get("admin/nest_page/web_app_origin_loading");
+
+    /// <summary>The scope sentence under the radios; empty until the read lands.</summary>
+    public string WebAppOriginScope => _webAppOriginView is { } v
+        ? Strings.Resolve(v.scope)
+        : string.Empty;
+
+    /// <summary>A save is in flight.</summary>
+    [ObservableProperty] private bool _webAppOriginWorking;
+
     /// <summary>The deployment-identity rotation ceremony's arm state
     /// (box-recovery.md § Deployment-seed rotation) — mirrors linux's
     /// <c>SeedRotateConfirmState</c> / android's <c>SeedRotateConfirmState</c>
@@ -277,6 +332,11 @@ public partial class AdminNestViewModel : ObservableObject
             // Declared region), so every nest-page
             // write re-reads it.
             ApplyRegion(await _rpc.AdminRegionStatusAsync());
+
+            // Web-app origin (fauna.admin.web_app_origin.get) — the same nav-edge
+            // read, but best-effort (own catch): a failed read leaves the section
+            // unloaded, never this page's Error.
+            await HydrateWebAppOriginAsync();
 
             // Outside-app sign-in keys (fauna.oauth.issuer_key_status) — folded
             // onto the same nav-edge read, but NEVER through this try's catch: a
@@ -444,6 +504,59 @@ public partial class AdminNestViewModel : ObservableObject
         RegionAuthority = view.authority is { } authority ? Strings.Resolve(authority) : null;
         RegionStaleness = view.staleness is { } staleness ? Strings.Resolve(staleness) : null;
         RegionCanWithdraw = view.canWithdraw;
+    }
+
+    /// <summary>Read the web-app origin view
+    /// (<c>fauna.admin.web_app_origin.get</c>) and repaint. Best-effort: a failure
+    /// leaves the section unloaded (radios disabled) rather than failing the
+    /// page — mirrors android's <c>hydrateWebAppOrigin</c>.</summary>
+    private async Task HydrateWebAppOriginAsync()
+    {
+        try
+        {
+            PaintWebAppOrigin(await _rpc.AdminWebAppOriginStatusAsync());
+        }
+        catch
+        {
+            // Leave the section unloaded; the loading caption says so.
+        }
+    }
+
+    private void PaintWebAppOrigin(FfiAdminWebAppOriginView view)
+    {
+        _webAppOriginView = view;
+        _webAppOriginDraft = view.selected;
+    }
+
+    /// <summary>A radio pick is local — it only arms the save. Ignored while the
+    /// radios are not live (unloaded, <c>can_set</c> false, or mid-save).
+    /// <c>internal</c>, not <c>public</c>: <c>FfiWebAppOrigin</c> is a
+    /// <c>uniffi-bindgen-cs</c> <c>internal</c> type (CS0051).</summary>
+    internal void SelectWebAppOrigin(FfiWebAppOrigin mode)
+    {
+        if (WebAppOriginCanSet) _webAppOriginDraft = mode;
+    }
+
+    /// <summary><c>admin-nest-web-app-origin-save-button</c> —
+    /// <c>fauna.admin.web_app_origin.set</c>, repainting from the set's own reply.
+    /// A failure routes to <see cref="Error"/> and leaves the draft as it was.</summary>
+    public async Task SaveWebAppOriginAsync()
+    {
+        if (!WebAppOriginCanSave || _webAppOriginDraft is not { } mode) return;
+        WebAppOriginWorking = true;
+        try
+        {
+            PaintWebAppOrigin(await _rpc.SetWebAppOriginAsync(mode));
+            Error = null;
+        }
+        catch (Exception ex)
+        {
+            Error = Strings.Error(ex);
+        }
+        finally
+        {
+            WebAppOriginWorking = false;
+        }
     }
 
     /// <summary>Hydrate the host-OS-maintenance surface from a

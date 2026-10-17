@@ -11,6 +11,7 @@
 pub mod blob_crypto;
 pub mod channel;
 pub mod engine;
+pub mod engine_role;
 pub mod error;
 pub mod replenish;
 pub mod room_message;

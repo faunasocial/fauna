@@ -5,6 +5,7 @@ import uuid
 import pytest
 
 from actions.api_actor import ApiActor
+from helpers.waiting import wait_until
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 
@@ -156,3 +157,89 @@ def test_admin_designates_a_membership_tier_re_points_it_and_clears_it(
         "clearing must revert the row to undesignated (lapse back to 'free') "
         f"without removing the row itself; error={admin_app.error_text()!r}"
     )
+
+
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.tui
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.windows
+@pytest.mark.android
+@pytest.mark.feature("admin-tiers")
+def test_admin_re_points_a_designated_membership_without_clearing_it(
+    admin_app, nest_instance,
+):
+    """monetization.md § Pillar 4: the admin changes which quota tier and which
+    lapse tier a paid membership points at, without clearing it first.
+
+    Designate personal/community, then — with the row still designated — pick
+    community/personal and Save again. The second Save is an upsert
+    (`fauna.admin.membership_tiers.set`), so the row must read the new pair,
+    and still read it after the page is left and reopened (the nest's answer,
+    not the widget's echo). The designation is cleared at the end, as the
+    test found it. Precondition setup — the admin's own subscription tier —
+    goes over WS-RPC, as in the designate-and-clear journey above."""
+    admin = nest_instance["admin"]
+    tier_name = f"paid-{uuid.uuid4().hex[:8]}"
+    ApiActor(
+        nest_instance["url"], admin["token"], admin["actor_id_hex"],
+        bytes(admin["signing_key"]),
+    ).subscription_create_tier(tier_name, rank=1, price_hint="$5/mo")
+
+    def _row() -> int | None:
+        for i in range(admin_app.admin.membership_row_count()):
+            if admin_app.admin.membership_tier_name(index=i) == tier_name:
+                return i
+        return None
+
+    def _reads(admin_tier: str, lapse_tier: str) -> bool:
+        i = _row()
+        return i is not None and (
+            admin_app.admin.membership_admin_tier(index=i) == admin_tier
+            and admin_app.admin.membership_lapse_tier(index=i) == lapse_tier
+        )
+
+    def _wait_reads(admin_tier: str, lapse_tier: str, what: str) -> None:
+        wait_until(
+            lambda: _reads(admin_tier, lapse_tier),
+            _TIER_REFRESH_BUDGET_S,
+            diagnose=lambda: f"{what}: expected admin_tier={admin_tier!r} "
+            f"lapse_tier={lapse_tier!r}; row={_row()!r} "
+            + (
+                f"admin_tier={admin_app.admin.membership_admin_tier(index=_row())!r} "
+                f"lapse_tier={admin_app.admin.membership_lapse_tier(index=_row())!r}"
+                if _row() is not None else "(no row)"
+            )
+            + f" error={admin_app.error_text()!r}",
+        )
+
+    def _designate(admin_tier: str, lapse_tier: str) -> None:
+        (i,) = wait_until(
+            lambda: (r := _row()) is not None and (r,),
+            _TIER_REFRESH_BUDGET_S,
+            diagnose=lambda: f"no membership row for {tier_name!r}; "
+            f"error={admin_app.error_text()!r}",
+        )
+        admin_app.admin.set_membership_admin_tier(admin_tier, index=i)
+        admin_app.admin.set_membership_lapse_tier(lapse_tier, index=i)
+        admin_app.admin.save_membership_tier(index=i)
+
+    admin_app.admin.navigate_settings()
+    admin_app.driver.wait_for("admin-settings-membership-section", timeout=15.0)
+    _designate("personal", "community")
+    _wait_reads("personal", "community", "the first designation never read back")
+
+    try:
+        # ── Re-point in place: no Clear between the two Saves ──────────────
+        _designate("community", "personal")
+        _wait_reads("community", "personal", "re-pointing never read back")
+
+        admin_app.admin.navigate_dashboard()
+        admin_app.admin.navigate_settings()
+        admin_app.driver.wait_for("admin-settings-membership-section", timeout=15.0)
+        _wait_reads("community", "personal", "the re-pointed pair did not survive a reopen")
+    finally:
+        i = _row()
+        if i is not None:
+            admin_app.admin.clear_membership_tier(index=i)

@@ -51,11 +51,12 @@ manifest bytes come from the cargo-built ``fauna_ffi`` cdylib
 (``seal_folder_file``) — so this module needs more than the image, which is
 exactly what that marker promises its CI runner it will not.
 
-Run against a **published** image rather than a local build (local nest-image
+Run against a **published** image (``:dev``, every image build's push —
+``:latest`` moves only on a production promote) rather than a local build (local nest-image
 builds are forbidden on dev VMs — ``helpers.docker_build``)::
 
-    docker pull ghcr.io/faunasocial/nest:latest
-    docker tag ghcr.io/faunasocial/nest:latest fauna-nest-test:local
+    docker pull ghcr.io/faunasocial/nest:dev
+    docker tag ghcr.io/faunasocial/nest:dev fauna-nest-test:local
     pytest tests/e2e-unified/tests/platform/docker/test_spa_shadow_by_user_site.py -v
 """
 
@@ -104,8 +105,8 @@ pytestmark = [
 #: The domain the admin claims WITH, so the box acquires a handle domain and the
 #: subdomain resolver has a `.<domain>` suffix to strip. Non-local, because the
 #: claim-time domain registration is gated to `is_public_dns_name` targets; and
-#: deliberately neither `example.com` nor `example.com` — the publish scrub
-#: rewrites the former to the latter, so a nest apex on the scrub target reads
+#: deliberately not `example.com` — the publish scrub rewrites a retired
+#: production name to it, so a nest apex on the scrub target reads
 #: differently in the public tree than it does here.
 DOMAIN = "spa-shadow.example"
 CLAIM_CODE = "SPASHDW1"

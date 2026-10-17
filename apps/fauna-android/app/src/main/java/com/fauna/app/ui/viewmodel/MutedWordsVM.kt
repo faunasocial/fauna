@@ -3,6 +3,7 @@ package com.fauna.app.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.ApiClient
+import com.fauna.app.ui.util.firstListingRefusal
 import uniffi.fauna_client_config.MutedWordsSnapshot
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
@@ -52,18 +53,33 @@ class MutedWordsVM @Inject constructor(
     fun load() {
         viewModelScope.launch {
             isLoading.value = true
+            var refusal: String? = null
             repeat(HYDRATE_ATTEMPTS) {
                 try {
                     page.value = api.mutedKeywordsList()
                     isLoading.value = false
+                    if (errorMessage.value == refusalShown) errorMessage.value = null
+                    refusalShown = null
                     return@launch
-                } catch (_: Exception) {
+                } catch (e: Exception) {
+                    refusal = e.firstListingRefusal()
                     delay(HYDRATE_RETRY_MS)
                 }
             }
             isLoading.value = false
+            // A background load is retried quietly — except the first-listing
+            // gate's refusal, which says why the page has not loaded
+            // (account-client-lifecycle.md § The first listing, clauses (4)/(5)).
+            refusal?.let {
+                refusalShown = it
+                errorMessage.value = it
+            }
         }
     }
+
+    /** The refusal text this VM put on [errorMessage], so a later good load
+     *  clears exactly that and never a gesture's own failure. */
+    private var refusalShown: String? = null
 
     /** Add a term as a DELTA against the stored list, never the page's copy
      *  wholesale: the shared seam re-reads the list inside its

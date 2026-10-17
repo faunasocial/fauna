@@ -83,6 +83,18 @@ class NestLogWatch:
         except OSError:
             self._offset = 0
 
+    def lines_since(self) -> list[str]:
+        """Every line appended since the watch point, ANSI-stripped — for a test
+        that COUNTS what an operation dispatched rather than waiting on one line
+        (`test_nest_info_draw.py`)."""
+        try:
+            with open(self._path, "r", errors="replace") as fh:
+                fh.seek(self._offset)
+                appended = fh.read()
+        except OSError:
+            return []
+        return _ANSI_RX.sub("", appended).splitlines()
+
     def wait_for(self, pattern: str, *, timeout: float = 15.0) -> str:
         """Poll the log for a regex appearing AFTER this watch's offset; return
         the first matching line. Raises TimeoutError with the tail on miss —

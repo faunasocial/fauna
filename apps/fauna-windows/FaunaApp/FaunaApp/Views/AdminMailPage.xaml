@@ -6,6 +6,7 @@
     xmlns:local="using:FaunaApp.Views"
     xmlns:loc="using:FaunaApp.Markup"
     xmlns:controls="using:FaunaApp.Controls"
+    xmlns:vm="using:FaunaApp.Core.ViewModels"
     Loaded="Page_Loaded"
     xmlns:ids="using:FaunaApp.UiIds">
 
@@ -76,6 +77,59 @@
                               Header="{loc:Localize Key=admin/mail_page/auto_enable_new_users_label}" />
                 <TextBlock Opacity="0.6" TextWrapping="Wrap"
                            Text="{loc:Localize Key=admin/mail_page/auto_enable_new_users_subtitle}" />
+            </StackPanel>
+
+            <!-- ════ Mail health readout (fauna.bridges.mail_health; read-only) ════
+                 mail-deliverability.md § The mail health readout. A dumb render of
+                 MailPolicySnapshot.health through AdminMailViewModel.Health (every
+                 sentence finished by shared Rust or the nest); collapsed while the VM
+                 holds none. The check rows are an ItemsControl so each paints its own
+                 -check / -label / -state / -detail ids (the admin-stat-card pattern). -->
+            <StackPanel x:Name="HealthSection" Spacing="8" Visibility="Collapsed"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailHealthSection}"
+                        AutomationProperties.Name="{loc:Localize Key=admin/mail_page/health_title}">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=admin/mail_page/health_title}" />
+                <TextBlock x:Name="HealthStatus"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailHealthStatus}"
+                           TextWrapping="Wrap" />
+                <ItemsControl x:Name="HealthChecks">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:MailHealthRow">
+                            <Border Padding="0,4"
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailHealthCheck}"
+                                    AutomationProperties.Name="{x:Bind Label}">
+                                <StackPanel Orientation="Horizontal" Spacing="12">
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailHealthCheckLabel}"
+                                               FontWeight="SemiBold" MinWidth="200"
+                                               Text="{x:Bind Label}" />
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailHealthCheckState}"
+                                               MinWidth="80"
+                                               Text="{x:Bind State}" />
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailHealthCheckDetail}"
+                                               Opacity="0.7" TextWrapping="Wrap"
+                                               Text="{x:Bind Detail}" />
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <HyperlinkButton x:Name="HealthDelistLink" Visibility="Collapsed"
+                                     AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailHealthDelistLink}"
+                                     Click="HealthDelistLink_Click"
+                                     Content="{loc:Localize Key=admin/mail_page/health_delist}" />
+                    <Button x:Name="HealthRecheckButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailHealthRecheckButton}"
+                            Click="HealthRecheckButton_Click"
+                            Content="{loc:Localize Key=admin/mail_page/health_recheck}" />
+                    <!-- Same-button two-click confirm: the first press relabels this button to
+                         health_warmup_reset_confirm, the second dispatches ResetWarmup. -->
+                    <Button x:Name="HealthWarmupResetButton"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailHealthWarmupResetButton}"
+                            Click="HealthWarmupResetButton_Click"
+                            Content="{loc:Localize Key=admin/mail_page/health_warmup_reset}" />
+                </StackPanel>
             </StackPanel>
 
             <!-- ════ Spam / inbound perimeter (put_spam_policy) ════ -->
@@ -212,6 +266,20 @@
                            Text="{loc:Localize Key=admin/mail_page/publish_spam_baseline_subtitle}" />
                 <TextBlock x:Name="PublishSpamBaselineResult"
                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailPublishSpamBaselineResult}"
+                           TextWrapping="Wrap" />
+                <!-- Standing publish (mail-spam.md § Cold start Path 2 → Standing publish):
+                     its own SetBaselineStandingPublish gesture off the persisted group, NOT
+                     the Spam group's Save; the state line is read-only. -->
+                <StackPanel Spacing="2">
+                    <ToggleSwitch x:Name="BaselineStandingToggle"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailSpamBaselineStandingToggle}"
+                                  Header="{loc:Localize Key=admin/mail_page/spam_baseline_standing_label}"
+                                  Toggled="BaselineStandingToggle_Toggled" />
+                    <TextBlock Opacity="0.6" FontSize="12" TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/mail_page/spam_baseline_standing_subtitle}" />
+                </StackPanel>
+                <TextBlock x:Name="SpamBaselineState"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminMailSpamBaselineState}"
                            TextWrapping="Wrap" />
             </StackPanel>
 

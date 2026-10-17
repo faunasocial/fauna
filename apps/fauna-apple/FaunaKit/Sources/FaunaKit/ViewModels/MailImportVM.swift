@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// Shared view-model for the user-facing `mail-import` wizard page (macOS + iOS,
@@ -147,3 +150,4 @@ public final class MailImportVM {
         errorMessage = snap.error
     }
 }
+#endif // !FAUNA_KIDS

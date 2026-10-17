@@ -172,6 +172,24 @@
                     </ItemsControl>
                 </StackPanel>
 
+                <!-- Update-channel radios: OUTSIDE the per-provider block (the
+                     choice does not depend on the provider, and shows before one
+                     is picked). Populated in codebehind, one RadioButton per
+                     UpdateChannel in the shared order, id
+                     vps-config-update-channel-row[<channel id>]; the selection
+                     is re-read from the shared getter each tick and published
+                     as "on"/"off" in HelpText (the `state` attribute).
+                     AutomationProperties.Name=" " puts the panel in the UIA
+                     content view, as on vps-provider-row. -->
+                <StackPanel x:Name="UpdateChannelRow"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.VpsConfigUpdateChannelRow}"
+                            AutomationProperties.Name=" "
+                            Spacing="4"
+                            Margin="0,8,0,0">
+                    <TextBlock Text="{loc:Localize Key=onboarding/vps_config/update_channel_heading}"
+                               Style="{StaticResource BodyStrongTextBlockStyle}" />
+                </StackPanel>
+
                 <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,16,0,0">
                     <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.VpsConfigBackButton}"
                             Content="{loc:Localize Key=common/back}"

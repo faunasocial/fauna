@@ -25,14 +25,14 @@
 //! `CfExecute(TRANSFER_DATA)`. The engines stay on one thread; their channel
 //! `Sender`s (which ARE `Send + Sync`) live in the keyed callback context. See
 //! `docs/goal/architecture/apps/windows.md` § On-demand hydration host and
-//! `docs/goal/behavior/file-sync.md` § On-Demand Files.
+//! `docs/goal/behavior/on-demand-files.md` § On-Demand Files.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::{broadcast, mpsc, watch};
 
 use fauna_client::NestClient;
@@ -45,7 +45,9 @@ use fauna_sync_engine::always_resident::{
 };
 use fauna_sync_engine::db::SyncState;
 use fauna_sync_engine::engine::SyncEngine;
-use fauna_sync_engine::engine::{PlaceholderFold, StaleHydratedRow};
+use fauna_sync_engine::engine::{
+    FoldedDelete, FoldedDeleteOutcome, PlaceholderFold, StaleHydratedRow,
+};
 use fauna_sync_engine::engine_host::CancellationToken;
 use fauna_sync_engine::engine_lifecycle::{EngineCredential, EngineParams};
 use fauna_sync_engine::enumerate::{
@@ -157,7 +159,9 @@ pub async fn serve_fetch(
 /// body of any other length is the wrong version for that placeholder (one left describing
 /// a version a remote edit superseded — [`PlaceholderInvalidator::supersede`]), and serving
 /// it would land a prefix of it, or leave the open waiting on bytes past its end; the
-/// transfer FAILS instead, so the open errors and nothing truncated is ever recorded.
+/// transfer FAILS instead ([`DescribesAnotherVersion`]), so the open errors and nothing
+/// truncated is ever recorded — and the loop owes the placeholder a re-describe from its
+/// row, so the open's retry is served ([`PendingRedescribes`]).
 pub(crate) async fn serve_fetch_chunked(
     hydrator: &dyn FileHydrator,
     sink: &dyn TransferSink,
@@ -182,10 +186,13 @@ pub(crate) async fn serve_fetch_chunked(
 
     let file_len = bytes.len() as i64;
     if file_len != file_size {
-        return fail(anyhow::anyhow!(
-            "the placeholder describes {file_size} bytes but its version has {file_len}: \
-             refusing to serve the wrong version"
-        ));
+        return fail(
+            DescribesAnotherVersion {
+                described: file_size,
+                version: file_len,
+            }
+            .into(),
+        );
     }
     let start = offset.clamp(0, file_len);
     let end = if length < 0 {
@@ -211,6 +218,30 @@ pub(crate) async fn serve_fetch_chunked(
     // OS will eventually hold.
     Ok(ContentHash::of_raw(&bytes))
 }
+
+/// [`serve_fetch_chunked`]'s refusal of a placeholder that describes another version than
+/// its row resolves — the one fetch failure the loop answers by re-describing the
+/// placeholder ([`PendingRedescribes`]).
+#[derive(Debug)]
+pub(crate) struct DescribesAnotherVersion {
+    /// The size the placeholder describes — what the OS asked for.
+    pub described: i64,
+    /// The length of the version its row resolves.
+    pub version: i64,
+}
+
+impl std::fmt::Display for DescribesAnotherVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the placeholder describes {} bytes but its version has {}: refusing to serve the \
+             wrong version",
+            self.described, self.version
+        )
+    }
+}
+
+impl std::error::Error for DescribesAnotherVersion {}
 
 // ---------------------------------------------------------------------------
 // FETCH_PLACEHOLDERS directory-listing logic (deterministically testable)
@@ -305,7 +336,7 @@ pub enum HydrationCommand {
     /// rename — record it `Synced`, push `FileStatusChanged{Synced}`, then
     /// answer `reply`. The linux FUSE root sends it for an `open` (or a `rename`,
     /// a `setattr`) of a placeholder, and completes the kernel's request once the
-    /// answer arrives (`on-demand-files.md` § Linux FUSE binding, *Hydrate on
+    /// answer arrives (`on-demand-files-linux.md` § Linux FUSE binding, *Hydrate on
     /// open*). Several may run at once, and two for one `rel` share one download
     /// ([`serve_materialize_batch`]). Linux-FUSE-driven in production.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -339,7 +370,7 @@ fn answer(reply: &LoopReply, outcome: std::result::Result<(), String>) {
 /// **[`LocalWriteHost`] is a supertrait on purpose — an on-demand root is TWO-WAY.**
 /// On-demand is a *storage* choice, never a *direction* choice: a change to a tracked
 /// file **must** be uploaded, and no mode, folder setting or host may suppress it
-/// (USER-ratified 2026-07-14, `file-sync.md` § On-Demand Files → *Sync direction*).
+/// (USER-ratified 2026-07-14, `on-demand-files.md` § On-Demand Files → *Sync direction*).
 /// Requiring the write half here means a download-only hydration host **does not
 /// compile** — the rule is enforced by the type system, not by a comment. Until
 /// 2026-07-14 this root really was download-only, and a user's edit to a tracked
@@ -409,6 +440,23 @@ pub trait HydrationHost: FileHydrator + PlaceholderLister + LocalWriteHost {
     /// [`apply_stale_hydrated`]). See [`SyncEngine::repoint_hydrated_to_placeholder`].
     async fn repoint_placeholder(&self, row: &StaleHydratedRow) -> Result<()>;
 
+    /// Apply one remote delete the fold left in place ([`PlaceholderFold::deleted`])
+    /// through the engine's shared verdict, `remove` being this root's binding
+    /// removing what the disk holds ([`PlaceholderInvalidator::remove`]): the file
+    /// first, the row after. See [`SyncEngine::apply_folded_delete`]. **Required,
+    /// never defaulted:** until 2026-10-08 the on-demand root applied no remote
+    /// delete to its disk at all — a placeholder stayed listed, a hydrated copy
+    /// stayed whole.
+    ///
+    /// `remove`'s lifetime is spelled higher-ranked (`for<'p>`) at every implementor:
+    /// `async_trait` rewrites an elided `&Path` inside `dyn Fn(..)` into one fixed
+    /// lifetime, which no caller's path can meet.
+    async fn apply_folded_delete(
+        &self,
+        delete: &FoldedDelete,
+        remove: &dyn for<'p> Fn(&'p Path) -> Result<()>,
+    ) -> Result<FoldedDeleteOutcome>;
+
     /// Re-fold the nest's `changes.list` into this root's SyncDb, returning the
     /// same [`PlaceholderFold`] [`prepare`](Self::prepare) does — new/moved
     /// placeholder rows written, stale hydrated rows *reported*.
@@ -439,12 +487,37 @@ pub trait HydrationHost: FileHydrator + PlaceholderLister + LocalWriteHost {
     /// full [`rescan_interval`](Self::rescan_interval) tick.
     fn reconnects(&self) -> watch::Receiver<u64>;
 
-    /// Is freeing `rel`'s local bytes provably lossless **by this engine's own
-    /// record** — row `Synced` and disk content hashing to the recorded uploaded
-    /// identity? The gate for overriding a stale platform dirty-file refusal with
-    /// [`PlaceholderInvalidator::set_in_sync`]; fail-closed. See
-    /// [`SyncEngine::is_dehydration_safe`] for the full safety argument.
-    async fn is_dehydration_safe(&self, rel: &str) -> bool;
+    /// Is `rel`'s disk content exactly what its recorded head reassembles to —
+    /// row `Synced` and the bytes hashing to the recorded content? What
+    /// [`PlaceholderInvalidator::set_in_sync`] may vouch for, so the one proof
+    /// behind every in-sync assertion ([`assert_recorded_in_sync`]); fail-closed.
+    /// [`SyncEngine::is_recorded_content`]: the dehydration gate's proof without
+    /// its holder-keeps clause, which [`Self::keeps_own_record`] answers.
+    async fn is_recorded_content(&self, rel: &str) -> bool;
+
+    /// Does the holder-keeps gate keep `rel`'s body — this device's own record in
+    /// a folder whose nest holds no bytes ([`SyncEngine::keeps_own_record`];
+    /// `file-sync.md` § Relay serving → *A holder keeps what it wrote*)? Row-only,
+    /// so [`free_local_bytes`] refuses it before the OS frees anything, and
+    /// [`assert_recorded_in_sync`] pins it before vouching it in sync.
+    async fn keeps_own_record(&self, rel: &str) -> bool;
+
+    /// Every hydrated body the holder-keeps gate keeps
+    /// ([`SyncEngine::kept_own_records`]) — what [`pin_kept_own_records`] holds out
+    /// of the OS's own eviction after each posture refresh.
+    async fn kept_own_records(&self) -> Result<Vec<String>>;
+
+    /// `rel`'s row when it is a `Placeholder` row — the version its placeholder must
+    /// describe ([`owed_redescribe`]) — else `None`. The default finds it in
+    /// [`PlaceholderLister::list_placeholder_rows`], right for the test hosts;
+    /// [`SyncEngine`] reads the one row.
+    async fn placeholder_row(&self, rel: &str) -> Result<Option<PlaceholderRow>> {
+        Ok(self
+            .list_placeholder_rows()
+            .await?
+            .into_iter()
+            .find(|row| row.rel == rel))
+    }
 
     /// Is every known row under `dir_rel/` clean, with at least one live one?
     /// The folder-✅ predicate ([`SyncEngine::subtree_fully_synced`]): gates
@@ -475,6 +548,18 @@ pub trait HydrationHost: FileHydrator + PlaceholderLister + LocalWriteHost {
     /// the posture the refresh installs, and a root without the refresh keeps
     /// its build-time posture for ever.
     async fn refresh_and_converge_corpus(&self, folder: &str);
+
+    /// One third-party deposit adoption pass
+    /// ([`fauna_sync_engine::always_resident::adopt_parked_deposits`] — the one
+    /// the always-resident root runs after its pull), run by
+    /// [`serve_hydration_root`] after its startup fold and after every re-pull
+    /// (rescan, reconnect, nudge); returns the paths it retired an item at,
+    /// which the loop flips in-sync like any recorded upload. **Required, never
+    /// defaulted:** until 2026-10-10 this root never adopted, so a deposit to an
+    /// owner whose seats were all on-demand stayed parked for good
+    /// (`file-sync.md` § Third-party deposit ingress). A host must say what it
+    /// does here; a test host answers with a no-op it owns.
+    async fn adopt_deposits(&self, folder: &str) -> Vec<String>;
 
     /// Answer one invoke-and-reply [`EngineCommand`] the pipe server routed to
     /// this root — the confirm of the mass-delete floor's *"apply N deletions"*
@@ -528,6 +613,36 @@ pub trait HydrationHost: FileHydrator + PlaceholderLister + LocalWriteHost {
     /// [`apply_stale_hydrated`] when the free is refused.
     async fn replace_superseded_own_record(&self, _row: &StaleHydratedRow) -> Result<bool> {
         Ok(false)
+    }
+
+    /// Stream the head the fold reported for `row` — not the version the row still
+    /// records — to `dest`, returning the whole file's content hash: the bytes
+    /// [`replace_pinned_copy`] swaps in over a pinned copy. The default serves
+    /// [`FileHydrator::download_file_bytes`], right for the test hosts, whose canned
+    /// bytes are keyed by path and so are already the head; [`SyncEngine`] fetches
+    /// `row`'s manifest ([`SyncEngine::download_head_to_path`]).
+    async fn download_head_to_path(
+        &self,
+        row: &StaleHydratedRow,
+        dest: &Path,
+    ) -> Result<ContentHash> {
+        let bytes = self.download_file_bytes(&row.relative_path).await?;
+        std::fs::write(dest, &bytes)?;
+        Ok(ContentHash::of_raw(&bytes))
+    }
+
+    /// Move a stale hydrated row to `row`'s head, `Synced` over the bytes now on
+    /// the disk — `content` their hash — once [`replace_pinned_copy`] has swapped
+    /// them in ([`SyncEngine::record_replaced_head`]). The default refuses: a host
+    /// that has not said how it records this never has a copy replaced.
+    async fn record_replaced_head(
+        &self,
+        _row: &StaleHydratedRow,
+        _content: ContentHash,
+    ) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "this host records no copy replaced in place"
+        ))
     }
 
     /// Record the user's delete of a **placeholder** — the mount's `unlink`
@@ -588,6 +703,22 @@ impl HydrationHost for SyncEngine {
 
     async fn replace_superseded_own_record(&self, row: &StaleHydratedRow) -> Result<bool> {
         SyncEngine::replace_superseded_own_record(self, row).await
+    }
+
+    async fn download_head_to_path(
+        &self,
+        row: &StaleHydratedRow,
+        dest: &Path,
+    ) -> Result<ContentHash> {
+        SyncEngine::download_head_to_path(self, row, dest).await
+    }
+
+    async fn record_replaced_head(
+        &self,
+        row: &StaleHydratedRow,
+        content: ContentHash,
+    ) -> Result<()> {
+        SyncEngine::record_replaced_head(self, row, content)
     }
 
     async fn delete_placeholder(&self, rel: &str) -> Result<()> {
@@ -655,6 +786,14 @@ impl HydrationHost for SyncEngine {
         SyncEngine::repoint_hydrated_to_placeholder(self, row)
     }
 
+    async fn apply_folded_delete(
+        &self,
+        delete: &FoldedDelete,
+        remove: &dyn for<'p> Fn(&'p Path) -> Result<()>,
+    ) -> Result<FoldedDeleteOutcome> {
+        SyncEngine::apply_folded_delete(self, delete, remove).await
+    }
+
     async fn repull(&self) -> Result<PlaceholderFold> {
         self.report_public_audience();
         self.populate_placeholders_from_nest().await
@@ -681,8 +820,29 @@ impl HydrationHost for SyncEngine {
         self.control_plane().subscribe_reconnects()
     }
 
-    async fn is_dehydration_safe(&self, rel: &str) -> bool {
-        SyncEngine::is_dehydration_safe(self, rel)
+    async fn is_recorded_content(&self, rel: &str) -> bool {
+        SyncEngine::is_recorded_content(self, rel)
+    }
+
+    async fn keeps_own_record(&self, rel: &str) -> bool {
+        SyncEngine::keeps_own_record(self, rel)
+    }
+
+    async fn kept_own_records(&self) -> Result<Vec<String>> {
+        SyncEngine::kept_own_records(self)
+    }
+
+    async fn placeholder_row(&self, rel: &str) -> Result<Option<PlaceholderRow>> {
+        // The same projection `list_placeholder_rows` makes, of the one row.
+        Ok(self
+            .db()
+            .get_entry(rel)?
+            .filter(|e| e.state == SyncState::Placeholder)
+            .map(|e| PlaceholderRow {
+                rel: e.path,
+                size: e.size_bytes as u64,
+                mtime: e.remote_mtime,
+            }))
     }
 
     async fn converge_corpus_at_start(&self, folder: &str) {
@@ -692,12 +852,41 @@ impl HydrationHost for SyncEngine {
     async fn refresh_and_converge_corpus(&self, folder: &str) {
         fauna_sync_engine::always_resident::refresh_and_converge_corpus(self, folder).await
     }
+
+    async fn adopt_deposits(&self, folder: &str) -> Vec<String> {
+        fauna_sync_engine::always_resident::adopt_parked_deposits(self, folder).await
+    }
+}
+
+/// One of a binding's platform calls, in flight: what every [`PlaceholderInvalidator`] call
+/// that changes a cloud file returns. Each such call waits for any outstanding fetch of its
+/// file, and only the serve loop answers a fetch (measured 2026-10-10,
+/// `cfapi_live_integration::diag_calls_that_wait_on_an_outstanding_fetch`). So a binding
+/// whose calls can wait makes them on a thread of their own, and the serve loop awaits them
+/// through [`PlatformRequests::answer_while`], answering the platform meanwhile
+/// (`on-demand-files.md` § *A placeholder describes the version its row resolves*: never on
+/// the serve thread).
+pub(crate) type PlatformCall<'a, T = ()> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + 'a>>;
+
+/// A platform call already made, in place — how a binding whose calls wait on nothing
+/// answers one.
+pub(crate) fn in_place<'a, T: 'a>(outcome: Result<T>) -> PlatformCall<'a, T> {
+    Box::pin(std::future::ready(outcome))
 }
 
 /// The platform's "free a hydrated file's bytes, back to a placeholder" operation,
 /// behind a trait so [`apply_stale_hydrated`]'s ordering is testable without a live
 /// cfapi sync root. Production is [`CfapiInvalidator`]; tests fake it, including the
 /// dirty-file refusal that is the whole safety story.
+///
+/// **The calls that change a cloud file are [`PlatformCall`]s** — `dehydrate`, `supersede`,
+/// `set_in_sync`, `pin`, `replace`: on cfapi each waits for any outstanding fetch of the
+/// file. The others return at once whatever the platform is fetching (measured, same probe):
+/// `anchor` and `convert_dir_in_sync` act on an ordinary file or directory, which no fetch
+/// reaches; `create_placeholder` makes a new name; `remove` is refused at once by the program
+/// whose open the fetch is serving. So they stay plain calls, and `remove` must: the engine
+/// makes it from inside its own delete verdict ([`HydrationHost::apply_folded_delete`]).
 pub(crate) trait PlaceholderInvalidator {
     /// Free `abs_path`'s on-disk bytes, converting the file back to a placeholder.
     ///
@@ -706,7 +895,7 @@ pub(crate) trait PlaceholderInvalidator {
     /// `CF_INSYNC_POLICY_TRACK_ALL` sync root refuses a not-in-sync (locally
     /// edited) file — and that refusal is exactly what stops [`apply_stale_hydrated`]
     /// from destroying a user's edit.
-    fn dehydrate(&self, abs_path: &Path) -> Result<()>;
+    fn dehydrate(&self, abs_path: &Path) -> PlatformCall<'_>;
 
     /// [`dehydrate`](Self::dehydrate) for a file another device's edit SUPERSEDED: free
     /// `abs_path`'s bytes AND leave its placeholder describing the new version — `size`
@@ -720,7 +909,26 @@ pub(crate) trait PlaceholderInvalidator {
     /// edit) — `on-demand-files.md` § On-Demand Files: a placeholder shows the right size
     /// and modification time. A binding that reads both from the rows unlinks, as
     /// [`dehydrate`](Self::dehydrate) does.
-    fn supersede(&self, abs_path: &Path, size: u64, mtime: i64) -> Result<()>;
+    fn supersede(&self, abs_path: &Path, size: u64, mtime: i64) -> PlatformCall<'_>;
+
+    /// Remove `abs_path` — a file another device deleted, once the engine's verdict
+    /// allowed it ([`HydrationHost::apply_folded_delete`]): a cloud-only placeholder,
+    /// which holds no bytes, or a copy the engine proved in sync. Nothing at the path
+    /// is already removed, not an error. The platform refuses nothing here — the gate
+    /// is the engine's verdict, run before this is reached — and both bindings take
+    /// this default: a cfapi placeholder and a FUSE reach file are each an ordinary
+    /// unlink (cfapi fires no callback for the provider's own I/O, and this provider
+    /// registers no `NOTIFY_DELETE`).
+    fn remove(&self, abs_path: &Path) -> Result<()> {
+        match std::fs::remove_file(abs_path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(anyhow::Error::new(e)
+                .context(format!(
+                    "removing {} for a remote delete",
+                    abs_path.display()
+                ))),
+            _ => Ok(()),
+        }
+    }
 
     /// Classify what, if anything, the provider owes `abs_path` given its pin
     /// state and byte-presence — stat-only ([`crate::pin_reaction::pin_action_for_path`]).
@@ -735,7 +943,7 @@ pub(crate) trait PlaceholderInvalidator {
     /// edit-protection razor ([`dehydrate`](Self::dehydrate)'s refusal), so a file
     /// only ever reaches it through [`assert_recorded_in_sync`], which reads the USN
     /// BEFORE proving the content — prove-then-assert as one atomic step.
-    fn set_in_sync(&self, abs_path: &Path, usn: i64) -> Result<()>;
+    fn set_in_sync(&self, abs_path: &Path, usn: i64) -> PlatformCall<'_>;
 
     /// The file's current update sequence number — what [`set_in_sync`](Self::set_in_sync)
     /// is conditioned on. Attributes-only; never a data open.
@@ -794,7 +1002,7 @@ pub(crate) trait PlaceholderInvalidator {
     ) -> Result<()>;
 
     /// Are this root's placeholders **rows only, never files on its disk**? True
-    /// for the linux FUSE binding (`on-demand-files.md` § Linux FUSE binding, the
+    /// for the linux FUSE binding (`on-demand-files-linux.md` § Linux FUSE binding, the
     /// dehydrate rule); cfapi's placeholders are files. It changes three things:
     /// the engine takes the off-disk posture before the boot sweep
     /// ([`HydrationHost::set_placeholders_off_disk`]); [`dehydrate`](Self::dehydrate)
@@ -804,21 +1012,70 @@ pub(crate) trait PlaceholderInvalidator {
     fn placeholders_off_disk(&self) -> bool {
         false
     }
+
+    /// Is `abs_path` pinned on the disk — the platform's *always keep on this
+    /// device*? Stat-only. A binding that keeps no pins on its disk answers `false`.
+    fn is_pinned(&self, _abs_path: &Path) -> bool {
+        false
+    }
+
+    /// Pin `abs_path` on the disk, so the OS never evicts its bytes — how this
+    /// provider keeps a body the holder-keeps gate keeps
+    /// ([`HydrationHost::keeps_own_record`]). cfapi refuses to dehydrate or
+    /// supersede a pinned file (`0x80070188`, measured by
+    /// `diag_holder_keep_mechanics`), and the pin leaves the in-sync bit as it was
+    /// but moves the USN, so it is set BEFORE the USN an in-sync assertion is
+    /// conditioned on is read. The default refuses: only a binding whose
+    /// placeholders are files has pins on its disk.
+    fn pin(&self, abs_path: &Path) -> PlatformCall<'_> {
+        in_place(Err(anyhow::anyhow!(
+            "this binding keeps no pins on its disk ({})",
+            abs_path.display()
+        )))
+    }
+
+    /// Is `abs_path` in sync — the platform's bit a local write clears, and the one its
+    /// dirty-file refusal reads? Stat-only. A binding that keeps no such bit answers `false`.
+    fn is_in_sync(&self, _abs_path: &Path) -> bool {
+        false
+    }
+
+    /// Replace `abs_path` with the bytes of `replacement` — the head `rel` moved to, written
+    /// beside it, last written at `mtime` (Unix seconds) — in one step that keeps the file's pin
+    /// and is refused unless the file is in sync: how a copy the platform will not free (a
+    /// pinned file) takes another device's edit ([`replace_pinned_copy`]). cfapi:
+    /// `fauna_cfapi::replace_placeholder`, a single rename of a pinned placeholder over the
+    /// file. The default refuses: only a binding whose pins are on its disk keeps such a copy.
+    fn replace(
+        &self,
+        abs_path: &Path,
+        _replacement: &Path,
+        _rel: &str,
+        _mtime: i64,
+    ) -> PlatformCall<'_> {
+        in_place(Err(anyhow::anyhow!(
+            "this binding replaces no file in place ({})",
+            abs_path.display()
+        )))
+    }
 }
 
 /// A reference delegates — so a test can lend its invalidator to the loop and
 /// still inspect what was recorded after the loop returns.
 impl<T: PlaceholderInvalidator + ?Sized> PlaceholderInvalidator for &T {
-    fn dehydrate(&self, abs_path: &Path) -> Result<()> {
+    fn dehydrate(&self, abs_path: &Path) -> PlatformCall<'_> {
         (**self).dehydrate(abs_path)
     }
-    fn supersede(&self, abs_path: &Path, size: u64, mtime: i64) -> Result<()> {
+    fn supersede(&self, abs_path: &Path, size: u64, mtime: i64) -> PlatformCall<'_> {
         (**self).supersede(abs_path, size, mtime)
+    }
+    fn remove(&self, abs_path: &Path) -> Result<()> {
+        (**self).remove(abs_path)
     }
     fn pin_action(&self, abs_path: &Path) -> Option<PinAction> {
         (**self).pin_action(abs_path)
     }
-    fn set_in_sync(&self, abs_path: &Path, usn: i64) -> Result<()> {
+    fn set_in_sync(&self, abs_path: &Path, usn: i64) -> PlatformCall<'_> {
         (**self).set_in_sync(abs_path, usn)
     }
     fn usn(&self, abs_path: &Path) -> Result<i64> {
@@ -852,27 +1109,68 @@ impl<T: PlaceholderInvalidator + ?Sized> PlaceholderInvalidator for &T {
     fn placeholders_off_disk(&self) -> bool {
         (**self).placeholders_off_disk()
     }
+    fn is_pinned(&self, abs_path: &Path) -> bool {
+        (**self).is_pinned(abs_path)
+    }
+    fn pin(&self, abs_path: &Path) -> PlatformCall<'_> {
+        (**self).pin(abs_path)
+    }
+    fn is_in_sync(&self, abs_path: &Path) -> bool {
+        (**self).is_in_sync(abs_path)
+    }
+    fn replace(
+        &self,
+        abs_path: &Path,
+        replacement: &Path,
+        rel: &str,
+        mtime: i64,
+    ) -> PlatformCall<'_> {
+        (**self).replace(abs_path, replacement, rel, mtime)
+    }
 }
 
 #[cfg(windows)]
 pub(crate) struct CfapiInvalidator;
 
+/// Make `call` on a thread of its own, as `kick_hydrate` parks `CfHydratePlaceholder`: every
+/// cfapi call that changes a cloud file waits for any outstanding fetch of it, which only the
+/// serve loop answers ([`PlatformCall`]).
+#[cfg(windows)]
+fn off_the_serve_thread<'a, T: Send + 'static>(
+    call: impl FnOnce() -> Result<T> + Send + 'static,
+) -> PlatformCall<'a, T> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(call());
+    });
+    Box::pin(async move {
+        rx.await.unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "the platform call's thread ended unanswered"
+            ))
+        })
+    })
+}
+
 #[cfg(windows)]
 impl PlaceholderInvalidator for CfapiInvalidator {
-    fn dehydrate(&self, abs_path: &Path) -> Result<()> {
-        fauna_cfapi::dehydrate_placeholder(abs_path)
+    fn dehydrate(&self, abs_path: &Path) -> PlatformCall<'_> {
+        let path = abs_path.to_path_buf();
+        off_the_serve_thread(move || fauna_cfapi::dehydrate_placeholder(&path))
     }
 
-    fn supersede(&self, abs_path: &Path, size: u64, mtime: i64) -> Result<()> {
-        fauna_cfapi::supersede_placeholder(abs_path, size, mtime)
+    fn supersede(&self, abs_path: &Path, size: u64, mtime: i64) -> PlatformCall<'_> {
+        let path = abs_path.to_path_buf();
+        off_the_serve_thread(move || fauna_cfapi::supersede_placeholder(&path, size, mtime))
     }
 
     fn pin_action(&self, abs_path: &Path) -> Option<PinAction> {
         crate::pin_reaction::pin_action_for_path(abs_path)
     }
 
-    fn set_in_sync(&self, abs_path: &Path, usn: i64) -> Result<()> {
-        fauna_cfapi::set_in_sync(abs_path, usn)
+    fn set_in_sync(&self, abs_path: &Path, usn: i64) -> PlatformCall<'_> {
+        let path = abs_path.to_path_buf();
+        off_the_serve_thread(move || fauna_cfapi::set_in_sync(&path, usn))
     }
 
     fn usn(&self, abs_path: &Path) -> Result<i64> {
@@ -909,6 +1207,41 @@ impl PlaceholderInvalidator for CfapiInvalidator {
 
     fn anchor(&self, abs_path: &Path, rel: &str) -> Result<()> {
         fauna_cfapi::convert_to_placeholder_anchored(abs_path, rel)
+    }
+
+    fn is_pinned(&self, abs_path: &Path) -> bool {
+        matches!(
+            fauna_cfapi::pin_state(abs_path),
+            Ok(fauna_cfapi::PinState::Pinned)
+        )
+    }
+
+    fn pin(&self, abs_path: &Path) -> PlatformCall<'_> {
+        let path = abs_path.to_path_buf();
+        off_the_serve_thread(move || fauna_cfapi::set_pin_state(&path, true))
+    }
+
+    fn is_in_sync(&self, abs_path: &Path) -> bool {
+        use windows::Win32::Storage::CloudFilters::CF_PLACEHOLDER_STATE_IN_SYNC;
+        fauna_cfapi::placeholder_state(abs_path)
+            .is_ok_and(|state| state & CF_PLACEHOLDER_STATE_IN_SYNC.0 != 0)
+    }
+
+    fn replace(
+        &self,
+        abs_path: &Path,
+        replacement: &Path,
+        rel: &str,
+        mtime: i64,
+    ) -> PlatformCall<'_> {
+        let (path, replacement, rel) = (
+            abs_path.to_path_buf(),
+            replacement.to_path_buf(),
+            rel.to_string(),
+        );
+        off_the_serve_thread(move || {
+            fauna_cfapi::replace_placeholder(&path, &replacement, &rel, mtime)
+        })
     }
 
     fn convert_dir_in_sync(&self, abs_path: &Path, rel: &str) -> Result<()> {
@@ -949,26 +1282,26 @@ pub(crate) struct CfapiInvalidator;
 
 #[cfg(not(windows))]
 impl PlaceholderInvalidator for CfapiInvalidator {
-    fn dehydrate(&self, _abs_path: &Path) -> Result<()> {
-        Err(anyhow::anyhow!(
+    fn dehydrate(&self, _abs_path: &Path) -> PlatformCall<'_> {
+        in_place(Err(anyhow::anyhow!(
             "cfapi dehydrate unsupported on non-Windows targets"
-        ))
+        )))
     }
 
-    fn supersede(&self, _abs_path: &Path, _size: u64, _mtime: i64) -> Result<()> {
-        Err(anyhow::anyhow!(
+    fn supersede(&self, _abs_path: &Path, _size: u64, _mtime: i64) -> PlatformCall<'_> {
+        in_place(Err(anyhow::anyhow!(
             "cfapi placeholder update unsupported on non-Windows targets"
-        ))
+        )))
     }
 
     fn pin_action(&self, _abs_path: &Path) -> Option<PinAction> {
         None
     }
 
-    fn set_in_sync(&self, _abs_path: &Path, _usn: i64) -> Result<()> {
-        Err(anyhow::anyhow!(
+    fn set_in_sync(&self, _abs_path: &Path, _usn: i64) -> PlatformCall<'_> {
+        in_place(Err(anyhow::anyhow!(
             "cfapi set-in-sync unsupported on non-Windows targets"
-        ))
+        )))
     }
 
     fn usn(&self, _abs_path: &Path) -> Result<i64> {
@@ -1021,14 +1354,17 @@ impl PlaceholderInvalidator for CfapiInvalidator {
 /// 1. an ordinary file (locally created, or an editor's replace-save destroyed the
 ///    placeholder) is first [`anchor`](PlaceholderInvalidator::anchor)ed as a hydrated,
 ///    NOT-in-sync placeholder — vouching for nothing, so it is safe unproven;
-/// 2. its USN is read;
-/// 3. the engine proves the disk content is the recorded content
-///    ([`HydrationHost::is_dehydration_safe`]: row `Synced`, disk hash ==
+/// 2. a body the holder-keeps gate keeps ([`HydrationHost::keeps_own_record`]) is
+///    [`pin`](PlaceholderInvalidator::pin)ned: in sync and unpinned is the one state the
+///    OS evicts on its own, and such a body must never be in it;
+/// 3. its USN is read — after the pin, which moves it;
+/// 4. the engine proves the disk content is the recorded content
+///    ([`HydrationHost::is_recorded_content`]: row `Synced`, disk hash ==
 ///    `recorded_content_hash`);
-/// 4. the in-sync assertion is conditioned on the step-2 USN, so a write landing after
+/// 5. the in-sync assertion is conditioned on the step-3 USN, so a write landing after
 ///    it — during or after the proof — makes the platform refuse.
 ///
-/// Whatever bytes step 3 hashed are the bytes step 4 vouches for, or nothing is
+/// Whatever bytes step 4 hashed are the bytes step 5 vouches for, or nothing is
 /// vouched for. `Ok(false)`: the proof failed (the disk moved past the recorded
 /// content) — the not-in-sync bit stands, and the newer content's own upload flips it.
 async fn assert_recorded_in_sync<H: HydrationHost, I: PlaceholderInvalidator + ?Sized>(
@@ -1040,11 +1376,14 @@ async fn assert_recorded_in_sync<H: HydrationHost, I: PlaceholderInvalidator + ?
     if !invalidator.is_cloud_file(abs) {
         invalidator.anchor(abs, rel)?;
     }
+    if hydrator.keeps_own_record(rel).await && !invalidator.is_pinned(abs) {
+        invalidator.pin(abs).await?;
+    }
     let usn = invalidator.usn(abs)?;
-    if !hydrator.is_dehydration_safe(rel).await {
+    if !hydrator.is_recorded_content(rel).await {
         return Ok(false);
     }
-    invalidator.set_in_sync(abs, usn)?;
+    invalidator.set_in_sync(abs, usn).await?;
     Ok(true)
 }
 
@@ -1126,9 +1465,10 @@ async fn flip_clean_ancestor_dirs<H: HydrationHost, I: PlaceholderInvalidator>(
         }
         let abs = sync_root.join(&dir);
         let result = if invalidator.is_cloud_file(&abs) {
-            invalidator
-                .usn(&abs)
-                .and_then(|usn| invalidator.set_in_sync(&abs, usn))
+            match invalidator.usn(&abs) {
+                Ok(usn) => invalidator.set_in_sync(&abs, usn).await,
+                Err(e) => Err(e),
+            }
         } else {
             invalidator.convert_dir_in_sync(&abs, &dir)
         };
@@ -1145,18 +1485,26 @@ async fn flip_clean_ancestor_dirs<H: HydrationHost, I: PlaceholderInvalidator>(
 /// Free `rel`'s local bytes through the root's OS binding — the one road every
 /// dehydrate takes (a superseded copy, an unpin, *Free up space*).
 ///
-/// On a cfapi root that is [`PlaceholderInvalidator::dehydrate`] alone: the OS's
-/// dirty-file refusal is its gate, and the bytes go first. On an off-disk root
+/// On a cfapi root the OS's dirty-file refusal is the gate, and the bytes go first
+/// ([`PlaceholderInvalidator::dehydrate`]) — after one row-only check the OS cannot
+/// make: a body the holder-keeps gate keeps ([`HydrationHost::keeps_own_record`])
+/// is refused before the OS is asked, since its in-sync bit may have been asserted
+/// while its folder was full. On an off-disk root
 /// (`placeholders_off_disk`) nothing in the OS refuses, so the engine gates and
 /// records first ([`HydrationHost::dehydrate_off_disk`]: lossless or nothing, the
 /// row flipped unseen, the removal suppression armed) and the unlink comes
-/// second — the crash-safe order (`on-demand-files.md` § Linux FUSE binding, the
+/// second — the crash-safe order (`on-demand-files-linux.md` § Linux FUSE binding, the
 /// dehydrate rule). An unlink that then fails leaves a `Placeholder` row over the
 /// bytes, which the next sweep repairs back to `Synced`.
 ///
 /// `superseded_by` names the version a remote edit made, when that is why the bytes go
 /// ([`apply_stale_hydrated`]): the freed placeholder must then describe it
 /// ([`PlaceholderInvalidator::supersede`]), not the version whose bytes were freed.
+/// Without it the freed placeholder describes the version the file's row resolves: the
+/// disk's own when they agree (a bare dehydrate), the row's when a `Placeholder` row has
+/// moved past the bytes — a restore whose own free was refused, so this free completes it
+/// (`file-versions.md` § Restore, ordering 2). A bare dehydrate there kept the replaced
+/// version's size, and every open of the file was refused.
 pub(crate) async fn free_local_bytes<H: HydrationHost, I: PlaceholderInvalidator + ?Sized>(
     hydrator: &H,
     invalidator: &I,
@@ -1164,19 +1512,205 @@ pub(crate) async fn free_local_bytes<H: HydrationHost, I: PlaceholderInvalidator
     rel: &str,
     superseded_by: Option<&StaleHydratedRow>,
 ) -> Result<()> {
-    if invalidator.placeholders_off_disk() && !hydrator.dehydrate_off_disk(rel).await? {
+    if invalidator.placeholders_off_disk() {
+        if !hydrator.dehydrate_off_disk(rel).await? {
+            return Err(anyhow::anyhow!(
+                "not freeing: this device may hold the only copy of the file's content — it \
+                 has not finished syncing, or its folder keeps no content on the server"
+            ));
+        }
+    } else if hydrator.keeps_own_record(rel).await {
         return Err(anyhow::anyhow!(
-            "not freeing: this device may hold the only copy of the file's content — it \
-             has not finished syncing, or its folder keeps no content on the server"
+            "not freeing: this device may hold the only copy of the file's content — its \
+             folder keeps no content on the server"
         ));
     }
     match superseded_by {
-        None => invalidator.dehydrate(abs),
-        Some(head) => invalidator.supersede(
-            abs,
-            u64::try_from(head.size_bytes).unwrap_or(0),
-            head.remote_mtime,
-        ),
+        Some(head) => {
+            invalidator
+                .supersede(
+                    abs,
+                    u64::try_from(head.size_bytes).unwrap_or(0),
+                    head.remote_mtime,
+                )
+                .await
+        }
+        // An off-disk root's placeholders are rows: its dehydrate is the unlink.
+        None if invalidator.placeholders_off_disk() => invalidator.dehydrate(abs).await,
+        // A row that cannot be read frees as before; an open of a placeholder left
+        // behind its row still re-describes it ([`PendingRedescribes`]).
+        None => match hydrator.placeholder_row(rel).await.ok().flatten() {
+            Some(row) if placeholder_disagrees(invalidator, abs, &row) => {
+                invalidator.supersede(abs, row.size, row.mtime).await
+            }
+            _ => invalidator.dehydrate(abs).await,
+        },
+    }
+}
+
+/// Does the cloud file at `abs` describe another version than `row`, its `Placeholder`
+/// row — another size, or another last-write time? Stat-only; `false` when nothing is at
+/// `abs`, or what is there is no cloud file (an ordinary file the user wrote is theirs).
+/// The size is what an open is refused on; the time only when the row carries one, so a
+/// row that knows none never re-dates the file to 1970.
+fn placeholder_disagrees<I: PlaceholderInvalidator + ?Sized>(
+    invalidator: &I,
+    abs: &Path,
+    row: &PlaceholderRow,
+) -> bool {
+    let Ok(meta) = std::fs::metadata(abs) else {
+        return false;
+    };
+    if !invalidator.is_cloud_file(abs) {
+        return false;
+    }
+    if meta.len() != row.size {
+        return true;
+    }
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|after| after.as_secs() as i64);
+    row.mtime > 0 && mtime != Some(row.mtime)
+}
+
+/// The re-describe `rel`'s placeholder is owed, if any: its path and its `Placeholder` row,
+/// when the file there describes another version ([`placeholder_disagrees`]) — the heal for
+/// every road that leaves a placeholder behind its row (`on-demand-files.md` § On-Demand
+/// Files, *A placeholder describes the version its row resolves*): a re-describe or a
+/// restore's free refused because another program held the file, then a bare eviction since
+/// — the OS's own keeps the size of the version it freed. `None` when nothing is owed: an
+/// off-disk root, no `Placeholder` row, nothing at the path, or the two agree.
+async fn owed_redescribe<H: HydrationHost, I: PlaceholderInvalidator + ?Sized>(
+    hydrator: &H,
+    invalidator: &I,
+    sync_root: &Path,
+    rel: &str,
+) -> Result<Option<(PathBuf, PlaceholderRow)>> {
+    if invalidator.placeholders_off_disk() {
+        return Ok(None);
+    }
+    let Some(row) = hydrator.placeholder_row(rel).await? else {
+        return Ok(None);
+    };
+    let abs = PathBuf::from(crate::path_map::overlay_abs_path(
+        &sync_root.to_string_lossy(),
+        rel,
+    ));
+    Ok(placeholder_disagrees(invalidator, &abs, &row).then_some((abs, row)))
+}
+
+/// The first try of an owed re-describe ([`PendingRedescribes`]).
+const REDESCRIBE_RETRY_FIRST: Duration = Duration::from_secs(1);
+/// A refused try backs off to this, and goes on at it while anything is still owed.
+const REDESCRIBE_RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// The placeholders owed a re-describe from their rows ([`owed_redescribe`]), tried by the
+/// serve loop's last arm a second after they are owed, then less often while refused, until
+/// each agrees with its row or no longer has one.
+///
+/// **Owed, never run where the need is found.** The re-describe is a
+/// [`PlaceholderInvalidator::supersede`] — so a file carrying a local edit is refused and
+/// nothing about it changes — and a refused open is the need: the platform retries the
+/// refused read at once, and the update waits on that fetch. Run on the loop at the refusal,
+/// the update held the loop for cfapi's 60 s request timeout (measured 2026-10-09 against a
+/// live root,
+/// `cfapi_live_integration::a_restore_whose_free_was_refused_opens_whole_after_a_bare_eviction`).
+/// The retry arm makes it as the loop makes every platform call, answering the platform's
+/// requests meanwhile ([`PlatformRequests::answer_while`]). A refused try is a file held
+/// open — the program whose open was refused keeps it until its read fails, and the fold's
+/// re-describe can meet any program's handle. The fold re-points a row once, so without this
+/// nothing would re-describe the placeholder before its next open.
+struct PendingRedescribes {
+    /// Owed, not yet tried.
+    rels: std::collections::BTreeSet<String>,
+    delay: Duration,
+    due: Option<tokio::time::Instant>,
+}
+
+impl Default for PendingRedescribes {
+    fn default() -> Self {
+        Self {
+            rels: Default::default(),
+            delay: REDESCRIBE_RETRY_FIRST,
+            due: None,
+        }
+    }
+}
+
+impl PendingRedescribes {
+    /// Owe `rel` a re-describe, tried within [`REDESCRIBE_RETRY_FIRST`]. A try already due
+    /// sooner stays put: an open retried faster than that must not keep the try away.
+    fn owe(&mut self, rel: String) {
+        self.rels.insert(rel);
+        let soon = tokio::time::Instant::now() + REDESCRIBE_RETRY_FIRST;
+        if self.due.is_none_or(|due| due > soon) {
+            self.delay = REDESCRIBE_RETRY_FIRST;
+            self.due = Some(soon);
+        }
+    }
+
+    /// Owe `rel` again after a refused or unreadable try, backing off.
+    fn owe_later(&mut self, rel: String) {
+        self.rels.insert(rel);
+        self.delay = (self.delay * 2).clamp(REDESCRIBE_RETRY_FIRST, REDESCRIBE_RETRY_MAX);
+        if self.due.is_none() {
+            self.due = Some(tokio::time::Instant::now() + self.delay);
+        }
+    }
+}
+
+/// Sleep until `due`, or for ever when nothing is owed — the retry arm of the serve loop.
+async fn redescribe_retry_due(due: Option<tokio::time::Instant>) {
+    match due {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Try every owed re-describe ([`PendingRedescribes`]): each placeholder still behind its
+/// row is re-described, a refused one owed again with a backoff.
+async fn try_pending_redescribes<H: HydrationHost, I: PlaceholderInvalidator + ?Sized>(
+    hydrator: &H,
+    invalidator: &I,
+    sync_root: &Path,
+    event_tx: Option<&broadcast::Sender<Event>>,
+    pending: &mut PendingRedescribes,
+) {
+    pending.due = None;
+    for rel in std::mem::take(&mut pending.rels) {
+        match owed_redescribe(hydrator, invalidator, sync_root, &rel).await {
+            Ok(None) => {}
+            Ok(Some((abs, row))) => match invalidator.supersede(&abs, row.size, row.mtime).await {
+                Ok(()) => {
+                    tracing::info!(
+                        path = %fauna_core::log_redact::log_path(&rel),
+                        "re-described a placeholder left behind its row; its next open is served"
+                    );
+                    // The update freed the file's bytes: what a fetch answered while it
+                    // was out recorded hydrated is a placeholder again.
+                    record_dehydrated(hydrator, sync_root, &rel, event_tx).await;
+                }
+                Err(e) => {
+                    tracing::info!(
+                        path = %fauna_core::log_redact::log_path(&rel),
+                        error = %e,
+                        "re-describing a placeholder from its row was refused (a program holds \
+                         it open?); retrying"
+                    );
+                    pending.owe_later(rel);
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    path = %fauna_core::log_redact::log_path(&rel),
+                    error = %e,
+                    "reading a placeholder's row to re-describe it failed; retrying"
+                );
+                pending.owe_later(rel);
+            }
+        }
     }
 }
 
@@ -1189,22 +1723,39 @@ pub(crate) async fn free_local_bytes<H: HydrationHost, I: PlaceholderInvalidator
 /// deliberately so** (`docs/goal/behavior/file-sync.md` § Restore):
 ///
 /// - *Restore* records content the user explicitly chose, so there is no local edit
-///   to protect: it re-points the row, then dehydrates, and a failed dehydrate just
-///   leaves a stale cache any later eviction completes.
-/// - *This* invalidation may be racing an **unsynced local edit** (this host is
-///   download-only — it never uploads, so a locally edited hydrated file has no
-///   other guardian). Dehydrate is that guardian: it *fails* on a dirty file, so we
-///   run it first as a gate. On failure we leave the row `Synced` and untouched —
-///   the edit survives, and a future reconcile pass resolves it as a conflict.
-///   Re-pointing first would strand the edit under a `Placeholder` row claiming no
-///   local bytes.
+///   to protect: it re-points the row, then frees the bytes, and a failed free leaves
+///   a stale cache that whatever frees it later completes — this provider's own free
+///   describes the row's version ([`free_local_bytes`]), and a placeholder the OS's
+///   eviction left at the replaced version's size is re-described from the row
+///   ([`owed_redescribe`], owed by the eviction's notice — or, at the latest, by the
+///   open it refuses — and tried a second later, [`PendingRedescribes`]). The one
+///   restore that comes HERE is one over a copy the binding keeps (a pinned file,
+///   which cfapi will not free — [`EngineCommand::ApplyStaleHydrated`]): with no
+///   free for the row to lead, it is replaced in and its row moves last.
+/// - *This* invalidation may be racing an **unsynced local edit**: the uploader is
+///   asynchronous, so there is always a window in which the newest bytes exist only
+///   on this disk. The free is the gate: it *fails* on a dirty file, so we run it
+///   first. On failure we leave the row `Synced` and untouched — the edit survives,
+///   uploads, and the divergence resolves as an ordinary conflict. Re-pointing first
+///   would strand the edit under a `Placeholder` row claiming no local bytes.
 ///
-/// **One refusal is followed instead of skipped.** On an off-disk root the gate
-/// also refuses this device's own record in a metadata-only folder (*a holder
-/// keeps what it wrote*). That body is **replaced**: the new head is fetched over
-/// it and the row moves last ([`HydrationHost::replace_superseded_own_record`]),
-/// the file staying on the disk as `Synced`. No holder answering leaves the old
-/// version whole for the next pull to retry.
+/// **Two refusals are followed instead of skipped — a copy this device keeps is
+/// replaced, never freed.** The gate also refuses this
+/// device's own record in a metadata-only folder (*a holder keeps what it wrote*) —
+/// the engine's on an off-disk root, [`free_local_bytes`]'s row-only check ahead of
+/// the OS on cfapi. That body is **replaced**: the new head is fetched over it and
+/// the row moves last ([`HydrationHost::replace_superseded_own_record`]), the file
+/// staying on the disk as `Synced`. Any refusal asks, and the engine answers
+/// `false` for every other case (a fetched body, a local edit). On cfapi the engine's
+/// atomic write leaves an ordinary file — the
+/// placeholder and its pin went with the old one (measured,
+/// `diag_holder_keep_mechanics`) — so it is re-anchored and vouched in sync through
+/// [`assert_recorded_in_sync`], as a fetched body that takes no pin. No holder
+/// answering leaves the old version whole for the next pull to retry. The second is
+/// cfapi's own: it frees no PINNED file — the user's *Always keep on this device*,
+/// or a pin the agent set on a kept body and left when its folder returned to full —
+/// so an in-sync pinned copy is replaced in place, pin and all
+/// ([`replace_pinned_copy`]). Every other refusal is skipped, its log naming why.
 ///
 /// **The free leaves the placeholder describing the NEW version**
 /// ([`PlaceholderInvalidator::supersede`]): cfapi asks for exactly the placeholder's size
@@ -1242,37 +1793,79 @@ pub(crate) async fn apply_stale_hydrated<H: HydrationHost>(
             // A refusal may be the holder-keeps gate: this device's own record in
             // a folder whose nest holds no bytes. That body is replaced, not
             // freed — the new head is fetched over it, so the device never holds
-            // no version (`file-sync.md` § Relay serving). Off-disk roots only:
-            // the cfapi binding of the rule is not built.
-            if invalidator.placeholders_off_disk() {
-                match hydrator.replace_superseded_own_record(row).await {
-                    Ok(true) => {
-                        if let Some(tx) = event_tx {
-                            let _ = tx.send(Event {
-                                event: EventKind::FileStatusChanged {
-                                    path: abs,
-                                    status: FileStatus::Synced,
-                                },
-                            });
+            // no version (`file-sync.md` § Relay serving).
+            match hydrator.replace_superseded_own_record(row).await {
+                Ok(true) => {
+                    if !invalidator.placeholders_off_disk() {
+                        match assert_recorded_in_sync(
+                            hydrator,
+                            invalidator,
+                            Path::new(&abs),
+                            &row.relative_path,
+                        )
+                        .await
+                        {
+                            Ok(true) => {}
+                            Ok(false) => tracing::debug!(
+                                path = %abs,
+                                "the fetched head is not vouched in sync: the disk moved past it"
+                            ),
+                            Err(e) => tracing::warn!(
+                                path = %abs,
+                                error = %e,
+                                "re-anchoring the fetched head failed; it keeps its sync-pending \
+                                 state until its next upload or pull"
+                            ),
                         }
-                        invalidated += 1;
-                        continue;
                     }
-                    Ok(false) => {}
-                    Err(fetch) => {
-                        tracing::info!(
-                            path = %abs,
-                            error = %fetch,
-                            "keeping this device's own version: the newer one could not be fetched from a device holding it — retried on the next pull"
-                        );
-                        continue;
+                    if let Some(tx) = event_tx {
+                        let _ = tx.send(Event {
+                            event: EventKind::FileStatusChanged {
+                                path: abs,
+                                status: FileStatus::Synced,
+                            },
+                        });
                     }
+                    invalidated += 1;
+                    continue;
                 }
+                Ok(false) => {}
+                Err(fetch) => {
+                    tracing::info!(
+                        path = %abs,
+                        error = %fetch,
+                        "keeping this device's own version: the newer one could not be fetched from a device holding it — retried on the next pull"
+                    );
+                    continue;
+                }
+            }
+            let abs_path = Path::new(&abs);
+            if !invalidator.placeholders_off_disk()
+                && invalidator.is_pinned(abs_path)
+                && invalidator.is_in_sync(abs_path)
+                && !hydrator.keeps_own_record(&row.relative_path).await
+            {
+                match replace_pinned_copy(hydrator, invalidator, abs_path, row).await {
+                    Ok(()) => {
+                        push_status(event_tx, sync_root, &row.relative_path, FileStatus::Synced);
+                        invalidated += 1;
+                    }
+                    Err(replace) => tracing::warn!(
+                        path = %abs,
+                        error = %replace,
+                        "skipping stale-hydrated invalidation: the file is kept on this device \
+                         (pinned), and replacing it with the new version failed — retried on \
+                         the next pull"
+                    ),
+                }
+                continue;
             }
             tracing::warn!(
                 path = %abs,
                 error = %e,
-                "skipping stale-hydrated invalidation (dehydrate refused — likely an unsynced local edit)"
+                cause = stale_copy_skip_cause(hydrator, invalidator, abs_path, &row.relative_path)
+                    .await,
+                "skipping stale-hydrated invalidation"
             );
             continue;
         }
@@ -1296,6 +1889,110 @@ pub(crate) async fn apply_stale_hydrated<H: HydrationHost>(
         invalidated += 1;
     }
     invalidated
+}
+
+/// The prefix of the sibling a pinned copy's new head lands in before it is swapped
+/// in ([`replace_pinned_copy`]). A dot-name, like [`HYDRATING_PREFIX`]'s: the watcher,
+/// the scans and the ignore rules pass over it, so it is never taken for the user's.
+pub(crate) const REPLACING_PREFIX: &str = ".fauna-replacing-";
+
+/// Replace a stale hydrated copy the user keeps on this device — a PINNED file, which
+/// cfapi never frees (its superseding update and a bare dehydrate are both refused
+/// `0x80070188`) — with the head the fold reported, keeping the pin
+/// (`on-demand-files.md` § *Sync direction*: another device's edit reaches the disk
+/// whatever the file's pin). In order:
+///
+/// 1. the head is fetched into a [`REPLACING_PREFIX`] sibling
+///    ([`HydrationHost::download_head_to_path`]);
+/// 2. the binding swaps it in over the copy in one step that keeps the pin and is
+///    refused unless the copy is in sync ([`PlaceholderInvalidator::replace`]) — the
+///    dirty-file refusal of `file-versions.md` § Restore, ordering 3, so an unsynced
+///    local edit survives whole and stays for the conflict path;
+/// 3. only then does the row move ([`HydrationHost::record_replaced_head`]);
+/// 4. the new bytes are vouched in sync ([`assert_recorded_in_sync`]).
+///
+/// The device holds one whole version, and the pin, at every instant: the swap is a
+/// single rename of a pinned placeholder (measured,
+/// `cfapi_live_integration::diag_update_a_pinned_file` — the other candidates either
+/// left the file cloud-only and unpinned, or held old bytes padded to the new size
+/// marked in sync, between two calls). A crash before the swap leaves the old copy and a
+/// sibling the next attempt removes; a crash between the swap and the row move leaves the
+/// new head on the disk, not yet in sync, under the old row — read as a local edit and
+/// uploaded, content the nest already holds, never a loss.
+async fn replace_pinned_copy<H: HydrationHost>(
+    hydrator: &H,
+    invalidator: &dyn PlaceholderInvalidator,
+    abs: &Path,
+    row: &StaleHydratedRow,
+) -> Result<()> {
+    let (Some(parent), Some(name)) = (abs.parent(), abs.file_name()) else {
+        anyhow::bail!("a replaced file needs a parent and a name");
+    };
+    let mut sibling_name = std::ffi::OsString::from(REPLACING_PREFIX);
+    sibling_name.push(name);
+    let sibling = parent.join(sibling_name);
+    // A sibling a crash left behind is already a placeholder, which the swap's
+    // anchoring refuses.
+    match std::fs::remove_file(&sibling) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(anyhow::Error::new(e)
+                .context(format!("removing the stale sibling {}", sibling.display())));
+        }
+        _ => {}
+    }
+    let mut guard = RemoveOnDrop(Some(sibling.clone()));
+    let fetched = hydrator
+        .download_head_to_path(row, &sibling)
+        .await
+        .context("fetching the new version")?;
+    invalidator
+        .replace(abs, &sibling, &row.relative_path, row.remote_mtime)
+        .await?;
+    guard.0 = None;
+    hydrator
+        .record_replaced_head(row, fetched)
+        .await
+        .context("recording the new version")?;
+    match assert_recorded_in_sync(hydrator, invalidator, abs, &row.relative_path).await {
+        Ok(true) => {}
+        Ok(false) => tracing::debug!(
+            path = %abs.display(),
+            "the replaced file is not vouched in sync: the disk moved past it"
+        ),
+        Err(e) => tracing::warn!(
+            path = %abs.display(),
+            error = %e,
+            "vouching the replaced file in sync failed; it keeps its sync-pending state until \
+             its next upload or pull"
+        ),
+    }
+    Ok(())
+}
+
+/// Why [`apply_stale_hydrated`] left a stale hydrated copy as it is — neither freed nor
+/// replaced — for its skip log to name. Every cause leaves the old version whole; each
+/// but the last is a local edit the conflict path owns once it uploads.
+async fn stale_copy_skip_cause<H: HydrationHost>(
+    hydrator: &H,
+    invalidator: &dyn PlaceholderInvalidator,
+    abs: &Path,
+    rel: &str,
+) -> &'static str {
+    if hydrator.keeps_own_record(rel).await {
+        "this device's own record in a folder whose nest keeps no content: the engine \
+         replaces it only while the disk holds exactly that record, and it no longer does \
+         (a local edit)"
+    } else if invalidator.placeholders_off_disk() {
+        "the engine's gate refused to free it (a local edit not yet uploaded)"
+    } else if !invalidator.is_in_sync(abs) {
+        if invalidator.is_pinned(abs) {
+            "kept on this device (pinned), with a local edit not yet uploaded"
+        } else {
+            "not in sync: a local edit not yet uploaded"
+        }
+    } else {
+        "the platform refused the update (the file held open for writing elsewhere?)"
+    }
 }
 
 /// Push the fold's brand-NEW rows ([`PlaceholderFold::created`]) onto disk wherever
@@ -1376,8 +2073,10 @@ pub(crate) fn materialize_created<I: PlaceholderInvalidator + ?Sized>(
 
 /// Act on one [`PlaceholderFold`]: the fold already wrote its new/moved
 /// `Placeholder` rows, so what remains is the disk — materializing the NEW rows
-/// into directories the platform will not list again ([`materialize_created`]) and
-/// invalidating the hydrated copies it *reported* stale. Shared by the startup
+/// into directories the platform will not list again ([`materialize_created`]),
+/// removing what the remote deletes it left in place still hold
+/// ([`apply_folded_deletes`]), and invalidating the hydrated copies it *reported*
+/// stale. Shared by the startup
 /// [`HydrationHost::prepare`] and every periodic [`HydrationHost::repull`] — one
 /// code path, so a change picked up on a timer lands in exactly the state a restart
 /// would have produced.
@@ -1387,6 +2086,7 @@ async fn apply_fold<H: HydrationHost>(
     sync_root: &Path,
     fold: PlaceholderFold,
     event_tx: Option<&broadcast::Sender<Event>>,
+    pending: &mut PendingRedescribes,
     phase: &'static str,
 ) {
     tracing::info!(
@@ -1411,13 +2111,24 @@ async fn apply_fold<H: HydrationHost>(
         }
     }
     if !fold.repointed.is_empty() {
-        let n = redescribe_repointed(invalidator, sync_root, &fold.repointed);
+        let n = redescribe_repointed(
+            hydrator,
+            invalidator,
+            sync_root,
+            &fold.repointed,
+            event_tx,
+            pending,
+        )
+        .await;
         tracing::info!(
             phase,
             repointed = fold.repointed.len(),
             redescribed = n,
             "re-described re-pointed placeholders"
         );
+    }
+    if !fold.deleted.is_empty() {
+        apply_folded_deletes(hydrator, invalidator, sync_root, &fold.deleted, phase).await;
     }
     if fold.stale_hydrated.is_empty() {
         return;
@@ -1436,19 +2147,76 @@ async fn apply_fold<H: HydrationHost>(
     tracing::info!(phase, invalidated = n, "invalidated stale hydrated copies");
 }
 
+/// Apply the remote deletes the fold left in place ([`PlaceholderFold::deleted`]) — the
+/// remote-delete half of two-way (`on-demand-files.md` § *Sync direction*). Each goes
+/// through the engine's shared verdict, the one the resident pull's delete arm runs
+/// ([`HydrationHost::apply_folded_delete`]), with this root's binding as the removal
+/// ([`PlaceholderInvalidator::remove`]): a cloud-only placeholder and an in-sync copy
+/// leave the disk and then lose their row; an unsynced edit stays, its delete-vs-edit
+/// conflict reported and the survivor uploaded — which then flips to the platform's ✅
+/// like any recorded upload ([`flip_recorded_in_sync`]).
+///
+/// Best-effort per path, like every other disk act of the fold: a failure is logged and
+/// the row kept, and the next re-pull — which folds the whole log — reports the delete
+/// again. Returns how many were applied.
+async fn apply_folded_deletes<H: HydrationHost>(
+    hydrator: &H,
+    invalidator: &dyn PlaceholderInvalidator,
+    sync_root: &Path,
+    deletes: &[FoldedDelete],
+    phase: &'static str,
+) -> usize {
+    let remove = |abs: &Path| invalidator.remove(abs);
+    let mut applied = 0usize;
+    let mut survivors: Vec<String> = Vec::new();
+    for delete in deletes {
+        match hydrator.apply_folded_delete(delete, &remove).await {
+            Ok(FoldedDeleteOutcome::Applied) => applied += 1,
+            Ok(FoldedDeleteOutcome::KeptConflict) => survivors.push(delete.relative_path.clone()),
+            Ok(FoldedDeleteOutcome::Kept | FoldedDeleteOutcome::Moot) => {}
+            Err(e) => tracing::warn!(
+                phase,
+                rel = delete.relative_path,
+                error = %e,
+                "applying a remote delete failed; the next re-pull retries it"
+            ),
+        }
+    }
+    tracing::info!(
+        phase,
+        deleted = deletes.len(),
+        applied,
+        kept_conflict = survivors.len(),
+        "applied remote deletes"
+    );
+    flip_recorded_in_sync(hydrator, &invalidator, sync_root, &survivors).await;
+    applied
+}
+
 /// Leave every placeholder the fold RE-POINTED ([`PlaceholderFold::repointed`]) describing
 /// its new version, through [`PlaceholderInvalidator::supersede`] — the fold moved only the
 /// row, and a placeholder already on the disk still carries the old version's size and
 /// mtime. A placeholder not on the disk (its directory not listed yet) gets both from its
-/// own listing, and an off-disk root's are rows only, so neither is touched. Best-effort
-/// per row like every other disk act of the fold: a refusal (a local edit since — the
-/// update is refused unless the placeholder is in sync) or a failure is logged, and the
-/// open of a placeholder that still disagrees with its row fails rather than serving the
-/// wrong bytes ([`serve_fetch`]). Returns how many were re-described.
-fn redescribe_repointed<I: PlaceholderInvalidator + ?Sized>(
+/// own listing, and an off-disk root's are rows only, so neither is touched. A refusal —
+/// another program holds the file open, or a local edit since (the update is refused
+/// unless the placeholder is in sync) — is owed to `pending` and retried: the next fold
+/// sees an unchanged head and re-points nothing, so nothing else would re-describe it
+/// before an open. An open of a placeholder that still disagrees with its row fails rather
+/// than serving the wrong bytes ([`serve_fetch`]), and owes it a re-describe again. Returns
+/// how many were re-described.
+///
+/// The update waits on any fetch of the file the platform has outstanding — a program
+/// opening it as the edit lands — so the loop makes it while answering the platform
+/// ([`PlatformCall`]). A fetch answered meanwhile may record the file hydrated before the
+/// update frees it again: a re-described placeholder is then recorded freed, so its row
+/// says what the disk holds.
+async fn redescribe_repointed<H: HydrationHost, I: PlaceholderInvalidator + ?Sized>(
+    hydrator: &H,
     invalidator: &I,
     sync_root: &Path,
     rows: &[PlaceholderRow],
+    event_tx: Option<&broadcast::Sender<Event>>,
+    pending: &mut PendingRedescribes,
 ) -> usize {
     if invalidator.placeholders_off_disk() {
         return 0;
@@ -1462,14 +2230,20 @@ fn redescribe_repointed<I: PlaceholderInvalidator + ?Sized>(
         if std::fs::symlink_metadata(&abs).is_err() {
             continue;
         }
-        match invalidator.supersede(&abs, row.size, row.mtime) {
-            Ok(()) => redescribed += 1,
-            Err(e) => tracing::warn!(
-                rel = row.rel,
-                error = %e,
-                "re-describing a re-pointed placeholder failed (a local edit since?); its \
-                 next open is refused until it is"
-            ),
+        match invalidator.supersede(&abs, row.size, row.mtime).await {
+            Ok(()) => {
+                record_dehydrated(hydrator, sync_root, &row.rel, event_tx).await;
+                redescribed += 1;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    rel = row.rel,
+                    error = %e,
+                    "re-describing a re-pointed placeholder was refused (a program holds it \
+                     open, or a local edit since?); retrying"
+                );
+                pending.owe(row.rel.clone());
+            }
         }
     }
     redescribed
@@ -1479,15 +2253,41 @@ fn redescribe_repointed<I: PlaceholderInvalidator + ?Sized>(
 /// `prepare`: a transient socket/nest failure means this pass saw nothing, and the
 /// next tick (or the reconnect edge) retries — [`NestClient`] reconnects itself
 /// indefinitely and is never torn down on a stall.
+/// One deposit adoption pass ([`HydrationHost::adopt_deposits`]), then the last
+/// leg every recorded upload takes on this root: the retired items' files flip
+/// to the platform's ✅ and so do their clean ancestors.
+async fn adopt_and_flip<H: HydrationHost, I: PlaceholderInvalidator>(
+    hydrator: &H,
+    invalidator: &I,
+    sync_root: &Path,
+    folder: &str,
+) {
+    let landed = hydrator.adopt_deposits(folder).await;
+    flip_recorded_in_sync(hydrator, invalidator, sync_root, &landed).await;
+    flip_clean_ancestor_dirs(hydrator, invalidator, sync_root, &landed).await;
+}
+
 async fn repull_and_apply<H: HydrationHost>(
     hydrator: &H,
     invalidator: &dyn PlaceholderInvalidator,
     sync_root: &Path,
     event_tx: Option<&broadcast::Sender<Event>>,
+    pending: &mut PendingRedescribes,
     phase: &'static str,
 ) {
     match hydrator.repull().await {
-        Ok(fold) => apply_fold(hydrator, invalidator, sync_root, fold, event_tx, phase).await,
+        Ok(fold) => {
+            apply_fold(
+                hydrator,
+                invalidator,
+                sync_root,
+                fold,
+                event_tx,
+                pending,
+                phase,
+            )
+            .await
+        }
         Err(e) => {
             tracing::warn!(phase, error = %e, "re-pulling the nest failed; retrying on the next tick")
         }
@@ -1555,11 +2355,17 @@ async fn record_dehydrated<H: HydrationHost>(
 /// a pin flip alone does not trip it). On refusal, the edit that tripped it has
 /// either been uploaded since (the refusal is **stale** — cfapi's in-sync bit
 /// only ever resets by provider assertion, and nothing asserted it) or is still
-/// pending. [`HydrationHost::is_dehydration_safe`] tells them apart by hashing
+/// pending. [`HydrationHost::is_recorded_content`] tells them apart by hashing
 /// the disk against the row's recorded uploaded identity — so an edit still
 /// sitting in the watcher's debounce window fails the gate and the refusal
 /// stands. Only a proven-stale refusal is repaired (`set_in_sync`) and retried;
 /// a dirty file is left for `converge` to upload, and the next sweep frees it.
+///
+/// **A body the holder-keeps gate keeps is never freed** — this device's own record
+/// in a folder whose nest holds no bytes (`file-sync.md` § Relay serving → *A holder
+/// keeps what it wrote*). The unpin is refused and the pin put back through
+/// [`assert_recorded_in_sync`], so the file stays out of the OS's own eviction and
+/// shows as kept on this device.
 async fn react_to_pin<H: HydrationHost, I: PlaceholderInvalidator>(
     hydrator: &H,
     invalidator: &I,
@@ -1573,6 +2379,16 @@ async fn react_to_pin<H: HydrationHost, I: PlaceholderInvalidator>(
         Some(PinAction::Hydrate) => {
             tracing::info!(rel, "pinned placeholder: requesting hydration");
             invalidator.kick_hydrate(&abs);
+        }
+        Some(PinAction::Dehydrate) if hydrator.keeps_own_record(rel).await => {
+            tracing::info!(
+                rel,
+                "not freeing: this device may hold the only copy of the file's content — its \
+                 folder keeps no content on the server; kept on this device"
+            );
+            if let Err(e) = assert_recorded_in_sync(hydrator, invalidator, &abs, rel).await {
+                tracing::warn!(rel, error = %e, "re-pinning a kept file failed (retried by the sweep)");
+            }
         }
         Some(PinAction::Dehydrate) => {
             let done = match free_local_bytes(hydrator, invalidator, &abs, rel, None).await {
@@ -1626,6 +2442,47 @@ async fn react_to_pin<H: HydrationHost, I: PlaceholderInvalidator>(
     }
 }
 
+/// Pin every body the holder-keeps gate keeps that is not pinned yet — the binding's
+/// half of a residency flip (`file-sync.md` § Relay serving → *A holder keeps what it
+/// wrote*). The gate reads the folder's residency when a body is freed, and the OS's
+/// own eviction asks no gate: a file asserted in sync while its folder was full may
+/// be evicted the moment the folder is metadata-only, unless it is pinned. Run right
+/// after each posture refresh — at start and on every rescan tick — so the pin lands
+/// in the pass that installs the reading. Stat-only for a body already pinned. An
+/// off-disk root keeps no pins on its disk and nothing there evicts on its own.
+async fn pin_kept_own_records<H: HydrationHost, I: PlaceholderInvalidator>(
+    hydrator: &H,
+    invalidator: &I,
+    sync_root: &Path,
+) {
+    if invalidator.placeholders_off_disk() {
+        return;
+    }
+    let rels = match hydrator.kept_own_records().await {
+        Ok(rels) => rels,
+        Err(e) => {
+            tracing::warn!(error = %e, "listing the bodies this device keeps failed; retried next tick");
+            return;
+        }
+    };
+    for rel in rels {
+        let abs = sync_root.join(&rel);
+        if invalidator.is_pinned(&abs) {
+            continue;
+        }
+        match invalidator.pin(&abs).await {
+            Ok(()) => tracing::info!(
+                rel,
+                "kept on this device: its folder keeps no content on the server, and this \
+                 device may hold the only copy"
+            ),
+            Err(e) => {
+                tracing::warn!(rel, error = %e, "pinning a kept file failed; retried next tick")
+            }
+        }
+    }
+}
+
 /// Sweep the root for pin-state disagreements and react to each — the backstop
 /// that heals flips the watcher never saw (made while the service was down),
 /// running at startup and on the rescan tick, exactly as `converge` backstops
@@ -1662,7 +2519,7 @@ async fn react_to_pin_sweep<H: HydrationHost, I: PlaceholderInvalidator>(
 }
 
 /// [`EngineCommand::FreeSpace`] on an off-disk root — the agent's *Free up space*
-/// verb where the platform has none (`on-demand-files.md` § Linux FUSE binding,
+/// verb where the platform has none (`on-demand-files-linux.md` § Linux FUSE binding,
 /// the dehydrate rule). A file already cloud-only has nothing to lose (`Ok`); a
 /// pinned file refuses (the user asked to keep it); otherwise the bytes are freed
 /// only when that is lossless ([`free_local_bytes`]), and the apps see the file go
@@ -1737,7 +2594,7 @@ async fn set_pin<H: HydrationHost, I: PlaceholderInvalidator>(
 ///
 /// **It is TWO-WAY.** Alongside serving reads, it watches the folder and uploads local
 /// edits through the shared [`LocalWrites`] / [`apply_local_write`] pair the
-/// always-resident loop drives — one uploader, not two (`file-sync.md` § On-Demand Files
+/// always-resident loop drives — one uploader, not two (`on-demand-files.md` § On-Demand Files
 /// → *Sync direction*).
 ///
 /// **The re-pull is the host's only inbound-change signal.** There is no nest-side
@@ -1893,7 +2750,7 @@ async fn drive_hydration_root<H, I, C, G>(
     hydrator: &H,
     invalidator: I,
     boot: RootBoot<C>,
-    mut cmd_rx: mpsc::UnboundedReceiver<HydrationCommand>,
+    cmd_rx: mpsc::UnboundedReceiver<HydrationCommand>,
     event_tx: Option<broadcast::Sender<Event>>,
     sync_root: PathBuf,
     folder: String,
@@ -1907,7 +2764,7 @@ async fn drive_hydration_root<H, I, C, G>(
 {
     // The off-disk posture comes before anything reads the rows: the fold, the
     // mark hygiene and above all the boot sweep must already treat a placeholder
-    // as a row, never a file (`on-demand-files.md` § Linux FUSE binding, the
+    // as a row, never a file (`on-demand-files-linux.md` § Linux FUSE binding, the
     // dehydrate rule). A host that cannot take it is not served — fail closed.
     if invalidator.placeholders_off_disk()
         && let Err(e) = hydrator.set_placeholders_off_disk().await
@@ -1971,9 +2828,21 @@ async fn drive_hydration_root<H, I, C, G>(
     // sign-out, an account switch: each is a cancel), the binding comes down
     // (the FUSE unmount, the cfapi disconnect) before the engine and its state
     // DB do, and no request through the binding ever finds the engine gone
-    // (`on-demand-files.md` § Linux FUSE binding, the flips rule). Keep it here.
+    // (`on-demand-files-linux.md` § Linux FUSE binding, the flips rule). Keep it here.
     let _connection = (boot.connect)();
 
+    // From the connection on the platform may ask, and every platform call this loop makes
+    // can wait on a fetch only the loop answers: so each one is made with the platform's
+    // requests answered meanwhile ([`PlatformCall`]).
+    let requests = PlatformRequests::new(hydrator, &sync_root, event_tx.as_ref(), cmd_rx);
+    let invalidator = AnsweringWhileOut {
+        binding: &invalidator,
+        requests: &requests,
+    };
+
+    // The re-describes owed to placeholders left behind their rows, tried by the serve
+    // loop's own last arm.
+    let mut pending = PendingRedescribes::default();
     if let Some(fold) = startup_fold {
         apply_fold(
             hydrator,
@@ -1981,6 +2850,7 @@ async fn drive_hydration_root<H, I, C, G>(
             &sync_root,
             fold,
             event_tx.as_ref(),
+            &mut pending,
             "startup",
         )
         .await
@@ -1989,7 +2859,7 @@ async fn drive_hydration_root<H, I, C, G>(
     // ── The two-way half ──────────────────────────────────────────────────────────
     //
     // An on-demand root uploads local edits, exactly as an always-resident one does
-    // (`file-sync.md` § On-Demand Files → *Sync direction*): on-demand is a storage
+    // (`on-demand-files.md` § On-Demand Files → *Sync direction*): on-demand is a storage
     // choice, never a direction choice. This is the SHARED watcher/debouncer/uploader
     // the always-resident loop drives (`always_resident::LocalWrites`) — one uploader,
     // not a second implementation grown inside the hydration host (priorities #2/#4).
@@ -2039,6 +2909,12 @@ async fn drive_hydration_root<H, I, C, G>(
     // never re-sealed it.
     hydrator.converge_corpus_at_start(&folder).await;
     hydrator.refresh_and_converge_corpus(&folder).await;
+    // Third-party deposits parked while this seat was down — after the startup
+    // fold, so an item another seat already adopted is found landed.
+    adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
+    // The residency reading the refresh just installed reaches the disk: a body
+    // the holder-keeps gate now keeps is pinned before anything may evict it.
+    pin_kept_own_records(hydrator, &invalidator, &sync_root).await;
 
     // Heal pin flips made while the service was down (Explorer's cloud verbs write
     // pin state whether or not the provider is up). AFTER converge, so an
@@ -2065,6 +2941,18 @@ async fn drive_hydration_root<H, I, C, G>(
     let mut watch_reconnects = true;
 
     loop {
+        // What the platform asked while a call of the loop's own was out and was left for
+        // after it — a notice, a FUSE request — in the order it came; and the re-describes
+        // the requests answered meanwhile owed.
+        while let Some(cmd) = requests.take_later() {
+            if let Some(rel) = serve_command(hydrator, cmd, &sync_root, event_tx.as_ref()).await {
+                pending.owe(rel);
+            }
+        }
+        for rel in requests.take_owed() {
+            pending.owe(rel);
+        }
+
         tokio::select! {
             biased;
 
@@ -2110,7 +2998,8 @@ async fn drive_hydration_root<H, I, C, G>(
             }
 
             _ = rescan_tick.tick() => {
-                repull_and_apply(hydrator, &invalidator, &sync_root, event_tx.as_ref(), "rescan").await;
+                repull_and_apply(hydrator, &invalidator, &sync_root, event_tx.as_ref(), &mut pending, "rescan").await;
+                adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
                 // Inbound first, then outbound. A file edited locally *and* moved on the nest
                 // is safe in this order: `apply_stale_hydrated`'s dehydrate REFUSES a file
                 // carrying unsynced local edits (`PlaceholderInvalidator::dehydrate`), so the
@@ -2126,6 +3015,8 @@ async fn drive_hydration_root<H, I, C, G>(
                 // always-resident loop runs (`always_resident::refresh_and_converge_corpus`).
                 // After converge, so a re-seal sees the tick's own uploads recorded.
                 hydrator.refresh_and_converge_corpus(&folder).await;
+                // A flip to metadata-only lands here: pin what the gate now keeps.
+                pin_kept_own_records(hydrator, &invalidator, &sync_root).await;
                 // Pin backstop, after converge for the same edit-survival reason: catches
                 // flips the watcher missed and dirty-at-flip-time files converge just uploaded.
                 react_to_pin_sweep(hydrator, &invalidator, &sync_root, event_tx.as_ref()).await;
@@ -2135,7 +3026,8 @@ async fn drive_hydration_root<H, I, C, G>(
             // in `changes.list` — fold it now instead of at the next tick.
             res = reconnected.changed(), if watch_reconnects => match res {
                 Ok(()) => {
-                    repull_and_apply(hydrator, &invalidator, &sync_root, event_tx.as_ref(), "reconnect").await;
+                    repull_and_apply(hydrator, &invalidator, &sync_root, event_tx.as_ref(), &mut pending, "reconnect").await;
+                    adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
                 }
                 Err(_) => watch_reconnects = false,
             },
@@ -2145,7 +3037,10 @@ async fn drive_hydration_root<H, I, C, G>(
             // than at the next tick — the same re-pull the tick and the
             // reconnect edge run, as the resident loop's nudge arm pulls.
             Some(()) = fauna_core::select_pending::recv_or_pending(&mut wake_rx) => {
-                repull_and_apply(hydrator, &invalidator, &sync_root, event_tx.as_ref(), "nudge").await;
+                repull_and_apply(hydrator, &invalidator, &sync_root, event_tx.as_ref(), &mut pending, "nudge").await;
+                // A deposit's nudge reaches the owner's seats alone; the pass is
+                // one list call when nothing is parked.
+                adopt_and_flip(hydrator, &invalidator, &sync_root, &folder).await;
             }
 
             // Invoke-and-reply command from the pipe server (the mass-delete
@@ -2155,7 +3050,8 @@ async fn drive_hydration_root<H, I, C, G>(
             //
             // *Free up space* and the pins are this loop's own: the bytes they move
             // are the root's binding's (an off-disk root's; cfapi roots take both
-            // from the OS shell and never send them).
+            // from the OS shell and never send them). So is a restore's apply to a
+            // copy the binding keeps: it takes the fold's own stale-hydrated road.
             Some(cmd) = fauna_core::select_pending::recv_or_pending(&mut engine_cmd_rx) => match cmd {
                 EngineCommand::FreeSpace { rel, reply } => {
                     let _ = reply.send(
@@ -2168,43 +3064,252 @@ async fn drive_hydration_root<H, I, C, G>(
                             .await,
                     );
                 }
+                EngineCommand::ApplyStaleHydrated { row, reply } => {
+                    let applied = apply_stale_hydrated(
+                        hydrator,
+                        &invalidator,
+                        &sync_root,
+                        std::slice::from_ref(&row),
+                        event_tx.as_ref(),
+                    )
+                    .await;
+                    let _ = reply.send(Ok(applied == 1));
+                }
                 cmd => hydrator.answer_engine_command(cmd).await,
             },
 
-            cmd = cmd_rx.recv() => match cmd {
+            cmd = requests.next() => match cmd {
                 // A hydration opens a batch: the loop keeps serving listings (and
                 // starts further hydrations) while it downloads, and serves the
                 // rest after it (`serve_materialize_batch`).
                 Some(HydrationCommand::Materialize { rel, reply }) => {
-                    let deferred = serve_materialize_batch(
+                    serve_materialize_batch(
                         hydrator,
                         rel,
                         reply,
-                        &mut cmd_rx,
+                        &requests,
                         &sync_root,
                         event_tx.as_ref(),
                         &cancel,
                     )
                     .await;
-                    for cmd in deferred {
-                        serve_command(hydrator, cmd, &sync_root, event_tx.as_ref()).await;
+                }
+                Some(cmd) => {
+                    if let Some(rel) =
+                        serve_command(hydrator, cmd, &sync_root, event_tx.as_ref()).await
+                    {
+                        pending.owe(rel);
                     }
                 }
-                Some(cmd) => serve_command(hydrator, cmd, &sync_root, event_tx.as_ref()).await,
                 // All senders dropped (the platform binding is gone).
                 None => break,
+            },
+
+            // The owed re-describes of placeholders left behind their rows
+            // (`PendingRedescribes`), made as every platform call is, answering the
+            // platform meanwhile. Last: nothing waits on them.
+            () = redescribe_retry_due(pending.due) => {
+                try_pending_redescribes(hydrator, &invalidator, &sync_root, event_tx.as_ref(), &mut pending).await;
             }
         }
     }
 }
 
-/// Serve one [`HydrationCommand`] to completion on the driving thread.
+/// The platform's requests of a served root — the fetches, listings and notices its binding
+/// sends ([`HydrationCommand`]) — and the one place the serve loop takes them from, so that
+/// it can go on answering them while a platform call of its own is out
+/// ([`answer_while`](Self::answer_while)).
+struct PlatformRequests<'a, H> {
+    hydrator: &'a H,
+    sync_root: &'a Path,
+    event_tx: Option<&'a broadcast::Sender<Event>>,
+    rx: std::cell::RefCell<mpsc::UnboundedReceiver<HydrationCommand>>,
+    /// Taken while a call was out, and nothing the platform waits on — an eviction's notice,
+    /// a FUSE request: served once the arm that made the call is done, in the order they came.
+    later: std::cell::RefCell<std::collections::VecDeque<HydrationCommand>>,
+    /// The re-describes the requests answered while a call was out owed ([`serve_command`]),
+    /// for the loop's [`PendingRedescribes`].
+    owed: std::cell::RefCell<Vec<String>>,
+}
+
+/// What [`PlatformRequests::answer_while`] woke for.
+enum WhileOut<T> {
+    /// The call is back.
+    Back(Result<T>),
+    /// The platform asked meanwhile (`None`: the binding is gone).
+    Asked(Option<HydrationCommand>),
+}
+
+impl<'a, H: HydrationHost> PlatformRequests<'a, H> {
+    fn new(
+        hydrator: &'a H,
+        sync_root: &'a Path,
+        event_tx: Option<&'a broadcast::Sender<Event>>,
+        rx: mpsc::UnboundedReceiver<HydrationCommand>,
+    ) -> Self {
+        Self {
+            hydrator,
+            sync_root,
+            event_tx,
+            rx: std::cell::RefCell::new(rx),
+            later: Default::default(),
+            owed: Default::default(),
+        }
+    }
+
+    /// The platform's next request; `None` once the binding is gone. Cancel-safe, so it
+    /// sits in the serve loop's `select!`, and it borrows the channel only while polled.
+    async fn next(&self) -> Option<HydrationCommand> {
+        std::future::poll_fn(|cx| self.rx.borrow_mut().poll_recv(cx)).await
+    }
+
+    /// The oldest request left for after a call ([`Self::later`]).
+    fn take_later(&self) -> Option<HydrationCommand> {
+        self.later.borrow_mut().pop_front()
+    }
+
+    /// Defer `cmd` to after the arm in hand, behind what is already left there.
+    fn leave_for_later(&self, cmd: HydrationCommand) {
+        self.later.borrow_mut().push_back(cmd);
+    }
+
+    /// The re-describes owed while calls were out ([`Self::owed`]).
+    fn take_owed(&self) -> Vec<String> {
+        std::mem::take(&mut *self.owed.borrow_mut())
+    }
+
+    /// Await `call`, answering the platform's fetches and listings until it is back — the
+    /// requests a platform call can be waiting on, which only this loop answers. Anything
+    /// else the platform sends meanwhile is left for after the arm
+    /// ([`Self::take_later`]), so the arm's work and the engine see no request but those.
+    /// A call on another file is not held up by a fetch, nor a call that answers at once
+    /// (a binding whose calls wait on nothing): it is back before anything is asked.
+    async fn answer_while<T>(&self, mut call: PlatformCall<'_, T>) -> Result<T> {
+        use std::task::Poll;
+        loop {
+            let woke = std::future::poll_fn(|cx| {
+                if let Poll::Ready(outcome) = call.as_mut().poll(cx) {
+                    return Poll::Ready(WhileOut::Back(outcome));
+                }
+                self.rx.borrow_mut().poll_recv(cx).map(WhileOut::Asked)
+            })
+            .await;
+            match woke {
+                WhileOut::Back(outcome) => return outcome,
+                WhileOut::Asked(Some(
+                    cmd @ (HydrationCommand::Fetch { .. } | HydrationCommand::Populate { .. }),
+                )) => {
+                    if let Some(rel) =
+                        serve_command(self.hydrator, cmd, self.sync_root, self.event_tx).await
+                    {
+                        self.owed.borrow_mut().push(rel);
+                    }
+                }
+                WhileOut::Asked(Some(cmd)) => self.leave_for_later(cmd),
+                // Nothing more will be asked.
+                WhileOut::Asked(None) => return call.await,
+            }
+        }
+    }
+}
+
+/// The serve loop's binding: every [`PlatformCall`] is made through
+/// [`PlatformRequests::answer_while`], every other call goes straight through.
+struct AnsweringWhileOut<'a, H, I> {
+    binding: &'a I,
+    requests: &'a PlatformRequests<'a, H>,
+}
+
+impl<H: HydrationHost, I: PlaceholderInvalidator> PlaceholderInvalidator
+    for AnsweringWhileOut<'_, H, I>
+{
+    fn dehydrate(&self, abs_path: &Path) -> PlatformCall<'_> {
+        Box::pin(self.requests.answer_while(self.binding.dehydrate(abs_path)))
+    }
+    fn supersede(&self, abs_path: &Path, size: u64, mtime: i64) -> PlatformCall<'_> {
+        Box::pin(
+            self.requests
+                .answer_while(self.binding.supersede(abs_path, size, mtime)),
+        )
+    }
+    fn set_in_sync(&self, abs_path: &Path, usn: i64) -> PlatformCall<'_> {
+        Box::pin(
+            self.requests
+                .answer_while(self.binding.set_in_sync(abs_path, usn)),
+        )
+    }
+    fn pin(&self, abs_path: &Path) -> PlatformCall<'_> {
+        Box::pin(self.requests.answer_while(self.binding.pin(abs_path)))
+    }
+    fn replace(
+        &self,
+        abs_path: &Path,
+        replacement: &Path,
+        rel: &str,
+        mtime: i64,
+    ) -> PlatformCall<'_> {
+        Box::pin(self.requests.answer_while(self.binding.replace(
+            abs_path,
+            replacement,
+            rel,
+            mtime,
+        )))
+    }
+    fn remove(&self, abs_path: &Path) -> Result<()> {
+        self.binding.remove(abs_path)
+    }
+    fn pin_action(&self, abs_path: &Path) -> Option<PinAction> {
+        self.binding.pin_action(abs_path)
+    }
+    fn usn(&self, abs_path: &Path) -> Result<i64> {
+        self.binding.usn(abs_path)
+    }
+    fn kick_hydrate(&self, abs_path: &Path) {
+        self.binding.kick_hydrate(abs_path)
+    }
+    fn is_cloud_file(&self, abs_path: &Path) -> bool {
+        self.binding.is_cloud_file(abs_path)
+    }
+    fn anchor(&self, abs_path: &Path, rel: &str) -> Result<()> {
+        self.binding.anchor(abs_path, rel)
+    }
+    fn convert_dir_in_sync(&self, abs_path: &Path, rel: &str) -> Result<()> {
+        self.binding.convert_dir_in_sync(abs_path, rel)
+    }
+    fn is_listed_dir(&self, abs_dir: &Path) -> bool {
+        self.binding.is_listed_dir(abs_dir)
+    }
+    fn create_placeholder(
+        &self,
+        parent_abs: &Path,
+        rel: &str,
+        size: u64,
+        mtime: i64,
+        is_dir: bool,
+    ) -> Result<()> {
+        self.binding
+            .create_placeholder(parent_abs, rel, size, mtime, is_dir)
+    }
+    fn placeholders_off_disk(&self) -> bool {
+        self.binding.placeholders_off_disk()
+    }
+    fn is_pinned(&self, abs_path: &Path) -> bool {
+        self.binding.is_pinned(abs_path)
+    }
+    fn is_in_sync(&self, abs_path: &Path) -> bool {
+        self.binding.is_in_sync(abs_path)
+    }
+}
+
+/// Serve one [`HydrationCommand`] to completion on the driving thread. Returns the file it
+/// left owed a re-describe from its row, if any ([`PendingRedescribes`]): a fetch refused
+/// because the placeholder describes another version, or the OS's eviction of one.
 async fn serve_command<H: HydrationHost>(
     hydrator: &H,
     cmd: HydrationCommand,
     sync_root: &Path,
     event_tx: Option<&broadcast::Sender<Event>>,
-) {
+) -> Option<String> {
     match cmd {
         HydrationCommand::Fetch {
             rel,
@@ -2239,9 +3344,22 @@ async fn serve_command<H: HydrationHost>(
                         tracing::warn!(rel, error = %e, "marking hydrated file Synced failed");
                     }
                     push_status(event_tx, sync_root, &rel, FileStatus::Synced);
+                    None
+                }
+                // The placeholder describes another version than its row: the open is
+                // refused (serve_fetch reported it), and the placeholder is owed a
+                // re-describe from the row, so the open's retry is served. Owed, not run
+                // here: the platform retries the refused read at once, and the update
+                // would wait on that fetch, which only this loop serves.
+                Err(e) if e.downcast_ref::<DescribesAnotherVersion>().is_some() => {
+                    tracing::warn!(rel, error = %e, "hydration fetch refused");
+                    Some(rel)
                 }
                 // serve_fetch already reported failure to the sink.
-                Err(e) => tracing::warn!(rel, error = %e, "hydration fetch failed"),
+                Err(e) => {
+                    tracing::warn!(rel, error = %e, "hydration fetch failed");
+                    None
+                }
             }
         }
         HydrationCommand::Populate { parent_rel, sink } => {
@@ -2251,6 +3369,7 @@ async fn serve_command<H: HydrationHost>(
                 // exactly where the underlying windows::core::Error HRESULT lives.
                 tracing::warn!(parent_rel, error = ?e, "directory population failed");
             }
+            None
         }
         HydrationCommand::Dehydrate { rel } => {
             // The OS freed this file's bytes (Storage Sense under disk
@@ -2262,15 +3381,22 @@ async fn serve_command<H: HydrationHost>(
             // live. Symmetric inverse of the Fetch success arm above.
             // Without this the row stays a dishonest `Synced` while the
             // disk is empty (harmless only because the placeholder guard
-            // catches it downstream — `file-sync.md` § On-Demand Files →
+            // catches it downstream — `on-demand-files.md` § On-Demand Files →
             // *present-but-unreadable*).
             record_dehydrated(hydrator, sync_root, &rel, event_tx).await;
+            // The OS's eviction keeps the size of the version it freed, which is not
+            // the row's when the row moved past the bytes (a restore whose own free
+            // was refused): owe it a re-describe, which leaves a placeholder that
+            // agrees with its row untouched.
+            Some(rel)
         }
-        // Not reached from the loop, which opens a batch for every hydration
-        // (`serve_materialize_batch`) — served alone here for completeness.
+        // Reached only for a hydration left for after a platform call
+        // (`PlatformRequests::take_later`): the loop opens a batch for every other
+        // (`serve_materialize_batch`).
         HydrationCommand::Materialize { rel, reply } => {
             let outcome = materialize(hydrator, &rel, sync_root).await;
             finish_materialize(hydrator, &rel, outcome, sync_root, event_tx, &[reply]).await;
+            None
         }
         HydrationCommand::Unlink { rel, reply } => {
             // Record-first (`SyncEngine::handle_delete`): a `Placeholder` row
@@ -2288,6 +3414,7 @@ async fn serve_command<H: HydrationHost>(
                 e.to_string()
             });
             answer(&reply, outcome);
+            None
         }
     }
 }
@@ -2412,8 +3539,8 @@ async fn finish_materialize<H: HydrationHost>(
 /// goes on serving [`HydrationCommand::Populate`], starts every further
 /// [`HydrationCommand::Materialize`] alongside the running ones (a second
 /// request for a `rel` already downloading joins it — one download, every
-/// waiter answered), and defers everything else, which it returns for the
-/// caller to serve once the last download is done.
+/// waiter answered), and leaves everything else for after the batch
+/// ([`PlatformRequests::take_later`]), served once the last download is done.
 ///
 /// Deliberately narrow: only downloads overlap — with each other and with
 /// listings, whose engine work is a synchronous DB read. The write half, the
@@ -2425,11 +3552,11 @@ async fn serve_materialize_batch<H: HydrationHost>(
     hydrator: &H,
     first_rel: String,
     first_reply: LoopReply,
-    cmd_rx: &mut mpsc::UnboundedReceiver<HydrationCommand>,
+    requests: &PlatformRequests<'_, H>,
     sync_root: &Path,
     event_tx: Option<&broadcast::Sender<Event>>,
     cancel: &CancellationToken,
-) -> Vec<HydrationCommand> {
+) {
     use futures_util::StreamExt as _;
     use futures_util::stream::FuturesUnordered;
 
@@ -2441,7 +3568,6 @@ async fn serve_materialize_batch<H: HydrationHost>(
         std::collections::HashMap::from([(first_rel.clone(), vec![first_reply])]);
     let mut running = FuturesUnordered::new();
     running.push(start(first_rel));
-    let mut deferred = Vec::new();
     let mut channel_open = true;
 
     while !running.is_empty() {
@@ -2456,7 +3582,7 @@ async fn serve_materialize_batch<H: HydrationHost>(
                         answer(reply, Err("the on-demand root is stopping".into()));
                     }
                 }
-                return deferred;
+                return;
             }
 
             Some((rel, outcome)) = running.next() => {
@@ -2464,7 +3590,7 @@ async fn serve_materialize_batch<H: HydrationHost>(
                 finish_materialize(hydrator, &rel, outcome, sync_root, event_tx, &replies).await;
             }
 
-            cmd = cmd_rx.recv(), if channel_open => match cmd {
+            cmd = requests.next(), if channel_open => match cmd {
                 Some(HydrationCommand::Materialize { rel, reply }) => {
                     if let Some(replies) = waiting.get_mut(&rel) {
                         replies.push(reply);
@@ -2478,12 +3604,11 @@ async fn serve_materialize_batch<H: HydrationHost>(
                         tracing::warn!(parent_rel, error = ?e, "directory population failed");
                     }
                 }
-                Some(other) => deferred.push(other),
+                Some(other) => requests.leave_for_later(other),
                 None => channel_open = false,
             },
         }
     }
-    deferred
 }
 
 // ---------------------------------------------------------------------------
@@ -2497,21 +3622,32 @@ async fn serve_materialize_batch<H: HydrationHost>(
 /// that is what a cross-nest relay is: this actor has a session only there, and
 /// its own nest forwards the federated read/record on its behalf. The driver
 /// connects it before the build, which reads over it.
+///
+/// **It announces `device_id` as the device's wake stand-in before it is
+/// returned**, so its first connection already does: the nest registers every
+/// connection of the actor, and one that announced nothing is the compatibility
+/// rider's trigger, which would silence the user's `web-push`/`apns` rows
+/// (`common.md` § Push Notifications → *Transports*, ruled 2026-10-09). A
+/// stand-in announce never suppresses a relay row; it only makes this
+/// connection one more delivery point for the device's `ws-device` frames,
+/// which nothing here listens for — the arm reads the retained client alone.
 pub(crate) fn agent_control_plane(
     capability: Arc<crate::bearer::CapabilitySlot>,
     nest_base_url: String,
     actor_id: [u8; 32],
+    device_id: [u8; 32],
 ) -> Arc<NestClient> {
     NestClient::with_auth(crate::bearer::bearer_only_auth_client(
         capability,
         nest_base_url,
         actor_id,
     ))
+    .announcing_stand_in(hex::encode(device_id))
 }
 
 /// The [`EngineParams`] one agent engine is built from — **the same inputs for
 /// both roots**: every engine this agent runs is built by the shared one builder
-/// ([`fauna_sync_engine::engine_lifecycle::build_engine`], `on-demand-files.md` §
+/// ([`fauna_sync_engine::engine_lifecycle::build_engine`], `on-demand-files-shared-sets.md` §
 /// Shared sets on a capability host → *One mechanism*, question 2), which
 /// resolves the set's keys from the holder's custody under the capability's
 /// `BackupKey`, and — for a cross-nest set — dials its home nest.
@@ -2677,6 +3813,9 @@ mod tests {
         /// What that call answers: `Some(true)` replaced, `Some(false)` not the
         /// rule's case, `None` no holder answered (an error).
         replace_answer: Option<bool>,
+        /// Every `record_replaced_head(row, _)` call, by rel — a pinned copy's row
+        /// moved over the bytes swapped in.
+        replaced_heads: Arc<std::sync::Mutex<Vec<String>>>,
         /// What each successive `repull()` returns (front first). Exhausted → an
         /// empty fold, so a loop that keeps ticking stays a harmless no-op. An
         /// `Err` entry fakes an unreachable nest.
@@ -2700,11 +3839,15 @@ mod tests {
         /// **local-write catch-up backstop** at startup and on the rescan tick, not just the
         /// nest re-pull. A root that only re-pulls is the one-way root this track killed.
         converges: Arc<std::sync::Mutex<usize>>,
-        /// Rels whose `is_dehydration_safe` answers `true` — the engine's own
+        /// Rels whose `is_recorded_content` answers `true` — the engine's own
         /// "this content is provably uploaded" verdict, faked per-rel.
         dehydration_safe: std::collections::HashSet<String>,
+        /// Rels the holder-keeps gate keeps (`keeps_own_record`, and the list
+        /// `kept_own_records` answers, sorted) — this device's own records in a
+        /// metadata-only folder.
+        kept: std::collections::BTreeSet<String>,
         /// A write that lands WHILE the engine proves the content: each
-        /// `is_dehydration_safe` call bumps this USN (share it with the
+        /// `is_recorded_content` call bumps this USN (share it with the
         /// [`FakeInvalidator::usn_now`] under test). The proof still answers from
         /// `dehydration_safe` — it hashed the bytes before the write.
         write_during_proof: Option<Arc<std::sync::atomic::AtomicI64>>,
@@ -2725,6 +3868,12 @@ mod tests {
         /// then once per rescan tick: the live path an audience flip takes to a
         /// RUNNING on-demand root.
         corpus_ticks: Arc<std::sync::Mutex<usize>>,
+        /// Every `adopt_deposits()` call, counted — once after the startup fold,
+        /// then after every re-pull.
+        adoptions: Arc<std::sync::Mutex<usize>>,
+        /// Rels the fake `adopt_deposits` reports as retired — the loop flips
+        /// them ✅ exactly as it flips `converge`'s recorded uploads.
+        adopt_records: Vec<String>,
         /// Every `answer_engine_command()` call, by variant name — the loop's
         /// command arm reaching the host. The fake answers with a canned verdict
         /// ([`FAKE_APPLIED`] / an empty share report at cursor
@@ -2740,6 +3889,11 @@ mod tests {
         /// Every `handle_delete(rel)` call — a placeholder unlinked through a
         /// FUSE mount reaches the host here.
         deleted: Arc<std::sync::Mutex<Vec<String>>>,
+        /// Every `apply_folded_delete(rel)` call, in order.
+        folded_deletes: Arc<std::sync::Mutex<Vec<String>>>,
+        /// The engine's verdict per rel for a folded delete; absent → `Applied`,
+        /// which hands the rel (as a relative path) to the binding's `remove`.
+        delete_answers: std::collections::HashMap<String, FoldedDeleteOutcome>,
     }
 
     /// The fake host's canned `ApplyHeldDeletes` verdict.
@@ -2767,6 +3921,7 @@ mod tests {
                 repointed: Default::default(),
                 replace_asked: Default::default(),
                 replace_answer: Some(false),
+                replaced_heads: Default::default(),
                 repulls: Default::default(),
                 repull_calls: Default::default(),
                 interval: None,
@@ -2774,15 +3929,20 @@ mod tests {
                 stop_after_repulls: None,
                 converges: Default::default(),
                 dehydration_safe: Default::default(),
+                kept: Default::default(),
                 write_during_proof: None,
                 clean_subtrees: Default::default(),
                 converge_records: Default::default(),
                 corpus_starts: Default::default(),
                 corpus_ticks: Default::default(),
+                adoptions: Default::default(),
+                adopt_records: Default::default(),
                 engine_commands: Default::default(),
                 downloads: Default::default(),
                 download_gate: None,
                 deleted: Default::default(),
+                folded_deletes: Default::default(),
+                delete_answers: Default::default(),
             }
         }
     }
@@ -2807,7 +3967,7 @@ mod tests {
 
     /// The write half of a two-way root. `HydrationHost` **requires** it, so this impl is not
     /// optional scaffolding — it is the type system refusing to let a download-only on-demand
-    /// host exist at all (`file-sync.md` § On-Demand Files → *Sync direction*).
+    /// host exist at all (`on-demand-files.md` § On-Demand Files → *Sync direction*).
     ///
     /// These loop-level tests never touch a real filesystem, so the write calls only need to be
     /// observable, not real. The uploads that must be *real* are asserted where they can be:
@@ -2897,6 +4057,26 @@ mod tests {
             Ok(())
         }
 
+        async fn apply_folded_delete(
+            &self,
+            delete: &FoldedDelete,
+            remove: &dyn for<'p> Fn(&'p Path) -> Result<()>,
+        ) -> Result<FoldedDeleteOutcome> {
+            self.folded_deletes
+                .lock()
+                .unwrap()
+                .push(delete.relative_path.clone());
+            let answer = self
+                .delete_answers
+                .get(&delete.relative_path)
+                .copied()
+                .unwrap_or(FoldedDeleteOutcome::Applied);
+            if answer == FoldedDeleteOutcome::Applied {
+                remove(Path::new(&delete.relative_path))?;
+            }
+            Ok(answer)
+        }
+
         async fn replace_superseded_own_record(&self, row: &StaleHydratedRow) -> Result<bool> {
             self.replace_asked
                 .lock()
@@ -2904,6 +4084,18 @@ mod tests {
                 .push(row.relative_path.clone());
             self.replace_answer
                 .ok_or_else(|| anyhow!("fake: no holder answered"))
+        }
+
+        async fn record_replaced_head(
+            &self,
+            row: &StaleHydratedRow,
+            _content: ContentHash,
+        ) -> Result<()> {
+            self.replaced_heads
+                .lock()
+                .unwrap()
+                .push(row.relative_path.clone());
+            Ok(())
         }
 
         async fn repull(&self) -> Result<PlaceholderFold> {
@@ -2939,11 +4131,19 @@ mod tests {
             self.clean_subtrees.contains(dir_rel)
         }
 
-        async fn is_dehydration_safe(&self, rel: &str) -> bool {
+        async fn is_recorded_content(&self, rel: &str) -> bool {
             if let Some(usn) = &self.write_during_proof {
                 usn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             self.dehydration_safe.contains(rel)
+        }
+
+        async fn keeps_own_record(&self, rel: &str) -> bool {
+            self.kept.contains(rel)
+        }
+
+        async fn kept_own_records(&self) -> Result<Vec<String>> {
+            Ok(self.kept.iter().cloned().collect())
         }
 
         // No engine in these loop tests: the passes themselves are the production
@@ -2951,10 +4151,16 @@ mod tests {
         // loop tests assert is that the loop CALLS them, at startup and per tick.
         async fn converge_corpus_at_start(&self, _folder: &str) {
             *self.corpus_starts.lock().unwrap() += 1;
+            self.boot_log.lock().unwrap().push("corpus_at_start");
         }
 
         async fn refresh_and_converge_corpus(&self, _folder: &str) {
             *self.corpus_ticks.lock().unwrap() += 1;
+        }
+
+        async fn adopt_deposits(&self, _folder: &str) -> Vec<String> {
+            *self.adoptions.lock().unwrap() += 1;
+            self.adopt_records.clone()
         }
 
         async fn answer_engine_command(&self, cmd: EngineCommand) {
@@ -2978,6 +4184,13 @@ mod tests {
                 EngineCommand::ResealInheritedVersion { reply, .. } => {
                     self.engine_commands.lock().unwrap().push("ResealInherited");
                     let _ = reply.send(Err(anyhow::anyhow!("the fake host holds no bytes")));
+                }
+                EngineCommand::ApplyStaleHydrated { reply, .. } => {
+                    self.engine_commands
+                        .lock()
+                        .unwrap()
+                        .push("ApplyStaleHydrated");
+                    let _ = reply.send(Err(anyhow::anyhow!("the fake host keeps no copies")));
                 }
             }
         }
@@ -3024,6 +4237,29 @@ mod tests {
         /// Every `create_placeholder` call, recorded as (rel, is_dir) — and made
         /// real on disk (an empty file or directory), as the platform would.
         created: std::sync::Mutex<Vec<(String, bool)>>,
+        /// Every `remove` call, recorded as the path it was handed.
+        removed: std::sync::Mutex<Vec<String>>,
+        /// The paths pinned on the fake disk. `pin` adds one and, as cfapi's
+        /// does (measured, `diag_holder_keep_mechanics`), moves the volume's USN
+        /// — and a pinned path refuses `dehydrate` and `supersede` (`0x80070188`).
+        pinned: std::sync::Mutex<std::collections::HashSet<String>>,
+        /// Every `pin` call, in order.
+        pins: std::sync::Mutex<Vec<String>>,
+        /// Every `replace` the platform ACCEPTED, recorded as (abs, rel, mtime) — made
+        /// real on disk (the sibling renamed over the file), as the platform would.
+        replaced: std::sync::Mutex<Vec<(String, String, i64)>>,
+        /// `replace` refuses whatever the file's state (a file held open elsewhere).
+        refuse_replace: bool,
+        /// Absolute paths whose `dehydrate` and `supersede` refuse this many more times,
+        /// then succeed — a file another program holds open, and later lets go.
+        held_for: std::sync::Mutex<std::collections::HashMap<String, usize>>,
+        /// Absolute paths whose `supersede` waits until the fetch writing into this sink
+        /// has been answered — cfapi's update of a file the platform is fetching
+        /// (`cfapi_live_integration::diag_calls_that_wait_on_an_outstanding_fetch`) — or,
+        /// unanswered, for cfapi's 60 s request timeout, when it fails.
+        supersede_waits_on: std::collections::HashMap<String, Arc<RecordingSink>>,
+        /// Every path whose `supersede` waited out that timeout.
+        timed_out: std::sync::Mutex<Vec<String>>,
     }
 
     impl FakeInvalidator {
@@ -3034,6 +4270,15 @@ mod tests {
             if self.refuse.contains(&s) {
                 return Err(anyhow!("fake dirty-file refusal"));
             }
+            if let Some(left) = self.held_for.lock().unwrap().get_mut(&s)
+                && *left > 0
+            {
+                *left -= 1;
+                return Err(anyhow!("fake: the file is held open elsewhere"));
+            }
+            if self.pinned.lock().unwrap().contains(&s) {
+                return Err(anyhow!("fake pinned-file refusal (0x80070188)"));
+            }
             if self.refuse_until_in_sync.contains(&s)
                 && !self.in_synced.lock().unwrap().contains(&s)
             {
@@ -3041,32 +4286,14 @@ mod tests {
             }
             Ok(s)
         }
-    }
 
-    impl PlaceholderInvalidator for FakeInvalidator {
-        fn placeholders_off_disk(&self) -> bool {
-            self.off_disk
-        }
-
-        fn dehydrate(&self, abs_path: &Path) -> Result<()> {
-            let s = self.unless_refused(abs_path)?;
-            self.dehydrated.lock().unwrap().push(s);
-            Ok(())
-        }
-
-        fn supersede(&self, abs_path: &Path, size: u64, mtime: i64) -> Result<()> {
+        fn supersede_now(&self, abs_path: &Path, size: u64, mtime: i64) -> Result<()> {
             let s = self.unless_refused(abs_path)?;
             self.superseded.lock().unwrap().push((s, size, mtime));
             Ok(())
         }
 
-        fn pin_action(&self, abs_path: &Path) -> Option<PinAction> {
-            self.pin_actions
-                .get(&abs_path.to_string_lossy().to_string())
-                .copied()
-        }
-
-        fn set_in_sync(&self, abs_path: &Path, usn: i64) -> Result<()> {
+        fn set_in_sync_now(&self, abs_path: &Path, usn: i64) -> Result<()> {
             let now = self.usn_now.load(std::sync::atomic::Ordering::SeqCst);
             if usn != now {
                 return Err(anyhow!(
@@ -3078,6 +4305,122 @@ mod tests {
                 .unwrap()
                 .push(abs_path.to_string_lossy().to_string());
             Ok(())
+        }
+
+        fn replace_now(
+            &self,
+            abs_path: &Path,
+            replacement: &Path,
+            rel: &str,
+            mtime: i64,
+        ) -> Result<()> {
+            if self.refuse_replace {
+                return Err(anyhow!("fake: the file is held open for writing elsewhere"));
+            }
+            if !self.is_in_sync(abs_path) {
+                return Err(anyhow!("fake not-in-sync refusal"));
+            }
+            std::fs::rename(replacement, abs_path)?;
+            self.replaced.lock().unwrap().push((
+                abs_path.to_string_lossy().to_string(),
+                rel.to_string(),
+                mtime,
+            ));
+            Ok(())
+        }
+    }
+
+    impl PlaceholderInvalidator for FakeInvalidator {
+        fn placeholders_off_disk(&self) -> bool {
+            self.off_disk
+        }
+
+        fn is_pinned(&self, abs_path: &Path) -> bool {
+            self.pinned
+                .lock()
+                .unwrap()
+                .contains(&abs_path.to_string_lossy().to_string())
+        }
+
+        fn pin(&self, abs_path: &Path) -> PlatformCall<'_> {
+            let s = abs_path.to_string_lossy().to_string();
+            self.usn_now
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.pinned.lock().unwrap().insert(s.clone());
+            self.pins.lock().unwrap().push(s);
+            in_place(Ok(()))
+        }
+
+        /// In sync unless the fake platform's dirty-file refusal holds for it.
+        fn is_in_sync(&self, abs_path: &Path) -> bool {
+            let s = abs_path.to_string_lossy().to_string();
+            !self.refuse.contains(&s)
+                && !(self.refuse_until_in_sync.contains(&s)
+                    && !self.in_synced.lock().unwrap().contains(&s))
+        }
+
+        fn replace(
+            &self,
+            abs_path: &Path,
+            replacement: &Path,
+            rel: &str,
+            mtime: i64,
+        ) -> PlatformCall<'_> {
+            in_place(self.replace_now(abs_path, replacement, rel, mtime))
+        }
+
+        fn dehydrate(&self, abs_path: &Path) -> PlatformCall<'_> {
+            in_place(self.unless_refused(abs_path).map(|s| {
+                self.dehydrated.lock().unwrap().push(s);
+            }))
+        }
+
+        fn supersede(&self, abs_path: &Path, size: u64, mtime: i64) -> PlatformCall<'_> {
+            let path = abs_path.to_path_buf();
+            match self
+                .supersede_waits_on
+                .get(&path.to_string_lossy().to_string())
+            {
+                // Made once the fetch is answered — by the loop, the one thing that can.
+                Some(fetch) => {
+                    let fetch = Arc::clone(fetch);
+                    Box::pin(async move {
+                        let timeout = tokio::time::Instant::now() + Duration::from_secs(60);
+                        while fetch.data.lock().unwrap().is_empty()
+                            && !*fetch.failed.lock().unwrap()
+                        {
+                            if tokio::time::Instant::now() >= timeout {
+                                let s = path.to_string_lossy().to_string();
+                                self.timed_out.lock().unwrap().push(s);
+                                return Err(anyhow!(
+                                    "fake: the fetch the update waits on timed out"
+                                ));
+                            }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        self.supersede_now(&path, size, mtime)
+                    })
+                }
+                None => in_place(self.supersede_now(&path, size, mtime)),
+            }
+        }
+
+        fn remove(&self, abs_path: &Path) -> Result<()> {
+            self.removed
+                .lock()
+                .unwrap()
+                .push(abs_path.to_string_lossy().to_string());
+            Ok(())
+        }
+
+        fn pin_action(&self, abs_path: &Path) -> Option<PinAction> {
+            self.pin_actions
+                .get(&abs_path.to_string_lossy().to_string())
+                .copied()
+        }
+
+        fn set_in_sync(&self, abs_path: &Path, usn: i64) -> PlatformCall<'_> {
+            in_place(self.set_in_sync_now(abs_path, usn))
         }
 
         fn usn(&self, _abs_path: &Path) -> Result<i64> {
@@ -3135,6 +4478,70 @@ mod tests {
             self.created.lock().unwrap().push((rel.to_string(), is_dir));
             Ok(())
         }
+    }
+
+    // ── apply_folded_deletes — the remote-delete half of two-way ──
+
+    /// The fold's reported deletes reach the engine's shared verdict, one by one, with
+    /// THIS root's binding as the removal: a delete the verdict applies is removed
+    /// through the invalidator, a declined one (an unsynced edit) is not — and its
+    /// survivor, uploaded by the conflict report, flips to the platform's ✅ like any
+    /// recorded upload (`on-demand-files.md` § *Sync direction*).
+    #[tokio::test]
+    async fn apply_fold_removes_the_reported_deletes_through_the_binding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let hydrator = FakeHydrator {
+            delete_answers: [
+                ("edited.txt".to_string(), FoldedDeleteOutcome::KeptConflict),
+                ("unreadable.txt".to_string(), FoldedDeleteOutcome::Kept),
+            ]
+            .into_iter()
+            .collect(),
+            dehydration_safe: ["edited.txt".to_string()].into_iter().collect(),
+            ..Default::default()
+        };
+        let inv = FakeInvalidator::default();
+        let delete = |rel: &str| FoldedDelete {
+            relative_path: rel.to_string(),
+            deleting_device: Some("another-device".to_string()),
+        };
+        let fold = PlaceholderFold {
+            deleted: vec![
+                delete("edited.txt"),
+                delete("gone.txt"),
+                delete("unreadable.txt"),
+            ],
+            ..Default::default()
+        };
+
+        apply_fold(
+            &hydrator,
+            &inv,
+            &root,
+            fold,
+            None,
+            &mut PendingRedescribes::default(),
+            "nudge",
+        )
+        .await;
+
+        assert_eq!(
+            *hydrator.folded_deletes.lock().unwrap(),
+            vec!["edited.txt", "gone.txt", "unreadable.txt"],
+            "every reported delete goes through the engine's verdict"
+        );
+        assert_eq!(
+            *inv.removed.lock().unwrap(),
+            vec!["gone.txt"],
+            "only the delete the verdict applied reaches the binding's removal"
+        );
+        let survivor = root.join("edited.txt").to_string_lossy().to_string();
+        assert_eq!(
+            *inv.in_synced.lock().unwrap(),
+            vec![survivor],
+            "the declined delete's uploaded survivor flips in-sync; nothing else does"
+        );
     }
 
     // ── materialize_created — the remote-create half of two-way ──
@@ -3272,7 +4679,7 @@ mod tests {
     /// **Recorded is not enough: the flip vouches only for the recorded
     /// content.** The upload read the file before its record landed; a save that
     /// landed in between is on disk now, and the engine's proof
-    /// (`is_dehydration_safe`: disk hash == recorded content) fails for it. The
+    /// (`is_recorded_content`: disk hash == recorded content) fails for it. The
     /// flip must then leave the not-in-sync bit alone — it is the refusal that
     /// stops the next dehydrate (an unpin in the same batch, *Free up space*, a
     /// remote change) freeing the only copy of the newer save. Red when the flip
@@ -3295,7 +4702,7 @@ mod tests {
             "the flip asserted in-sync over a save newer than the recorded content"
         );
         assert!(
-            fake.dehydrate(Path::new(&abs)).is_err(),
+            fake.dehydrate(Path::new(&abs)).await.is_err(),
             "the next bare dehydrate must still refuse the newer save"
         );
     }
@@ -3326,7 +4733,7 @@ mod tests {
             "a write after the USN read must make the in-sync assertion refuse"
         );
         assert!(
-            fake.dehydrate(Path::new(&abs)).is_err(),
+            fake.dehydrate(Path::new(&abs)).await.is_err(),
             "the next bare dehydrate must still refuse the save that landed mid-proof"
         );
     }
@@ -3392,6 +4799,7 @@ mod tests {
             content_key_version: None,
             remote_mtime: 900,
             version_num: 1,
+            signed_as: None,
         }
     }
 
@@ -3733,28 +5141,330 @@ mod tests {
         }
     }
 
+    /// The cfapi binding of *a superseded own-record body is replaced, never freed*
+    /// (`file-sync.md` § Relay serving): a kept body is refused ahead of the OS, the
+    /// engine fetches the head over it, and the ordinary file its atomic write leaves
+    /// is re-anchored and vouched in sync — a fetched body, which takes no pin.
     #[tokio::test]
-    async fn a_cfapi_refusal_is_not_followed_by_a_replace() {
-        // The cfapi binding of the rule is unbuilt: the OS's refusal stays a skip.
+    async fn a_cfapi_refusal_is_followed_by_a_replace_re_anchored_in_sync() {
+        let abs = "C:\\sync\\a.txt".to_string();
         let hydrator = FakeHydrator {
             replace_answer: Some(true),
+            dehydration_safe: ["a.txt".to_string()].into(),
             ..Default::default()
         };
         let invalidator = FakeInvalidator {
-            refuse: ["C:\\sync\\a.txt".to_string()].into_iter().collect(),
+            refuse: [abs.clone()].into(),
+            not_cloud_files: [abs.clone()].into(),
             ..Default::default()
         };
+        let (tx, mut rx) = broadcast::channel(16);
         let root = Path::new("C:\\sync");
         let rows = vec![stale_row("a.txt", 0x02)];
-        let n = apply_stale_hydrated(&hydrator, &invalidator, root, &rows, None).await;
+        let n = apply_stale_hydrated(&hydrator, &invalidator, root, &rows, Some(&tx)).await;
+
+        assert_eq!(n, 1, "the stale copy is stale no longer");
+        assert_eq!(*hydrator.replace_asked.lock().unwrap(), vec!["a.txt"]);
+        assert_eq!(
+            *invalidator.anchored.lock().unwrap(),
+            vec![(abs.clone(), "a.txt".to_string())],
+            "the replaced file is a placeholder again, its rel as FileIdentity"
+        );
+        assert_eq!(*invalidator.in_synced.lock().unwrap(), vec![abs]);
+        assert!(
+            invalidator.pins.lock().unwrap().is_empty(),
+            "a fetched body takes no pin — the next remote edit supersedes it"
+        );
+        assert!(hydrator.repointed.lock().unwrap().is_empty());
+        let EventKind::FileStatusChanged { status, .. } = rx.try_recv().unwrap().event else {
+            panic!("expected FileStatusChanged");
+        };
+        assert_eq!(status, FileStatus::Synced, "the file stays on this device");
+    }
+
+    /// A real directory holding `a.txt` as `old` — the replace road moves real bytes.
+    fn root_holding_a(old: &[u8]) -> (tempfile::TempDir, String) {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), old).unwrap();
+        let abs = crate::path_map::overlay_abs_path(&root.path().to_string_lossy(), "a.txt");
+        (root, abs)
+    }
+
+    /// The sibling a pinned copy's head lands in before the swap.
+    fn replacing_sibling(root: &Path) -> PathBuf {
+        root.join(format!("{REPLACING_PREFIX}a.txt"))
+    }
+
+    /// **A pinned copy is replaced in place, never freed** (`on-demand-files.md`
+    /// § *Sync direction*): cfapi refuses to free a pinned file, so the head is
+    /// fetched beside it, the binding swaps it in, the row moves to it last, and the
+    /// new bytes are vouched in sync. The binding's swap keeps the pin — nothing here
+    /// pins again.
+    #[tokio::test]
+    async fn a_pinned_copy_is_replaced_in_place_and_the_row_moves_after() {
+        let (root, abs) = root_holding_a(b"old");
+        let hydrator = FakeHydrator {
+            bytes: Some(b"the new head".to_vec()),
+            dehydration_safe: ["a.txt".to_string()].into(),
+            ..Default::default()
+        };
+        let invalidator = FakeInvalidator {
+            pinned: std::sync::Mutex::new([abs.clone()].into()),
+            ..Default::default()
+        };
+        let (tx, mut rx) = broadcast::channel(16);
+        let rows = vec![stale_row("a.txt", 0x02)];
+        let n = apply_stale_hydrated(&hydrator, &invalidator, root.path(), &rows, Some(&tx)).await;
+
+        assert_eq!(n, 1, "the pinned copy is stale no longer");
+        assert!(
+            invalidator.superseded.lock().unwrap().is_empty(),
+            "the platform freed nothing"
+        );
+        assert_eq!(
+            *invalidator.replaced.lock().unwrap(),
+            vec![(abs.clone(), "a.txt".to_string(), 900)],
+            "swapped in, carrying the new version's mtime"
+        );
+        assert_eq!(std::fs::read(&abs).unwrap(), b"the new head");
+        assert!(
+            !replacing_sibling(root.path()).exists(),
+            "no sibling is left"
+        );
+        assert_eq!(*hydrator.replaced_heads.lock().unwrap(), vec!["a.txt"]);
+        assert!(
+            hydrator.repointed.lock().unwrap().is_empty(),
+            "the row is never made a placeholder: the bytes stay"
+        );
+        assert_eq!(*invalidator.in_synced.lock().unwrap(), vec![abs]);
+        assert!(invalidator.pins.lock().unwrap().is_empty());
+        let EventKind::FileStatusChanged { status, .. } = rx.try_recv().unwrap().event else {
+            panic!("expected FileStatusChanged");
+        };
+        assert_eq!(status, FileStatus::Synced, "the file stays on this device");
+    }
+
+    /// A pinned copy carrying a local edit is skipped before anything is fetched:
+    /// the edit survives whole and the row stays for the conflict path.
+    #[tokio::test]
+    async fn a_pinned_copy_with_a_local_edit_is_skipped_without_a_fetch() {
+        let (root, abs) = root_holding_a(b"edited here");
+        let hydrator = FakeHydrator {
+            bytes: Some(b"the new head".to_vec()),
+            ..Default::default()
+        };
+        let invalidator = FakeInvalidator {
+            pinned: std::sync::Mutex::new([abs.clone()].into()),
+            refuse: [abs.clone()].into(),
+            ..Default::default()
+        };
+        let rows = vec![stale_row("a.txt", 0x02)];
+        let n = apply_stale_hydrated(&hydrator, &invalidator, root.path(), &rows, None).await;
+
         assert_eq!(n, 0);
-        assert!(hydrator.replace_asked.lock().unwrap().is_empty());
+        assert_eq!(std::fs::read(&abs).unwrap(), b"edited here");
+        assert!(
+            !replacing_sibling(root.path()).exists(),
+            "nothing was fetched"
+        );
+        assert!(invalidator.replaced.lock().unwrap().is_empty());
+        assert!(hydrator.replaced_heads.lock().unwrap().is_empty());
+        assert!(hydrator.repointed.lock().unwrap().is_empty());
+    }
+
+    /// A refused swap leaves the old copy, the old row, and no sibling — the next
+    /// pull retries.
+    #[tokio::test]
+    async fn a_refused_swap_of_a_pinned_copy_leaves_it_and_no_sibling() {
+        let (root, abs) = root_holding_a(b"old");
+        let hydrator = FakeHydrator {
+            bytes: Some(b"the new head".to_vec()),
+            ..Default::default()
+        };
+        let invalidator = FakeInvalidator {
+            pinned: std::sync::Mutex::new([abs.clone()].into()),
+            refuse_replace: true,
+            ..Default::default()
+        };
+        let rows = vec![stale_row("a.txt", 0x02)];
+        let n = apply_stale_hydrated(&hydrator, &invalidator, root.path(), &rows, None).await;
+
+        assert_eq!(n, 0);
+        assert_eq!(std::fs::read(&abs).unwrap(), b"old");
+        assert!(
+            !replacing_sibling(root.path()).exists(),
+            "the fetched sibling is removed"
+        );
+        assert!(hydrator.replaced_heads.lock().unwrap().is_empty());
+    }
+
+    /// A pinned body the holder-keeps gate keeps stays the engine's: it takes the
+    /// replace that fetches over it (and drops the pin), never the pinned road.
+    #[tokio::test]
+    async fn a_pinned_kept_own_record_never_takes_the_pinned_road() {
+        let (root, abs) = root_holding_a(b"mine");
+        let hydrator = FakeHydrator {
+            bytes: Some(b"the new head".to_vec()),
+            kept: ["a.txt".to_string()].into(),
+            replace_answer: Some(false),
+            ..Default::default()
+        };
+        let invalidator = FakeInvalidator {
+            pinned: std::sync::Mutex::new([abs.clone()].into()),
+            ..Default::default()
+        };
+        let rows = vec![stale_row("a.txt", 0x02)];
+        let n = apply_stale_hydrated(&hydrator, &invalidator, root.path(), &rows, None).await;
+
+        assert_eq!(n, 0, "the engine declined, so the copy stays");
+        assert_eq!(*hydrator.replace_asked.lock().unwrap(), vec!["a.txt"]);
+        assert!(invalidator.replaced.lock().unwrap().is_empty());
+        assert_eq!(std::fs::read(&abs).unwrap(), b"mine");
+    }
+
+    // ── a holder keeps what it wrote: the cfapi binding ──
+
+    /// A recorded upload in a metadata-only folder is vouched in sync only once it is
+    /// pinned — in sync and unpinned is the one state the OS evicts on its own. The pin
+    /// moves the USN (measured), so it lands before the USN the assertion is
+    /// conditioned on is read: red if the pin follows the read.
+    #[tokio::test]
+    async fn a_kept_body_is_pinned_before_it_is_vouched_in_sync() {
+        let root = Path::new("C:\\root");
+        let at = |rel: &str| root.join(rel).to_string_lossy().to_string();
+        let fake = FakeInvalidator::default();
+        let hydrator = FakeHydrator {
+            dehydration_safe: ["mine.txt".to_string(), "theirs.txt".to_string()].into(),
+            kept: ["mine.txt".to_string()].into(),
+            ..Default::default()
+        };
+
+        flip_recorded_in_sync(
+            &hydrator,
+            &fake,
+            root,
+            &["mine.txt".to_string(), "theirs.txt".to_string()],
+        )
+        .await;
+
+        assert_eq!(
+            *fake.pins.lock().unwrap(),
+            vec![at("mine.txt")],
+            "only the kept body"
+        );
+        assert_eq!(
+            *fake.in_synced.lock().unwrap(),
+            vec![at("mine.txt"), at("theirs.txt")],
+            "both are the recorded content, so both are vouched in sync"
+        );
+    }
+
+    /// The pin reaction's dehydrate is refused for a kept body before the OS is asked:
+    /// its in-sync bit may date from when the folder was full, so the OS would free it.
+    #[tokio::test]
+    async fn free_local_bytes_refuses_a_kept_body_before_the_os() {
+        let root = Path::new("C:\\root");
+        let fake = FakeInvalidator::default();
+        let hydrator = FakeHydrator {
+            kept: ["mine.txt".to_string()].into(),
+            ..Default::default()
+        };
+
+        let freed =
+            free_local_bytes(&hydrator, &fake, &root.join("mine.txt"), "mine.txt", None).await;
+        assert!(freed.is_err(), "the only copy is never freed");
+        let superseded = free_local_bytes(
+            &hydrator,
+            &fake,
+            &root.join("mine.txt"),
+            "mine.txt",
+            Some(&stale_row("mine.txt", 0x02)),
+        )
+        .await;
+        assert!(
+            superseded.is_err(),
+            "nor freed under a newer head's description"
+        );
+        assert!(
+            fake.dehydrated.lock().unwrap().is_empty()
+                && fake.superseded.lock().unwrap().is_empty(),
+            "the OS was never asked"
+        );
+
+        free_local_bytes(
+            &hydrator,
+            &fake,
+            &root.join("theirs.txt"),
+            "theirs.txt",
+            None,
+        )
+        .await
+        .expect("a body the gate does not keep is the OS's to refuse");
+    }
+
+    /// Explorer's *Free up space* on a kept body: the unpin is refused and the pin put
+    /// back, so the file stays out of the OS's eviction and shows as kept.
+    #[tokio::test]
+    async fn an_unpin_of_a_kept_body_is_refused_and_the_pin_restored() {
+        let root = Path::new("C:\\root");
+        let abs = root.join("mine.txt").to_string_lossy().to_string();
+        let fake = FakeInvalidator {
+            pin_actions: [(abs.clone(), PinAction::Dehydrate)].into(),
+            ..Default::default()
+        };
+        let hydrator = FakeHydrator {
+            dehydration_safe: ["mine.txt".to_string()].into(),
+            kept: ["mine.txt".to_string()].into(),
+            ..Default::default()
+        };
+
+        react_to_pin(&hydrator, &fake, root, "mine.txt", None).await;
+
+        assert!(fake.dehydrated.lock().unwrap().is_empty(), "the bytes stay");
+        assert!(
+            hydrator.placeheld.lock().unwrap().is_empty(),
+            "the row stays Synced"
+        );
+        assert_eq!(
+            *fake.pins.lock().unwrap(),
+            vec![abs.clone()],
+            "pinned again"
+        );
+        assert_eq!(*fake.in_synced.lock().unwrap(), vec![abs], "and in sync");
+    }
+
+    /// A flip to metadata-only reaches the disk at the posture refresh: every kept body
+    /// not yet pinned is pinned, once; an off-disk root keeps no pins on its disk.
+    #[tokio::test]
+    async fn the_flip_sweep_pins_every_kept_body_not_yet_pinned() {
+        let root = Path::new("C:\\root");
+        let at = |rel: &str| root.join(rel).to_string_lossy().to_string();
+        let hydrator = FakeHydrator {
+            kept: ["a.txt".to_string(), "b.txt".to_string()].into(),
+            ..Default::default()
+        };
+        let fake = FakeInvalidator {
+            pinned: std::sync::Mutex::new([at("b.txt")].into()),
+            ..Default::default()
+        };
+
+        pin_kept_own_records(&hydrator, &fake, root).await;
+        pin_kept_own_records(&hydrator, &fake, root).await;
+        assert_eq!(
+            *fake.pins.lock().unwrap(),
+            vec![at("a.txt")],
+            "the unpinned body, once; the pinned one is left alone"
+        );
+
+        let off_disk = off_disk_root();
+        pin_kept_own_records(&hydrator, &off_disk, root).await;
+        assert!(off_disk.pins.lock().unwrap().is_empty());
     }
 
     // ── redescribe_repointed: a re-pointed placeholder on the disk follows its row ──
 
-    #[test]
-    fn a_repointed_placeholder_on_the_disk_is_redescribed_as_the_new_version() {
+    #[tokio::test]
+    async fn a_repointed_placeholder_on_the_disk_is_redescribed_as_the_new_version() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         std::fs::write(root.join("listed.txt"), b"").unwrap();
@@ -3764,13 +5474,16 @@ mod tests {
             refuse: [at("edited.txt")].into_iter().collect(),
             ..Default::default()
         };
+        let hydrator = FakeHydrator::default();
         let rows = [
             prow("listed.txt", 248, 1_700_000_100),
             prow("edited.txt", 7, 1_700_000_100), // a local edit since: refused
             prow("unlisted.txt", 9, 1_700_000_100), // not on the disk: its listing carries it
         ];
+        let mut pending = PendingRedescribes::default();
 
-        let n = redescribe_repointed(&invalidator, root, &rows);
+        let n =
+            redescribe_repointed(&hydrator, &invalidator, root, &rows, None, &mut pending).await;
 
         assert_eq!(n, 1);
         assert_eq!(
@@ -3778,20 +5491,413 @@ mod tests {
             vec![(at("listed.txt"), 248, 1_700_000_100)],
             "only the placeholder on the disk is re-described, with the new size and mtime"
         );
+        assert_eq!(
+            *hydrator.placeheld.lock().unwrap(),
+            vec!["listed.txt".to_string()],
+            "the update freed the file's bytes: its row says so, whatever a fetch answered \
+             while it was out recorded"
+        );
+        assert_eq!(
+            pending.rels.iter().cloned().collect::<Vec<_>>(),
+            vec!["edited.txt".to_string()],
+            "the refused re-describe is owed a retry — the next fold re-points nothing"
+        );
+        assert!(pending.due.is_some(), "…and the retry is armed");
     }
 
-    #[test]
-    fn an_off_disk_root_has_no_placeholder_to_redescribe() {
+    #[tokio::test]
+    async fn an_off_disk_root_has_no_placeholder_to_redescribe() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a.txt"), b"hydrated bytes").unwrap();
         let invalidator = off_disk_root();
+        let mut pending = PendingRedescribes::default();
 
-        let n = redescribe_repointed(&invalidator, tmp.path(), &[prow("a.txt", 3, 1)]);
+        let n = redescribe_repointed(
+            &FakeHydrator::default(),
+            &invalidator,
+            tmp.path(),
+            &[prow("a.txt", 3, 1)],
+            None,
+            &mut pending,
+        )
+        .await;
 
         assert_eq!(n, 0);
         assert!(
             invalidator.superseded.lock().unwrap().is_empty(),
             "an off-disk root's placeholders are rows: nothing on its disk is touched"
+        );
+    }
+
+    // ── owed re-describes: a placeholder left behind its row heals from the row ──
+
+    /// A file of `len` bytes last written at `mtime` (Unix seconds) at `rel` under `root` —
+    /// what a placeholder describes on the disk. Returns its path as the loop names it.
+    fn described_file(root: &Path, rel: &str, len: usize, mtime: i64) -> String {
+        let abs = root.join(rel);
+        std::fs::write(&abs, vec![b'o'; len]).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&abs)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(mtime as u64)),
+            )
+            .unwrap();
+        crate::path_map::overlay_abs_path(&root.to_string_lossy(), rel)
+    }
+
+    /// Run `run_hydration_loop` over `root` on a paused clock, send it `cmds`, and cancel it
+    /// once `done` holds (the clock auto-advances through the loop's timers meanwhile).
+    fn serve_until(
+        hydrator: FakeHydrator,
+        invalidator: &FakeInvalidator,
+        root: &Path,
+        cmds: Vec<HydrationCommand>,
+        done: impl Fn() -> bool,
+    ) {
+        let at_once = cmds.into_iter().map(|cmd| (Duration::ZERO, cmd)).collect();
+        serve_until_timed(hydrator, invalidator, root, at_once, done);
+    }
+
+    /// [`serve_until`], each command sent at its own time after the start (paused clock).
+    fn serve_until_timed(
+        hydrator: FakeHydrator,
+        invalidator: &FakeInvalidator,
+        root: &Path,
+        cmds: Vec<(Duration, HydrationCommand)>,
+        done: impl Fn() -> bool,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        loop_runtime().block_on(async move {
+            tokio::time::pause();
+            let driver = async {
+                let start = tokio::time::Instant::now();
+                for (at, cmd) in cmds {
+                    tokio::time::sleep_until(start + at).await;
+                    tx.send(cmd).unwrap();
+                }
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+                while !done() && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                stop.cancel();
+            };
+            tokio::join!(
+                run_hydration_loop(
+                    hydrator,
+                    invalidator,
+                    rx,
+                    None,
+                    root.to_path_buf(),
+                    "docs".to_string(),
+                    cancel,
+                    None,
+                    None,
+                ),
+                driver
+            );
+        });
+    }
+
+    /// An open refused because the placeholder describes another size than its row's
+    /// version (`on-demand-files.md` § On-Demand Files, *A placeholder describes the version
+    /// its row resolves*) re-describes the placeholder from the row — size and mtime — so the
+    /// open's retry is served. Until 2026-10-09 every open of it was refused, for ever.
+    #[test]
+    fn an_open_refused_on_size_redescribes_the_placeholder_from_its_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let abs = described_file(tmp.path(), "f.txt", 6, 1_700_000_000);
+        let invalidator = FakeInvalidator::default();
+        let sink = Arc::new(RecordingSink::default());
+        let hydrated = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        serve_until(
+            FakeHydrator {
+                bytes: Some(vec![b'n'; 248]),
+                rows: Some(vec![prow("f.txt", 248, 1_700_000_100)]),
+                hydrated: hydrated.clone(),
+                ..Default::default()
+            },
+            &invalidator,
+            tmp.path(),
+            vec![HydrationCommand::Fetch {
+                rel: "f.txt".into(),
+                offset: 0,
+                length: 6,
+                file_size: 6,
+                sink: Box::new(sink.clone()),
+            }],
+            || !invalidator.superseded.lock().unwrap().is_empty(),
+        );
+
+        assert!(*sink.failed.lock().unwrap(), "the open is refused");
+        assert!(sink.data.lock().unwrap().is_empty(), "nothing is served");
+        assert!(
+            hydrated.lock().unwrap().is_empty(),
+            "nothing is recorded hydrated"
+        );
+        assert_eq!(
+            *invalidator.superseded.lock().unwrap(),
+            vec![(abs.clone(), 248, 1_700_000_100)],
+            "the placeholder now describes the row's version"
+        );
+    }
+
+    /// A refused open is retried by the platform at once, and the owed re-describe waits on
+    /// that retry's fetch, which only the loop answers (measured 2026-10-09: run on the
+    /// loop, the update held it for cfapi's 60 s). The retry arm makes the update while the
+    /// loop answers the platform: the retried fetch is answered — refused again, the
+    /// placeholder still behind its row — and the update lands.
+    #[test]
+    fn an_owed_redescribe_waiting_on_the_platforms_retry_is_made_while_the_loop_answers_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let abs = described_file(tmp.path(), "f.txt", 6, 1_700_000_000);
+        let retry = Arc::new(RecordingSink::default());
+        let invalidator = FakeInvalidator {
+            supersede_waits_on: [(abs.clone(), retry.clone())].into_iter().collect(),
+            ..Default::default()
+        };
+        let placeheld = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let fetch = |sink: Box<dyn TransferSink + Send>| HydrationCommand::Fetch {
+            rel: "f.txt".into(),
+            offset: 0,
+            length: 6,
+            file_size: 6,
+            sink,
+        };
+
+        serve_until_timed(
+            FakeHydrator {
+                bytes: Some(vec![b'n'; 248]),
+                rows: Some(vec![prow("f.txt", 248, 1_700_000_100)]),
+                placeheld: placeheld.clone(),
+                ..Default::default()
+            },
+            &invalidator,
+            tmp.path(),
+            vec![
+                (Duration::ZERO, fetch(Box::<RecordingSink>::default())),
+                // After the retry arm's first try (1 s) has made the update.
+                (Duration::from_millis(1500), fetch(Box::new(retry.clone()))),
+            ],
+            || !invalidator.superseded.lock().unwrap().is_empty(),
+        );
+
+        assert!(
+            *retry.failed.lock().unwrap(),
+            "the retried fetch is answered while the update waits on it"
+        );
+        assert!(
+            invalidator.timed_out.lock().unwrap().is_empty(),
+            "the update never waits out cfapi's timeout: the loop answered its fetch"
+        );
+        assert_eq!(
+            *invalidator.superseded.lock().unwrap(),
+            vec![(abs, 248, 1_700_000_100)],
+            "…and the update lands"
+        );
+        assert_eq!(
+            *placeheld.lock().unwrap(),
+            vec!["f.txt".to_string()],
+            "the re-described file's row says its bytes are freed"
+        );
+    }
+
+    /// The fold's re-describe of a placeholder the platform is fetching — a program
+    /// opening the file as another device's edit lands — waits on that fetch
+    /// (`on-demand-files.md` § *A placeholder describes the version its row resolves*).
+    /// The loop answers the fetch while the update is out, and the fold completes: until
+    /// 2026-10-10 the fold made the update on the serve thread, which then answered nothing
+    /// for cfapi's 60 s.
+    #[test]
+    fn a_fold_redescribe_waiting_on_a_fetch_of_its_file_is_made_while_the_loop_answers_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let abs = described_file(tmp.path(), "f.txt", 6, 1_700_000_000);
+        let fetch = Arc::new(RecordingSink::default());
+        let invalidator = FakeInvalidator {
+            supersede_waits_on: [(abs.clone(), fetch.clone())].into_iter().collect(),
+            ..Default::default()
+        };
+        // The edit lands as the loop starts: its first pass folds it.
+        let reconnect = Arc::new(watch::channel(0u64));
+        reconnect.0.send(1).unwrap();
+        let placeheld = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        serve_until(
+            FakeHydrator {
+                bytes: Some(vec![b'n'; 248]),
+                rows: Some(vec![prow("f.txt", 248, 1_700_000_100)]),
+                repulls: Arc::new(std::sync::Mutex::new(
+                    [Ok(PlaceholderFold {
+                        repointed: vec![prow("f.txt", 248, 1_700_000_100)],
+                        ..Default::default()
+                    })]
+                    .into_iter()
+                    .collect(),
+                )),
+                reconnect,
+                placeheld: placeheld.clone(),
+                ..Default::default()
+            },
+            &invalidator,
+            tmp.path(),
+            vec![HydrationCommand::Fetch {
+                rel: "f.txt".into(),
+                offset: 0,
+                length: 6,
+                file_size: 6,
+                sink: Box::new(fetch.clone()),
+            }],
+            || !invalidator.superseded.lock().unwrap().is_empty(),
+        );
+
+        assert!(
+            *fetch.failed.lock().unwrap(),
+            "the outstanding fetch is answered while the fold's update waits on it — refused, \
+             the placeholder still describing the old version"
+        );
+        assert!(
+            invalidator.timed_out.lock().unwrap().is_empty(),
+            "the update never waits out cfapi's timeout: the loop answered its fetch"
+        );
+        assert_eq!(
+            *invalidator.superseded.lock().unwrap(),
+            vec![(abs, 248, 1_700_000_100)],
+            "…and the fold's re-describe lands"
+        );
+        assert_eq!(
+            *placeheld.lock().unwrap(),
+            vec!["f.txt".to_string()],
+            "the re-described file's row says its bytes are freed"
+        );
+    }
+
+    /// The program whose open was refused can hold the file past the first try, so a
+    /// refused try is owed again, with a backoff — the re-describe lands once the file is
+    /// let go, with no other open.
+    #[test]
+    fn a_redescribe_a_held_file_refused_is_retried_until_it_lands() {
+        let tmp = tempfile::tempdir().unwrap();
+        let abs = described_file(tmp.path(), "f.txt", 6, 1_700_000_000);
+        let invalidator = FakeInvalidator {
+            held_for: std::sync::Mutex::new([(abs.clone(), 3)].into_iter().collect()),
+            ..Default::default()
+        };
+
+        serve_until(
+            FakeHydrator {
+                bytes: Some(vec![b'n'; 248]),
+                rows: Some(vec![prow("f.txt", 248, 1_700_000_100)]),
+                ..Default::default()
+            },
+            &invalidator,
+            tmp.path(),
+            vec![HydrationCommand::Fetch {
+                rel: "f.txt".into(),
+                offset: 0,
+                length: 6,
+                file_size: 6,
+                sink: Box::new(RecordingSink::default()),
+            }],
+            || !invalidator.superseded.lock().unwrap().is_empty(),
+        );
+
+        assert_eq!(
+            *invalidator.superseded.lock().unwrap(),
+            vec![(abs.clone(), 248, 1_700_000_100)],
+            "three tries are refused while the file is held; the fourth lands, once"
+        );
+        assert_eq!(
+            invalidator.held_for.lock().unwrap().get(&abs),
+            Some(&0),
+            "every refusal was spent before it landed"
+        );
+    }
+
+    /// The OS's own eviction keeps the size of the version it freed. When the row has moved
+    /// past those bytes — a restore whose own free was refused (`file-versions.md`
+    /// § Restore, ordering 2) — the eviction's notice owes the placeholder a re-describe from
+    /// the row, so it is right before the user opens it; one that agrees is left alone.
+    #[test]
+    fn an_os_eviction_behind_its_row_is_redescribed_at_the_notice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let abs = described_file(tmp.path(), "f.txt", 61, 1_700_000_000);
+        let stale = described_file(tmp.path(), "agrees.txt", 9, 1_700_000_000);
+        let invalidator = FakeInvalidator::default();
+
+        // Both are owed, and tried in one pass — `agrees.txt` first.
+        serve_until(
+            FakeHydrator {
+                rows: Some(vec![
+                    prow("f.txt", 12, 1_700_000_100),
+                    prow("agrees.txt", 9, 1_700_000_000),
+                ]),
+                ..Default::default()
+            },
+            &invalidator,
+            tmp.path(),
+            vec![
+                HydrationCommand::Dehydrate {
+                    rel: "agrees.txt".into(),
+                },
+                HydrationCommand::Dehydrate {
+                    rel: "f.txt".into(),
+                },
+            ],
+            || !invalidator.superseded.lock().unwrap().is_empty(),
+        );
+
+        assert_eq!(
+            *invalidator.superseded.lock().unwrap(),
+            vec![(abs, 12, 1_700_000_100)],
+            "only the placeholder behind its row is re-described — {stale} already agrees"
+        );
+    }
+
+    /// This provider's own free (Explorer's *Free up space*, through the pin reaction) of a
+    /// file whose `Placeholder` row moved past its bytes — a restore whose own free was
+    /// refused — leaves the placeholder describing the row's version, completing the restore;
+    /// a file whose row agrees with it is freed bare, as ever.
+    #[tokio::test]
+    async fn the_providers_own_free_describes_the_rows_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let behind = described_file(root, "restored.txt", 61, 1_700_000_000);
+        let agrees = described_file(root, "agrees.txt", 9, 1_700_000_000);
+        let synced = described_file(root, "synced.txt", 5, 1_700_000_000);
+        let hydrator = FakeHydrator {
+            // `synced.txt` is a `Synced` row: not among the `Placeholder` rows.
+            rows: Some(vec![
+                prow("restored.txt", 12, 1_700_000_100),
+                prow("agrees.txt", 9, 1_700_000_000),
+            ]),
+            ..Default::default()
+        };
+        let inv = FakeInvalidator::default();
+
+        for (abs, rel) in [
+            (&behind, "restored.txt"),
+            (&agrees, "agrees.txt"),
+            (&synced, "synced.txt"),
+        ] {
+            free_local_bytes(&hydrator, &inv, Path::new(abs), rel, None)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            *inv.superseded.lock().unwrap(),
+            vec![(behind, 12, 1_700_000_100)],
+            "the file behind its row is freed describing the row's version"
+        );
+        assert_eq!(
+            *inv.dehydrated.lock().unwrap(),
+            vec![agrees, synced],
+            "the others are freed bare"
         );
     }
 
@@ -3912,12 +6018,20 @@ mod tests {
     /// BEFORE the root is connected. Connecting first re-arms the root's
     /// population, and the first browse lists every tracked placeholder back —
     /// silently reverting a delete the user made while nothing ran.
+    ///
+    /// The tail pins the corpus passes behind the startup fold:
+    /// `prepare` is this root's first pull, and its fold is applied right after
+    /// `connect` (the stale-hydrated invalidation included), so a re-seal reads
+    /// local rows that already hold everything the nest held at start — never
+    /// the head a seat last saw before a peer's newer edit
+    /// (`mls-group-key-material.md` § M2 → *(B) Reclaim*, property (1)).
     #[test]
     fn the_boot_sweep_runs_before_the_root_connects() {
         assert_eq!(
             boot_order(FakeHydrator::default(), false),
-            vec!["prepare", "converge", "connect"],
-            "a kept registration keeps its marks and sweeps before connecting"
+            vec!["prepare", "converge", "connect", "corpus_at_start"],
+            "a kept registration keeps its marks and sweeps before connecting; the corpus \
+             passes run behind the startup fold"
         );
     }
 
@@ -3928,7 +6042,13 @@ mod tests {
     fn a_fresh_registration_clears_every_mark_before_the_sweep() {
         assert_eq!(
             boot_order(FakeHydrator::default(), true),
-            vec!["prepare", "clear_seen_all", "converge", "connect"]
+            vec![
+                "prepare",
+                "clear_seen_all",
+                "converge",
+                "connect",
+                "corpus_at_start"
+            ]
         );
     }
 
@@ -4652,7 +6772,7 @@ mod tests {
     /// assertion; nothing asserted it before this loop existed, so an
     /// edited-then-uploaded file would refuse "Free up space" forever. When the
     /// engine's own record proves the disk content is uploaded
-    /// (`is_dehydration_safe`), the loop asserts in-sync and retries.
+    /// (`is_recorded_content`), the loop asserts in-sync and retries.
     #[test]
     fn a_stale_not_in_sync_refusal_is_repaired_for_proven_uploaded_content() {
         let (_tmp, root, abs) = pin_root("edited.txt");
@@ -4717,10 +6837,10 @@ mod tests {
 
     /// **The safety rail: unverified content never overrides the platform's
     /// refusal.** A dirty file (an edit the engine hasn't finished uploading —
-    /// e.g. still in the watcher's debounce window) fails `is_dehydration_safe`,
+    /// e.g. still in the watcher's debounce window) fails `is_recorded_content`,
     /// so the loop must NOT assert in-sync, must NOT dehydrate, and must NOT flip
     /// the row. Anything else destroys the user's edit — the iron rule
-    /// (`file-sync.md` § Sync direction: a change to a tracked file MUST be
+    /// (`on-demand-files.md` § Sync direction: a change to a tracked file MUST be
     /// uploaded).
     #[test]
     fn a_dirty_unpinned_file_is_never_force_dehydrated() {
@@ -4864,6 +6984,89 @@ mod tests {
             *converges.lock().unwrap(),
             "the corpus pair rides every converge: startup + each tick, never fewer"
         );
+    }
+
+    /// **The on-demand root adopts third-party deposits, as the always-resident
+    /// root does** (`file-sync.md` § Third-party deposit ingress): once after the
+    /// startup fold, then after every re-pull. Until 2026-10-10 the loop never
+    /// adopted, so a deposit to an owner whose seats were all on-demand stayed
+    /// parked for good.
+    #[test]
+    fn the_loop_adopts_deposits_at_start_and_after_every_rescan_repull() {
+        let (_cmd_tx, rx) = mpsc::unbounded_channel::<HydrationCommand>();
+        let cancel = CancellationToken::new();
+        let hydrator = FakeHydrator {
+            interval: Some(Duration::from_secs(300)),
+            stop_after_repulls: Some((2, cancel.clone())),
+            ..Default::default()
+        };
+        let adoptions = hydrator.adoptions.clone();
+
+        loop_runtime().block_on(async move {
+            tokio::time::pause();
+            run_hydration_loop(
+                hydrator,
+                FakeInvalidator::default(),
+                rx,
+                None,
+                PathBuf::from(r"C:\Root"),
+                "docs".to_string(),
+                cancel,
+                None,
+                None,
+            )
+            .await;
+        });
+
+        assert_eq!(
+            *adoptions.lock().unwrap(),
+            3,
+            "one pass after the startup fold, then one after each of the two rescan re-pulls"
+        );
+    }
+
+    /// The deposit's own nudge reaches an on-demand root: the re-pull it triggers
+    /// is followed by an adoption pass, off the rescan cadence.
+    #[test]
+    fn a_remote_change_nudge_adopts_after_its_repull() {
+        let host = FakeHydrator::default();
+        let adoptions = host.adoptions.clone();
+        let (wake_tx, wake_rx) = mpsc::channel(1);
+        assert!(wake_tx.try_send(()).is_ok());
+        let polled = adoptions.clone();
+        let adopted = drive_loop_with_inbox(host, Some(wake_rx), None, async move {
+            // The startup pass is the first; the nudge's is the second.
+            while *polled.lock().unwrap() < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        assert!(
+            adopted.is_some(),
+            "a nudge must adopt now, not wait out the rescan tick"
+        );
+    }
+
+    /// The adopted file takes the last leg every recorded upload takes on this
+    /// root: it flips to the platform's ✅, or Explorer shows it sync-pending
+    /// although its record reached the nest.
+    #[test]
+    fn an_adopted_deposit_flips_in_sync() {
+        let (_tmp, root, abs) = pin_root("note.txt");
+        let (evt_tx, _evt_rx) = broadcast::channel(16);
+        let invalidator = FakeInvalidator::default();
+
+        run_startup(
+            FakeHydrator {
+                adopt_records: vec!["note.txt".to_string()],
+                dehydration_safe: ["note.txt".to_string()].into(),
+                ..Default::default()
+            },
+            &invalidator,
+            root,
+            evt_tx,
+        );
+
+        assert_eq!(*invalidator.in_synced.lock().unwrap(), vec![abs]);
     }
 
     /// The pin sweep is a **backstop like converge**: it runs on the rescan tick
@@ -5327,6 +7530,34 @@ mod tests {
     // bearer-only inputs, assembled over a hand-made binding by the builder's
     // construction half — no control plane to read.
 
+    /// Every engine's control plane (and the relay seat's) is a connection of
+    /// the account's actor, so it announces the capability's device as a wake
+    /// stand-in before its first connect — an unannounced one would trip the
+    /// nest's compatibility rider and silence the user's relay rows (`common.md`
+    /// § Push Notifications → *Transports*, ruled 2026-10-09).
+    #[tokio::test]
+    async fn an_engine_control_plane_announces_the_device_as_a_stand_in() {
+        let slot = crate::bearer::CapabilitySlot::new(Some(SyncCapability::new(
+            vec![5u8; 32],
+            vec![6u8; 32],
+            "http://127.0.0.1:7450".into(),
+            "dev-test".into(),
+            BearerToken::new("tok".into(), 4_000_000_000),
+        )));
+        let device_id = [0xabu8; 32];
+        let client =
+            agent_control_plane(slot, "http://127.0.0.1:7450".into(), [5u8; 32], device_id);
+        assert_eq!(
+            client.push_presence(),
+            Some(fauna_protocol::push::PresenceRequest {
+                device_id: hex::encode(device_id),
+                stand_in: true,
+                ..Default::default()
+            }),
+            "an engine control plane must announce the capability's device as a stand-in"
+        );
+    }
+
     /// An engine assembled from the agent's own inputs (`agent_engine_params`),
     /// its own nest at `own_nest`, over `binding`.
     fn assembled(
@@ -5342,7 +7573,7 @@ mod tests {
             BearerToken::new("tok".into(), 4_000_000_000),
         )));
         let params = agent_engine_params(
-            agent_control_plane(slot, own_nest.to_string(), [6u8; 32]),
+            agent_control_plane(slot, own_nest.to_string(), [6u8; 32], [0u8; 32]),
             dir.to_path_buf(),
             dir.to_path_buf(),
             fauna_core::folder_keys::FolderRef::Local(1),

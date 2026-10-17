@@ -59,7 +59,7 @@ func TestEnqueueProbeAgainstLiveNest(t *testing.T) {
 	defer c.Close()
 
 	ids, err := EnqueueOutboundMail(ctx, c, "<probe-go@repro>", sender,
-		[]string{"probe@example.com"}, []byte("From: x\r\n\r\nbody\r\n"), nil, nil)
+		[]string{"probe@example.com"}, []byte("From: x\r\n\r\nbody\r\n"), nil, nil, nil)
 	if err != nil {
 		var se *ServerError
 		if errors.As(err, &se) {

@@ -27,6 +27,10 @@ pub struct BackupsHandles {
     /// Restore surfaces (history list, divergence banner/modal, local
     /// restore action) — see `restore.rs`.
     pub restore: restore::RestoreHandles,
+    /// The destinations section's own re-read (what its `connect_map` runs) —
+    /// the store-change notice re-drives it while the page is open
+    /// (`crate::store_surfaces`).
+    pub destinations_refresh: Rc<dyn Fn()>,
 }
 
 /// Bridges `BackupsMachine` notifications to the GTK main loop: each
@@ -83,7 +87,7 @@ pub fn build_backups_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView
     // Restore surfaces + backup-destination management — scrollable together so
     // the history list, restore action card, and destination list all fit.
     let (restore_box, restore_handles) = restore::build_restore_section(client);
-    let (audit_alerts, destinations_box, error_label) =
+    let (audit_alerts, destinations_box, error_label, destinations_refresh) =
         destinations::build_destinations_section(client);
     let scroll_inner = gtk::Box::new(gtk::Orientation::Vertical, 0);
     scroll_inner.append(&restore_box);
@@ -161,6 +165,7 @@ pub fn build_backups_view(client: &Rc<FaunaClient>) -> (adw::NavigationSplitView
         detail_header,
         machine,
         restore: restore_handles,
+        destinations_refresh,
     };
 
     (split, handles)

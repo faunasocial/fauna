@@ -60,6 +60,32 @@ class EncryptionSettingsContentTest {
     }
 
     @Test
+    fun carriesTheApprovedEncryptionIds() {
+        render(keyPackageCount = 7)
+        composeTestRule.onNodeWithTag("encryption-keypackage-count").assertTextEquals("7")
+        composeTestRule.onNodeWithTag("encryption-keypackage-refresh-button").assertExists()
+    }
+
+    @Test
+    fun countBelowFiveShowsLowWarningNamingTheCount() {
+        render(keyPackageCount = 4)
+        composeTestRule.onNodeWithTag("encryption-keypackage-low-warning").assertExists()
+        composeTestRule.onNodeWithText("Only 4 key package(s)", substring = true).assertExists()
+    }
+
+    @Test
+    fun countOfFiveShowsNoLowWarning() {
+        render(keyPackageCount = 5)
+        composeTestRule.onNodeWithTag("encryption-keypackage-low-warning").assertDoesNotExist()
+    }
+
+    @Test
+    fun unreadCountShowsNoLowWarning() {
+        render(keyPackageCount = null)
+        composeTestRule.onNodeWithTag("encryption-keypackage-low-warning").assertDoesNotExist()
+    }
+
+    @Test
     fun errorMessageRendersWhenPresent() {
         render(errorMessage = "boom")
         composeTestRule.onNodeWithText("boom").assertExists()

@@ -145,7 +145,7 @@ fn install_panic_hook() {
 /// view's source. Returns a JS array of `{ timestamp_ms, level, target, message }`.
 #[wasm_bindgen(js_name = logSnapshot)]
 pub fn log_snapshot() -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(&js_entries(&fauna_log::snapshot())).map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&js_entries(&fauna_log::snapshot()))
 }
 
 /// Log lines at or above `min_level` (`"error"|"warn"|"info"|"debug"|"trace"`;
@@ -154,7 +154,7 @@ pub fn log_snapshot() -> Result<JsValue, JsValue> {
 #[wasm_bindgen(js_name = logSnapshotAtLeast)]
 pub fn log_snapshot_at_least(min_level: &str) -> Result<JsValue, JsValue> {
     let entries = fauna_log::snapshot_at_least(parse_level(min_level));
-    serde_wasm_bindgen::to_value(&js_entries(&entries)).map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&js_entries(&entries))
 }
 
 /// Drop all retained entries (the page's "Clear" affordance — `fauna_log::clear`).
@@ -216,7 +216,7 @@ pub fn log_filter_entries(entries: JsValue, min_level: &str) -> Result<JsValue, 
     // `parse_level` maps "all"/unknown → Trace, the least-severe threshold, so
     // `Some(Trace)` keeps everything — matching the native index-0 "All".
     let filtered = fauna_log::format::filter_entries(&native, Some(parse_level(min_level)));
-    serde_wasm_bindgen::to_value(&js_entries(&filtered)).map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&js_entries(&filtered))
 }
 
 /// The one-line `LEVEL · HH:MM:SS · target · message` form for one entry
@@ -254,7 +254,7 @@ pub fn log_rows(entries: JsValue, tz_offset_secs: i32) -> Result<JsValue, JsValu
             subtitle: r.subtitle,
         })
         .collect();
-    serde_wasm_bindgen::to_value(&rows).map_err(crate::rpc::err_to_js)
+    crate::rpc::to_js(&rows)
 }
 
 // ── Browser-console layer ───────────────────────────────────────────────────

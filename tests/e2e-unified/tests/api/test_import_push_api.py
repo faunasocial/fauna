@@ -133,6 +133,7 @@ def test_import_message_emits_progress_push(two_nodes):
         assert push.payload["errored_count"] == 0
 
 
+@pytest.mark.feature("mailbox-import")
 def test_import_batch_emits_exactly_one_progress_push(two_nodes):
     """§ Batching: one Push per *call*, not one per message."""
     port = two_nodes["port_a"]
@@ -199,6 +200,7 @@ def test_import_dedup_skip_is_reported_in_the_progress_push(two_nodes):
         assert push.payload["skipped_count"] == 1
 
 
+@pytest.mark.feature("mailbox-import")
 def test_finalize_emits_complete_push(two_nodes):
     """`finalize_import_session` delivers `BridgeImportComplete` with the summary."""
     port = two_nodes["port_a"]
@@ -222,6 +224,7 @@ def test_finalize_emits_complete_push(two_nodes):
         assert push.payload["imported_count"] == 1
 
 
+@pytest.mark.feature("mailbox-import")
 def test_fail_session_emits_error_push(two_nodes):
     """`fail_import_session` delivers `BridgeImportError` carrying the reason."""
     port = two_nodes["port_a"]

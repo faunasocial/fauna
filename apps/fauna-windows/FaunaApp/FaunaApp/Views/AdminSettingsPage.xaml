@@ -102,6 +102,41 @@
                 <!-- Empty state -->
                 <TextBlock x:Name="NoTiersText" Visibility="Collapsed" Opacity="0.5"
                            Text="{loc:Localize Key=admin/settings_page/no_tiers}" />
+
+                <!-- Define a new tier (admin-settings-tier-add-section, admin.md § 3 →
+                     Defining a new tier): a name + the same five raw-i64 cap inputs a
+                     row edits (the admin-settings-tier-cap-* ids, scoped under this
+                     section) + admin-settings-tier-add-button → fauna.admin.tiers.create.
+                     Shown whether or not any tier exists, so a fresh box can get its
+                     first one. DataContext is set to the VM in OnNavigatedTo; the form
+                     clears only after the create lands. Mirrors web/android/linux. -->
+                <StackPanel x:Name="AddTierSection" Padding="4,8" Spacing="6"
+                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTierAddSection}"
+                            AutomationProperties.Name="{loc:Localize Key=admin/settings_page/add_tier_section}">
+                    <TextBlock Text="{loc:Localize Key=admin/settings_page/add_tier_section}" FontWeight="SemiBold" />
+                    <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTierAddNameInput}"
+                             Header="{loc:Localize Key=admin/settings_page/add_tier_name}"
+                             Text="{Binding AddTierName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                    <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTierCapInbox}"
+                             Header="{loc:Localize Key=admin/settings_page/cap_inbox_bytes}"
+                             Text="{Binding AddMaxInboxBytesText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                    <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTierCapStorage}"
+                             Header="{loc:Localize Key=admin/settings_page/cap_storage_bytes}"
+                             Text="{Binding AddMaxStorageBytesText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                    <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTierCapDevices}"
+                             Header="{loc:Localize Key=admin/settings_page/cap_devices}"
+                             Text="{Binding AddMaxDevicesText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                    <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTierCapBlobSize}"
+                             Header="{loc:Localize Key=admin/settings_page/cap_blob_size}"
+                             Text="{Binding AddMaxBlobSizeText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                    <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTierCapFeeds}"
+                             Header="{loc:Localize Key=admin/settings_page/cap_feeds}"
+                             Text="{Binding AddMaxFeedsText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                    <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminSettingsTierAddButton}"
+                            Content="{loc:Localize Key=admin/settings_page/add_tier}"
+                            Click="AddTier_Click"
+                            HorizontalAlignment="Left" />
+                </StackPanel>
             </StackPanel>
 
             <!-- Membership designations (admin-settings-membership-section + -item,

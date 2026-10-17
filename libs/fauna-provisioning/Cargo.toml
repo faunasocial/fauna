@@ -38,6 +38,9 @@ tracing = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
 sha1_smol = "1"
+# The never-downgrade decision compares image version labels
+# (`update_channel::decide`).
+semver = { workspace = true }
 rand = { workspace = true }
 getrandom = { version = "0.2", optional = true }
 tokio = { workspace = true, optional = true }

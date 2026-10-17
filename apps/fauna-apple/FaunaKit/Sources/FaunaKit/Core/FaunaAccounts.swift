@@ -139,6 +139,33 @@ public enum FaunaAccounts {
             installStore: KeychainSecretStore(keychain: keychain), actorId: actorId)
     }
 
+    /// The sync device id the SESSION account registers under — what both app
+    /// shells' stored-identity launch paths (`completeAuthenticatedLaunch`,
+    /// `enterOptimistically`) hand `FaunaClient(deviceId:)`. Resolved through the
+    /// shared get-or-create (`deviceId(forActorId:)`), never read off the raw
+    /// per-actor registry slot: a slot that is not a 32-byte-hex sync id (the e2e
+    /// harness's free-form placeholder) is no id at all, and serving it verbatim
+    /// left `startAccountRuntime` with no enrollment target — the account store
+    /// never mounted. Windows' twin: `SessionDeviceId.Resolve`.
+    ///
+    /// `nil` when the registry does not hold `actorId`, or when no stable id
+    /// exists (the shared call's only error) — the callers' "no device id"
+    /// branch, rather than an id the next read could not reproduce.
+    public static func sessionDeviceId(
+        forActorId actorId: String, keychain: KeychainStore = KeychainStore()
+    ) -> String? {
+        guard registry(keychain: keychain).sessionMaterial(actorId: actorId) != nil else {
+            return nil
+        }
+        do {
+            return try deviceId(forActorId: actorId, keychain: keychain)
+        } catch {
+            logMessage(level: .warn, target: "fauna.accounts",
+                       message: "sessionDeviceId: deviceIdForActor failed; no device id this session: \(error)")
+            return nil
+        }
+    }
+
     /// The account **this process serves**: the bound account of a secondary instance
     /// (`sessionLaunchBinding()` — the environment's binding or the launch-collision
     /// chooser's pick), else the registry's active account. Every session-identity read

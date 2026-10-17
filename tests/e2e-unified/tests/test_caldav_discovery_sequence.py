@@ -160,7 +160,7 @@ def test_apple_style_caldav_discovery_walk(app, dedicated_mail_nest, request):
     app.mail_settings.navigate()
     assert app.mail_settings.is_page_visible(), "mail-settings page must be reachable"
     app.mail_settings.enable_mail_plain(_PASSWORD)
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         f"enabling mail must mint the default credential; error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
     assert app.mail_settings.wait_for_enabled_status(timeout=15.0), (

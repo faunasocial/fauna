@@ -13,8 +13,9 @@ grace watcher, abort inverse) is covered by the Rust handler + storage tests
 assertions are deliberately **side-effect-free**: they read status/list, and prove
 ``start`` *reaches validation and refuses* a bogus target — they never actually
 begin a rename (which would flip the deployment primary and pollute the shared
-nest). The happy-path start→banner→abort flow is exercised UI-side in
-``test_admin_dns.py`` against the driver, which aborts pre-flip.
+nest). The start→banner→abort flow, and the grace period chosen at the start, are
+exercised UI-side in ``test_admin_dns_domain_lifecycle.py``, each on a dedicated
+nest of its own.
 """
 
 import secrets

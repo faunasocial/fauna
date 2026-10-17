@@ -284,7 +284,7 @@ func (p *Provider) TriggerRefresh() {
 // or a capped backoff (1m/5m/15m) on failure. It is never zero, so a
 // persistently-failing refresh retries at the 15m cadence forever rather
 // than busy-spinning — the bug that flooded a 69 GB json log and filled
-// example.com's disk on 2026-06-01.
+// the live nest's disk on 2026-06-01.
 func (p *Provider) refreshLoop(ctx context.Context) {
 	retryAttempt := 0
 

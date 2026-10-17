@@ -60,6 +60,8 @@ object LabelerInspectViewFixture {
         needsMediaMetadata: Boolean = false,
         needsAuthor: Boolean = false,
         needsAttachmentBytes: Boolean = false,
+        labelAbi: UShort = 1u.toUShort(),
+        newerThanThisApp: Boolean = false,
     ) = LabelerInspectView(
         labelerId = labelerId,
         version = version,
@@ -71,6 +73,8 @@ object LabelerInspectViewFixture {
         needsMediaMetadata = needsMediaMetadata,
         needsAuthor = needsAuthor,
         needsAttachmentBytes = needsAttachmentBytes,
+        labelAbi = labelAbi,
+        newerThanThisApp = newerThanThisApp,
         verified = verified,
         listName = listName,
         listEntries = listEntries,

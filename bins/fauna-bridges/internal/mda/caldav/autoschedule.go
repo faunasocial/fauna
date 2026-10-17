@@ -127,10 +127,12 @@ func (b *Backend) enqueueScheduling(
 	// PUT's REQUEST + CANCEL recipient sets are disjoint by construction, so the
 	// shared per-event msgid never collides.
 	msgID := hex.EncodeToString(uidHash) + "@" + sess.AuthedDomain()
-	// nil stagedBody: iMIP scheduling messages are small and always ride inline;
-	// only the SMTP submission leg stages an over-inline-budget body.
+	// nil submissionToken: the MDA's AUTH blob carries no user signature, so nest
+	// holds it to its caller scope instead. nil stagedBody: iMIP scheduling
+	// messages are small and always ride inline; only the SMTP submission leg
+	// stages an over-inline-budget body.
 	if _, err := wsrpc.EnqueueOutboundMail(
-		ctx, sess.Client(), msgID, from, recipients, raw, &actorID, nil,
+		ctx, sess.Client(), msgID, from, recipients, raw, &actorID, nil, nil,
 	); err != nil {
 		b.logger.Warn(
 			"caldav auto-schedule: enqueue iMIP failed",
@@ -288,11 +290,12 @@ func (b *Backend) classifyAutoScheduleRecipients(
 		// email-disabled nest → WS-RPC sealed delivery; the same-nest mirror of the
 		// cross-nest resolve_attendee_transport keying on the peer's email_enabled).
 		if b.nestMailEnabled() {
-			// Empty sender_address: this is a *routing probe* ("is this attendee
-			// reachable by email?"), not a delivery, so the guardian mail gate
-			// must not answer Reject here and silently reroute the attendee onto
-			// the sealed rail. The gate applies to the iMIP delivery that follows.
-			resolved, err := wsrpc.ResolveRecipient(ctx, client, local, domain, sess.AuthedDomain(), "")
+			// A *routing probe* ("is this attendee reachable by email?"), not a
+			// delivery, so the guardian mail gate must not answer Reject here and
+			// silently reroute the attendee onto the sealed rail. The gate — and
+			// the attendee's receive switch — apply to the iMIP delivery that
+			// follows.
+			resolved, err := wsrpc.ResolveRecipientOwner(ctx, client, local, domain, sess.AuthedDomain())
 			if err != nil ||
 				resolved.Outcome == wsrpc.ResolveResolved ||
 				resolved.Outcome == wsrpc.ResolveForward {

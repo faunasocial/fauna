@@ -31,7 +31,9 @@
 // account, exactly as `bind_account` refuses a malformed binding as
 // `UnknownActor` rather than quietly dropping it.
 
-/** The `sessionStorage` slot. Namespaced like the SPA's other stored keys. */
+/** The `sessionStorage` slot. Namespaced like the SPA's other stored keys.
+ *  The wasm launch seam reads the same key (`fauna_client_accounts::TAB_PIN_KEY`)
+ *  to bind a secondary tab's launch slots to its own account. */
 const STORAGE_KEY = 'fauna_tab_account';
 
 /**

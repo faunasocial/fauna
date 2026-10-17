@@ -24,11 +24,15 @@ pub(crate) const DEFAULT_DEADLINE: std::time::Duration = std::time::Duration::fr
 ///
 /// The connection is fixed (no reconnect-wait): a closed connection surfaces as
 /// the dispatcher-synthesised [`fauna_protocol::DISCONNECTED_CODE`], mapped here
-/// to [`AnonClientError::RpcDisconnected`]. The `Req` is CBOR-encoded before the
+/// to [`AnonClientError::RpcDisconnected`] — or, when `close` records that the
+/// nest closed the connection 4426, to [`AnonClientError::SubprotocolMismatch`]
+/// (the app is too old for the nest; `transport-connection.md` § Connection
+/// lifecycle, the 4426 paragraph). The `Req` is CBOR-encoded before the
 /// shared path's first await, so the returned future is `Send` — native callers
 /// can `tokio::spawn` it.
 pub(crate) async fn request_typed<Req, Reply>(
     dispatcher: &RpcDispatcher,
+    close: &crate::ws::CloseSignal,
     kind_registry: &KindRegistry,
     kind: &'static str,
     payload: Req,
@@ -58,6 +62,12 @@ where
     );
     result.map_err(|e| {
         use fauna_protocol::TypedRequestError as T;
+        // A request the nest's 4426 close ended — as an in-flight disconnect,
+        // or as a send onto the already-closed socket — is the app being too
+        // old, whichever way the dispatcher saw it go.
+        if !matches!(e, T::Rpc(_) | T::Codec(_)) && close.is_subprotocol_mismatch() {
+            return AnonClientError::SubprotocolMismatch;
+        }
         match e {
             T::Codec(msg) => AnonClientError::Decode(msg),
             T::Dispatch(e) => AnonClientError::WebSocket(format!("dispatch: {e}")),

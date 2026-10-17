@@ -75,7 +75,7 @@ var conformanceTypes = []any{
 	subscribeMailboxRequest{}, unsubscribeMailboxRequest{}, subscribeMailboxStateRequest{},
 	provisionCalendarRequest{}, listCalendarsRequest{}, putEventCiphertextRequest{},
 	deleteEventRequest{}, queryEventsRequest{}, syncCalendarSinceRequest{},
-	reportLogEventsRequest{},
+	reportLogEventsRequest{}, reportDmarcObservationRequest{},
 
 	// ── reply bodies ──
 	requestEnrollmentReply{}, WhoamiReply{}, registerServiceUserReply{},
@@ -97,6 +97,7 @@ var conformanceTypes = []any{
 	subscribeMailboxReply{}, unsubscribeMailboxReply{}, subscribeMailboxStateReply{},
 	provisionCalendarReply{}, listCalendarsReply{}, putEventCiphertextReply{},
 	deleteEventReply{}, queryEventsReply{}, syncCalendarSinceReply{},
+	reportDmarcObservationReply{},
 
 	// ── nested element & push payload types ──
 	SpamPolicyThresholds{}, AuthPolicy{}, SubmissionPolicyThresholds{}, ImapPolicy{},
@@ -107,6 +108,7 @@ var conformanceTypes = []any{
 	StoreFlagsResultEntry{}, CopyPair{}, OutboundUnit{}, MtaStsPolicyWire{},
 	TlsaRecordWire{}, EmailFilterWire{}, CalendarEntry{}, EventEntry{}, ExpungedEntry{},
 	MailboxStateEvent{}, BridgeMailboxStatePush{}, BridgeConfigChangedPush{},
+	DmarcObservation{}, DkimAuthResult{},
 }
 
 // cborField is the parsed view of one struct field's `cbor:"..."` tag.

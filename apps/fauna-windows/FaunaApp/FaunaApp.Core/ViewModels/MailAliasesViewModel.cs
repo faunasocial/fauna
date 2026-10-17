@@ -192,7 +192,12 @@ public partial class MailAliasesViewModel : ObservableObject
     /// <summary>Mint a disposable alias with the per-user defaults (the nest derives
     /// <c>&lt;handle&gt;+&lt;domain&gt;</c> server-side from the canonical exact alias).</summary>
     public Task GenerateDisposableAsync()
-        => DispatchAsync(new MailAliasesAction.GenerateDisposable(null, null, string.Empty));
+        => GenerateDisposableAsync(null, null, string.Empty);
+
+    /// <summary>Mint a disposable alias lasting <paramref name="ttlDays"/> days and taking
+    /// <paramref name="uses"/> messages (null = the per-user default).</summary>
+    public Task GenerateDisposableAsync(uint? ttlDays, uint? uses, string label)
+        => DispatchAsync(new MailAliasesAction.GenerateDisposable(ttlDays, uses, label));
 
     /// <summary>Full-overwrite an owned alias's editable fields (kind is immutable).</summary>
     public Task UpdateAsync(string aliasIdHex, string pattern, string label, uint? spamThresholdOverride, long? rateLimitPerHour)

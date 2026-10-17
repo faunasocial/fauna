@@ -56,9 +56,11 @@ Stamped 2026-09-19 at acb58fddf3.
    - `tests/e2e-unified/tests/test_delete_account.py::test_windows_an_account_the_nest_stops_accepting_erases_nothing_on_the_device`
    - `tests/e2e-unified/tests/test_delete_account.py::test_apple_an_account_the_nest_stops_accepting_erases_nothing_on_the_device`
    - `tests/e2e-unified/tests/test_delete_account.py::test_web_an_account_the_nest_stops_accepting_erases_nothing_on_the_device`
+   - `tests/e2e-unified/tests/test_delete_account.py::test_android_an_account_the_nest_stops_accepting_erases_nothing_on_the_device`
 13. [app] Signing out while another Fauna window on this device is using one of your accounts is refused: nothing is erased, you stay signed in, and you are told to close the other window and sign out again — `docs/goal/architecture/apps/account-scoping.md` § Concurrent instances
    - `tests/e2e-unified/tests/test_sign_out_refused_other_tab_web.py::test_web_sign_out_refuses_while_another_tab_holds_the_engine`
    - `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_sign_out_refuses_while_another_instance_serves_the_account`
+   - `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_sign_out_refuses_while_a_sibling_app_serves_the_account`
 14. [app] What a sign-out could not remove can be removed again from the sign-in screen, and the notice goes away only once nothing is left — `docs/goal/architecture/apps/account-scoping.md` § The scoping taxonomy (iron-clad for new app state)
    - `tests/e2e-unified/tests/test_sign_out.py::test_the_sign_out_residue_retry_finishes_the_erase`
    - `tests/e2e-unified/tests/test_sign_out_web.py::test_web_sign_out_residue_retry_refuses_beside_another_tab_and_finishes_the_erase`
@@ -70,11 +72,11 @@ Stamped 2026-09-19 at acb58fddf3.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| linux | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| windows | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| macos | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| ios | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| web | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |
 
@@ -107,8 +109,10 @@ Stamped 2026-09-19 at acb58fddf3.
 | 12 | app | `tests/e2e-unified/tests/test_delete_account.py::test_windows_an_account_the_nest_stops_accepting_erases_nothing_on_the_device` | windows (windows): passed |
 | 12 | app | `tests/e2e-unified/tests/test_delete_account.py::test_apple_an_account_the_nest_stops_accepting_erases_nothing_on_the_device` | macos (macos): passed, ios (macos): passed |
 | 12 | app | `tests/e2e-unified/tests/test_delete_account.py::test_web_an_account_the_nest_stops_accepting_erases_nothing_on_the_device` | web (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_delete_account.py::test_android_an_account_the_nest_stops_accepting_erases_nothing_on_the_device` | — |
 | 13 | app | `tests/e2e-unified/tests/test_sign_out_refused_other_tab_web.py::test_web_sign_out_refuses_while_another_tab_holds_the_engine` | web (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_sign_out_refuses_while_another_instance_serves_the_account` | — |
+| 13 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_sign_out_refuses_while_another_instance_serves_the_account` | linux (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_erase_refused_other_instance.py::test_sign_out_refuses_while_a_sibling_app_serves_the_account` | — |
 | 14 | app | `tests/e2e-unified/tests/test_sign_out.py::test_the_sign_out_residue_retry_finishes_the_erase` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_sign_out_web.py::test_web_sign_out_residue_retry_refuses_beside_another_tab_and_finishes_the_erase` | web (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_sign_out.py::test_the_sign_out_residue_outlives_the_app` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |

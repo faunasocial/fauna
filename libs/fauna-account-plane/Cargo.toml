@@ -139,3 +139,5 @@ futures-util = { workspace = true }
 fauna-client-capabilities = { path = "../fauna-client-capabilities" }
 # The intake's and the tail's tests stand on the SQLite backend.
 fauna-account-store = { workspace = true, features = ["test-helpers"] }
+# `departed_fleet`'s tests record into an in-memory account registry.
+fauna-client-accounts = { path = "../fauna-client-accounts", features = ["test-helpers"] }

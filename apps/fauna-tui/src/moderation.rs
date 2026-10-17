@@ -676,18 +676,26 @@ fn row_elements(index: usize, row: &QueueRow) -> Vec<Element> {
     // The queue row addresses the badge by its own single `category` (a merged
     // row carries exactly one), so it calls the category helper directly rather
     // than the list one.
-    let mut els = vec![content_label_badge_for_category(&row.category)];
+    // The badge also carries the confidence and action the row paints as
+    // `confidence` / `action` attributes (`moderation.md` § Element IDs → *Queue
+    // row facts*): the chrome lines below have no id an automation can read.
+    let pct = fauna_core::format::confidence_percent(row.confidence_per_mille);
+    let mut badge =
+        content_label_badge_for_category(&row.category).attr("confidence", format!("{pct}%"));
+    let action_label = row.action.map(|action| {
+        fauna_core::obligation::obligation_action_label(action).resolve(fauna_i18n::strings::lookup)
+    });
+    if let Some(label) = &action_label {
+        badge = badge.attr("action", label.clone());
+    }
+    let mut els = vec![badge];
 
     // Server rows only — a local detection carries no `action`, so its action
     // column stays blank. Never fabricate one.
-    if let Some(action) = row.action {
-        els.push(Element::chrome(
-            fauna_core::obligation::obligation_action_label(action)
-                .resolve(fauna_i18n::strings::lookup),
-        ));
+    if let Some(label) = action_label {
+        els.push(Element::chrome(label));
     }
 
-    let pct = fauna_core::format::confidence_percent(row.confidence_per_mille);
     els.push(Element::chrome(format!(
         "{} · {} — {pct}% {}",
         row.content_type,
@@ -786,6 +794,18 @@ mod tests {
             "875 per-mille rounds half-up to 88%, the shared contract: {:?}",
             els[4].text,
         );
+        // The badge carries the row's confidence and action as automation
+        // attributes — the witness of what the row paints (the chrome lines
+        // above have no id of their own).
+        let attr = |k: &str| {
+            els[2]
+                .attrs
+                .iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(attr("confidence").as_deref(), Some("88%"));
+        assert_eq!(attr("action").as_deref(), Some(els[3].text.as_str()));
     }
 
     /// A local detection's action column is **blank** — never fabricated
@@ -808,6 +828,12 @@ mod tests {
             ],
             "one fewer chrome line than a server row (the blank action column) \
              and no appeal-button: there is no nest-side decision to appeal",
+        );
+        let keys: Vec<&str> = els[2].attrs.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["confidence"],
+            "a local detection publishes its confidence and no action attribute",
         );
     }
 

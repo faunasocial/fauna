@@ -37,6 +37,9 @@ public struct InviteRequestSnapshotPayload: Decodable {
     /// claim (`family-safety.md` § App surface → *Age-band surfaces*); absent
     /// on the wire = nothing to paint.
     public let age_notice: LocalizedTextPayload?
+    /// The machine-derived `invite-code-supervised-notice` text (guardian,
+    /// plus the code's age band); absent on the wire = no notice.
+    public let supervised_notice: LocalizedTextPayload?
 
     public func intoSnapshot() -> InviteRequestSnapshot {
         InviteRequestSnapshot(
@@ -46,7 +49,8 @@ public struct InviteRequestSnapshotPayload: Decodable {
             recheckVisible: recheck_visible,
             outOfBandCodeState: out_of_band_code_state.intoState(),
             oobMessage: oob_message.intoLocalizedText(),
-            ageNotice: age_notice?.intoLocalizedText()
+            ageNotice: age_notice?.intoLocalizedText(),
+            supervisedNotice: supervised_notice?.intoLocalizedText()
         )
     }
 }

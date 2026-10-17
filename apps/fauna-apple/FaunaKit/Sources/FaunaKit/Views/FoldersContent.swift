@@ -26,7 +26,7 @@ public struct FoldersContent<BindingContent: View>: View {
     /// The refs (`FolderRef` wire strings) of the sets whose local presence is a
     /// bound always-resident folder — the
     /// `folder-on-demand-toggle` arbitration input (bound folder > FP domain;
-    /// `file-sync.md` § Apple File Provider binding). macOS reads
+    /// `on-demand-files-apple.md` § Apple File Provider binding). macOS reads
     /// `LocationsModel`; iOS (no binding surface) keeps the empty default.
     let boundSets: () -> Set<String>
     /// Shared-set names the agent has PARKED (the owner revoked this actor's
@@ -521,7 +521,7 @@ public struct FoldersContent<BindingContent: View>: View {
     /// `folder-on-demand-toggle` on a row of a folder shared WITH the account —
     /// hide-only (the membership is the seat; no place is written), and, for a
     /// writer whose set is bound to a local folder, the same arbitration
-    /// caption an owner's bound row shows (`on-demand-files.md` § Shared sets
+    /// caption an owner's bound row shows (`on-demand-files-shared-sets.md` § Shared sets
     /// on a capability host, decision 3; ui/folders.md § Element IDs).
     @ViewBuilder
     private func memberOnDemandToggle(_ folder: FolderSummary) -> some View {
@@ -687,6 +687,7 @@ private struct FolderWebdavToggle: View {
     }
 }
 
+#if !FAUNA_KIDS
 /// Per-set "paywall to tier" select (`folder-paywall-tier-select`) — website-enabled
 /// OWNER rows only, the structural sibling of the `FolderWebdavToggle` above
 /// (folders.md § Web paywall / monetization.md § Pillar 2; the linux
@@ -698,8 +699,9 @@ private struct FolderWebdavToggle: View {
 /// cross-app `select(id, value)` e2e contract drives are each own-tier's NAME, plus
 /// an empty-string sentinel for the "Not paywalled (public)" placeholder. **v1 is
 /// SET-ONLY** (ratified 2026-07-13): the placeholder is offered only while the set is
-/// still public — once paywalled there is no clear affordance (the nest-side
-/// revoke/rotation leg is not shipped), so picking the placeholder never dispatches.
+/// still public — once paywalled there is no clear affordance (the shared
+/// `unpaywall_set` / `rotate_paywall_grant` legs exist, but no app ships the clear
+/// control yet — folders.md § Web paywall), so picking the placeholder never dispatches.
 /// A tier the set is already paywalled to stays offered even if since deleted from
 /// the tier list, so the row still shows its state. No tiers ⇒ nothing to paywall
 /// to: the select is disabled with a "create a tier first" hint, mirroring the
@@ -776,6 +778,7 @@ private struct FolderPaywallTierPicker: View {
         }
     }
 }
+#endif
 
 /// The page-level **Sync defaults** section — `sync-default-conflict-policy-select`,
 /// the global default stamped onto NEWLY created sets (existing sets keep their own
@@ -1523,6 +1526,7 @@ private struct FolderRowBody: View {
             // `row.add_row(&webdav_row)`. webdav-server.md § Independent enablement pt 2.
             FolderWebdavToggle(vm: vm, folder: folder)
 
+            #if !FAUNA_KIDS
             // Per-set "paywall to tier" (`folder-paywall-tier-select`) — the
             // structural sibling of the webdav toggle above (folders.md § Web paywall; the linux shape).
             // Website-enabled rows only — keyed on the toggle, never on the
@@ -1530,6 +1534,7 @@ private struct FolderRowBody: View {
             if folder.websiteEnabled {
                 FolderPaywallTierPicker(vm: vm, folder: folder)
             }
+            #endif
 
             // The nest place's snapshot policy (`folder-nest-*`) — on EVERY
             // folder, not just a Backup-mode one: the mode is gone and "what the
@@ -1555,17 +1560,32 @@ private struct FolderRowBody: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            TextField(L.devices.includePaths, text: $include)
-                .textFieldStyle(.roundedBorder)
-                .accessibilityIdentifier(Ids.folderIncludePaths)
-                // Writes/reads the same `$include` binding a keystroke would.
-                // Env-gated no-op in production.
-                .automationField(Ids.folderIncludePaths, text: $include)
+            // A list this device could not open renders read-only as
+            // unavailable (same id), never as a blank editable field; the save
+            // sends `nil` ("leave unchanged") for it.
+            if folder.includePathsUnreadable {
+                Text(L.devices.pathsUnavailable)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(Ids.folderIncludePaths)
+            } else {
+                TextField(L.devices.includePaths, text: $include)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier(Ids.folderIncludePaths)
+                    // Writes/reads the same `$include` binding a keystroke would.
+                    // Env-gated no-op in production.
+                    .automationField(Ids.folderIncludePaths, text: $include)
+            }
 
-            TextField(L.devices.excludePaths, text: $exclude)
-                .textFieldStyle(.roundedBorder)
-                .accessibilityIdentifier(Ids.folderExcludePaths)
-                .automationField(Ids.folderExcludePaths, text: $exclude)
+            if folder.excludePathsUnreadable {
+                Text(L.devices.pathsUnavailable)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(Ids.folderExcludePaths)
+            } else {
+                TextField(L.devices.excludePaths, text: $exclude)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier(Ids.folderExcludePaths)
+                    .automationField(Ids.folderExcludePaths, text: $exclude)
+            }
 
             HStack {
                 Button(L.devices.savePaths) {
@@ -1695,8 +1715,8 @@ private struct FolderRowBody: View {
         Task {
             await vm.setFolderPaths(
                 name: folder.name,
-                include: parsePathsField(text: include),
-                exclude: parsePathsField(text: exclude)
+                include: folder.includePathsUnreadable ? nil : parsePathsField(text: include),
+                exclude: folder.excludePathsUnreadable ? nil : parsePathsField(text: exclude)
             )
             collapse()
         }

@@ -58,8 +58,18 @@ class ReportActions:
         """Whether the excerpt checkbox renders — a sealed subject only."""
         return self.driver.count("report-include-text-checkbox") > 0
 
+    def include_text_label(self) -> str:
+        """The excerpt checkbox's label — the consequence it names."""
+        return self.driver.get_text("report-include-text-checkbox")
+
+    def include_text_checked(self) -> bool:
+        return self.driver.get_attr("report-include-text-checkbox", "checked") == "true"
+
     def tick_include_text(self) -> None:
         self.driver.click("report-include-text-checkbox")
+
+    def block_author_checked(self) -> bool:
+        return self.driver.get_attr("report-block-author-checkbox", "checked") == "true"
 
     def tick_block_author(self) -> None:
         self.driver.click("report-block-author-checkbox")

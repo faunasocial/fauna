@@ -31,6 +31,14 @@ Cases (goal: ``docs/goal/behavior/family-safety.md`` § The mail gate — bounds
       ``guardian_mail_correlated_origins`` declines the auto-seed); a submission-stamped
       Message-ID verifies as Fauna-minted (``family-safety.md:163`` bound 3 — a genuine
       bounce correlates only because its id passes ``is_fauna_minted_msgid``).
+  (f) The ward's own mail client reads held mail but cannot move or expunge it — an
+      IMAP-observable refusal (``family-safety.md`` § The mail gate: the ward's to
+      read, never to relocate).
+  (g) A same-nest Fauna sender mailing a ``reject`` ward is refused, typed
+      ``guardian_approval_required``, and nothing is delivered — not even to an adult
+      co-recipient (§ Guardian policy — the enforcement split).
+  (h) Graduation keeps the account, its handle and its mail, and releases what was
+      held to INBOX (§ Graduation & transfer — "graduation releases, never drops").
 
 Topology mirrors ``test_mail_security_accept.py``: one user-defined network carrying the
 fail-closed ``fakes/{fake_clamd,fake_rspamd}`` scan sidecars (a *held* or *delivered*
@@ -554,6 +562,7 @@ def test_genuine_bounce_delivers_forged_report_held(family_nest, run_seal_helper
     assert inbox_count(nest, ward) == 1, "the forged report must not reach INBOX"
 
 
+@pytest.mark.feature("family-safety")
 def test_correlation_budget_exhaustion_holds(family_nest, run_seal_helper):
     """(d) A correlated report replayed past the per-id budget (remote-recipients + 2,
     = 3 for a 1-remote send) is held: three deliveries reach INBOX, the fourth is held."""
@@ -632,3 +641,220 @@ def test_reply_to_correlated_report_never_allowlists_and_mint_verifies(
         nest["name"], mail_from="alice@remote.test", rcpt_to=ward["username"],
         subject="cold from alice", body_text="alice is allowlisted\n"))
     wait_inbox(nest, ward, want_min=before + 1)
+
+
+# ── The child's own view of held mail, the in-domain sender, graduation ──────
+
+
+def _ward_ws(nest, ward):
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    return WsRpcAdminClient(
+        nest["url"], actor_id=ward["actor_id"], signing_key=bytes(ward["signing_key"]))
+
+
+class _ImapSession:
+    """One authenticated IMAPS session as ``recipient`` — the ward's own mail
+    client. ``cmd`` returns the tagged completion line in full (status AND
+    text), because a refusal's text is what the MUA shows the child."""
+
+    def __init__(self, nest, recipient, timeout: float = 60.0):
+        from helpers.mail_wire import _imap_auth_plain, _imaps_connect_addr
+
+        self._deadline = time.monotonic() + timeout
+        self._seq = 0
+        self.sock, self.buf = _imaps_connect_addr(
+            "127.0.0.1", nest["mail_ports"][993], DOMAIN, self._deadline)
+        status = _imap_auth_plain(self.sock, self.buf, "a0", recipient["username"],
+                                  recipient["password"], self._deadline)
+        assert status == "OK", f"AUTH PLAIN must succeed for {recipient['username']}"
+
+    def cmd(self, text: str) -> tuple[str, list[str]]:
+        from helpers.mail_wire import _recv_line
+
+        self._seq += 1
+        tag = f"c{self._seq}"
+        self.sock.sendall(f"{tag} {text}\r\n".encode())
+        untagged = []
+        while True:
+            line = _recv_line(self.sock, self.buf, self._deadline)
+            if line.startswith(tag + " "):
+                return line[len(tag) + 1:], untagged
+            untagged.append(line)
+
+    def select(self, mailbox: str) -> int:
+        quoted = f'"{mailbox}"' if " " in mailbox else mailbox
+        done, untagged = self.cmd(f"SELECT {quoted}")
+        assert done.startswith("OK"), f"SELECT {quoted} failed: {done!r} {untagged!r}"
+        exists = [ln for ln in untagged if ln.upper().endswith("EXISTS")]
+        return int(exists[0].split()[1]) if exists else 0
+
+    def close(self):
+        try:
+            self.sock.sendall(b"z LOGOUT\r\n")
+        except OSError:
+            pass
+        self.sock.close()
+
+
+@pytest.mark.feature("family-safety")
+def test_ward_reads_held_mail_but_cannot_move_or_delete_it(family_nest, run_seal_helper):
+    """Outcome 18, from the child's own mail client over IMAP.
+
+    A cold sender's mail to a ``hold`` ward lands in ``Guardian Review``. The ward
+    can SELECT that mailbox and FETCH the message — reading is theirs — but a
+    ``UID MOVE`` out of it is refused with a tagged ``NO`` naming the guardian
+    review, and a ``\\Deleted`` + ``EXPUNGE`` leaves it exactly where it is: the
+    expunge succeeds (the ward's routine mail handling keeps working) and simply
+    skips the held message. Only the guardian's release or discard relocates it,
+    so after all of that the guardian's queue still shows the hold and INBOX is
+    still empty."""
+    nest = family_nest
+    guardian = make_guardian(nest)
+    ward = make_ward(nest, run_seal_helper, guardian=guardian,
+                     local_part="kidimap", password="ward-pw-imap-1")
+    set_family_policy(nest, guardian=guardian, ward_actor_id=ward["actor_id"],
+                      unknown_sender_mail="hold")
+
+    accept_delivery(lambda: deliver_inbound_attempt_loopback_curl(
+        nest["name"], mail_from="stranger@cold.test", rcpt_to=ward["username"],
+        subject="held for review", body_text="a held message the child may read\n"))
+    wait_held(nest, ward)
+
+    imap = _ImapSession(nest, ward)
+    try:
+        assert imap.select(HELD_MAILBOX) == 1
+        done, untagged = imap.cmd("UID FETCH 1:* BODY[]")
+        assert done.startswith("OK"), f"the ward must be able to read held mail: {done!r}"
+        assert any("a held message the child may read" in ln for ln in untagged) or (
+            "held for review" in " ".join(untagged)), (
+            f"the FETCH must return the held message itself: {untagged!r}")
+
+        done, _ = imap.cmd("UID MOVE 1:* INBOX")
+        assert done.startswith("NO") and "held for guardian review" in done, (
+            f"moving held mail out must be refused with the guardian-review NO: {done!r}")
+
+        done, _ = imap.cmd("UID STORE 1:* +FLAGS (\\Deleted)")
+        assert done.startswith("OK"), f"flagging is harmless and allowed: {done!r}"
+        done, _ = imap.cmd("EXPUNGE")
+        assert done.startswith("OK"), f"the expunge itself must still succeed: {done!r}"
+        assert imap.select(HELD_MAILBOX) == 1, (
+            "the expunge must skip the held message — it is not the child's to delete")
+    finally:
+        imap.close()
+
+    assert inbox_count(nest, ward) == 0, "nothing the child tried may move it to INBOX"
+    assert list_mail_holds(nest, guardian=guardian, ward_actor_id=ward["actor_id"]), (
+        "the hold must still be the guardian's to decide")
+
+
+@pytest.mark.feature("family-safety")
+def test_same_nest_sender_is_told_the_mail_needs_guardian_approval(
+        family_nest, run_seal_helper):
+    """Outcome 19: the in-domain twin of the mail gate refuses the SENDER.
+
+    A Fauna user on the same nest mails a ward whose guardian accepts only known
+    senders (``reject``). There is no SMTP stage to refuse per recipient, so the
+    nest refuses the whole send, typed ``guardian_approval_required`` — the
+    sender is told — and refuses it BEFORE delivering to anyone: neither the
+    ward nor an adult co-recipient receives it. The same sender's identical send
+    to the adult alone is delivered, so the refusal is the ward's gate."""
+    from clients.ws_rpc_admin_client import RpcCallError
+
+    nest = family_nest
+    guardian = make_guardian(nest)
+    ward = make_ward(nest, run_seal_helper, guardian=guardian,
+                     local_part="kidindomain", password="ward-pw-indomain-1")
+    adult = provision_mail_recipient(nest, run_seal_helper, domain=DOMAIN,
+                                     local_part="adultindomain", password="adult-pw-indomain")
+    sender = provision_mail_recipient(nest, run_seal_helper, domain=DOMAIN,
+                                      local_part="neighbour", password="sender-pw-indomain")
+    set_family_policy(nest, guardian=guardian, ward_actor_id=ward["actor_id"],
+                      unknown_sender_mail="reject")
+
+    def send(recipients: list[str], subject: str):
+        raw = compose(sender=sender["username"], rcpt=", ".join(recipients),
+                      subject=subject, body="hello neighbour",
+                      message_id=f"<{uuid.uuid4().hex}@{DOMAIN}>")
+        with _ward_ws(nest, sender) as ws:
+            return ws.call("fauna.email.send",
+                           {"recipients": recipients, "raw_rfc5322": raw})
+
+    with pytest.raises(RpcCallError) as refusal:
+        send([ward["username"], adult["username"]], "to the kid and the adult")
+    assert refusal.value.code == "fauna.email.guardian_approval_required", (
+        f"the sender must be told the mail needs the guardian's approval: {refusal.value!r}")
+
+    assert inbox_count(nest, ward) == 0, "nothing may be delivered to the ward"
+    # Not `held_count`: the held mailbox is created by the first hold, so on a
+    # ward that never had one SELECT fails — the guardian's queue is the fact.
+    assert list_mail_holds(nest, guardian=guardian, ward_actor_id=ward["actor_id"]) == [], (
+        "a reject ward's mail is refused, never held for the guardian")
+    assert inbox_count(nest, adult) == 0, (
+        "no partial delivery: the adult co-recipient must not receive the refused send")
+
+    send([adult["username"]], "to the adult alone")
+    body = wait_inbox(nest, adult)
+    assert b"to the adult alone" in body, "the same sender's send to the adult must deliver"
+
+
+@pytest.mark.feature("family-safety")
+def test_graduation_keeps_the_account_and_hands_held_mail_to_the_child(
+        family_nest, run_seal_helper):
+    """Outcome 10: graduation turns the supervised account into an ordinary one
+    in place — same account, same handle, same mail — and what was waiting for
+    the guardian is released to the child.
+
+    Before graduating, the ward has one message it already received (delivered
+    while the policy allowed it) and one held for the guardian (after the
+    guardian switched to ``hold``). The guardian graduates; afterwards the SAME
+    identity reads the same handle on its account, no guardian on its family
+    status, and — over the same IMAP credential — both messages in INBOX with
+    ``Guardian Review`` empty and nothing left in the guardian's queue."""
+    nest = family_nest
+    guardian = make_guardian(nest)
+    ward = make_ward(nest, run_seal_helper, guardian=guardian,
+                     local_part="kidgrad", password="ward-pw-grad-1")
+
+    accept_delivery(lambda: deliver_inbound_attempt_loopback_curl(
+        nest["name"], mail_from="pal@friends.test", rcpt_to=ward["username"],
+        subject="already received", body_text="mail the child already had\n"))
+    wait_inbox(nest, ward)
+
+    set_family_policy(nest, guardian=guardian, ward_actor_id=ward["actor_id"],
+                      unknown_sender_mail="hold")
+    accept_delivery(lambda: deliver_inbound_attempt_loopback_curl(
+        nest["name"], mail_from="stranger@cold.test", rcpt_to=ward["username"],
+        subject="waiting for the guardian", body_text="held until graduation\n"))
+    wait_held(nest, ward)
+
+    with _ward_ws(nest, ward) as ws:
+        handle_before = ws.call("fauna.account.get", {}).get("handle")
+    assert handle_before, "the ward must have a handle before graduating"
+
+    with _guardian_ws(nest, guardian) as gws:
+        gws.call("fauna.family.graduate", {"supervised_actor_id": ward["actor_id"]})
+
+    with _ward_ws(nest, ward) as ws:
+        account = ws.call("fauna.account.get", {})
+        own_family = ws.call("fauna.family.status", {})
+    assert account.get("handle") == handle_before, (
+        f"the graduated account must keep its handle: {account.get('handle')!r} "
+        f"vs {handle_before!r}")
+    assert not own_family.get("supervised_by"), (
+        f"the graduated account must be an ordinary one: {own_family!r}")
+
+    wait_inbox(nest, ward, want_min=2)
+    imap = _ImapSession(nest, ward)
+    try:
+        assert imap.select("INBOX") == 2, "both the old mail and the released one are in INBOX"
+        done, untagged = imap.cmd("UID FETCH 1:* BODY[]")
+        assert done.startswith("OK"), done
+        fetched = " ".join(untagged)
+        for subject in ("already received", "waiting for the guardian"):
+            assert subject in fetched, f"INBOX must carry {subject!r}: {fetched[:600]!r}"
+        assert imap.select(HELD_MAILBOX) == 0, "nothing may stay in Guardian Review"
+    finally:
+        imap.close()
+    assert list_mail_holds(nest, guardian=guardian, ward_actor_id=ward["actor_id"]) == [], (
+        "nothing may be left waiting in the former guardian's queue")

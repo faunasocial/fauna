@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The user-facing **mail-aliases** page (`docs/goal/behavior/mail-aliases.md`),
@@ -683,3 +686,4 @@ struct MailAliasImportSheet: View {
         error = vm.errorMessage
     }
 }
+#endif // !FAUNA_KIDS

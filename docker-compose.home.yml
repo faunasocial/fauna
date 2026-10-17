@@ -1,0 +1,132 @@
+# Home-relay PRIVATE nest — docker-compose.home.yml
+#
+# The residential (private plaintext-mode) half of the home-with-public-relay
+# deployment: a box on the user's LAN that holds the canonical plaintext mail
+# store and pulls inbound + Sent mail from a paired PUBLIC nest on a VPS. See
+# docs/goal/architecture/installers/home-relay.md for the full two-box walkthrough
+# and docs/goal/architecture/nest/deployment-home-with-public-relay.md for the
+# architecture.
+#
+# How this differs from the public docker-compose.yml (same image, slimmer):
+#   • FAUNA_MODE=private — the private NAT axis (skips STUN; ACME
+#     force-disabled; IMAP/CalDAV default to loopback). Nothing here names the
+#     public nest: the relay target the sync/relay worker polls is the public
+#     nest's URL on your own pairing row, recorded when you link the two boxes
+#     from your Fauna app.
+#   • No MTA — no clamd / rspamd sidecars and no ports 25/465/587. Inbound mail
+#     arrives over federation from the public nest; the home box never terminates
+#     SMTP. (The fauna-mail-bridge-mta s6 service stays `down`.)
+#   • host networking — so the in-container MDA can bind the box's real LAN IP for
+#     IMAP and the always-up fauna-sni-router can front :443 (nest web/WS-RPC +
+#     mail.<domain> CalDAV) on the LAN. A behind-NAT home box has no public-
+#     routable interface, so binding all host interfaces is LAN-only in practice.
+#     If this box DOES have a public IP, switch to bridge networking and publish
+#     ports to the LAN IP only (see home-relay.md § If the box has a public IP).
+#   • FAUNA_LAN_BIND_IP=<box LAN IP> — the OS-deployment-topology opt-out that
+#     binds the MDA's IMAP 993/143 listeners AND its direct CalDAV listener
+#     (<LAN-IP>:<admin caldav_port>, default 8443 — the entrypoint writes
+#     caldav_bind_host from it; caldav-server.md § Network exposure) on the LAN
+#     IP. The router-fronted mail.<domain> CalDAV on :443 keeps working too.
+#     Bind address is operator topology, never nest state (product invariant).
+#
+# ✅ tier_4 validated (Slice 6, 2026-06-04): the two-box bundle is exercised
+# end-to-end by tests/e2e-unified/tests/platform/docker/test_mail_relay_two_nest.py
+# (SNI-router/:443 fronting, IMAP LAN exposure via FAUNA_LAN_BIND_IP, no-MTA boot,
+# the full external-MTA→public→home→MUA round-trip + the no-readable-copy property).
+#
+# Copy to the home box, create a .env with FAUNA_LAN_BIND_IP,
+# then: docker compose -f docker-compose.home.yml up -d. The box boots domainless
+# and learns its domain from the admin's claim handle (claimed from your Fauna
+# app on the LAN — see home-relay.md).
+# Pairing (linking this box with the public nest) is done from your Fauna app
+# after both boxes are up — see home-relay.md § Pair the two nests.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+services:
+  fauna-nest:
+    image: ghcr.io/faunasocial/nest:${FAUNA_IMAGE_TAG:-latest}
+    # Host networking: the MDA binds ${FAUNA_LAN_BIND_IP}:993/143 directly and the
+    # fauna-sni-router fronts :443 on the LAN. No `ports:` mapping is used (it is
+    # ignored under host networking).
+    network_mode: host
+    volumes:
+      - fauna-data:/data
+    environment:
+      FAUNA_MODE: private
+      # The update-channel seed: the same tag as `image:` above, read only while
+      # no admin has chosen a channel from their Fauna app; a tag that is no
+      # channel (`sha-…`, a version) leaves the box pinned
+      # (docs/goal/architecture/nest/update-channel.md § The channel as nest state).
+      FAUNA_IMAGE_TAG: ${FAUNA_IMAGE_TAG:-latest}
+      # Box-recovery deployment seed: the client-custodied Ed25519 signing seed
+      # (64-char hex) that re-instantiates THIS box's identity (nest_actor_id)
+      # after total box loss, so pinned clients reconnect to the same channel-
+      # binding identity (docs/goal/architecture/nest/box-recovery.md § Restore —
+      # the self-hosted analogue of the cloud-init env-injection). Empty on a
+      # fresh box ⇒ nest mints its own seed on first boot and hands it back at
+      # claim; consulted only on a fresh box (an established on-disk identity
+      # wins, key-material-hierarchy.md:26). Bucket-2 IPC the installer writes
+      # from its FAUNA_DEPLOYMENT_SEED input — recovery material, never a
+      # human-chosen preference (no operator).
+      FAUNA_DEPLOYMENT_SEED: ${FAUNA_DEPLOYMENT_SEED:-}
+      # The box's LAN IP — binds the MDA IMAP 993/143 listeners and its direct
+      # CalDAV listener (<LAN-IP>:<admin caldav_port>, default 8443) on the LAN
+      # so LAN MUAs can reach them (mail.<domain> CalDAV via the :443 router
+      # keeps working too). OS-deployment topology, never a user/nest setting.
+      FAUNA_LAN_BIND_IP: ${FAUNA_LAN_BIND_IP}
+      # nest's internal listener (the sni-router fronts it on :443). 3000 — kept
+      # off 8443 so the MDA can serve user-facing CalDAV at <LAN-IP>:8443 with no
+      # port collision (the home-box bug fixed 2026-06-20). Matches the public
+      # image's production default.
+      FAUNA_PORT: ${FAUNA_PORT:-3000}
+      # Bind nest's internal listener to LOOPBACK under host networking.
+      # The bridge-networked production image leaves this 0.0.0.0 (its
+      # netns isolates the port), but here `network_mode: host` means 0.0.0.0
+      # would expose nest's full WS-RPC/HTTP surface on the box's LAN interfaces
+      # — an unintended second public face. Every in-bundle consumer already
+      # dials nest at 127.0.0.1:${FAUNA_PORT} (the SNI-router default/PROXY
+      # backends, the MTA --nest-endpoint, the relay sidecar), so loopback is
+      # transparent to them; only the LAN exposure is removed. The LAN reach the
+      # home box DOES want — IMAP 993/143 and the :443 SNI router — is bound
+      # separately (FAUNA_LAN_BIND_IP / the router's :443). OS-deployment-topology
+      # IPC, never a user/nest setting. (First-run only: baked into nest.toml.)
+      FAUNA_BIND_ADDR: 127.0.0.1
+      # NB: no FAUNA_CLAMD_ADDR / FAUNA_RSPAMD_URL — the home box runs no MTA, so
+      # the inbound scan gate is never exercised here (scanning happened on the
+      # public nest's MTA before the mail was relayed).
+    labels:
+      - "social.fauna.update=true"
+    logging: *default-logging
+    restart: unless-stopped
+    # On SIGTERM the nest broadcasts WS 1001 to every connected client and waits
+    # (ws::GRACEFUL_SHUTDOWN_TIMEOUT = 7 s) for in-flight requests to drain before
+    # flushing the DB (transport.md § Graceful shutdown). Give the container
+    # comfortably more than that drain + flush budget before Docker escalates to
+    # SIGKILL, so an updater re-create never truncates the 1001 broadcast.
+    stop_grace_period: 15s
+
+  # The Fauna updater (docs/goal/architecture/nest/update-channel.md § The
+  # updater): the nest image's second binary, run as its own container at the
+  # same tag. It follows the update channel the nest reports (chosen from your
+  # Fauna app; until then the tag above), asks the registry at the channel's
+  # interval (a minute on Dev and Test, an hour on Stable) and at once on a
+  # channel change, and re-creates the containers labelled
+  # social.fauna.update=true on a newer build — never an older one. It holds the
+  # Docker socket and nothing else: no environment, no port, no data.
+  # Host networking, as the nest: it reads the nest's health on loopback.
+  fauna-updater:
+    image: ghcr.io/faunasocial/nest:${FAUNA_IMAGE_TAG:-latest}
+    entrypoint: ["/usr/local/bin/fauna-updater"]
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    logging: *default-logging
+    restart: unless-stopped
+
+volumes:
+  fauna-data:

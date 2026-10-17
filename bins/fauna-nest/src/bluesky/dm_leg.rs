@@ -61,6 +61,45 @@ async fn own_did(db: &CacheDb, account: &[u8; 32]) -> anyhow::Result<Option<Stri
     Ok(db_helpers::get_linked_account(&conn, &actor_hex)?.map(|a| a.bluesky_did))
 }
 
+/// The far room id of the leg's room with `address`: the peer's DID, whether
+/// `address` is that DID or a handle it is known by — with or without its
+/// leading `@`, in any case — resolved through `far` under `account`'s
+/// session. `None` for a handle that names no DID.
+pub async fn far_room_id(
+    far: &impl bridge_legs::FarResolve,
+    account: &[u8; 32],
+    address: &str,
+) -> Option<String> {
+    let address = address.trim();
+    if address.starts_with("did:") {
+        return Some(address.to_string());
+    }
+    let handle = address
+        .strip_prefix('@')
+        .unwrap_or(address)
+        .to_ascii_lowercase();
+    far.bluesky_handle(account, &handle)
+        .await
+        .filter(|did| did.starts_with("did:plc:") || did.starts_with("did:web:"))
+}
+
+/// The DID the handle `handle` names, asked of the service under `account`'s
+/// restored session (`app.bsky.actor.getProfile`). `None` when the session
+/// does not restore or the service names no one.
+pub async fn resolve_handle(state: &AppState, account: &[u8; 32], handle: &str) -> Option<String> {
+    let actor_hex = hex::encode(account);
+    let agent = db_helpers::get_agent_for_actor(state, &actor_hex)
+        .await
+        .ok()?;
+    match fauna_bridge_atproto::xrpc::get_profile_for(&agent, handle).await {
+        Ok(profile) => Some(profile.did),
+        Err(e) => {
+            tracing::debug!("bluesky leg: handle did not resolve: {e:#}");
+            None
+        }
+    }
+}
+
 /// A far `sentAt` as unix ms — the sender's claim, carried for display and
 /// never ordered on; `0` when it does not parse.
 fn sent_at_ms(sent_at: &str) -> i64 {
@@ -259,6 +298,7 @@ mod tests {
 
     use fauna_bridge_atproto::types::BlueskyDm;
 
+    use crate::bridge_legs::test_support::FakeResolve;
     use crate::bridged_conversation_handlers::test_support as family;
 
     const ALICE: [u8; 32] = [0xA1; 32];
@@ -409,6 +449,46 @@ mod tests {
             .unwrap();
         }
         assert!(!serves(&state.db, &ALICE).await.unwrap());
+    }
+
+    /// `conversations.md` § *The `Bridged` adapter*, ruling 2 (d): a typed
+    /// handle — with or without its `@`, in any case — opens the room keyed on
+    /// the DID it names, asked under the account's own session; the DID itself
+    /// opens the same room.
+    #[tokio::test]
+    async fn a_typed_handle_opens_the_room_keyed_on_its_did() {
+        let state = linked_state().await;
+        let far = FakeResolve::knowing(&[("bob.example.social", PEER)]);
+
+        let room = family::open_resolving(&state, ALICE, "@Bob.Example.Social", &far)
+            .await
+            .unwrap();
+        assert_eq!(room.bridge_id, "bluesky");
+        assert_eq!(room.far_room_id, PEER);
+        assert_eq!(room.participants, vec![PEER.to_string()]);
+        assert_eq!(
+            *far.bluesky_asks.lock().unwrap(),
+            vec![(ALICE, "bob.example.social".to_string())]
+        );
+
+        let by_did = family::open(&state, ALICE, "bluesky", PEER).await.unwrap();
+        assert_eq!(by_did.room_id, room.room_id);
+        assert_eq!(family::rooms(&state, ALICE).await.len(), 1);
+    }
+
+    /// A handle the service does not know — or answers with something that is
+    /// no DID — is the family's typed refusal, and opens no room.
+    #[tokio::test]
+    async fn a_handle_that_names_no_one_is_address_refused() {
+        let state = linked_state().await;
+        let far = FakeResolve::knowing(&[("odd.example.social", "not-a-did")]);
+        for handle in ["nobody.example.social", "odd.example.social"] {
+            let err = family::open_resolving(&state, ALICE, handle, &far)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "fauna.bridges.address_refused", "{handle}");
+        }
+        assert!(family::rooms(&state, ALICE).await.is_empty());
     }
 
     /// A fake chat service: records every send, answers with a far id.

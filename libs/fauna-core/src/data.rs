@@ -3660,7 +3660,7 @@ pub struct PeerAnchorDomain {
     pub actor: ActorId,
     /// The host of the peer's self-asserted home-nest URL (`Profile.nests[0]`),
     /// scheme/port/path stripped — the string the witness's
-    /// `walk_from_domain` resolves and dials.
+    /// `walk_line_from_domain` resolves and dials.
     pub domain: String,
     /// When this fleet first anchored `actor` — same contract as
     /// [`PeerChainHead::first_seen`]: the merge ceiling's ordering key, stamped
@@ -5464,6 +5464,24 @@ pub const AUDIT_STATE_OK: &str = "ok";
 /// talking. Without this state a rotting custodian renders healthy indefinitely.
 pub const AUDIT_STATE_FAILED: &str = "failed";
 
+/// A peer-nest destination's writer gate accepts this box: the last answer it
+/// gave this box's passes let the write through
+/// (`docs/goal/behavior/backup-destinations.md` § Per-destination status read →
+/// *A refused writer is a state, never a lag*).
+///
+/// Beside the cap and audit states for the reason they sit here: the backlog
+/// label (`crate::format::backup_backlog_label`) compares against the canonical
+/// value, and `fauna-core` cannot name `fauna-protocol`. Absent on a
+/// client-device row, which has no writer gate.
+pub const WRITER_STATE_OK: &str = "ok";
+
+/// The destination's writer gate answered this box's last pass with its typed
+/// refusal (`fauna.backup.writer_not_seated`): the destination holds the
+/// account's backup from another box, or the owner revoked this box's grant.
+/// Read, never inferred — a stale upload time and a backlog are also what a
+/// busy box shows, and the two must not read alike.
+pub const WRITER_STATE_REFUSED: &str = "refused";
+
 /// The reserved-set prefix an **ordinary folder's destination mirror** rests
 /// under — `__folder/<source-nest-id-hex>/<folder-id>`
 /// (`docs/goal/behavior/backup-destinations.md` § Ordinary-folder coverage).
@@ -7233,7 +7251,7 @@ pub struct ForeignFolder {
     /// cross-nest member has no `folders` row on its own nest, so this record
     /// is where its engine reads the floor: the pre-seal hold arms from it and
     /// a floor move is a basis change at the host's custody edge
-    /// (`../behavior/on-demand-files.md` § Shared sets on a capability host →
+    /// (`../behavior/on-demand-files-shared-sets.md` § Shared sets on a capability host →
     /// *One mechanism*, question 2). Last-writer-wins from every stamp; `None`
     /// = the home nest holds no floor, or the record was
     /// written at share-accept (the Welcome carries none) → nothing armed, and

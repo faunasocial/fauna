@@ -344,6 +344,7 @@ private func makeFolderSummaryFixture(
         id: id, name: "docs", retentionPolicy: nil,
         cachedSnapshotCount: 0, cachedTotalBytes: 0,
         cachedLastSnapshotAt: nil, includePaths: nil, excludePaths: nil,
+        includePathsUnreadable: false, excludePathsUnreadable: false,
         mlsGroupId: mlsGroupId, role: nil, access: nil, ownerHandle: nil,
         ownerDisplay: "", webdavEnabled: false, conflictPolicy: nil,
         webPaywallTier: nil, homeNestUrl: homeNestUrl, nestSnapshots: nil,

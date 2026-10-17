@@ -23,9 +23,10 @@
 //!   boot-time upsert D1 relies on for device-label convergence).
 //! - **Keyless-writer shapes that legally still rest plaintext** (each a
 //!   ratified class, each converged by the stamp-at-bind pattern + the boot
-//!   scrub): `fauna.folders.update` with plaintext include/exclude and no
-//!   seals (the create-gesture class), plus raw-seeded dual-write custody /
-//!   import rows.
+//!   scrub): `fauna.folders.update` with plaintext retention, plus raw-seeded
+//!   dual-write custody / import rows (the import descriptor overflow-sized, so
+//!   the `VACUUM` is pinned). Keyless include/exclude lists are refused at the
+//!   wire and never rest.
 //! - **The D1 backfill pass**, via the real shared client
 //!   (`FoldersClient::backfill_sealed_fields`) — the keyed stamp that
 //!   licenses the boot scrub to clear the keyless plaintext above.
@@ -119,15 +120,10 @@ const FRAG_TAG: &str = "insurance-claim";
 /// `sync_conflicts.path` — never rests (reports rest `''`).
 const CONFLICT_PATH: &str = "2026/affidavit_draft.docx";
 const FRAG_CONFLICT_PATH: &str = "affidavit_draft";
-/// `sync_conflicts.details` — scrubbed. Deliberately OVERFLOW-SIZED (~15KB,
-/// vs. the 4KB page): a big TEXT value lands on overflow pages, and an
-/// `UPDATE … = NULL` frees those pages to the freelist with their content
-/// intact (`secure_delete` is OFF — SQLite's default; `CacheDb::open` sets no
-/// pragma). This is the plane that makes the `VACUUM` below load-bearing: the
-/// small in-page values happen to be overwritten by the cell rewrite, but
-/// freelist pages keep their bytes until VACUUM discards them — verified by
-/// mutation (dropping the VACUUM reddens exactly this marker's absence
-/// assert).
+/// `sync_conflicts.details` — never rests (the seal writes only the sentinel
+/// and the sealed pair), though the value is still overflow-sized. It is no
+/// longer the `VACUUM`'s pin: that role moved to [`FRAG_IMPORT`], the one
+/// overflow-sized plane that still rests and is scrubbed at boot.
 const FRAG_CONFLICT_DETAILS: &str = "raced on the same paragraph";
 
 fn conflict_details() -> String {
@@ -142,8 +138,24 @@ fn conflict_details() -> String {
 /// rests it NULL from the start.)
 const FRAG_CUSTODY: &str = "deed_scan_originals";
 /// `import_sessions.source_descriptor` — scrubbed; the per-source lock keys
-/// on `source_hash`.
+/// on `source_hash`. Deliberately OVERFLOW-SIZED (~15KB, vs. the 4KB page),
+/// like `sync_conflicts.details` once was: this is the plane that makes the
+/// boot scrub's `VACUUM` load-bearing. The scrub's `UPDATE … = NULL` frees the
+/// value's overflow pages to the freelist with their content intact
+/// (`secure_delete` is OFF — SQLite's default; `CacheDb::open` sets no
+/// pragma), and only `VACUUM` discards them; the small in-page values above
+/// are overwritten by the cell rewrite with or without it. Verified by
+/// mutation (disabling the VACUUM reddens exactly this marker's absence
+/// assert).
 const FRAG_IMPORT: &str = "lawfirm-familia";
+
+fn import_descriptor() -> String {
+    let folders = (0..500)
+        .map(|i| format!("INBOX/{FRAG_IMPORT}/case-{i:03}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("imap://mail.{FRAG_IMPORT}.test/INBOX?folders={folders}")
+}
 
 const OWNER_SECRET: [u8; 32] = [0xb1; 32];
 /// The owner's real keypair: every record below is signed by it under the
@@ -421,10 +433,7 @@ async fn no_sealed_plane_plaintext_ever_rests() {
             "INSERT INTO import_sessions (session_id, actor_id, source_descriptor, state,
                     started_at, last_progress_at, expires_at, source_sealed)
              VALUES ('s1', ?1, ?2, 'completed', 1, 1, 9999999999, x'33')",
-            rusqlite::params![
-                &actor()[..],
-                format!("imap://mail.{FRAG_IMPORT}.test/INBOX")
-            ],
+            rusqlite::params![&actor()[..], import_descriptor()],
         )
         .unwrap();
     }
@@ -494,7 +503,9 @@ async fn no_sealed_plane_plaintext_ever_rests() {
 
     // ── The proof: nothing scrubbed rests anywhere in the DB directory. ──────
     let after = resting_bytes(data_dir.path());
-    for (frag, plane) in [
+    // Every leak is collected before asserting, so a failure names ALL the
+    // planes that still rest (which is what attributes a dropped `VACUUM`).
+    let leaked: Vec<String> = [
         (SET_A, "folders.name A"),
         (SET_B, "folders.name B"),
         (FRAG_PATH_A, "sync_changes.path"),
@@ -507,13 +518,15 @@ async fn no_sealed_plane_plaintext_ever_rests() {
         (FRAG_CONFLICT_DETAILS, "sync_conflicts.details"),
         (FRAG_CUSTODY, "backup_custody.path"),
         (FRAG_IMPORT, "import_sessions.source_descriptor"),
-    ] {
-        assert!(
-            !contains(&after, frag),
-            "{plane}: marker {frag:?} still rests in the raw DB file after the \
-             boot scrub (scrub + VACUUM)"
-        );
-    }
+    ]
+    .into_iter()
+    .filter(|(frag, _)| contains(&after, frag))
+    .map(|(frag, plane)| format!("{plane}: marker {frag:?}"))
+    .collect();
+    assert!(
+        leaked.is_empty(),
+        "still rests in the raw DB file after the boot scrub (scrub + VACUUM): {leaked:#?}"
+    );
 
     // The one plane that legally still rests, asserted PRESENT — an honest
     // flag, not a skip.

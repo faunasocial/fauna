@@ -149,6 +149,11 @@ pub struct FaunaClient {
     /// Cleared on `shutdown()` so a sign-out/reset rebuilds against the new
     /// connection. See `tls-certificates.md` § B tier 3 (S6a) + the cert-UI TODO.
     dns_machine: RefCell<Option<Arc<fauna_client_dns::DnsManagementMachine>>>,
+    /// What ends the auto-renew tick's wait early — empty in a production build;
+    /// the e2e agent's `auto_renew_wake` fires it ([`crate::loop_wake::LoopWake`]).
+    /// Minted where `start_ws_rpc` spawns the tick and dropped by `shutdown()`, so
+    /// a wake with no tick running is refused rather than acked into nothing.
+    auto_renew_wake: RefCell<Option<crate::loop_wake::LoopWake>>,
     /// Lazily-resolved, then cached for the client's lifetime: the account's
     /// retired owner keys (`AccountRegistry::predecessor_backup_keys`), read
     /// by both `label_custody()` (this plane) and `sync_agent::install()`
@@ -285,6 +290,7 @@ impl FaunaClient {
             nest_rpc,
             staged_attachment: RefCell::new(None),
             dns_machine: RefCell::new(None),
+            auto_renew_wake: RefCell::new(None),
             predecessor_backup_keys_cache: RefCell::new(None),
             attested_predecessors_cache: RefCell::new(None),
             predecessor_chain_cache: RefCell::new(None),
@@ -546,29 +552,72 @@ impl FaunaClient {
         });
     }
 
-    /// Silent sign-in: the `fauna.auth.challenge` + `fauna.auth.verify`
-    /// WS-RPC ceremony over a fresh anonymous connection (the shared
-    /// `fauna-launch-machine` `WsAuthConnector` — the same path
-    /// `LaunchMachine::start` drives). On success, refreshes the libsecret
-    /// server-data cache (handle / domain / tier) and pushes
-    /// `DataMessage::IdentityRefreshed` so the launch UI's status bar /
-    /// settings page can update from the cached values to the
-    /// just-fetched authoritative ones.
+    /// Keep the libsecret server-data cache (handle / domain / tier) current
+    /// from the session client's identity watch
+    /// (`AuthClient::subscribe_self_identity` — the launch machine behind this
+    /// client's `LaunchMachineBearer` publishes every successful silent
+    /// challenge's `VerifyReply` identity on it), pushing
+    /// `DataMessage::IdentityRefreshed` on each value so the status bar /
+    /// settings page move from the cached values to the authoritative ones.
+    /// The current value is applied at once (the launch's mint has landed by
+    /// the time the launch funnel calls this) and every later one too, so a
+    /// server-side handle rename lands at the next hourly re-mint. No
+    /// challenge of its own: that was a second full mint for the actor at the
+    /// same instant (`transport-connection.md` § The dial budget).
     ///
-    /// Failures (network, nest down, actor-not-registered) are logged and
-    /// swallowed — cached values stay visible. Cross-app convergence
-    /// follow-up.
+    /// The identity re-check the old sign-in challenge doubled as
+    /// (`security.md` § Post-auth surfacing, channel 3) is the same mint's own
+    /// verdict: it stops the WS supervisor, and the connection-state pump
+    /// escalates that stop through [`session_ending_escalation`]. Stops when the
+    /// bearer source starts minting for another actor, so a later account's
+    /// identity never lands in this session's cache.
+    pub fn follow_self_identity(&self) {
+        let Some(mut identity) = self.nest_auth.subscribe_self_identity() else {
+            tracing::warn!("the session client cannot say who it is signed in as");
+            return;
+        };
+        let bearer = self.nest_auth.bearer();
+        let actor_id = actor_id_from_secret_hex(&self.secret_hex).unwrap_or_default();
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            loop {
+                if let Some(minted_for) = bearer.bearer_actor_id()
+                    && fauna_core::hex32::encode(&minted_for) != actor_id
+                {
+                    return;
+                }
+                let current = identity.borrow_and_update().clone();
+                if let Some(minted) = current {
+                    apply_self_identity(minted.handle, minted.domain, minted.tier, &tx).await;
+                }
+                if identity.changed().await.is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
+    /// The forced identity re-check: the `fauna.auth.challenge` +
+    /// `fauna.auth.verify` WS-RPC ceremony over a fresh anonymous connection
+    /// (the shared `fauna-launch-machine` `WsAuthConnector` — the same path
+    /// `LaunchMachine::start` drives), run on demand by the e2e bridge's
+    /// `silent_sign_in` command (`security.md` § Post-auth surfacing, channel
+    /// 3; `test_nest_identity_pin_post_auth.py`). The launch no longer runs it
+    /// — [`Self::follow_self_identity`] reads the session mint's reply instead.
+    /// On success it applies the same merge ([`apply_self_identity`]).
     ///
-    /// **One exception, and it is the point of the exception rule**
-    /// (`security.md` § Post-auth surfacing): a mid-session
-    /// `IdentityChanged` verdict escalates to `DataMessage::NestIdentityChanged`
-    /// instead of being swallowed. It is not a fault — it is the same
-    /// possible-MITM signal the launch path blocks on, and the session is
-    /// already de-facto dead because its connections can no longer graduate.
+    /// Failures (network, nest down) are logged and swallowed — cached values
+    /// stay visible. Cross-app convergence follow-up.
+    ///
+    /// **The session-ending verdicts escalate** (`security.md` § Post-auth
+    /// surfacing): `IdentityChanged`, `Superseded` and `NotRegistered` are not
+    /// faults — the session is already de-facto dead — so each routes to the
+    /// launch surface instead of being swallowed.
     pub fn silent_sign_in(&self) {
         let node_url = self.node_url.clone();
         let secret_hex = self.secret_hex.clone();
         let tx = self.tx.clone();
+        let actor_id_hex = self.actor_id();
 
         self.spawn_bg(async move {
             match do_silent_sign_in(&node_url, &secret_hex).await {
@@ -576,25 +625,7 @@ impl FaunaClient {
                     handle,
                     domain,
                     tier,
-                }) => {
-                    // `store_account_cache_async` skips an empty handle (verify
-                    // returns `""` when no handle is set on the nest), so this
-                    // never clobbers a previously-cached handle with a blank. We
-                    // await the ASYNC core here — this runs on `self.runtime`, so
-                    // the sync `store_account_cache` (which builds its own
-                    // runtime + `block_on`) would panic with "Cannot start a
-                    // runtime from within a runtime" on this worker thread.
-                    if let Err(e) =
-                        store_account_cache_async(Some(&handle), Some(&domain), Some(&tier)).await
-                    {
-                        tracing::error!("silent-sign-in cache refresh failed: {e:#}");
-                    }
-                    tx.send(UiMessage::Data(DataMessage::IdentityRefreshed {
-                        handle,
-                        domain,
-                        tier,
-                    }));
-                }
+                }) => apply_self_identity(handle, domain, tier, &tx).await,
                 Ok(SilentSignIn::NotRegistered) => {
                     // Suspended or removed while signed in — this runs
                     // post-auth only, so the refusal is never onboarding's
@@ -629,7 +660,16 @@ impl FaunaClient {
                         "[identity] this identity was succeeded (claimed successor \
                          {new_actor_id_hex}) — routing to the identity-import flow"
                     );
-                    tx.send(UiMessage::Data(DataMessage::IdentitySuperseded));
+                    tx.send(UiMessage::Data(DataMessage::IdentitySuperseded {
+                        actor_id_hex,
+                    }));
+                }
+                Ok(SilentSignIn::Locked { locked_until_secs }) => {
+                    tracing::warn!(
+                        "[identity] this account is locked until {locked_until_secs} — \
+                         routing to the locked launch surface"
+                    );
+                    tx.send(UiMessage::Data(DataMessage::AccountLocked));
                 }
                 Err(e) => {
                     tracing::error!("silent-sign-in failed: {e:#}");
@@ -831,86 +871,30 @@ impl FaunaClient {
             // canonical/identity domain, which `HandleResolved` then displays as
             // `handle@<primary>`. A typed `bob@domain2` never reaches here — it
             // classifies as `Handle{user,domain}` and routes through
-            // `resolve_nest` → `resolve_handle_on_remote`, which threads the
-            // domain. (mail-multidomain.md § Multi-domain handles § Resolution)
+            // [`Self::find_user`], which threads the domain and discovers a
+            // foreign peer. (mail-multidomain.md § Multi-domain handles § Resolution)
             tx.send(find_user_message(&*nest_rpc, &handle, None).await);
         });
     }
 
-    /// Resolve a domain to a fauna nest URL via the home nest's SRV lookup over
-    /// the anonymous `fauna.nest.resolve` discovery kind (replacing the
-    /// deleted `GET /api/v1/resolve-node/{domain}` twin; api-layers.md
-    /// discovery row). The result arrives as `DataMessage::NestResolved` with the
-    /// original handle + domain, carrying `{"url": …}` so the `NestResolved`
-    /// handler (which auto-chains `resolve_handle_on_remote`) is unchanged. An
-    /// internal / unresolvable domain (`localhost`, bare IP, `.local`) comes back
-    /// with an empty result → the handler renders "Could not resolve domain".
-    pub fn resolve_nest(&self, domain: &str, handle: &str) {
-        let home_url = self.node_url.clone();
-        let domain_owned = domain.to_string();
-        let handle_owned = handle.to_string();
-        let tx = self.tx.clone();
-        self.spawn_bg(async move {
-            use fauna_anon_client::AnonymousNestClient;
-            use fauna_protocol::discovery::{NestResolveReply, NestResolveRequest};
-            let result = match AnonymousNestClient::connect(&home_url).await {
-                Ok(client) => {
-                    let reply: Result<NestResolveReply, _> = client
-                        .request(
-                            "fauna.nest.resolve",
-                            NestResolveRequest {
-                                domain: domain_owned.clone(),
-                                extra: Default::default(),
-                            },
-                        )
-                        .await;
-                    match reply {
-                        Ok(r) => serde_json::json!({ "url": r.url }),
-                        Err(_) => serde_json::Value::Null,
-                    }
-                }
-                Err(_) => serde_json::Value::Null,
-            };
-            tx.send(UiMessage::Data(DataMessage::NestResolved {
-                domain: domain_owned,
-                handle: handle_owned,
-                result,
-            }));
-        });
-    }
-
-    /// Resolve a handle on a (possibly remote) nest over the anonymous
-    /// `fauna.actor.by_handle` discovery kind — an anonymous connection to
-    /// `node_url` (the URL [`Self::resolve_nest`] returned; the local nest or a
-    /// cross-nest peer), replacing the deleted
-    /// `GET {node_url}/api/v1/actor/by-handle/{handle}` twin (api-layers.md
-    /// discovery row). Mirrors the local [`Self::resolve_handle`]: the reply is
-    /// the same `ActorByHandleReply` the `HandleResolved` consumer reads, and a
-    /// not-found / unreachable resolve surfaces as `ActionResult::Failed` (the
-    /// structured WS-RPC error message), never a raw HTTP body.
-    ///
-    /// `domain` is the typed `@domain` qualifier from the find-user input (the
-    /// `Handle{user,domain}` branch). Given, the result names the TYPED
-    /// `handle@domain` — the dial names the peer, and the reply's own echo is
-    /// never read for identity (`foreign-handle-resolution.md` § Peer-auth
-    /// model; see [`find_user_message`]) — and a nest that does not serve it
-    /// refuses (`mail-multidomain.md` § Multi-domain handles § Resolution).
-    pub fn resolve_handle_on_remote(&self, node_url: &str, handle: &str, domain: Option<&str>) {
-        let node_url = node_url.to_string();
+    /// The Find User lookup for a typed `user@domain`, with cross-nest peer
+    /// discovery: the shared [`fauna_client_core::find_user::find_user_across_nests`]
+    /// probes the home nest and, when the typed domain is foreign, dials the
+    /// peer **directly** (`fauna_provisioning::probe::peer_nest_url`) — not
+    /// through the home nest's `fauna.nest.resolve` proxy, which refuses
+    /// loopback / IP / `.local` authorities. The result arrives as
+    /// `DataMessage::HandleResolved` carrying `{ actor_id, handle, domain,
+    /// nest_url }`; `nest_url` is the peer the actor resolved on, which the
+    /// result row's knock hands to `fauna.inbox.send` as `recipient_nest_url`
+    /// (`contacts.md` § Implementation status today → *Cross-nest knocks*). Any
+    /// failure is `ActionResult::Failed` — the page's one find-error.
+    pub fn find_user(&self, handle: &str, domain: &str) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
         let handle = handle.to_string();
-        let domain = domain.map(|d| d.to_string());
+        let domain = domain.to_string();
         let tx = self.tx.clone();
-
         self.spawn_bg(async move {
-            use fauna_anon_client::AnonymousNestClient;
-            let msg = match AnonymousNestClient::connect(&node_url).await {
-                Ok(client) => find_user_message(&client, &handle, domain.as_deref()).await,
-                Err(e) => UiMessage::Action(ActionResult::Failed {
-                    context: "fauna.actor.by_handle".into(),
-                    error: e.to_string(),
-                }),
-            };
-            tx.send(msg);
+            tx.send(cross_nest_find_message(&*nest_rpc, &handle, &domain).await);
         });
     }
 
@@ -1086,6 +1070,52 @@ impl FaunaClient {
         )
     }
 
+    /// Read the Events page's open refused changes from the account plane
+    /// (`fauna_client_account_runtime::refused_changes::load_views` — the
+    /// shared view, the sender handle re-derived here at read). A store not up
+    /// yet reads empty; the next calendar load fills the list in. Run with
+    /// every calendar load, and again on the store-change notice while the
+    /// page is open (`StoreSurface::Events`): a refusal is the runtime's own
+    /// background write to the store, a source of the notice like a pump run.
+    pub fn fetch_refused_changes(&self) {
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let store = crate::account_runtime::handle();
+            let rows = fauna_client_account_runtime::refused_changes::load_views(
+                store.as_ref(),
+                &crate::conversations::host::manager(),
+            )
+            .await
+            .iter()
+            .map(crate::views::events::refused_changes::RefusedChangeRow::from_view)
+            .collect();
+            tx.send(UiMessage::Data(DataMessage::RefusedChangesLoaded { rows }));
+        });
+    }
+
+    /// Dismiss one refused change (the row's only control — a local store
+    /// write, so it works with no nest) and re-read the list.
+    pub fn dismiss_refused_change(&self, key: String) {
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let store = crate::account_runtime::handle();
+            if let Err(e) =
+                fauna_client_account_runtime::refused_changes::dismiss(store.as_ref(), &key).await
+            {
+                tracing::warn!("refused change not dismissed: {e:#}");
+            }
+            let rows = fauna_client_account_runtime::refused_changes::load_views(
+                store.as_ref(),
+                &crate::conversations::host::manager(),
+            )
+            .await
+            .iter()
+            .map(crate::views::events::refused_changes::RefusedChangeRow::from_view)
+            .collect();
+            tx.send(UiMessage::Data(DataMessage::RefusedChangesLoaded { rows }));
+        });
+    }
+
     /// Fetch all calendars for the authenticated user from the encrypted
     /// `bridge_caldav_*` store via `fauna.bridges.list_calendars` (events.md
     /// Decision B). When the actor has no calendars yet, the Personal calendar
@@ -1094,6 +1124,7 @@ impl FaunaClient {
     /// to an empty list when the calendar key is unavailable (mail/CalDAV not
     /// enabled — see [`caldav_context`]).
     pub fn fetch_calendars(&self) {
+        self.fetch_refused_changes();
         let nest = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
         let secret_hex = self.secret_hex.clone();
@@ -2305,6 +2336,7 @@ impl FaunaClient {
         // timeline. With no manager (not yet initialised) there is nothing to
         // fold into and nothing on screen to update.
         let manager = crate::feed::host::manager();
+        let nest_content = Arc::clone(&self.content_api);
         self.spawn_bg(async move {
             let msg = match manager {
                 // `reply`/`quote` are COMPOSED, not recorded: they create a post
@@ -2319,7 +2351,12 @@ impl FaunaClient {
                 //
                 Some(m) => {
                     let routed = match (action.as_str(), body.clone()) {
-                        ("reply", Some(text)) => Some(m.reply(post_id.clone(), text).await),
+                        // The reply dialog sends through [`FaunaClient::reply_to_post`]
+                        // (sealed / confirmed-public / plain); this arm is the
+                        // unconfirmed door, the same shared `send_reply`.
+                        ("reply", Some(text)) => {
+                            Some(send_reply(&m, &nest_content, post_id.clone(), text, false).await)
+                        }
                         ("quote", text) => {
                             Some(m.quote(post_id.clone(), text.unwrap_or_default()).await)
                         }
@@ -2353,17 +2390,7 @@ impl FaunaClient {
                         // the user's language, recognized by the one shared
                         // `refusal_i18n_key`; every other failure keeps its
                         // own text behind the RPC context. tui's `refusal_copy`.
-                        Err(e) => match fauna_feed::refusal_i18n_key(&e)
-                            .and_then(crate::i18n::strings::lookup)
-                        {
-                            Some(sentence) => UiMessage::Action(ActionResult::FailedLocalized {
-                                message: sentence.to_string(),
-                            }),
-                            None => UiMessage::Action(ActionResult::Failed {
-                                context: "fauna.posts.interact".into(),
-                                error: e,
-                            }),
-                        },
+                        Err(e) => UiMessage::Action(interact_failure(e)),
                     }
                 }
                 None => {
@@ -2378,6 +2405,30 @@ impl FaunaClient {
                         }),
                     }
                 }
+            };
+            tx.send(msg);
+        });
+    }
+
+    /// The reply dialog's send: **sealed to the target's own audience** when the
+    /// manager says this device can author under it, the explicit-public door
+    /// when `public_confirmed` (the dialog's `feed-reply-public-confirm`,
+    /// checked), the ordinary `reply` otherwise (`goal/behavior/restricted-posts.md`
+    /// § Encryption at rest → *Ruling 5's build — the shape*, (c) + (e)). The
+    /// audience is the manager's answer, never decided here.
+    pub fn reply_to_post(&self, post_id: &str, text: &str, public_confirmed: bool) {
+        let Some(manager) = crate::feed::host::manager() else {
+            return;
+        };
+        let nest = Arc::clone(&self.content_api);
+        let tx = self.tx.clone();
+        let (post_id, text) = (post_id.to_string(), text.to_string());
+        self.spawn_bg(async move {
+            let msg = match send_reply(&manager, &nest, post_id, text, public_confirmed).await {
+                Ok(()) => UiMessage::Action(ActionResult::Success {
+                    context: "post_reply".into(),
+                }),
+                Err(e) => UiMessage::Action(interact_failure(e)),
             };
             tx.send(msg);
         });
@@ -2760,7 +2811,7 @@ impl FaunaClient {
         let fs = folder.to_string();
         self.spawn_bg(async move {
             let sync = fauna_client_sync::SyncClient::new(nest_rpc);
-            let msg = match sync.files(fs.clone()).await {
+            let msg = match sync.files(fs.clone(), None).await {
                 Ok(reply) => {
                     let files = reply
                         .files
@@ -2793,8 +2844,7 @@ impl FaunaClient {
         });
     }
 
-    /// Aggregate the Status page's Sync section ("Files Synced" / "Last Sync")
-    /// across every device-sync folder binding (`sync_agent::current_locations()`)
+    /// Aggregate the Status page's nest-side "Files Synced" count across every device-sync folder binding (`sync_agent::current_locations()`)
     /// via `fauna.sync.files` per bound folder — the same wire call the Media
     /// page already uses (`fetch_sync_files`). Best-effort, per the
     /// `refresh_mail_epoch_schedule` posture: a set whose
@@ -2809,28 +2859,9 @@ impl FaunaClient {
         let folders = crate::sync_agent::current_locations();
         self.spawn_bg(async move {
             let sync = fauna_client_sync::SyncClient::new(nest_rpc);
-            let mut files_synced: u64 = 0;
-            let mut last_sync_at: Option<i64> = None;
-            for folder in &folders {
-                match sync.files(folder.folder.clone()).await {
-                    Ok(reply) => {
-                        files_synced += reply.files.len() as u64;
-                        for f in &reply.files {
-                            last_sync_at = Some(
-                                last_sync_at.map_or(f.updated_at, |cur| cur.max(f.updated_at)),
-                            );
-                        }
-                    }
-                    Err(e) => tracing::warn!(
-                        "fetch_sync_status_summary: fauna.sync.files failed for {:?} \
-                         (best-effort, excluded from the aggregate): {e}",
-                        folder.folder
-                    ),
-                }
-            }
+            let files_synced = count_bound_files(&sync, &folders).await;
             tx.send(UiMessage::Data(DataMessage::SyncStatusSummaryLoaded {
                 files_synced,
-                last_sync_at,
             }));
         });
     }
@@ -2865,6 +2896,7 @@ impl FaunaClient {
     pub fn save_snapshot_file(
         &self,
         file: fauna_backups_machine::SnapshotFileRow,
+        set: fauna_client_snapshots::SnapshotSet,
         save_path: &str,
     ) {
         let context = "snapshot_file_downloaded".to_string();
@@ -2903,6 +2935,14 @@ impl FaunaClient {
 
         let auth = self.build_sync_auth();
         let nest_rpc = Arc::clone(&self.nest_rpc);
+        // The snapshot reader's nonce source: this seat's custody, the same
+        // resolver `label_custody()` renders sealed paths through.
+        let resolver: Arc<dyn fauna_core::folder_keys::FolderKeyResolver> =
+            Arc::new(fauna_client_folders::NestFolderKeyResolver::new(
+                Arc::clone(&self.nest_rpc),
+                crate::account_runtime::folder_key_store(),
+            ));
+        let nonces = Some(fauna_client_sync::SetNonceSource::Resolver(resolver));
         let secret_hex = self.secret_hex.clone();
         let save_path = save_path.to_string();
         let tx = self.tx.clone();
@@ -2923,6 +2963,8 @@ impl FaunaClient {
                     nest_rpc,
                     device_id,
                     &secret_hex,
+                    nonces,
+                    set,
                     manifest_hash,
                     &relative_path,
                     &save_path,
@@ -3109,21 +3151,27 @@ impl FaunaClient {
         rx
     }
 
-    /// Check a blob's `x-c2pa` provenance hint via `HEAD /api/v1/blob/{hash}`
-    /// (`ui/media.md` § C2PA provenance) — the `c2pa-badge` gate, tui's
-    /// `Op::FetchC2pa` twin. A HEAD request, not a `GET`: the badge check must
-    /// not pull the whole blob just to read one response header. An error
-    /// degrades to "no badge" at the call site, same as a resolved `false` —
-    /// `has_c2pa` is a UI hint, not a security boundary.
-    pub fn fetch_has_c2pa(
+    /// The two nest reads of the `c2pa-badge` verdict (`ui/media.md` § C2PA
+    /// provenance), tui's `Op::FetchC2pa` twin. Stage 1 is a `HEAD` of the blob
+    /// for the uploader's `x-c2pa` hint — a pre-filter only, so a `false` ends
+    /// the check without pulling the blob (`Ok(None)`). On `true`, stage 2 is
+    /// the blob `GET`, handed back as fetched (`Ok(Some(bytes))`) for the
+    /// caller to open and run `fauna_media::process::detect_c2pa_in_bytes`
+    /// over: the header is a UI hint, not a security boundary, so it never
+    /// feeds the badge itself. Either stage's error is the call's error.
+    pub fn fetch_c2pa_candidate_bytes(
         &self,
         hash: &str,
-    ) -> async_channel::Receiver<Result<bool, crate::nest_content_api::ApiError>> {
+    ) -> async_channel::Receiver<Result<Option<Vec<u8>>, crate::nest_content_api::ApiError>> {
         let (tx, rx) = async_channel::bounded(1);
         let nest = Arc::clone(&self.content_api);
         let path = paths::blob::by_hash(hash);
         self.spawn_bg(async move {
-            let res = nest.head_has_c2pa(&path).await;
+            let res = match nest.head_has_c2pa(&path).await {
+                Ok(true) => nest.get(&path).await.map(|b| Some(b.to_vec())),
+                Ok(false) => Ok(None),
+                Err(e) => Err(e),
+            };
             let _ = tx.send(res).await;
         });
         rx
@@ -3162,6 +3210,9 @@ impl FaunaClient {
     /// and folding both into ready-to-render rows (priority #2: no client
     /// recomposes the tier meet).
     pub fn fetch_features(&self) {
+        // The self-limits control's authored read rides the same nav edge: the
+        // rows and their summaries repaint independently as each answers.
+        self.fetch_feature_limits(crate::feature_editor::Host::SelfTier);
         let nest_rpc = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
         self.spawn_bg(async move {
@@ -3171,6 +3222,65 @@ impl FaunaClient {
                 Err(e) => UiMessage::Action(ActionResult::Failed {
                     context: "fauna.features.status".into(),
                     error: e.to_string(),
+                }),
+            };
+            tx.send(msg);
+        });
+    }
+
+    /// Fetch one tier's AUTHORED feature documents for the shared
+    /// `feature-policy-editor`'s hosts (`dynamic-features.md` § Authoring
+    /// surfaces) via `FeaturesClient::authored_surface`: the admin Nest section
+    /// (`Host::Admin`) or the Status sub-page's own-limit control
+    /// (`Host::SelfTier`). A failed read is worded and rides back as the `Err`.
+    pub fn fetch_feature_limits(&self, host: crate::feature_editor::Host) {
+        // The guardian host has no authored read of its own: its rows ride the
+        // Family page's status read (`views::family`).
+        let Some(tier) = host.static_tier() else {
+            return;
+        };
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let result = fauna_client_features::FeaturesClient::new(nest_rpc)
+                .authored_surface(tier)
+                .await
+                .map_err(|e| crate::i18n::strings::features::editor_load_failed(&e.to_string()));
+            tx.send(UiMessage::Data(DataMessage::FeatureLimitsAuthored {
+                host,
+                result,
+            }));
+        });
+    }
+
+    /// Save (or, with `remove`, clear) the open editor's document through the
+    /// shared seam — it parses the draft (a refusal dispatches nothing), writes
+    /// the whole document at the host's tier and re-reads. A refusal or a
+    /// transport failure is worded by the seam and lands on the global banner.
+    pub fn write_feature_limit(
+        &self,
+        host: crate::feature_editor::Host,
+        editor: fauna_client_features::PolicyEditor,
+        remove: bool,
+    ) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let client = fauna_client_features::FeaturesClient::new(nest_rpc);
+            let written = if remove {
+                client.remove(&editor).await
+            } else {
+                client.save(&editor).await
+            };
+            let lookup = crate::i18n::strings::lookup;
+            let msg = match written {
+                Ok(saved) => UiMessage::Data(DataMessage::FeatureLimitWritten {
+                    host,
+                    status: saved.status.resolve(lookup),
+                    editor: editor.reseeded(&saved.reply).map(Box::new),
+                }),
+                Err(e) => UiMessage::Action(ActionResult::FailedLocalized {
+                    message: e.text().resolve(lookup),
                 }),
             };
             tx.send(msg);
@@ -3215,28 +3325,21 @@ impl FaunaClient {
         });
     }
 
-    /// Fetch node info (domain, version) over the WS-RPC `fauna.nest.info` kind
-    /// — the live, authenticated connection — instead of the (now deleted) HTTP
-    /// `/api/v1/node-info` twin. Both resolved the same `nest_info_core` on the
-    /// nest, but the HTTP twin was unreachable on a deployed HTTPS nest, so
-    /// Settings > Status > Node > Domain sat at "—". `NestInfoReply` carries the
-    /// `domain` + `version` the status view reads.
-    pub fn fetch_nest_info(&self) {
+    /// Fetch the Status page's node leg (domain, version) through the shared
+    /// `fauna_client_status::StatusClient::node()` — `fauna.nest.info` over the
+    /// live WS-RPC link (`ui/status.md` § State & data shape). A failed read
+    /// leaves the Node section absent rather than painting a placeholder.
+    pub fn fetch_node_leg(&self) {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            use fauna_protocol::discovery::{NestInfoReply, NestInfoRequest};
-            let reply: Result<NestInfoReply, _> = nest_rpc
-                .request("fauna.nest.info", NestInfoRequest::default())
-                .await;
-            let info = match reply {
-                Ok(r) => serde_json::json!({ "domain": r.domain, "version": r.version }),
-                Err(e) => {
-                    tracing::warn!(error = %e, "fauna.nest.info request failed");
-                    serde_json::Value::Null
-                }
-            };
-            tx.send(UiMessage::Data(DataMessage::NestInfoLoaded { info }));
+            match fauna_client_status::StatusClient::new(nest_rpc)
+                .node()
+                .await
+            {
+                Ok(node) => tx.send(UiMessage::Data(DataMessage::NodeLegLoaded { node })),
+                Err(e) => tracing::warn!(error = %e, "fauna.nest.info request failed"),
+            }
         });
     }
 
@@ -3507,7 +3610,6 @@ impl FaunaClient {
     /// nothing. The status the user sees next is the SUCCESSOR's, read after the
     /// switch by the section's own on-visible refresh.
     pub fn succeed_identity(&self, phrase: &str) {
-        let nest_rpc = Arc::clone(&self.nest_rpc);
         let secret_hex = self.secret_hex.clone();
         let phrase = phrase.to_string();
         let node_url = self.node_url().to_string();
@@ -3520,8 +3622,7 @@ impl FaunaClient {
         let old_engine =
             crate::conversations::conv_backend::active_session().map(|session| session.engine());
         self.spawn_bg(async move {
-            let outcome =
-                do_succeed_identity(nest_rpc, &secret_hex, &phrase, &node_url, old_engine).await;
+            let outcome = do_succeed_identity(&secret_hex, &phrase, &node_url, old_engine).await;
             tx.send(UiMessage::Data(DataMessage::RecoverySucceeded {
                 outcome: Box::new(outcome),
             }));
@@ -3636,13 +3737,18 @@ impl FaunaClient {
     pub fn fetch_spam_preferences(&self) {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
+        // Stamped with the actor generation it was fired under; the fold drops a reply
+        // whose generation moved (an account switch while it was in flight).
+        let generation = crate::actor_scope::current_generation();
         self.spawn_bg(async move {
             let spam = fauna_client_spam::SpamClient::new(nest_rpc);
             let req = fauna_client_spam::spam::SpamGetPreferencesRequest {
                 extra: Default::default(),
             };
             let msg = match spam.get_preferences(req).await {
-                Ok(prefs) => UiMessage::Data(DataMessage::SpamPreferencesLoaded { prefs }),
+                Ok(prefs) => {
+                    UiMessage::Data(DataMessage::SpamPreferencesLoaded { generation, prefs })
+                }
                 Err(e) => UiMessage::Action(ActionResult::Failed {
                     context: "fauna.spam.get_preferences".into(),
                     error: e.to_string(),
@@ -3671,6 +3777,7 @@ impl FaunaClient {
     pub fn update_spam_preferences(&self, req: fauna_client_spam::spam::SpamSetPreferencesRequest) {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
+        let generation = crate::actor_scope::current_generation();
         self.spawn_bg(async move {
             let spam = fauna_client_spam::SpamClient::new(nest_rpc);
             let msg = match spam.set_preferences(req).await {
@@ -3678,6 +3785,7 @@ impl FaunaClient {
                     // Re-bind the just-saved thresholds to the render engine
                     // before reporting success (see the doc comment above).
                     tx.send(UiMessage::Data(DataMessage::SpamPreferencesLoaded {
+                        generation,
                         prefs,
                     }));
                     UiMessage::Action(ActionResult::Success {
@@ -3787,6 +3895,12 @@ impl FaunaClient {
         let Some((entries, offset)) = crate::content_policy::take_notify_report() else {
             return;
         };
+        // Coarse by construction (category + count, the report's own content), so
+        // a guardian readout can be traced to the report(s) that built it.
+        tracing::debug!(
+            entries = ?entries.iter().map(|e| (e.category.as_str(), e.count)).collect::<Vec<_>>(),
+            "fauna.family.notify_report: sending"
+        );
         let nest_rpc = Arc::clone(&self.nest_rpc);
         self.spawn_bg(async move {
             let family = fauna_client_family::FamilyClient::new(nest_rpc);
@@ -3848,6 +3962,17 @@ impl FaunaClient {
                 None => crate::screen_lock::report_failed(),
             },
         );
+    }
+
+    /// A fresh `LocalDomainMachine` over this client's nest connection — what
+    /// the `nest_retire` page's admin entry re-reads live for the nest's active
+    /// domains (`nest-retirement.md` § DNS cleanup → *Several domains* (1)).
+    pub fn local_domains_machine(
+        &self,
+    ) -> Arc<fauna_client_mail_settings::local_domains::LocalDomainMachine> {
+        Arc::new(crate::mail_glue::build_local_domains_machine(Arc::clone(
+            &self.nest_rpc,
+        )))
     }
 
     /// Fetch the deployment's local mail domains over WS-RPC via the shared
@@ -3952,6 +4077,37 @@ impl FaunaClient {
             let _ = machine.dispatch(LocalDomainAction::Refresh).await;
             let _ = machine
                 .dispatch(LocalDomainAction::SetCatchAllActor { domain, actor_id })
+                .await;
+            tx.send(UiMessage::Data(DataMessage::AdminLocalDomainsLoaded {
+                snapshot: machine.snapshot(),
+            }));
+        });
+    }
+
+    /// Set one domain's published DMARC policy from the `admin-dns` per-domain row
+    /// (`admin-dns-domain-dmarc-policy-select`; dmarc-reporting.md § Multi-domain
+    /// deployments). `UpdateConfig` with only `dmarc_policy` set, so no other
+    /// per-domain knob is touched; `Reject`, the default, clears the override.
+    /// Same `Refresh`-then-act shape as `set_catch_all_actor`.
+    pub fn set_dmarc_policy(
+        &self,
+        domain: String,
+        policy: fauna_client_mail_settings::local_domains::DomainDmarcPolicy,
+    ) {
+        use fauna_client_mail_settings::local_domains::LocalDomainAction;
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let machine = crate::mail_glue::build_local_domains_machine(nest_rpc);
+            let _ = machine.dispatch(LocalDomainAction::Refresh).await;
+            let _ = machine
+                .dispatch(LocalDomainAction::UpdateConfig {
+                    domain,
+                    mta_sts_max_age_seconds: None,
+                    mta_sts_cert_mode: None,
+                    spf_record: None,
+                    dmarc_policy: Some(policy),
+                })
                 .await;
             tx.send(UiMessage::Data(DataMessage::AdminLocalDomainsLoaded {
                 snapshot: machine.snapshot(),
@@ -4347,6 +4503,24 @@ impl FaunaClient {
             let _ = machine
                 .dispatch(DnsAction::VerifyRecords { domain: None })
                 .await;
+            tx.send(UiMessage::Data(DataMessage::AdminDnsRecordsLoaded {
+                snapshot: machine.snapshot(),
+            }));
+        });
+    }
+
+    /// One tick of the open `admin-dns` page's background re-check
+    /// (`views::admin::arm_dns_background_recheck`): the shared
+    /// `background_recheck` re-reads the matrix and verifies it, re-publishing a
+    /// managed record public DNS no longer serves; the page re-renders on the
+    /// resulting snapshot. No HTTP.
+    pub fn dns_background_recheck(&self) {
+        let Some(machine) = self.dns_machine() else {
+            return;
+        };
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            machine.background_recheck().await;
             tx.send(UiMessage::Data(DataMessage::AdminDnsRecordsLoaded {
                 snapshot: machine.snapshot(),
             }));
@@ -4774,12 +4948,26 @@ impl FaunaClient {
         );
     }
 
-    /// Opportunistically refresh the published mail content-sealing epoch
-    /// schedule on every successful (re)connect
+    /// The mail connect-time refresh on every (re)connect of this client, for
+    /// its life (`mail-credentials.md` § Hard revoke → *Published before the
+    /// nest moves*, rule (4)): spawns the shared
+    /// [`fauna_client_mail_settings::rpc_glue::refresh_epoch_schedule_on_every_connect`]
+    /// once, at the AuthSuccess post-auth hook (tui's `session::establish`
+    /// spawns the same). Best-effort / log-only.
+    pub fn spawn_mail_epoch_refresh_on_every_connect(&self) {
+        self.spawn_bg(
+            fauna_client_mail_settings::rpc_glue::refresh_epoch_schedule_on_every_connect(
+                self.nest_rpc(),
+                crate::account_runtime::mail_store(),
+            ),
+        );
+    }
+
+    /// One pass of the published mail content-sealing epoch schedule refresh
     /// (`docs/goal/architecture/encryption-at-rest.md` § Capability tiering →
-    /// *Content-sealing epochs*), mirroring [`Self::run_critical_alert_sweep`]'s
-    /// posture exactly: fired at the same universal post-auth hook,
-    /// best-effort / log-only. Delegates to the shared, idempotent
+    /// *Content-sealing epochs*), for the same-client re-establish edge in
+    /// `main.rs` — [`Self::spawn_mail_epoch_refresh_on_every_connect`] covers
+    /// the connects themselves. Best-effort / log-only. Delegates to the shared, idempotent
     /// [`fauna_client_mail_settings::MailSettingsMachine::refresh_epoch_schedule`],
     /// which no-ops when mail isn't enabled (no MSEK) — so this is always
     /// safe to call unconditionally, admin or not. Without it, a schedule published
@@ -4807,6 +4995,34 @@ impl FaunaClient {
                     "mail epoch schedule refresh failed (best-effort; re-converges next \
                      connect): {e}"
                 ),
+            }
+        });
+    }
+
+    /// Publish the account's subscriber encapsulation-key registry entry
+    /// (`post-quantum.md` § surface B) through the shared
+    /// `SubscriptionsClient::publish_encaps_key`, at the same universal
+    /// post-auth hook as [`Self::refresh_mail_epoch_schedule`] (tui's
+    /// `spawn_publish_subscriber_encaps_key` is the reference). Idempotent
+    /// (every device derives the same key), best-effort / log-only. A
+    /// third-party follow under `fauna:follow:write` is refused while no entry
+    /// exists (`authorization-server.md` § Scope grammar → *The sixth arm*).
+    pub fn publish_subscriber_encaps_key(&self) {
+        let keypair = match secret_to_keypair(self.secret_hex()) {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!("publish subscriber encaps key: decode secret: {e}");
+                return;
+            }
+        };
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        self.spawn_bg(async move {
+            let subs = fauna_client_subscriptions::SubscriptionsClient::new(nest_rpc);
+            if let Err(e) = subs.publish_encaps_key(&keypair).await {
+                tracing::warn!(
+                    "publish subscriber encaps key failed (best-effort; re-converges next \
+                     connect): {e}"
+                );
             }
         });
     }
@@ -5058,7 +5274,13 @@ impl FaunaClient {
             // but un-claimable by anyone. The mint-and-persist helper returns the
             // code only once the row is durable, so the crash-unsafe ordering is
             // unrepresentable here.
-            let persistence = crate::account_registry().launch_persistence();
+            // This process's own account's slot — `crate::launch_persistence()`
+            // resolves a bound launch to its bound account (tui's
+            // `session::launch_persistence` twin). The unbound adapter wrote
+            // through `active`, so a second instance bound to account B wrote
+            // B's re-claim over account A's slot (`nest/common.md`
+            // § Client-state recoverability, CR-3: the slot is per-identity).
+            let persistence = crate::launch_persistence();
             let Some(pinned_code) = fauna_launch_machine::mint_and_persist_pending_factory_reset(
                 &persistence,
                 nest_url.clone(),
@@ -5139,18 +5361,18 @@ impl FaunaClient {
     /// The whole ceremony is the shared plane drive
     /// (`fauna_client_account_runtime::deployment_seeds::rotate_deployment_seed`:
     /// the successor's custody row merged and published before dispatch, over
-    /// the account-store handle — refused plainly without one). There is no
+    /// the account-store handle resolved per call — a store still assembling is
+    /// waited out, one that never comes refused plainly). There is no
     /// fan-out: the plane carries the successor's row (`box-recovery.md` § The
     /// plane-era recovery floor → *(c) The writes*). The verdict is the shared
     /// decision, not this app's.
     pub fn rotate_deployment_seed(&self) {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
-        let store = crate::account_runtime::handle();
         self.spawn_bg(async move {
             let status = fauna_client_account_runtime::deployment_seeds::rotate_deployment_seed(
                 &nest_rpc,
-                store.as_ref(),
+                crate::account_runtime::handle,
             )
             .await
             .resolve(crate::i18n::strings::lookup);
@@ -5240,6 +5462,28 @@ impl FaunaClient {
             let status = fauna_client_moderation::takedown_verdict(form.restore, error)
                 .resolve(crate::i18n::strings::lookup);
             tx.send(UiMessage::Data(DataMessage::TakedownSubmitted { status }));
+        });
+    }
+
+    /// Dispatch the open appeal (`fauna.moderation.appeal`; `moderation.md` §
+    /// Legal takedown — the transparency triple's second leg), fired on
+    /// `appeal-submit-button` once the shared `appeal_form_view` fold said the
+    /// draft may submit. `content_id` is the one the form captured at OPEN time,
+    /// never re-read from the queue (it refetches). The outcome rides
+    /// [`DataMessage::AppealSubmitted`] — `None` = recorded for review, `Some(e)`
+    /// = the error for `appeal_verdict` to word — deliberately not an
+    /// `ActionResult::Failed`: a refused appeal is form feedback, and the
+    /// page-level `error-message` would blank the queue being read.
+    pub fn submit_appeal(&self, content_id: String, reason: String) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let error = fauna_client_moderation::ModerationClient::new(nest_rpc)
+                .appeal(content_id.trim(), reason.trim())
+                .await
+                .err()
+                .map(|e| e.to_string());
+            tx.send(UiMessage::Data(DataMessage::AppealSubmitted { error }));
         });
     }
 
@@ -5339,29 +5583,19 @@ impl FaunaClient {
         });
     }
 
-    /// Fetch nest-wide statistics (admin only) via `fauna.admin.stats` (WS-RPC;
-    /// the typed twin of the deleted `GET /admin/api/stats`). The dashboard
-    /// reads its counters from the JSON `stats` value, so `AdminStatsReply` is
-    /// re-serialized with `serde_json::to_value` — shape-identical to the old
-    /// HTTP body (`total_users`/`users_by_tier`/`suspended_users`/
-    /// `total_inbox_bytes`/`total_storage_bytes`/`ws_connections`). Typing the
-    /// `AdminStatsLoaded` payload is a later dashboard cleanup, not this slice.
-    pub fn fetch_admin_stats(&self) {
+    /// Read the admin dashboard's shared card set (`AdminClient::dashboard_snapshot`,
+    /// `admin.md` § 1 → *The card set*): five tolerated reads folded by shared
+    /// Rust. Fired on every entry to the dashboard sub-page (its `connect_map`),
+    /// never cached, so the storage cards re-read what the nest holds now.
+    pub fn fetch_admin_dashboard(&self) {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
         self.spawn_bg(async move {
             let admin = fauna_client_admin::AdminClient::new(nest_rpc);
-            let msg = match admin.stats().await {
-                Ok(reply) => {
-                    let stats = serde_json::to_value(&reply).unwrap_or(serde_json::Value::Null);
-                    UiMessage::Data(DataMessage::AdminStatsLoaded { stats })
-                }
-                Err(e) => UiMessage::Action(ActionResult::Failed {
-                    context: "fauna.admin.stats".into(),
-                    error: e.to_string(),
-                }),
-            };
-            tx.send(msg);
+            let snapshot = admin.dashboard_snapshot().await;
+            tx.send(UiMessage::Data(DataMessage::AdminDashboardLoaded {
+                snapshot,
+            }));
         });
     }
 
@@ -5380,9 +5614,14 @@ impl FaunaClient {
     /// created after the initial admin-status fetch — which otherwise fires
     /// only once per session.
     pub fn refresh_admin_shell(&self) {
+        // The dashboard's own `connect_map` re-reads on a sub-page switch; an
+        // admin re-entering the shell while it is already the seated page never
+        // re-maps it, so the shell edge reads the snapshot too.
+        self.fetch_admin_dashboard();
         self.fetch_admin_users();
         self.fetch_admin_invite_codes();
         self.fetch_admin_invite_requests();
+        self.fetch_admin_pending_actions();
         self.fetch_local_domains();
         self.fetch_pending_bridges();
         self.fetch_dns_records();
@@ -5410,8 +5649,7 @@ impl FaunaClient {
 
     /// Fetch registered users (admin only) over `fauna.admin.users.list`.
     /// `limit` `None` ⇒ the nest default page (50); backs the consolidated
-    /// `admin-users` Users section + the dashboard recent-users group, and
-    /// carries the pickers' every-account read ([`Self::picker_users_read`]).
+    /// `admin-users` Users section, and carries the pickers' every-account read ([`Self::picker_users_read`]).
     pub fn fetch_admin_users(&self) {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
@@ -5448,32 +5686,6 @@ impl FaunaClient {
                 }),
                 Err(e) => UiMessage::Action(ActionResult::Failed {
                     context: "fauna.admin.users.list".into(),
-                    error: e.to_string(),
-                }),
-            };
-            tx.send(msg);
-        });
-    }
-
-    /// Fetch server status (admin only) via `fauna.admin.status` (WS-RPC; the
-    /// typed twin of the deleted `GET /admin/api/status`). The dashboard
-    /// reads `version` + the `update_available` advisory from the JSON `status`
-    /// value; `AdminStatusReply` re-serialized with `serde_json::to_value` is
-    /// shape-identical to the old HTTP body. (The view's `uptime`/`workers`
-    /// reads are defensive `if let Some` arms the HTTP twin never populated —
-    /// live worker/cluster detail lives on the sibling `fauna.admin.cluster.
-    /// status`/`fauna.admin.worker.status` kinds, not here — so nothing is lost.)
-    pub fn fetch_admin_server_status(&self) {
-        let nest_rpc = Arc::clone(&self.nest_rpc);
-        let tx = self.tx.clone();
-        self.spawn_bg(async move {
-            let admin = fauna_client_admin::AdminClient::new(nest_rpc);
-            let msg = match admin.status().await {
-                Ok(reply) => UiMessage::Data(DataMessage::AdminServerStatusLoaded {
-                    status: serde_json::to_value(&reply).unwrap_or(serde_json::Value::Null),
-                }),
-                Err(e) => UiMessage::Action(ActionResult::Failed {
-                    context: "fauna.admin.status".into(),
                     error: e.to_string(),
                 }),
             };
@@ -5519,6 +5731,37 @@ impl FaunaClient {
             };
             tx.send(msg);
         });
+    }
+
+    /// Define a new tier over `fauna.admin.tiers.create` — the add-a-tier form on
+    /// `admin-settings` (admin.md § 3 → *Defining a new tier*). On success the
+    /// form clears and `tiers.list` is refetched (`AdminTierAdded`); a refusal
+    /// (empty name `fauna.admin.invalid_params`, taken name
+    /// `fauna.admin.conflict`) is worded through `add_tier_error` on the banner,
+    /// and the form keeps what was typed.
+    pub fn add_admin_tier(&self, req: fauna_client_admin::admin::AdminTierCreateRequest) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let admin = fauna_client_admin::AdminClient::new(nest_rpc);
+            let msg = match admin.tiers_create(req).await {
+                Ok(()) => UiMessage::Data(DataMessage::AdminTierAdded),
+                Err(e) => UiMessage::Action(ActionResult::FailedLocalized {
+                    message: crate::i18n::strings::admin::settings_page::add_tier_error(
+                        &e.to_string(),
+                    ),
+                }),
+            };
+            tx.send(msg);
+        });
+    }
+
+    /// Put an already-worded local refusal on the app banner (`error-message`) —
+    /// the add-a-tier form's empty-name / bad-cap refusals, which never reach
+    /// the wire.
+    pub fn report_localized_error(&self, message: String) {
+        self.tx
+            .send(UiMessage::Action(ActionResult::FailedLocalized { message }));
     }
 
     /// Fetch the calling admin's membership designations (admin only) over
@@ -5810,6 +6053,48 @@ impl FaunaClient {
         });
     }
 
+    /// Fetch the web-app origin over `fauna.admin.web_app_origin.get` (the
+    /// `admin-nest-web-app-origin-*` section, `admin.md` § N Nest → *Web-app
+    /// origin*) via the shared `AdminClient`, folded through
+    /// `fauna_client_admin::admin_web_app_origin_view` — every sentence and the
+    /// `can_set` verdict live there (tui's `admin/nest.rs`, the reference leg).
+    /// An older nest's unknown-kind answer is the fold's own "predates the
+    /// choice" view (`Ok(None)`), not a failure; any other error leaves the
+    /// section as last-rendered, like the sibling nest fetches.
+    pub fn fetch_nest_web_app_origin(&self) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let admin = fauna_client_admin::AdminClient::new(nest_rpc);
+            if let Ok(reply) = admin.web_app_origin().await {
+                tx.send(UiMessage::Data(DataMessage::NestWebAppOriginLoaded {
+                    view: fauna_client_admin::admin_web_app_origin_view(reply.as_ref()),
+                }));
+            }
+        });
+    }
+
+    /// Save the web-app origin over `fauna.admin.web_app_origin.set` (the
+    /// `admin-nest-web-app-origin-save-button`) via the shared `AdminClient`.
+    /// The section repaints from the set's own reply — no second read.
+    pub fn set_web_app_origin(&self, mode: fauna_client_admin::WebAppOrigin) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let admin = fauna_client_admin::AdminClient::new(nest_rpc);
+            let msg = match admin.set_web_app_origin(mode).await {
+                Ok(reply) => UiMessage::Data(DataMessage::NestWebAppOriginLoaded {
+                    view: fauna_client_admin::admin_web_app_origin_view(Some(&reply)),
+                }),
+                Err(e) => UiMessage::Action(ActionResult::Failed {
+                    context: "fauna.admin.web_app_origin.set".into(),
+                    error: e.to_string(),
+                }),
+            };
+            tx.send(msg);
+        });
+    }
+
     /// Fetch the deployment's registration posture + free-tier ceiling over
     /// `fauna.setup.status` (`registration_mode` raw wire string +
     /// `max_free_users`) for the `admin-users-registration-section` (admin.md § 2
@@ -5933,13 +6218,22 @@ impl FaunaClient {
     /// today). On success the caller refetches the users list at the current
     /// page, same as [`Self::update_admin_user_tier`]/[`Self::evict_user`],
     /// so the newly admitted account is the visible feedback.
-    pub fn admit_user(&self, actor_id: Vec<u8>, tier: String, handle: Option<String>) {
+    ///
+    /// `guardian_actor` is the Admit-section guardian picker's pick (`None` for
+    /// an ordinary admission); no age band is sent from this surface.
+    pub fn admit_user(
+        &self,
+        actor_id: Vec<u8>,
+        tier: String,
+        handle: Option<String>,
+        guardian_actor: Option<Vec<u8>>,
+    ) {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
         self.spawn_bg(async move {
             let admin = fauna_client_admin::AdminClient::new(nest_rpc);
             let msg = match admin
-                .users_create(actor_id, tier, String::new(), handle)
+                .users_create(actor_id, tier, String::new(), handle, guardian_actor, None)
                 .await
             {
                 Ok(()) => UiMessage::Data(DataMessage::AdminUserUpdated),
@@ -6155,6 +6449,63 @@ impl FaunaClient {
         });
     }
 
+    /// `fauna.admin.pending_actions.list` — every account's pending admin
+    /// actions, the read behind the Users hub's `admin-users-pending-section`
+    /// (`admin.md` § Pending admin actions).
+    pub fn fetch_admin_pending_actions(&self) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let admin = fauna_client_admin::AdminClient::new(nest_rpc);
+            let msg = match admin.pending_actions_list().await {
+                Ok(reply) => UiMessage::Data(DataMessage::AdminPendingActionsLoaded { reply }),
+                Err(e) => UiMessage::Action(ActionResult::Failed {
+                    context: "fauna.admin.pending_actions.list".into(),
+                    error: e.to_string(),
+                }),
+            };
+            tx.send(msg);
+        });
+    }
+
+    /// Add this admin's approval to a quorum-gated pending action
+    /// (`admin-pending-action-approve-button`) over `fauna.pending_actions.approve`.
+    /// The failure `context` is namespaced `fauna.admin.pending_actions.` so it
+    /// routes to the hub's `admin-users-action-error`.
+    pub fn approve_admin_pending_action(&self, id: i64) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let admin = fauna_client_admin::AdminClient::new(nest_rpc);
+            let msg = match admin.pending_action_approve(id).await {
+                Ok(()) => UiMessage::Data(DataMessage::AdminPendingActionDecided),
+                Err(e) => UiMessage::Action(ActionResult::Failed {
+                    context: "fauna.admin.pending_actions.approve".into(),
+                    error: e.to_string(),
+                }),
+            };
+            tx.send(msg);
+        });
+    }
+
+    /// Cancel a pending admin action (`admin-pending-action-cancel-button`) over
+    /// `fauna.pending_actions.cancel` — one click, no confirm.
+    pub fn cancel_admin_pending_action(&self, id: i64) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let admin = fauna_client_admin::AdminClient::new(nest_rpc);
+            let msg = match admin.pending_action_cancel(id).await {
+                Ok(()) => UiMessage::Data(DataMessage::AdminPendingActionDecided),
+                Err(e) => UiMessage::Action(ActionResult::Failed {
+                    context: "fauna.admin.pending_actions.cancel".into(),
+                    error: e.to_string(),
+                }),
+            };
+            tx.send(msg);
+        });
+    }
+
     /// Approve a pending invite request by id (admin only) over
     /// `fauna.admin.invite_requests.approve`, admitting at the chosen `tier`.
     /// Creates the user and deletes the row; the caller refetches on success.
@@ -6255,7 +6606,9 @@ impl FaunaClient {
             Err(
                 e @ (ApiError::NestIdentityChanged { .. }
                 | ApiError::SignInRefused
-                | ApiError::Superseded { .. }),
+                | ApiError::Superseded { .. }
+                | ApiError::NestOutdated
+                | ApiError::SubprotocolMismatch),
             ) => UiMessage::Action(ActionResult::Failed {
                 context: url,
                 error: e.to_string(),
@@ -6361,8 +6714,25 @@ impl FaunaClient {
         // against the next connection (and any suspended manual cert order is
         // abandoned with the session, not leaked into the new one).
         self.dns_machine.borrow_mut().take();
+        // The tick dies with the runtime; its wake goes with it.
+        self.auto_renew_wake.borrow_mut().take();
         if let Some(rt) = self.runtime.borrow_mut().take() {
             rt.shutdown_background();
+        }
+    }
+
+    /// End the auto-renew tick's current wait now (the agent's
+    /// `fauna_e2e_agent::AUTO_RENEW_WAKE`); `false` when this client runs no
+    /// tick (pre-auth, or after `shutdown()`), which the agent refuses loudly
+    /// (convention 11).
+    #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
+    pub fn wake_auto_renew(&self) -> bool {
+        match self.auto_renew_wake.borrow().as_ref() {
+            Some(wake) => {
+                wake.wake();
+                true
+            }
+            None => false,
         }
     }
 
@@ -6402,45 +6772,23 @@ impl FaunaClient {
         });
     }
 
-    // -----------------------------------------------------------------------
-    // Bluesky thread
-    // -----------------------------------------------------------------------
-
-    /// Fetch the Bluesky thread context for a crossposted post via the
-    /// `bluesky.feed.thread` WS-RPC kind (`PostId` variant — the post-detail
-    /// surface holds the hex `[u8; 32]` Fauna post id, which the handler
-    /// resolves to its AT-URI through the `bluesky_posts` crosspost mapping).
-    /// The reply is the flat thread list: ancestors oldest-first, the focal
-    /// post, then its direct replies; `focal_index` names the focal post. Sends
-    /// `DataMessage::BlueskyThreadLoaded`.
-    pub fn fetch_bluesky_thread(&self, post_id: &str) {
-        use fauna_client_bluesky::bluesky::BlueskyThreadRequest;
-        let pid = post_id.to_string();
+    /// The per-view read of the Notifications page (`notifications.md`
+    /// § Persistence — apps hold no durable cache, pages are fetched per view):
+    /// the same list as [`Self::fetch_notifications`], but delivered as
+    /// [`DataMessage::NotificationsPageLoaded`] so it repaints the page and the
+    /// unread count WITHOUT raising a desktop toast per unread row — the user is
+    /// already looking at them.
+    pub fn fetch_notifications_for_view(&self) {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            let post_id = match hex32(&pid) {
-                Some(bytes) => bytes.to_vec(),
-                None => {
-                    tx.send(UiMessage::Action(ActionResult::Failed {
-                        context: "bluesky.feed.thread".into(),
-                        error: "invalid post id: expected 32 hex-encoded bytes".into(),
-                    }));
-                    return;
-                }
-            };
-            let client = fauna_client_bluesky::BlueskyClient::new(nest_rpc);
-            let msg = match client
-                .thread(BlueskyThreadRequest::PostId { post_id })
-                .await
-            {
-                Ok(reply) => UiMessage::Data(DataMessage::BlueskyThreadLoaded {
-                    post_id: pid,
-                    posts: reply.posts,
-                    focal_index: reply.focal_index as usize,
+            let notifs = fauna_client_notifications::NotificationsClient::new(nest_rpc);
+            let msg = match notifs.notifications_list(None, Some(20)).await {
+                Ok(reply) => UiMessage::Data(DataMessage::NotificationsPageLoaded {
+                    notifications: reply.notifications,
                 }),
                 Err(e) => UiMessage::Action(ActionResult::Failed {
-                    context: "bluesky.feed.thread".into(),
+                    context: "fauna.notifications.list".into(),
                     error: e.to_string(),
                 }),
             };
@@ -6500,6 +6848,7 @@ impl FaunaClient {
             }
         }
         let nest_rpc_state = Arc::clone(&nest_rpc);
+        let session_actor = self.actor_id();
         self.spawn_bg(async move {
             let mut cs_rx = nest_rpc_state.connection_state();
             // Emit the initial state once.
@@ -6516,7 +6865,7 @@ impl FaunaClient {
                 if state == ConnectionState::Disconnected
                     && let Some(escalation) = nest_rpc_state
                         .supervisor_stop()
-                        .and_then(|stop| session_ending_escalation(&stop))
+                        .and_then(|stop| session_ending_escalation(&stop, session_actor.clone()))
                 {
                     tx_state.send(UiMessage::Data(escalation));
                     break;
@@ -6579,6 +6928,13 @@ impl FaunaClient {
         if let Ok(keypair) = secret_to_keypair(&self.secret_hex) {
             let nest_rpc_renew = Arc::clone(&nest_rpc);
             let tx_renew = self.tx.clone();
+            // The e2e build's agent can end the wait early (`auto_renew_wake`,
+            // convention 14) so a witness drives this production loop instead of
+            // waiting out its clock; a production build's `LoopWake` is empty and
+            // sleeps the clock. Fresh per spawn, so a departed loop's handle is
+            // fired by nothing.
+            let wake = crate::loop_wake::LoopWake::default();
+            *self.auto_renew_wake.borrow_mut() = Some(wake.clone());
             self.spawn_bg(async move {
                 let machine = crate::mail_glue::build_dns_management_machine_with_credentials(
                     Arc::clone(&nest_rpc_renew),
@@ -6586,7 +6942,7 @@ impl FaunaClient {
                     Arc::new(crate::account_runtime::handle),
                 );
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(
+                    wake.sleep(std::time::Duration::from_secs(
                         fauna_client_dns::auto_renew_poll_secs(),
                     ))
                     .await;
@@ -6718,19 +7074,21 @@ impl FaunaClient {
     // -----------------------------------------------------------------------
 
     /// The once-per-sign-in look for a newer version (`installers/README.md`
-    /// § Knowing a newer version is out): one unasked round trip through the
-    /// shared `fauna_client::update_look`, sending `DataMessage::UpdateAvailable`
-    /// only when a newer release is out. A failed look is silent by rule; the
-    /// asked check on Settings → General keeps its own error.
+    /// § Knowing a newer version is out): one unasked read of the newest
+    /// release the signed-in nest reports, through the shared
+    /// `fauna_client::update_look` — never the release host — sending
+    /// `DataMessage::UpdateAvailable` only when a newer release is out. A
+    /// failed look is silent by rule; the asked check on Settings → General
+    /// keeps its own error.
     pub fn check_for_updates(&self) {
         let tx = self.tx.clone();
-        let http = self.http.clone();
+        let nest_rpc = Arc::clone(&self.nest_rpc);
 
         self.spawn_bg(async move {
             // Small delay so the look doesn't race startup I/O.
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-            if let Some(tag) = crate::updater::look_at_sign_in(&http).await {
+            if let Some(tag) = crate::updater::look_at_sign_in(&nest_rpc).await {
                 tx.send(UiMessage::Data(DataMessage::UpdateAvailable {
                     version: tag.trim_start_matches('v').to_string(),
                     url: fauna_core::version::release_page_url(&tag),
@@ -8227,6 +8585,130 @@ async fn find_user_message<R: fauna_protocol::RpcRequester>(
     }
 }
 
+/// [`find_user_message`] for a typed `user@domain`: the shared cross-nest lookup,
+/// serialized as the `HandleResolved` shape plus `nest_url` (the peer the actor
+/// resolved on, `null` for a home-nest actor).
+async fn cross_nest_find_message<R>(rpc: &R, handle: &str, domain: &str) -> UiMessage
+where
+    R: fauna_protocol::RpcRequester,
+    R::Error: std::fmt::Display,
+{
+    use fauna_anon_client::AnonymousNestClient;
+    match fauna_client_core::find_user::find_user_across_nests(
+        rpc,
+        handle,
+        Some(domain),
+        |d| fauna_provisioning::probe::peer_nest_url(Some(d.to_string())),
+        |url| async move { AnonymousNestClient::connect(&url).await },
+    )
+    .await
+    {
+        Ok(hit) => UiMessage::Data(DataMessage::HandleResolved {
+            result: serde_json::json!({
+                "actor_id": hit.found.actor_id,
+                "handle": hit.found.handle,
+                "domain": hit.found.domain,
+                "nest_url": hit.nest_url,
+            }),
+        }),
+        Err(error) => UiMessage::Action(ActionResult::Failed {
+            context: "fauna.actor.by_handle".into(),
+            error,
+        }),
+    }
+}
+
+/// The Status page's "Files Synced" aggregate: `fauna.sync.files` per bound
+/// location, summed. Each binding holds its set's row (`LocationBinding::folder_id`),
+/// so the request carries it (`set-addressing.md` § The row form → *Whoever
+/// holds the row sends it*): a member location bound beside an own namesake
+/// counts the bound set's files, never the own set's. A fetch that fails is
+/// logged and excluded (best-effort, see `fetch_sync_status_summary`).
+async fn count_bound_files<R: fauna_protocol::RpcRequester>(
+    sync: &fauna_client_sync::SyncClient<R>,
+    folders: &[crate::sync::LocationBinding],
+) -> u64 {
+    let mut files_synced: u64 = 0;
+    for folder in folders {
+        let row = fauna_core::folder_keys::FolderRef::parse(&folder.folder_id);
+        match sync.files(folder.folder.clone(), row).await {
+            Ok(reply) => {
+                files_synced += reply.files.len() as u64;
+            }
+            Err(e) => tracing::warn!(
+                "fetch_sync_status_summary: fauna.sync.files failed for {:?} \
+                 (best-effort, excluded from the aggregate): {e}",
+                folder.folder
+            ),
+        }
+    }
+    files_synced
+}
+
+#[cfg(test)]
+mod count_bound_files_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Records every request payload and answers one file per set.
+    #[derive(Default)]
+    struct Recording(Mutex<Vec<serde_json::Value>>);
+
+    impl fauna_protocol::RpcRequester for Recording {
+        type Error = std::convert::Infallible;
+
+        async fn request<Req, Reply>(
+            &self,
+            kind: &'static str,
+            payload: Req,
+        ) -> Result<Reply, Self::Error>
+        where
+            Req: serde::Serialize,
+            Reply: serde::de::DeserializeOwned,
+        {
+            assert_eq!(kind, "fauna.sync.files");
+            self.0
+                .lock()
+                .unwrap()
+                .push(serde_json::to_value(&payload).unwrap());
+            Ok(serde_json::from_value(serde_json::json!({
+                "files": [{
+                    "path": "a.jpg",
+                    "manifest_hash": "00",
+                    "size_bytes": 1,
+                    "updated_at": 0,
+                }],
+            }))
+            .unwrap())
+        }
+    }
+
+    fn binding(folder: &str, folder_id: &str) -> crate::sync::LocationBinding {
+        crate::sync::LocationBinding {
+            path: std::path::PathBuf::from("/tmp/x"),
+            folder: folder.to_string(),
+            folder_id: folder_id.to_string(),
+        }
+    }
+
+    /// A bound location's `fauna.sync.files` names its row: a local ref stamps
+    /// `folder_id`, a foreign ref stamps none (the channel form addresses it).
+    #[tokio::test]
+    async fn the_files_count_names_each_bindings_row() {
+        let rec = Recording::default();
+        let sync = fauna_client_sync::SyncClient::new(&rec);
+        let channel = "ab".repeat(32);
+        let folders = [
+            binding("photos", "local:9"),
+            binding("photos", &format!("foreign:{channel}")),
+        ];
+        assert_eq!(count_bound_files(&sync, &folders).await, 2);
+        let sent = rec.0.lock().unwrap();
+        assert_eq!(sent[0]["folder_id"], 9, "{}", sent[0]);
+        assert!(sent[1].get("folder_id").is_none(), "{}", sent[1]);
+    }
+}
+
 #[cfg(test)]
 mod find_user_message_tests {
     use super::*;
@@ -8932,8 +9414,8 @@ async fn query_events_in_seeded(
 /// `WsAuthConnector` over a fresh `AnonymousNestClient` — the same path
 /// `LaunchMachine::start` drives) and use the returned `{handle, domain,
 /// tier}` to refresh the per-launch server-data cache. Called from
-/// `FaunaClient::silent_sign_in` on startup; the resulting fields are written
-/// into libsecret and pushed to the UI via `DataMessage::IdentityRefreshed`.
+/// `FaunaClient::silent_sign_in`, the e2e bridge's forced re-check; the
+/// resulting fields go through [`apply_self_identity`].
 ///
 /// Returns `Ok(None)` when the actor isn't registered on this nest — the
 /// `fauna.auth.not_registered` rejection on verify (the WS twin of the former
@@ -8968,17 +9450,55 @@ async fn do_silent_sign_in(
     ))
 }
 
+/// Write a nest-confirmed handle/domain/tier into the libsecret server-data
+/// cache and push `DataMessage::IdentityRefreshed` — the one merge behind both
+/// the session mint's identity watch ([`FaunaClient::follow_self_identity`])
+/// and the forced re-check ([`FaunaClient::silent_sign_in`]).
+///
+/// `store_account_cache_async` skips an empty handle (verify returns `""` when
+/// no handle is set on the nest), so this never clobbers a previously-cached
+/// handle with a blank. It awaits the ASYNC core because both callers run on
+/// the client's runtime, where the sync `store_account_cache` (which builds its
+/// own runtime + `block_on`) would panic with "Cannot start a runtime from
+/// within a runtime".
+async fn apply_self_identity(handle: String, domain: String, tier: String, tx: &UiSender) {
+    if let Err(e) = store_account_cache_async(Some(&handle), Some(&domain), Some(&tier)).await {
+        tracing::error!("account cache refresh failed: {e:#}");
+    }
+    tx.send(UiMessage::Data(DataMessage::IdentityRefreshed {
+        handle,
+        domain,
+        tier,
+    }));
+}
+
 /// The message a stopped supervisor's reason escalates as, if it is a
-/// session-ending verdict — the three the background silent sign-in escalates,
-/// read through the one shared classifier
-/// (`NestClientError::session_ending_verdict`). Every other stop (a clean
-/// close, a version skew, a mint fault) stays the connection indicator's.
-fn session_ending_escalation(stop: &NestClientError) -> Option<DataMessage> {
+/// session-ending verdict, read through the one shared classifier
+/// (`NestClientError::session_ending_verdict`). Three are the identity verdicts
+/// the forced re-check ([`FaunaClient::silent_sign_in`]) escalates too; since
+/// the launch stopped running a challenge of its own, this is how the session
+/// mint's own verdict reaches the launch surface (`security.md` § Post-auth
+/// surfacing, channel 3). The last two are the version verdicts — the nest
+/// refused this app's subprotocol as too old, or refused the re-mint as
+/// outdated (restarted into its degraded needs-update mode) — and the re-run
+/// launch lands the needs-update surface (`version-compatibility.md`
+/// § Dimension 4). Every other
+/// stop (a clean close, a mint fault) stays the connection indicator's.
+/// `session_actor` is the identity the stopped session spoke as — the one a
+/// `Superseded` verdict is about ([`DataMessage::IdentitySuperseded`]).
+fn session_ending_escalation(
+    stop: &NestClientError,
+    session_actor: Option<String>,
+) -> Option<DataMessage> {
     use fauna_client::SessionEndingVerdict as V;
     Some(match stop.session_ending_verdict()? {
         V::NestIdentityChanged => DataMessage::NestIdentityChanged,
-        V::Superseded => DataMessage::IdentitySuperseded,
+        V::Superseded => DataMessage::IdentitySuperseded {
+            actor_id_hex: session_actor,
+        },
         V::SignInRefused => DataMessage::SignInRefused,
+        V::AppOutdated => DataMessage::AppOutdated,
+        V::NestOutdated => DataMessage::NestOutdated,
     })
 }
 
@@ -9010,13 +9530,11 @@ fn adapt_verdict(
         SilentSignInVerdict::Superseded { new_actor_id_hex } => {
             Ok(SilentSignIn::Superseded { new_actor_id_hex })
         }
-        // A locked account: terminal in the shared classifier, but the locked
-        // surface (`devices.md` § The locked state, `ui/sessions.md` leg 2) is
-        // not built on linux yet, so for now it logs through the error path —
-        // every door refuses the bearer at use regardless.
-        SilentSignInVerdict::Locked { locked_until_secs } => Err(anyhow::anyhow!(
-            "this account is locked until {locked_until_secs} (Unix seconds)"
-        )),
+        // A locked account: the fourth escalating verdict (`devices.md` § The
+        // locked state) — the launch flow lands the locked surface.
+        SilentSignInVerdict::Locked { locked_until_secs } => {
+            Ok(SilentSignIn::Locked { locked_until_secs })
+        }
         SilentSignInVerdict::Failed { error } => Err(anyhow::anyhow!(error)),
     }
 }
@@ -9049,6 +9567,11 @@ enum SilentSignIn {
     /// device fleet*). The hex is the nest's **claimed** successor, carried for
     /// the log line only — nothing here presents it as fact.
     Superseded { new_actor_id_hex: String },
+    /// `fauna.auth.account_locked`: the account was locked while signed in. The
+    /// lock revoked every bearer and the nest mints no new one before
+    /// `locked_until_secs`, so the session is already dead — escalated like
+    /// [`Self::Superseded`], to the locked launch surface.
+    Locked { locked_until_secs: u64 },
 }
 
 /// The 32-byte identity secret behind `secret_hex`, for the pre-login
@@ -9075,15 +9598,26 @@ fn recovery_secret(secret_hex: &str) -> Option<[u8; 32]> {
 /// `FaunaClient` exists. **Only the public `nest_actor_id` crosses out** — the
 /// seed stays inside Rust. **Never errors**: a malformed secret or a failed
 /// source collapses to what the other source answered (possibly empty).
+/// The account-store root the pre-login recovery reads open — `None`, logged,
+/// when the process has no absolute home (the shared no-home refusal).
+fn recovery_store_root() -> Option<fauna_sync_engine::root::StoreRoot> {
+    fauna_sync_engine::root::StoreRoot::platform()
+        .inspect_err(|e| tracing::error!("recovery: no account-store root: {e:#}"))
+        .ok()
+}
+
 pub async fn load_recoverable_boxes(node_url: Option<&str>, secret_hex: &str) -> Vec<String> {
     let Some(secret) = recovery_secret(secret_hex) else {
         tracing::warn!("load_recoverable_boxes: malformed secret; no box list");
         return vec![];
     };
+    let Some(root) = recovery_store_root() else {
+        return vec![];
+    };
     fauna_client_account_runtime::deployment_seeds::recoverable_box_ids(
         node_url.map(str::to_string),
         secret,
-        fauna_sync_engine::root::StoreRoot::platform(),
+        root,
     )
     .await
 }
@@ -9114,7 +9648,7 @@ pub async fn load_selfhosted_recovery_command(
     fauna_client_account_runtime::deployment_seeds::selfhosted_command(
         node_url.map(str::to_string),
         secret,
-        fauna_sync_engine::root::StoreRoot::platform(),
+        recovery_store_root()?,
         nest_actor_id_hex,
     )
     .await
@@ -9137,7 +9671,7 @@ pub async fn run_deployment_seed_custody_leg(
     {
         tx.send(UiMessage::Action(ActionResult::Failed {
             context: "deployment-seed recovery custody".into(),
-            error: warning,
+            error: warning.resolve(crate::i18n::strings::lookup),
         }));
     }
 }
@@ -9308,14 +9842,19 @@ fn retired_mls_db_path(old_actor_hex: &str) -> std::path::PathBuf {
         .join("mls_state.db")
 }
 
-/// The succession ceremony's whole background half — `succeed_with_held_kit`,
-/// the seed persist, and whichever of the two arms the nest's reply lands on.
+/// The succession ceremony's whole background half — the shared
+/// [`fauna_client_recovery::ceremony::succeed_stolen_identity`] (its own
+/// anonymous connection, the seed persisted first, then the sweep or the
+/// reconcile) and, on a landed arm, the shared park + link
+/// ([`fauna_client_recovery::ceremony::record_landed_succession`]) BEFORE the
+/// fold switches the account: the link is where a bound launch follows the
+/// account to the successor, and the switch re-enters the launch machine.
 ///
-/// Mirrors tui's `Op::RecoveryStolen` body; everything with a decision in it is
-/// the shared `fauna_client_recovery::ceremony`'s, and what is left here is
-/// linux's own store-path resolution and its registry handle.
-async fn do_succeed_identity(
-    nest: Arc<NestClient>,
+/// The same composition tui runs from both of its ceremony surfaces; what is
+/// left here is linux's own store-path resolution and its registry handle.
+/// `old_engine` is the retired identity's live engine when the app is signed
+/// in, and `None` from the locked launch surface, which has no session.
+pub(crate) async fn do_succeed_identity(
     secret_hex: &str,
     phrase: &str,
     node_url: &str,
@@ -9327,120 +9866,31 @@ async fn do_succeed_identity(
         Ok(identity) => identity,
         Err(e) => return StolenOutcome::not_landed(e),
     };
-    let client = fauna_client_recovery::RecoveryClient::new(Arc::clone(&nest));
-    // The old identity rides as `old_identity`: this device still holds the seed
-    // (it is signed in), and `old_sig` is informational continuity — never
-    // load-bearing (`identity-succession.md` § The succession statement) — so
-    // supplying it changes no consumer's verdict.
-    let old_actor_id = identity.actor_id();
-    // A refusal before the submit is the not-landed arm: nothing moved, and
-    // the seed it minted authorizes nothing.
-    let attempt = match fauna_client_recovery::succeed_with_held_kit(
-        &client,
-        old_actor_id,
-        phrase,
-        Some(&identity),
-    )
-    .await
-    {
-        Ok(attempt) => attempt,
-        Err(e) => return StolenOutcome::not_landed(e),
-    };
-
-    // FIRST, before anything that can fail or block: make the successor seed
-    // durable. From the nest's commit until this line that seed is the only copy
-    // of the key the account now belongs to, and the sweep below makes network
-    // calls over every group.
-    //
-    // Read off the attempt rather than a matched arm: BOTH arms carry the seed,
-    // and the `Unconfirmed` one is precisely the case where the nest may already
-    // have committed while telling us it did not. Persisting only the confirmed
-    // arm would reproduce that finding one layer up. Hoisted rather than built
-    // inline because the `Unconfirmed` arm READS BACK through this same registry
-    // to decide whether it may claim the seed is saved, and a second registry
-    // over a second store handle could answer about a different store.
     let accounts = crate::account_registry();
-    if let Err(e) = accounts.add_account(attempt.successor_secret_hex(), Some(node_url), None) {
-        // Not fatal: the fold's adoption tries again and, failing that, puts the
-        // seed on screen as the only way back. Logged because this is the moment
-        // of maximum exposure.
-        tracing::error!(
-            "[settings/recovery] persisting the successor seed straight after the succession \
-             landed: {e}"
-        );
-    }
-
-    // Everything below is the *propagation* half — it can fail without unmaking
-    // the succession, so its errors ride the outcome as a report rather than
-    // turning the whole ceremony into an `Err`.
-    let outcome = match attempt {
-        fauna_client_recovery::SuccessionAttempt::Confirmed(handoff) => {
-            let sweep = fauna_client_recovery::ceremony::sweep_after_succession(
-                node_url,
-                old_engine.as_deref(),
-                &handoff,
-                successor_mls_db_path,
-            )
-            .await;
-            StolenOutcome::Landed(fauna_client_recovery::ceremony::LandedSuccession::new(
-                handoff.successor_secret_hex().to_string(),
-                handoff.new_actor_id,
-                sweep,
-                handoff.succeeded_at,
-            ))
-        }
-        fauna_client_recovery::SuccessionAttempt::Unconfirmed(unconfirmed) => {
-            fauna_client_recovery::ceremony::finish_unconfirmed_succession(
-                node_url,
-                old_engine.as_deref(),
-                unconfirmed.old_actor_id,
-                unconfirmed.successor_secret_hex(),
-                &unconfirmed.error,
-                &accounts,
-                successor_mls_db_path,
-            )
-            .await
-        }
-    };
-    let StolenOutcome::Landed(landed) = &outcome else {
-        return outcome;
-    };
-
-    // Record which row the retired identity is, durably, while we still know —
-    // and BEFORE the fold switches the account, which is load-bearing twice
-    // over. (1) `record_succession` is also where a **bound** launch follows the
-    // account to the successor (`account-scoping.md` § Concurrent instances →
-    // *The binding follows the account*); the switch re-enters the launch
-    // machine, whose bound-or-refuse gate would otherwise still see the retired
-    // id. (2) Nothing after the switch names that row, yet the retry below and
-    // the corpus re-seal need it at **every** later sign-in, on every device, to
-    // open blobs still sealed under the predecessor's `BackupKey`
-    // (`succession-aftermath.md` § Re-key scope) — and
-    // `ceremony::retry_predecessor` reads exactly this link to find the store it
-    // sweeps from. Without it the retry answers `NotLanded` on the one device
-    // that can actually finish the job.
-    //
-    // Never fatal: the succession has already landed on the nest, and a failure
-    // here costs the automatic re-seal and the retry, not the account.
-    //
-    // Parked FIRST, in the same registry: what only this ceremony knows (the
-    // sweep's roster, the nest's commit stamp) is the member-item and
-    // filter-mark raises' input, drained by the successor's post-store-ready
-    // pass — the single durable decision point of those raises
-    // (`fauna_client_recovery::aftermath::PendingCeremony`).
-    fauna_client_recovery::aftermath::PendingCeremony::new(
-        &old_actor_id,
-        &landed.sweep.review_roster(),
-        landed.succeeded_at,
+    let outcome = fauna_client_recovery::ceremony::succeed_stolen_identity(
+        node_url,
+        &identity,
+        phrase,
+        old_engine.as_deref(),
+        None,
+        &accounts,
+        successor_mls_db_path,
     )
-    .park(&accounts, &landed.new_actor_id.to_hex());
-    if let Err(e) =
-        accounts.record_succession(&old_actor_id.to_hex(), &landed.new_actor_id.to_hex())
-    {
-        tracing::warn!(
-            "[settings/recovery] recording the succession link failed — the corpus re-seal will \
-             not find this predecessor automatically, and the group-sweep retry will report that \
-             no move was recorded: {e}"
+    .await;
+    if let StolenOutcome::Landed(landed) = &outcome {
+        // The departed fleet first: off the live runtime while it is still
+        // the predecessor's, else (the locked surface) off its store at rest.
+        fauna_client_account_runtime::record_departed_fleet(
+            crate::account_runtime::handle().as_ref(),
+            &accounts,
+            fauna_sync_engine::root::StoreRoot::platform(),
+            &identity,
+        )
+        .await;
+        fauna_client_recovery::ceremony::record_landed_succession(
+            &accounts,
+            &identity.actor_id(),
+            landed,
         );
     }
     outcome
@@ -9632,6 +10082,83 @@ async fn build_and_send(
 /// for the typed refusal: offering the ask on a transport failure would tell an
 /// unsupervised user their account is supervised (`family-safety.md`
 /// § Feed-source approvals, rule (a) of the contacts half).
+/// A feed-manager failure from a post interaction as the action banner paints
+/// it: a stated refusal (words under a restricted post) reads as the shared
+/// `feed.reference_restricted` sentence; every other failure keeps its text.
+/// The reply send shared by the dialog and the `interact_with_post` arm:
+/// `reply_public_confirmed` when the dialog's answer is checked; else
+/// `prepare_sealed_reply` — bytes go through the composer's own upload +
+/// `submit_gated_post` / `abort_gated_submit` pair, nothing falls through to
+/// `reply` (public, or a stated refusal under a restricted post this reader
+/// cannot author under). tui's `send_reply`.
+async fn send_reply(
+    manager: &Arc<LinuxFeedManager>,
+    nest: &Arc<dyn crate::nest_content_api::NestContentApi>,
+    post_id: String,
+    body: String,
+    public_confirmed: bool,
+) -> Result<(), String> {
+    if public_confirmed {
+        return manager.reply_public_confirmed(post_id, body).await;
+    }
+    match manager
+        .prepare_sealed_reply(post_id.clone(), body.clone())
+        .await?
+    {
+        Some(sealed) => {
+            let sidecar = manager.gated_upload_sidecar();
+            match fauna_client::upload_sealed_post_blob(&**nest, sidecar, sealed).await {
+                Ok(hash) => manager.submit_gated_post(hash).await,
+                Err(e) => {
+                    tracing::warn!("reply: sealed blob upload failed: {e}");
+                    manager.abort_gated_submit(e.to_string());
+                    Err(e.to_string())
+                }
+            }
+        }
+        None => manager.reply(post_id, body).await,
+    }
+}
+
+fn interact_failure(e: String) -> ActionResult {
+    match fauna_feed::refusal_i18n_key(&e).and_then(crate::i18n::strings::lookup) {
+        Some(sentence) => ActionResult::FailedLocalized {
+            message: sentence.to_string(),
+        },
+        None => ActionResult::Failed {
+            context: "fauna.posts.interact".into(),
+            error: e,
+        },
+    }
+}
+
+#[cfg(test)]
+mod interact_failure_tests {
+    use super::*;
+
+    // `fauna_client_core::post::REFERENCE_REFUSED_RESTRICTED`, spelled out so a
+    // moved text fails here, as in windows' `FeedVerbErrorCopyTests`.
+    const REFUSAL: &str = "this post is restricted to a smaller audience, and a reply or quote \
+                           with text would be public — it was not sent";
+
+    #[test]
+    fn a_restricted_reply_refusal_paints_the_shared_string() {
+        let expected = crate::i18n::strings::lookup("feed.reference_restricted").unwrap();
+        match interact_failure(REFUSAL.to_string()) {
+            ActionResult::FailedLocalized { message } => assert_eq!(message, expected),
+            _ => panic!("the refusal must paint the localized string"),
+        }
+    }
+
+    #[test]
+    fn any_other_failure_keeps_its_own_text() {
+        match interact_failure("nest unreachable".to_string()) {
+            ActionResult::Failed { error, .. } => assert_eq!(error, "nest unreachable"),
+            _ => panic!("a plain failure must keep its text"),
+        }
+    }
+}
+
 fn feed_source_refusal(
     e: &fauna_client::NestClientError,
     bridge_id: &str,
@@ -9881,6 +10408,8 @@ fn download_snapshot_file_and_save(
     nest_rpc: Arc<NestClient>,
     device_id: [u8; 32],
     secret_hex: &str,
+    snapshot_nonces: Option<fauna_client_sync::SetNonceSource>,
+    set: fauna_client_snapshots::SnapshotSet,
     manifest_hash: fauna_core::data::ContentHash,
     relative_path: &str,
     save_path: &str,
@@ -9904,10 +10433,24 @@ fn download_snapshot_file_and_save(
     };
     let result = rt.block_on(async move {
         let engine = fauna_sync_engine::engine_lifecycle::build_restore_engine(
-            auth, nest_rpc, device_id, secret_hex,
+            auth,
+            nest_rpc,
+            device_id,
+            secret_hex,
+            snapshot_nonces,
         );
+        // The ONE snapshot entry reader (`backup-restore.md` § Security
+        // Properties → Integrity): the entry, sealed or plaintext, licensed by
+        // the judged change row of the snapshot's set that named its manifest
+        // under its path, before any byte.
         engine
-            .download_file_bytes_by_manifest(manifest_hash, None, relative_path)
+            .download_snapshot_entry_bytes(
+                &set,
+                &fauna_sync_engine::engine::SnapshotFileToRestore {
+                    relative_path: relative_path.to_string(),
+                    manifest_hash,
+                },
+            )
             .await
     });
     match result {
@@ -10002,7 +10545,16 @@ pub fn install_logging() {
 /// derivation for every writer (this app, tui) and consumer (the sync agent),
 /// per `security.md` § Pin custody rule 1.
 pub fn install_disk_pin_store() {
-    let dir = fauna_client::cert_binding::install_scoped_trust_home();
+    // No absolute home → refuse: a `/tmp` pin file another local
+    // account pre-planted would decide which certificate this app trusts. The
+    // in-memory default pin store stays installed (first-trust per run).
+    let Some(dir) = fauna_client::cert_binding::install_scoped_trust_home() else {
+        tracing::error!(
+            "nest-identity pin store NOT persisted: {}",
+            fauna_core::platform_ids::NO_HOME_REFUSAL
+        );
+        return;
+    };
     let _ = std::fs::create_dir_all(&dir);
     tracing::info!("nest-identity pin store under {}", dir.display());
     fauna_client::trust::install_pin_store(std::sync::Arc::new(
@@ -10490,23 +11042,30 @@ mod silent_sign_in_adapter_tests {
 
     /// A supervisor that stopped because the nest refused its post-4401
     /// re-mint — the user suspended mid-session — escalates to the launch
-    /// surface; an ordinary stop stays the connection indicator's.
+    /// surface, and so does one the nest refused as too old for it; an
+    /// ordinary stop stays the connection indicator's.
     #[test]
     fn a_stopped_supervisors_session_ending_reason_escalates_and_nothing_else_does() {
         use crate::app::DataMessage;
         use fauna_client::NestClientError as E;
         assert!(matches!(
-            super::session_ending_escalation(&E::Rpc(fauna_protocol::RpcError::not_registered())),
+            super::session_ending_escalation(
+                &E::Rpc(fauna_protocol::RpcError::not_registered()),
+                None
+            ),
             Some(DataMessage::SignInRefused)
+        ));
+        assert!(matches!(
+            super::session_ending_escalation(&E::SubprotocolMismatch, None),
+            Some(DataMessage::AppOutdated)
         ));
         for ordinary in [
             E::RpcDisconnected {
                 was_in_flight: false,
             },
-            E::SubprotocolMismatch,
             E::Auth("(401) fauna.auth.signature_failed".into()),
         ] {
-            assert!(super::session_ending_escalation(&ordinary).is_none());
+            assert!(super::session_ending_escalation(&ordinary, None).is_none());
         }
     }
 }

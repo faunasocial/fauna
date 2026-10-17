@@ -468,6 +468,19 @@ pub fn task_delegation_option_label(
     ))
 }
 
+/// The stable cross-app picker key for one option (`"automatic"` /
+/// `"this-device"` / a participant's hex) — the one shared decision in
+/// `fauna_core::delegation::option_key`, so all four native apps derive the
+/// same `<option value>` the e2e driver selects by.
+///
+/// # Errors
+///
+/// `FfiError::General` if `option` embeds a nest pubkey that is not 32 bytes.
+#[uniffi::export]
+pub fn task_delegation_option_key(option: FfiPinOption) -> Result<String, FfiError> {
+    Ok(fauna_core::delegation::option_key(&option.into_core()?))
+}
+
 // ── The machine ──
 
 /// FFI handle over the shared [`TaskDelegationView`] for one actor on one device.

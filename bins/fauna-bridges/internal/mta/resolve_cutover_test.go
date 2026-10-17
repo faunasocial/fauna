@@ -495,6 +495,45 @@ func TestRcptForwarderAcceptedAndRecorded(t *testing.T) {
 	}
 }
 
+// TestSecondTransactionDoesNotInheritEarlierRecipients: the resolved recipients
+// are transaction-scoped, like `rcpts`. A sending MTA that caches its connection
+// hands several messages over one session; the second message must reach only
+// the second envelope's recipients — never the first's again (that would
+// deliver message 2 to message 1's recipient).
+func TestSecondTransactionDoesNotInheritEarlierRecipients(t *testing.T) {
+	t.Parallel()
+	mc := newMockCaller()
+	admin := bytes.Repeat([]byte{0x07}, 32)
+	mc.decisions["sales@test.example"] = rcptDecision{forward: true, forwardTarget: "team@example.net", forwarderActorID: admin}
+	s := forwarderSession(mc, admin, "oldaccount@example.net", "alice@example.org")
+	s.sleep = func(time.Duration) {}
+
+	first := "From: alice@example.org\r\nMessage-ID: <m1@example.org>\r\n\r\none\r\n"
+	if err := s.Data(bytes.NewReader([]byte(first))); err != nil {
+		t.Fatalf("first Data: %v", err)
+	}
+	s.Reset() // go-smtp resets the session after every DATA
+
+	if err := s.Mail("bob@example.org", nil); err != nil {
+		t.Fatalf("second MAIL: %v", err)
+	}
+	if err := s.Rcpt("sales@test.example", nil); err != nil {
+		t.Fatalf("second RCPT: %v", err)
+	}
+	second := "From: bob@example.org\r\nMessage-ID: <m2@example.org>\r\n\r\ntwo\r\n"
+	if err := s.Data(bytes.NewReader([]byte(second))); err != nil {
+		t.Fatalf("second Data: %v", err)
+	}
+
+	if got := len(mc.forwardRequests); got != 2 {
+		t.Fatalf("one forward per transaction: got %d; reqs=%+v", got, mc.forwardRequests)
+	}
+	if fr := mc.forwardRequests[1]; fr.destination != "team@example.net" || fr.originalMsgID != "m2@example.org" {
+		t.Errorf("the second message must reach only its own recipient: got %q for %q",
+			fr.destination, fr.originalMsgID)
+	}
+}
+
 // TestStampHeaderLines covers the pure helper: nil/empty → nil (prependHeaders
 // then returns the buffer untouched), and each StampedHeader renders as a
 // "Name: Value" line.

@@ -113,7 +113,12 @@ test-helpers = [
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 fauna-core = { path = "../fauna-core", default-features = false, features = ["js", "qr_render", "blob-fetch-wasm"] }
 fauna-client-core = { path = "../fauna-client-core", features = ["js"] }
-fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"] }
+# `find_user_across_nests`' peer URL: the pure domain→base-URL derivation
+# (`probe::peer_nest_url`) that decides where a foreign Find User hop dials.
+# default-features = false keeps reqwest's native TLS/tokio out of wasm, the form
+# fauna-wasm-onboarding and fauna-client-conversations use.
+fauna-provisioning = { path = "../fauna-provisioning", default-features = false, features = ["js"] }
+fauna-mls ={ path = "../fauna-mls", default-features = false, features = ["js"] }
 # Client-side inbound-mail decrypt (`open_inbound_record`) for the conversations
 # SMTP receive rail (`src/conversations.rs`). default-features = false +
 # `segments-receive` pulls only the WASM-safe codec + `wrapped_blob` HPKE unseal
@@ -215,6 +220,10 @@ fauna-client-family = { path = "../fauna-client-family" }
 # The gated-feature plane's transparency read + the shared row shape the SPA
 # renders (`featuresStatus`), so web says what the native apps say.
 fauna-client-features = { path = "../fauna-client-features" }
+# The Status page's node leg and clock-free text projection (`ui/status.md` §
+# State & data shape) — `statusNode` / `statusText`; no `agent`/`local-clock`
+# (web has no local sync agent and no OS clock behind the relative time).
+fauna-client-status = { path = "../fauna-client-status" }
 # The region content plane's app side (src/region.rs, `WasmRegionPlane`).
 fauna-client-region = { path = "../fauna-client-region" }
 fauna-client-bridges = { path = "../fauna-client-bridges" }
@@ -401,7 +410,7 @@ fauna-client-push = { path = "../fauna-client-push" }
 # `fauna.search.query`, the twin of `GET /api/v1/search`. Wasm-clean
 # (fauna-protocol only); mirrors the linux native binding.
 #
-fauna-client-search = { path = "../fauna-client-search" }
+fauna-client-search = { path = "../fauna-client-search", features = ["query"] }
 # Shared log ring (`src/logs.rs`) — the web twin of the native `fauna-log`
 # subscriber install + snapshot reads behind the Settings → Logs page. Web is
 # ring-only (no filesystem): `RingLayer` + the browser console, no rolling file

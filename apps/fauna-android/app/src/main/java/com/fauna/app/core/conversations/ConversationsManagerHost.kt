@@ -6,6 +6,7 @@ import com.fauna.app.testing.TestAgent
 import com.fauna.app.widget.WidgetUnreadPublisher
 import com.fauna.ffi.FfiContactOverlays
 import com.fauna.ffi.FfiDraftsSync
+import com.fauna.ffi.FfiException
 import com.fauna.ffi.FfiNestClient
 import com.fauna.ffi.autosaveDebounceMs
 import kotlinx.coroutines.CoroutineScope
@@ -322,6 +323,7 @@ class ConversationsManagerHost @Inject constructor(
         mlsDbPath: String,
         predecessorBackupKeys: List<ByteArray>,
         recordingDevice: String?,
+        accounts: com.fauna.ffi.FfiAccountRegistry?,
     ) {
         if (TestAgent.isE2EActive && !TestAgent.isRealConversationsActive) return
         synchronized(this) {
@@ -350,11 +352,28 @@ class ConversationsManagerHost @Inject constructor(
                     null,
                     predecessorBackupKeys,
                     recordingDevice,
+                    // The registry: Rust resolves this session's attested
+                    // predecessor ids off it once for the content-index reader,
+                    // the launch resume and the served-set walk (ruling (8)(b)
+                    // source (ii)).
+                    accounts,
                 )
+            } catch (e: FfiException.StateNeedsNewerApp) {
+                // A newer build wrote this account's `mls.db` with a breaking
+                // change (`ui/conversations.md` § Errors & edge cases, the sixth
+                // standing truth): the store is intact and untouched. This arm
+                // builds over the FRESH-MANAGER factory, which has no manager
+                // to arm, so the standing flag goes on the observed
+                // [bareManager] — the page-error chain reads it from
+                // [manager]. Everything non-conversations proceeds.
+                ShellLog.w("ConversationsSession", "state needs a newer app: ${e.message}")
+                bareManager.setEngineStateNeedsNewerApp(true)
+                return
             } catch (e: Exception) {
                 ShellLog.w("ConversationsSession", "build failed: ${e.message}")
                 return
             }
+            bareManager.setEngineStateNeedsNewerApp(false)
             conversationsSession = session
             this.nestClient = nestClient
             val m = session.manager()
@@ -409,6 +428,8 @@ class ConversationsManagerHost @Inject constructor(
             conversationsSession = null
             nestClient = null
             sessionManager = null
+            // A newer-build verdict belonged to the outgoing identity's store.
+            bareManager.setEngineStateNeedsNewerApp(false)
             // The next identity's restored threads are not new messages: a fresh
             // tracker seeds on them silently (MessageBannerObserver's reset doc).
             banners.resetForIdentityChange()
@@ -428,25 +449,13 @@ class ConversationsManagerHost @Inject constructor(
      * left non-fatal — the `FfiDraftsSync` launch gate then stays closed, so a
      * later autosave can't clobber the unread blob (no-data-loss).
      *
-     * The target manager and its identity epoch are read HERE, before the
-     * load starts — never after it returns. [manager] is a getter over the
-     * CURRENT session, so a reply the outgoing account's fetch delivers after
-     * a switch would otherwise fill the incoming account's manager; the
-     * epoch-checked restore (`restoreDraftsAt`) also refuses it on a manager
-     * cleared in between (`account-scoping.md` § The scoping taxonomy — the
-     * writers of account-scoped state retire with the drop).
+     * The target manager and its identity epoch are read before the load
+     * starts, never after it returns — see [launchDraftsRestore], which holds
+     * the capture and is pinned by `DraftsRestoreCaptureTest`.
      */
     fun startDraftsSync(sync: FfiDraftsSync) {
         synchronized(this) { draftsSync = sync }
-        val target = manager
-        val epoch = target.identityEpoch()
-        draftsScope.launch {
-            try {
-                sync.load()?.let { target.restoreDraftsAt(epoch, it) }
-            } catch (e: Exception) {
-                ShellLog.w("ConversationsDrafts", "restore drafts failed: ${e.message}")
-            }
-        }
+        launchDraftsRestore(draftsScope, sync) { ManagerDraftsRestoreTarget(manager) }
     }
 
     /**

@@ -59,6 +59,9 @@ public sealed partial class SettingsMemberReviewPage : Page, IAsyncLoadedPage
     {
         base.OnNavigatedFrom(e);
         _vm?.CleanupReconnect();
+        if (_vm is null) return;
+        _vm.CleanupStoreChange();
+        _vm.StoreResynced -= RenderState;
     }
 
     private ConversationsManager Manager =>
@@ -72,6 +75,12 @@ public sealed partial class SettingsMemberReviewPage : Page, IAsyncLoadedPage
             _vm ??= new MemberReviewViewModel(_clients.Rpc);
             await _vm.LoadAsync(Manager);
             RenderState();
+            // The shared store-change notice (account-runtime.md § A runtime's own
+            // pump is a source of the notice too): a person put up for review
+            // paints on this open page with no re-visit.
+            _vm.StoreResynced -= RenderState;
+            _vm.StoreResynced += RenderState;
+            _vm.WatchStore(() => Manager);
         }
         finally
         {

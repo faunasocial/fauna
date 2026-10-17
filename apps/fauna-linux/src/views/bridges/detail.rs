@@ -589,9 +589,7 @@ pub fn populate_follows_list(
     follows: &[BridgeFollow],
     on_remove: impl Fn(&str) + Clone + 'static,
 ) {
-    while let Some(child) = follows_list.first_child() {
-        follows_list.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(follows_list);
 
     for follow in follows {
         let display = follow_display(follow);

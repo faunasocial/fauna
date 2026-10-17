@@ -95,6 +95,7 @@
       type="checkbox"
       data-testid={IDS.ADMIN_FILES_WEBDAV_ENABLED_TOGGLE}
       checked={webdavEnabled}
+      data-state={webdavEnabled ? 'on' : 'off'}
       disabled={busy && !snap}
       onchange={handleToggleEnabled}
     />

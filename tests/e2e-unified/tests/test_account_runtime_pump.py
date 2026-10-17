@@ -26,7 +26,13 @@ no pass by design, so its counters sit frozen at `(0, 0)` — a *correct* readin
 for a healthy app. Measured 2026-08-18 in a single run, same code: linux reached
 `(4, 3)` on one app instance while both linux and tui sat frozen on a later one.
 So every assertion below is **gated on the role**, and the two roles get
-different, both-meaningful assertions.
+different, both-meaningful assertions. Since 2026-10-08 the race has a rule:
+on a desktop whose agent is up, the settled holder is the agent
+(`account-runtime.md` § Multi-instance concurrency → *The agent holds the role
+when present*) — the app holds at most until its agent mounts, then yields and
+nudges the agent to take the role at once. That makes the settled role
+predictable, never the role at an instant: a role read in the first seconds
+after sign-in may still be the app's, so the gate stays.
 
 ⚠ Never assert a wall-clock delay here (convention 14). The pump has a
 30 s-class backstop ticker, so "sleep and hope" would be defunct by
@@ -201,8 +207,8 @@ def test_the_device_set_reader_answers_a_report_on_every_app_hosting_the_runtime
     """The fleet-removal convergence reader is BUILT on this app: an id no device
     carries reads `{"found": false}`, never `None`.
 
-    `docs/goal/architecture/account-data-taxonomy.md` § The generation machinery
-    → *Fleet-scope reclamation*, clause (4): `device_set_state` is the e2e's
+    `docs/goal/architecture/fleet-scope-reclamation.md`
+    § *Fleet-scope reclamation*, clause (4): `device_set_state` is the e2e's
     only observation path over the `fauna.state.device-set` plane, and
     `test_crash_recovery_journeys._require_device_set_reader` treats **any
     non-`None` answer as "the reader is built"** — so an app that answers `None`
@@ -269,7 +275,6 @@ def test_the_device_set_reader_reports_not_found_before_any_sign_in(app):
     assert _device_set_report(raw) == {"found": False}, f"got {raw!r}"
 
 
-@pytest.mark.windows
 @pytest.mark.parametrize(
     "payload",
     [{}, {"device_id_hex": 7}],
@@ -281,7 +286,10 @@ def test_a_device_set_state_command_without_a_string_device_id_is_refused_loudly
 
     Convention 11's bad-payload clause. A silent not-found would make every
     journey assertion of the form "the row is NOT there" pass on a typo'd key:
-    a vacuous green. Apple's `DeviceSetStateTestCommand` refuses the same way.
+    a vacuous green. Every app refuses the same way: apple's
+    `DeviceSetStateTestCommand`, windows, tui, linux and android through their
+    agent-failure slot, web by throwing out of `_execute_js` (the second
+    legal channel, as in `test_agent_refuses_unknown_command.py`).
 
     ⚠ **The assertion must name the field, not merely the command.** Before the
     arm exists the dispatcher's `default:` refusal already names
@@ -294,15 +302,21 @@ def test_a_device_set_state_command_without_a_string_device_id_is_refused_loudly
         f"Current text: {app.error_text()!r}"
     )
 
-    raw = app.driver.call_command("device_set_state", payload)
+    surfaced = ""
+    try:
+        raw = app.driver.call_command("device_set_state", payload)
+    except Exception as exc:  # web's throw channel — loud, and that is the point
+        raw = None
+        surfaced = f"{type(exc).__name__}: {exc}"
+    else:
+        surfaced = app.error_text()
 
     assert raw is None, (
         f"a refused command must leave the result slot empty, got {raw!r} — "
         "a value there is a stale neighbour's answer or a not-found report "
         "standing in for a refusal"
     )
-    refusal = app.error_text()
-    assert "device_id_hex" in refusal, (
+    assert "device_id_hex" in surfaced, (
         f"payload {payload!r} was not refused on the field it got wrong. Got "
-        f"{refusal!r}; the arm must say it needs a `device_id_hex` string."
+        f"{surfaced!r}; the arm must say it needs a `device_id_hex` string."
     )

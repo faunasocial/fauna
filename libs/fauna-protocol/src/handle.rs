@@ -33,7 +33,8 @@
 ///
 /// One hard-coded list, shared by the nest's register/discovery/invite/
 /// handle-change gates (`RegistrationConfig::default()`) and `fauna-router`'s
-/// pre-flight checks. Nobody *chooses* this list — it is a correctness
+/// pre-flight checks — always through [`reserved_handles`], which adds the six
+/// mail role names. Nobody *chooses* this list — it is a correctness
 /// constant, not a policy — so it is a Rust constant, never a config key, CLI
 /// flag, or env var. (Both the nest's `--reserved-handle` flag and the
 /// router's `[registration] reserved_handles` TOML key were exactly that
@@ -69,13 +70,28 @@ pub const RESERVED_HANDLES: &[&str] = &[
     "system",
 ];
 
-/// `true` when `handle` is on the [`RESERVED_HANDLES`] list. Case-insensitive:
+/// Every handle no user may register: [`RESERVED_HANDLES`] followed by each mail
+/// role name (`fauna_core::mail_aliases::DEFAULT_RESERVED_LOCAL_PARTS`) the list
+/// does not already carry. A handle is also its owner's canonical mail address,
+/// and the six role names are a floor no member may hold as an address
+/// (`docs/goal/behavior/mail-aliases.md` § Reserved local-parts) — so they are
+/// derived from the one mail constant here rather than copied into the list,
+/// and a seventh role name cannot be forgotten. Every gate reads this, never
+/// [`RESERVED_HANDLES`] alone.
+pub fn reserved_handles() -> impl Iterator<Item = &'static str> {
+    RESERVED_HANDLES.iter().copied().chain(
+        fauna_core::mail_aliases::DEFAULT_RESERVED_LOCAL_PARTS
+            .iter()
+            .copied()
+            .filter(|role| !RESERVED_HANDLES.contains(role)),
+    )
+}
+
+/// `true` when `handle` is one of [`reserved_handles`]. Case-insensitive:
 /// stored handles are lowercase by [`validate_handle`], but pre-flight callers
 /// (`fauna-router`) see raw client input.
 pub fn is_reserved_handle(handle: &str) -> bool {
-    RESERVED_HANDLES
-        .iter()
-        .any(|r| r.eq_ignore_ascii_case(handle))
+    reserved_handles().any(|r| r.eq_ignore_ascii_case(handle))
 }
 
 pub fn validate_handle(handle: &str) -> Result<(), &'static str> {
@@ -183,6 +199,27 @@ mod tests {
         // treatment `relay` got when its route landed.
         assert!(super::is_reserved_handle("pds"));
         assert!(super::is_reserved_handle("PDS"));
+    }
+
+    #[test]
+    fn every_mail_role_name_is_a_reserved_handle() {
+        // A handle is its owner's canonical mail address, so a handle equal to a
+        // role name would take that role's mail (`mail-aliases.md` § Reserved
+        // local-parts — the six are a floor no member may hold).
+        for role in fauna_core::mail_aliases::DEFAULT_RESERVED_LOCAL_PARTS {
+            assert!(
+                super::is_reserved_handle(role),
+                "mail role name {role:?} must be a reserved handle"
+            );
+            assert_eq!(
+                super::reserved_handles().filter(|h| h == role).count(),
+                1,
+                "{role:?} must appear exactly once in reserved_handles()"
+            );
+        }
+        for h in ["noc", "tlsrpt", "dmarc-report", "TLSRPT"] {
+            assert!(super::is_reserved_handle(h), "{h:?} must be reserved");
+        }
     }
 
     #[test]

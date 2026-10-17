@@ -27,10 +27,18 @@ account-port = ["dep:fauna-account-port", "dep:serde_bytes"]
 # `NestClient`, wasm `fauna-rpc-wasm`'s `WsRpcClient`) and forwards the wizard
 # crate's `rpc-glue` so `build_folder_wizard_machine` is available. Mirrors
 # `fauna-folders-machine`'s `rpc-glue`.
+# The website toggle's subdomain read (`nest_api::ws_rpc` — the WS-RPC
+# adapter's `web_subdomain_enabled` over `fauna-client-web`). Its own feature,
+# off by default, so a build that excises web publishing (the kids flavor —
+# `dynamic-features.md` § Compile-time excision) carries no web-plane sender:
+# without it the adapter answers the trait's `None` and the hint hedges.
+# Rule (b): a flavor root forwards it from its OWN feature (fauna-ffi's
+# `web-content`), never on the dependency line, so `--no-default-features`
+# genuinely drops it. Meaningful only beside `rpc-glue`.
+web = ["dep:fauna-client-web"]
 rpc-glue = [
     "dep:fauna-client-folders",
     "dep:fauna-client-sync",
-    "dep:fauna-client-web",
     "dep:fauna-client",
     "dep:fauna-client-config",
     "dep:fauna-rpc-wasm",
@@ -126,6 +134,6 @@ tokio = { workspace = true }
 # build only (the `#[cfg(any(test, feature = "..."))]` items aren't visible to
 # `tests/*.rs` otherwise). `rpc-glue` so the native ws_rpc seam + its unit tests
 # compile under `cargo test`. Mirrors fauna-folders-machine.
-fauna-devices-machine = { path = ".", features = ["test-helpers", "test-observer", "rpc-glue", "account-port"] }
+fauna-devices-machine = { path = ".", features = ["test-helpers", "test-observer", "rpc-glue", "web", "account-port"] }
 # The loopback the `port` module's tests wire forwarder → `serve` through.
 fauna-account-port = { workspace = true, features = ["test-helpers"] }

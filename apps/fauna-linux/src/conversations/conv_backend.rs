@@ -133,6 +133,7 @@ pub fn start_conversations_session(
     secret_hex: &str,
     runtime: &tokio::runtime::Handle,
     mls_predecessors: Vec<BackupKey>,
+    mls_predecessor_actors: Vec<fauna_core::identity::ActorId>,
     tx: crate::client::UiSender,
 ) {
     let self_actor = mls_engine.identity_actor_id();
@@ -337,6 +338,11 @@ pub fn start_conversations_session(
     // knock. The same shared `NestFolderGate` the FFI factory injects
     // (`fauna-ffi` `nest_client.rs`) — one gate fleet-wide (priority #2).
     session.register_folder_gate(Arc::new(NestFolderGate::new(Arc::clone(&nest))));
+    // The recipient picker's contacts (`conversations.md` § Where logic lives →
+    // *Recipient suggestions*) — the one shared roster source.
+    session.register_contact_roster(Arc::new(
+        fauna_client_conversations::NestContactRoster::new(Arc::clone(&nest)),
+    ));
 
     // Member content-key custody ingest (Phase 0 — the read leg; `folders.md` §
     // Sharing): on join and on each rotation-commit receipt, the session fetches
@@ -392,8 +398,15 @@ pub fn start_conversations_session(
     // reports the pass's progress through `AftermathUpdate::MlsReseal` the same
     // way `succession_aftermath.rs`'s other legs do, so `recovery-kit-mls-reseal-status`
     // stops reading empty.
-    let mls_sync = keypair_from_hex(secret_hex)
-        .map(|keypair| Arc::new(build_mls_sync(&nest, &keypair, mls_predecessors, tx)));
+    let mls_sync = keypair_from_hex(secret_hex).map(|keypair| {
+        Arc::new(build_mls_sync(
+            &nest,
+            &keypair,
+            mls_predecessors,
+            mls_predecessor_actors,
+            tx,
+        ))
+    });
     match &mls_sync {
         // The plane exists from here, so no key-package mint may publish until
         // `wire_mls_state_sync` injects its save-before-publish seam (or gives up).
@@ -571,6 +584,7 @@ fn build_mls_sync(
     nest: &Arc<NestClient>,
     keypair: &ActorKeypair,
     mls_predecessors: Vec<BackupKey>,
+    mls_predecessor_actors: Vec<fauna_core::identity::ActorId>,
     tx: crate::client::UiSender,
 ) -> MlsStateSync {
     MlsStateSync::new(
@@ -578,6 +592,9 @@ fn build_mls_sync(
         keypair,
     )
     .with_predecessors(mls_predecessors)
+    // The walk's actor half: the restore door parks the retired leaf it finds
+    // at this identity's `provider` path under the predecessor these name.
+    .with_predecessor_actors(mls_predecessor_actors)
     .with_reseal_sink(Box::new(move |progress| {
         tx.send(crate::app::UiMessage::Data(
             crate::app::DataMessage::AftermathProgress(
@@ -849,8 +866,10 @@ fn block_on_e2e<F: std::future::Future>(fut: F) -> Result<F::Output, String> {
 pub fn e2e_accept_recipient() -> bool {
     let m = crate::conversations::manager();
     if let Some(rt) = e2e_runtime() {
-        let m_resolve = m.clone();
-        rt.block_on(async move { m_resolve.resolve_recipient().await });
+        // The same body the picker's on-accept handler runs.
+        return rt.block_on(async move {
+            crate::conversations::host::resolve_accept_and_refresh(&m).await
+        });
     }
     m.accept_current_recipient_chip()
 }
@@ -858,8 +877,8 @@ pub fn e2e_accept_recipient() -> bool {
 /// `conversations_real_resolve_send_new`: start a new FaunaMls conversation by
 /// **resolving** the typed `recipient` through the real backend probe (no
 /// `actor_id` injection) and send `body`. Types `recipient` into the new-thread
-/// picker, drives `resolve_recipient` (which probes
-/// `fauna.conversations.keypackage.count` to promote a 64-hex actor id to
+/// picker, drives `resolve_recipient` (which asks the boolean
+/// `fauna.conversations.keypackage.addressable` to promote a 64-hex actor id to
 /// `TypedAddress::Fauna`), commits the resolved chip, then `send_new_thread`
 /// bootstraps the group (fetch key package → create MLS group → deliver Welcome
 /// → post Application envelope). The end-to-end proof that the recipient picker
@@ -1124,7 +1143,14 @@ mod succession_fallback_tests {
             &NestClient::new("http://127.0.0.1:1".to_string(), ActorKeypair::generate()),
             &ActorKeypair::generate(),
             retired,
+            vec![ActorKeypair::generate().actor_id()],
             tx,
+        );
+        assert_eq!(
+            sync.predecessor_actor_count(),
+            1,
+            "the walk's actor half reaches the plane, or the restore door parks \
+             no retired leaf and the first save destroys it"
         );
         assert_eq!(
             sync.predecessor_count(),
@@ -1146,8 +1172,10 @@ mod succession_fallback_tests {
             &NestClient::new("http://127.0.0.1:1".to_string(), ActorKeypair::generate()),
             &ActorKeypair::generate(),
             Vec::new(),
+            Vec::new(),
             tx,
         );
         assert_eq!(sync.predecessor_count(), 0);
+        assert_eq!(sync.predecessor_actor_count(), 0);
     }
 }

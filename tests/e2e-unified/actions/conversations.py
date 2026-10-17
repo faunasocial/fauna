@@ -147,16 +147,15 @@ class ConversationsActions:
     def resolve_recipient(self, recipient: str) -> str:
         """Open the new-conversation composer, type ``recipient``, and wait for
         the recipient picker to reach a terminal resolve state. Returns the
-        state string (``"resolved"`` or ``"error"``) read while the composer is
-        still open.
+        state string (``"resolved"``, ``"not-found"`` or ``"error"`` — the
+        three terminal tokens of ``fauna_conversations::compose::ResolveState``)
+        read while the composer is still open.
 
         Unlike ``start_new_conversation``, this does NOT accept a chip or send.
         Sending replaces the new-thread composer with the thread view, which
         destroys the ``recipient-resolve-status`` element — so any test that
         asserts on the *resolve status* must read it before a send, while the
-        composer is still on screen. Mirrors the inline picker-only flow in
-        ``test_rail_locks_after_first_chip`` (which reads picker state without
-        sending and passes).
+        composer is still on screen.
         """
         self.navigate()
         self.driver.click("new-conversation-button")
@@ -199,8 +198,22 @@ class ConversationsActions:
         sidesteps that by calling AcceptCurrentForTest on the visible
         RecipientPicker UserControl on the UI thread.
         """
-        if self.driver.count("recipient-picker-suggestion") > 0:
-            self.driver.click("recipient-picker-suggestion", index=0)
+        # A suggestion row is a person this account already knows
+        # (conversations.md § Where logic lives → *Recipient suggestions*), so
+        # row 0 may be someone else whose address merely contains the typed
+        # text: click only a row that names ``addr`` — the real
+        # `accept_suggestion` verb — else commit the typed text.
+        wanted = addr.lower()
+        row = next(
+            (
+                i
+                for i in range(self.driver.count("recipient-picker-suggestion"))
+                if wanted in self.driver.get_text("recipient-picker-suggestion", index=i).lower()
+            ),
+            None,
+        )
+        if row is not None:
+            self.driver.click("recipient-picker-suggestion", index=row)
         else:
             self.driver.call_command("conversations_accept_recipient", {})
         # The accept pushes the chip into the manager and fires the snapshot
@@ -1960,9 +1973,42 @@ class ConversationsActions:
                     return
             time.sleep(0.5)
         detail = f" Last probe: {last_timeout}" if last_timeout is not None else ""
+        self._raise_if_not_signed_in(timeout_s, detail)
         raise AssertionError(
             f"real FaunaMls backend did not activate within {timeout_s}s.{detail}"
         )
+
+    def _raise_if_not_signed_in(self, timeout_s: float, detail: str) -> None:
+        """Name a missing sign-in instead of blaming MLS (convention 6).
+
+        The real engine starts at AuthSuccess, so on an app that never signed in
+        the poll above can only time out — and "the MLS backend did not activate"
+        then names the wrong subject. A linux launch once acked the fixture's
+        sign-in `set_state` without applying it, and the red read as an MLS fault
+        for three triage passes.
+
+        ⚠ **The witness is the authenticated shell on screen, NOT `get_state`'s
+        `session.authenticated`.** On linux that flag is the `set_state`
+        override when one was set — the value the test *asked* for — so it reads
+        `true` on an app whose patch was half-applied, and a check built on it
+        could never fail (`helpers/e2e_session.live_actor_id`'s docstring names
+        the same trap). The shell landmarks are the product's own; the fixture
+        navigated to the feed, so a signed-in app shows `feed-view`.
+        """
+        from helpers.authenticated_shell import SHELL_MARKERS, describe_markers
+
+        try:
+            landed = any(self.driver.is_visible(m) for m in SHELL_MARKERS)
+        except Exception:
+            return  # no element surface to ask: keep the MLS verdict
+        if not landed:
+            raise AssertionError(
+                f"the app is not signed in: after {timeout_s}s no authenticated-"
+                "shell landmark is on screen, so the real FaunaMls engine (started "
+                "at AuthSuccess) had nothing to start against — look at the "
+                "sign-in `set_state`, not MLS. "
+                f"{describe_markers(self, SHELL_MARKERS)}{detail}"
+            )
 
     def disable_real_faunamls(self) -> None:
         """Restore the FaunaMls mock backend (test-ordering safety net).
@@ -2012,8 +2058,8 @@ class ConversationsActions:
     def real_resolve_send_new(self, recipient: str, body: str) -> None:
         """Start a new FaunaMls conversation by *resolving* the typed `recipient`
         through the real backend probe (no actor_id injection): types `recipient`
-        into the picker, drives `resolve_recipient` (which probes
-        `fauna.conversations.keypackage.count` to promote a 64-hex actor id to a
+        into the picker, drives `resolve_recipient` (which asks the boolean
+        `fauna.conversations.keypackage.addressable` to promote a 64-hex actor id to a
         `Fauna` chip), commits it, then sends `body` (group bootstrap: fetch key
         package → create group → deliver Welcome → post Application envelope)."""
         self.driver.call_command("conversations_real_resolve_send_new", {
@@ -2215,33 +2261,20 @@ class ConversationsActions:
         (``TestAgent.kt::pickMoreReaction``). A pick commits by itself, so there is
         no second click; a type with no sheet open is refused, as on linux.
 
-        Web alone has no seam yet: a built grid of fixed emoji, which cannot
-        reach an emoji outside it, so the seam there is a UI change, not only an
-        automation one. That is real parity debt, declared through
-        ``skip_unbuilt`` rather than skipped silently (convention 7).
-        """
-        from helpers.app_surface import skip_unbuilt
+        **web** — "more" swaps the menu's button in place for a free-entry
+        single-emoji ``<input>`` carrying the button's id (*entry mode*), with
+        the shortcut grid beneath it. The web driver's ``type_text`` types the
+        emoji keystroke by keystroke (Playwright ``press_sequentially``), and
+        the field's ``input`` handler commits the first complete grapheme and
+        closes the menu — as on apple, no second click. One keystroke at a time
+        means a multi-code-point emoji may commit on its first scalar; Enter is
+        the full-sequence path (``apps/fauna-web``'s
+        ``routes/conversations/+page.svelte``, ``commitMoreEntry``).
 
+        All seven apps carry an arm, so the action has no ``skip_unbuilt`` gate.
+        """
         self.open_message_actions(message_index=message_index, timeout_s=timeout_s)
         is_tui = getattr(self.driver, "is_tui", lambda: False)()
-        if not (
-            is_tui
-            or self.driver.is_linux()
-            or self.driver.is_macos()
-            or self.driver.is_ios()
-            or self.driver.is_windows()
-            or self.driver.is_android()
-        ):
-            skip_unbuilt(
-                self.driver,
-                surface="a drivable dm-reaction-more-button picker",
-                detail=(
-                    "the fuller picker has no automation seam on this app yet "
-                    "(a fixed built grid on web), so no test can pick an emoji "
-                    "outside the quick set here yet"
-                ),
-                tracked="docs/features/reactions-and-message-delete.md outcome 5",
-            )
         self.driver.click("dm-reaction-more-button")
         self.driver.type_text("dm-reaction-more-button", emoji)
         if is_tui:
@@ -2413,12 +2446,17 @@ class ConversationsActions:
     # --- Internal helpers ---
 
     def _wait_resolve(self, timeout_s: float = 5.0):
-        """Wait until recipient-resolve-status is in a terminal state (resolved or error)."""
+        """Wait until recipient-resolve-status is in a terminal state
+        (``resolved``, ``not-found`` or ``error``). ``not-found`` is terminal
+        since 2026-07-16: the address was probed and no rail claimed it — what a
+        far-network shape such as a bare ``did:plc:…`` reads now that no app
+        parses a bridged address (``docs/goal/ui/conversations.md`` § Errors &
+        edge cases)."""
         deadline = time.time() + timeout_s
         last_state = None
         while time.time() < deadline:
             last_state = self.driver.get_attr("recipient-resolve-status", "state")
-            if last_state in ("resolved", "error"):
+            if last_state in ("resolved", "not-found", "error"):
                 return
             time.sleep(0.05)
         # Self-diagnosing failure (e2e rule 6): the bare "did not reach terminal

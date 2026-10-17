@@ -42,10 +42,19 @@ pub fn set_visible_child_forced(stack: &gtk::Stack, name: &str) {
 /// rail selection follows the sub-stack's visible child (so the test agent's
 /// name-based nav and the nav-back button highlight the right row). `select_row`
 /// emits row-selected, NOT row-activated, so there is no feedback loop.
+///
+/// Each row is tagged `<row_id>[<page key>]` (`admin-nav-row[…]` /
+/// `settings-nav-row[…]`, ui.yaml `navigation.sub_page_nav_rows`).
+/// `page_key` maps a stack child name to the ui.yaml page key the row opens
+/// (several child names differ from their registry keys); `None` leaves the
+/// row untagged — the Settings Account row, whose `account-settings-link`
+/// already lives on the Status page.
 pub fn build_nav_rail(
     nav_back: &impl IsA<gtk::Widget>,
     entries: &[(&'static str, &'static str, &'static str, bool)],
     stack: &gtk::Stack,
+    row_id: &str,
+    page_key: impl Fn(&str) -> Option<&'static str>,
 ) -> gtk::Box {
     let rail = gtk::Box::new(gtk::Orientation::Vertical, 0);
     rail.append(nav_back);
@@ -53,7 +62,7 @@ pub fn build_nav_rail(
     let nav_list = gtk::ListBox::new();
     nav_list.set_vexpand(true);
     nav_list.add_css_class("navigation-sidebar");
-    for &(_, label, icon, indent) in entries {
+    for &(child, label, icon, indent) in entries {
         let icon_w = gtk::Image::from_icon_name(icon);
         icon_w.set_margin_end(12);
         let label_w = gtk::Label::new(Some(label));
@@ -69,6 +78,9 @@ pub fn build_nav_rail(
         hbox.append(&label_w);
         let row = gtk::ListBoxRow::new();
         row.set_child(Some(&hbox));
+        if let Some(key) = page_key(child) {
+            crate::testid::set_test_id(&row, &format!("{row_id}[{key}]"));
+        }
         nav_list.append(&row);
     }
 

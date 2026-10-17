@@ -135,4 +135,38 @@ pub const CREATE_TABLES_SQL: &str = "
         failure_count    INTEGER NOT NULL DEFAULT 1,
         last_success_at  INTEGER
     );
+
+    -- The oracle's ActivityPub class (TP11 -- `key-material-hierarchy.md`
+    -- § Audience: deployment infrastructure → *The oracle*, the
+    -- `activitypub.http_sig` row). One row per (account, third-party
+    -- principal) that has had a request signed: the audit counters and the
+    -- rate ceiling's fixed window (`fauna_core::identity_op::RateWindow`).
+    -- NOT the authority -- every request re-resolves the principal row, its
+    -- declared peer set and the owner's live `identity.op` grant. Deleted
+    -- with the principal, the account's federation, and at succession.
+    CREATE TABLE IF NOT EXISTS ap_oracle_principals (
+        actor_id      TEXT NOT NULL,
+        principal_id  BLOB NOT NULL,
+        last_used_at  INTEGER,
+        use_count     INTEGER NOT NULL DEFAULT 0,
+        window_start  INTEGER NOT NULL DEFAULT 0,
+        window_count  INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (actor_id, principal_id)
+    );
+
+    -- The oracle's per-operation record (the audit split): one row per
+    -- signature the custodian made for a principal -- the class and its
+    -- detail (`<method> <host>`). Bounded to the newest
+    -- `activitypub::oracle::OPS_KEPT_PER_PRINCIPAL` per principal; the grant
+    -- lifecycle itself is the client-signed `GrantEvent` log.
+    CREATE TABLE IF NOT EXISTS ap_oracle_ops (
+        id           INTEGER PRIMARY KEY,
+        actor_id     TEXT NOT NULL,
+        principal_id BLOB NOT NULL,
+        at           INTEGER NOT NULL,
+        class        TEXT NOT NULL,
+        detail       TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ap_oracle_ops_principal
+        ON ap_oracle_ops(actor_id, principal_id, id);
 ";

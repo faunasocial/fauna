@@ -42,8 +42,15 @@
 //! verb), which is client-side and applies everywhere. Hence [`SealedScorers::is_muted`],
 //! which is a render signal, not an ordering one.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use fauna_core::data::MutedKeyword;
-use fauna_core::scoring::{factor, muted_keywords_collapse, muted_keywords_penalty_entry};
+use fauna_core::identity::ActorId;
+use fauna_core::scoring::{
+    LabelerPostInput, factor, labels_to_score_entry, muted_keywords_collapse,
+    muted_keywords_penalty_entry,
+};
 use fauna_text_model::publish::PublishedTextModel;
 use fauna_text_model::topic::{ExampleLabel, TopicModel, TrainOutcome};
 
@@ -191,14 +198,85 @@ pub(crate) enum SealedScorer {
     /// subscriber's own client is the one position where post plaintext meets
     /// the artifact. The nest term for this factor is 0 by the zero-term seam.
     SubscribedModel(Box<PublishedTextModel>),
+    /// A **subscribed** tier-3 `wasm` labeler declared over `post` content
+    /// (`content-moderation-and-ranking.md` § Tier-3 → *Where it runs*,
+    /// position (1)): the module, prepared once per feed (re)load, runs at the
+    /// subscriber's own app over the card it renders. Same seam, same reason
+    /// as [`Self::SubscribedModel`] — the nest term for the factor is 0.
+    SubscribedWasm(Box<SubscribedWasm>),
+}
+
+/// The most posts one labeler version's memo holds before it starts afresh — a
+/// bound on a long session's scrolling, never reached by one window.
+const WASM_MEMO_MAX_POSTS: usize = 4096;
+
+/// One labeler version's answers, by post id — the memo invariant (d) asks
+/// for. The runner is deterministic, so a remembered answer is exact; the
+/// manager keeps it across (re)loads of the same version, so each post runs
+/// the module once.
+#[derive(Default)]
+pub(crate) struct WasmMemo {
+    /// `None` = the module trapped or ran out of fuel on that post: no term.
+    scores: HashMap<String, Option<i64>>,
+    /// How many times the module actually ran — what the memo pins count.
+    runs: usize,
+}
+
+/// A prepared post-kind `wasm` labeler and the memo its answers land in.
+pub(crate) struct SubscribedWasm {
+    pub(crate) prepared: fauna_labeler::PreparedLabeler,
+    pub(crate) memo: Arc<Mutex<WasmMemo>>,
+}
+
+impl SubscribedWasm {
+    /// This labeler's per-mille for `post`, run once per labeler version.
+    fn value_permille(&self, post: &PostSummary) -> Option<i64> {
+        let mut memo = self.memo.lock().unwrap();
+        if let Some(value) = memo.scores.get(&post.post_id) {
+            return *value;
+        }
+        memo.runs += 1;
+        let value = self.run(post);
+        if memo.scores.len() >= WASM_MEMO_MAX_POSTS {
+            memo.scores.clear();
+        }
+        memo.scores.insert(post.post_id.clone(), value);
+        value
+    }
+
+    /// Run the module over the card (invariant (b)): the preview body and
+    /// tags the snapshot holds, `has_media`, the author — through the one card
+    /// mapping — with an empty attachment facet, since a feed holds no bytes.
+    /// An item the module traps or runs out of fuel on contributes no term
+    /// (invariant (e)); a module that labels nothing scores 0.
+    fn run(&self, post: &PostSummary) -> Option<i64> {
+        let author = hex::decode(&post.author)
+            .ok()
+            .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+            .map(ActorId)
+            .unwrap_or(ActorId([0; 32]));
+        let input = LabelerPostInput::from_card(author, &post.body, &post.tags, post.has_media);
+        let bare = fauna_labeler::encode_labeler_input(&input).ok()?;
+        match self.prepared.run(&bare, &[]) {
+            Ok(labels) => Some(labels_to_score_entry(&labels, String::new(), 0).score),
+            Err(e) => {
+                tracing::debug!(
+                    "subscribed labeler left post {} unscored: {e:#}",
+                    post.post_id
+                );
+                None
+            }
+        }
+    }
 }
 
 impl SealedScorer {
-    /// This scorer's factor value for `text`, in per-mille — the `v` of
+    /// This scorer's factor value for `post` (whose model text is `text`), in
+    /// per-mille — the `v` of
     /// [`crate::sealed_compose::sealed_contribution_micro`]. `None` = no
     /// contribution at all (an unmatched keyword list), which is *not* the same
     /// as a zero value.
-    fn value_permille(&self, text: &str) -> Option<i64> {
+    fn value_permille(&self, post: &PostSummary, text: &str) -> Option<i64> {
         match self {
             SealedScorer::Topic(model) => {
                 Some(model.damped_score(text, fauna_core::scoring::cues::CUE_ENGAGEMENT_WEIGHT_PM))
@@ -211,6 +289,7 @@ impl SealedScorer {
                 muted_keywords_penalty_entry(words, text).map(|entry| entry.score)
             }
             SealedScorer::SubscribedModel(model) => Some(model.damped_score(text)),
+            SealedScorer::SubscribedWasm(labeler) => labeler.value_permille(post),
         }
     }
 }
@@ -244,6 +323,19 @@ impl SealedScorers {
         self.entries.is_empty()
     }
 
+    /// How many times the subscribed `wasm` labelers' modules actually ran —
+    /// the memo pins' count.
+    #[cfg(test)]
+    pub(crate) fn wasm_runs(&self) -> usize {
+        self.entries
+            .iter()
+            .map(|e| match &e.scorer {
+                SealedScorer::SubscribedWasm(w) => w.memo.lock().unwrap().runs,
+                _ => 0,
+            })
+            .sum()
+    }
+
     /// The `(weight_permille, factor_value_permille)` terms this post
     /// contributes, for [`crate::sealed_compose::adjusted_score_micro`].
     ///
@@ -259,7 +351,7 @@ impl SealedScorers {
             .iter()
             .filter_map(|e| {
                 e.scorer
-                    .value_permille(&text)
+                    .value_permille(post, &text)
                     .map(|v| (e.weight_permille, v))
             })
             .collect()
@@ -301,7 +393,9 @@ impl SealedScorers {
                 // A subscribed model is somebody ELSE's published artifact, not
                 // a model of the user's this device may train — the toggle-state
                 // read this backs has nothing to show for one.
-                SealedScorer::MutedKeywords(_) | SealedScorer::SubscribedModel(_) => None,
+                SealedScorer::MutedKeywords(_)
+                | SealedScorer::SubscribedModel(_)
+                | SealedScorer::SubscribedWasm(_) => None,
             })
     }
 }
@@ -315,7 +409,7 @@ impl SealedScorers {
 /// across the two or a post would train under one feature set and score under
 /// another — only the body's length may differ, and that asymmetry is the
 /// declared accepted one.
-pub(crate) fn model_text(title: Option<&str>, body: &str, tags: &[String]) -> String {
+pub fn model_text(title: Option<&str>, body: &str, tags: &[String]) -> String {
     let mut parts: Vec<&str> = Vec::with_capacity(2 + tags.len());
     if let Some(t) = title.filter(|t| !t.is_empty()) {
         parts.push(t);

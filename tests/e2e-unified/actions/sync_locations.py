@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 class SyncLocationsActions:
     """Seed the location ↔ folder binding rows nested under each folder on
-    Settings → Folders (file-sync.md § On-Demand Files; ui.yaml `folders`
+    Settings → Folders (on-demand-files.md § On-Demand Files; ui.yaml `folders`
     `platform_elements` — the shared ``folder-location-*`` contract, desktop-only).
 
     The former free-standing flat ``Settings → Sync`` page this class used to drive

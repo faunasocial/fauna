@@ -61,6 +61,8 @@ pub struct AliasControlsInput {
 pub enum AliasWriteError {
     Conflict,
     KeyHeldByOtherKind,
+    /// An expiry move on a row that is not a still-alive disposable.
+    NotExtendable,
     Db(anyhow::Error),
 }
 
@@ -74,6 +76,12 @@ impl std::fmt::Display for AliasWriteError {
                 f,
                 "alias address is held by an exact alias, forwarder or list"
             ),
+            AliasWriteError::NotExtendable => {
+                write!(
+                    f,
+                    "only a disposable alias that is still alive can be extended"
+                )
+            }
             AliasWriteError::Db(e) => write!(f, "{e}"),
         }
     }
@@ -348,12 +356,21 @@ impl CacheDb {
     /// rename into an existing `(local_domain, pattern, kind)` is
     /// [`AliasWriteError::Conflict`]; renaming an exact-key-tier row onto a
     /// key another tier kind holds is [`AliasWriteError::KeyHeldByOtherKind`].
+    ///
+    /// `extend_expiry_to` (epoch millis) moves a disposable's `expires_at` —
+    /// the user's "extend" (`mail-aliases.md` § Don't do these: "the user can
+    /// extend (edit) before expiry"); `None` keeps the stored expiry. It is
+    /// [`AliasWriteError::NotExtendable`] unless the row is a disposable that
+    /// is still alive at `now_millis`: a dead disposable's token is free to be
+    /// minted again, so reviving it could collide with a newer alias.
     pub async fn update_alias_controls(
         &self,
         alias_id: &[u8; 16],
         actor_id: &[u8; 32],
         pattern: &str,
         controls: &AliasControlsInput,
+        extend_expiry_to: Option<i64>,
+        now_millis: i64,
     ) -> std::result::Result<bool, AliasWriteError> {
         let id = *alias_id;
         let actor = *actor_id;
@@ -362,19 +379,26 @@ impl CacheDb {
         let conn = self.conn.lock().await;
         // `kind` and `local_domain` are immutable, so the row's own values
         // decide which tier the renamed key joins.
-        let row: Option<(String, String)> = conn
+        type Row = (String, String, Option<i64>, Option<i64>);
+        let row: Option<Row> = conn
             .query_row(
-                "SELECT local_domain, kind FROM account_aliases
+                "SELECT local_domain, kind, expires_at, uses_remaining FROM account_aliases
                  WHERE alias_id = ?1 AND actor_id = ?2",
                 rusqlite::params![&id[..], &actor[..]],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()
             .context("lookup alias for update")
             .map_err(AliasWriteError::Db)?;
-        let Some((local_domain, kind)) = row else {
+        let Some((local_domain, kind, expires_at, uses_remaining)) = row else {
             return Ok(false);
         };
+        if extend_expiry_to.is_some()
+            && (kind != "disposable"
+                || !fauna_mail::aliases::disposable_alive(expires_at, uses_remaining, now_millis))
+        {
+            return Err(AliasWriteError::NotExtendable);
+        }
         if exact_key_held_by_other_kind(&conn, &local_domain, &pattern, &kind)
             .map_err(AliasWriteError::Db)?
         {
@@ -384,7 +408,8 @@ impl CacheDb {
             .execute(
                 "UPDATE account_aliases
                  SET pattern = ?1, label = ?2, spam_threshold_override = ?3,
-                     rate_limit_per_hour = ?4, rate_limit_per_day = ?5
+                     rate_limit_per_hour = ?4, rate_limit_per_day = ?5,
+                     expires_at = COALESCE(?8, expires_at)
                  WHERE alias_id = ?6 AND actor_id = ?7",
                 rusqlite::params![
                     &pattern,
@@ -394,6 +419,7 @@ impl CacheDb {
                     controls.rate_limit_per_day,
                     &id[..],
                     &actor[..],
+                    extend_expiry_to,
                 ],
             )
             .map_err(map_alias_write_err)?;
@@ -1393,7 +1419,7 @@ mod tests {
             .unwrap();
         // Bob can't update / disable / delete Alice's row → no rows affected.
         assert!(
-            !db.update_alias_controls(&id, &bob, "hacked", &c)
+            !db.update_alias_controls(&id, &bob, "hacked", &c, None, 0)
                 .await
                 .unwrap()
         );

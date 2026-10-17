@@ -10,7 +10,9 @@
 //! WS-RPC request — the anonymous discovery surface included — with the typed
 //! [`fauna_protocol::RpcError::nest_outdated`] (`fauna.nest.outdated`) error, so
 //! a client sees an actionable "update this nest" signal rather than a silent
-//! crash-loop or a raw SQL leak (Dim 4).
+//! crash-loop or a raw SQL leak (Dim 4). An app's bearer upgrade is refused
+//! with `401` instead ([`bearer_ws_refused`]), so the app meets that typed error
+//! at its re-mint's handshake rather than inside a session that looks live.
 //!
 //! This path opens **no** database and constructs **no** `AppState` (both
 //! require a DB this binary can operate); it shares only the on-disk TLS
@@ -100,7 +102,7 @@ pub fn degraded_router_with_heartbeat(heartbeat: WsHeartbeatPolicy) -> axum::Rou
     let ws_route = get(move |ws| ws_outdated(ws, heartbeat));
     axum::Router::new()
         .route("/api/v1/ws", ws_route.clone())
-        .route("/api/v1/ws/{actor_id}", ws_route.clone())
+        .route("/api/v1/ws/{actor_id}", get(bearer_ws_refused))
         // A third-party principal's session sees the same typed signal; its
         // token cannot be verified without the DB either.
         .route(
@@ -111,9 +113,24 @@ pub fn degraded_router_with_heartbeat(heartbeat: WsHeartbeatPolicy) -> axum::Rou
         .fallback(http_outdated)
 }
 
+/// The app's bearer-authenticated upgrade (`/api/v1/ws/{actor_id}`): refused
+/// with `401`, before any session opens. This mode opens no DB, so it can verify
+/// no bearer — and a session opened on one anyway looked live to the app's
+/// reconnect supervisor while every request in it was refused, so a signed-in
+/// app never learned its nest needed updating (`version-compatibility.md`
+/// § 2.2: the degraded nest *rejects connects*). A `401` is what a healthy nest
+/// answers a bearer it cannot honour, so the app re-mints over the silent
+/// challenge, meets the typed `fauna.nest.outdated` there, and ends the session
+/// onto its non-retry update surface. Pinned by
+/// `tests/degraded_bearer_upgrade.rs`.
+async fn bearer_ws_refused() -> Response {
+    axum::http::StatusCode::UNAUTHORIZED.into_response()
+}
+
 /// Accept the WS upgrade (selecting the `fauna.v1` subprotocol when offered) and
-/// drive the outdated-reply loop. No auth is checked: the authenticated endpoint
-/// would need the DB to verify a bearer, and every request is rejected anyway.
+/// drive the outdated-reply loop — the anonymous surface and a third-party
+/// principal's session. No auth is checked: a principal's token would need the
+/// DB to verify, and every request is rejected anyway.
 ///
 /// **The frame caps are not optional here, precisely because nothing is
 /// authenticated.** `transport-connection.md` § Abuse posture states the 2 MiB
@@ -214,7 +231,8 @@ async fn handle_ws_outdated(mut socket: WebSocket, heartbeat: WsHeartbeatPolicy)
 /// most needs to identify, and omitting `build_id` here would leave the
 /// promotion gate unable to name the artifact that is failing to serve.
 async fn health_outdated() -> Response {
-    axum::Json(crate::build_identity::identity_json("needs_update")).into_response()
+    // No database is open here, so no channel to report (`null`).
+    axum::Json(crate::build_identity::identity_json("needs_update", None)).into_response()
 }
 
 /// Any non-WS, non-health HTTP path: a plain 503 so a stray HTTP probe sees the

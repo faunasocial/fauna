@@ -18,8 +18,8 @@ file, recorded as a version for the author's journey (which then makes the link
 through the app's own controls, rule 8), and for the recipient's a link made by
 the shared ``ShareClient``. What runs as the recipient does is the browser.
 
-The author's journey is tui's — the lead app; the other six inherit the key
-notice through the batched trickle-down (share-links.md § Build order). The
+The author's journey is tui's — the lead app; linux, web, android and windows
+inherited the key notice through the batched trickle-down (share-links.md § Build order). The
 recipient's is web-only by nature, marked rather than skipped
 (``feature-catalog.md``, the marked-witness rule): the viewer is the one
 browser-served surface of the feature, a page no other app hosts.
@@ -103,6 +103,10 @@ def private_file_app(request, app, nest_instance):
 
 
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.android
+@pytest.mark.windows
 @pytest.mark.feature("share-links")
 def test_the_author_links_a_private_file_and_the_link_is_the_key(private_file_app):
     app, content, chunk_count = private_file_app

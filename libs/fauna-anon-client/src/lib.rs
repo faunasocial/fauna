@@ -25,7 +25,8 @@ pub mod trust;
 mod ws;
 
 pub use bearer::{
-    MintedBearer, mint_bearer_over_custody_handshake, mint_bearer_over_device_handshake,
+    MintedBearer, MintedIdentity, mint_bearer_over_custodied_fleet_handshake,
+    mint_bearer_over_custody_handshake, mint_bearer_over_device_handshake,
     mint_bearer_over_handshake, mint_bearer_over_silent_challenge,
 };
 pub use cert_binding::{

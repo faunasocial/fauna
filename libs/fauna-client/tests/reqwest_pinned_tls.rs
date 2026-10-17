@@ -18,61 +18,18 @@
 //! the explicit resolvers here keep the test isolated from the process-global pin
 //! store.
 
+mod common;
+
 use std::sync::Arc;
 
 use fauna_anon_client::tls_verify::{NoPinPolicy, dynamic_pinned_client_config};
-use fauna_protocol::tls_spki::spki_sha256_of_cert_der;
-use rustls::ServerConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
 
-/// Spawn a self-signed TLS HTTP/1.1 server on `127.0.0.1:0` that answers every
-/// request with `200 ok`. Returns `(addr_port, spki_sha256_of_the_served_cert)`.
+/// The shared self-signed fixture server answering every request with `200 ok`.
 async fn spawn_self_signed_server() -> (u16, [u8; 32]) {
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-        .expect("self-signed cert");
-    let cert_der: CertificateDer<'static> = cert.cert.der().clone();
-    let spki = spki_sha256_of_cert_der(cert_der.as_ref()).expect("served cert SPKI");
-    let key_der: PrivateKeyDer<'static> =
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()));
-
-    let server_cfg = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(vec![cert_der], key_der)
-        .expect("server tls config");
-    let acceptor = TlsAcceptor::from(Arc::new(server_cfg));
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    tokio::spawn(async move {
-        loop {
-            let Ok((tcp, _)) = listener.accept().await else {
-                break;
-            };
-            let acceptor = acceptor.clone();
-            tokio::spawn(async move {
-                // A failed handshake (the client rejected our cert) is the
-                // expected path for the no-pin / wrong-pin arms — just drop it.
-                let Ok(mut tls) = acceptor.accept(tcp).await else {
-                    return;
-                };
-                // Read (and ignore) the request head, then answer.
-                let mut buf = [0u8; 1024];
-                let _ = tls.read(&mut buf).await;
-                let _ = tls
-                    .write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-                    )
-                    .await;
-                let _ = tls.shutdown().await;
-            });
-        }
-    });
-
-    (port, spki)
+    common::spawn_self_signed_server(|_head| {
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec()
+    })
+    .await
 }
 
 /// Build a reqwest client whose TLS verification is our per-handshake pinning
@@ -160,4 +117,49 @@ async fn accept_provisional_reaches_self_signed_cert() {
         );
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.text().await.unwrap(), "ok");
+}
+
+#[tokio::test]
+async fn a_re_pin_bites_on_the_next_request_even_when_the_server_offers_resumption() {
+    // A TLS 1.3 session resumed from a cached ticket never runs the client's
+    // certificate verifier. With rustls' default client-side session cache, a
+    // re-pin of the host to a NEW identity (a replaced box) would therefore not
+    // bite until the cached session aged out: the process keeps talking to the
+    // OLD box on every reqwest leg for as long as its ticket lives, the pin store
+    // consulted only on full handshakes. The pinned configs never resume
+    // (security.md § Cross-connection binding → *No session resumption on a
+    // pinned config*), so against a server that OFFERS resumption the request
+    // after a re-pin is a full handshake and is refused. The default fixture
+    // disables resumption server-side and so could not see this.
+    let (port, spki) =
+        common::spawn_self_signed_server_with(common::ServerSessions::Resumable, |_head| {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec()
+        })
+        .await;
+    let pin = Arc::new(std::sync::Mutex::new(Some(spki)));
+    let client = pinned_client(Arc::new({
+        let pin = Arc::clone(&pin);
+        move || *pin.lock().unwrap()
+    }));
+    let url = format!("https://127.0.0.1:{port}/");
+
+    // Full handshake under the matching pin; the server hands out a session.
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .expect("matching pinned SPKI: the first request completes");
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.text().await.unwrap(), "ok");
+
+    // The host is re-pinned to a different identity. `Connection: close` means
+    // the next request opens a new TLS connection — the one the client would
+    // resume from its cache if it cached sessions.
+    *pin.lock().unwrap() = Some([0xBBu8; 32]);
+    let res = client.get(&url).send().await;
+    assert!(
+        res.is_err(),
+        "a re-pinned host must refuse the old cert on the very next request, \
+         whether or not the server offers session resumption"
+    );
 }

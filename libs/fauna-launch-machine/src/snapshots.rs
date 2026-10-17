@@ -66,9 +66,10 @@ pub struct LaunchSnapshot {
     /// same § identity resolution must never delay conversation delivery: the
     /// app builds its session immediately, renders whatever it cached for
     /// "Welcome back", and refuses a send locally until a real address arrives.
-    /// A token refresh does not clear it: a refresh ignores its verify reply's
-    /// metadata (the launch owns the cached identity), so the last confirmed one
-    /// stands.
+    /// A successful token refresh replaces it with its own verify reply's
+    /// identity (so a mid-session handle rename lands at the next re-mint); a
+    /// failed one leaves the last confirmed identity standing. The launch alone
+    /// persists it (`LaunchPersistence::save_authenticated`).
     pub identity: Option<LaunchIdentity>,
     /// Set when the account index at `fauna/index` is present but this build
     /// cannot use it (`version-compatibility.md` § 5 item 9). `None` in every
@@ -166,6 +167,33 @@ impl LaunchSnapshot {
             locked_until_secs: None,
         }
     }
+
+    /// Whether an app showing the locked notice for `shown_locked_until_secs`
+    /// has nothing to do on this snapshot: the machine is still parked on that
+    /// lock, or it is mid-flight (its refresh at the unlock time is running and
+    /// the settled state arrives as a later change). Any other settled snapshot
+    /// — signed in, a transient failure, the wizard, a NEW lock with another
+    /// unlock time — is the app's cue to route it (`devices.md` § The locked
+    /// state: the refresh is the machine's own, so the surface follows the
+    /// snapshot out with no timer of its own). One rule for every app's notice.
+    pub fn lock_notice_holds(&self, shown_locked_until_secs: u64) -> bool {
+        match self.phase {
+            LaunchPhase::Boot
+            | LaunchPhase::Hydrating
+            | LaunchPhase::SilentChallenge { .. }
+            | LaunchPhase::Refreshing { .. } => true,
+            _ => self.locked_until_secs == Some(shown_locked_until_secs),
+        }
+    }
+}
+
+/// [`LaunchSnapshot::lock_notice_holds`] as a free function — the UniFFI face
+/// of the one notice rule (a method on a `uniffi::Record` is not exported), so
+/// a native app's locked surface calls the shared rule rather than restating
+/// it. The wasm twin is `fauna-wasm-launch`'s `lockNoticeHolds`.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn launch_lock_notice_holds(snapshot: LaunchSnapshot, shown_locked_until_secs: u64) -> bool {
+    snapshot.lock_notice_holds(shown_locked_until_secs)
 }
 
 /// Coarse-grained phase the launch flow is in. Drives client UI:
@@ -296,6 +324,62 @@ pub enum RefreshReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The locked notice holds while the machine is on this lock or mid-flight,
+    /// and gives way to any settled snapshot that is not this lock.
+    #[test]
+    fn the_lock_notice_holds_on_this_lock_and_yields_to_any_other_settled_state() {
+        const UNTIL: u64 = 1_800_000_000;
+        let locked = LaunchSnapshot {
+            phase: LaunchPhase::Offline { transient: false },
+            locked_until_secs: Some(UNTIL),
+            ..LaunchSnapshot::initial()
+        };
+        assert!(locked.lock_notice_holds(UNTIL), "the same lock");
+        for phase in [
+            LaunchPhase::Boot,
+            LaunchPhase::Hydrating,
+            LaunchPhase::SilentChallenge { attempt: 2 },
+        ] {
+            assert!(
+                LaunchSnapshot {
+                    phase,
+                    locked_until_secs: None,
+                    ..LaunchSnapshot::initial()
+                }
+                .lock_notice_holds(UNTIL),
+                "mid-flight: the settled state arrives as a later change"
+            );
+        }
+        assert!(
+            !LaunchSnapshot {
+                phase: LaunchPhase::Online,
+                ..LaunchSnapshot::initial()
+            }
+            .lock_notice_holds(UNTIL),
+            "the lock lapsed and the refresh signed in"
+        );
+        assert!(
+            !LaunchSnapshot {
+                locked_until_secs: Some(UNTIL + 86_400),
+                ..locked.clone()
+            }
+            .lock_notice_holds(UNTIL),
+            "a different unlock time is a new lock — the notice repaints"
+        );
+        assert!(
+            !LaunchSnapshot {
+                phase: LaunchPhase::Offline { transient: true },
+                locked_until_secs: None,
+                ..LaunchSnapshot::initial()
+            }
+            .lock_notice_holds(UNTIL),
+            "the refresh failed transiently — the ordinary retry surface"
+        );
+        // The UniFFI face is the same rule, not a restatement.
+        assert!(launch_lock_notice_holds(locked.clone(), UNTIL));
+        assert!(!launch_lock_notice_holds(locked, UNTIL + 1));
+    }
 
     #[test]
     fn launch_phase_boot_round_trip() {

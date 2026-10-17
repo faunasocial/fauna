@@ -38,8 +38,11 @@ pub use machine::LaunchMachine;
 pub use dial::resolved_dial_url;
 #[cfg(any(test, debug_assertions, feature = "e2e-agent"))]
 pub use dial::{nest_dial_override, set_nest_dial_override};
+pub use snapshots::launch_lock_notice_holds;
 
-pub use auth::{SilentChallengeOutcome, SilentSignInVerdict, classify_silent_challenge};
+pub use auth::{
+    OutdatedSide, SilentChallengeOutcome, SilentSignInVerdict, classify_silent_challenge,
+};
 pub use connector::{AuthConnector, WsAuthConnector};
 pub use error::LaunchError;
 pub use observer::LaunchObserver;

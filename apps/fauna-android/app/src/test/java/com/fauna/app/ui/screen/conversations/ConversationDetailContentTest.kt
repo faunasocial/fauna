@@ -108,6 +108,10 @@ class ConversationDetailContentTest {
         reactions: List<ReactionGroup> = emptyList(),
         deleted: Boolean = false,
         isOwn: Boolean = false,
+        // The snapshot's own delete verdict (the sender, or a viewer who governs
+        // the room); the screen gates the delete controls on it alone. Defaults
+        // to isOwn, the common case; a peer's message sets it explicitly.
+        canDelete: Boolean = isOwn,
         labels: List<ContentLabelEntry> = emptyList(),
     ) = MessageSnapshot(
         messageId = id,
@@ -122,6 +126,7 @@ class ConversationDetailContentTest {
         reactions = reactions,
         deleted = deleted,
         isOwn = isOwn,
+        canDelete = canDelete,
         legalTakedownRef = null,
         // Post-decrypt content-policy labels (moderation.md § Per-row badge
         // data path) — drives `content-label-badge` via the shared
@@ -202,6 +207,7 @@ class ConversationDetailContentTest {
         // message in, mirroring the read-time-resolve: the producer already
         // guarantees `None` unless the id names a message in `messages`.
         selectedMessageId: String? = null,
+        room: uniffi.fauna_conversations.RoomSnapshot? = null,
     ) = ThreadDetail(
         threadId = "t1",
         rail = rail,
@@ -219,7 +225,7 @@ class ConversationDetailContentTest {
         // grew the field; nothing on any merge path
         // compiles this source set except `android-unit-test-compile-check`,
         // which is exactly the gate this omission was waiting for.
-        room = null,
+        room = room,
     )
 
     private fun addParticipantState(
@@ -275,6 +281,7 @@ class ConversationDetailContentTest {
         onRemoveParticipant: (TypedAddress) -> Unit = {},
         pageError: LocalizedText? = null,
         receiveStopped: Boolean = false,
+        stateNeedsNewerApp: Boolean = false,
         unopenableMail: UInt = 0u,
         // `null` is UNKNOWN, not "connecting" — the shared rule leaves a
         // control live on a state word it does not recognise, so every case
@@ -296,6 +303,7 @@ class ConversationDetailContentTest {
                 onRemoveParticipant = onRemoveParticipant,
                 pageError = pageError,
                 receiveStopped = receiveStopped,
+                stateNeedsNewerApp = stateNeedsNewerApp,
                 unopenableMail = unopenableMail,
                 onBack = onBack,
                 onReply = onReply,
@@ -326,6 +334,36 @@ class ConversationDetailContentTest {
             )
             }
         }
+    }
+
+    private fun roomSnapshot(awaitingKey: Boolean = false, moderationUnverified: Boolean = false) =
+        uniffi.fauna_conversations.RoomSnapshot(
+            `class` = uniffi.fauna_conversations.RoomClass.COMMUNITY,
+            members = emptyList(),
+            policy = null,
+            myRole = null,
+            nestRead = null,
+            labelers = null,
+            awaitingKey = awaitingKey,
+            moderationUnverified = moderationUnverified,
+            pendingInvites = null,
+        )
+
+    @Test
+    fun threadRoomNoticePaintsOnlyWhileARoomCaveatStands() {
+        render(detail(room = roomSnapshot()))
+        composeTestRule.onNodeWithTag("thread-room-notice").assertDoesNotExist()
+    }
+
+    @Test
+    fun threadRoomNoticeNamesAwaitingKeyOverModerationUnverified() {
+        render(detail(room = roomSnapshot(awaitingKey = true, moderationUnverified = true)))
+        composeTestRule.onNodeWithTag("thread-room-notice").assertExists()
+        assertEquals(
+            "awaiting-key",
+            composeTestRule.onNodeWithTag("thread-room-notice").fetchSemanticsNode()
+                .config[androidx.compose.ui.semantics.SemanticsProperties.StateDescription],
+        )
     }
 
     @Test
@@ -602,6 +640,35 @@ class ConversationDetailContentTest {
         )
         composeTestRule.onNodeWithTag("error-message")
             .assertTextContains("stopped arriving", substring = true)
+        composeTestRule.onAllNodesWithTag("error-message").assertCountEquals(1)
+    }
+
+    @Test
+    fun stateNeedsNewerAppOutranksEveryOtherTruth() {
+        // The sixth truth (`ui/conversations.md` § Errors & edge cases): a newer
+        // build's conversation state is a STANDING condition, top precedence on
+        // android (no served-elsewhere arm) — above a dead receive rail, a page
+        // error and a failed compose-send. Mirrors tui's `sync_page_error`.
+        render(
+            detail(
+                compose = composeState(
+                    sendState = SendState.Failed(
+                        LocalizedText(
+                            key = "conversations.unified.error_send",
+                            args = mapOf("message" to "send failed"),
+                        ),
+                    ),
+                ),
+            ),
+            pageError = LocalizedText(
+                key = "conversations.unified.error_remove_participant",
+                args = mapOf("message" to "removal failed"),
+            ),
+            receiveStopped = true,
+            stateNeedsNewerApp = true,
+        )
+        composeTestRule.onNodeWithTag("error-message")
+            .assertTextContains("too old to open the conversations", substring = true)
         composeTestRule.onAllNodesWithTag("error-message").assertCountEquals(1)
     }
 
@@ -1255,7 +1322,8 @@ class ConversationDetailContentTest {
         render(
             detail(
                 capabilities = caps(reactions = false, messageDelete = false),
-                messages = listOf(msg("m1", isOwn = true)),
+                // The nest reports can_delete = false on a thread with no delete.
+                messages = listOf(msg("m1", isOwn = true, canDelete = false)),
             ),
         )
         composeTestRule.onAllNodesWithTag("dm-message-actions-button").assertCountEquals(0)
@@ -1263,8 +1331,8 @@ class ConversationDetailContentTest {
 
     @Test
     fun actionsButtonShownForOwnDeletableMessageWithoutReactions() {
-        // delete-only capability + own message → the ⋯ button still appears
-        // (the gate is supports_reactions OR (supports_message_delete && is_own)).
+        // delete-only capability + a deletable message → the ⋯ button still appears
+        // (the gate is supports_reactions OR the snapshot's can_delete).
         render(
             detail(
                 capabilities = caps(reactions = false, messageDelete = true),
@@ -1349,8 +1417,8 @@ class ConversationDetailContentTest {
 
     @Test
     fun deleteButtonAbsentOnPeerMessage() {
-        // is_own = false → the ⋯ button still shows (supports_reactions), but the
-        // delete option must be absent (sender-only).
+        // can_delete = false → the ⋯ button still shows (supports_reactions), but the
+        // delete option must be absent.
         render(
             detail(
                 capabilities = caps(reactions = true, messageDelete = true),
@@ -1360,6 +1428,20 @@ class ConversationDetailContentTest {
         composeTestRule.onNodeWithTag("dm-message-actions-button").performClick()
         composeTestRule.onAllNodesWithTag("dm-reaction-option").assertCountEquals(6)
         composeTestRule.onAllNodesWithTag("dm-message-delete-button").assertCountEquals(0)
+    }
+
+    @Test
+    fun deleteButtonShownOnPeerMessageTheViewerMayDelete() {
+        // A viewer who governs the room may delete a peer's message: the snapshot
+        // says so via can_delete, whatever is_own is.
+        render(
+            detail(
+                capabilities = caps(reactions = true, messageDelete = true),
+                messages = listOf(msg("m1", isOwn = false, canDelete = true)),
+            ),
+        )
+        composeTestRule.onNodeWithTag("dm-message-actions-button").performClick()
+        composeTestRule.onNodeWithTag("dm-message-delete-button").assertExists()
     }
 
     @Test

@@ -438,7 +438,7 @@ pub enum SiteLinkDisabledReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SiteLinkView {
-    /// The serving origin with a trailing slash (`https://alice.example.com/`),
+    /// The serving origin with a trailing slash (`https://alice.example.net/`),
     /// or `None` — see `disabled_reason`.
     pub origin: Option<String>,
     /// Set exactly when `origin` is `None`.
@@ -647,18 +647,18 @@ mod tests {
 
     #[test]
     fn subdomain_view_enabled_with_handle() {
-        let v = subdomain_view(true, Some("alice"), "example.com");
+        let v = subdomain_view(true, Some("alice"), "example.net");
         assert!(v.enabled);
-        assert_eq!(v.url.as_deref(), Some("https://alice.example.com/"));
+        assert_eq!(v.url.as_deref(), Some("https://alice.example.net/"));
         assert_eq!(v.disabled_reason, None);
     }
 
     #[test]
     fn subdomain_view_no_handle() {
-        let v = subdomain_view(false, None, "example.com");
+        let v = subdomain_view(false, None, "example.net");
         assert_eq!(v.url, None);
         assert_eq!(v.disabled_reason, Some(SubdomainDisabledReason::NoHandle));
-        let empty = subdomain_view(false, Some(""), "example.com");
+        let empty = subdomain_view(false, Some(""), "example.net");
         assert_eq!(
             empty.disabled_reason,
             Some(SubdomainDisabledReason::NoHandle)
@@ -667,7 +667,7 @@ mod tests {
 
     #[test]
     fn subdomain_view_reserved_label() {
-        let v = subdomain_view(true, Some("www"), "example.com");
+        let v = subdomain_view(true, Some("www"), "example.net");
         assert_eq!(v.url, None);
         assert_eq!(
             v.disabled_reason,
@@ -677,10 +677,10 @@ mod tests {
 
     #[test]
     fn apex_view_shape() {
-        let v = apex_view(Some(vec![1u8; 32]), "example.com");
+        let v = apex_view(Some(vec![1u8; 32]), "example.net");
         assert_eq!(v.current_actor, Some(vec![1u8; 32]));
-        assert_eq!(v.apex_url, "https://example.com/");
-        assert_eq!(apex_view(None, "example.com").current_actor, None);
+        assert_eq!(v.apex_url, "https://example.net/");
+        assert_eq!(apex_view(None, "example.net").current_actor, None);
     }
 
     // A minimal in-memory transport so the kind strings + request/reply shapes
@@ -846,7 +846,7 @@ mod tests {
         // Subdomain OFF and no handle — the two things that would otherwise
         // disable every copy affordance — so the only thing that can produce an
         // origin here is the active custom domain.
-        let view = site_link_view(&rows, false, None, "example.com");
+        let view = site_link_view(&rows, false, None, "example.net");
         assert_eq!(view.origin.as_deref(), Some("https://live.example/"));
         assert_eq!(view.disabled_reason, None);
     }
@@ -876,14 +876,14 @@ mod tests {
         let rows = WebClient::new(NoDomains).domain_get().await.unwrap();
         assert!(rows.is_empty());
         assert_eq!(
-            site_link_view(&rows, false, Some("alice"), "example.com").disabled_reason,
+            site_link_view(&rows, false, Some("alice"), "example.net").disabled_reason,
             Some(SiteLinkDisabledReason::SubdomainDisabled)
         );
         assert_eq!(
-            site_link_view(&rows, true, Some("alice"), "example.com")
+            site_link_view(&rows, true, Some("alice"), "example.net")
                 .origin
                 .as_deref(),
-            Some("https://alice.example.com/")
+            Some("https://alice.example.net/")
         );
     }
 
@@ -1080,7 +1080,7 @@ mod tests {
             &active("blog.example.com"),
             true,
             Some("alice"),
-            "example.com",
+            "example.net",
         );
         assert_eq!(v.origin.as_deref(), Some("https://blog.example.com/"));
         assert_eq!(v.disabled_reason, None);
@@ -1095,10 +1095,10 @@ mod tests {
                 domain: "blog.example.com".to_string(),
                 status: status.to_string(),
             }];
-            let v = site_link_view(&domains, true, Some("alice"), "example.com");
+            let v = site_link_view(&domains, true, Some("alice"), "example.net");
             assert_eq!(
                 v.origin.as_deref(),
-                Some("https://alice.example.com/"),
+                Some("https://alice.example.net/"),
                 "status {status} must not win the precedence"
             );
         }
@@ -1106,15 +1106,15 @@ mod tests {
 
     #[test]
     fn site_link_view_falls_back_to_the_subdomain() {
-        let v = site_link_view(&[], true, Some("alice"), "example.com");
-        assert_eq!(v.origin.as_deref(), Some("https://alice.example.com/"));
+        let v = site_link_view(&[], true, Some("alice"), "example.net");
+        assert_eq!(v.origin.as_deref(), Some("https://alice.example.net/"));
         assert_eq!(v.disabled_reason, None);
     }
 
     #[test]
     fn site_link_view_disables_with_a_reason_when_there_is_no_origin() {
         // Subdomain off — the one reason the user can fix from this page.
-        let off = site_link_view(&[], false, Some("alice"), "example.com");
+        let off = site_link_view(&[], false, Some("alice"), "example.net");
         assert_eq!(off.origin, None);
         assert_eq!(
             off.disabled_reason,
@@ -1122,19 +1122,19 @@ mod tests {
         );
 
         // On, but nothing to key the host on.
-        let no_handle = site_link_view(&[], true, None, "example.com");
+        let no_handle = site_link_view(&[], true, None, "example.net");
         assert_eq!(no_handle.origin, None);
         assert_eq!(
             no_handle.disabled_reason,
             Some(SiteLinkDisabledReason::NoHandle)
         );
         assert_eq!(
-            site_link_view(&[], true, Some(""), "example.com").disabled_reason,
+            site_link_view(&[], true, Some(""), "example.net").disabled_reason,
             Some(SiteLinkDisabledReason::NoHandle)
         );
 
         // On, but the handle is a label the nest never serves.
-        let reserved = site_link_view(&[], true, Some("www"), "example.com");
+        let reserved = site_link_view(&[], true, Some("www"), "example.net");
         assert_eq!(reserved.origin, None);
         assert_eq!(
             reserved.disabled_reason,
@@ -1223,8 +1223,8 @@ mod tests {
         // The two surfaces read the same rules; a handle the toggle refuses to
         // serve must never yield a copyable link.
         for handle in [Some("mail"), Some("www"), Some("app"), None, Some("")] {
-            let sub = subdomain_view(true, handle, "example.com");
-            let link = site_link_view(&[], true, handle, "example.com");
+            let sub = subdomain_view(true, handle, "example.net");
+            let link = site_link_view(&[], true, handle, "example.net");
             assert_eq!(
                 sub.url.is_some(),
                 link.origin.is_some(),
@@ -1238,14 +1238,14 @@ mod tests {
     #[test]
     fn post_page_url_is_the_tokenless_public_link() {
         assert_eq!(
-            post_page_url("https://alice.example.com/", "my-post"),
-            "https://alice.example.com/post/my-post.html"
+            post_page_url("https://alice.example.net/", "my-post"),
+            "https://alice.example.net/post/my-post.html"
         );
         // Defensive: an origin without the trailing slash must not produce a
         // double-slash-free concatenation like `…fanpost/…`.
         assert_eq!(
-            post_page_url("https://alice.example.com", "my-post"),
-            "https://alice.example.com/post/my-post.html"
+            post_page_url("https://alice.example.net", "my-post"),
+            "https://alice.example.net/post/my-post.html"
         );
     }
 
@@ -1253,16 +1253,16 @@ mod tests {
     fn tokened_url_appends_the_minted_token_to_the_nest_scoped_path() {
         assert_eq!(
             tokened_url(
-                "https://alice.example.com/",
+                "https://alice.example.net/",
                 "post/my-post.html",
                 "AbC-_123"
             ),
-            "https://alice.example.com/post/my-post.html?token=AbC-_123"
+            "https://alice.example.net/post/my-post.html?token=AbC-_123"
         );
         // A leading slash on the nest's path must not double up.
         assert_eq!(
-            tokened_url("https://alice.example.com/", "/downloads/r.pdf", "T"),
-            "https://alice.example.com/downloads/r.pdf?token=T"
+            tokened_url("https://alice.example.net/", "/downloads/r.pdf", "T"),
+            "https://alice.example.net/downloads/r.pdf?token=T"
         );
     }
 
@@ -1271,7 +1271,7 @@ mod tests {
         // The pair a creator copies from one row: the selling link (teaser) and
         // the preview link (full body). Same page, one carries the capability.
         let client = WebClient::new(FakeNest::default());
-        let origin = site_link_view(&[], true, Some("alice"), "example.com")
+        let origin = site_link_view(&[], true, Some("alice"), "example.net")
             .origin
             .unwrap();
         let public = post_page_url(&origin, "my-post");

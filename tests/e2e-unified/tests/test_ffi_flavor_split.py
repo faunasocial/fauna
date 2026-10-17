@@ -632,6 +632,9 @@ def test_automation_port_reads_are_compile_gated(rel, fn_decl):
 _CREDENTIAL_REDIRECT_READS = [
     ("libs/fauna-credential-store/src/lib.rs", "pub fn cred_file_dir"),
     ("libs/fauna-credential-store/src/lib.rs", "pub fn force_headless_store"),
+    # `FAUNA_E2E_FORCE_LOCKED_KEYRING` — the probe's "a store answered but is
+    # locked" outcome on demand; same crate, same family, same pair shape.
+    ("libs/fauna-credential-store/src/lib.rs", "pub fn forced_keyring_reach"),
     ("libs/fauna-credential-store/src/lib.rs", "pub fn keyring_app_override"),
 ]
 
@@ -1429,13 +1432,19 @@ _BRIDGE_SEAM_LITERALS = (
     "FAUNA_ATPROTO_FAKE_DNS_URL",
     "FAUNA_ATPROTO_PLC_DIRECTORY_URL",
     "FAUNA_ATPROTO_PROXY_FIXTURES",
+    "FAUNA_ATPROTO_PERMISSION_SET_FIXTURES",
+    "FAUNA_ATPROTO_RELAY_URL",
 )
 #: (real file, twin file, the same-signature fns both must define) — the
 #: redirect seams' real-plus-twin pairs.
 _FIXTURE_SEAM_PAIRS = (
     (_ATPROTOID / "resolve_seam.go", _ATPROTOID / "resolve_seam_absent.go", ("TXTResolverFromEnv",)),
     (_ATPROTOID / "directory_seam.go", _ATPROTOID / "directory_seam_absent.go", ("PLCDirectoryBaseURL",)),
-    (_BRIDGE_CMD / "fixtures_seam.go", _BRIDGE_CMD / "fixtures_seam_absent.go", ("proxyFixtureWrap", "proofFetcherFromEnv")),
+    (
+        _BRIDGE_CMD / "fixtures_seam.go",
+        _BRIDGE_CMD / "fixtures_seam_absent.go",
+        ("proxyFixtureWrap", "proofFetcherFromEnv", "permissionSetFixtureWrap", "crawlRelays"),
+    ),
 )
 _ATPROTO_SEAM_LITERAL = re.compile(r'"FAUNA_ATPROTO_[A-Z_]+"')
 
@@ -1724,7 +1733,13 @@ def _win_app_sources():
 # life of this pin *because* the pin matched on the prefix, so the 2026-08-11
 # sweep that gated the rest walked straight past it. A harness variable is
 # defined by who sets it, not by how it is spelled — add any new one here.
-_HARNESS_ENV_PATTERN = re.compile(r'"(FAUNA_E2E_[A-Z_]+|FAUNA_KEYRING_APP)"')
+# The three cadence knobs (`FAUNA_CONV_POLL_SECS`, `FAUNA_SHARE_ADVERTISE_FLOOR_SECS`,
+# `FAUNA_SHARE_PUMP_SECS`) are the same lesson a third time: unprefixed, set only
+# by the harness, and the last two shipped ungated in release for weeks.
+_HARNESS_ENV_PATTERN = re.compile(
+    r'"(FAUNA_E2E_[A-Z_]+|FAUNA_KEYRING_APP|FAUNA_CONV_POLL_SECS'
+    r'|FAUNA_SHARE_ADVERTISE_FLOOR_SECS|FAUNA_SHARE_PUMP_SECS)"'
+)
 
 
 def _ungated_e2e_literals(path):
@@ -1848,6 +1863,9 @@ _RUST_FLAVOR_CFG_NEEDLES = (
     "debug_assertions",
     'feature = "e2e-agent"',
     'feature = "test-helpers"',
+    # The nest's own never-default test feature — the precedent every app-side
+    # gate mirrors (the goal doc's Rust-apps bullet).
+    'feature = "test-hooks"',
 )
 
 
@@ -1893,6 +1911,86 @@ def _rust_harness_env_call_sites(text):
         if _line_is_in_a_cfg_test_module(text, n):
             continue
         for m in _HARNESS_ENV_PATTERN.finditer(code):
+            hits.append((n, m.group(1)))
+    return hits
+
+
+#: Any `FAUNA_*` literal, harness-spelled or not. The sweep below keys on this
+#: rather than `_HARNESS_ENV_PATTERN`: a harness variable is defined by who sets
+#: it, not how it is spelled, so the rule is inverted to "gated, or allowlisted
+#: with a reason" and a NEW unprefixed read reds until someone classifies it.
+_FAUNA_ENV_LITERAL = re.compile(r'"(FAUNA_[A-Z0-9_]+)"')
+
+#: Unprefixed `FAUNA_*` reads that legitimately compile into release artifacts:
+#: set by the deployment artifact (Dockerfile, compose, systemd, the router),
+#: never by a human and never by the e2e harness. Each entry carries its reason;
+#: a harness knob does NOT belong here — gate it (real fn under a flavor cfg plus
+#: a production twin) as `FAUNA_SHARE_PUMP_SECS` and friends were.
+_PRODUCTION_ENV_ALLOWLIST = {
+    "FAUNA_DATA_DIR": "the artifact relocates the on-disk data root (nest; the macOS bridge supervisor's LaunchDaemon plist)",
+    "FAUNA_MODE": "the compose file seeds the nest's NAT posture; the client-set DB row overrides it",
+    "FAUNA_IMAGE_TAG": "the compose file stamps the image tag the bundle was installed with; seeds the update channel until the admin's `nest_update_channel` row wins (nest/update-channel.md)",
+    "FAUNA_BUILD_ID": "the image config stamps the per-build id the deploy-verify serving check matches",
+    "FAUNA_BLESSED_KEYS_DIR": "the image's root-owned blessed-pubkey registry directory (bridge enrollment integrity)",
+    "FAUNA_FRONTED_BY_ROUTER": "the artifact marks a router-fronted box (nest/common.md § Serving ports)",
+    "FAUNA_INTERNAL_LOOPBACK_PORT": "the Windows nest service asks for the co-located IPC port",
+    "FAUNA_INBOUND_DELIVER_KEY": "the run-script passes the inbound-mail deliver key to nest and bridge",
+    "FAUNA_ROUTER_PROXY_SECRET": "the run-script env-passes the router PROXY-v2 auth secret to nest and the SNI router",
+    "FAUNA_SIDECAR_TOKEN": "the s6 run-script provides the iroh-relay sidecar's nest token",
+}
+
+#: Crates that exist only as `[dev-dependencies]` of other crates and never reach a
+#: release dependency graph, so any env read in them is test code by construction.
+_DEV_ONLY_RUST_CRATES = {
+    "libs/fauna-pebble-testkit": "the Pebble ACME test container's helper; dev-dependency of fauna-client-dns and fauna-acme-http01 only",
+}
+
+#: A `#[cfg(...)]` that only ever holds under `cargo test` — such code never ships.
+#: `any(test, X)` is NOT test-only (X alone compiles it), so it must carry a
+#: flavor needle instead.
+_RUST_TEST_ONLY_CFG = re.compile(r"#\[cfg\((?:test|all\(\s*test\b)")
+
+_RUST_MOD_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;")
+
+
+def _rust_cfg_is_flavor_gated(preceding):
+    return "#[cfg(" in preceding and (
+        any(needle in preceding for needle in _RUST_FLAVOR_CFG_NEEDLES)
+        or bool(_RUST_TEST_ONLY_CFG.search(preceding))
+    )
+
+
+def _flavor_gated_module_paths():
+    """Repo-relative `.rs` paths (and dir prefixes) of out-of-line modules whose
+    `mod x;` declaration carries a flavor gate: the gate is in the PARENT file,
+    so an env read inside the child file has no cfg of its own to find."""
+    gated = set()
+    for rel, path in _rust_scan_files():
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        parent = path.parent
+        base = parent if path.name in ("lib.rs", "main.rs", "mod.rs") else parent / path.stem
+        for i, line in enumerate(lines):
+            m = _RUST_MOD_DECL.match(line)
+            if m and _rust_cfg_is_flavor_gated(_cfg_attrs_above(lines, i)):
+                for p in (base / f"{m.group(1)}.rs", base / m.group(1)):
+                    gated.add(p.relative_to(_REPO).as_posix())
+    return gated
+
+
+def _rust_fauna_env_call_sites(text):
+    """(lineno, var_name) for every `FAUNA_*` literal on an `env::var`/
+    `env::var_os` line outside comments and `#[cfg(test)]` modules — the
+    harness sweep's call-site shape, widened from the name list to the prefix."""
+    hits = []
+    for n, line in enumerate(text.splitlines(), 1):
+        if line.strip().startswith("//"):
+            continue
+        code = line.split("//")[0]
+        if "env::var" not in code:
+            continue
+        if _line_is_in_a_cfg_test_module(text, n):
+            continue
+        for m in _FAUNA_ENV_LITERAL.finditer(code):
             hits.append((n, m.group(1)))
     return hits
 
@@ -2055,9 +2153,32 @@ fn download_dir(
     )
 
 
+def test_production_env_allowlist_is_live_and_holds_no_harness_knob():
+    """The allowlist is a claim "this read ships and the deployment sets it":
+    an entry nobody reads any more is stale, and a harness-spelled or
+    harness-listed name on it is the exact hole the inversion closes."""
+    read = {
+        name
+        for _, path in _rust_scan_files()
+        for _, name in _rust_fauna_env_call_sites(path.read_text(encoding="utf-8", errors="replace"))
+    }
+    stale = sorted(set(_PRODUCTION_ENV_ALLOWLIST) - read)
+    assert not stale, f"allowlist entries with no remaining env read: {stale}"
+    harness = sorted(
+        n
+        for n in _PRODUCTION_ENV_ALLOWLIST
+        if _HARNESS_ENV_PATTERN.fullmatch(f'"{n}"') or n.startswith(("FAUNA_TEST_", "FAUNA_BLESS_"))
+    )
+    assert not harness, f"harness knobs must be gated, never allowlisted: {harness}"
+    assert all(_PRODUCTION_ENV_ALLOWLIST.values()), "every allowlist entry needs a reason"
+
+
 def test_no_rust_harness_env_read_compiles_unconditionally():
-    """Every `env::var`/`env::var_os` call in libs/+bins/+apps/ naming a harness
-    variable must sit under a compile-time flavor gate.
+    """Every `env::var`/`env::var_os` call in libs/+bins/+apps/ naming a `FAUNA_*`
+    variable must sit under a compile-time flavor gate or be on
+    `_PRODUCTION_ENV_ALLOWLIST` (deployment-set IPC, one-line reason each) — an
+    allowlist, not a name list of harness knobs, so a NEW unprefixed read reds
+    until it is classified.
 
     `_cfg_attrs_above` — defined earlier in this file for the fn-decl checks
     — is applied to the CALL's own line here first, not to an enclosing
@@ -2075,19 +2196,20 @@ def test_no_rust_harness_env_read_compiles_unconditionally():
     that header's own attribute stack instead.
     """
     offenders = []
+    gated_modules = _flavor_gated_module_paths()
     for rel, path in _rust_scan_files():
+        if any(rel.startswith(c + "/") for c in _DEV_ONLY_RUST_CRATES):
+            continue
+        if any(rel == g or rel.startswith(g + "/") for g in gated_modules):
+            continue
         text = path.read_text(encoding="utf-8", errors="replace")
         lines = text.splitlines()
-        for n, name in _rust_harness_env_call_sites(text):
-            preceding = _cfg_attrs_above(lines, n - 1)
-            gated = "#[cfg(" in preceding and any(
-                needle in preceding for needle in _RUST_FLAVOR_CFG_NEEDLES
-            )
+        for n, name in _rust_fauna_env_call_sites(text):
+            if name in _PRODUCTION_ENV_ALLOWLIST:
+                continue
+            gated = _rust_cfg_is_flavor_gated(_cfg_attrs_above(lines, n - 1))
             if not gated:
-                preceding = _enclosing_scope_cfg_attrs(lines, n - 1)
-                gated = "#[cfg(" in preceding and any(
-                    needle in preceding for needle in _RUST_FLAVOR_CFG_NEEDLES
-                )
+                gated = _rust_cfg_is_flavor_gated(_enclosing_scope_cfg_attrs(lines, n - 1))
             if not gated:
                 offenders.append(f"{rel}:{n} {name}")
     assert not offenders, (

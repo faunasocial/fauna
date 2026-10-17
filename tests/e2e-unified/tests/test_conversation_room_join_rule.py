@@ -60,7 +60,15 @@ from tests.api.conv_api import mint_key_packages as _mint_keypackages
 pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.real_conversations,
+    # tui leads; the six others joined together through the one wide-gap lift
+    # (`feature-catalog.md` § Cell semantics), each with a `ROOM_APPS` entry.
     pytest.mark.tui,
+    pytest.mark.linux,
+    pytest.mark.macos,
+    pytest.mark.ios,
+    pytest.mark.windows,
+    pytest.mark.web,
+    pytest.mark.android,
 ]
 
 

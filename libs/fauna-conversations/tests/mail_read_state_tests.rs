@@ -9,8 +9,8 @@ use fauna_conversations::backend::{
     InboundMailPage, InboundMailRecord, InboundMailSource, MailFeed, OutboundMailSink,
 };
 use fauna_conversations::backends::smtp::{
-    SmtpBackend, flush_owed_mail_seen, ingest_inbound_record, poll_inbound_mail,
-    sync_mail_read_state,
+    MARK_SEEN_BATCH_MAX, SmtpBackend, flush_owed_mail_seen, ingest_inbound_record,
+    poll_inbound_mail, sync_mail_read_state,
 };
 use fauna_conversations::thread::ThreadId;
 use fauna_conversations::{
@@ -258,6 +258,41 @@ async fn reading_a_thread_emits_one_batched_write_naming_exactly_its_unread_inbo
     m.select_thread(id_of(&m, "alpha"));
     flush_owed_mail_seen(&source, &m).await;
     assert_eq!(source.mark_seen_calls(), [vec![1, 3], vec![4]]);
+}
+
+#[tokio::test]
+async fn an_owed_set_over_the_request_cap_goes_out_in_capped_chunks() {
+    // A long offline spell can owe far more than one request may carry; the
+    // nest refuses an over-cap list (`mail-app-surface.md` § Read state).
+    let m = manager();
+    let source = FakeInbox::default();
+    m.requeue_mail_seen((1..=2_500).collect());
+    flush_owed_mail_seen(&source, &m).await;
+    let lens: Vec<usize> = source.mark_seen_calls().iter().map(Vec::len).collect();
+    assert_eq!(lens, [MARK_SEEN_BATCH_MAX, MARK_SEEN_BATCH_MAX, 500]);
+    assert!(
+        source.mark_seen_calls().concat() == (1..=2_500).collect::<Vec<u32>>(),
+        "every owed UID sent once, ascending"
+    );
+    assert!(m.take_owed_mail_seen().is_empty(), "nothing left owed");
+}
+
+#[tokio::test]
+async fn a_chunk_the_nest_refused_keeps_it_and_every_later_one_owed() {
+    let m = manager();
+    let source = FakeInbox::default();
+    source.mark_seen_answers.lock().unwrap().extend([
+        Ok(()),
+        Err(MailFlagCallError::Failed("nest unreachable".into())),
+    ]);
+    m.requeue_mail_seen((1..=2_500).collect());
+    flush_owed_mail_seen(&source, &m).await;
+    assert_eq!(source.mark_seen_calls().len(), 2, "stops at the failure");
+    assert_eq!(
+        m.take_owed_mail_seen(),
+        (MARK_SEEN_BATCH_MAX as u32 + 1..=2_500).collect::<Vec<u32>>(),
+        "the failed chunk and the unsent tail stay owed; the sent chunk does not"
+    );
 }
 
 #[tokio::test]

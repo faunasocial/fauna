@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The D4 link-preview card (`link-preview-card`) — a clickable embedded preview of a standalone
@@ -106,3 +109,4 @@ public struct LinkPreviewCard: View {
         if let parsed = URL(string: url) { openURL(parsed) }
     }
 }
+#endif // !FAUNA_KIDS

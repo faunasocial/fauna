@@ -159,9 +159,11 @@ from common.keyring import secret_service_available
 from helpers.app_surface import app_name, skip_environment, skip_unbuilt
 from common.launch_harness import make_launch_harness, reached_authenticated_app
 from i18n.strings import S
+from helpers.app_launch import app_launch_config
 from conftest import _trust_seeder, get_available_apps
 from helpers import budgets
 from helpers.waiting import await_account_runtime_assembled, wait_until
+from helpers.launch_token import launch_token
 
 pytestmark = [
     pytest.mark.tier_3, pytest.mark.linux, pytest.mark.tui, pytest.mark.web,
@@ -180,9 +182,11 @@ LAUNCH_FALLTHROUGH = "launch-fallthrough-button"
 # `onboarding.launch_sign_in_refused`), so smoke E cannot be satisfied by any
 # old `error-message` text.
 SIGN_IN_REFUSED_NOTICE = "launch-sign-in-refused-notice"
-# The apps that paint that notice. The others still carry the sentence in
-# `error-message` until they adopt the element.
-_SIGN_IN_REFUSED_NOTICE_APPS = frozenset({"tui", "linux", "web", "macos", "ios"})
+# The apps that paint that notice (all seven). An app dropped from the set would
+# fall back to the sentence in `error-message`.
+_SIGN_IN_REFUSED_NOTICE_APPS = frozenset(
+    {"tui", "linux", "web", "macos", "ios", "windows", "android"}
+)
 CREATE_IDENTITY = "create-identity-button"
 
 #: Fresh web drivers compile wasm cold and the routed surface only paints after
@@ -304,23 +308,11 @@ def launch_harness(request, tmp_path):
     if client == "web":
         spa_url = request.getfixturevalue("spa_url")
         harness = make_launch_harness("web", spa_url=spa_url, extra_launch_config=extra)
-    elif client == "ios":
-        # No bare `ios_app_path` fixture exists — iOS's direct-launch fixture
-        # (`ios_setup`, used by e.g. the account-switcher suite for the same
-        # reason: a test-scoped credential seed must reach the app BEFORE
-        # launch) returns `{"udid", "app_path"}` together, since
-        # `drivers/ios.py`'s `launch()` requires both.
-        ios_setup = request.getfixturevalue("ios_setup")
-        harness = make_launch_harness(
-            "ios", tmp_path=tmp_path, app_path=ios_setup["app_path"],
-            udid=ios_setup["udid"], file_backed=headless, extra_launch_config=extra,
-            seed_trust=_trust_seeder(request),
-        )
     else:
-        app_path = request.getfixturevalue(f"{client}_app_path")
         harness = make_launch_harness(
-            client, tmp_path=tmp_path, app_path=app_path, file_backed=headless,
-            extra_launch_config=extra, seed_trust=_trust_seeder(request),
+            client, tmp_path=tmp_path, **app_launch_config(client, request),
+            file_backed=headless, extra_launch_config=extra,
+            seed_trust=_trust_seeder(request),
         )
     try:
         yield harness
@@ -469,7 +461,9 @@ def test_smoke_d_unreachable_dns_fail_shows_retry_surface(launch_harness):
 # E — silent-challenge not_registered on a CLAIMED nest, saved nest_url →
 #     the sign-in-refused surface (never the invite wizard)
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("launch_harness", _clients(*WEB_FIT), indirect=True)
+@pytest.mark.parametrize(
+    "launch_harness", _clients(*WEB_FIT, "windows"), indirect=True
+)
 def test_smoke_e_previously_signed_in_identity_refused_by_claimed_nest_lands_refused_surface(
     nest_instance, launch_harness, live_node_url
 ):
@@ -481,8 +475,8 @@ def test_smoke_e_previously_signed_in_identity_refused_by_claimed_nest_lands_ref
     by design). It lands the sign-in-refused surface, NOT the invite wizard: the
     localized sentence in the surface's own ``launch-sign-in-refused-notice``
     and "Use a different nest"; an app that reads the snapshot's side channel
-    adds Retry (tui, linux, web, macos and ios do). An app that has not adopted the notice element yet
-    still paints the sentence in ``error-message``, and is recorded unbuilt
+    adds Retry (all seven apps do). An app that has not adopted the notice element
+    would still paint the sentence in ``error-message``, and be recorded unbuilt
     after that interim shape is checked. Before this
     row the launch offered to re-join a nest that already held the account — a
     suspended actor's invite submit is refused outright.
@@ -547,10 +541,8 @@ def test_smoke_e2_suspended_while_signed_in_lands_refused_surface_without_relaun
     from FaunaKit's connection-state observer (`escalateSessionEnding`), windows
     from its connection-state pump and TTL refresh loop through
     `SessionEndingRoute`; all, like linux, reach the launch surface over the SAME
-    account on the same page / process. tui, linux, web, macos and ios paint the surface's own notice +
-    Retry; android and windows the interim shape (the sentence in ``error-message``) until they
-    adopt the page, recorded unbuilt after that
-    check. The user is registered on the session ``nest_instance`` directly;
+    account on the same page / process. All seven apps paint the surface's own
+    notice + Retry. The user is registered on the session ``nest_instance`` directly;
     web reaches that same nest through ``spa_url`` (``live_node_url``)."""
     from common.auth import _authed_call, make_keypair, register_user
 
@@ -1379,25 +1371,6 @@ def _own_session_ids_on_nest(nest_instance, harness_ids: set[str]) -> set[str]:
     return listed - harness_ids
 
 
-def _launch_token(driver) -> dict:
-    # JSON `null` is the key's documented "cannot answer yet" (no bearer held
-    # while a mint is in flight, `fauna_e2e_agent::LAUNCH_TOKEN_KEY`), so wait on
-    # the state itself (convention 14) before judging that the app publishes none.
-    try:
-        wait_until(
-            lambda: isinstance(driver.get_state("launch_token"), dict),
-            budgets.RPC_ROUNDTRIP_S,
-        )
-    except AssertionError:
-        pass
-    token = driver.get_state("launch_token")
-    assert isinstance(token, dict), (
-        f"the app publishes no `launch_token` state — an app under test that does not "
-        f"publish the key, not a schedule that failed. got {token!r}"
-    )
-    return token
-
-
 @pytest.mark.parametrize(
     "launch_harness", _clients("tui", "linux", "web", "macos", "ios"), indirect=True
 )
@@ -1438,7 +1411,8 @@ def test_smoke_m_wrong_clock_ahead_stays_signed_in(nest_instance, launch_harness
     **Whose bearer, and why the witness is not vacuous on any seat.** The
     `launch_token` key and the `launch_refresh_token` command name the bearer the
     app actually holds and refreshes (`fauna_e2e_agent::LAUNCH_TOKEN_KEY`): the
-    launch machine's on tui and linux, `getAuthToken`'s cache on web, and
+    launch machine's on linux and on a launch-routed tui (this case),
+    `getAuthToken`'s cache on web, and
     `FfiNestClient`'s `WsChallengeBearer` on the UniFFI apps. Every one of them
     anchors and compares on the one client clock (`fauna_protocol::client_clock`;
     web reads the launch chunk's copy of it), whose offset the `clock` key proves
@@ -1468,7 +1442,7 @@ def test_smoke_m_wrong_clock_ahead_stays_signed_in(nest_instance, launch_harness
     )
 
     # Leg 1 — the schedule is on the app's own clock, a full TTL away.
-    token = _launch_token(driver)
+    token = launch_token(driver)
     expires_in = token.get("expires_in_secs")
     assert expires_in is not None and BEARER_REFRESH_BUFFER_SECS < expires_in <= TOKEN_TTL_SECS, (
         "the bearer's deadline is not a TTL away on the app's own clock: "
@@ -1484,7 +1458,7 @@ def test_smoke_m_wrong_clock_ahead_stays_signed_in(nest_instance, launch_harness
     # sync-agent capability provisioning mints a second through the launch
     # machine, web's login `silentSignIn` beside the launch's primed bearer.
     driver.barrier()
-    settled_ids = set(_launch_token(driver).get("own_session_ids") or [])
+    settled_ids = set(launch_token(driver).get("own_session_ids") or [])
     assert settled_ids == launch_ids, (
         f"the own-session set kept growing after launch ({launch_ids!r} → "
         f"{settled_ids!r}) — the hot re-mint loop"
@@ -1509,7 +1483,7 @@ def test_smoke_m_wrong_clock_ahead_stays_signed_in(nest_instance, launch_harness
     assert driver.is_absent(LAUNCH_TRANSIENT_ERROR), (
         "the launch error surface is up after the refresh"
     )
-    token_after = _launch_token(driver)
+    token_after = launch_token(driver)
     expires_in_after = token_after.get("expires_in_secs")
     assert (
         expires_in_after is not None

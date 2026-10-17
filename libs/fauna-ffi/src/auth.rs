@@ -136,7 +136,9 @@ fn silent_outcome_to_ffi(
         // `fauna.nest.outdated` — degraded nest. Its own variant so native
         // apps route to a non-retry "update your nest" surface, not the retry
         // loop the generic error feeds (version-compatibility.md Dim 4).
-        SilentChallengeOutcome::NeedsUpdate { message } => {
+        // The app-too-old 426 rides the same non-retry variant: the FFI apps
+        // render its `msg`, which names the side to update.
+        SilentChallengeOutcome::NeedsUpdate { message, .. } => {
             Err(FfiError::NestOutdated { msg: message })
         }
         // Changed/withdrawn pinned identity — its own variant so native apps
@@ -146,9 +148,10 @@ fn silent_outcome_to_ffi(
         // trust).
         // `fork` (rotation-chain fork evidence) is deliberately NOT a new
         // `FfiError` field yet — the same build-risk trade the Superseded arm
-        // below carried until an app actually rendered its affordance, and no
-        // app renders a fork one; the FFI apps read the machine's
-        // `LaunchSnapshot::identity_fork` when their fork rendering lands.
+        // below carried until an app actually rendered its affordance. tui (no
+        // FFI) renders the fork warning off the machine's
+        // `LaunchSnapshot::identity_fork`; the FFI apps read that same field
+        // when their fork rendering lands.
         SilentChallengeOutcome::IdentityChanged {
             host,
             pinned_hex,
@@ -260,6 +263,7 @@ mod tests {
         // NOT collapse into the generic `General` error that native apps retry.
         let out = silent_outcome_to_ffi(SilentChallengeOutcome::NeedsUpdate {
             message: "this nest must be updated".into(),
+            outdated: fauna_launch_machine::OutdatedSide::Nest,
         });
         match out {
             Err(FfiError::NestOutdated { msg }) => assert_eq!(msg, "this nest must be updated"),

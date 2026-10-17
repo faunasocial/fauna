@@ -24,6 +24,21 @@ pub fn build_signature_string(headers: &[(String, String)]) -> String {
         .join("\n")
 }
 
+/// The `(request-target)` value an HTTP signature is computed over: path **and**
+/// query.
+///
+/// The remote rebuilds the request-target from the line it received, so signing
+/// the bare path would mismatch for any URL carrying a query and the signature
+/// would be rejected — a failure that only shows up against the peers whose
+/// actor or inbox URLs happen to be parameterised, which is exactly the kind of
+/// interop bug that hides until production.
+pub fn request_target_path(url: &url::Url) -> String {
+    match url.query() {
+        Some(query) => format!("{}?{}", url.path(), query),
+        None => url.path().to_string(),
+    }
+}
+
 /// Compute a `SHA-256=<base64>` digest string for a request body.
 pub fn compute_digest(body: &[u8]) -> String {
     let hash = Sha256::digest(body);

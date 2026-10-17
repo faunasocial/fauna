@@ -323,7 +323,8 @@ public sealed partial class AdminDnsPage : Page
                 ctx.DnsByName.TryGetValue(d.domain, out var view);
                 AddDomainItem(d.domain, d.isPrimary, view, d.catchAllActorId,
                     d.catchAllClearedBySuccessionAt,
-                    d.roleAddressOverrides, true, ld.renameAvailable, ld.activeRename, ctx);
+                    d.roleAddressOverrides, d.dmarcPolicy, true, ld.renameAvailable,
+                    ld.activeRename, ctx);
             }
         }
         else
@@ -331,13 +332,14 @@ public sealed partial class AdminDnsPage : Page
             // Local-domains snapshot not in yet (or failed) — render the DNS domains
             // read-only so records appear; is_primary unknown (remove enabled, but the
             // nest still refuses the primary). The catch-all designation is unknown
-            // here too, so the picker is collapsed (catchAllKnown: false). The rename
+            // here too, so the picker is collapsed (catchAllKnown: false) — and so is
+            // the DMARC policy picker (dmarcPolicy: null). The rename
             // affordances need the authoritative CRUD snapshot, so they stay hidden on
             // the read-only fallback row (renameAvailable: false, activeRename: null).
             // Mirrors linux render_admin_dns's None arm.
             foreach (var view in dns.domains)
             {
-                AddDomainItem(view.domain, false, view, null, null, null, false, false, null, ctx);
+                AddDomainItem(view.domain, false, view, null, null, null, null, false, false, null, ctx);
             }
         }
 
@@ -364,6 +366,14 @@ public sealed partial class AdminDnsPage : Page
         /// role-address routing → *One owner for the role vocabulary*).</summary>
         public readonly IReadOnlyList<RoleAddressOption> RoleOptions =
             FaunaClientMailSettingsMethods.RoleAddressOptions();
+        /// <summary>The shared DMARC policy catalog
+        /// (<c>fauna_client_mail_settings::local_domains::dmarc_policy_options()</c>) —
+        /// every row's <c>admin-dns-domain-dmarc-policy-select</c> paints this table in
+        /// its order; each option carries both its RFC 7489 tag and the policy it
+        /// names, so nothing here maps one to the other (dmarc-reporting.md
+        /// § Multi-domain deployments).</summary>
+        public readonly IReadOnlyList<DmarcPolicyOption> DmarcOptions =
+            FaunaClientMailSettingsMethods.DmarcPolicyOptions();
 
         // Captions (resolved once per render, not per domain).
         public readonly string NameCaption = S.Get("admin/dns/field_name");
@@ -382,6 +392,7 @@ public sealed partial class AdminDnsPage : Page
         public readonly string CatchAllClearedBySuccession = S.Get("admin/dns/catch_all_cleared_by_succession");
         public readonly string RoleAddressLabel = S.Get("admin/dns/role_address_label");
         public readonly string RoleAddressAdminDefault = S.Get("admin/dns/role_address_admin_default");
+        public readonly string DmarcPolicyLabel = S.Get("admin/dns/dmarc_policy_label");
         public readonly string AutoRenewLabel = S.Get("admin/dns/cert/auto_renew");
         public readonly string IssueLabel = S.Get("admin/dns/cert/issue");
         public readonly string CompleteLabel = S.Get("admin/dns/cert/issue_complete");
@@ -417,10 +428,11 @@ public sealed partial class AdminDnsPage : Page
     /// read-only badge and a disabled remove-button. <paramref name="renameAvailable"/>
     /// + <paramref name="activeRename"/> are the snapshot-wide primary-domain-rename
     /// gate + projection (same for every row) driving the per-row rename/promote/state
-    /// affordances.</summary>
+    /// affordances. <paramref name="dmarcPolicy"/> is the domain's published DMARC
+    /// policy, null on the read-only DNS-fallback row (unknown there).</summary>
     private void AddDomainItem(string domain, bool isPrimary, DomainView? view,
         byte[]? catchAllActorId, long? catchAllClearedBySuccessionAt,
-        IReadOnlyList<RoleAddressOverrideView>? roleOverrides,
+        IReadOnlyList<RoleAddressOverrideView>? roleOverrides, DomainDmarcPolicy? dmarcPolicy,
         bool catchAllKnown, bool renameAvailable, PrimaryDomainRenameView? activeRename,
         DomainRenderContext ctx)
     {
@@ -491,6 +503,24 @@ public sealed partial class AdminDnsPage : Page
         var abusePicker = BuildRolePicker(RoleOption(ctx.RoleOptions, "abuse"), roleOverrides, ctx);
         var nocPicker = BuildRolePicker(RoleOption(ctx.RoleOptions, "noc"), roleOverrides, ctx);
         var securityPicker = BuildRolePicker(RoleOption(ctx.RoleOptions, "security"), roleOverrides, ctx);
+
+        // Per-domain DMARC policy picker (admin-dns-domain-dmarc-policy-select;
+        // dmarc-reporting.md § Multi-domain deployments) — a RAW-VALUE picker over the
+        // shared catalog: each item's AutomationProperties.Name + Tag is the RFC 7489 tag,
+        // what the FlaUI bridge's select/get_text match a ComboBoxItem by (the
+        // PersonalizationPage publish-kind precedent), and its Content the localized
+        // text. The parallel DmarcPolicies list is what the handler dispatches.
+        var dmarcItems = new List<ComboBoxItem>();
+        var dmarcPolicies = new List<DomainDmarcPolicy>();
+        var dmarcSelected = -1;
+        foreach (var opt in ctx.DmarcOptions)
+        {
+            var dmarcItem = new ComboBoxItem { Content = S.Resolve(opt.@label), Tag = opt.@value };
+            AutomationProperties.SetName(dmarcItem, opt.@value);
+            if (opt.@policy == dmarcPolicy) dmarcSelected = dmarcItems.Count;
+            dmarcItems.Add(dmarcItem);
+            dmarcPolicies.Add(opt.@policy);
+        }
 
         // Primary-domain rename affordances (mail-primary-domain-rename.md § UX surface;
         // mirrors web +page.svelte row block + linux build_domain_section). PRIMARY row
@@ -584,6 +614,14 @@ public sealed partial class AdminDnsPage : Page
             AbusePicker = abusePicker,
             NocPicker = nocPicker,
             SecurityPicker = securityPicker,
+
+            // Per-domain DMARC policy picker (admin-dns-domain-dmarc-policy-select).
+            // Known only from the authoritative local-domains row.
+            DmarcPolicyLabel = ctx.DmarcPolicyLabel,
+            DmarcPolicyItems = dmarcItems,
+            DmarcPolicies = dmarcPolicies,
+            DmarcPolicySelectedIndex = dmarcSelected,
+            DmarcPolicyVisibility = dmarcPolicy is not null ? Visibility.Visible : Visibility.Collapsed,
         });
     }
 
@@ -1349,6 +1387,25 @@ public sealed partial class AdminDnsPage : Page
             item.DomainName, picker.Kind, actorId));
     }
 
+    /// <summary>Set a domain's published DMARC policy
+    /// (`admin-dns-domain-dmarc-policy-select` → <c>LocalDomainAction.UpdateConfig</c>
+    /// with only <c>dmarcPolicy</c> set → <c>fauna.bridges.update_local_domain_config</c>;
+    /// dmarc-reporting.md § Multi-domain deployments). Every other per-domain knob rides
+    /// as null, so none is touched; <c>Reject</c>, the default, clears the override.
+    /// The x:Bind SelectedIndex set when the row is realized raises SelectionChanged
+    /// too, so a change that merely matches the row's current policy index (the
+    /// render-time echo) is ignored — the same guard
+    /// <see cref="CatchAll_SelectionChanged"/> uses.</summary>
+    private async void DmarcPolicy_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is not ComboBox cb || cb.DataContext is not DnsDomainItem item) return;
+        var idx = cb.SelectedIndex;
+        if (idx < 0 || idx == item.DmarcPolicySelectedIndex) return; // render-time echo
+        if (idx >= item.DmarcPolicies.Count) return;
+        await DispatchLocalDomainAsync(new LocalDomainAction.UpdateConfig(
+            item.DomainName, null, null, null, item.DmarcPolicies[idx]));
+    }
+
     /// <summary>Dispatch a <c>LocalDomainAction</c> (the action refetches the list on
     /// success) then re-render. A CRUD rejection is stored in the snapshot's
     /// <c>error</c> (surfaced via <see cref="RenderAll"/>'s precedence); a thrown
@@ -1776,6 +1833,26 @@ public sealed class DnsDomainItem
     public RoleAddressPickerItem? AbusePicker { get; init; }
     public RoleAddressPickerItem? NocPicker { get; init; }
     public RoleAddressPickerItem? SecurityPicker { get; init; }
+
+    // ── Per-domain DMARC policy picker (admin-dns-domain-dmarc-policy-select) ──────
+    /// <summary>"DMARC policy:" caption shown beside the picker.</summary>
+    public string DmarcPolicyLabel { get; init; } = "";
+    /// <summary>The picker's items, in the shared catalog's paint order (reject,
+    /// quarantine, none): Content = the localized text, AutomationProperties.Name +
+    /// Tag = the RFC 7489 tag — the raw value the e2e's select/get_text round-trip.
+    /// Fresh per render, so no item is ever parented twice.</summary>
+    public IReadOnlyList<ComboBoxItem> DmarcPolicyItems { get; init; } = Array.Empty<ComboBoxItem>();
+    /// <summary>Parallel policy map for <see cref="DmarcPolicyItems"/> — what the
+    /// SelectionChanged handler dispatches in <c>UpdateConfig</c>. <c>internal</c>
+    /// because the UniFFI enum is (the <see cref="RoleAddressPickerItem.Kind"/>
+    /// precedent).</summary>
+    internal IReadOnlyList<DomainDmarcPolicy> DmarcPolicies { get; init; } = Array.Empty<DomainDmarcPolicy>();
+    /// <summary>The current policy's index. Bound to the ComboBox SelectedIndex; the
+    /// handler ignores a SelectionChanged that matches it (the render-time echo).</summary>
+    public int DmarcPolicySelectedIndex { get; init; }
+    /// <summary>Shown only when the authoritative local-domains row is in (the policy
+    /// is known); collapsed on the read-only DNS-fallback row.</summary>
+    public Visibility DmarcPolicyVisibility { get; init; } = Visibility.Collapsed;
 }
 
 /// <summary>One per-domain role-address override picker

@@ -427,6 +427,16 @@ impl AuthClient {
         Arc::clone(&self.bearer)
     }
 
+    /// The identity this client's bearer source's latest silent-challenge mint
+    /// confirmed, as a watch ([`BearerSource::subscribe_self_identity`]) —
+    /// the [`WsChallengeBearer`](crate::ws_challenge_bearer::WsChallengeBearer)
+    /// [`Self::new`] builds, or the launch machine behind a
+    /// `LaunchMachineBearer` handed to [`Self::with_bearer_source`]. `None`
+    /// when the source cannot say.
+    pub fn subscribe_self_identity(&self) -> Option<fauna_nest_http::SelfIdentityWatch> {
+        self.bearer.subscribe_self_identity()
+    }
+
     /// Nest base URL — the *current* value (the cell is swapped by
     /// [`try_srv_recover`](Self::try_srv_recover) on an SRV-reconnect serving-port
     /// change). Returns an owned `String` rather than a borrow because the value
@@ -533,7 +543,7 @@ impl AuthClient {
     }
 }
 
-fn map_api_err(e: ApiError) -> NestClientError {
+pub(crate) fn map_api_err(e: ApiError) -> NestClientError {
     match e {
         ApiError::Status { code, message } => NestClientError::Auth(format!("({code}) {message}")),
         // Transport failures and a malformed handshake reply both surface
@@ -564,6 +574,17 @@ fn map_api_err(e: ApiError) -> NestClientError {
         ApiError::Superseded { new_actor_id_hex } => {
             NestClientError::Rpc(superseded_refusal(&new_actor_id_hex))
         }
+        // And a nest that needs updating, as the degraded boot's own wire
+        // refusal — so the supervisor stops on it and `session_ending_verdict`
+        // names it, from either bearer shape (`version-compatibility.md`
+        // § Dimension 4).
+        ApiError::NestOutdated => NestClientError::Rpc(fauna_protocol::RpcError::nest_outdated()),
+        // And an app too old for its nest, met at the mint's own upgrade: the
+        // authenticated connect's own terminal error for the same 426, so a
+        // mint-first reconnect stops exactly as a connect-first one does and
+        // `session_ending_verdict` names `AppOutdated` (`version-compatibility.md`
+        // § Dimension 4).
+        ApiError::SubprotocolMismatch => NestClientError::SubprotocolMismatch,
     }
 }
 
@@ -644,6 +665,40 @@ mod tests {
         assert!(
             matches!(&e, NestClientError::Rpc(r) if r.is_not_registered()),
             "expected the verdict to survive, got {e:?}"
+        );
+    }
+
+    /// …and the same for a nest that needs updating: the typed wire refusal,
+    /// which the supervisor stops on and the apps' routing reads as
+    /// [`crate::SessionEndingVerdict::NestOutdated`].
+    #[test]
+    fn a_nest_outdated_mint_does_not_join_the_couldnt_obtain_a_token_bucket() {
+        let e = map_api_err(ApiError::NestOutdated);
+        assert!(
+            matches!(&e, NestClientError::Rpc(r) if r.code == fauna_protocol::RpcError::CODE_NEST_OUTDATED),
+            "expected the verdict to survive, got {e:?}"
+        );
+        assert_eq!(
+            e.session_ending_verdict(),
+            Some(crate::SessionEndingVerdict::NestOutdated)
+        );
+    }
+
+    /// …and an app too old for its nest, met at the mint's own upgrade (the
+    /// nest's 426): the authenticated connect's own terminal
+    /// `SubprotocolMismatch`, which the supervisor stops on and the apps'
+    /// routing reads as [`crate::SessionEndingVerdict::AppOutdated`] — so a
+    /// mint-first reconnect ends exactly as a connect-first one does.
+    #[test]
+    fn a_too_old_app_at_the_mint_does_not_join_the_couldnt_obtain_a_token_bucket() {
+        let e = map_api_err(ApiError::SubprotocolMismatch);
+        assert!(
+            matches!(e, NestClientError::SubprotocolMismatch),
+            "expected the verdict to survive, got {e:?}"
+        );
+        assert_eq!(
+            e.session_ending_verdict(),
+            Some(crate::SessionEndingVerdict::AppOutdated)
         );
     }
 

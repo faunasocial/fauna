@@ -9,9 +9,12 @@
 import {
   byteSizeRaw,
   relativeTimeRaw,
+  mailHealthStateLabel,
+  mailHealthHeartbeatLabelRaw,
   durationSecsRaw,
   graceCountdownRaw,
   conversationTimestampRaw,
+  approvalTimestampRaw,
   backupLastUploadLabel,
   backupBacklogLabel,
   backupLastAuditLabel,
@@ -57,6 +60,50 @@ export function relativeTime(epochMs: number): string {
 }
 
 /**
+ * An audit timestamp (epoch-**millisecond**) in `format_unix_local_ms`'s fixed
+ * shape — `YYYY-MM-DD HH:MM`, local time (value-formatting.md § Absolute local
+ * timestamp display). Web formats it in JS because `format_unix_local` needs
+ * the OS timezone database, which wasm lacks; the cross-app actions parse this
+ * shape. Seconds-valued callers multiply by 1000.
+ */
+export function localTimestamp(epochMs: number): string {
+  const d = new Date(epochMs);
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * One mail-health heartbeat stamp (`last_outbound_delivered_at` /
+ * `last_inbound_accepted_at`, unix **seconds**; `null` = never) as text: "Never"
+ * or the shared relative bucket / absolute date. The text of heartbeat rows 5–6
+ * and of the two facts on `admin-mail-health-status`.
+ */
+export function mailHealthHeartbeatText(atSecs: number | null): string {
+  return resolveRelativeTime(mailHealthHeartbeatLabelRaw(atSecs, Date.now()));
+}
+
+/**
+ * `admin-mail-health-status` line: the shared state label followed by the two
+ * heartbeat facts, composed from the `admin.mail_page.health_status_line`
+ * template (the native-Rust apps get the same line from
+ * `fauna_core::format::mail_health_status_text`).
+ */
+export function mailHealthStatusText(
+  state: string,
+  lastDeliveredSecs: number | null,
+  lastReceivedSecs: number | null,
+): string {
+  return resolveLocalized({
+    key: 'admin.mail_page.health_status_line',
+    args: {
+      state: resolveLocalized(mailHealthStateLabel(state)),
+      delivered: mailHealthHeartbeatText(lastDeliveredSecs),
+      received: mailHealthHeartbeatText(lastReceivedSecs),
+    },
+  });
+}
+
+/**
  * `backup-destination-last-upload-time` row text. The never-vs-real key choice,
  * the epoch-`0` guard, and the seconds→ms conversion are the shared fn's
  * (`fauna_core::format::backup_last_upload_label`) — pass the status's raw
@@ -77,11 +124,12 @@ export function backupLastUploadText(lastUploadSecs: number | null): string {
 /**
  * `backup-destination-backlog-count` row text ("{count} queued"). The
  * absent-status 0 baseline is the shared fn's
- * (`fauna_core::format::backup_backlog_label`). See value-formatting.md
- * § Backup destination status labels.
+ * (`fauna_core::format::backup_backlog_label`), and so is the refused-writer
+ * text that replaces the count. See value-formatting.md § Backup destination
+ * status labels.
  */
-export function backupBacklogText(backlogCount: number | null): string {
-  return resolveLocalized(backupBacklogLabel(backlogCount));
+export function backupBacklogText(backlogCount: number | null, writerState: string | null): string {
+  return resolveLocalized(backupBacklogLabel(backlogCount, writerState));
 }
 
 /**
@@ -229,4 +277,22 @@ export function conversationTimestamp(epochMs: number): string {
     return new Date(d.absolute_epoch_ms).toLocaleDateString();
   }
   return '';
+}
+
+/**
+ * When a held mail arrived, for a `family-approval-item` row's "sender · time"
+ * (`fauna_core::format::approval_timestamp_display` over wasm): the
+ * `conversationTimestamp` buckets over the entry's `created_at` (unix
+ * **seconds**), or `null` for every other kind and an unstamped hold — the row
+ * then shows its sender alone.
+ */
+export function approvalTimestamp(kind: string, createdAtSecs: number): string | null {
+  const d = approvalTimestampRaw(kind, createdAtSecs, Date.now(), utcOffsetSeconds());
+  if (d == null) return null;
+  if (d.clock != null) return d.clock;
+  if (d.localized) return resolveLocalized(d.localized);
+  if (d.absolute_epoch_ms != null) {
+    return new Date(d.absolute_epoch_ms).toLocaleDateString();
+  }
+  return null;
 }

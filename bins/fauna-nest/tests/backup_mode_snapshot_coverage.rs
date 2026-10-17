@@ -108,12 +108,14 @@ async fn supersede(
     folder: &str,
     path: &str,
     head: ContentHash,
+    source: ContentHash,
 ) -> u64 {
     let req = SyncChangesSupersedeRequest {
         folder: folder.to_string(),
         device_id: device_hex.to_string(),
         path: path.to_string(),
         manifest_hash: hex::encode(head.digest()),
+        source_manifest_hash: Some(hex::encode(source.digest())),
         ..Default::default()
     };
     let payload = Bytes::from(encode_canonical(&req).expect("encode req").to_vec());
@@ -320,6 +322,7 @@ async fn backup_folder_records_ride_the_head_feed_and_snapshots_pin_versions() {
         "photo-library",
         "2024/IMG_0001.heic",
         m_a2,
+        m_a1,
     )
     .await;
     assert_eq!(marked_a, 1, "A's v1 row marks superseded");
@@ -330,6 +333,7 @@ async fn backup_folder_records_ride_the_head_feed_and_snapshots_pin_versions() {
         "photo-library",
         "2024/IMG_0002.heic",
         m_b2,
+        m_b1,
     )
     .await;
     assert_eq!(marked_b, 1, "B's v1 row marks superseded");

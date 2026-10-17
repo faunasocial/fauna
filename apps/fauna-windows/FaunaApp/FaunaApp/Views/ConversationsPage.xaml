@@ -23,6 +23,7 @@
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
@@ -67,8 +68,58 @@
                 PlaceholderText="{loc:Localize Key=conversations/list/search_placeholder}"
                 TextChanged="ConversationSearchBox_TextChanged" />
 
-            <ListView
+            <!--
+                The community-room invitations standing for this account, atop the
+                list (`room-invitation[i]` with its accept/decline pair, flat and
+                indexed — the `room-admin-toggle` convention; `ui/conversations.md`
+                § Element IDs → *Pending invitations*). The rows are already
+                verified against their signers in shared Rust and the sentence is
+                shared too (`RoomInvitationText`), so this only lays them out.
+                COLLAPSED — absent — while none stands. The `role` attribute rides
+                HelpText; the text label carries an AutomationId ONLY (a static
+                Name makes get_text read the wrong thing).
+
+                Accept follows the manager into the room's thread (the manager
+                selects it) and is the `room.accept_invite` ceremony, so it gates;
+                decline is `inbox.ack` — offline-safe, UNGATED on purpose
+                (the offline-gate-kinds checker refuses a gate there).
+            -->
+            <ItemsControl
                 Grid.Row="2"
+                x:Name="RoomInvitationsList"
+                Margin="16,0,16,4"
+                Visibility="Collapsed">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Grid ColumnSpacing="8" Margin="0,2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                                       TextWrapping="Wrap"
+                                       AutomationProperties.AutomationId="room-invitation"
+                                       AutomationProperties.HelpText="{Binding RoleToken}"
+                                       Text="{Binding Text}" />
+                            <Button Grid.Column="1"
+                                    AutomationProperties.AutomationId="room-invitation-accept-button"
+                                    Content="{Binding AcceptLabel}"
+                                    Tag="{Binding Id}"
+                                    Loaded="RoomInvitationAccept_Loaded"
+                                    Click="RoomInvitationAccept_Click" />
+                            <Button Grid.Column="2"
+                                    AutomationProperties.AutomationId="room-invitation-decline-button"
+                                    Content="{Binding DeclineLabel}"
+                                    Tag="{Binding Id}"
+                                    Click="RoomInvitationDecline_Click" />
+                        </Grid>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <ListView
+                Grid.Row="3"
                 x:Name="ConversationsList"
                 SelectionChanged="ConversationsList_SelectionChanged"
                 ContainerContentChanging="ConversationsList_ContainerContentChanging"
@@ -135,8 +186,21 @@
                                      (render-model.md § D5). No Segoe MDL2 Assets — that
                                      symbol font has no emoji; the default font's Segoe UI
                                      Emoji fallback renders 🦊/✉️/🦋/⚡/🌐/📡 in color. -->
+                                <!-- conversation-guardian-state: the family gate's marker,
+                                     painted only while the nest reports one (family-safety.md
+                                     § The bridge-DM gate); its `state` rides HelpText, and
+                                     Collapsed is how a driver sees it absent. -->
+                                <TextBlock
+                                    AutomationProperties.AutomationId="{x:Bind ids:Ids.ConversationGuardianState}"
+                                    AutomationProperties.HelpText="{x:Bind GuardianToken}"
+                                    Text="{x:Bind GuardianLabel}"
+                                    Visibility="{x:Bind GuardianVis}"
+                                    FontSize="11"
+                                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                    VerticalAlignment="Center" />
                                 <TextBlock
                                     AutomationProperties.AutomationId="{x:Bind ids:Ids.ProtocolIcon}"
+                                    AutomationProperties.HelpText="{x:Bind ProtocolBridgeId}"
                                     Text="{x:Bind ProtocolGlyph}"
                                     FontSize="11"
                                     Opacity="0.7"
@@ -393,19 +457,26 @@
                 IsTabStop="True"
                 KeyDown="RoomSettings_KeyDown"
                 Background="{ThemeResource SystemControlAcrylicWindowBrush}">
+            <!--
+                Two regions: the editor's CONTENT scrolls (title, the two selects,
+                the member rows, the home nest's read, the pending invitations and
+                the labeler set — a community room's editor is taller than the
+                window), while the error line, Save and the walk-out stay put
+                beneath it, so the controls that commit or leave are never pushed
+                below the fold by a long labeler catalog.
+            -->
             <Grid Padding="32" HorizontalAlignment="Center" VerticalAlignment="Center"
                   RowSpacing="8" MinWidth="420">
                 <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
-                <TextBlock Grid.Row="0"
+                <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto">
+                <StackPanel Spacing="8">
+                <TextBlock
                            Text="{loc:Localize Key=conversations/unified/thread_room_settings}"
                            Style="{StaticResource SubtitleTextBlockStyle}" />
 
@@ -483,6 +554,108 @@
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
+
+                <!--
+                    The home nest's read (`room-nest-read-toggle`, `ui/conversations.md`
+                    § Element IDs): ONLY where there is one to stage — a community room
+                    whose answer this device has read (`RoomSettingsDraft.nestRead` is
+                    Some). Collapsed otherwise, so it is absent to a driver. Staged into
+                    the shared draft by the press and committed by Save; greyed unless
+                    `can_set_policy`. `checked` rides HelpText, the `room-admin-toggle`
+                    shape.
+                -->
+                <ToggleButton x:Name="RoomNestReadToggle"
+                              AutomationProperties.AutomationId="{x:Bind ids:Ids.RoomNestReadToggle}"
+                              Visibility="Collapsed"
+                              HorizontalAlignment="Left"
+                              Click="RoomNestRead_Click" />
+
+                <!--
+                    What stands pending on the room (`room-pending-invite[i]` with its
+                    withdraw button), only once the home nest has served this viewer a
+                    list and only while it is not empty: the whole section is COLLAPSED
+                    for `None` and for an empty answer alike. Every row is one the nest
+                    served BECAUSE this viewer may withdraw it, so the button is live on
+                    every row (gated on `room.revoke_invite`, the online-only ceremony).
+                    Withdrawing acts at once, never through Save, and needs no confirm.
+                    Rebuilt only when the served list changes (RefreshRoomPendingInvites).
+                -->
+                <StackPanel x:Name="RoomPendingInvitesSection" Spacing="4" Visibility="Collapsed">
+                    <TextBlock Text="{loc:Localize Key=conversations/unified/room_pending_invites_label}"
+                               Style="{StaticResource BodyStrongTextBlockStyle}" />
+                    <ItemsControl x:Name="RoomPendingInvitesList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid ColumnSpacing="8" Margin="0,2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                                               TextWrapping="Wrap" MaxWidth="320"
+                                               AutomationProperties.AutomationId="room-pending-invite"
+                                               AutomationProperties.HelpText="{Binding LapsedToken}"
+                                               Text="{Binding Text}" />
+                                    <Button Grid.Column="1"
+                                            AutomationProperties.AutomationId="room-pending-invite-withdraw-button"
+                                            Content="{Binding WithdrawLabel}"
+                                            Tag="{Binding InviteeActorHex}"
+                                            Loaded="RoomPendingInviteWithdraw_Loaded"
+                                            Click="RoomPendingInviteWithdraw_Click" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+
+                <!--
+                    The room's labeler set (`room-labeler-toggle[i]` +
+                    `room-labeler-inspect-button[i]` per catalog labeler a room may name;
+                    behavior owner community-rooms.md § The three classes, purpose 2).
+                    Absent where the draft has no set to stage (an end-to-end room, or a
+                    set that did not verify). The decisions are all shared Rust: which
+                    kinds a room may name (`RoomMayNameLabelerKind`), the `checked` mark
+                    (`RoomSettingsLabelerStaged`) and whether a row may act
+                    (`RoomSettingsLabelerToggleLive`). The catalog comes from this
+                    page's own LabelerCatalogMachine (the windows per-page-machine
+                    convention), built when the editor opens on a room with a set.
+                -->
+                <StackPanel x:Name="RoomLabelersSection" Spacing="4" Visibility="Collapsed">
+                    <TextBlock Text="{loc:Localize Key=conversations/unified/room_labelers_label}"
+                               Style="{StaticResource BodyStrongTextBlockStyle}" />
+                    <ItemsControl x:Name="RoomLabelersList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid ColumnSpacing="8" Margin="0,2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <ToggleButton Grid.Column="0" HorizontalAlignment="Stretch"
+                                                  HorizontalContentAlignment="Left"
+                                                  AutomationProperties.AutomationId="room-labeler-toggle"
+                                                  AutomationProperties.HelpText="{Binding Checked}"
+                                                  IsChecked="{Binding Staged}"
+                                                  IsEnabled="{Binding ToggleEnabled}"
+                                                  Content="{Binding Label}"
+                                                  Tag="{Binding LabelerId}"
+                                                  Click="RoomLabelerToggle_Click" />
+                                    <Button Grid.Column="1"
+                                            AutomationProperties.AutomationId="room-labeler-inspect-button"
+                                            Content="{Binding InspectLabel}"
+                                            Tag="{Binding CatalogIndex}"
+                                            Click="RoomLabelerInspect_Click" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <!-- The catalog's own inspect view, in place — the editor's draft
+                         survives the read. -->
+                    <controls:LabelerInspectPanel x:Name="RoomLabelerInspectPanel"
+                                                  CloseRequested="RoomLabelerInspect_CloseRequested" />
+                </StackPanel>
+                </StackPanel>
+                </ScrollViewer>
 
                 <!--
                     The editor's own `error-message` (ui.yaml lists it among this

@@ -72,7 +72,11 @@ impl NotificationGlyph {
             | NotifType::FamilyContentNotice
             | NotifType::FamilyContactRequest
             | NotifType::FamilyFeedSourceRequest
-            | NotifType::FamilyFeedSourceApproved => Self::Unknown,
+            | NotifType::FamilyFeedSourceApproved
+            // A tip paints the neutral bell until a tip category is appended:
+            // a new variant here renumbers nothing but breaks every native
+            // app's exhaustive switch, so it lands with that trickle-down lift.
+            | NotifType::Tip => Self::Unknown,
             // A type this build does not name renders neutral.
             NotifType::Other(_) => Self::Unknown,
         }

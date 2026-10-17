@@ -505,6 +505,23 @@ pub fn label_vocabulary<'a>(overlays: impl IntoIterator<Item = &'a ContactOverla
     best.values().filter_map(|r| r.value.clone()).collect()
 }
 
+/// The completion offered under the add field: the `vocabulary` labels whose
+/// folded form starts with the folded `typed` text (nothing typed offers all),
+/// minus the labels already `staged` for this person. Vocabulary order is kept,
+/// and a pick is staged through [`OverlayEditor::add_label`] exactly as if it
+/// had been typed.
+pub fn label_suggestions(vocabulary: &[String], typed: &str, staged: &[String]) -> Vec<String> {
+    let prefix = fold_label(typed);
+    vocabulary
+        .iter()
+        .filter(|label| {
+            let folded = fold_label(label);
+            folded.starts_with(&prefix) && !staged.iter().any(|s| fold_label(s) == folded)
+        })
+        .cloned()
+        .collect()
+}
+
 /// The two items an identity-succession fold writes (`contacts.md` § The
 /// private overlay → *When a person's identity succeeds*).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -907,6 +924,25 @@ mod tests {
         // "family" is live on sample 1 (Family @10) and sample 3 (family @12):
         // the newer spelling wins; sample 2's removal does not hide it.
         assert_eq!(vocab, vec!["Book club", "family", "Work"]);
+    }
+
+    #[test]
+    fn label_suggestions_match_the_typed_prefix_and_skip_staged_labels() {
+        let vocab: Vec<String> = ["Book club", "family", "Friends", "Work"]
+            .map(String::from)
+            .to_vec();
+        let none: Vec<String> = Vec::new();
+        // Case-insensitive prefix, vocabulary order kept.
+        assert_eq!(label_suggestions(&vocab, "f", &none), ["family", "Friends"]);
+        assert_eq!(label_suggestions(&vocab, "  FA", &none), ["family"]);
+        // Whitespace is normalized the way an add normalizes it.
+        assert_eq!(label_suggestions(&vocab, "book   c", &none), ["Book club"]);
+        // A label already staged (under any spelling) is not offered again.
+        let staged = vec!["FAMILY".to_string()];
+        assert_eq!(label_suggestions(&vocab, "f", &staged), ["Friends"]);
+        // Nothing typed offers the whole remaining vocabulary; no match, nothing.
+        assert_eq!(label_suggestions(&vocab, "", &staged).len(), 3);
+        assert!(label_suggestions(&vocab, "zzz", &none).is_empty());
     }
 
     #[test]

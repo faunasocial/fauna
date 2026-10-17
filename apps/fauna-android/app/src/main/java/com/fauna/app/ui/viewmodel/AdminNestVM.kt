@@ -9,11 +9,14 @@ import com.fauna.app.core.SessionAccount
 import com.fauna.app.core.OnboardingHost
 import com.fauna.app.ui.util.getStringFmt
 import com.fauna.app.ui.util.resolveLocalized
+import com.fauna.app.ui.util.resolveLocalizedNested
 import com.fauna.ffi.FfiAdminRegionView
+import com.fauna.ffi.FfiAdminWebAppOriginView
 import com.fauna.ffi.FfiIssuerForcedArm
 import com.fauna.ffi.FfiIssuerForcedConfirmView
 import com.fauna.ffi.FfiIssuerKeyView
 import com.fauna.ffi.FfiSeedRotationConfirmView
+import com.fauna.ffi.FfiWebAppOrigin
 import com.fauna.ffi.onboarding.AdminNatModeMachine
 import com.fauna.ffi.onboarding.NatModeState
 import com.fauna.ffi.onboarding.qualifyReclaimHandle
@@ -126,6 +129,23 @@ class AdminNestVM @Inject constructor(
 
     /** Disables the region save/withdraw buttons mid-dispatch (re-tap guard). */
     val regionWorking = MutableStateFlow(false)
+
+    /**
+     * Web-app origin (`admin-nest-web-app-origin-*`,
+     * `fauna.admin.web_app_origin.{get,set}`; admin.md § N Nest → Web-app
+     * origin). Every sentence and the `canSet` verdict are the shared
+     * `FfiAdminWebAppOriginView` fold (tui's `admin/nest.rs`, the reference
+     * leg) — this VM decides nothing. `null` until the read lands: the radios
+     * stay unmarked and disabled meanwhile, since pre-marking bundled would
+     * state a choice the nest may not hold.
+     */
+    val webAppOriginView = MutableStateFlow<FfiAdminWebAppOriginView?>(null)
+
+    /** The marked radio — the local selection the save commits. */
+    val webAppOriginDraft = MutableStateFlow<FfiWebAppOrigin?>(null)
+
+    /** Disables the radios + save mid-dispatch (re-tap guard). */
+    val webAppOriginWorking = MutableStateFlow(false)
 
     /**
      * Shared admin NAT-mode control (admin.md § Nest → NAT-mode control) — the
@@ -358,10 +378,27 @@ class AdminNestVM @Inject constructor(
         takedownPrefill.value = null
     }
 
+    /**
+     * The admin host of the shared feature-policy editor
+     * (`admin-nest-feature-limits-*`, `dynamic-features.md` § Authoring
+     * surfaces): the admin's nest-wide documents, one row per gated feature
+     * the nest carries, directly after *Declared region*. A fault in the read
+     * leaves the section absent rather than inventing "No limit set" rows.
+     */
+    val featureLimits = FeatureAuthoringHost(
+        scope = viewModelScope,
+        tier = "admin",
+        readRows = api::fetchAuthoredFeatureRows,
+        openEditor = api::openFeatureEditor,
+        resolve = { resolveLocalizedNested(appContext, it).orEmpty() },
+    )
+
     init {
         hydrate()
         hydrateNatMode()
         hydrateRegion()
+        featureLimits.refresh()
+        hydrateWebAppOrigin()
         hydrateOauthKeys()
         loadReports()
     }
@@ -499,6 +536,45 @@ class AdminNestVM @Inject constructor(
      *  `Err` payload outright. */
     fun reportInvalidRegion(message: String) {
         error.value = message
+    }
+
+    /** Page load: read `fauna.admin.web_app_origin.get`, folded through the
+     *  shared `admin_web_app_origin_view`. Best-effort like [hydrateRegion]: a
+     *  failure leaves the section unloaded (radios disabled) rather than
+     *  failing the page. */
+    private fun hydrateWebAppOrigin() {
+        viewModelScope.launch {
+            runCatching { api.adminWebAppOriginStatus() }.onSuccess { paintWebAppOrigin(it) }
+        }
+    }
+
+    private fun paintWebAppOrigin(view: FfiAdminWebAppOriginView) {
+        webAppOriginView.value = view
+        webAppOriginDraft.value = view.selected
+    }
+
+    /** A radio pick is local — it only arms the save. */
+    fun selectWebAppOrigin(mode: FfiWebAppOrigin) {
+        if (webAppOriginView.value?.canSet == true) webAppOriginDraft.value = mode
+    }
+
+    /** `admin-nest-web-app-origin-save-button` — `fauna.admin.web_app_origin.set`
+     *  with the marked radio's mode; the section repaints from the set's own
+     *  reply. */
+    fun saveWebAppOrigin() {
+        val mode = webAppOriginDraft.value ?: return
+        if (webAppOriginView.value?.canSet != true) return
+        viewModelScope.launch {
+            webAppOriginWorking.value = true
+            try {
+                paintWebAppOrigin(api.adminSetWebAppOrigin(mode))
+                error.value = null
+            } catch (e: Exception) {
+                error.value = e.message
+            } finally {
+                webAppOriginWorking.value = false
+            }
+        }
     }
 
     /** Expedite the host's idle-gated reboot over `fauna.admin.request_host_restart`

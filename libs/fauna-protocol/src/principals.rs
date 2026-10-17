@@ -3,9 +3,10 @@
 //!
 //! A **principal** is the nest-side identity of one approved Client ID Metadata
 //! Document for one account: minted by the account's own consent, never by a
-//! registrar or an admin (rule 1). These two USER-class kinds are its whole
+//! registrar or an admin (rule 1). These three USER-class kinds are its whole
 //! app-facing surface today: the roster read the connected-apps page composes
-//! from, and **the one verb** that ends a principal (rule 4).
+//! from, the oracle's per-operation record for one principal, and **the one
+//! verb** that ends a principal (rule 4).
 
 use std::collections::BTreeMap;
 
@@ -79,6 +80,64 @@ pub struct PrincipalInfo {
     /// none. Additive.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub service_auth: Vec<crate::kind_manifest::ServiceAuthEntry>,
+    /// The consented document's `activitypub_peers` hosts (`third-party.md`
+    /// § The manifest) — the set the oracle's `activitypub.http_sig` class
+    /// signs to. Empty (and absent on the wire) for a document that declares
+    /// none. Additive.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activitypub_peers: Vec<String>,
+    /// What the oracle's custodians did for this principal
+    /// (`key-material-hierarchy.md` § Audience: deployment infrastructure →
+    /// *The oracle*, the audit split) — absent for a principal no custodian
+    /// has served. Merged across custodians, so a second custodian's record
+    /// joins this one field. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle: Option<OracleSummary>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// The class an [`OracleOp`] carries for one write an external app made at
+/// the ATProto PDS write funnel (`key-material-hierarchy.md` § *The oracle* →
+/// *The ATProto classes ride the protocol's own door*). Carried by the
+/// ATProto family, never an `identity.op` class: no
+/// `fauna_core::identity_op::IdentityOpClass` parses it.
+pub const ATPROTO_COMMIT_CLASS: &str = "atproto.commit";
+
+/// One key operation an oracle custodian performed for a principal — a row of
+/// the custodian-held per-operation record the audit split names.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct OracleOp {
+    /// Unix seconds.
+    pub at: i64,
+    /// The `identity.op` class the operation ran under (`nostr.sign_event`,
+    /// …). The class names its custodian, so rows of several custodians
+    /// interleave without a custodian field.
+    pub class: String,
+    /// The class's own detail: the event kind for `nostr.sign_event`, the
+    /// method for the NIP-44 pair, `<method> <host>` for
+    /// `activitypub.http_sig`. An app renders it verbatim.
+    pub detail: String,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// The oracle's per-principal summary a roster row carries, summed across the
+/// custodians that served the principal.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct OracleSummary {
+    /// Operations admitted in the rate ceiling's current window — the
+    /// custodian's own window position, so it reads what the ceiling reads.
+    #[serde(default)]
+    pub ops_in_window: u32,
+    /// Every request a custodian served for this principal, the key-less ones
+    /// (connect, ping, the public-key read) included — the same count the
+    /// bunker roster's `use_count` keeps.
+    #[serde(default)]
+    pub requests_served: u64,
+    /// The newest operation, absent before the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_op: Option<OracleOp>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -94,6 +153,31 @@ pub struct ListPrincipalsRequest {
 pub struct ListPrincipalsReply {
     /// Oldest first.
     pub principals: Vec<PrincipalInfo>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// How many operation rows one `fauna.principals.ops` reply carries at most —
+/// a hard constant: the record is the owner's recent-activity view, not an
+/// archive.
+pub const PRINCIPAL_OPS_PAGE: u32 = 256;
+
+/// `fauna.principals.ops` — one principal's oracle record (USER class,
+/// self-scoped): the per-operation audit the custodians keep.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ListPrincipalOpsRequest {
+    #[serde(with = "serde_bytes")]
+    pub principal_id: Vec<u8>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ListPrincipalOpsReply {
+    /// Newest first, at most [`PRINCIPAL_OPS_PAGE`]. Empty for a principal no
+    /// custodian has served — and for one that is not the caller's, which
+    /// reads exactly like it.
+    pub ops: Vec<OracleOp>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -144,6 +228,37 @@ mod tests {
         let back: PrincipalInfo = decode_strict(&encode_canonical(&info).unwrap()).unwrap();
         assert_eq!(back, info);
         assert_eq!(back.holder_x25519, None);
+    }
+
+    #[test]
+    fn an_oracle_summary_round_trips_and_an_absent_one_stays_absent() {
+        let op = OracleOp {
+            at: 1_700_000_000,
+            class: "nostr.sign_event".into(),
+            detail: "1".into(),
+            extra: Default::default(),
+        };
+        let info = PrincipalInfo {
+            oracle: Some(OracleSummary {
+                ops_in_window: 3,
+                requests_served: 5,
+                last_op: Some(op.clone()),
+                extra: Default::default(),
+            }),
+            ..Default::default()
+        };
+        let back: PrincipalInfo = decode_strict(&encode_canonical(&info).unwrap()).unwrap();
+        assert_eq!(back, info);
+        let none: PrincipalInfo =
+            decode_strict(&encode_canonical(&PrincipalInfo::default()).unwrap()).unwrap();
+        assert_eq!(none.oracle, None);
+        let reply = ListPrincipalOpsReply {
+            ops: vec![op],
+            extra: Default::default(),
+        };
+        let back: ListPrincipalOpsReply =
+            decode_strict(&encode_canonical(&reply).unwrap()).unwrap();
+        assert_eq!(back, reply);
     }
 
     #[test]

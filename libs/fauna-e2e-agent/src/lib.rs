@@ -559,6 +559,27 @@ pub const ALERT_SWEEP_PASSES_KEY: &str = "alert_sweep_passes";
 /// (convention 11) rather than acking a wake nothing will ever read.
 pub const ALERT_SWEEP_WAKE: &str = "alert_sweep_wake";
 
+/// The certificate auto-renew tick's **poke** — convention 14's `run_now` for the
+/// six-hour clock `fauna_client_dns::auto_renew_poll_secs()`
+/// (`tls-certificates.md` § C.3: any synced admin device renews a managed or
+/// delegated domain's certificate with no admin tap).
+///
+/// **Contract.** The command ends the current session's auto-renew WAIT now, so
+/// the app's real tick body — `auto_renew_scan`, then `auto_renew_issue` for
+/// whatever is due — runs its next pass, and returns without awaiting it. The
+/// barrier is the app's own log: a pass that found something due writes
+/// `fauna_client_dns::AUTO_RENEW_PASS_LOG_LINE`; one that found nothing writes
+/// nothing. A poke that lands mid-pass is kept for the next wait.
+///
+/// **Why a poke and not a shorter clock.** The tick fires its first pass only
+/// after a full interval so a short-lived session never opens a real CA order;
+/// a compressed cadence would be a clock knob in every e2e build, where a poke
+/// fires only when a witness asks.
+///
+/// Pre-auth there is no tick to wake; the app refuses the poke loudly
+/// (convention 11).
+pub const AUTO_RENEW_WAKE: &str = "auto_renew_wake";
+
 /// The Guardian Notify flush **poke** — convention 14's `run_now` applied to a
 /// client-side cadence instead of a nest-side one.
 ///
@@ -742,10 +763,57 @@ pub const ACCOUNT_PUMP_CYCLES_KEY: &str = "account_pump_cycles";
 /// the consumer's own deadline poll, naming the app and the key.
 pub const ACCOUNT_PUMP_NOW: &str = "account_pump_now";
 
-/// State key: the photo-backup **pass funnel**, apple-only today (PhotoKit is
-/// the ingress, so web/linux/windows/tui have no leg and publish nothing —
-/// convention 11: publishing zeros and not publishing at all stay different
-/// answers). Shape: `authorization` (the Photos grant word) plus the integer
+/// The custody owner's **send-again** poke: every ceremony this account
+/// granted posts its newest sent step once more on its channel — a delivered
+/// ceremony's deliver, re-signed through the drive's own witness-signing site;
+/// an offer still unanswered, its verbatim envelope
+/// (`fauna_client_capabilities::custody_ceremony::resend_owner_ceremonies`,
+/// the one shared body). It posts and records nothing.
+///
+/// **Why it exists.** `devices` outcome 15 — a copy the host declined or
+/// removed does not come back when its owner sends again, and the host's pause
+/// and allowance survive the owner's refresh — needs an owner that sends
+/// again, and no app gesture does: the drive posts each step once, and its
+/// marks are monotone. The host-side refusals are pinned at tier_1; this is
+/// the end-to-end witness's trigger.
+///
+/// **Contract.** Fire-and-forget, like [`ACCOUNT_PUMP_NOW`]: the barrier is
+/// the HOST's [`CUSTODY_CEREMONY_INGEST_KEY`], not this ack — read it before
+/// the poke, then poll the host's receive cycles until `seen` passes the
+/// baseline. Pre-auth (no session or store) is a quiet no-op. Compiled out of
+/// release artifacts (convention 15).
+pub const CUSTODY_OWNER_RESEND_NOW: &str = "custody_owner_resend_now";
+
+/// State key: what this process's custody ceremony sink did with each received
+/// ceremony payload — `{"seen": N, "moved": N, "duplicate": N, "refused": N,
+/// "uncaptured": N}` (`fauna_client_conversations::custody_ceremony_ingest_counts`,
+/// which owns the counting; receipts are not counted).
+///
+/// `seen` counts every offer / accept / deliver handed to the sink; `moved`
+/// those that advanced a ceremony; `duplicate` re-deliveries of what is on
+/// record; `refused` verification refusals — a deliver for a custody this
+/// account declined or removed lands here; `uncaptured` the ones the store
+/// door could not take. All only ever increase from 0 at process start, so a
+/// reader compares against a baseline read before its trigger.
+///
+/// **Why it exists.** A test asserting that something did NOT happen (a
+/// declined offer stays gone after a re-send) needs proof the payload actually
+/// arrived — otherwise it passes on a re-send that never crossed the wire.
+/// Publishing zeros and not publishing at all stay different answers
+/// (convention 11): an app with no ceremony sink publishes nothing.
+pub const CUSTODY_CEREMONY_INGEST_KEY: &str = "custody_ceremony_ingest";
+
+/// Build [`CUSTODY_CEREMONY_INGEST_KEY`]'s value — re-exported from the
+/// wasm-safe `fauna-e2e-contract`, which owns the shape.
+pub use fauna_e2e_contract::custody_ceremony_ingest_json;
+
+/// State key: the photo-backup **pass funnel**, apple and android only (PhotoKit /
+/// MediaStore are the ingress, so web/linux/windows/tui have no leg and publish
+/// nothing — convention 11: publishing zeros and not publishing at all stay
+/// different answers). android publishes the SUBSET it has — `passes_started`,
+/// `passes_completed`, `pending` and `uploaded` — and omits the rest (it has no
+/// authorization / already-synced / export-failed leg; a missing field is not a
+/// zero). Shape: `authorization` (the Photos grant word) plus the integer
 /// counters `assets_seen`, `already_synced`, `export_failed`, `ingest_failed`,
 /// `uploaded`, `pending`, `passes_started`, `passes_completed`, `completed_total`,
 /// and `last_backup_at`, plus `enabled` — the install's PERSISTED backup choice
@@ -1009,8 +1077,11 @@ pub const SHARE_ENDPOINTS_COUNTS_KEY: &str = "share_endpoints_counts";
 pub const SHARE_SERVE_TALLY_KEY: &str = "share_serve_tally";
 
 /// State key: the **new-message OS banners this app process actually fired**,
-/// as `{"started": N, "completed": M, "fired": [{"thread_id", "label"}, …]}`,
-/// built by the one shared derivation
+/// as `{"started": N, "completed": M, "fired": [{"thread_id", "label"}, …],
+/// "seeded_with": [thread_id, …]}` (the last names the snapshot the tracker
+/// seeded on — the batch its first rule keeps silent — empty until it has;
+/// web reads it off its wasm tracker, `messageBannerSeed`), built by the one
+/// shared derivation
 /// `fauna_conversations::notification::message_banners_json` (which owns the
 /// contract and the recording, so no app keeps its own tally).
 ///
@@ -1097,8 +1168,11 @@ pub const CONNECTION_KEY: &str = "connection";
 /// refresh fires, plus the pre-expiry buffer. `null` while no bearer is held.
 ///
 /// **Whose bearer.** The one the app actually refreshes: the launch machine's
-/// (`TokenStatus::Valid { expires_at_secs }`) on tui and linux, whose session
-/// bearer it serves through `LaunchMachineBearer`; `FfiNestClient`'s
+/// (`TokenStatus::Valid { expires_at_secs }`) on linux, and on tui when the
+/// machine was `Online` at session establish — the session bearer it serves
+/// through `LaunchMachineBearer`; else tui's session client's own
+/// `WsChallengeBearer` cache (`AuthClient::held_bearer_for_test` — the e2e
+/// session patch's case, `Session::bearer_machine` says which); `FfiNestClient`'s
 /// `WsChallengeBearer` cache on the four UniFFI apps
 /// (`FfiNestClient::launch_token_json_for_test`); `getAuthToken`'s home-nest
 /// cache on web. The companion command [`LAUNCH_REFRESH_TOKEN`] forces that
@@ -1122,10 +1196,14 @@ pub const LAUNCH_TOKEN_KEY: &str = "launch_token";
 /// The agent command forcing the held session bearer's refresh NOW, through
 /// the production refresh path, awaited so the ack lands after the outcome —
 /// the wrong-clock refresh witness's ceremony leg (case M). The bearer is the
-/// one [`LAUNCH_TOKEN_KEY`] describes: `LaunchMachine::refresh_token` on tui
-/// and linux, `FfiNestClient::refresh_held_bearer_for_test` (clear + re-mint
-/// over the silent challenge) on the UniFFI apps, `getAuthToken(…, true)` on
-/// web. No payload.
+/// one [`LAUNCH_TOKEN_KEY`] describes: `LaunchMachine::refresh_token` on
+/// linux, the session client's `AuthClient` clear + re-mint on tui (which
+/// reaches the machine's refresh through `LaunchMachineBearer::notify_401` when
+/// the machine holds the bearer), `FfiNestClient::refresh_held_bearer_for_test`
+/// (the same clear + re-mint) on the UniFFI apps, `getAuthToken(…, true)` on
+/// web. Every arm keeps the predecessor id in the app's own set and live
+/// nest-side — the Sessions page's own-row witness (`test_sessions_page.py`)
+/// renews through it. No payload.
 pub const LAUNCH_REFRESH_TOKEN: &str = "launch_refresh_token";
 
 /// Build [`LAUNCH_TOKEN_KEY`]'s value — re-exported from the wasm-safe
@@ -1712,6 +1790,27 @@ pub fn start(port: u16, hooks: AgentHooks) {
     });
 }
 
+/// `POST /app/commands`: hand the command to the host, and answer **500** when
+/// the host could not deliver it (`{error: …}`).
+///
+/// The driver reads only the status of this POST, then polls `/app/state` for
+/// its id. A 200 carrying an error body therefore read as "delivered", and a
+/// host that had also recorded the ack (so the driver would not hang) made a
+/// dropped command indistinguishable from an applied one: linux's sign-in
+/// `set_state` once returned cleanly on an app that never signed in. A non-2xx
+/// makes `set_state` raise with the host's own reason (convention 11 — honour a
+/// command or fail loudly).
+#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+fn inject(hooks: &AgentHooks, body: &Value) -> (u16, Value) {
+    let reply = (hooks.inject_command)(body);
+    let status = if reply.get("error").is_some() {
+        500
+    } else {
+        200
+    };
+    (status, reply)
+}
+
 #[cfg(any(debug_assertions, feature = "e2e-agent"))]
 fn handle(request: &mut tiny_http::Request, hooks: &AgentHooks) -> (u16, Value) {
     let method = request.method().as_str().to_string();
@@ -1775,7 +1874,7 @@ fn handle(request: &mut tiny_http::Request, hooks: &AgentHooks) -> (u16, Value) 
                 .unwrap_or("?")
                 .to_string();
             LAST_COMMAND.with(|c| *c.borrow_mut() = Some((action, Instant::now())));
-            (200, (hooks.inject_command)(&body))
+            inject(hooks, &body)
         }
         // Stubs so the driver's helpers don't 404: no pointer scrolling needed
         // (finds are global), no screenshots/tree in the in-process path.
@@ -2432,6 +2531,18 @@ mod tests {
             scope: Vec::new(),
             arg: String::new(),
         }
+    }
+
+    #[test]
+    fn a_command_the_host_could_not_deliver_answers_500() {
+        let mut hooks = stub_hooks(|_op| Ok(()));
+        hooks.inject_command = Box::new(|_| json!({ "error": "agent command channel closed" }));
+        let (status, body) = inject(&hooks, &json!({ "id": "cmd_1", "action": "patch" }));
+        assert_eq!(status, 500);
+        assert_eq!(body, json!({ "error": "agent command channel closed" }));
+
+        hooks.inject_command = Box::new(|_| json!({ "ok": true }));
+        assert_eq!(inject(&hooks, &json!({ "id": "cmd_2" })).0, 200);
     }
 
     #[test]

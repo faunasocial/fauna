@@ -274,3 +274,64 @@ def test_both_native_consumers_build_their_trust_store_through_the_one_door():
             "second one bypasses both the WebPKI roots it sets up and the e2e "
             "trust seed that rides on them."
         )
+
+
+# ── The Microsoft authority seed (`e2e-automation-surface-gating.md` § The
+# Microsoft authority seed): the fifth gated seed, on the ONE door that builds
+# the Outlook sign-in's endpoints.
+
+_OAUTH = _REPO / "libs" / "fauna-mail" / "src" / "imap_client" / "oauth_device.rs"
+_AUTHORITY_ENV = "FAUNA_E2E_MICROSOFT_AUTHORITY"
+
+
+def test_the_microsoft_authority_seed_is_gated_with_a_production_twin():
+    """The constant and its reader carry the gate, the reader has its
+    same-signature no-op twin, and the environment is read nowhere but inside
+    the gated reader.
+
+    The seed redirects the identity far end the device code and the refresh
+    token are sent to; ungated, every release artifact would carry a switch
+    that points a user's Microsoft sign-in at another host.
+    """
+    text = _OAUTH.read_text(encoding="utf-8")
+    gated = re.findall(
+        re.escape(_SEAM_GATE) + r"\s*\n\s*(?:pub\s+)?(?:const|fn)\s+(\w+)",
+        text,
+    )
+    for item in ("E2E_AUTHORITY_ENV", "authority_base", "seeded_authority"):
+        assert item in gated, (
+            f"`{item}` is no longer directly under {_SEAM_GATE} in "
+            "libs/fauna-mail/src/imap_client/oauth_device.rs — the Microsoft "
+            "authority seed would ship in every release artifact (convention 15)."
+        )
+    twin = re.search(
+        r"#\[cfg\(not\(any\(test, debug_assertions, feature = \"test-helpers\"\)\)\)\]"
+        r"\s*\n\s*fn authority_base\b",
+        text,
+    )
+    assert twin, (
+        "the production no-op twin of `authority_base` is gone — the twin IS "
+        "the statement that a shipped build has no authority seed."
+    )
+    reader = re.search(re.escape(_SEAM_GATE) + r"\s*\n\s*fn authority_base\b", text)
+    assert reader
+    for occurrence in re.finditer(r"std::env::var\(", text):
+        assert occurrence.start() > reader.end(), (
+            "oauth_device.rs reads the process environment outside the gated "
+            "`authority_base` reader, which `MicrosoftIdentity::client` — "
+            "unconditional — would then carry into every release artifact."
+        )
+    assert f'"{_AUTHORITY_ENV}"' in text, (
+        f"oauth_device.rs no longer names {_AUTHORITY_ENV}, the spelling "
+        "`e2e-automation-surface-gating.md` § The Microsoft authority seed rules."
+    )
+
+
+def test_the_microsoft_authority_seed_refuses_a_plaintext_authority():
+    """`https://` only, even under the gate: a token never crosses a
+    plaintext hop in a test either (the gating doc's terms)."""
+    text = _OAUTH.read_text(encoding="utf-8")
+    body = text[text.find("fn seeded_authority") :]
+    assert 'starts_with("https://")' in body and "panic!(" in body, (
+        "`seeded_authority` no longer refuses a non-https authority."
+    )

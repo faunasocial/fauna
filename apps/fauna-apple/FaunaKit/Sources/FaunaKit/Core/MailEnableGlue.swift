@@ -24,6 +24,7 @@ import Foundation
 /// the mail-settings/admin pages, so it logs and no-ops rather than surfacing
 /// an error.
 public enum MailEnableGlue {
+#if !FAUNA_KIDS
     /// The post-claim serving enablement (`onboarding.md` § 3b *Mechanism*) —
     /// replaces the four per-step Admin-class writes (mail provision, the
     /// three DAV toggles, their one-MSEK-mint-path companion mints) with the
@@ -53,6 +54,7 @@ public enum MailEnableGlue {
                 message: "post-claim serving enablement failed (recoverable via mail-settings/admin pages): \(error)")
         }
     }
+#endif
 
     /// Post-onboarding one-tap trust offer glue (`onboarding.md` § 3b-ter) —
     /// the apple leg of the trust_prompt trickle-down.
@@ -145,57 +147,25 @@ public enum MailEnableGlue {
     /// The deployment-seed custody leg's post-auth entry
     /// (`box-recovery.md` § The plane-era recovery floor, (c) The writes) — fired at
     /// the universal post-auth hook on **every** connect. The leg itself (capture at
-    /// store-ready, the co-admin hand-off self-heal) lives in shared Rust; this is
-    /// only the apple projection of its outcome onto `RecoveryCustodyBanner`, the
-    /// twin of android's `MailEnableGlueVM.runDeploymentSeedCustodyLeg` and
-    /// windows' `RunDeploymentSeedCustodyLegAsync`.
+    /// store-ready, the co-admin hand-off self-heal) and the choice of the warning it
+    /// owes live in shared Rust (`fauna_client_config::custody_leg_warning`); this
+    /// only renders that `LocalizedText` onto `RecoveryCustodyBanner`, the twin of
+    /// android's `PostAuthGlueVM.runDeploymentSeedCustodyLeg` and windows'
+    /// `RunDeploymentSeedCustodyLegAsync`.
     ///
     /// **A non-confirmed custody is USER-VISIBLE, never a silent log**: a swallowed
     /// failure would leave the admin believing recovery is protected and finding out
-    /// only at total box loss. A thrown call (the bound nest id could not be
-    /// resolved, or a bad secret) means custody could not even be attempted, so it
-    /// raises the "failed" warning too. `alreadyCustodied` / `notAdmin` and the
-    /// expected multi-nest `refusedDiffering` (BR-1) stay quiet.
+    /// only at total box loss. A leg that could not even be reached answers the
+    /// shared "not attempted" warning (`APIClient.selfHealDeploymentSeedCustody`), so
+    /// it raises the banner too.
     @MainActor
     public static func selfHealDeploymentSeedCustody(api: APIClient, session: SessionState) async {
-        do {
-            let outcome = try await api.selfHealDeploymentSeedCustody()
-            logMessage(level: .debug, target: "fauna.recovery",
-                       message: "[recovery] custody leg: \(outcome)")
-            if case .captured(.refusedMismatch) = outcome {
-                logMessage(level: .error, target: "fauna.recoveryglue",
-                           message: "deployment-seed custody refused: seed does not derive to this nest (BR-2); recovery not protected")
-            }
-            session.recoveryCustodyWarning = recoveryCustodyWarning(for: outcome)
-        } catch {
+        let warning = await api.selfHealDeploymentSeedCustody()
+        if let warning {
             logMessage(level: .warn, target: "fauna.recoveryglue",
-                       message: "deployment-seed custody leg failed (custody not confirmed): \(error)")
-            session.recoveryCustodyWarning = L.launch.recoveryCustodyFailed
+                       message: "deployment-seed custody unconfirmed: \(warning.key)")
         }
-    }
-
-    /// Pure custody-leg outcome → user-visible-warning mapping. `nil` for a
-    /// silent success — `alreadyCustodied`, `notAdmin`, and a `captured` write that
-    /// is `wrote` / `alreadyHeldSame` / `refusedDiffering` (the **expected**
-    /// multi-nest no-op: this admin identity already custodies another nest,
-    /// BR-1). `captured(.refusedMismatch)` → the loud "recovery not protected"
-    /// warning (BR-2); `handoffUnavailable` / `nestHoldsNoSeed` → the "failed"
-    /// warning (custody not confirmed). Factored out so it is unit-testable
-    /// without a live nest.
-    static func recoveryCustodyWarning(for outcome: FfiDeploymentSeedSelfHeal) -> String? {
-        switch outcome {
-        case .alreadyCustodied, .notAdmin:
-            return nil
-        case .handoffUnavailable, .nestHoldsNoSeed:
-            return L.launch.recoveryCustodyFailed
-        case .captured(let capture):
-            switch capture {
-            case .wrote, .alreadyHeldSame, .refusedDiffering:
-                return nil
-            case .refusedMismatch:
-                return L.launch.recoveryCustodyMismatch
-            }
-        }
+        session.recoveryCustodyWarning = warning.map(renderLocalizedText)
     }
 
     /// The full post-auth glue sequence, in the fixed order both shells' launch
@@ -221,7 +191,9 @@ public enum MailEnableGlue {
     /// no-ops on failure — see each method's own doc).
     @MainActor
     public static func runPostAuthGlue(api: APIClient, session: SessionState) async {
+        #if !FAUNA_KIDS
         await applyPostClaimServingEnablement(api: api, session: session)
+        #endif
         await applyPendingTrustPromptGrant(api: api, session: session)
         await registerPendingRecoveryKit(api: api, session: session)
         await reportHostAddress(api: api)

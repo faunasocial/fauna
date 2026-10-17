@@ -45,6 +45,11 @@ pub fn is_pre_identity_kind(kind: &str) -> bool {
             // sync alive.
             | "fauna.auth.device_handshake"
             | "fauna.auth.custody_handshake"
+            // The custodian-NEST serve door's owner-fleet mint: pre-identity
+            // by necessity (the device has no account here — its owner is
+            // custodied, not registered). Signature-work-bounded and
+            // replay-guarded like its custody twin, so not throttled.
+            | "fauna.auth.custodied_fleet_handshake"
             // Track A3 — account registration (handler pending).
             | "fauna.account.register"
             // The attested age claim's nonce mint (family-safety.md § The
@@ -273,6 +278,7 @@ mod tests {
         assert!(is_pre_identity_kind("fauna.auth.nest_handshake"));
         assert!(is_pre_identity_kind("fauna.auth.device_handshake"));
         assert!(is_pre_identity_kind("fauna.auth.custody_handshake"));
+        assert!(is_pre_identity_kind("fauna.auth.custodied_fleet_handshake"));
     }
 
     #[test]
@@ -345,6 +351,7 @@ mod tests {
             "fauna.auth.nest_handshake",
             "fauna.auth.device_handshake",
             "fauna.auth.custody_handshake",
+            "fauna.auth.custodied_fleet_handshake",
             "fauna.account.register",
             "fauna.auth.claim_admin",
             "fauna.setup.status",

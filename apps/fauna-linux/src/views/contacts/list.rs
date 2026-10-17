@@ -58,9 +58,7 @@ fn fill_knocks_list<A, D, B>(
     D: Fn() + 'static,
     B: Fn() + 'static,
 {
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(list_box);
     for knock in knocks {
         let (on_accept, on_dismiss, on_block) = actions(&knock.peer_actor_id);
         let row = build_wired_knock_row(knock, overlays, on_accept, on_dismiss, on_block);
@@ -171,9 +169,7 @@ pub fn update_contacts_list(
             );
         }
     }
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(list_box);
     // The row's names come finished from the overlay projection — the one
     // resolver over the viewer's nickname, the enriched handle, then the
     // canonical short id (`contacts.md` § The private overlay → *Where the
@@ -311,9 +307,7 @@ pub fn build_contact_list_with_boxes(
             }
 
             // Clear previous find results.
-            while let Some(child) = results_list.first_child() {
-                results_list.remove(&child);
-            }
+            crate::views::layout::clear_list_box_rows(&results_list);
 
             // Classify via the shared recipient parser (priority #2/#4) instead of
             // re-deriving the actor-id check + handle split here. The 3-way routing
@@ -332,15 +326,16 @@ pub fn build_contact_list_with_boxes(
                     // offline depends on to confirm the right person before
                     // knocking (test_contacts_knock_send_web.py's cross-app id-echo
                     // check).
-                    let row = super::find::build_find_result_row(&id, &id, &c);
+                    let row = super::find::build_find_result_row(&id, &id, None, &c);
                     results_list.append(&row);
                     results_list.set_visible(true);
                     results_label.set_visible(true);
                 }
                 fauna_core::resolve::RecipientInput::Handle { user, domain } => {
-                    // user@domain: resolve the domain to its nest URL, then look up
-                    // the handle there (the `NestResolved` handler auto-chains).
-                    c.resolve_nest(&domain, &user);
+                    // user@domain: the shared cross-nest lookup — home probe, then a
+                    // direct dial of the peer when the domain is foreign; the hit
+                    // carries the nest it resolved on for the knock.
+                    c.find_user(&user, &domain);
                     results_list.set_visible(true);
                     results_label.set_visible(true);
                 }

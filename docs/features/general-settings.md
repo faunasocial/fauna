@@ -18,7 +18,7 @@ never a silent stop: the app keeps running in the tray where there is one, sync
 carries on where the desktop keeps its agent alive past the window, and where
 nothing can stay behind, closing quits and the setting says so. Close to tray
 is on by default wherever there is a tray, and start at login is on by default
-on Linux and Windows; on macOS you turn start at login on yourself.
+on Linux, Windows and macOS (you can turn either off, and the app keeps your choice).
 
 ## Coverage contract
 
@@ -48,7 +48,7 @@ Stamped 2026-09-22 at e9f79fdf25.
 | App | Status | Stamp |
 |---|---|---|
 | web | — absent | |
-| linux | ⚠ partial | 0.1.2-dev+c4a95c20 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ✅ full | |
 | macos | ⚠ partial | |
 | ios | — absent | |

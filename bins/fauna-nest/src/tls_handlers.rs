@@ -31,7 +31,8 @@ use fauna_mls::wrapped_blob::LAN_TLS_CERT_ENTRY_ID;
 use fauna_protocol::{
     decode_strict as decode,
     tls::{
-        CertStatusReply, CertStatusRequest, DomainCertStatus, PublishCertReply, PublishCertRequest,
+        CertIssuanceError, CertStatusReply, CertStatusRequest, DomainCertStatus, IssuanceOrder,
+        PublishCertReply, PublishCertRequest,
     },
 };
 
@@ -194,10 +195,38 @@ fn cert_status_handler() -> RpcHandler {
             encode_reply(&CertStatusReply {
                 statuses,
                 desired_sans: desired_listener_sans(&state).await,
+                issuance_errors: issuance_errors(&state.acme_dir),
                 extra: Default::default(),
             })
         })
     })
+}
+
+/// The last error of each failing order the nest places itself, read from the
+/// ACME state file `cert_lifecycle_loop` keeps (`tls-certificates.md` § Keeping
+/// the cert alive, *The admin sees why issuance is failing*). `AppState::acme_dir`
+/// is the directory the lifecycle task writes (both resolve `[acme].dir`). A
+/// missing or unreadable file is no error. A tag this build does not know — a
+/// newer build's order, read after a downgrade — is left out: the wire's unknown
+/// arm is never written, and this build never places or clears that order.
+fn issuance_errors(acme_dir: &std::path::Path) -> Vec<CertIssuanceError> {
+    use crate::acme_http01::{IssuanceOrder as Stored, RetryState};
+    RetryState::load(acme_dir)
+        .last_errors
+        .into_iter()
+        .filter_map(|e| {
+            let order = match Stored::from_tag(&e.order)? {
+                Stored::Domain => IssuanceOrder::Domain,
+                Stored::IpBridge => IssuanceOrder::IpBridge,
+            };
+            Some(CertIssuanceError {
+                order,
+                detail: e.detail,
+                failed_at_unix: i64::try_from(e.failed_at_unix).unwrap_or(i64::MAX),
+                extra: Default::default(),
+            })
+        })
+        .collect()
 }
 
 /// Register the `fauna.tls.*` kinds with the WS-RPC router.

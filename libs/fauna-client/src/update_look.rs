@@ -17,12 +17,20 @@
 //! every failure — offline, a rate-limited feed, a body that is not the feed's
 //! shape — folds to "nothing to say" (`None`), never an error surface.
 //!
-//! **Where the look reads from.** The target is the nest the app has just
-//! signed in to, which follows the release channel itself; until the nest
-//! carries that field the look reads the release host, as the asked check
-//! does. When it lands, [`look_at_sign_in`] is the one place that changes.
+//! **Where the look reads from.** The nest the app has just signed in to —
+//! its `fauna.nest.info` reply's `newest_release` — so the unasked look
+//! contacts no third party; a nest that says nothing means no notice, never a
+//! fall-back to the release host (`installers/README.md` § Knowing a newer
+//! version is out → *The nest's newest-release field*). The asked check
+//! always reads the release host. [`look_at_sign_in_over_http`] is the
+//! release-host look macOS and windows still reach through `fauna-ffi` until
+//! each moves to the nest-reading face; nothing else may call it.
 
 use std::future::Future;
+
+use fauna_protocol::RpcRequester;
+#[cfg(test)]
+use fauna_protocol::discovery::NestInfoReply;
 
 /// Read the release feed's "newest release" answer off `origin` (production:
 /// `fauna_core::version::GITHUB_API_ORIGIN`; under e2e automation, the
@@ -99,15 +107,60 @@ pub async fn check_for_newer_release_over_http(
     check_for_newer_release(current, || fetch_latest_release(http, origin, user_agent)).await
 }
 
-/// The once-per-sign-in look: whether a release newer than `current` is out,
-/// as its tag (`v0.2.0`, the feed's spelling) — or `None` when it is not, or
-/// when the look failed in any way (silent by rule).
+/// The once-per-sign-in look: whether the nest the app has just signed in to
+/// knows of a release newer than `current`, as that release's tag (`v0.2.0`,
+/// the spelling the notice and [`fauna_core::version::release_page_url`]
+/// take) — or `None` when it does not, when it says nothing (an older nest,
+/// its update check off), or when the read failed (silent by rule).
 ///
-/// Each app calls this once from its post-sign-in hook and paints the same
-/// notice its asked check paints. `fetch` produces the feed body — in
-/// production [`fetch_latest_release`] (see [`look_at_sign_in_over_http`]);
-/// a test hands in its own answer.
-pub async fn look_at_sign_in<F, Fut, E>(current: &str, fetch: F) -> Option<String>
+/// Each app calls this once from its post-sign-in hook, with that sign-in's
+/// nest, and paints the same notice its asked check paints. One read of
+/// `fauna.nest.info` and nothing else: no request reaches the release host —
+/// and that read is the connection's shared one
+/// ([`fauna_protocol::read_nest_info`]), so a settings landing loaded on the
+/// same connection draws no second.
+pub async fn look_at_sign_in<R: RpcRequester>(nest: &R, current: &str) -> Option<String> {
+    match fauna_protocol::read_nest_info(nest).await {
+        Ok(reply) => newer_release_from_nest(current, reply.newest_release.as_deref()),
+        Err(e) => {
+            tracing::debug!("[update_look] sign-in look failed silently: {e}");
+            None
+        }
+    }
+}
+
+/// The pure half of [`look_at_sign_in`]: the tag to paint for the newest
+/// release a nest reported, when it is newer than `current`.
+pub fn newer_release_from_nest(current: &str, newest_release: Option<&str>) -> Option<String> {
+    let newest = newest_release?.trim_start_matches('v');
+    fauna_core::version::is_newer(current, newest).then(|| format!("v{newest}"))
+}
+
+/// The notice an app signed in to several nests keeps: the newer of the tag
+/// it already shows and the one a later sign-in's look found, so within one
+/// run of the app the notice only ever moves up (`installers/README.md`
+/// § Knowing a newer version is out → *Several nests*).
+pub fn keep_the_newer(shown: Option<String>, found: Option<String>) -> Option<String> {
+    match (shown, found) {
+        (Some(shown), Some(found))
+            if fauna_core::version::is_newer(
+                shown.trim_start_matches('v'),
+                found.trim_start_matches('v'),
+            ) =>
+        {
+            Some(found)
+        }
+        (Some(shown), _) => Some(shown),
+        (None, found) => found,
+    }
+}
+
+/// The release-host look — **interim**: the sign-in look macOS and windows
+/// still make through `fauna-ffi` until each moves to [`look_at_sign_in`].
+/// Whether a release newer than `current` is out, as its feed tag, or `None`
+/// (silent by rule). `fetch` produces the feed body — in production
+/// [`fetch_latest_release`] (see [`look_at_sign_in_over_http`]).
+pub async fn look_at_feed_at_sign_in<F, Fut, E>(current: &str, fetch: F) -> Option<String>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<String, E>>,
@@ -122,15 +175,16 @@ where
     }
 }
 
-/// [`look_at_sign_in`] over the real feed: the form every app's post-sign-in
-/// hook calls.
+/// [`look_at_feed_at_sign_in`] over the real feed — **interim**, for
+/// `fauna-ffi`'s release-host face only (macOS and windows, until each moves
+/// to [`look_at_sign_in`]).
 pub async fn look_at_sign_in_over_http(
     http: &reqwest::Client,
     origin: &str,
     user_agent: &str,
     current: &str,
 ) -> Option<String> {
-    look_at_sign_in(current, || fetch_latest_release(http, origin, user_agent)).await
+    look_at_feed_at_sign_in(current, || fetch_latest_release(http, origin, user_agent)).await
 }
 
 #[cfg(test)]
@@ -139,7 +193,91 @@ mod tests {
 
     async fn look(current: &str, answer: Result<&str, &str>) -> Option<String> {
         let answer = answer.map(str::to_owned).map_err(str::to_owned);
-        look_at_sign_in(current, || async move { answer }).await
+        look_at_feed_at_sign_in(current, || async move { answer }).await
+    }
+
+    /// A nest that answers `fauna.nest.info` with `reply` (or fails), and
+    /// counts the kinds it was asked — the look must ask exactly that one.
+    struct Nest {
+        reply: Result<NestInfoReply, &'static str>,
+        asked: std::sync::Mutex<Vec<&'static str>>,
+    }
+
+    impl Nest {
+        fn reporting(newest_release: Option<&str>) -> Self {
+            Self {
+                reply: Ok(NestInfoReply {
+                    newest_release: newest_release.map(str::to_owned),
+                    ..Default::default()
+                }),
+                asked: Default::default(),
+            }
+        }
+    }
+
+    impl RpcRequester for Nest {
+        type Error = &'static str;
+        async fn request<Req, Reply>(
+            &self,
+            kind: &'static str,
+            _payload: Req,
+        ) -> Result<Reply, Self::Error>
+        where
+            Req: serde::Serialize,
+            Reply: serde::de::DeserializeOwned,
+        {
+            self.asked.lock().unwrap().push(kind);
+            let reply = self.reply.clone()?;
+            let bytes = fauna_protocol::encode_canonical(&reply).unwrap();
+            Ok(fauna_protocol::decode_strict(&bytes).unwrap())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_sign_in_look_reads_the_nests_newest_release_and_nothing_else() {
+        let nest = Nest::reporting(Some("0.2.0"));
+        assert_eq!(
+            look_at_sign_in(&nest, "0.1.2").await,
+            Some("v0.2.0".to_owned())
+        );
+        assert_eq!(*nest.asked.lock().unwrap(), vec!["fauna.nest.info"]);
+    }
+
+    #[tokio::test]
+    async fn a_nest_that_says_nothing_or_nothing_newer_means_no_notice() {
+        // An older nest, or one whose update check is off: no field.
+        assert_eq!(look_at_sign_in(&Nest::reporting(None), "0.1.2").await, None);
+        // At or behind the running version.
+        assert_eq!(
+            look_at_sign_in(&Nest::reporting(Some("0.1.2")), "0.1.2").await,
+            None
+        );
+        assert_eq!(
+            look_at_sign_in(&Nest::reporting(Some("0.1.0")), "0.1.2").await,
+            None
+        );
+        // Not a version at all: no spurious notice.
+        assert_eq!(
+            look_at_sign_in(&Nest::reporting(Some("soon")), "0.1.2").await,
+            None
+        );
+        // The read failed: silent.
+        let unreachable = Nest {
+            reply: Err("disconnected"),
+            asked: Default::default(),
+        };
+        assert_eq!(look_at_sign_in(&unreachable, "0.1.2").await, None);
+    }
+
+    #[test]
+    fn several_nests_keep_the_newest_notice() {
+        let v = |s: &str| Some(s.to_owned());
+        assert_eq!(keep_the_newer(None, v("v0.2.0")), v("v0.2.0"));
+        assert_eq!(keep_the_newer(v("v0.2.0"), v("v0.3.0")), v("v0.3.0"));
+        // A later nest that knows less never moves the notice down or away.
+        assert_eq!(keep_the_newer(v("v0.3.0"), v("v0.2.0")), v("v0.3.0"));
+        assert_eq!(keep_the_newer(v("v0.3.0"), None), v("v0.3.0"));
+        assert_eq!(keep_the_newer(None, None), None);
     }
 
     async fn ask(current: &str, answer: Result<&str, &str>) -> NewerReleaseCheck {

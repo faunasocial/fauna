@@ -29,7 +29,8 @@ use fauna_mls::engine::MlsEngine;
 use fauna_nest::{conversations_handlers, db::CacheDb, routes::AppState, rpc_router::RpcRouter};
 use fauna_protocol::{
     conversations::{
-        KeypackageCountReply, KeypackageCountRequest, KeypackageFetchReply, KeypackageFetchRequest,
+        KeypackageAddressableReply, KeypackageAddressableRequest, KeypackageCountReply,
+        KeypackageCountRequest, KeypackageFetchReply, KeypackageFetchRequest,
         KeypackageUploadReply, KeypackageUploadRequest,
     },
     decode_strict as decode, encode_canonical,
@@ -317,11 +318,11 @@ async fn fetch_consumes_one_keypackage_fifo() {
         "FIFO returns the oldest KP"
     );
 
-    // Count must drop from 3 → 2 (consumed).
+    // Count must drop from 3 → 2 (consumed) — read by the owner, whose count it is.
     let count_bytes = dispatch(
         &router,
         state,
-        caller,
+        target,
         "fauna.conversations.keypackage.count",
         count_payload(&target_hex),
     )
@@ -377,11 +378,11 @@ async fn fetch_drains_in_published_order() {
     }
     assert_eq!(drained, kps, "fetch drains in published_at order");
 
-    // Count must now be zero.
+    // Count must now be zero — read by the owner, whose count it is.
     let count_bytes = dispatch(
         &router,
         state,
-        caller,
+        target,
         "fauna.conversations.keypackage.count",
         count_payload(&target_hex),
     )
@@ -412,14 +413,13 @@ async fn fetch_rejects_malformed_actor_id() {
 #[tokio::test]
 async fn count_zero_for_actor_with_no_uploads() {
     let (router, state) = router_with_db_only().await;
-    let caller = [61u8; 32];
-    let target = [62u8; 32];
+    let actor = [61u8; 32];
     let reply_bytes = dispatch(
         &router,
         state,
-        caller,
+        actor,
         "fauna.conversations.keypackage.count",
-        count_payload(&hex::encode(target)),
+        count_payload(&hex::encode(actor)),
     )
     .await
     .expect("count ok");
@@ -491,4 +491,137 @@ async fn count_isolates_per_actor() {
         reply.count, 0,
         "actor_b's count is independent of actor_a's uploads"
     );
+}
+
+/// The starter-key count is its owner's alone (`federation.md` § Key packages
+/// — privacy & exhaustion): a caller asking another actor's supply is refused,
+/// whatever that supply is.
+#[tokio::test]
+async fn count_refuses_another_actors_supply() {
+    let (router, state) = router_with_db_only().await;
+    let (engine_b, actor_b) = real_actor_engine();
+    let actor_a = [83u8; 32];
+    let kps = engine_b.generate_key_packages_bytes(2).unwrap();
+
+    dispatch(
+        &router,
+        state.clone(),
+        actor_b,
+        "fauna.conversations.keypackage.upload",
+        upload_payload(kps),
+    )
+    .await
+    .expect("upload ok");
+
+    let err = dispatch(
+        &router,
+        state.clone(),
+        actor_a,
+        "fauna.conversations.keypackage.count",
+        count_payload(&hex::encode(actor_b)),
+    )
+    .await
+    .expect_err("a foreign count is refused");
+    assert_eq!(err.code, "fauna.conversations.permission_denied", "{err:?}");
+
+    // The owner's own count still answers.
+    let reply_bytes = dispatch(
+        &router,
+        state,
+        actor_b,
+        "fauna.conversations.keypackage.count",
+        count_payload(&hex::encode(actor_b)),
+    )
+    .await
+    .expect("owner count ok");
+    let reply: KeypackageCountReply = decode(&reply_bytes).unwrap();
+    assert_eq!(reply.count, 2);
+}
+
+// ── fauna.conversations.keypackage.addressable ─────────────────
+
+fn addressable_payload(actor_id_hex: &str) -> Bytes {
+    let req = KeypackageAddressableRequest {
+        actor_id: actor_id_hex.into(),
+        extra: std::collections::BTreeMap::new(),
+    };
+    Bytes::from(encode_canonical(&req).unwrap().to_vec())
+}
+
+async fn addressable(
+    router: &RpcRouter,
+    state: Arc<AppState>,
+    caller: [u8; 32],
+    target: [u8; 32],
+) -> bool {
+    let reply_bytes = dispatch(
+        router,
+        state,
+        caller,
+        "fauna.conversations.keypackage.addressable",
+        addressable_payload(&hex::encode(target)),
+    )
+    .await
+    .expect("addressable ok");
+    let reply: KeypackageAddressableReply = decode(&reply_bytes).unwrap();
+    reply.addressable
+}
+
+#[tokio::test]
+async fn addressable_false_with_none() {
+    let (router, state) = router_with_db_only().await;
+    assert!(!addressable(&router, state, [84u8; 32], [85u8; 32]).await);
+}
+
+/// The count excludes the last-resort package; the boolean must not — an actor
+/// down to it is still served by `keypackage.fetch`.
+#[tokio::test]
+async fn addressable_true_with_only_last_resort() {
+    let (router, state) = router_with_db_only().await;
+    let (engine, target) = real_actor_engine();
+    let lr_kp = engine.generate_last_resort_key_package_bytes().unwrap();
+
+    dispatch(
+        &router,
+        state.clone(),
+        target,
+        "fauna.conversations.keypackage.upload",
+        upload_payload_kind(vec![lr_kp], true),
+    )
+    .await
+    .expect("last-resort upload ok");
+
+    assert!(addressable(&router, state, [86u8; 32], target).await);
+}
+
+#[tokio::test]
+async fn addressable_does_not_consume() {
+    let (router, state) = router_with_db_only().await;
+    let (engine, target) = real_actor_engine();
+    let kps = engine.generate_key_packages_bytes(1).unwrap();
+
+    dispatch(
+        &router,
+        state.clone(),
+        target,
+        "fauna.conversations.keypackage.upload",
+        upload_payload(kps),
+    )
+    .await
+    .expect("upload ok");
+
+    for _ in 0..2 {
+        assert!(addressable(&router, state.clone(), [87u8; 32], target).await);
+    }
+    let reply_bytes = dispatch(
+        &router,
+        state,
+        target,
+        "fauna.conversations.keypackage.count",
+        count_payload(&hex::encode(target)),
+    )
+    .await
+    .expect("owner count ok");
+    let reply: KeypackageCountReply = decode(&reply_bytes).unwrap();
+    assert_eq!(reply.count, 1, "the boolean probe consumes nothing");
 }

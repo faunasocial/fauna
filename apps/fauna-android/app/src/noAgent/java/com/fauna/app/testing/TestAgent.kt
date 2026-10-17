@@ -43,10 +43,18 @@ import uniffi.fauna_conversations.ConversationsManager
  *     firing path identical in every flavor;
  *   * `ApiClient.startConnectionStatePump` calls [observeConnectionReport] on
  *     every connection-state value — ungated, a plain no-op here;
+ *   * `KidsExcisedApi.startAutoRenewCadence` takes its wait from
+ *     [autoRenewWaiter] — ungated, a bare `delay` here;
  *   * [com.fauna.app.ui.navigation.FaunaNavHost] writes [focusManager] inside
  *     a `BuildConfig.DEBUG`-gated `SideEffect`;
  *   * `ConversationDetailScreen`'s reaction picker writes [moreReactionPick]
- *     inside a `BuildConfig.DEBUG`-gated `DisposableEffect`.
+ *     inside a `BuildConfig.DEBUG`-gated `DisposableEffect`;
+ *   * `ProfileEditForm.kt`'s edit form writes [profileEditImagePick] inside a
+ *     `BuildConfig.DEBUG`-gated `DisposableEffect`;
+ *   * `MediaScreen.kt`'s upload row writes [mediaFilePick] inside a
+ *     `BuildConfig.DEBUG`-gated `DisposableEffect`;
+ *   * `EventsScreen.kt`'s import row writes [calendarImportPick] inside a
+ *     `BuildConfig.DEBUG`-gated `DisposableEffect`.
  *
  * This is the same "gated-real plus same-signature no-op twin" shape linux and
  * tui use for `start_test_agent_if_enabled` / `start_if_enabled`. Keeping the
@@ -87,6 +95,30 @@ object TestAgent {
     var moreReactionPick: ((String) -> Unit)? = null
 
     /**
+     * Never read in release — there is no `compose.file` dispatch here. Mirrors
+     * the debug twin's `profileEditImagePick` only so `ProfileEditForm.kt`'s
+     * `BuildConfig.DEBUG`-gated registration still type-checks in the release
+     * variant.
+     */
+    var profileEditImagePick: ((target: String, rawBytes: ByteArray, mimeType: String) -> Unit)? = null
+
+    /**
+     * Never read in release — there is no `compose.file` dispatch here. Mirrors
+     * the debug twin's `mediaFilePick` only so `MediaScreen.kt`'s
+     * `BuildConfig.DEBUG`-gated registration still type-checks in the release
+     * variant.
+     */
+    var mediaFilePick: ((path: String) -> Unit)? = null
+
+    /**
+     * Never read in release — there is no `compose.file` dispatch here. Mirrors
+     * the debug twin's `calendarImportPick` only so `EventsScreen.kt`'s
+     * `BuildConfig.DEBUG`-gated registration still type-checks in the release
+     * variant.
+     */
+    var calendarImportPick: ((path: String) -> Unit)? = null
+
+    /**
      * Always null in release, so `LaunchModule.provideSecretBackend` always
      * picks the real encrypted store. `var` for the same reason as
      * [isRealConversationsActive].
@@ -124,6 +156,11 @@ object TestAgent {
     @Suppress("UNUSED_PARAMETER")
     fun observeConnectionReport(state: com.fauna.ffi.FfiConnectionState) {
     }
+
+    /** Bare-clock twin: the auto-renew tick's wait is its clock alone — there is
+     *  no `auto_renew_wake` to race it in a release build. */
+    @Suppress("RedundantSuspendModifier")
+    suspend fun autoRenewWaiter(): suspend (Long) -> Unit = { ms -> kotlinx.coroutines.delay(ms) }
 
     /** No-op twin: the e2e session-generation counter has no reader in a
      *  release build — the agent that would publish it does not exist here. */

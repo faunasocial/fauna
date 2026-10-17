@@ -32,8 +32,6 @@ import json
 import secrets
 import threading
 import time
-import urllib.error
-import urllib.parse
 import urllib.request
 
 import pytest
@@ -54,9 +52,9 @@ from helpers.client_metadata_server import (
     manifest_payload,
     sign_manifest,
 )
-from helpers.oauth_client import NONCE_HEADER, OAuthClient
+from helpers.oauth_client import OAuthClient
 from tests.api.test_ext_kinds import _approve_with_grant, _put, _raw, _secret
-from tests.api.test_third_party_session import _Session, _upgrade
+from helpers.principal_session import PrincipalSession, events_poll, upgrade
 
 pytestmark = pytest.mark.tier_3
 
@@ -70,7 +68,6 @@ A_PATH, B_PATH = "/a-client.json", "/b-client.json"
 #: place a manifest may aim it (``validate_events_uri``).
 A_HOOK_PATH, B_HOOK_PATH = "/a-fauna-events", "/b-fauna-events"
 REDIRECT_URI = "http://127.0.0.1:17775/callback"
-EVENTS_PATH = "/api/v1/events"
 #: The one event type the nest emits (``events_webhook::SCOPE_CHANGED_EVENT``).
 SCOPE_CHANGED_EVENT = "urn:fauna:event-type:scope-changed"
 #: How long the long-poll is asked to hold — the door's own ceiling. The
@@ -128,7 +125,7 @@ class _App:
             secrets.token_bytes(16), kinds=(kind,),
         )
         self.token = tokens["access_token"]
-        self.session = _Session(_upgrade(nest, self.client, self.token))
+        self.session = PrincipalSession(upgrade(nest, self.client, self.token))
         ok, reply = self.session.call("fauna.capabilities.fetch", {})
         assert ok and len(reply.get("grants", [])) == 1, reply
         self.grant = bytes(reply["grants"][0])
@@ -146,34 +143,7 @@ class _App:
 
 
 def _events(nest, app: _App, cursor: int | None, wait: int) -> tuple[int, dict]:
-    """``GET /api/v1/events`` with the app's token and a fresh DPoP proof; one
-    ``use_dpop_nonce`` retry, the protocol's own."""
-    query = {"wait": wait} | ({} if cursor is None else {"cursor": cursor})
-    url = f"{nest['url']}{EVENTS_PATH}?{urllib.parse.urlencode(query)}"
-    htu = f"https://{HANDLE_DOMAIN}{EVENTS_PATH}"
-
-    def send():
-        request = urllib.request.Request(
-            url,
-            method="GET",
-            headers={
-                "Authorization": f"DPoP {app.token}",
-                "DPoP": app.client.dpop_proof("GET", htu, access_token=app.token),
-            },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=wait + RPC_ROUNDTRIP_S) as resp:
-                return resp.status, dict(resp.headers), json.loads(resp.read() or b"{}")
-        except urllib.error.HTTPError as refused:
-            raw = refused.read()
-            return refused.code, dict(refused.headers), json.loads(raw) if raw else {}
-
-    status, headers, body = send()
-    lowered = {k.lower(): v for k, v in headers.items()}
-    if status == 401 and "use_dpop_nonce" in lowered.get("www-authenticate", ""):
-        app.client.nonce = lowered.get(NONCE_HEADER.lower())
-        status, _, body = send()
-    return status, body
+    return events_poll(nest, app.client, app.token, cursor, wait)
 
 
 def _b64d(segment: str) -> bytes:

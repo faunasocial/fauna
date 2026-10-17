@@ -196,7 +196,7 @@ def test_web_local_spam_detection_surfaces_in_moderation_queue(
     #    can add him to a group — and he keeps the private half, which is what lets him
     #    DECRYPT (and therefore classify) below.
     wait_until(
-        lambda: conv_api.keypackage_count(port, alice, bob_actor_id) > 0,
+        lambda: conv_api.keypackage_count(port, test_user, bob_actor_id) > 0,
         MLS_HANDSHAKE_S,
         diagnose=lambda: "waiting for bob's web client to publish a key package",
     )

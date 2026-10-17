@@ -1,6 +1,10 @@
-//! The share leg's ROW-half store: [`fauna_peer_share::server::ShareStore`]
-//! over the engine's own per-set `SyncDb` (B2 — `p2p-shared-set-build.md` § *Build design —
-//! the row half*).
+//! The peer legs' ROW-half store over the engine's own per-set `SyncDb` (B2 —
+//! `p2p-shared-set-build.md` § *Build design — the row half*; the same-account
+//! leg reads it too, § *Build design — the same-account row leg*). Compiled
+//! without `p2p-share`: the rows, the cached roster, the materialization
+//! judge and the ingest report are both legs'; only the
+//! `fauna_peer_share::server::ShareStore` impls and the share byte half
+//! ([`ShareServeSource`]) ride the feature.
 //!
 //! `changes_since` serves every row this replica holds for the set: the rows
 //! `own_change_log` retained at the engine's recording funnel — **real
@@ -33,13 +37,19 @@
 
 use std::sync::Mutex;
 
-use fauna_peer_share::provenance::LocalShareChange;
+#[cfg(feature = "p2p-share")]
 use fauna_peer_share::server::ShareStore;
+use fauna_protocol::peer_row::LocalShareChange;
 
 use crate::db::SyncDb;
 
-/// [`ShareStore`] over one set's `SyncDb` — the row half only (module doc).
+/// One set's held rows over its `SyncDb` — the row half only (module doc):
+/// the `ShareStore` the share leg serves through, and the folder row source
+/// the same-account leg's host reads ([`Self::rows_since`]).
 pub struct SyncDbShareStore {
+    /// The set the share door may name — its mis-wire check; the same-account
+    /// door names the folder by routing, before it reaches this store.
+    #[cfg_attr(not(feature = "p2p-share"), allow(dead_code))]
     set_id: [u8; 32],
     // A plain mutex, held only across quick synchronous SQLite calls (never
     // an await): `SyncDb` wraps a `rusqlite::Connection`, which is `Send` but
@@ -58,22 +68,14 @@ impl SyncDbShareStore {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl ShareStore for SyncDbShareStore {
-    async fn changes_since(
-        &self,
-        set: &[u8; 32],
-        since: i64,
-        max_rows: u32,
-    ) -> anyhow::Result<Vec<LocalShareChange>> {
-        if *set != self.set_id {
-            anyhow::bail!(
-                "mis-wired share store: this store serves set {}, asked for {}",
-                hex::encode(self.set_id),
-                hex::encode(set)
-            );
-        }
+impl SyncDbShareStore {
+    /// The folder's held change rows with `seq` strictly greater than `since`,
+    /// in seq order, pending rows on the tail page, at most `max_rows` — the
+    /// serve set BOTH peer legs' row doors read (`fauna.peer.share.changes.list`
+    /// through [`ShareStore`], `fauna.peer.sync.changes.list` through the host's
+    /// `FolderChangesFn`). May include rows the provenance ruling withholds —
+    /// the servers filter.
+    pub fn rows_since(&self, since: i64, max_rows: u32) -> anyhow::Result<Vec<LocalShareChange>> {
         let db = self.db.lock().expect("share-store db mutex poisoned");
         // The sequenced page: own and relayed rows share the nest's one seq
         // space for the set, so they merge into one seq-ordered page.
@@ -118,6 +120,38 @@ impl ShareStore for SyncDbShareStore {
             }
         }
         Ok(out)
+    }
+
+    /// A retained manifest's canonical bytes by content hash — self-verifying
+    /// (re-hashed here before they serve, so a corrupt retention reads as
+    /// `None`), and the same-account manifest door's whole answer: the share
+    /// leg's re-derive fallback needs the M2 keys and stays there.
+    pub fn retained_manifest_bytes(&self, manifest_hash: &[u8; 32]) -> Option<Vec<u8>> {
+        let db = self.db.lock().expect("share-store db mutex poisoned");
+        let retained = db.retained_manifest(&hex::encode(manifest_hash)).ok()??;
+        (fauna_core::data::ContentHash::of_raw(&retained.bytes).digest() == *manifest_hash)
+            .then_some(retained.bytes)
+    }
+}
+
+#[cfg(feature = "p2p-share")]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl ShareStore for SyncDbShareStore {
+    async fn changes_since(
+        &self,
+        set: &[u8; 32],
+        since: i64,
+        max_rows: u32,
+    ) -> anyhow::Result<Vec<LocalShareChange>> {
+        if *set != self.set_id {
+            anyhow::bail!(
+                "mis-wired share store: this store serves set {}, asked for {}",
+                hex::encode(self.set_id),
+                hex::encode(set)
+            );
+        }
+        self.rows_since(since, max_rows)
     }
 
     async fn manifest_bytes(
@@ -611,7 +645,7 @@ pub async fn chunk_body_from_hit(
     body: &dyn crate::share_body::BodySource,
     memo: &Mutex<ShareServeMemo>,
     hit: &MemoChunkHit,
-    secret: [u8; 32],
+    secrets: impl IntoIterator<Item = [u8; 32]>,
     store_key: &[u8; 32],
 ) -> anyhow::Result<Option<Vec<u8>>> {
     if let Some(cached) = memo
@@ -628,9 +662,19 @@ pub async fn chunk_body_from_hit(
         len: hit.coords.len,
         plain_hash: hit.coords.plain_hash,
     };
-    let Some(body) =
-        crate::serve_core::serve_held_chunk(body, &hit.path, &held, Some(&secret)).await?
-    else {
+    // Every same-version candidate (`FolderContentKeys::keys_for`): the serve
+    // core serves only a re-seal that reproduces `store_key`, so the first
+    // candidate that does is the generation the body was sealed under.
+    let mut served = None;
+    for secret in secrets {
+        if let Some(body) =
+            crate::serve_core::serve_held_chunk(body, &hit.path, &held, Some(&secret)).await?
+        {
+            served = Some(body);
+            break;
+        }
+    }
+    let Some(body) = served else {
         return Ok(None);
     };
     memo.lock()
@@ -690,6 +734,7 @@ pub async fn rederive_manifest_from_disk(
 /// backfill retention, best-effort under the connection's busy timeout. An
 /// in-process-engine app (linux) composes the same type over the same
 /// triple; only who opened the DB differs.
+#[cfg(feature = "p2p-share")]
 pub struct ShareServeSource {
     rows: SyncDbShareStore,
     body: std::sync::Arc<dyn crate::share_body::BodySource>,
@@ -697,6 +742,7 @@ pub struct ShareServeSource {
     memo: Mutex<ShareServeMemo>,
 }
 
+#[cfg(feature = "p2p-share")]
 impl ShareServeSource {
     /// A source serving `set_id` from `db` (the set's state DB), `body`
     /// (where the replica's plaintext is read) and `content_keys` (the set's
@@ -716,6 +762,7 @@ impl ShareServeSource {
     }
 }
 
+#[cfg(feature = "p2p-share")]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl ShareStore for ShareServeSource {
@@ -772,13 +819,18 @@ impl ShareStore for ShareServeSource {
             let Some(version) = entry.content_key_version else {
                 continue;
             };
-            let Some(secret) = self.content_keys.key_for(version).copied() else {
-                continue;
-            };
-            let Some(sealed) =
-                rederive_manifest_from_disk(&*self.body, &entry.path, secret, version, &target)
-                    .await?
-            else {
+            // Every same-version candidate: the re-seal is checked against
+            // `target`, so the first that reproduces it is the sealing generation.
+            let mut resealed = None;
+            for secret in self.content_keys.keys_for(version).copied() {
+                resealed =
+                    rederive_manifest_from_disk(&*self.body, &entry.path, secret, version, &target)
+                        .await?;
+                if resealed.is_some() {
+                    break;
+                }
+            }
+            let Some(sealed) = resealed else {
                 continue;
             };
             {
@@ -821,10 +873,14 @@ impl ShareStore for ShareServeSource {
         let Some(version) = hit.content_key_version else {
             return Ok(None);
         };
-        let Some(secret) = self.content_keys.key_for(version).copied() else {
-            return Ok(None);
-        };
-        let body = chunk_body_from_hit(&*self.body, &self.memo, &hit, secret, store_key).await?;
+        let body = chunk_body_from_hit(
+            &*self.body,
+            &self.memo,
+            &hit,
+            self.content_keys.keys_for(version).copied(),
+            store_key,
+        )
+        .await?;
         if body.is_some() {
             crate::share_serve_tally::record_chunk_served(&hit.path);
         }
@@ -848,7 +904,7 @@ impl ShareStore for ShareServeSource {
         let Some(version) = hit.content_key_version else {
             return Ok(false);
         };
-        Ok(self.content_keys.key_for(version).is_some())
+        Ok(self.content_keys.keys_for(version).next().is_some())
     }
 }
 
@@ -871,6 +927,18 @@ pub fn spool_chunk_path(
     dir.join("chunks").join(hex::encode(store_key.digest()))
 }
 
+/// The spool's marker for a manifest the pump's per-operation cap kept out
+/// (dropped at the plan or stopped on arrival) — [`spool_manifest_path`]'s
+/// twin for a body that will not be there. [`SpoolFetcher`] answers a marked
+/// manifest with a permanent miss, so the ingest lets the cursor pass the
+/// row instead of holding it for a retry the cap would refuse again.
+pub fn spool_capped_path(
+    dir: &std::path::Path,
+    hash: &fauna_core::data::ContentHash,
+) -> std::path::PathBuf {
+    dir.join("capped").join(hex::encode(hash.digest()))
+}
+
 /// A [`fauna_core::file_download::BlobFetcher`] over a caller-populated SPOOL
 /// directory — the ingest side of the app↔agent handoff on
 /// out-of-process-agent apps: the app (which owns the peer channel)
@@ -878,7 +946,10 @@ pub fn spool_chunk_path(
 /// `spool/manifests/<hex>` + `spool/chunks/<hex>`, and the agent's engine
 /// ingests with this fetcher. A spool miss is an error, which the ingest door
 /// already treats as a per-row skip — never the page — so an
-/// under-provisioned spool degrades row by row, honestly.
+/// under-provisioned spool degrades row by row, honestly. An ordinary miss is
+/// transient (the ingest holds the cursor below the row for a retry); a miss
+/// the pump marked capped ([`spool_capped_path`]) is marked
+/// [`fauna_core::apply_failure::PermanentApplyFailure::PER_OPERATION_CAP`].
 pub struct SpoolFetcher {
     dir: std::path::PathBuf,
 }
@@ -896,6 +967,18 @@ impl fauna_core::file_download::BlobFetcher for SpoolFetcher {
         &self,
         hash: &fauna_core::data::ContentHash,
     ) -> anyhow::Result<Vec<u8>> {
+        if tokio::fs::try_exists(spool_capped_path(&self.dir, hash))
+            .await
+            .unwrap_or(false)
+        {
+            return Err(fauna_core::apply_failure::permanent(
+                fauna_core::apply_failure::PermanentApplyFailure::PER_OPERATION_CAP,
+                format!(
+                    "spool manifest {}: kept out by the per-operation cap",
+                    hex::encode(hash.digest())
+                ),
+            ));
+        }
         let path = spool_manifest_path(&self.dir, hash);
         tokio::fs::read(&path)
             .await
@@ -919,6 +1002,54 @@ impl fauna_core::file_download::BlobFetcher for SpoolFetcher {
             })?);
         }
         Ok(out)
+    }
+}
+
+/// Which peer leg served a page — the ONE ingest's parameter
+/// (`p2p-shared-set-build.md` § Build design — the same-account row leg,
+/// decision 3). The judge, the overlay, materialization, the view-only delete
+/// and retire-on-arrival are the same code for both; what the share leg
+/// conflated in one actor hex comes apart into the three facts below.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerPageOrigin {
+    /// The cross-user share leg: a peer's actor is its NodeId (PT-1b).
+    Share { peer_actor_hex: String },
+    /// The same-account leg: a sibling device of this account, admitted by its
+    /// `DeviceAuthorization` verdict.
+    Sibling { device_hex: String },
+}
+
+impl PeerPageOrigin {
+    /// The per-peer pull cursor's key (the `share_pull_cursors.peer_actor`
+    /// column): the peer's actor hex, or `device:<hex>` for a sibling — the
+    /// prefix keeps the two spaces apart by construction.
+    pub fn cursor_key(&self) -> String {
+        match self {
+            Self::Share { peer_actor_hex } => peer_actor_hex.to_ascii_lowercase(),
+            Self::Sibling { device_hex } => format!("device:{}", device_hex.to_ascii_lowercase()),
+        }
+    }
+
+    /// The actor the channel proved — what an exempt-class row's stamp is
+    /// compared against: the share peer's actor, or THIS account's own actor
+    /// (`own_actor_hex`), since admission proved the sibling is a device of it.
+    pub fn proven_actor_hex(&self, own_actor_hex: &str) -> String {
+        match self {
+            Self::Share { peer_actor_hex } => peer_actor_hex.to_ascii_lowercase(),
+            Self::Sibling { .. } => own_actor_hex.to_ascii_lowercase(),
+        }
+    }
+
+    /// Whether the serving peer is a writer: the cached roster's answer for a
+    /// share peer (fail closed — no cached role is `false`), or `true` by
+    /// admission for a sibling of the account.
+    pub fn peer_is_cached_writer(&self, db: &SyncDb) -> bool {
+        match self {
+            Self::Share { peer_actor_hex } => {
+                db.cached_share_writer(peer_actor_hex).unwrap_or(false)
+            }
+            Self::Sibling { .. } => true,
+        }
     }
 }
 
@@ -951,7 +1082,7 @@ pub struct PeerIngestReport {
     pub storage_limited: bool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "p2p-share"))]
 pub(crate) mod tests {
     use super::*;
     use crate::db::OwnChangeRow;
@@ -1054,6 +1185,7 @@ pub(crate) mod tests {
                 path_hash: "ef".repeat(32),
                 row: fauna_protocol::encode_canonical(&change).unwrap().to_vec(),
                 signer_cert: Some(fauna_protocol::encode_canonical(&cert).unwrap().to_vec()),
+                device_id: None,
             })
             .unwrap();
         }
@@ -1713,6 +1845,75 @@ pub(crate) mod tests {
                 .await
                 .unwrap()
                 .expect("chunk serves");
+            assert_eq!(&got, body);
+        }
+        drop(writer);
+    }
+
+    /// A set's custody holding TWO generations of one version (two owner
+    /// devices rotated at once, then merged) serves a body sealed under the
+    /// NON-current one — its manifest (re-derived with no retention row) and a
+    /// chunk. The serve legs try every `keys_for(version)` candidate, never the
+    /// first only (`mls-group-key-material.md` § M2 → *Generations*).
+    #[tokio::test]
+    async fn the_composite_source_serves_a_body_sealed_under_the_non_current_same_version_generation()
+     {
+        let mut a = fauna_core::folder_keys::FolderContentKeys::genesis([0x10; 32], 1_760_000_000);
+        let mut b = a.clone();
+        a.rotate([0xA1; 32], 1_760_000_100);
+        b.rotate([0xB2; 32], 1_760_000_100);
+        let keys = a.merge(&b);
+        assert_eq!(keys.keys_for(2).count(), 2, "a same-version pair");
+        let loser = if *keys.current_key() == [0xA1; 32] {
+            [0xB2; 32]
+        } else {
+            [0xA1; 32]
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let bytes: Vec<u8> = (0..40_000u32).map(|i| (i % 239) as u8).collect();
+        std::fs::write(dir.path().join("clip.mp4"), &bytes).unwrap();
+        let sealed = crate::seal::seal_blob(&bytes, Some((loser, Some(2)))).unwrap();
+
+        let db_path = dir.path().join("fs-state.db");
+        let writer = SyncDb::open(&db_path).unwrap();
+        // The entry only — NO manifest retention, so the manifest is re-derived
+        // from the entry's recorded head.
+        writer
+            .upsert_entry(
+                "clip.mp4",
+                None,
+                None,
+                Some(sealed.manifest_hash),
+                SyncState::Synced,
+                0,
+                0,
+                bytes.len() as i64,
+                1,
+                Some(2),
+            )
+            .unwrap();
+
+        let source = ShareServeSource::new(
+            SET_A,
+            SyncDb::open(&db_path).unwrap(),
+            std::sync::Arc::new(crate::share_body::TreeBodySource::new(
+                dir.path().to_path_buf(),
+            )),
+            keys,
+        );
+        let manifest = source
+            .manifest_bytes(&SET_A, &sealed.manifest_hash.digest())
+            .await
+            .unwrap()
+            .expect("manifest re-derives under the second candidate");
+        assert_eq!(manifest, sealed.manifest_bytes);
+        for (store_key, body) in &sealed.chunks {
+            let got = source
+                .chunk_body(&SET_A, &store_key.digest())
+                .await
+                .unwrap()
+                .expect("chunk serves under the second candidate");
             assert_eq!(&got, body);
         }
         drop(writer);

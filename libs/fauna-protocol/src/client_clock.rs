@@ -67,7 +67,10 @@ static ENV_SEEDED: std::sync::Once = std::sync::Once::new();
 /// Parse the seed. Whitespace-tolerant; anything that is not a signed integer
 /// is `None`, so a stray value falls back to the real clock rather than
 /// failing a launch.
-#[cfg(any(debug_assertions, feature = "e2e-agent"))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(debug_assertions, feature = "e2e-agent")
+))]
 fn parse_offset(raw: Option<&str>) -> Option<i64> {
     raw?.trim().parse().ok()
 }

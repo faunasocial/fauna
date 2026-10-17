@@ -9,6 +9,7 @@ import org.junit.runner.RunWith
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import org.robolectric.annotation.Config
 import uniffi.fauna_mail.ExportFormat
+import uniffi.fauna_client_mail_settings.ExportSessionState
 import uniffi.fauna_client_mail_settings.ExportStatus
 import uniffi.fauna_client_mail_settings.ExportStep
 import uniffi.fauna_client_mail_settings.MailExportSnapshot
@@ -33,6 +34,11 @@ class MailExportContentTest {
         downloadUrl: String = "",
         blobBytes: ULong? = null,
         savedArchivePath: String = "",
+        // The session's clock; 0 = no session read yet (the untimed summaries).
+        startedAt: Long = 0L,
+        lastProgressAt: Long = 0L,
+        sessionState: ExportSessionState? = null,
+        errorLog: List<String> = emptyList(),
     ) = MailExportSnapshot(
         step = step,
         format = ExportFormat.MBOX,
@@ -40,16 +46,18 @@ class MailExportContentTest {
         dateFrom = "",
         dateTo = "",
         stripHeaders = false,
-        sessionState = null,
+        sessionState = sessionState,
         exportedCount = 0u,
         skippedCount = 0u,
         erroredCount = 0u,
         totalCount = totalCount,
         mailboxProgress = emptyList(),
-        errorLog = emptyList(),
+        errorLog = errorLog,
         blobBytes = blobBytes,
         downloadUrl = downloadUrl,
         savedArchivePath = savedArchivePath,
+        startedAt = startedAt,
+        lastProgressAt = lastProgressAt,
         status = ExportStatus.IDLE,
         error = null,
     )
@@ -59,6 +67,7 @@ class MailExportContentTest {
         onSelectFormat: (ExportFormat) -> Unit = {},
         onStart: () -> Unit = {},
         onDownload: () -> Unit = {},
+        onDiscard: () -> Unit = {},
     ) {
         composeTestRule.setContent {
             MailExportContent(
@@ -77,7 +86,7 @@ class MailExportContentTest {
                 onPause = {},
                 onResume = {},
                 onCancel = {},
-                onDiscard = {},
+                onDiscard = onDiscard,
                 onDownload = onDownload,
             )
         }
@@ -163,9 +172,99 @@ class MailExportContentTest {
     }
 
     @Test
+    fun doneSummaryReportsHowLongTheExportTook() {
+        render(
+            snap(
+                ExportStep.DONE, downloadUrl = "/api/v1/export/1", blobBytes = 1234uL,
+                startedAt = 1_000L, lastProgressAt = 1_090L,
+            ),
+        )
+        composeTestRule.onNodeWithTag("mail-export-done-summary")
+            .assertTextContains("took", substring = true)
+    }
+
+    @Test
+    fun progressSummaryAddsElapsedTime() {
+        render(snap(ExportStep.PROGRESS, totalCount = 10u, startedAt = 1_000L, lastProgressAt = 1_090L))
+        composeTestRule.onNodeWithTag("mail-export-progress-summary")
+            .assertTextContains("elapsed", substring = true)
+    }
+
+    @Test
+    fun confirmStepTotalsTheSelectedMailboxesAndSaysTheEstimateIsMissing() {
+        render(
+            snap(
+                ExportStep.CONFIRM,
+                mailboxes = listOf(
+                    MailboxOption(name = "INBOX", selected = true, messageCount = 7u),
+                    MailboxOption(name = "Archive", selected = false, messageCount = 99u),
+                ),
+            ),
+        )
+        composeTestRule.onNodeWithTag("mail-export-confirm-summary")
+            .assertTextContains("7 messages", substring = true)
+        composeTestRule.onNodeWithText("not estimated yet", substring = true).assertExists()
+    }
+
+    @Test
+    fun confirmStepEstimatesTheSelectedBytesAndTime() {
+        // 150 MiB at the shared 1 MiB/s is 150 s; Trash is not selected, so its
+        // bytes are not coming. Mirrors tui's
+        // `the_confirm_step_estimates_the_selected_bytes_and_time`.
+        render(
+            snap(
+                ExportStep.CONFIRM,
+                mailboxes = listOf(
+                    MailboxOption(name = "INBOX", selected = true, messageCount = 10u, sealedBytes = 157_286_400uL),
+                    MailboxOption(name = "Trash", selected = false, messageCount = 10u, sealedBytes = 943_718_400uL),
+                ),
+            ),
+        )
+        composeTestRule.onNodeWithTag("mail-export-confirm-summary")
+            .assertTextContains("10 messages", substring = true)
+            .assertTextContains("about 150 MB · about 2m to export", substring = true)
+        composeTestRule.onNodeWithText("not estimated yet", substring = true).assertDoesNotExist()
+    }
+
+    @Test
     fun doneSummaryNamesNoPathBeforeDownload() {
         render(snap(ExportStep.DONE, downloadUrl = "/api/v1/export/1", blobBytes = 1234uL))
         composeTestRule.onNodeWithTag("mail-export-done-summary")
             .assert(hasText("saved to", substring = true).not())
+    }
+
+    /** A failed export is painted on the Progress step with its reason and one
+     *  control, Dismiss — none of Pause / Resume / Cancel (`mail-export.md` § A
+     *  failed export is a record the wizard shows until the user moves on).
+     *  Mirrors tui's `a_failed_export_offers_dismiss_and_none_of_the_three_controls`. */
+    @Test
+    fun aFailedExportOffersDismissAndNoneOfTheThreeControls() {
+        var dismissed = false
+        render(
+            snap(
+                ExportStep.PROGRESS,
+                sessionState = ExportSessionState.ERRORED,
+                errorLog = listOf("INBOX: uid 2 could not be opened"),
+            ),
+            onDiscard = { dismissed = true },
+        )
+        for (id in listOf("mail-export-pause-button", "mail-export-resume-button", "mail-export-cancel-button")) {
+            composeTestRule.onNodeWithTag(id).assertDoesNotExist()
+        }
+        composeTestRule.onNodeWithTag("mail-export-discard-button").assertTextEquals("Dismiss")
+        composeTestRule.onNodeWithText("INBOX: uid 2 could not be opened").assertExists()
+        composeTestRule.onNodeWithTag("mail-export-progress-summary").assertExists()
+        composeTestRule.onNodeWithTag("mail-export-discard-button").performScrollTo().performClick()
+        assert(dismissed)
+    }
+
+    /** A live export keeps its three controls and paints no Dismiss. */
+    @Test
+    fun aLiveExportKeepsTheThreeControlsAndPaintsNoDismiss() {
+        render(snap(ExportStep.PROGRESS, sessionState = ExportSessionState.RUNNING))
+        for (id in listOf("mail-export-pause-button", "mail-export-resume-button", "mail-export-cancel-button")) {
+            composeTestRule.onNodeWithTag(id).assertExists()
+        }
+        composeTestRule.onNodeWithTag("mail-export-discard-button").assertDoesNotExist()
     }
 }

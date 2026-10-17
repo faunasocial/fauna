@@ -174,15 +174,15 @@ pub fn counterparty_headroom(limits: &FeatureLimits, window: Window) -> Option<u
 /// wormability rule 7's brake; the same string
 /// `ceremony_bind_verdict` consults, so the limits screen and the bind door
 /// cannot disagree about what an excised nest looks like).
-/// `zaps` has **no token yet** (§ Wire & data shape names the per-feature
-/// tokens as target state), and `None` is the honest answer: its presence is
-/// unknowable from the capability set, so nothing may be hidden on that
-/// basis. When its token lands, this map grows in one place instead of seven.
+/// `zaps` = its own token (advertised under `cfg!(feature = "zaps")`, so a
+/// nest built with `payments` and without `zaps` is told apart from a full one).
+/// Every registry member has a token; this map grows in one place instead of
+/// seven.
 pub fn capability_token(feature: GatedFeature) -> Option<&'static str> {
     match feature {
         GatedFeature::Payments => Some(capability::SUBSCRIPTIONS),
         GatedFeature::P2pShare => Some(capability::P2P_SHARE),
-        GatedFeature::Zaps => None,
+        GatedFeature::Zaps => Some(capability::ZAPS),
         // No surface renders a feature this build does not know.
         GatedFeature::Unknown => None,
     }
@@ -547,31 +547,37 @@ mod tests {
         );
     }
 
-    /// `zaps` has no token yet, so absence proves nothing and nothing may be
-    /// hidden on that basis; `p2p-share` gained its token with the 2026-08-17
-    /// nest legs and hides exactly like payments.
+    /// Every registry member has a capability token, so absence of it means
+    /// the nest build does not carry the member and the row is hidden — `zaps`
+    /// (its own token, `cfg!(feature = "zaps")` nest-side) and `p2p-share`
+    /// alike.
     #[test]
-    fn a_member_without_a_capability_token_is_never_hidden() {
-        assert_eq!(capability_token(GatedFeature::Zaps), None);
-        let it = item(
-            GatedFeature::Zaps,
-            tier1(GatedFeature::Zaps),
-            UsageCounters::default(),
-        );
-        assert_ne!(affordance(&it, &[]), Affordance::Hidden);
-
+    fn every_registry_member_has_a_token_and_is_hidden_without_it() {
+        for (feature, token) in [
+            (GatedFeature::Payments, capability::SUBSCRIPTIONS),
+            (GatedFeature::Zaps, capability::ZAPS),
+            (GatedFeature::P2pShare, capability::P2P_SHARE),
+        ] {
+            assert_eq!(capability_token(feature), Some(token));
+            let it = item(feature, tier1(feature), UsageCounters::default());
+            assert_eq!(affordance(&it, &[]), Affordance::Hidden);
+            assert_ne!(affordance(&it, &[token.to_string()]), Affordance::Hidden);
+        }
+        for feature in GatedFeature::ALL {
+            assert!(
+                capability_token(feature).is_some(),
+                "{feature:?} has no capability token"
+            );
+        }
         assert_eq!(
-            capability_token(GatedFeature::P2pShare),
-            Some(capability::P2P_SHARE)
-        );
-        let it = item(
-            GatedFeature::P2pShare,
-            tier1(GatedFeature::P2pShare),
-            UsageCounters::default(),
-        );
-        assert_eq!(affordance(&it, &[]), Affordance::Hidden);
-        assert_eq!(
-            affordance(&it, &[capability::P2P_SHARE.to_string()]),
+            affordance(
+                &item(
+                    GatedFeature::P2pShare,
+                    tier1(GatedFeature::P2pShare),
+                    UsageCounters::default()
+                ),
+                &[capability::P2P_SHARE.to_string()]
+            ),
             Affordance::Available
         );
     }

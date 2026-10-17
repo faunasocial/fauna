@@ -33,7 +33,6 @@ package mta
 import (
 	"bytes"
 	"context"
-	crand "crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
 	"errors"
@@ -100,6 +99,17 @@ const (
 	// Hard-coded: internal anti-abuse tuning, not a human-chosen knob;
 	// smtp-server.md § Connection-time limits.
 	maxInboundConnsPerIP = 50
+	// maxInboundMsgsPerIPPerHour caps the message transactions (accepted MAIL
+	// FROM — the unit postfix's `smtpd_client_message_rate_limit` counts) one
+	// port-25 source IP may open per hour, in a fixed window held for the
+	// process's life (a config reload does not reset it). The per-message
+	// complement to the per-IP connection rate: a sender that keeps one
+	// connection open and loops MAIL/RCPT/DATA never trips that one. Over the
+	// cap the next MAIL FROM is told to retry later (451 4.7.1, tarpitted).
+	// Loopback is exempt, as for maxInboundConnsPerIP. Hard-coded: internal
+	// anti-abuse tuning, not a human-chosen knob; smtp-server.md
+	// § Connection-time limits.
+	maxInboundMsgsPerIPPerHour = 50
 	// maxSubmissionConns caps simultaneously-served submission (465/587)
 	// connections. Authenticated clients, so the cap is a generous OS-FD /
 	// goroutine backstop rather than a flood brake — matched to the Rust
@@ -359,6 +369,13 @@ type inboundBackend struct {
 	// unit-test backends that don't exercise shutdown — the gate then no-ops.
 	drain *drainTracker
 
+	// msgRate is the port-25 per-IP message rate (maxInboundMsgsPerIPPerHour
+	// per hour), shared by pointer into every session so the budget is the
+	// IP's, not the connection's. Process-lifetime, unlike the Policy's
+	// connection-rate limiter, which a config reload rebuilds. nil in
+	// unit-test backends → no message-rate gate.
+	msgRate *RateLimiter
+
 	// outboundTrigger pokes the outbound worker after a forward-all stage
 	// enqueues a forward row, so the forward delivers on the next poll cycle
 	// instead of waiting the full PollInterval (mirrors the submission Data
@@ -394,10 +411,12 @@ func (b *inboundBackend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
 		scanGate:                 b.scanGate,
 		requireStartTLS:          b.requireStartTLS,
 		drain:                    b.drain,
+		msgRate:                  b.msgRate,
 	}
 	if lc.policy != nil {
-		// Per-IP rate limit. Reject at NewSession so botnet floods
-		// don't even reach the HELO banner exchange.
+		// Per-IP rate limit. Reject at NewSession — which go-smtp runs
+		// when the client greets (HELO/EHLO), after its own 220 — so a
+		// flood never reaches a mail transaction.
 		if !lc.policy.RateLimiter.Allow(ip) {
 			b.logger.Warn("smtp: rate-limited",
 				"client_ip", ip,
@@ -428,7 +447,8 @@ func (b *inboundBackend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
 		// FCrDNS — captured here for the once-per-session enforce
 		// gate at Session.Mail (where we have HELO and the policy's
 		// enforce-mode + reject_fcrdns_fail intersection can fire).
-		if lc.policy.FCrDNSMode != FCrDNSModeOff {
+		// `reject_no_rdns` needs the PTR answer whatever the mode.
+		if lc.policy.FCrDNSMode != FCrDNSModeOff || lc.policy.RejectNoRDNS {
 			sess.fcrdns = lc.policy.FCrDNS.Check(ip)
 			sess.fcrdnsResolved = true
 		}
@@ -477,12 +497,22 @@ type resolvedInboundRcpt struct {
 	forwardTarget    string
 	forwarderActorID []byte
 
+	// processor marks a reserved role address a nest processor consumes
+	// (resolve_recipient's Processor outcome — dmarc-report@ / tlsrpt@ →
+	// wsrpc.ProcessorDmarcReport / ProcessorTlsrptInbound, dmarc-reporting.md § Envelope-time
+	// routing). The DATA stage hands the message to the processor ahead of any
+	// local commit (dispatchProcessor) and writes NO mailbox copy. `actorID` is
+	// nil.
+	processor string
+
 	// headersToStamp carries the resolver's `X-Fauna-Address-*` headers for an
 	// alias-kind match (subaddress / wildcard / disposable / catch-all —
 	// aliases/mod.rs:55). The DATA stage stamps them onto this recipient's sealed
 	// copy AND into this recipient's filter-rule context so a rule can match on
-	// the matched-alias metadata (mail-aliases.md § Resolution order). Empty for
-	// exact / role-address (and for the forwarder/SRS-bounce paths).
+	// the matched-alias metadata (mail-aliases.md § Resolution order). Every
+	// resolved mailbox (exact / role-address included) also carries the delivery
+	// stamps X-Fauna-Delivered-To + X-Fauna-Spam-Threshold; empty only for the
+	// forwarder/SRS-bounce paths.
 	headersToStamp []wsrpc.StampedHeader
 
 	// controlOverrides carries the resolver's per-alias spam-threshold / rate-cap
@@ -509,7 +539,8 @@ type resolvedInboundRcpt struct {
 // successful Rcpt call, `inboundRcpts[i]` carries the 32-byte nest-resolved
 // actor identifier the C.9 ingest call keys on (plus its role-address
 // bit). RCPTs rejected by the domain filter or resolve_recipient don't
-// make it into either slice (go-smtp drops the recipient on error return).
+// make it into either slice (go-smtp drops the recipient on error return). Both are
+// transaction-scoped: MAIL FROM and Reset clear them together.
 type inboundSession struct {
 	conn         *gosmtp.Conn
 	logger       *slog.Logger
@@ -529,6 +560,9 @@ type inboundSession struct {
 	fcrdns         FCrDNSResult
 	fcrdnsResolved bool
 	mailChecked    bool
+	// msgRate is the backend's shared per-IP message-rate limiter
+	// (inboundBackend.msgRate); nil ⇒ no message-rate gate.
+	msgRate *RateLimiter
 
 	// errCount is the running count of policy rejections on this session.
 	// It drives the escalating tarpit (tarpitDelay) and persists across
@@ -785,6 +819,7 @@ func (s *inboundSession) Mail(from string, _ *gosmtp.MailOptions) error {
 	}
 	s.from = from
 	s.rcpts = nil
+	s.inboundRcpts = nil
 	s.hasDiscardRcpt = false
 	if s.policy == nil {
 		return nil
@@ -801,6 +836,23 @@ func (s *inboundSession) Mail(from string, _ *gosmtp.MailOptions) error {
 				Code:         554,
 				EnhancedCode: gosmtp.EnhancedCode{5, 7, 0},
 				Message:      "Invalid HELO/EHLO: " + err.Error(),
+			})
+		}
+		// HELO self-claim (smtp-server.md § HELO / EHLO, the two self-claim
+		// rows): a peer greeting with a domain this server hosts mail for —
+		// the primary hostname included, it is the first of them — is
+		// impersonating us. Always on, no knob; loopback keeps the exemption
+		// the other greeting rules give it (SkipHELOLoopback drives it from
+		// 127.0.0.1 in tests). Ahead of the identity check, which a name we
+		// host would otherwise pass whenever the peer shares our address.
+		if (s.policy.SkipHELOLoopback || !isLoopbackIP(s.clientIP)) &&
+			containsFoldDomain(s.localDomains, helo) {
+			s.logger.Info("smtp: HELO self-claim", "client_ip", s.clientIP, "helo", helo)
+			metrics.SMTPInboundHELOSelfClaim.Inc()
+			return s.reject(&gosmtp.SMTPError{
+				Code:         554,
+				EnhancedCode: gosmtp.EnhancedCode{5, 7, 0},
+				Message:      "Invalid HELO/EHLO: the greeting claims this server's own name",
 			})
 		}
 		// HELO identity (DNS-based) — production default rejects when
@@ -823,6 +875,16 @@ func (s *inboundSession) Mail(from string, _ *gosmtp.MailOptions) error {
 					Message:      "HELO identity check failed: " + reason,
 				})
 			}
+		}
+		// No rDNS alone-reject — the admin opted in, and the peer has
+		// definitely no PTR (a resolver error fails open).
+		if s.policy.RejectNoRDNS && s.fcrdnsResolved && s.fcrdns.NoPTR {
+			s.logger.Info("smtp: no-rDNS reject", "client_ip", s.clientIP)
+			return s.reject(&gosmtp.SMTPError{
+				Code:         550,
+				EnhancedCode: gosmtp.EnhancedCode{5, 7, 25},
+				Message:      "Client host has no reverse DNS",
+			})
 		}
 		// FCrDNS enforce — only fires when mode=enforce AND
 		// reject_fcrdns_fail AND the check was a definite fail (not
@@ -870,6 +932,18 @@ func (s *inboundSession) Mail(from string, _ *gosmtp.MailOptions) error {
 				Message:      "Sender domain has no DNS records",
 			})
 		}
+	}
+	// Per-IP message rate (smtp-server.md § Connection-time limits): the last
+	// gate, so only a transaction every other gate admitted spends the budget.
+	// Loopback is exempt, as for the per-IP concurrent cap.
+	if s.msgRate != nil && !isLoopbackIP(s.clientIP) && !s.msgRate.Allow(s.clientIP) {
+		s.logger.Info("smtp: message-rate limited",
+			"client_ip", s.clientIP, "limit_per_hour", s.msgRate.limit)
+		return s.reject(&gosmtp.SMTPError{
+			Code:         451,
+			EnhancedCode: gosmtp.EnhancedCode{4, 7, 1},
+			Message:      "Message rate limit exceeded; try again later",
+		})
 	}
 	return nil
 }
@@ -1003,6 +1077,16 @@ func (s *inboundSession) Rcpt(to string, _ *gosmtp.RcptOptions) error {
 				forwarderActorID: res.ForwarderActorID,
 				rcptAddr:         to,
 			})
+		case wsrpc.ResolveProcessor:
+			// A reserved role address a nest processor consumes (dmarc-report@, tlsrpt@):
+			// accepted like any role address — never rejected for want of a
+			// mailbox — and diverted to the processor at DATA, after the normal
+			// policy stack has run on it (dmarc-reporting.md § Envelope-time
+			// routing, step 4).
+			s.inboundRcpts = append(s.inboundRcpts, resolvedInboundRcpt{
+				processor: res.Processor,
+				rcptAddr:  to,
+			})
 		case wsrpc.ResolveReject:
 			s.logger.Info("smtp: resolve_recipient reject",
 				"client_ip", s.clientIP, "local_part", localPart, "domain", rcptDomain,
@@ -1065,12 +1149,16 @@ func (s *inboundSession) Rcpt(to string, _ *gosmtp.RcptOptions) error {
 
 // containsFoldDomain returns true when `needle` matches any entry in
 // `haystack` under ASCII case-folding (RFC 1035 § 2.3.3 — domain
-// labels compare case-insensitively). Empty haystack ⇒ false (no
-// local domain accepts mail). Used by Rcpt to decide whether RCPT
-// TO is for one of our local_domains.
+// labels compare case-insensitively) with every trailing dot stripped
+// from both sides (`example.com.` is the FQDN of `example.com`; the nest's
+// `normalize_dns_name` rule, mail-app-surface.md § Sender-handle
+// verification). Empty haystack ⇒ false (no local domain accepts mail).
+// Used by Rcpt to decide whether RCPT TO is for one of our local_domains,
+// and by the sender-ownership predicate.
 func containsFoldDomain(haystack []string, needle string) bool {
+	needle = strings.TrimRight(needle, ".")
 	for _, d := range haystack {
-		if strings.EqualFold(d, needle) {
+		if strings.EqualFold(strings.TrimRight(d, "."), needle) {
 			return true
 		}
 	}
@@ -1291,14 +1379,39 @@ func rcptStampedCatchall(stamped []wsrpc.StampedHeader) bool {
 }
 
 // verifyInbound is the SPF/DKIM/DMARC/ARC verifier Data calls at C.5 — always
-// mailfauna.VerifyInbound in production. It is a package variable so this
+// mailfauna.VerifyInboundObserved in production (the verdicts plus the DMARC
+// aggregate-report observation). It is a package variable so this
 // package's tests can install a canned verifier once, in TestMain
 // (main_test.go): the real one resolves SPF and DMARC over live DNS, which made
 // every inbound Data test's verdict depend on the box reaching a resolver
 // (convention 14, docs/goal/architecture/e2e-latency-independent-assertions.md)
 // and, on Windows, raised a firewall prompt per run from the resolver's
 // wildcard-bound socket. Nothing outside TestMain assigns it.
-var verifyInbound = mailfauna.VerifyInbound
+var verifyInbound = mailfauna.VerifyInboundObserved
+
+// dmarcObservationTimeout bounds the synchronous report_dmarc_observation call
+// inside DATA: a slow nest delays the transaction at most this long, and an
+// error only drops the message from the day's DMARC report.
+const dmarcObservationTimeout = 2 * time.Second
+
+// reportDmarcObservation hands one verified message's DMARC observation to
+// nest's aggregate-report buckets. Skipped without a nest link (skeleton
+// tests); never fails the transaction.
+func (s *inboundSession) reportDmarcObservation(outcome mailfauna.InboundAuthOutcome) {
+	if s.caller == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), dmarcObservationTimeout)
+	defer cancel()
+	if _, err := wsrpc.ReportDmarcObservation(
+		ctx, s.caller, s.clientIP,
+		mailfauna.DmarcVerdictToWire(outcome.Verdicts.Dmarc),
+		mailfauna.DmarcObservationToWire(outcome.Observation),
+	); err != nil {
+		s.logger.Warn("report_dmarc_observation failed; message left out of the DMARC report",
+			"client_ip", s.clientIP, "err", err)
+	}
+}
 
 func (s *inboundSession) Data(r io.Reader) error {
 	// This MTA's own accept instant for the SMTP transaction — read ONCE,
@@ -1428,7 +1541,8 @@ func (s *inboundSession) Data(r io.Reader) error {
 	if s.conn != nil {
 		helo = strings.TrimSpace(s.conn.Hostname())
 	}
-	verdicts, err := verifyInbound(raw, s.from, s.clientIP, helo)
+	outcome, err := verifyInbound(raw, s.from, s.clientIP, helo)
+	verdicts := outcome.Verdicts
 	if err != nil {
 		if errors.Is(err, mailfauna.ErrAuthErrorUnparseable) {
 			s.logger.Info("smtp: verify_inbound unparseable",
@@ -1455,6 +1569,12 @@ func (s *inboundSession) Data(r io.Reader) error {
 		}
 	}
 	s.verdicts = &verdicts
+	// Outbound DMARC aggregate report (dmarc-reporting.md § Outbound
+	// aggregate-report sender): count this message toward the report the
+	// domain it claims asked for, BEFORE the enforcement gates below, so mail
+	// they refuse is counted too. Synchronous and bounded, so the 250 on `.`
+	// orders after it; a failure drops the message from the report only.
+	s.reportDmarcObservation(outcome)
 	// T1.5 inbound auth-enforcement stage (DMARC-reject → SPF-hardfail →
 	// DKIM, behind !LogOnly). Acts on the verdicts C.5 just stashed,
 	// emitting the spec'd 5xx per gate (DMARC 550 5.7.1, SPF 550 5.7.23,
@@ -1552,8 +1672,10 @@ func (s *inboundSession) Data(r io.Reader) error {
 			"bytes", len(raw),
 			"combined_score_milli", combinedMilli,
 		)
+		// 550 5.7.1, the code family of every other DATA-stage policy
+		// refusal (smtp-server.md § Error / tempfail strategy).
 		return s.reject(&gosmtp.SMTPError{
-			Code:         554,
+			Code:         550,
 			EnhancedCode: gosmtp.EnhancedCode{5, 7, 1},
 			Message:      "Message rejected by spam policy",
 		})
@@ -1732,6 +1854,25 @@ func (s *inboundSession) Data(r io.Reader) error {
 			return tempErr
 		}
 	}
+	// Processor recipients (dmarc-report@, tlsrpt@) are handed off in the same
+	// before-any-local-commit position, for the same reason: a hand-off the
+	// nest could not take answers 451, and nothing this envelope's resend would
+	// duplicate may have committed yet. The report-carrying mail's own SPF /
+	// DKIM / DMARC verdicts ride along (§ Envelope-time routing, step 4).
+	for _, rcpt := range s.inboundRcpts {
+		if rcpt.processor == "" {
+			continue
+		}
+		env := wsrpc.ReportSourceEnvelope{
+			ClientIP:    s.clientIP,
+			Helo:        helo,
+			MailFrom:    s.from,
+			AuthResults: wireVerdicts,
+		}
+		if tempErr := dispatchProcessor(s.caller, s.logger, rcpt.processor, raw, env, acceptedAtUnix); tempErr != nil {
+			return tempErr
+		}
+	}
 	for i, rcpt := range s.inboundRcpts {
 		// mail-forwarding N4 — a verified-ours SRS bounce whose forwarding row
 		// is gone (orphan). It was accepted at RCPT so the sending MX doesn't
@@ -1746,8 +1887,8 @@ func (s *inboundSession) Data(r io.Reader) error {
 		// Admin external forwarder (mail-aliases.md § Kind 7) — already
 		// redirected, with NO local copy, in the forwarders-first pass above. No
 		// filter rules / ingest / auto-reply run (there is no local mailbox whose
-		// rules apply).
-		if rcpt.forward {
+		// rules apply). A processor recipient was likewise handed off above.
+		if rcpt.forward || rcpt.processor != "" {
 			continue
 		}
 		// control_overrides (rcpt.controlOverrides): per-alias spam-threshold /
@@ -1840,7 +1981,7 @@ func (s *inboundSession) Data(r io.Reader) error {
 				// Non-terminal + non-placement: stash the reply and keep composing.
 				// It fires after a successful local delivery (O5); the last
 				// AutoReply in a continue chain wins.
-				plan := autoReplyPlan{subject: a.Subject, body: a.Body, intervalHours: a.IntervalHours}
+				plan := autoReplyPlan{ruleID: match.FilterId}
 				pendingAutoReply = &plan
 				s.logger.Info("smtp: filter AutoReply matched (deferred to post-delivery)",
 					"client_ip", s.clientIP, "actor", actor, "filter_id", match.FilterId,
@@ -1922,7 +2063,7 @@ func (s *inboundSession) Data(r io.Reader) error {
 				// The forward enqueue is this recipient's delivery commit, so
 				// the vacation reply fires exactly as after a local one (O5).
 				if pendingAutoReply != nil {
-					s.maybeAutoReply(rcpt.actorID, rcpt.rcptAddr, filterHeaders, pendingAutoReply)
+					s.maybeAutoReply(rcpt.actorID, rcpt.rcptAddr, rcpt.isRoleAddress, filterHeaders, pendingAutoReply)
 				}
 				continue
 			}
@@ -1932,10 +2073,10 @@ func (s *inboundSession) Data(r io.Reader) error {
 			// must not try them a second time.
 			pendingForwards = nil
 		}
-		// Stamp this recipient's X-Fauna-Address-* headers onto their sealed copy
-		// (the MDA / client reads which alias matched; the filter context above
-		// already sees them). prependHeaders returns `raw` unchanged when there
-		// are none, so exact / role-address matches pay nothing. The forward-all
+		// Stamp this recipient's resolver stamps (X-Fauna-Address-* plus the
+		// X-Fauna-Delivered-To / X-Fauna-Spam-Threshold delivery stamps) onto
+		// their sealed copy (the MDA / client reads which alias matched; the
+		// filter context above already sees them). The forward-all
 		// copy below intentionally keeps the *unstamped* `raw` — internal alias
 		// routing metadata must not leak to an external forward destination.
 		// Recipient-whitelist unlisted-recipient penalty (mail-spam.md
@@ -1957,7 +2098,13 @@ func (s *inboundSession) Data(r io.Reader) error {
 		if s.unlistedRecipientPenalty > 0 && rcptStampedCatchall(rcpt.headersToStamp) {
 			penalizedMilli := mailfauna.ApplyUnlistedRecipientPenaltyMilli(combinedMilli, s.unlistedRecipientPenalty)
 			disp := mailfauna.DecideSpamDisposition(penalizedMilli, verdicts, s.spamPolicy)
-			if disp == mailfauna.SpamDispositionReject {
+			if _, isJunk := scanAction.(mailfauna.ScanActionJunk); isJunk {
+				// The penalty may only raise a disposition: ClamAV
+				// infected + junk action already filed this message to Junk
+				// message-wide, and re-deriving from the penalized score alone
+				// would drop it to INBOX (and the nest to action_taken=tagged).
+				disp = mailfauna.SpamDispositionPolicyJunk
+			} else if disp == mailfauna.SpamDispositionReject {
 				disp = mailfauna.SpamDispositionPolicyJunk
 			}
 			dispWire, _ := mailfauna.SpamDispositionToWire(disp)
@@ -2080,7 +2227,7 @@ func (s *inboundSession) Data(r io.Reader) error {
 		// auto-reply must never bounce a bounce). Like forwarding, a reply
 		// failure never costs the local copy or fails the accepted SMTP txn.
 		if pendingAutoReply != nil && !rcpt.srsBounce {
-			s.maybeAutoReply(rcpt.actorID, rcpt.rcptAddr, filterHeaders, pendingAutoReply)
+			s.maybeAutoReply(rcpt.actorID, rcpt.rcptAddr, rcpt.isRoleAddress, filterHeaders, pendingAutoReply)
 		}
 	}
 	return nil
@@ -2447,24 +2594,37 @@ func mxAuthenticatedSenderStamp(v *mailfauna.AuthVerdicts, from string) string {
 }
 
 // autoReplyPlan is a matched `AutoReply` action stashed during filter
-// composition and fired after the recipient's local delivery commits (O5).
+// composition and fired after the recipient's local delivery commits. It names
+// the matched rule only: the nest composes the reply from its own stored copy
+// of that rule.
 type autoReplyPlan struct {
-	subject       string
-	body          string
-	intervalHours uint32
+	ruleID int64
 }
 
 // maybeAutoReply runs the per-recipient vacation auto-reply stage AFTER a
-// successful local delivery (smtp-server.md § Email filter rules — O4/O5/O6). It
-// (1) applies the perimeter loop guard (`fauna_mail::filter::auto_reply_decision`),
-// (2) composes the RFC 5322 reply in shared Rust, and (3) hands it to nest's
-// `send_auto_reply`, which atomically rate-limits + enqueues it with a null
-// envelope-from. The reply leaves here unsigned: the nest signs it at the
-// outbound hand-out, like every other queued message (O6). Every skip leaves
+// successful local delivery (email-filters.md, the AutoReply action). It (1)
+// applies the perimeter loop guard (`fauna_mail::filter::auto_reply_decision`)
+// — only the MTA sees the inbound headers — and (2) names the reply to nest's
+// `send_auto_reply`: the recipient, the delivered-to address (the reply's
+// From), the triggering sender and Message-ID, and the matched rule. nest
+// composes the reply from its stored copy of that rule, rate-limits it and
+// enqueues it with a null envelope-from; it signs it at the outbound hand-out,
+// like every other queued message (mail-multidomain.md § From: header
+// ownership → Per door, nest-side, the auto-reply door). Every skip leaves
 // the local copy delivered and never fails the accepted SMTP txn (mirrors
-// maybeForwardForRecipient).
-func (s *inboundSession) maybeAutoReply(actorID []byte, rcptAddr string, headers []mailfauna.FilterHeader, plan *autoReplyPlan) {
+// maybeForwardForRecipient). A recipient that resolved through a role-address
+// route (postmaster@, abuse@, …) never auto-replies: the admin's vacation rule
+// fires for their own mail, never from a role address, which is an
+// amplification vector and a backscatter source (smtp-server.md § abuse@ /
+// postmaster@ role-address routing).
+func (s *inboundSession) maybeAutoReply(actorID []byte, rcptAddr string, isRoleAddress bool, headers []mailfauna.FilterHeader, plan *autoReplyPlan) {
 	actor := hex.EncodeToString(actorID)
+	if isRoleAddress {
+		metrics.SMTPInboundAutoReplySuppressed.WithLabelValues("role_address").Inc()
+		s.logger.Info("smtp: auto-reply suppressed (role address)",
+			"client_ip", s.clientIP, "actor", actor, "verdict", "auto_reply_suppressed")
+		return
+	}
 	// Defense-in-depth: this stage runs POST-delivery and, per the contract above,
 	// must never fail the already-accepted SMTP txn. An unexpected panic here —
 	// e.g. one crossing the UniFFI boundary from shared Rust on a hostile header —
@@ -2492,21 +2652,10 @@ func (s *inboundSession) maybeAutoReply(actorID []byte, rcptAddr string, headers
 			"verdict", "auto_reply_suppressed")
 		return
 	}
-	// 2. Compose the reply (shared Rust). From = the delivery recipient; To = the
-	// envelope sender; In-Reply-To = the triggering Message-ID (if any).
-	msgID := newMessageID(autoReplyDomain(rcptAddr))
-	raw := mailfauna.ComposeAutoReply(mailfauna.AutoReplyMessage{
-		FromAddr:  rcptAddr,
-		ToAddr:    s.from,
-		Subject:   plan.subject,
-		Body:      plan.body,
-		InReplyTo: filterHeaderValue(headers, "Message-ID"),
-		MessageId: msgID,
-		Date:      time.Now().UTC().Format(time.RFC1123Z),
-	})
-	// 3. Rate-limit claim + null-sender enqueue (nest, atomic).
+	// 2. Name the reply; nest composes, rate-limits and enqueues it (atomic).
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	sent, err := wsrpc.SendAutoReply(ctx, s.caller, actorID, s.from, plan.intervalHours, msgID, raw)
+	sent, err := wsrpc.SendAutoReply(ctx, s.caller, actorID, s.from, rcptAddr,
+		filterHeaderValue(headers, "Message-ID"), plan.ruleID)
 	cancel()
 	if err != nil {
 		s.logger.Warn("smtp: send_auto_reply failed (local copy delivered)",
@@ -2559,26 +2708,6 @@ func filterHeaderValue(headers []mailfauna.FilterHeader, name string) string {
 	return ""
 }
 
-// autoReplyDomain extracts the domain of an `user@domain` address for the
-// auto-reply Message-ID; falls back to "localhost" if the address has no '@'.
-func autoReplyDomain(addr string) string {
-	if at := strings.LastIndexByte(addr, '@'); at >= 0 && at+1 < len(addr) {
-		return addr[at+1:]
-	}
-	return "localhost"
-}
-
-// newMessageID builds a fresh RFC 5322 Message-ID `<random@domain>`. Uniqueness
-// (not secrecy) is the goal; the id is only queue/correlation metadata.
-func newMessageID(domain string) string {
-	var b [16]byte
-	if _, err := crand.Read(b[:]); err != nil {
-		// crypto/rand essentially never fails; fall back to a time-based id.
-		return fmt.Sprintf("<%d@%s>", time.Now().UnixNano(), domain)
-	}
-	return fmt.Sprintf("<%s@%s>", hex.EncodeToString(b[:]), domain)
-}
-
 // maybeFilterPlacement evaluates one recipient's stored filter rules (T3.3,
 // smtp-server.md § Email filter rules) against the just-received message and
 // returns the **ordered** matched verdicts (Sieve `continue` — a non-`continue`
@@ -2622,7 +2751,7 @@ func (s *inboundSession) maybeFilterPlacement(actorID []byte, ctx mailfauna.Filt
 // s.inboundRcpts, since Rcpt only appends when s.caller != nil) is a no-op.
 func (s *inboundSession) preflightRecipientSealKeys() *gosmtp.SMTPError {
 	for _, rcpt := range s.inboundRcpts {
-		if rcpt.forward || rcpt.srsBounceOrphan {
+		if rcpt.forward || rcpt.srsBounceOrphan || rcpt.processor != "" {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -2784,7 +2913,16 @@ func mailboxFullError() *gosmtp.SMTPError {
 	}
 }
 
-func (s *inboundSession) Reset() { s.from = ""; s.rcpts = nil; s.hasDiscardRcpt = false }
+// Reset ends the transaction (RSET, and go-smtp after every DATA): every
+// transaction-scoped field goes, `inboundRcpts` with `rcpts` — a connection the
+// sender keeps open for its next message must never deliver that message to
+// this one's recipients.
+func (s *inboundSession) Reset() {
+	s.from = ""
+	s.rcpts = nil
+	s.inboundRcpts = nil
+	s.hasDiscardRcpt = false
+}
 
 // Logout deregisters the session from the shutdown drain tracker exactly
 // once (go-smtp may call Logout from both the normal QUIT path and the

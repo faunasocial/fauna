@@ -66,6 +66,14 @@ class LabelerCatalogVM @Inject constructor(
         machine?.closeInspect()
     }
 
+    /**
+     * Whether the catalog row at [index] paints its subscribe button enabled —
+     * the shared gate (`LabelerCatalogMachine::subscribe_enabled`), read fresh
+     * on each recomposition the [snapshot] drives. No machine yet → false.
+     */
+    fun subscribeEnabled(index: Int): Boolean =
+        machine?.subscribeEnabled(index.toUInt()) ?: false
+
     /** Subscribe to the catalog row at [index], then refresh. */
     fun subscribe(index: Int) {
         val m = machine ?: return

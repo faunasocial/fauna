@@ -604,6 +604,53 @@ impl From<fauna_protocol::custody::AdminHostingRemoveReply> for FfiAdminHostingR
     }
 }
 
+/// FFI mirror of [`fauna_protocol::admin::AdminPendingActionSummary`] — one
+/// row of the admin Users hub's standing pending-admin-actions section
+/// (`admin.md` § Pending admin actions). `description` (the shared
+/// `describe_pending_action` sentence) and `actor_short` (the scheduling
+/// admin's canonical short id) are derived in shared Rust so no app re-derives
+/// either; `is_pending` gates the row (the console shows only still-`pending`
+/// actions). `ip_address` is dropped — the console never renders it.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiAdminPendingAction {
+    pub id: i64,
+    pub actor_id: Vec<u8>,
+    pub actor_short: String,
+    pub action_type: String,
+    pub target: Option<String>,
+    pub description: String,
+    pub status: String,
+    pub is_pending: bool,
+    pub created_at: i64,
+    pub execute_after: i64,
+    pub requires_quorum: i64,
+    pub approvals: Vec<String>,
+}
+
+impl From<fauna_protocol::admin::AdminPendingActionSummary> for FfiAdminPendingAction {
+    fn from(r: fauna_protocol::admin::AdminPendingActionSummary) -> Self {
+        let description = fauna_protocol::pending_actions::describe_pending_action(
+            &r.action_type,
+            r.target.as_deref(),
+        );
+        let actor_short = fauna_core::format::short_id(&hex::encode(&r.actor_id));
+        FfiAdminPendingAction {
+            id: r.id,
+            actor_id: r.actor_id.to_vec(),
+            actor_short,
+            description,
+            is_pending: r.status == "pending",
+            action_type: r.action_type,
+            target: r.target,
+            status: r.status,
+            created_at: r.created_at,
+            execute_after: r.execute_after,
+            requires_quorum: r.requires_quorum,
+            approvals: r.approvals,
+        }
+    }
+}
+
 // ── FfiAdminClient ─────────────────────────────────────────────────────
 
 /// UniFFI handle for the `fauna.admin.*` kinds. Construct via
@@ -748,14 +795,30 @@ impl FfiAdminClient {
     /// tui/linux/web — there is no free-text label on direct admission, only
     /// a tier. A duplicate actor or taken handle is `fauna.admin.conflict`, a
     /// malformed/reserved handle `fauna.admin.invalid_params`.
+    /// `guardian_actor` links the admitted account to a guardian (the
+    /// `admin-users-admit-guardian-select` pick; `family-safety.md` § The
+    /// guardianship link); `None` admits an ordinary account. `age_band` is
+    /// the guardian's band option value (a wire token from
+    /// `age_band_options`, or `None`/the not-set value); anything the
+    /// vocabulary cannot name is refused **here**, never sent.
     pub async fn users_create(
         &self,
         actor_id: Vec<u8>,
         tier: String,
         handle: Option<String>,
+        guardian_actor: Option<Vec<u8>>,
+        age_band: Option<String>,
     ) -> Result<(), FfiError> {
+        let age_band = parse_age_band(age_band)?;
         self.client()
-            .users_create(actor_id, tier, String::new(), handle)
+            .users_create(
+                actor_id,
+                tier,
+                String::new(),
+                handle,
+                guardian_actor,
+                age_band,
+            )
             .await
             .map_err(stringify)
     }
@@ -846,6 +909,38 @@ impl FfiAdminClient {
             .await
             .map_err(stringify)?;
         Ok(())
+    }
+
+    /// `fauna.admin.pending_actions.list` — every account's pending actions
+    /// (ALL statuses; the console narrows to `is_pending`), the read behind the
+    /// Users hub's `admin-users-pending-section` (`admin.md` § Pending admin
+    /// actions). Replay-safe pure read.
+    pub async fn pending_actions_list(&self) -> Result<Vec<FfiAdminPendingAction>, FfiError> {
+        let reply = self
+            .client()
+            .pending_actions_list()
+            .await
+            .map_err(stringify)?;
+        Ok(reply.actions.into_iter().map(Into::into).collect())
+    }
+
+    /// `fauna.pending_actions.approve` — add this admin's approval to a
+    /// quorum-gated action (`admin-pending-action-approve-button`). The nest
+    /// refuses self-approval and a row no longer pending.
+    pub async fn pending_action_approve(&self, id: i64) -> Result<(), FfiError> {
+        self.client()
+            .pending_action_approve(id)
+            .await
+            .map_err(stringify)
+    }
+
+    /// `fauna.pending_actions.cancel` from the admin console
+    /// (`admin-pending-action-cancel-button`) — one click, no confirm.
+    pub async fn pending_action_cancel(&self, id: i64) -> Result<(), FfiError> {
+        self.client()
+            .pending_action_cancel(id)
+            .await
+            .map_err(stringify)
     }
 
     /// `fauna.admin.evictions.list` — every user with an in-flight eviction (each
@@ -1362,6 +1457,61 @@ pub async fn seed_rotate_roster(
         .into())
 }
 
+// ── The dashboard's one card set (`admin-stat-card`) ───────────────────
+//
+// The UniFFI face of `AdminClient::dashboard_snapshot` (`admin.md` § 1.
+// Dashboard → *The card set*): the five reads and the fold, once, so the
+// native dashboards render the list and choose no card of their own. A free
+// function for the `seed_rotate_roster` reason above.
+
+/// FFI mirror of [`fauna_client_admin::StatCard`] — one `admin-stat-card`.
+#[cfg(feature = "value-format")]
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct FfiStatCard {
+    pub label: LocalizedText,
+    pub value: LocalizedText,
+}
+
+/// FFI mirror of [`fauna_client_admin::AdminDashboardSnapshot`] — the cards in
+/// the ruled order, and the first failed read's detail for `error-message`
+/// (the cards the other reads produced still render).
+#[cfg(feature = "value-format")]
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct FfiAdminDashboardSnapshot {
+    pub stats: Vec<FfiStatCard>,
+    pub error: Option<String>,
+}
+
+#[cfg(feature = "value-format")]
+impl From<fauna_client_admin::AdminDashboardSnapshot> for FfiAdminDashboardSnapshot {
+    fn from(s: fauna_client_admin::AdminDashboardSnapshot) -> Self {
+        FfiAdminDashboardSnapshot {
+            stats: s
+                .stats
+                .into_iter()
+                .map(|c| FfiStatCard {
+                    label: c.label,
+                    value: c.value,
+                })
+                .collect(),
+            error: s.error,
+        }
+    }
+}
+
+/// The admin dashboard's cards (`admin_dashboard_snapshot()`). Never fails as
+/// a whole: a failed read drops its own cards and rides `error`.
+#[cfg(feature = "value-format")]
+#[fauna_uniffi_async::export]
+pub async fn admin_dashboard_snapshot(
+    nest: Arc<crate::nest_client::FfiNestClient>,
+) -> FfiAdminDashboardSnapshot {
+    AdminClient::new(nest.nest_arc())
+        .dashboard_snapshot()
+        .await
+        .into()
+}
+
 // ── Declared region (`admin-nest-region-*`) ──────────────────────────────
 //
 // The native (windows/apple/android) leg — the reference is
@@ -1835,6 +1985,31 @@ mod tests {
     use fauna_client_admin::admin::AdminUser as ProtoUser;
     use fauna_protocol::ByteBuf;
     use fauna_protocol::admin::AdminAdminsListReply;
+
+    #[test]
+    fn admin_pending_action_maps_with_derived_fields() {
+        let proto = fauna_protocol::admin::AdminPendingActionSummary {
+            id: 7,
+            actor_id: ByteBuf::from(vec![0xab; 32]),
+            action_type: "handle.change".into(),
+            target: Some("bob".into()),
+            status: "pending".into(),
+            requires_quorum: 1,
+            approvals: vec![],
+            ..Default::default()
+        };
+        let ffi: FfiAdminPendingAction = proto.into();
+        assert!(ffi.is_pending);
+        assert_eq!(
+            ffi.description,
+            fauna_protocol::pending_actions::describe_pending_action("handle.change", Some("bob"))
+        );
+        assert_eq!(
+            ffi.actor_short,
+            fauna_core::format::short_id(&"ab".repeat(32))
+        );
+        assert_eq!(ffi.actor_id, vec![0xab; 32]);
+    }
 
     #[test]
     fn admin_user_with_eviction_maps() {

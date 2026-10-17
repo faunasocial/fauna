@@ -1217,9 +1217,13 @@ func dialNetwork(ipv6Enabled bool) string {
 // extractEnhancedStatus plucks the RFC 3463 enhanced status code (e.g.
 // "5.7.1") out of a textproto error string like "550 5.7.1 message". Returns
 // "" when no enhanced code is present (the bare 3-digit reply code "550" is
-// not one — it has no dotted triple).
+// not one — it has no dotted triple). Tokens split on every character that is
+// neither a digit nor a dot, the rule the nest's `parse_enhanced_status` uses:
+// since go1.26 `textproto.Error` quotes the reply text (`550 "5.7.1 …"`), so a
+// whitespace split would leave the code glued to a quote and never match.
 func extractEnhancedStatus(msg string) string {
-	for _, tok := range strings.Fields(msg) {
+	notCodeChar := func(r rune) bool { return (r < '0' || r > '9') && r != '.' }
+	for _, tok := range strings.FieldsFunc(msg, notCodeChar) {
 		if isEnhancedStatusCode(tok) {
 			return tok
 		}

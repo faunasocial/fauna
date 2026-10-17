@@ -69,6 +69,10 @@ pub enum FakeCall {
         name: String,
         residency: String,
     },
+    SetFolderExclusiveEditing {
+        name: String,
+        on: bool,
+    },
     /// The whole flag triple, because the point applies whole — a test asserts
     /// all three, including the two the user did not touch.
     SetFolderPlace {
@@ -122,6 +126,7 @@ pub struct FakeDevicesNestApi {
     set_audience_response: Mutex<Option<Result<(), DevicesApiError>>>,
     set_website_response: Mutex<Option<Result<(), DevicesApiError>>>,
     set_residency_response: Mutex<Option<Result<(), DevicesApiError>>>,
+    set_exclusive_editing_response: Mutex<Option<Result<(), DevicesApiError>>>,
     set_place_response: Mutex<Option<Result<(), DevicesApiError>>>,
     set_nest_place_response: Mutex<Option<Result<(), DevicesApiError>>>,
     restore_version_response: Mutex<Option<Result<(), DevicesApiError>>>,
@@ -209,6 +214,9 @@ impl FakeDevicesNestApi {
     }
     pub fn set_residency_response(&self, r: Result<(), DevicesApiError>) {
         *self.set_residency_response.lock().unwrap() = Some(r);
+    }
+    pub fn set_exclusive_editing_response(&self, r: Result<(), DevicesApiError>) {
+        *self.set_exclusive_editing_response.lock().unwrap() = Some(r);
     }
     pub fn set_place_response(&self, r: Result<(), DevicesApiError>) {
         *self.set_place_response.lock().unwrap() = Some(r);
@@ -424,6 +432,25 @@ impl DevicesNestApi for FakeDevicesNestApi {
                 residency: residency.to_string(),
             });
         self.set_residency_response
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(Ok(()))
+    }
+
+    async fn set_folder_exclusive_editing(
+        &self,
+        name: &str,
+        on: bool,
+    ) -> Result<(), DevicesApiError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(FakeCall::SetFolderExclusiveEditing {
+                name: name.to_string(),
+                on,
+            });
+        self.set_exclusive_editing_response
             .lock()
             .unwrap()
             .clone()

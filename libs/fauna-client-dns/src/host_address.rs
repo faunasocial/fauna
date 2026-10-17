@@ -196,7 +196,10 @@ where
     };
 
     let Some(public) = public else {
-        tracing::debug!(dial = %dial_url, "host-address: no public IP determinable — reporting nothing");
+        // `info`, once per admin session: the e2e witness of the never-publish-a-LAN-address
+        // rule reads it as the proof the report ran (`domains-and-tls-bootstrap.md`
+        // § Host-address acquisition).
+        tracing::info!(dial = %dial_url, "host-address: no public IP determinable — reporting nothing");
         return HostAddressOutcome::SkippedNoPublicIp;
     };
 

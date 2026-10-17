@@ -237,6 +237,25 @@ public partial class AtprotoViewModel : ViewModelBase
     /// a second sweep.</summary>
     [ObservableProperty] private bool _deleteConfirmActionsEnabled = true;
 
+    /// <summary>The delete card's terminal opt-in, <c>atproto-delete-tombstone</c>
+    /// ("also permanently retire this identity"). Always on the card, never
+    /// pre-ticked; greyed with <see cref="DeleteRetireIdentityReason"/> where the
+    /// identity cannot be retired. The tick is machine card state, not a gesture:
+    /// nothing is sent until the confirm.</summary>
+    [ObservableProperty] private bool _deleteRetireIdentitySelected;
+
+    /// <summary>The toggle is live: the machine says it is available and the
+    /// confirm is not in flight.</summary>
+    [ObservableProperty] private bool _deleteRetireIdentityEnabled;
+
+    /// <summary>The machine's reason the toggle is greyed; null when it is live.</summary>
+    [ObservableProperty] private string? _deleteRetireIdentityReason;
+
+    /// <summary>The <c>state</c> attr the e2e reads off the toggle: <c>on</c> /
+    /// <c>off</c> / <c>unavailable</c> (the greyed row is assertable apart from its
+    /// reason's wording).</summary>
+    [ObservableProperty] private string _deleteRetireIdentityState = "off";
+
     // ── The full-PDS (F1 login-plane) panel — gated on level = hosted_full ────
 
     [ObservableProperty] private bool _showFullPds;
@@ -511,11 +530,20 @@ public partial class AtprotoViewModel : ViewModelBase
             ShowDeleteConfirmCard = true;
             foreach (var line in deleteConfirm.@lines) DeleteConfirmLines.Add(Strings.Resolve(line));
             DeleteConfirmActionsEnabled = !deleteConfirm.@inProgress;
+            var optIn = deleteConfirm.@retireIdentity;
+            DeleteRetireIdentitySelected = optIn.@selected;
+            DeleteRetireIdentityEnabled = optIn.@available && !deleteConfirm.@inProgress;
+            DeleteRetireIdentityReason = optIn.@unavailableReason is { } reason ? Strings.Resolve(reason) : null;
+            DeleteRetireIdentityState = !optIn.@available ? "unavailable" : (optIn.@selected ? "on" : "off");
         }
         else
         {
             ShowDeleteConfirmCard = false;
             DeleteConfirmActionsEnabled = true;
+            DeleteRetireIdentitySelected = false;
+            DeleteRetireIdentityEnabled = false;
+            DeleteRetireIdentityReason = null;
+            DeleteRetireIdentityState = "off";
         }
 
         // Full-PDS panel — the deepest level's own panel.
@@ -712,6 +740,16 @@ public partial class AtprotoViewModel : ViewModelBase
     {
         if (_machine is null) return;
         _machine.SetDidMethod(method);
+        Render();
+    }
+
+    /// <summary>Tick or untick the delete card's retire-identity opt-in. Synchronous
+    /// card state on the machine; the machine also swaps the card's identity-kept
+    /// line for the cannot-be-undone one, so the re-render carries that.</summary>
+    public void SetDeleteRetireIdentity(bool enabled)
+    {
+        if (_machine is null) return;
+        _machine.SetDeleteRetireIdentity(enabled);
         Render();
     }
 

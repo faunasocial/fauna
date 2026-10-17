@@ -25,7 +25,7 @@ pub mod nest_api;
 pub mod observer;
 pub mod snapshots;
 
-pub use machine::{LabelerCatalogMachine, LabelerGrantSeams};
+pub use machine::{LabelerCatalogMachine, LabelerGrantSeams, NEEDS_NEWER_APP_KEY};
 #[cfg(all(feature = "rpc-glue", not(target_arch = "wasm32")))]
 pub use nest_api::build_labeler_catalog_machine;
 #[cfg(feature = "rpc-glue")]

@@ -337,6 +337,7 @@ mod tests {
                     account: ACCOUNT,
                     principal_id,
                     token_scopes: vec![scope, "fauna:folder:read:999".into()],
+                    family_id: None,
                 },
                 exp: 4_000_000_000,
             },

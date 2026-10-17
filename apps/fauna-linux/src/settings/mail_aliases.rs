@@ -81,6 +81,50 @@ enum FormMode {
     Edit,
 }
 
+/// The add sheet's kind picker states. One click steps Exact → Wildcard →
+/// Disposable → Exact; the `kind` attr carries the selection (ui.yaml: "Selection
+/// exposed via attribute"), the same shape tui and android use.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SheetKind {
+    Exact,
+    Wildcard,
+    Disposable,
+}
+
+impl SheetKind {
+    fn from_alias(kind: AliasKind) -> Self {
+        match kind {
+            AliasKind::Wildcard => Self::Wildcard,
+            AliasKind::Disposable => Self::Disposable,
+            _ => Self::Exact,
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Exact => Self::Wildcard,
+            Self::Wildcard => Self::Disposable,
+            Self::Disposable => Self::Exact,
+        }
+    }
+
+    fn attr(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Wildcard => "wildcard",
+            Self::Disposable => "disposable",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Exact => S::KIND_EXACT,
+            Self::Wildcard => S::KIND_WILDCARD,
+            Self::Disposable => S::KIND_DISPOSABLE,
+        }
+    }
+}
+
 /// Handles to the widgets the snapshot renders into. GTK objects are
 /// reference-counted, so cloning this is cheap and shares the same widgets.
 #[derive(Clone)]
@@ -100,14 +144,13 @@ struct AliasesWidgets {
 
     // Add/edit inline sheet.
     sheet_group: adw::PreferencesGroup,
-    kind_picker: gtk::CheckButton,
+    kind_picker: gtk::Button,
+    ttl_input: gtk::Entry,
+    uses_input: gtk::Entry,
     pattern_input: gtk::Entry,
     label_input: gtk::Entry,
     spam_threshold_input: gtk::Entry,
     rate_per_hour_input: gtk::Entry,
-    // ttl/uses inputs are disposable-only and minted via the generate button,
-    // not this sheet, so the seed never reads them — they live in the widget
-    // tree (for ui.yaml conformance) but not in this struct.
     submit_button: gtk::Button,
     cancel_button: gtk::Button,
 
@@ -124,6 +167,8 @@ struct AliasesCtx {
     machine: Arc<MailAliasesMachine>,
     rt: tokio::runtime::Handle,
     form_mode: Cell<FormMode>,
+    /// The add sheet's kind picker selection (Add mode only; Edit shows the row's).
+    sheet_kind: Cell<SheetKind>,
     /// `Some(hex)` while the sheet is editing that row (Edit mode).
     editing_id: RefCell<Option<String>>,
     w: AliasesWidgets,
@@ -224,13 +269,13 @@ pub fn build_mail_aliases_page() -> (adw::PreferencesPage, Rc<dyn Fn()>) {
     sheet_box.set_margin_top(8);
     sheet_box.set_margin_bottom(8);
 
-    // mail-aliases-add-sheet-kind-picker — value-via-state kind selector. A
-    // single native gtk::CheckButton with one stable id (same idiom as
-    // mail-add-credential-type-selector): unchecked = Exact (the default),
-    // checked = Wildcard prefix. Disposable mints via the dedicated generate
-    // button, not this sheet (mail-aliases.md § Aliases UX). Read-only on Edit.
-    let kind_picker = gtk::CheckButton::with_label(S::KIND_WILDCARD_LABEL);
+    // mail-aliases-add-sheet-kind-picker — value-via-state kind selector. One
+    // button with one stable id; a click steps Exact → Wildcard → Disposable and
+    // the `kind` attr carries the selection (the shape tui and android share).
+    // Read-only on Edit (a wildcard cannot become a disposable mid-life).
+    let kind_picker = gtk::Button::builder().halign(gtk::Align::Start).build();
     set_test_id(&kind_picker, ids::MAIL_ALIASES_ADD_SHEET_KIND_PICKER);
+    paint_kind_picker(&kind_picker, SheetKind::Exact);
     sheet_box.append(&kind_picker);
 
     // mail-aliases-add-sheet-pattern-input.
@@ -267,11 +312,10 @@ pub fn build_mail_aliases_page() -> (adw::PreferencesPage, Rc<dyn Fn()>) {
     );
     sheet_box.append(&rate_per_hour_input);
 
-    // mail-aliases-add-sheet-ttl-input / -uses-input — disposable-only. The
-    // create path doesn't mint disposables (those go via the generate button),
-    // so they stay hidden in the seed; present in the tree so the page conforms
-    // to ui.yaml's shared element set (same as mail-add-credential's conditional
-    // fields).
+    // mail-aliases-add-sheet-ttl-input / -uses-input — disposable-only: how many
+    // days a throwaway address lasts and how many messages it takes. Hidden until
+    // the kind picker reads Disposable (`apply_sheet_kind`); empty = the per-user
+    // default.
     let ttl_input = gtk::Entry::builder()
         .placeholder_text(S::TTL_PLACEHOLDER)
         .visible(false)
@@ -284,8 +328,6 @@ pub fn build_mail_aliases_page() -> (adw::PreferencesPage, Rc<dyn Fn()>) {
         .build();
     set_test_id(&uses_input, ids::MAIL_ALIASES_ADD_SHEET_USES_INPUT);
     sheet_box.append(&uses_input);
-    // ttl_input/uses_input are now owned by the widget tree; the seed never
-    // reads them back, so they're not threaded into AliasesWidgets.
 
     // mail-aliases-add-sheet-submit-button / -cancel-button.
     let submit_button = gtk::Button::builder()
@@ -390,6 +432,8 @@ pub fn build_mail_aliases_page() -> (adw::PreferencesPage, Rc<dyn Fn()>) {
         rows: Rc::new(RefCell::new(Vec::new())),
         sheet_group,
         kind_picker,
+        ttl_input,
+        uses_input,
         pattern_input,
         label_input,
         spam_threshold_input,
@@ -424,6 +468,7 @@ fn wire_machine(widgets: AliasesWidgets) -> Rc<dyn Fn()> {
         machine,
         rt: client.runtime_handle(),
         form_mode: Cell::new(FormMode::Add),
+        sheet_kind: Cell::new(SheetKind::Exact),
         editing_id: RefCell::new(None),
         w: widgets,
     });
@@ -450,6 +495,19 @@ fn wire_machine(widgets: AliasesWidgets) -> Rc<dyn Fn()> {
                     label: String::new(),
                 },
             );
+        });
+    }
+
+    // Kind picker → step Exact → Wildcard → Disposable (inert on Edit).
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w.kind_picker.clone().connect_clicked(move |_| {
+            if ctx.form_mode.get() != FormMode::Add {
+                return;
+            }
+            let next = ctx.sheet_kind.get().next();
+            ctx.sheet_kind.set(next);
+            apply_sheet_kind(&ctx.w, next, false);
         });
     }
 
@@ -508,6 +566,28 @@ fn wire_machine(widgets: AliasesWidgets) -> Rc<dyn Fn()> {
     Rc::new(move || hydrate_and_render(&ctx))
 }
 
+/// Paint the picker for `kind`: the label names the current choice and the
+/// `kind` attr is what a test reads back.
+fn paint_kind_picker(picker: &gtk::Button, kind: SheetKind) {
+    picker.set_label(kind.label());
+    crate::testid::set_test_attr(picker, "kind", kind.attr());
+}
+
+/// Show `kind` in the sheet: the picker, and which inputs belong to it. A
+/// disposable's address is minted, never typed, and the mint takes a lifetime,
+/// a use count and a label — so the pattern and the two per-alias controls hide
+/// and the ttl/uses pair shows (`mail-aliases.md` § Layout). Editing never
+/// shows the pair.
+fn apply_sheet_kind(w: &AliasesWidgets, kind: SheetKind, editing: bool) {
+    paint_kind_picker(&w.kind_picker, kind);
+    let minting = !editing && kind == SheetKind::Disposable;
+    w.pattern_input.set_visible(!minting);
+    w.spam_threshold_input.set_visible(!minting);
+    w.rate_per_hour_input.set_visible(!minting);
+    w.ttl_input.set_visible(minting);
+    w.uses_input.set_visible(minting);
+}
+
 /// Open the add/edit sheet in `Add` mode, resetting it to an empty exact alias.
 fn open_add_sheet(ctx: &Rc<AliasesCtx>) {
     ctx.form_mode.set(FormMode::Add);
@@ -519,8 +599,11 @@ fn open_add_sheet(ctx: &Rc<AliasesCtx>) {
     let w = &ctx.w;
     // The add/edit and import sheets are mutually exclusive reveals.
     w.import_sheet.set_visible(false);
-    w.kind_picker.set_active(false);
+    ctx.sheet_kind.set(SheetKind::Exact);
+    apply_sheet_kind(w, SheetKind::Exact, false);
     w.kind_picker.set_sensitive(true);
+    w.ttl_input.set_text("");
+    w.uses_input.set_text("");
     w.pattern_input.set_text("");
     w.label_input.set_text("");
     w.spam_threshold_input.set_text("");
@@ -542,7 +625,7 @@ fn open_edit_sheet(ctx: &Rc<AliasesCtx>, view: &AliasView) {
     );
     let w = &ctx.w;
     w.import_sheet.set_visible(false);
-    w.kind_picker.set_active(view.kind == AliasKind::Wildcard);
+    apply_sheet_kind(w, SheetKind::from_alias(view.kind), true);
     w.kind_picker.set_sensitive(false);
     w.pattern_input.set_text(&view.pattern);
     w.label_input.set_text(&view.label);
@@ -573,17 +656,25 @@ fn submit_sheet(ctx: &Rc<AliasesCtx>) {
 
     let action = match ctx.form_mode.get() {
         FormMode::Add => {
-            let kind = if w.kind_picker.is_active() {
-                AliasKind::Wildcard
-            } else {
-                AliasKind::Exact
-            };
-            MailAliasesAction::Create {
-                kind,
-                pattern,
-                label,
-                spam_threshold_override,
-                rate_limit_per_hour,
+            match ctx.sheet_kind.get() {
+                // A disposable's address is minted: the sheet sends its
+                // lifetime, use count and label (empty = the per-user default).
+                SheetKind::Disposable => MailAliasesAction::GenerateDisposable {
+                    ttl_days: fauna_core::format::parse_count(&w.ttl_input.text()),
+                    uses: fauna_core::format::parse_count(&w.uses_input.text()),
+                    label,
+                },
+                kind => MailAliasesAction::Create {
+                    kind: if kind == SheetKind::Wildcard {
+                        AliasKind::Wildcard
+                    } else {
+                        AliasKind::Exact
+                    },
+                    pattern,
+                    label,
+                    spam_threshold_override,
+                    rate_limit_per_hour,
+                },
             }
         }
         FormMode::Edit => {
@@ -713,6 +804,10 @@ fn render(ctx: &Rc<AliasesCtx>, snap: &MailAliasesSnapshot) {
     // Disposable-mint success: copy the full address + show a transient toast.
     if let Some(addr) = &snap.last_minted_address {
         crate::clipboard::copy_text(addr);
+        // `copied` reports the exact address that reached the clipboard — the
+        // copy-button contract (`account-actor-id-copy-btn`): the clipboard is
+        // fire-and-forget, so the confirmation carries what was copied.
+        crate::testid::set_test_attr(&w.generate_button, "copied", addr);
         w.minted_toast.set_text(&format!("{} {addr}", S::COPIED));
         w.minted_toast.set_visible(true);
         let toast = w.minted_toast.downgrade();

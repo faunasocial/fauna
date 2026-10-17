@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { classifySources } from '$lib/wasm';
+  import { classifySources, type BridgeIdentity } from '$lib/wasm';
   import { sourceGlyphEmoji } from '$lib/source-glyph';
   import { IDS } from '$lib/generated/uiIds';
 
-  let { source }: { source: string } = $props();
+  let { source, bridgeRoster }: { source: string; bridgeRoster: BridgeIdentity[] } = $props();
 
   // The comma-separated wire `source` field → ordered, deduplicated
   // `{ id, label, glyph }` badges via the shared `fauna_feed::classify_sources`
@@ -11,8 +11,10 @@
   // shared with the conversations rail), keyed off the precomputed `glyph` concept;
   // the label is the canonical shared `SourceKind::label`. One `protocol-badge` per
   // classified source — matching linux `build_protocol_badges` (`feed.md` § Where
-  // logic lives). An empty / whitespace `source` classifies to no badge.
-  let badges = $derived(classifySources(source));
+  // logic lives). An empty / whitespace `source` classifies to no badge. A token
+  // naming a bridge on the snapshot's `bridgeRoster` is that bridge's badge, its
+  // declared glyph and label (`feed.md` § Implementation status today).
+  let badges = $derived(classifySources(source, bridgeRoster));
 </script>
 
 {#each badges as badge}

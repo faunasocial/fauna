@@ -194,8 +194,9 @@ object E2eLoudSurfaces {
         // The sweep's own counters, bumped inside the shared sweep on the ONE
         // process-wide registry (`criticalAlertsRegistry()` hands back the same
         // `Arc` every call) — never an android-side count. A pair, not one
-        // number: a re-established session stacks sweep loops, so the waiter
-        // compares `completed` against the `started` it read at plant time.
+        // number: the waiter compares `completed` against the `started` it read
+        // at plant time. A same-identity re-establish runs one pass, not a
+        // second loop (`CriticalAlertSweepDispatcher`).
         val alerts = criticalAlertsRegistry()
         state.put(
             "alert_sweep_passes",

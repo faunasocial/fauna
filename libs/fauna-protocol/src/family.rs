@@ -768,6 +768,22 @@ impl FamilyApprovalEntry {
             &self.target,
         )
     }
+
+    /// When this row's item arrived, for the kinds whose row shows it (a
+    /// `mail_hold` only) — a thin forward to
+    /// [`fauna_core::format::approval_timestamp_display`].
+    pub fn timestamp_display(
+        &self,
+        now_ms: i64,
+        utc_offset_seconds: i32,
+    ) -> Option<fauna_core::format::ConversationTimestampDisplay> {
+        fauna_core::format::approval_timestamp_display(
+            &self.kind,
+            self.created_at,
+            now_ms,
+            utc_offset_seconds,
+        )
+    }
 }
 
 /// Reply to `fauna.family.approvals.list`.

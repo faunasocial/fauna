@@ -50,6 +50,10 @@ pytestmark = [
     # tui leads; the other six join through the batched trickle-down, each
     # arriving with its own marker (and its `helpers.room_seats.ROOM_APPS` entry).
     pytest.mark.tui,
+    pytest.mark.linux,
+    pytest.mark.web,
+    pytest.mark.android,
+    pytest.mark.windows,
 ]
 
 FIRST = "the member's first message"

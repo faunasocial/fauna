@@ -458,7 +458,7 @@ async fn domain_available_inside_a_zone_lands_with_buy_domain_off() {
             price: None,
         },
         message: LocalizedText {
-            key: "handle_check.outcome.domain_available_inside_zone".into(),
+            key: "onboarding.handle_check.outcome.domain_available_inside_zone".into(),
             args: Default::default(),
         },
         continue_enabled: true,
@@ -726,4 +726,95 @@ async fn flow_d_resume_pending_review_then_admin_approves() {
         }
         other => panic!("expected LoggedIn, got {other:?}"),
     }
+}
+
+/// Drive the pending-invite poll to its not-found probe with `probe` as the
+/// silent-challenge answer; returns the machine for the caller's assertions.
+async fn pending_poll_with_probe(
+    probe: fauna_onboarding_machine::nest_api::SilentChallengeOutcome,
+) -> Arc<OnboardingMachine> {
+    use fauna_onboarding_machine::nest_api::{FakeNestApi, InviteRequestError, NestApi};
+
+    let observer: Arc<dyn OnboardingObserver> = Arc::new(NullObserver);
+    let fake = Arc::new(FakeNestApi::new());
+    let m = OnboardingMachine::with_nest_api(observer, fake.clone() as Arc<dyn NestApi>);
+    m.seed_identity("0".repeat(64));
+    let pending_status = serde_json::json!({
+        "PendingReview": { "request_id": "REQ1", "last_checked_ms": 0 }
+    });
+    m.seed_pending_invite(
+        "https://a.example".into(),
+        "alice@a.example".into(),
+        "REQ1".into(),
+        pending_status.to_string(),
+    );
+    fake.set_recheck_invite_request_response(Err(InviteRequestError::NotFound));
+    fake.set_silent_challenge_response(probe);
+    m.recheck_invite_status().await;
+    m
+}
+
+/// A typed verdict on the not-found probe is terminal (`security.md` §
+/// Pre-claim surfacing): the pending-invite poll must stop, not render the
+/// verdict as an indefinite "pending review".
+#[tokio::test]
+async fn pending_poll_typed_verdicts_end_on_the_terminal_error() {
+    use fauna_onboarding_machine::nest_api::{OutdatedSide, SilentChallengeOutcome as O};
+    use fauna_onboarding_machine::{ErrorContext, InviteRequestState};
+
+    let verdicts = [
+        O::IdentityChanged {
+            host: "a.example".into(),
+            pinned_hex: "11".repeat(32),
+            seen_hex: Some("22".repeat(32)),
+            fork: false,
+        },
+        O::Superseded {
+            new_actor_id_hex: "33".repeat(32),
+        },
+        O::Locked {
+            locked_until_secs: 1,
+        },
+        O::SecretInvalid { error: "x".into() },
+        O::NeedsUpdate {
+            message: "m".into(),
+            outdated: OutdatedSide::Nest,
+        },
+    ];
+    for v in verdicts {
+        let label = format!("{v:?}");
+        let m = pending_poll_with_probe(v).await;
+        let snap = m.invite_request_snapshot();
+        assert!(
+            matches!(
+                snap.state,
+                InviteRequestState::Error {
+                    transient: false,
+                    context: ErrorContext::Rechecking,
+                    ..
+                }
+            ),
+            "{label} must end terminal, got {:?}",
+            snap.state
+        );
+        assert!(!snap.recheck_visible, "{label}: poll must stop");
+    }
+}
+
+/// An unreachable probe is the one answer that keeps the poll going.
+#[tokio::test]
+async fn pending_poll_transient_probe_stays_pending_review() {
+    use fauna_onboarding_machine::InviteRequestState;
+    use fauna_onboarding_machine::nest_api::SilentChallengeOutcome;
+
+    let m = pending_poll_with_probe(SilentChallengeOutcome::Transient {
+        error: "down".into(),
+    })
+    .await;
+    let snap = m.invite_request_snapshot();
+    assert!(matches!(
+        snap.state,
+        InviteRequestState::PendingReview { .. }
+    ));
+    assert!(snap.recheck_visible);
 }

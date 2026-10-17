@@ -2,7 +2,7 @@
 //! this machine runs re-keys it, and it never seals under the generation the
 //! rotation left behind.**
 //!
-//! `on-demand-files.md` § Shared sets on a capability host → *One mechanism —
+//! `on-demand-files-shared-sets.md` § Shared sets on a capability host → *One mechanism —
 //! the agent converges*: the desktop sync agent reads every set's content keys
 //! from its holder's folder-key custody itself — the account plane's
 //! `fauna.state.folder-keys`, through the account store it mounts as the

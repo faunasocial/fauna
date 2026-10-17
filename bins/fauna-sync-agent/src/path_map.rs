@@ -146,13 +146,18 @@ pub struct ResolvedFolder {
     pub folder_ref: FolderRef,
     /// Forward-slash folder-relative path.
     pub rel: String,
+    /// The serving location's mode — what a verb acting on the file's local
+    /// copy chooses its road by (a restore replaces a copy an always-resident
+    /// root keeps, and frees one an on-demand root caches).
+    pub mode: LocationMode,
 }
 
 /// Resolve an absolute path to the bound folder serving it plus its folder
-/// relative path. Only **on-demand** folders with a **binding** are
-/// served by the multi-root hydration host (and so have a per-folder state DB
-/// to answer overlay-status queries); always-resident and unbound on-demand
-/// folders return `None`. First matching folder wins.
+/// relative path. Only **on-demand** folders with a **binding** are served;
+/// always-resident and unbound on-demand folders return `None`. A bound
+/// resident root keeps its state DB at the same identity-keyed path, but no
+/// shell verb answers for one yet. First matching
+/// folder wins.
 ///
 /// The single resolver for the IPC read/write sites: it carries the binding's
 /// `folder_ref` so no consumer re-reads config to recover the identity it
@@ -169,6 +174,7 @@ pub fn resolve_to_folder_rel(config: &SyncConfig, abs_path: &str) -> Option<Reso
             folder: binding.folder.to_string(),
             folder_ref: binding.folder_ref,
             rel,
+            mode: f.mode.clone(),
         })
     })
 }
@@ -470,6 +476,7 @@ mod tests {
                 folder: "docs".to_string(),
                 folder_ref: FolderRef::Local(1),
                 rel: "sub/a.txt".to_string(),
+                mode: LocationMode::OnDemand,
             })
         );
     }
@@ -487,6 +494,7 @@ mod tests {
                 folder: "docs".to_string(),
                 folder_ref: FolderRef::Local(1),
                 rel: String::new(),
+                mode: LocationMode::OnDemand,
             })
         );
     }
@@ -504,8 +512,9 @@ mod tests {
 
     #[test]
     fn always_resident_folder_is_not_resolved() {
-        // Always folders are not served by the hydration host, so they carry no
-        // per-folder db to query — even if (wrongly) bound to a folder.
+        // Not yet served: the resident engine keeps its state DB at the same
+        // identity-keyed path, but no shell verb answers for a resident root
+        // yet.
         let config = config_with(vec![folder(
             r"C:\always",
             LocationMode::Always,
@@ -542,6 +551,7 @@ mod tests {
                 folder: "docs".to_string(),
                 folder_ref: FolderRef::Local(1),
                 rel: "a.txt".to_string(),
+                mode: LocationMode::OnDemand,
             })
         );
     }

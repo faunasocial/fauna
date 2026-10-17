@@ -8,7 +8,8 @@ Homepage: https://fauna.social
 
 Package: fauna-desktop
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, libgtk-4-1, libadwaita-1-0, fuse3
+Depends: ${shlibs:Depends}, ${misc:Depends}, libgtk-4-1, libadwaita-1-0, fuse3,
+ gstreamer1.0-plugins-base, gstreamer1.0-plugins-good
 Description: Fauna - Decentralized social communication
  End-to-end encrypted messaging, group chat, calendar, file sync,
  and bridges to Bluesky, Nostr, and ActivityPub.

@@ -53,6 +53,11 @@
                  PlaceholderText="{loc:Localize Key=conversations/unified/recipient_picker_placeholder}"
                  TextChanged="OnInputChanged"
                  KeyDown="OnInputKeyDown" />
+        <!-- Chrome, no id (ui.yaml gives the bridges line none): which far networks a
+             typed address may reach, by each serving bridge's declared label. Collapsed
+             while no bridge serves the account. -->
+        <TextBlock x:Name="BridgesLine" Visibility="Collapsed" Opacity="0.7" FontSize="12"
+                   TextWrapping="Wrap" />
         <ListView x:Name="SuggestionsList"
                   Visibility="Collapsed"
                   SelectionChanged="OnSuggestionPicked">
@@ -78,5 +83,19 @@
                    AutomationProperties.AutomationId="{x:Bind ids:Ids.RecipientPickerClass}"
                    Visibility="Collapsed"
                    Opacity="0.7" FontSize="12" />
+        <!-- `recipient-picker-home-nest-toggle`: the new-thread composer's
+             home-nest choice (ui.yaml; behavior owner community-rooms.md § The
+             three classes). ON seats the user's home nest in the room about to be
+             created, which makes it a community room the first send founds; the
+             class statement above follows it. COLLAPSED (absent to a driver)
+             wherever the picker is not the new-thread composer's — the
+             add-participant overlay and the folder-share picker share this
+             control and have no room to found. Its `checked` attribute rides
+             HelpText (the `room-admin-toggle` shape); the label is the shared
+             yes/no sentence, set with the state. -->
+        <ToggleButton x:Name="HomeNestToggle"
+                      AutomationProperties.AutomationId="{x:Bind ids:Ids.RecipientPickerHomeNestToggle}"
+                      Visibility="Collapsed"
+                      Click="OnHomeNestClicked" />
     </StackPanel>
 </UserControl>

@@ -127,7 +127,7 @@ pub use engine_keys::{
 // The read half of the folder-key custody seam once custody is plane-only
 // (`fauna.state.folder-keys`): what an engine build reads custody through,
 // implemented over the account's store and over a capability host's throwaway
-// replica, in the crates that own each (`on-demand-files.md` § Shared sets on
+// replica, in the crates that own each (`on-demand-files-shared-sets.md` § Shared sets on
 // a capability host, decision 1′).
 pub mod key_reader;
 pub use key_reader::{
@@ -1070,20 +1070,27 @@ impl<R: RpcRequester> FoldersClient<R> {
     /// acquired it: a device frees only its own lease, never
     /// another actor's. There is no holder-blind form — the device-id-less
     /// owner force-release was retired 2026-09-24 (compat-remnant sweep); a
-    /// crash-stuck lease lapses on the nest's TTL.
+    /// crash-stuck lease lapses on the nest's TTL. `row` is the set's identity
+    /// when the sender holds it — `Local(id)` stamps `folder_id`, resolved by
+    /// that row alone (`set-addressing.md` § The row form); a lease acquire
+    /// carries it on its request the same way.
     pub async fn lease_release(
         &self,
         name: impl Into<String>,
         device_id: impl Into<String>,
+        row: Option<fauna_core::folder_keys::FolderRef>,
     ) -> Result<LeaseReleaseReply, R::Error> {
         self.nest
             .request(
                 KIND_FOLDERS_LEASE_RELEASE,
-                addressed(LeaseReleaseRequest {
-                    name: name.into(),
-                    device_id: device_id.into(),
-                    ..Default::default()
-                }),
+                fauna_protocol::folders::addressed_at(
+                    LeaseReleaseRequest {
+                        name: name.into(),
+                        device_id: device_id.into(),
+                        ..Default::default()
+                    },
+                    row,
+                ),
             )
             .await
     }
@@ -1121,7 +1128,7 @@ impl<R: RpcRequester> FoldersClient<R> {
     /// Its engine consumer is a cross-nest reader's byte plane, which takes it
     /// in place of the write-token bearer
     /// (`fauna_sync_engine::write_token_bearer::folder_read_token_bearer`,
-    /// `on-demand-files.md` § Shared sets on a capability host, decision 3).
+    /// `on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 3).
     pub async fn read_token_get(
         &self,
         nest_url: impl Into<String>,
@@ -1756,6 +1763,14 @@ mod tests {
                 },
             )
         }
+
+        /// Keyed by name: no answer by identity.
+        async fn resolve_ref(
+            &self,
+            _folder_ref: &fauna_core::folder_keys::FolderRef,
+        ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+            anyhow::bail!("no set with that identity")
+        }
     }
 
     /// A bound row with resolvable keys: the name stamps under the roster's
@@ -2127,7 +2142,7 @@ mod tests {
         assert_eq!(req.name_hash.as_deref(), Some(&want));
 
         let (rec, c) = client();
-        block_on(c.lease_release("photos", "ab".repeat(16))).expect("infallible mock");
+        block_on(c.lease_release("photos", "ab".repeat(16), None)).expect("infallible mock");
         let (_, payload) = rec.recorded();
         let req: LeaseReleaseRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
         assert_eq!(req.name_hash.as_deref(), Some(&want));
@@ -2277,7 +2292,7 @@ mod tests {
     #[test]
     fn lease_release_composes_kind_and_payload() {
         let (rec, c) = client();
-        block_on(c.lease_release("photos", "ab".repeat(32))).expect("infallible mock");
+        block_on(c.lease_release("photos", "ab".repeat(32), None)).expect("infallible mock");
         let (kind, payload) = rec.recorded();
         assert_eq!(kind, "fauna.folders.lease.release");
         let req: LeaseReleaseRequest = fauna_protocol::decode_strict(&payload).expect("decodes");

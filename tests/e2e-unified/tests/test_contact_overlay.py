@@ -13,7 +13,7 @@ why every wait below reads it into its failure (convention 6).
 
 tier_3: the real nest, the real app binary, the real account runtime. tui
 led (the Profile private section and the roster row were tui's first), linux,
-android, macos and ios followed; each other app joins the marker list below with its own leg. The
+android, macos, ios, web and windows followed; each other app joins the marker list below with its own leg. The
 two-seat test's second seat is always a tui seat (`helpers.fleet.SiblingSeats`),
 so on another app it needs tui in the run's app set (`--app linux,tui`).
 
@@ -39,7 +39,7 @@ from helpers.waiting import await_account_runtime_assembled, wait_until
 
 pytestmark = [
     pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.android,
-    pytest.mark.macos, pytest.mark.ios,
+    pytest.mark.macos, pytest.mark.ios, pytest.mark.web, pytest.mark.windows,
 ]
 
 #: A Save in a fresh session first-need mints the generation tip (an escrow
@@ -51,8 +51,8 @@ FIRST_SAVE_S = 240.0
 PAINT_S = 30.0
 
 #: A sibling seat hearing of the other seat's write: its publish, the nest's
-#: relay, the other seat's walk — pump passes, poked where this process holds
-#: the pump.
+#: relay, the other seat's walk — pump passes, poked on whichever co-located
+#: process holds the seat's pump (the app, or its sync agent once it took over).
 CONVERGE_S = 240.0
 
 
@@ -146,7 +146,24 @@ def test_a_nickname_notes_and_label_paint_on_the_roster_and_profile_and_survive_
     )
 
     # A relaunch: the overlay is account state, not the old process's memory.
+    # Web signs in through the session patch, which lives in the page's memory
+    # only, so a reloaded page is signed in again the same way — after the
+    # origin store is made to hold the account, so the new page presents the
+    # same device leaf (`helpers.web_tabs`, whose `open_same_account_tab` is
+    # this shape; a store-only boot is the open web-boot question it names).
+    web_session = None
+    if app.driver.is_web():
+        from helpers.web_tabs import seed_origin_store_from_session
+
+        web_session = seed_origin_store_from_session(app.driver)
     app.driver.hard_reload()
+    if web_session is not None:
+        from helpers.connection import wait_until_online
+
+        # `_login_app_as`'s web sign-in, whole: the patch, the feed landing,
+        # and its connection barrier.
+        app.driver.set_state({"session": dict(web_session), "nav": {"stack": [{"view": "feed"}]}})
+        wait_until_online(app.driver)
     await_account_runtime_assembled(app.driver)
     _await_row(app, other, (nickname, public, label), where="after the relaunch")
     open_other_profile(app, other)

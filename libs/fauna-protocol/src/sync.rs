@@ -133,7 +133,7 @@ pub struct DeviceGrantRegisterReply {
 /// (`sync-agent-credentials.md` § Credential model → the RULED 2026-09-28
 /// block, decision 4: it clears the named row's grant columns and keeps the
 /// row) and a runtime's revoke of a removed member's grant at every nest it
-/// completes (`account-data-taxonomy.md` § Fleet-scope reclamation, clause (4)
+/// completes (`fleet-scope-reclamation.md` § Fleet-scope reclamation, clause (4)
 /// → *The nest half follows merged state*). Added 2026-08-15 for the agent's
 /// self-retirement of its legacy grant, which went with that grant.
 ///
@@ -223,6 +223,13 @@ pub struct SyncChangesListRequest {
     /// Wire-additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     /// **Item-class routing** (W2.3 of account-data-plane.md § Workstreams;
     /// `account-sync-plane.md` § Feeds and cursors → *Feed row + wire
     /// evolution*): which
@@ -294,8 +301,8 @@ pub struct SyncChangesListRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub of_owner: Option<String>,
     /// **The walker's identity for the feed's retention gate**
-    /// (`account-data-taxonomy.md` § The generation machinery → *Fleet-scope
-    /// reclamation*, clause (1)): 64-char hex of the requesting replica's
+    /// (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (1)): 64-char hex of the requesting replica's
     /// writer id. Read only beside [`Self::held_through_seq`] on the
     /// state-entry arm: the nest records the pair as this walker's mark —
     /// "I hold every row of this scope at or below that seq" — and
@@ -487,8 +494,8 @@ pub struct SyncChangesListReply {
     /// store-served leg's reply. Additive 2026-09-13.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub complete_through_seq: Option<i64>,
-    /// **The retention gate's watermark** (`account-data-taxonomy.md` § The
-    /// generation machinery → *Fleet-scope reclamation*, clause (1) → *the
+    /// **The retention gate's watermark** (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (1) → *the
     /// gate's watermark*): the LOWEST mark among this scope's counted walkers
     /// — every walker marked on the scope ([`SyncChangesListRequest::walker_id`])
     /// whose key holds a live, non-tombstoned grant on the account. A
@@ -530,9 +537,22 @@ pub struct SyncChangesListReply {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SyncChangeRecordRequest {
-    /// Folder name (must be owned by the connection actor).
+    /// Folder name — a set the connection actor owns, or a group-bound shared
+    /// set of that name where it holds a `writer` grant (`file-sync.md` §
+    /// Multi-writer shared sets; the owner's row wins a name collision).
+    /// Ignored when [`Self::folder_id`] is present.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub folder: String,
+    /// The set's **row** on this nest (`folders.id`), preferred over
+    /// `folder`/`name_hash` when present: the nest resolves it under the write
+    /// gate alone — the row with this id, for its owner or a roster member
+    /// holding the `writer` grant, else `not_found` — and never falls through
+    /// to the name forms or provisions a reserved set, so a same-named own set
+    /// cannot shadow the shared set the writer meant
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     /// Hex device id recording the change (must have the `write` capability).
     pub device_id: String,
     /// Plaintext file path; the nest hashes it to `path_hash`.
@@ -638,9 +658,26 @@ pub struct SyncChangesSupersedeRequest {
     /// migration* bullet B; `webdav-server.md` § Architectural rules "deletes
     /// nothing until the re-sealed copy is verified").
     pub manifest_hash: String,
+    /// Hex manifest hash of the head the caller's re-seal sourced its
+    /// plaintext from. The nest marks only when the newest live non-delete row
+    /// strictly below the head carries exactly this manifest — the head must be
+    /// a reissue of the row directly below it — and refuses with
+    /// `supersede_source_not_head` otherwise, an absent source included, so a
+    /// stale reissue recorded after a peer's newer edit can never bury that
+    /// edit (`mls-group-key-material.md` § M2 → *(B) Reclaim*, property (1)).
+    /// Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_manifest_hash: Option<String>,
     /// Hash-first addressing (S5b) — see `SyncChangesListRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -700,6 +737,13 @@ pub struct SyncStatusRequest {
     /// Hash-first addressing (S5b) — see `SyncChangesListRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -721,6 +765,13 @@ pub struct SyncFilesRequest {
     /// Hash-first addressing (S5b) — see `SyncChangesListRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }

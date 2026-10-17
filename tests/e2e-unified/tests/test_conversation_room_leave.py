@@ -75,6 +75,8 @@ pytestmark = [
     # inside it.
     pytest.mark.tui,
     pytest.mark.windows,
+    pytest.mark.linux,
+    pytest.mark.web,
 ]
 
 LEAVE_BUDGET_S = MESSAGE_BUDGET_S + MEMBERSHIP_BUDGET_S

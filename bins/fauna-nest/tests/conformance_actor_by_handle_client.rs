@@ -14,13 +14,14 @@
 //!   → ConversationsRpc::actor_by_handle                (seam)
 //!   → NestConversationsRpc → ConversationsClient        (fauna-client-conversations)
 //!   → fauna.actor.by_handle  over the WS               (real socket → fauna-nest)
-//!   → reply {actor_id, domain}
-//!   → resolve_reachable → fauna.conversations.keypackage.count > 0
+//!   → reply {actor_id, domain, addressable}
+//!   → the reply's `addressable` bit (no second call; a bare actor id asks
+//!     fauna.conversations.keypackage.addressable instead)
 //!   → ResolveResult::Resolved(TypedAddress::Fauna { actor_id })
 //! ```
 //!
 //! What only this real-wire test can catch (vs. tier_1's MockNest): the
-//! `ActorByHandleRequest`/`Reply` and `KeypackageCount*` CBOR encode/decode over
+//! `ActorByHandleRequest`/`Reply` and `KeypackageAddressable*` CBOR encode/decode over
 //! the dispatcher, the bearer auth (challenge-free `fauna.auth.handshake` mint +
 //! subprotocol WS upgrade), and — critically — the adapter's
 //! `fauna.actor.not_found` → `Ok(None)` → `NotFound` mapping, which a catch-all
@@ -59,8 +60,9 @@ async fn start_server() -> (String, Arc<fauna_nest::routes::AppState>) {
             // pre-identity `fauna.auth.handshake` (WsChallengeBearer), so the
             // anon endpoint must serve the auth-bootstrap kinds.
             fauna_nest::auth_handlers::register_auth_handlers(&mut b);
-            // `fauna.actor.by_handle` lives in discovery; the keypackage.count
-            // probe + the rest of `fauna.conversations.*` in conversations.
+            // `fauna.actor.by_handle` lives in discovery; the actor-id form's
+            // `keypackage.addressable` probe + the rest of
+            // `fauna.conversations.*` in conversations.
             fauna_nest::discovery_handlers::register_discovery_handlers(&mut b);
             fauna_nest::conversations_handlers::register_conversations_handlers(&mut b);
             b.build()
@@ -84,10 +86,11 @@ async fn start_server() -> (String, Arc<fauna_nest::routes::AppState>) {
 }
 
 /// Seed a registered, handle-owning peer with `n` real (TLS-serialized) MLS key
-/// packages so the `keypackage.count > 0` reachability probe promotes the
-/// resolved handle to a Fauna address. The bytes are minted by the peer's own
-/// `MlsEngine` (the production source), though only the row count matters to the
-/// probe under test. Takes the keypair by value (`MlsEngine` consumes it); the
+/// packages so the `addressable` reachability bit (the by_handle reply's, or
+/// `keypackage.addressable` for the actor-id form) promotes the resolved peer to
+/// a Fauna address. The bytes are minted by the peer's own
+/// `MlsEngine` (the production source), though only the rows' presence matters to
+/// the probe under test. Takes the keypair by value (`MlsEngine` consumes it); the
 /// caller captures `actor_id()` beforehand.
 async fn seed_peer_with_keypackages(db: &CacheDb, actor: ActorKeypair, handle: &str, n: usize) {
     let actor_id = actor.actor_id();
@@ -151,7 +154,7 @@ async fn resolve_handle_over_real_wire() {
     let nest = connected_client(&base, alice).await;
     let backend = fauna_mls_backend(nest, alice_id);
 
-    // 1. Bare handle resolves to bob over the wire (by_handle → count probe).
+    // 1. Bare handle resolves to bob over the wire (by_handle's `addressable` bit).
     assert_resolved_to(backend.resolve_address("bobhandle").await, bob_id);
 
     // 2. Unknown handle: nest replies `fauna.actor.not_found`, the adapter maps
@@ -164,7 +167,7 @@ async fn resolve_handle_over_real_wire() {
     );
 
     // 3. Actor-id form regression: a 64-hex string IS the actor key, so it
-    //    skips by_handle and goes straight to the count probe.
+    //    skips by_handle and asks the `keypackage.addressable` boolean.
     assert_resolved_to(
         backend.resolve_address(&hex::encode(bob_id.0)).await,
         bob_id,

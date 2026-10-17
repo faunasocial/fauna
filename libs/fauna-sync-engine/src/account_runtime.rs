@@ -80,7 +80,7 @@ use fauna_account_store::{
         AgentPresence, EngineLock, EngineLockOutcome, MigrationLock, MigrationLockOutcome,
         SeedLegLock, SeedLegLockOutcome,
     },
-    sqlite::SqliteBackend,
+    sqlite::{ReplicaPosture, ReplicaSealKey, SqliteBackend},
     store::AccountStore,
     types::WriterId,
 };
@@ -105,13 +105,17 @@ pub use fauna_account_plane::account_driver::{
     ACCOUNT_HANDLE_WAIT, AccountDriver, AccountHandleSource, AccountMailStore, AccountStoreAccess,
     AccountStoreHandle, Assembly, CapabilitySweep, DEFAULT_BACKSTOP_INTERVAL, DriverConfig,
     ENROLLMENT_RETIRE_BUDGET, ElectionOutcome, EngineElection, EngineRole, EnrollmentPass,
-    EnrollmentRefusal, EnrollmentRetirement, FleetBootstrapRows, GroupCeremonyAuthority, HostLegs,
-    LegsCtx, LegsOutput, LinkedNestConnector, MembershipSource, NoLegs, OwedDeliveries,
-    OwedNestDeliverer, PassTimings, Presence, PrincipalCustody, PumpCycles, PumpCyclesView,
-    PumpReport, RUNTIME_ABSENT, RuntimePrincipal, SIGN_OUT_PASS_GRACE, SeatAccountStore, ServeEnd,
-    TrustedHolderSource, elect_at_start, fixed_holders, fleet_bootstrap, fleet_bootstrap_rows,
-    nudge_scope_for_push, push_step_error, r14_trust,
+    EnrollmentRefusal, EnrollmentRetirement, FleetBootstrapRows, GroupCeremonyAuthority,
+    HolderWalk, HolderWalkSeat, HostLegs, LegsCtx, LegsOutput, LinkedNestConnector,
+    MembershipSource, NoLegs, OwedDeliveries, OwedNestDeliverer, PassTimings, Presence,
+    PrincipalCustody, PumpCycles, PumpCyclesView, PumpReport, RUNTIME_ABSENT, RuntimePrincipal,
+    SIGN_OUT_PASS_GRACE, SeatAccountStore, ServeEnd, TrustedHolderSource, elect_at_start,
+    fixed_holders, fleet_bootstrap, fleet_bootstrap_rows, nudge_scope_for_push, push_step_error,
+    r14_trust,
 };
+/// The refused-change door's write, for a host that drives the door itself
+/// (the conformance suites' background-write proof).
+pub use fauna_account_plane::refused_change_rows::RefusedChangeWrite;
 #[cfg(test)]
 use {
     crate::device_endpoints_writer::EndpointFacts,
@@ -229,6 +233,20 @@ pub const STORE_THREAD_STACK_BUDGET: usize = STORE_THREAD_STACK_BYTES / 2;
 /// [`writer_key_from_slot`]'s read-back refuses — loudly, as before 2026-08-26
 /// (`apps/common.md` § Credential storage → *The shared Rust credential slots
 /// on the phones*).
+/// The replica's at-rest posture on this machine
+/// (`account-replica-posture.md` § Local at-rest posture): sealed wherever the
+/// credential store keeps its items away from the data — the platform
+/// keychains, Secret Service, the passphrase-sealed headless store, a phone's
+/// foreign store — and plaintext only on the file backend, whose items rest in
+/// files beside the store (the seal key would too). Never a knob.
+pub fn replica_posture(credentials: &CredentialStore) -> ReplicaPosture {
+    if credentials.items_rest_in_files() {
+        ReplicaPosture::Plaintext
+    } else {
+        ReplicaPosture::Sealed
+    }
+}
+
 pub fn production_credential_store() -> CredentialStore {
     CredentialStore::new(CRED_NAMESPACE)
 }
@@ -769,6 +787,34 @@ where
             }
             Err(e) => push_step_error(report, format!("peer dial: {e:#}"), &e),
         }
+        // The custodian dial pass's NEST arm (the custodian-NEST serve door,
+        // ruling 6): the restore dial to a nest-form custodian, run only on a
+        // pass whose own-nest walk did not answer — never standing — and not
+        // gated on the peer transport (the door rides the nest wire). Counted
+        // into the same `peer_dial` slot; a pass whose peer leg is unbound
+        // reports the arm alone when it dialed or withheld anything.
+        match crate::peer_leg::custodian_nest_arm(
+            peer,
+            store,
+            schedule,
+            trust,
+            writer_key,
+            slot,
+            content_scopes,
+            nest,
+        )
+        .await
+        {
+            Ok(Some(arm)) if arm.dialed + arm.withheld > 0 => {
+                let pass = report.peer_dial.get_or_insert_with(Default::default);
+                pass.nest_custodians += arm.dialed;
+                pass.nest_custodians_admitted += arm.admitted;
+                pass.nest_custodians_withheld += arm.withheld;
+                pass.applied += arm.applied;
+            }
+            Ok(_) => {}
+            Err(e) => push_step_error(report, format!("custodian nest restore: {e:#}"), &e),
+        }
         // The custody serve refresh (W8.5 P1): the served-custodies registry,
         // after the fleet walk (custodies-held rows fresh) and after the ensure
         // step (the live server, when bound, takes the registry). Its revocation
@@ -1194,8 +1240,17 @@ async fn worker<R>(
                 }
             }
             let writer = WriterId(writer_key.verifying_key().to_bytes());
-            let backend =
-                SqliteBackend::open(&store_dir).context("account runtime: open backend")?;
+            // The replica's at-rest posture (`account-replica-posture.md`
+            // § Local at-rest posture): sealed under the key derived from this
+            // account's `BackupKey` — held by the credential store, never
+            // beside the data — except on the one backend that keeps its items
+            // in files next to the store, where a seal would be theatre.
+            let backend = SqliteBackend::open_keyed(
+                &store_dir,
+                ReplicaSealKey::derive(&backup_key),
+                replica_posture(&credentials),
+            )
+            .context("account runtime: open backend")?;
             // The lost-slot arm (charter § The store device principal,
             // refinement 10) and the journal-bound writer's two arms
             // (refinement 11: a key LOADED over a store with no stamped
@@ -1288,7 +1343,8 @@ async fn worker<R>(
             peer_transport.clone(),
             store_dir.clone(),
             actor_id_hex.clone(),
-        );
+        )
+        .with_seal_key(ReplicaSealKey::derive(&backup_key));
         // The custodian leg (W8.5): worker-owned like the peer leg; rebuilt
         // on reassembly for the same reason (the writer identity may have
         // rotated). The revocation snapshot reads the grant log off this
@@ -1433,6 +1489,30 @@ mod tests {
         item_key: Vec<u8>,
         op: String,
         entry: Vec<u8>,
+    }
+
+    impl FeedRow {
+        /// Does this row open under `keys` — is it a row of their kind?
+        fn opens_under(&self, keys: &fauna_core::crypto::AccountStateKindKeys) -> bool {
+            let (Ok(writer_id), Ok(item_key), Ok(writer_seq)) = (
+                fauna_core::hex32::decode(&self.writer_id),
+                <[u8; 32]>::try_from(self.item_key.as_slice()),
+                u64::try_from(self.writer_seq),
+            ) else {
+                return false;
+            };
+            fauna_core::account_entry_crypto::open_entry(
+                keys,
+                &fauna_core::account_entry_crypto::EntryCoordinates {
+                    writer_id,
+                    writer_seq,
+                    scope: &self.scope,
+                },
+                &item_key,
+                &self.entry,
+            )
+            .is_ok()
+        }
     }
 
     /// One `record-cid` feed row of a content scope — what the nest derives
@@ -1634,6 +1714,13 @@ mod tests {
         /// the holder has deleted them, so a recovery that asks hears that
         /// nothing opens.
         escrow_reads_empty: Arc<AtomicBool>,
+        /// The account's `fauna.state.escrow-wrap` kind keys, set by
+        /// [`fixture`]. While either escrow-read fault stands the feed
+        /// withholds every row that opens under them — the fleet plane's copy
+        /// of the wrap is an escrow copy too (`account-replica-posture.md`
+        /// § *Escrow custody*), and a fault that left it served would be no
+        /// fault for a seed-holding runtime, which opens it plane-first.
+        escrow_wrap_keys: Arc<Mutex<Option<Arc<fauna_core::crypto::AccountStateKindKeys>>>>,
         /// The deepest a request was polled below the store thread's entry,
         /// in bytes of stack ([`FakeNest::note_stack_depth`]).
         deepest_request: Arc<std::sync::atomic::AtomicUsize>,
@@ -2038,6 +2125,10 @@ mod tests {
                     let want_state_rows = req.item_class.as_ref() == Some(&state_class);
                     let record_class = ItemClass::RecordCid.as_wire().to_string();
                     let want_record_rows = req.item_class.as_ref() == Some(&record_class);
+                    let wrap_keys = (self.escrow_reads_unreachable.load(Ordering::SeqCst)
+                        || self.escrow_reads_empty.load(Ordering::SeqCst))
+                    .then(|| self.escrow_wrap_keys.lock().unwrap().clone())
+                    .flatten();
                     let mut s = self.state.lock().unwrap();
                     s.list_calls += 1;
                     if let Some(scope) = want_scope.clone() {
@@ -2049,6 +2140,7 @@ mod tests {
                         .filter(|_| want_state_rows)
                         .filter(|r| want_scope.as_ref().is_none_or(|want| &r.scope == want))
                         .filter(|r| r.writer_seq > frontier.get(&r.writer_id).copied().unwrap_or(0))
+                        .filter(|r| !wrap_keys.as_ref().is_some_and(|keys| r.opens_under(keys)))
                         .map(|r| SyncChange {
                             seq: r.nest_seq,
                             path_hash: hex::encode(&r.item_key),
@@ -2402,9 +2494,15 @@ mod tests {
         let base = dir.path().join("state");
         let cred_dir = dir.path().join("creds");
         std::fs::create_dir_all(&cred_dir).expect("cred dir");
+        let fake = FakeNest::default();
+        *fake.escrow_wrap_keys.lock().unwrap() = fauna_protocol::merge_policy::kind_keys(
+            &fauna_core::crypto::AccountStateKeySchedule::derive(&BackupKey::derive(&secret)),
+            fauna_protocol::merge_policy::KIND_ESCROW_WRAP,
+        )
+        .map(Arc::new);
         Fixture {
             _dir: dir,
-            fake: FakeNest::default(),
+            fake,
             secret,
             actor_hex,
             base,
@@ -3921,8 +4019,8 @@ mod tests {
     }
 
     /// **A sign-out that cuts a pass mid-put still lands this device's own
-    /// `Removed` row** (`account-data-taxonomy.md` § The generation machinery
-    /// → *Fleet-scope reclamation*, clause (4)). The cut drops the pass where
+    /// `Removed` row** (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (4)). The cut drops the pass where
     /// it stands, and when that is inside a fleet-scope put the nest already
     /// holds the row but the reply dies with the future: the own slot stays
     /// below it. The severance's ordered own publish then re-sends that row
@@ -4657,8 +4755,8 @@ mod tests {
     /// **The honest writer behind the live removal doors refuses this device's
     /// own id and any id the fleet view does not verify, and a retried
     /// completion is a no-op** (`docs/goal/behavior/devices.md` § Removing a
-    /// Device; `docs/goal/architecture/account-data-taxonomy.md` § The
-    /// generation machinery → *Fleet-scope reclamation*, clause (4)).
+    /// Device; `docs/goal/architecture/fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (4)).
     /// `Removed` is absorbing and excludes unconditionally at every reader, so
     /// `write_removed` — reached in production through `settle` (`Gone`),
     /// `complete_pending` and `remove_fleet_member` — refuses its own device
@@ -5399,6 +5497,57 @@ mod tests {
         assert!(
             !second.is_engine_holder(),
             "still not the holder after the re-try"
+        );
+
+        second.shutdown().await;
+        first.shutdown().await;
+    }
+
+    /// **The member re-fetch request crosses the two mounts of one store.**
+    /// The engine's host (the desktop sync agent) stamps one device-local
+    /// meta row per set; the app's custody-ingest sink reads it. Here the
+    /// stamp is written through the holder's mount and read through a
+    /// second mount of the same store directory — the agent beside an app —
+    /// and a later stamp through the first is read as the later time.
+    #[tokio::test]
+    async fn a_refetch_request_stamped_through_one_mount_is_read_through_a_second() {
+        use fauna_account_seams::folder_keys::PlaneFolderKeys;
+        use fauna_client_folders::FolderKeyReader;
+
+        type Source = Box<dyn Fn() -> Option<AccountStoreHandle> + Send + Sync>;
+
+        let fx = fixture();
+        let first = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("first runtime");
+        first.reconcile_now().await.expect("pass");
+        let second = AccountStoreRuntime::start(fx.params("a"))
+            .await
+            .expect("second runtime");
+        assert!(!second.is_engine_holder(), "the second mount is the app");
+
+        let (h1, h2) = (first.clone(), second.clone());
+        let writer = PlaneFolderKeys::new(Box::new(move || Some(h1.clone())) as Source);
+        let reader = PlaneFolderKeys::new(Box::new(move || Some(h2.clone())) as Source);
+
+        let channel = [7u8; 32];
+        assert_eq!(reader.refetch_requested_at(&channel).await.unwrap(), None);
+        writer.request_refetch(&channel, 1_000).await.unwrap();
+        assert_eq!(
+            reader.refetch_requested_at(&channel).await.unwrap(),
+            Some(1_000),
+            "the second mount reads the stamp the first wrote"
+        );
+        writer.request_refetch(&channel, 2_500).await.unwrap();
+        assert_eq!(
+            reader.refetch_requested_at(&channel).await.unwrap(),
+            Some(2_500),
+            "a later stamp reads as the later time"
+        );
+        assert_eq!(
+            reader.refetch_requested_at(&[8u8; 32]).await.unwrap(),
+            None,
+            "the stamp is per set"
         );
 
         second.shutdown().await;
@@ -6899,6 +7048,122 @@ mod tests {
             );
         }
 
+        app.shutdown().await;
+        agent.shutdown().await;
+    }
+
+    /// **A machine signed out and back in beside its agent keys the account's
+    /// generation once the agent has listed, with no command**
+    /// (`account-client-lifecycle.md` § The client-side lifecycle → *The first
+    /// listing*, clause (5), *How a hold ends* (b); `account-runtime.md`
+    /// § Multi-instance concurrency → *The seed-leg role*, part 4, *Escrow
+    /// recovery*). The sign-out erased the store and the credential slot, so
+    /// the re-signed-in app holds no key for the generation its first sign-in
+    /// minted. It starts a non-holder beside the agent, and its seed prologue
+    /// runs before the agent's first listing has merged a receipt or a mint
+    /// row: its escrow recovery has nothing to ask about. The agent's listing
+    /// then leaves the account's rows unopened, and every gated tip-sealed
+    /// read is held for the holder. The app's runtime must run its recovery
+    /// once the listing lands, not at the backstop tick (disarmed here, as
+    /// five minutes are in production), and the agent's next full pass then
+    /// re-presents the rows, so the backup read answers the account's list.
+    ///
+    /// Red-verified: with the seed pass run only at the prologue, the tick
+    /// and a command, the hold stood with the holder its only source for as
+    /// long as the test waited (linux, 2026-10-12: the Backups page refused
+    /// for 40 s after a re-sign-in).
+    #[tokio::test]
+    async fn a_machine_signed_out_and_in_beside_its_agent_keys_the_generation_without_a_command() {
+        use fauna_core::data::BackupConfig;
+
+        let fx = fixture();
+        // The first sign-in, alone: the app pumps, mints the account's one
+        // generation through the trusted holder and writes a backup list.
+        let first = AccountStoreRuntime::start(fx.params_trusting_the_holder("a"))
+            .await
+            .expect("the first sign-in");
+        first.reconcile_now().await.expect("it enrolls");
+        first
+            .write_backup_destinations(
+                BACKUP_SOURCE_BOX,
+                BackupConfig {
+                    destinations: vec![backup_destination("first"), backup_destination("second")],
+                },
+            )
+            .await
+            .expect("its backup list");
+        first.reconcile_now().await.expect("it publishes");
+        first.shutdown().await;
+
+        // The sign-out's erase: the account scope and the credential slot.
+        std::fs::remove_dir_all(fx.base.join("a")).expect("erase the store");
+        std::fs::remove_dir_all(fx.cred_dir.join("a")).expect("erase the slot");
+        std::fs::create_dir_all(fx.cred_dir.join("a")).expect("a fresh slot dir");
+
+        // The re-sign-in: the agent's host has mounted (its presence lock),
+        // so the app starts a non-holder; then the agent's runtime starts and
+        // lists the fleet scope.
+        let store_dir = fx
+            .params("a")
+            .store_root
+            .store_dir(&fx.actor_hex)
+            .expect("store dir");
+        std::fs::create_dir_all(&store_dir).expect("the store dir");
+        let presence = match fauna_account_store::locks::AgentPresenceLock::acquire(&store_dir) {
+            fauna_account_store::locks::AgentPresenceLockOutcome::Held(lock) => lock,
+            other => panic!("the agent's lock: {other:?}"),
+        };
+        let app = AccountStoreRuntime::start(fx.params_trusting_the_holder("a"))
+            .await
+            .expect("the re-signed-in app");
+        assert!(
+            !app.is_engine_holder(),
+            "beside its agent the app never pumps"
+        );
+        let mut owed = app.subscribe_holder_pass_owed();
+        let agent = AccountStoreRuntime::start(AccountRuntimeParams {
+            principal: RuntimePrincipal::Seedless,
+            ..fx.params_trusting_the_holder("a")
+        })
+        .await
+        .expect("the agent's runtime");
+        agent.reconcile_now().await.expect("the agent lists");
+        assert!(agent.is_engine_holder(), "the agent pumps");
+
+        // No command to the app: its own runtime keys the generation.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let sources = loop {
+            let sources = app.unkeyed_hold().await.expect("the hold's sources");
+            if sources.device || tokio::time::Instant::now() >= deadline {
+                break sources;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        // The holder's source still reads standing — its receipt is live and
+        // it never answered empty — so the device's key is what tells the
+        // recovery ran.
+        assert!(
+            sources.device,
+            "the app's runtime recovered the generation from escrow once the agent \
+             listed: {sources:?}"
+        );
+
+        // The recovery owes the agent a pass, which the host's watch asks for
+        // (`fauna_client_account_runtime::holder_yield`, pinned there); its
+        // stand-in here is the agent's `reconcile_now`, the arm the nudge runs.
+        tokio::time::timeout(Duration::from_secs(5), owed.changed())
+            .await
+            .expect("the recovery owes the engine holder its pass")
+            .expect("the runtime is up");
+        agent.reconcile_now().await.expect("the agent re-presents");
+        let read = backup_read(&app).await.expect("the backup read answers");
+        assert_eq!(
+            destination_ids(&read),
+            vec!["first".to_string(), "second".to_string()],
+            "the account's list, not an empty one"
+        );
+
+        drop(presence);
         app.shutdown().await;
         agent.shutdown().await;
     }
@@ -10727,6 +10992,88 @@ mod tests {
         }
         fn set(&self, _key: &str, _value: &str) {}
         fn delete(&self, _key: &str) {}
+    }
+
+    /// The replica posture follows the credential store (`account-replica-posture.md`
+    /// § Local at-rest posture): sealed wherever the store keeps its items
+    /// away from the data, plaintext only on the file backend.
+    #[test]
+    fn the_replica_posture_is_plaintext_only_on_the_file_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            replica_posture(&CredentialStore::with_file_backend(
+                CRED_NAMESPACE,
+                dir.path().join("file")
+            )),
+            ReplicaPosture::Plaintext
+        );
+        assert_eq!(
+            replica_posture(&CredentialStore::with_sealed_backend(
+                CRED_NAMESPACE,
+                dir.path().join("sealed")
+            )),
+            ReplicaPosture::Sealed
+        );
+        assert_eq!(
+            replica_posture(&CredentialStore::with_foreign_backend(
+                CRED_NAMESPACE,
+                Arc::new(PlatformStore::default())
+            )),
+            ReplicaPosture::Sealed
+        );
+    }
+
+    /// The whole runtime over the phones' lent store — a sealed posture: a
+    /// row it writes rests as no opened byte anywhere in the store dir, and a
+    /// relaunch over the same credential store reads it back.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sealed_replica_reads_its_rows_back_across_a_relaunch() {
+        let fx = fixture();
+        let platform: Arc<dyn SecretStore> = Arc::new(PlatformStore::default());
+        let params = || {
+            let mut params = fx.params("a");
+            params.credentials =
+                CredentialStore::with_foreign_backend(CRED_NAMESPACE, Arc::clone(&platform));
+            params
+        };
+        let marker = "sealed-replica-marker-0123456789";
+        let value = moderation_value(&[marker]);
+
+        let handle = AccountStoreRuntime::start(params())
+            .await
+            .expect("assemble");
+        handle
+            .put_preference(KIND_MODERATION, value.clone())
+            .await
+            .expect("the local write lands");
+        handle.settled().await;
+        handle.shutdown().await;
+
+        let store_dir = store_dir_of(&fx, "a");
+        let mut on_disk = Vec::new();
+        for entry in std::fs::read_dir(&store_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                on_disk.extend(std::fs::read(&path).unwrap());
+            }
+        }
+        assert!(
+            !on_disk
+                .windows(marker.len())
+                .any(|w| w == marker.as_bytes()),
+            "no file in the store dir holds the opened row"
+        );
+
+        let handle = AccountStoreRuntime::start(params())
+            .await
+            .expect("relaunch");
+        let entry = handle
+            .get_preference(KIND_MODERATION)
+            .await
+            .expect("get")
+            .expect("the row survives the relaunch");
+        assert_eq!(entry.value, value, "and opens under the re-derived key");
+        handle.shutdown().await;
     }
 
     /// The writer key mints into the lent store, reads back, and every later

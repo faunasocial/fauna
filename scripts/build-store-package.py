@@ -4,6 +4,13 @@
     just windows-store-package arm64 --identity-name … --publisher …   # what an upload runs
     python scripts/build-store-package.py --arch arm64        # pack an already-staged payload
     python scripts/build-store-package.py --arch arm64 --self-sign
+    python scripts/build-store-package.py --grade <msix> --arch arm64 --identity-name … --publisher …
+
+`--grade` reads a finished package back and checks it is a Store upload (identity,
+capabilities, every PE's arch, no symbols, no automation surface, and — for the
+`store-safe` flavour the Store ships, the default — no payments, zaps or
+peer-to-peer sharing plane in its native core); the public
+`release-store-windows.yml` workflow grades every package it builds with it.
 
 This script PACKS. The payload it packs — the self-contained WinUI publish, the sync
 agent and the shell extension, all in their shipped flavour — is built and staged by
@@ -97,9 +104,13 @@ def _sdk_tool(name):
     return hits[-1]
 
 
-def _product_version():
-    """MSI ProductVersion (Package.wxs) → 4-part MSIX version."""
-    with open(os.path.join(INSTALLER, "Package.wxs"), encoding="utf-8") as f:
+def _product_version(package_wxs=None):
+    """MSI ProductVersion (Package.wxs) → 4-part MSIX version.
+
+    `package_wxs` names another tree's Package.wxs: the public Store workflow grades
+    with the workflow commit's packer a package built from an older recorded commit,
+    whose version is that commit's."""
+    with open(package_wxs or os.path.join(INSTALLER, "Package.wxs"), encoding="utf-8") as f:
         m = re.search(r'\bVersion="(\d+\.\d+\.\d+)"', f.read())
     if not m:
         sys.exit("error: could not read Version from Package.wxs")
@@ -190,41 +201,53 @@ _APP_TEST_NAMESPACE = b"FaunaApp.Testing\x00"
 _FFI_DLL = os.path.join("App", "fauna_ffi.dll")
 
 
-def pe_export_names(path):
-    """The export names of a PE image; [] when `path` is not a PE with an export table.
+def _pe_layout(data):
+    """`(machine, data_directory(index) -> rva, offset(rva) -> file offset)` of a PE
+    image, or None when `data` is not one. Raises struct.error/ValueError on a
+    truncated or inconsistent image.
 
     Standard library only — the packer ships publicly and must not need a binary
     toolchain to read its own payload.
     """
+    if data[:2] != b"MZ":
+        return None
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    if data[pe:pe + 4] != b"PE\0\0":
+        return None
+    coff = pe + 4
+    machine, nsect = struct.unpack_from("<HH", data, coff)
+    (opt_size,) = struct.unpack_from("<H", data, coff + 16)
+    opt = coff + 20
+    (magic,) = struct.unpack_from("<H", data, opt)
+    dirs = opt + (112 if magic == 0x20B else 96)            # PE32+ : PE32
+    (ndirs,) = struct.unpack_from("<I", data, dirs - 4)
+    sections = [struct.unpack_from("<IIII", data, opt + opt_size + 40 * i + 8)
+                for i in range(nsect)]                      # vsize, rva, raw size, raw ptr
+
+    def directory(index):
+        return struct.unpack_from("<I", data, dirs + 8 * index)[0] if index < ndirs else 0
+
+    def offset(rva):
+        for vsize, va, raw_size, raw_ptr in sections:
+            if va <= rva < va + max(vsize, raw_size):
+                return raw_ptr + rva - va
+        raise ValueError(f"rva {rva:#x} outside every section")
+
+    return machine, directory, offset
+
+
+def pe_export_names(path):
+    """The export names of a PE image; [] when `path` is not a PE with an export table."""
     try:
         with open(path, "rb") as f:
             data = f.read()
-        if data[:2] != b"MZ":
+        layout = _pe_layout(data)
+        if layout is None:
             return []
-        pe = struct.unpack_from("<I", data, 0x3C)[0]
-        if data[pe:pe + 4] != b"PE\0\0":
-            return []
-        coff = pe + 4
-        (nsect,) = struct.unpack_from("<H", data, coff + 2)
-        (opt_size,) = struct.unpack_from("<H", data, coff + 16)
-        opt = coff + 20
-        (magic,) = struct.unpack_from("<H", data, opt)
-        dirs = opt + (112 if magic == 0x20B else 96)        # PE32+ : PE32
-        (ndirs,) = struct.unpack_from("<I", data, dirs - 4)
-        if ndirs < 1:
-            return []
-        (exp_rva,) = struct.unpack_from("<I", data, dirs)
+        _, directory, offset = layout
+        exp_rva = directory(0)
         if not exp_rva:
             return []
-        sections = [struct.unpack_from("<IIII", data, opt + opt_size + 40 * i + 8)
-                    for i in range(nsect)]                  # vsize, rva, raw size, raw ptr
-
-        def offset(rva):
-            for vsize, va, raw_size, raw_ptr in sections:
-                if va <= rva < va + max(vsize, raw_size):
-                    return raw_ptr + rva - va
-            raise ValueError(f"rva {rva:#x} outside every section")
-
         exp = offset(exp_rva)
         nnames, names_rva = struct.unpack_from("<I", data, exp + 24)[0], \
             struct.unpack_from("<I", data, exp + 32)[0]
@@ -252,6 +275,131 @@ def automation_surface_hits(payload_root):
     if seams:
         hits.append(f"App/fauna_ffi.dll exports {len(seams)} test seam(s), e.g. {seams[0]}")
     return hits
+
+
+# ── Grading a packed upload ──────────────────────────────────────────────────────
+#
+# `--grade` reads a finished .msix back and checks what a Store upload must be. The
+# packer SETS identity from its arguments; the grade compares the package with what
+# the caller states independently, so a wrong argument or a wrong payload cannot
+# reach the Store looking fine. The Store-upload workflow runs it on every package
+# it builds, and a hand build runs it too (installers/windows.md § Store
+# distribution (MSIX)).
+
+# IMAGE_FILE_MACHINE_* per Store arch.
+_PE_MACHINE = {"x64": 0x8664, "arm64": 0xAA64}
+_PE_MACHINE_I386 = 0x14C
+_CLR_DIRECTORY = 14
+_COMIMAGE_FLAGS_ILONLY = 0x1
+_COMIMAGE_FLAGS_32BITREQUIRED = 0x2
+# Every capability a Store upload declares. Owner of the ruling: installers/windows.md
+# § Data continuity (`unvirtualizedResources` dropped 2026-08-23); the template test
+# pins the same set on the source side.
+STORE_CAPABILITIES = {"runFullTrust"}
+_MANIFEST_NS = "{http://schemas.microsoft.com/appx/manifest/foundation/windows10}"
+
+# The Store package's flavour: `store-safe`, for now (installers/windows.md § Store
+# distribution, the flavour paragraph, owner ruling 2026-10-14) -- the payments
+# plane compiled away, and zaps and peer-to-peer sharing with it. `full` is the
+# direct-download MSI's build, graded only when a new ruling returns the Store to
+# it. What a store-safe core must NOT carry is the native column of `just
+# windows-store-safe-check` (its PAY_KIND_PATS and P2P_NATIVE_PATS): the kind strings
+# and the UniFFI names of the excised planes, all plain UTF-8 in a Rust cdylib.
+FLAVOURS = ("store-safe", "full")
+STORE_SAFE_ABSENT = (
+    b"fauna.payments.", b"fauna.tips.", b"fauna.nostr.zap_signers.",
+    b"uniffi_fauna_ffi_fn_func_offline_share_", b"FfiCeremonySeat",
+    b"share_plane_view", b"FfiSharePlaneView",
+)
+
+
+def pe_arch_problem(data, arch):
+    """Why the PE image `data` cannot ship in the `arch` package, or None.
+
+    A native image must carry the package's machine type. A managed AnyCPU assembly
+    (i386 machine type, a CLR header flagged ILONLY and not 32BITREQUIRED) runs on
+    either arch, so it passes whatever the package's arch.
+    """
+    try:
+        layout = _pe_layout(data)
+        if layout is None:
+            return "is not a PE image"
+        machine, directory, offset = layout
+        if machine == _PE_MACHINE[arch]:
+            return None
+        clr_rva = directory(_CLR_DIRECTORY)
+        if machine == _PE_MACHINE_I386 and clr_rva:
+            (flags,) = struct.unpack_from("<I", data, offset(clr_rva) + 16)
+            if flags & _COMIMAGE_FLAGS_ILONLY and not flags & _COMIMAGE_FLAGS_32BITREQUIRED:
+                return None
+        return f"has machine type {machine:#06x}, not {arch}'s {_PE_MACHINE[arch]:#06x}"
+    except (struct.error, ValueError) as e:
+        return f"is a malformed PE image ({e})"
+
+
+def grade_package(msix_path, arch, identity_name, publisher, version, flavour="store-safe"):
+    """Every reason the package at `msix_path` is not a valid `arch` Store upload
+    of the `flavour` build."""
+    import tempfile
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    if flavour not in FLAVOURS:
+        raise ValueError(f"flavour must be one of {FLAVOURS}, got {flavour!r}")
+    problems = []
+    with zipfile.ZipFile(msix_path) as z:
+        names = z.namelist()
+        try:
+            root = ET.fromstring(z.read("AppxManifest.xml"))
+        except (KeyError, ET.ParseError) as e:
+            return [f"AppxManifest.xml is missing or unreadable ({e})"]
+
+        identity = root.find(f"{_MANIFEST_NS}Identity")
+        want = {"Name": identity_name, "Publisher": publisher, "Version": version,
+                "ProcessorArchitecture": arch}
+        got = {k: (identity.get(k) if identity is not None else None) for k in want}
+        if got != want:
+            problems.append(f"identity is {got}, an upload carries {want}")
+
+        caps = root.find(f"{_MANIFEST_NS}Capabilities")
+        declared = {c.get("Name") for c in (caps if caps is not None else ())}
+        if declared != STORE_CAPABILITIES:
+            problems.append(f"capabilities are {sorted(declared)}, an upload declares "
+                            f"exactly {sorted(STORE_CAPABILITIES)}")
+
+        for name in names:
+            lower = name.lower()
+            if lower.endswith(".pdb"):
+                problems.append(f"{name}: debug symbols (.pdb) never ship")
+            elif lower.endswith((".exe", ".dll")):
+                why = pe_arch_problem(z.read(name), arch)
+                if why:
+                    problems.append(f"{name} {why}")
+
+        # The automation-surface scan reads files on disk; give it ours.
+        with tempfile.TemporaryDirectory() as tmp:
+            for rel in (_APP_ASSEMBLY, _FFI_DLL):
+                member = rel.replace(os.sep, "/")
+                if member in names:
+                    dst = os.path.join(tmp, rel)
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    with open(dst, "wb") as f:
+                        f.write(z.read(member))
+            problems += [f"automation surface: {hit}" for hit in automation_surface_hits(tmp)]
+
+        if flavour == "store-safe":
+            ffi = _FFI_DLL.replace(os.sep, "/")
+            if ffi not in names:
+                # An absent core is an empty scan, which reads as a clean excision.
+                problems.append(f"{ffi} is missing, so the store-safe excision cannot be graded")
+            else:
+                data = z.read(ffi)
+                for marker in STORE_SAFE_ABSENT:
+                    n = data.count(marker)
+                    if n:
+                        problems.append(f"{ffi} carries {n} '{marker.decode()}' occurrence(s); "
+                                        "a store-safe core carries none of the excised planes")
+    return problems
 
 
 def _stage(pack_dir, payload_root, manifest_text, allow_test_surface=False):
@@ -349,6 +497,20 @@ def main():
                     help="pack a payload that carries the e2e automation surface "
                          "(the MSI test helper's stage). Dev/test packages only — "
                          "NEVER an upload; without it such a payload is refused")
+    ap.add_argument("--grade", metavar="MSIX", default=None,
+                    help="grade an already-packed package instead of building one: "
+                         "identity (the identity name and publisher passed here, the "
+                         "Package.wxs version, the one --arch), runFullTrust as the "
+                         "only capability, every PE built for that arch, no .pdb, no "
+                         "automation surface, and the --flavour's excision. Exit 1 on "
+                         "any finding")
+    ap.add_argument("--flavour", choices=FLAVOURS, default="store-safe",
+                    help="with --grade: the build the package must be. `store-safe` "
+                         "(the Store's, the default) also refuses a fauna_ffi.dll "
+                         "carrying the payments, zaps or peer-to-peer sharing planes")
+    ap.add_argument("--package-wxs", default=None,
+                    help="with --grade: the Package.wxs whose version the package must "
+                         "carry (default: this tree's)")
     args = ap.parse_args()
 
     arches = [a.strip() for a in args.arch.split(",") if a.strip()]
@@ -356,7 +518,20 @@ def main():
     if unknown:
         sys.exit(f"error: unknown arch {unknown}; supported: {list(ARCHES)}")
 
-    version = _product_version()
+    version = _product_version(args.package_wxs if args.grade else None)
+    if args.grade:
+        if len(arches) != 1:
+            sys.exit("error: --grade grades one package; name its one --arch")
+        problems = grade_package(args.grade, arches[0], args.identity_name,
+                                 args.publisher, version, flavour=args.flavour)
+        for p in problems:
+            print(f"GRADE FAIL: {p}")
+        if problems:
+            return 1
+        print(f"GRADE OK: {args.grade} is a {arches[0]} {args.flavour} upload of "
+              f"{args.identity_name} {version}, publisher {args.publisher}")
+        return 0
+
     with open(os.path.join(STORE, "AppxManifest.xml.in"), encoding="utf-8") as f:
         template = f.read()
 

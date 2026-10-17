@@ -11,6 +11,7 @@ import com.fauna.app.testing.FaunaRobolectricTestRunner
 import org.robolectric.annotation.Config
 import uniffi.fauna_media_machine.FileVersionSummary
 import uniffi.fauna_media_machine.FollowedScopeOption
+import uniffi.fauna_media_machine.MediaFolderOption
 import uniffi.fauna_media_machine.MediaItemSummary
 import uniffi.fauna_media_machine.MediaPageSnapshot
 import uniffi.fauna_media_machine.ShareCreateSnapshot
@@ -40,6 +41,9 @@ class MediaContentTest {
         eligible: Boolean = false,
     ) = MediaItemSummary(
         folder = set,
+        // Sibling field-add: the filter value that scopes the browse to this
+        // item's own set; for an own set it is the set's name.
+        filterValue = set,
         path = "$set/$name",
         name = name,
         sizeBytes = 2048L,
@@ -54,6 +58,10 @@ class MediaContentTest {
         folders: List<String> = listOf("photos", "videos"),
         sort: String = "name",
         filter: String? = null,
+        filterLabel: String? = filter,
+        folderOptions: List<MediaFolderOption> = folders.map {
+            MediaFolderOption(name = it, folderId = null, value = it, label = it)
+        },
         viewGrid: Boolean = false,
         loaded: Boolean = true,
         shareCreate: ShareCreateSnapshot? = null,
@@ -61,12 +69,11 @@ class MediaContentTest {
     ) = MediaPageSnapshot(
         items = items,
         folders = folders,
-        // A sibling field-add: the same entries with each set's id beside its
-        // label; nothing this fixture renders reads them.
-        folderOptions = emptyList(),
+        folderOptions = folderOptions,
         sort = sort,
         descending = false,
         filter = filter,
+        filterLabel = filterLabel,
         viewGrid = viewGrid,
         // Sibling field-adds this fixture had not caught up with: no followed
         // scopes, and none selected.
@@ -398,6 +405,35 @@ class MediaContentTest {
         composeTestRule.onAllNodesWithText("photos")[0].assertExists()
     }
 
+    // A same-named own set and shared set are two options: each paints its
+    // minted label and hands its minted value (the shared one's row address)
+    // to the filter gesture, never the name (media.md § The filter and the
+    // upload target address the row).
+    @Test
+    fun aSameNamedSharedSetIsItsOwnLabelledOptionAddressedByRow() {
+        var picked: String? = null
+        render(
+            snapshot(
+                folderOptions = listOf(
+                    MediaFolderOption(name = "photos", folderId = "local:1", value = "photos", label = "photos"),
+                    MediaFolderOption(name = "photos", folderId = "local:42", value = "local:42", label = "photos (alice)"),
+                ),
+            ),
+            actions = MediaActions(onSetFilter = { picked = it }),
+        )
+        composeTestRule.onNodeWithTag("media-folder-filter").performClick()
+        composeTestRule.onNodeWithText("local:42").assertDoesNotExist()
+        composeTestRule.onNodeWithText("photos (alice)").performClick()
+        assertEquals("local:42", picked)
+    }
+
+    @Test
+    fun filterSelectShowsTheActiveOptionsMintedLabel() {
+        render(snapshot(filter = "local:42", filterLabel = "photos (alice)"))
+        composeTestRule.onAllNodesWithText("photos (alice)")[0].assertExists()
+        composeTestRule.onNodeWithText("local:42").assertDoesNotExist()
+    }
+
     @Test
     fun filterSelectDefaultsToAllMedia() {
         render(snapshot(filter = null))
@@ -643,6 +679,7 @@ class MediaContentTest {
     private fun followedSnapshot() = snapshot(
         items = listOf(item("pub.jpg", set = "Holiday pics")),
         filter = followedOpt.value,
+        filterLabel = followedOpt.label,
     ).copy(followed = listOf(followedOpt), followedScope = followedOpt)
 
     @Test

@@ -51,13 +51,53 @@ public sealed partial class MailSpamPanel : UserControl
     public MailSpamPanel()
     {
         this.InitializeComponent();
+        Unloaded += (_, _) => Unsubscribe();
+    }
+
+    private INestRpcClient? _subscribed;
+
+    /// <summary>Follow an undo or reset made on another device (mail-spam.md
+    /// § Implementation status today, item 5): the shared classifier's
+    /// <c>mail_spam</c> push flag, and a reconnect, re-hydrate the open history.
+    /// Subscribed only while the panel is loaded; idempotent.</summary>
+    private void Subscribe()
+    {
+        var rpc = _clients?.Rpc;
+        if (rpc is null || ReferenceEquals(_subscribed, rpc)) return;
+        Unsubscribe();
+        rpc.MailSpamPushChanged += OnSpamHistoryStale;
+        rpc.Reconnected += OnSpamHistoryStale;
+        _subscribed = rpc;
+    }
+
+    private void Unsubscribe()
+    {
+        if (_subscribed is null) return;
+        _subscribed.MailSpamPushChanged -= OnSpamHistoryStale;
+        _subscribed.Reconnected -= OnSpamHistoryStale;
+        _subscribed = null;
+    }
+
+    /// <summary>Re-read the history WITHOUT the visit's reset of the form: a push must
+    /// never disarm a reset confirm the user is looking at, so <c>_resetArmed</c> and
+    /// the button label are left alone (the tui's <c>mail_spam_resync_op</c> shape).
+    /// Skipped until the first load has built the VM — that load reads fresh anyway.</summary>
+    private async void OnSpamHistoryStale()
+    {
+        if (_vm is null) return;
+        await _vm.ResyncAsync();
+        RenderState();
     }
 
     /// <summary>Supplied by the host page (SettingsMailSpamPage.OnNavigatedTo) before Loaded
     /// fires — carries the secrets used to build the WS client.</summary>
     internal void Configure(ServiceClients clients) => _clients = clients;
 
-    private async void Panel_Loaded(object sender, RoutedEventArgs e) => await LoadAsync();
+    private async void Panel_Loaded(object sender, RoutedEventArgs e)
+    {
+        Subscribe();
+        await LoadAsync();
+    }
 
     private async Task EnsureVmAsync()
     {
@@ -110,6 +150,9 @@ public sealed partial class MailSpamPanel : UserControl
             ContributeToggle.IsOn = _vm.ContributeBaseline;
             _syncing = false;
         }
+        // The uniform `state` attr (on/off) the e2e driver reads for this toggle.
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
+            ContributeToggle, _vm.ContributeBaseline ? "on" : "off");
 
         // Reflect the persisted report-share opt-in without echoing it back as a dispatch.
         // Mirrored to AutomationProperties.HelpText so the e2e driver reads it via the
@@ -136,7 +179,7 @@ public sealed partial class MailSpamPanel : UserControl
     }
 
     /// <summary>Reset is destructive + irreversible — arm-then-confirm (no modal, no
-    /// separate confirm ID): the first click arms (relabels "Confirm?") and auto-disarms
+    /// separate confirm ID): the first click arms (relabels to <c>mail_spam.reset_confirm</c>) and auto-disarms
     /// after 4 s; the second click within the window dispatches. Mirrors the linux
     /// wire_two_click and MailAliasesPanel's per-row confirm.</summary>
     private async void Reset_Click(object sender, RoutedEventArgs e)
@@ -147,7 +190,7 @@ public sealed partial class MailSpamPanel : UserControl
         {
             _resetArmed = true;
             var baseLabel = ResetButton.Content;
-            ResetButton.Content = "Confirm?";
+            ResetButton.Content = S.Get("mail_spam/reset_confirm");
             await Task.Delay(4000);
             if (_resetArmed)
             {

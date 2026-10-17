@@ -154,6 +154,15 @@ impl LabelerCatalogState {
         self.snapshot.as_ref().is_some_and(|s| s.loaded)
     }
 
+    /// Whether the catalog row at `index` paints subscribe enabled — the
+    /// shared `LabelerCatalogSnapshot::subscribe_enabled`, every app's one
+    /// read of the inspect gate. No snapshot yet → no rows to paint.
+    fn subscribe_enabled(&self, index: u32) -> bool {
+        self.snapshot
+            .as_ref()
+            .is_some_and(|s| s.subscribe_enabled(index))
+    }
+
     /// The open inspect view, if the panel is showing.
     pub(crate) fn inspecting(&self) -> Option<&LabelerInspectView> {
         self.snapshot.as_ref()?.inspecting.as_ref()
@@ -269,7 +278,7 @@ pub(super) fn personalization_elements(state: &SettingsState) -> Vec<Element> {
     for (row, (index, entry)) in subscribed.iter().enumerate() {
         // `show_inspect_subscribe: false` — the home is the "what I already
         // granted" facet; browsing and granting happen on the catalog page.
-        push_labeler_row(&mut els, entry, *index, row, false);
+        push_labeler_row(&mut els, entry, *index, row, false, false);
     }
     els.push(Element::gesture_button(
         ids::PERSONALIZATION_BROWSE_CATALOG_BUTTON,
@@ -328,7 +337,14 @@ pub(super) fn labeler_catalog_elements(state: &SettingsState) -> Vec<Element> {
     for (row, entry) in entries.iter().enumerate() {
         // On the catalog the painted row and the snapshot index coincide; the
         // pair is passed explicitly anyway so the two never silently fuse.
-        push_labeler_row(&mut els, entry, row as u32, row, true);
+        push_labeler_row(
+            &mut els,
+            entry,
+            row as u32,
+            row,
+            true,
+            lc.subscribe_enabled(row as u32),
+        );
     }
     if let Some(view) = lc.inspecting() {
         push_inspect_panel(
@@ -360,12 +376,20 @@ pub(super) fn labeler_catalog_elements(state: &SettingsState) -> Vec<Element> {
 /// user already granted). **Unsubscribe renders on both** whenever the row is
 /// subscribed, and exactly one of subscribe/unsubscribe ever paints per row — the
 /// gating the shared action's `wait_for_subscribed_state` polls on.
+///
+/// `subscribe_enabled` is the shared `LabelerCatalogSnapshot::subscribe_enabled`
+/// for this row: false when the open inspect view is THIS row's labeler and
+/// fails [`LabelerInspectView::subscribable`] (`content-moderation-and-ranking.md`
+/// § Tier-3: "`verified` reads false and subscribe stays disabled"). The shared
+/// machine refuses the gesture regardless — this is the visible half of the
+/// same predicate. Unread where `show_inspect_subscribe` is false.
 fn push_labeler_row(
     els: &mut Vec<Element>,
     entry: &LabelerCatalogEntry,
     index: u32,
     row: usize,
     show_inspect_subscribe: bool,
+    subscribe_enabled: bool,
 ) {
     els.push(Element::label(ids::LABELER_CATALOG_ITEM, String::new()));
     // The kind badge is the ONE field that is not a verbatim passthrough, and
@@ -419,7 +443,7 @@ fn push_labeler_row(
                 Element::gesture_button(
                     ids::LABELER_CATALOG_ITEM_SUBSCRIBE_BUTTON,
                     t::SUBSCRIBE,
-                    true,
+                    subscribe_enabled,
                     Gesture::Settings(Action::LabelerSubscribe(index)),
                 )
                 .within(ids::LABELER_CATALOG_ITEM, row),
@@ -456,12 +480,28 @@ pub(crate) fn push_inspect_panel(
     close: Gesture,
 ) {
     els.push(Element::label(ids::LABELER_INSPECT_PANEL, String::new()));
+    // The declared output revision sits beside the five input flags, and a
+    // module this build cannot read says so in the same block — inert, with
+    // subscribe disabled (`content-moderation-and-ranking.md` § Tier-3 → *The
+    // output half of the `label()` ABI*, position (ii)). The sentence is the
+    // machine's own refusal key, so the notice and the refused subscribe's
+    // `error-message` are one string.
+    let newer_notice = if view.newer_than_this_app {
+        format!(
+            "\n{}",
+            crate::wizard::localized(&fauna_core::localized::LocalizedText::key(
+                fauna_labeler_catalog_machine::NEEDS_NEWER_APP_KEY,
+            ))
+        )
+    } else {
+        String::new()
+    };
     els.push(Element::label(
         ids::LABELER_INSPECT_METADATA,
         format!(
             "labeler_id: {}\nversion: {}\nartifact_kind: {}\nwasm_hash: {}\nwasm_size: {}\n\
              needs_text: {}\nneeds_hashtags: {}\nneeds_media_metadata: {}\nneeds_author: {}\n\
-             needs_attachment_bytes: {}\nverified: {}",
+             needs_attachment_bytes: {}\nlabel_abi: {}\nverified: {}{}",
             view.labeler_id,
             view.version,
             view.artifact_kind,
@@ -472,7 +512,9 @@ pub(crate) fn push_inspect_panel(
             view.needs_media_metadata,
             view.needs_author,
             view.needs_attachment_bytes,
+            view.label_abi,
             view.verified,
+            newer_notice,
         ),
     ));
     // The list-kind section is `optional_elements` in ui.yaml — it registers only
@@ -679,6 +721,98 @@ mod tests {
         }
         // The empty state is the honest alternative to rows, never both.
         assert!(!ids.contains(&"labeler-catalog-empty".to_string()));
+    }
+
+    /// An open inspect view that fails the shared `subscribable` predicate
+    /// disables THAT row's subscribe, and only that row's; a verified view
+    /// leaves it enabled.
+    #[test]
+    fn an_unverified_inspected_labeler_paints_its_subscribe_disabled() {
+        let view = |tag: &str, verified: bool| LabelerInspectView {
+            labeler_id: tag.repeat(32),
+            version: 1,
+            artifact_kind: "wasm".into(),
+            wasm_hash: "ab".repeat(36),
+            wasm_size: 1024,
+            needs_text: true,
+            needs_hashtags: false,
+            needs_media_metadata: false,
+            needs_author: false,
+            needs_attachment_bytes: false,
+            label_abi: 1,
+            newer_than_this_app: false,
+            verified,
+            list_name: None,
+            list_entries: Vec::new(),
+            model_name: None,
+            model_ngrams: Vec::new(),
+        };
+        let enabled = |verified: bool| {
+            let mut state = state_with(vec![entry("a", false), entry("b", false)]);
+            state.labeler_catalog.snapshot.as_mut().unwrap().inspecting = Some(view("a", verified));
+            let els = labeler_catalog_elements(&state);
+            let at = |row: usize| {
+                els.iter()
+                    .find(|e| {
+                        e.id == "labeler-catalog-item-subscribe-button"
+                            && e.path == vec![("labeler-catalog-item".to_string(), row)]
+                    })
+                    .expect("an unsubscribed row paints subscribe")
+                    .enabled
+            };
+            (at(0), at(1))
+        };
+        assert_eq!(
+            enabled(false),
+            (false, true),
+            "unverified: row 0 disabled, row 1 untouched"
+        );
+        assert_eq!(enabled(true), (true, true), "verified: subscribable");
+
+        // A verified labeler whose module emits a newer label format than this
+        // build reads (`content-moderation-and-ranking.md` § Tier-3 → *The
+        // output half of the `label()` ABI*, position (ii)): the panel shows
+        // the revision and says so, and the row's subscribe is disabled.
+        let mut state = state_with(vec![entry("a", false), entry("b", false)]);
+        let mut newer = view("a", true);
+        newer.label_abi = fauna_core::scoring::LABEL_ABI_CURRENT + 1;
+        newer.newer_than_this_app = true;
+        state.labeler_catalog.snapshot.as_mut().unwrap().inspecting = Some(newer);
+        let els = labeler_catalog_elements(&state);
+        let subscribe = |row: usize| {
+            els.iter()
+                .find(|e| {
+                    e.id == "labeler-catalog-item-subscribe-button"
+                        && e.path == vec![("labeler-catalog-item".to_string(), row)]
+                })
+                .expect("an unsubscribed row paints subscribe")
+                .enabled
+        };
+        assert_eq!(
+            (subscribe(0), subscribe(1)),
+            (false, true),
+            "newer: row 0 disabled"
+        );
+        let metadata = &els
+            .iter()
+            .find(|e| e.id == "labeler-inspect-metadata")
+            .unwrap()
+            .text;
+        assert!(
+            metadata.contains(&format!(
+                "label_abi: {}",
+                fauna_core::scoring::LABEL_ABI_CURRENT + 1
+            )),
+            "metadata: {metadata:?}"
+        );
+        assert!(
+            metadata.ends_with(&crate::wizard::localized(
+                &fauna_core::localized::LocalizedText::key(
+                    fauna_labeler_catalog_machine::NEEDS_NEWER_APP_KEY
+                )
+            )),
+            "the inert notice closes the block: {metadata:?}"
+        );
     }
 
     /// The empty state paints only when the catalog is genuinely empty.
@@ -895,9 +1029,10 @@ mod tests {
             .unwrap()
             .text;
         assert!(metadata.contains("version: 7"), "metadata: {metadata:?}");
+        assert!(metadata.contains("label_abi: 1"), "metadata: {metadata:?}");
         assert!(
-            metadata.contains("verified: true"),
-            "metadata: {metadata:?}"
+            metadata.ends_with("verified: true"),
+            "an ordinary labeler carries no inert notice: {metadata:?}"
         );
     }
 
@@ -913,6 +1048,8 @@ mod tests {
             needs_media_metadata: false,
             needs_author: false,
             needs_attachment_bytes: true,
+            label_abi: 1,
+            newer_than_this_app: false,
             verified: true,
             list_name: Some("Cats".to_string()),
             list_entries: vec![

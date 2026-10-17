@@ -5,9 +5,11 @@ This is the one e2e tier that stands up a *real, paid* VPS at a real cloud
 provider, drives DNS in a real zone, and tears it all down. It is therefore
 **opt-in** and never runs in default CI:
 
-  * ``HETZNER_API_TOKEN`` — REQUIRED, from the env **or the file
-    ``~/.hetzner-token``** (the fleet's per-machine home for it; the env wins
-    when both are set — ``helpers.live_provision.hetzner_token``). A single
+  * ``HETZNER_API_TOKEN`` — REQUIRED, from the env **or the token file of the
+    cloud project the run's box lives in** (``~/.config/fauna/cloud/uat.token``
+    for the uat boxes and the throwaway ones; the env wins when both are set —
+    ``helpers.live_provision.hetzner_token``, the map in
+    ``scripts/_cloud_project.py``). A single
     Hetzner **Cloud** API token with Read&Write on the project. It covers *both*
     server provisioning and DNS (Hetzner's standalone DNS API went read-only
     2026-05-20; zones are now Cloud resources under the same Bearer token —
@@ -39,7 +41,7 @@ from datetime import datetime, timezone
 import pytest
 import requests
 
-from helpers.live_provision import hetzner_token
+from helpers.live_provision import hetzner_token, hetzner_token_hint
 
 HETZNER_API = "https://api.hetzner.cloud/v1"
 # A server older than this whose name starts with `e2e-` is a crashed-run orphan
@@ -98,8 +100,7 @@ def _live_provisioning_gate(request):
     token = hetzner_token()
     if not token:
         pytest.skip(
-            "live Hetzner provisioning needs HETZNER_API_TOKEN (a Cloud R/W token) in the "
-            "env or in ~/.hetzner-token"
+            "live Hetzner provisioning needs a Cloud R/W token: " + hetzner_token_hint()
         )
     # A file-sourced token is promoted into the env so the four live tests and
     # the `hetzner` fixture keep their one name (`os.environ["HETZNER_API_TOKEN"]`)

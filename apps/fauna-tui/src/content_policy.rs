@@ -44,11 +44,29 @@ use fauna_core::obligation::{ComposedVerdict, ContentPolicy, ViewerThresholds};
 /// shared [`fauna_core::obligation::ContentPolicyState`] (see the module
 /// docs for why the interior mutability lives here rather than there).
 ///
-/// Default = no thresholds, no floor, counting off = every item renders normally,
-/// which is also what an identity change resets to
+/// Default = no thresholds, no floor, counting off, no session = every item
+/// renders normally, which is also what an identity change resets to
 /// ([`crate::app::App::drop_authenticated_state`]).
-#[derive(Debug, Default)]
-pub struct ContentPolicyState(std::cell::RefCell<fauna_core::obligation::ContentPolicyState>);
+#[derive(Default)]
+pub struct ContentPolicyState {
+    engine: std::cell::RefCell<fauna_core::obligation::ContentPolicyState>,
+    /// This session's nest, bound by [`attach_session`] — what the reconnect
+    /// sweep re-reads the viewer's own thresholds through
+    /// ([`spawn_spam_preferences_check`]). Cleared with the rest of the state
+    /// on an identity change, so a re-read can never cross accounts.
+    nest: Option<std::sync::Arc<fauna_client::NestClient>>,
+}
+
+// By hand: `NestClient` is not `Debug`; whether a session is bound is all
+// there is to show of it.
+impl std::fmt::Debug for ContentPolicyState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContentPolicyState")
+            .field("engine", &self.engine)
+            .field("nest_bound", &self.nest.is_some())
+            .finish()
+    }
+}
 
 impl ContentPolicyState {
     /// Epoch seconds and the device's local UTC offset in minutes.
@@ -73,7 +91,7 @@ impl ContentPolicyState {
             spam_permille: p.spam_threshold,
             phishing_permille: p.phishing_threshold,
         });
-        self.0.borrow_mut().set_spam_preferences(thresholds);
+        self.engine.borrow_mut().set_spam_preferences(thresholds);
     }
 
     /// Set the supervised viewer's guardian content policy (from the
@@ -81,7 +99,7 @@ impl ContentPolicyState {
     /// [`Self::verdict_for`]. `None` clears the floor (unsupervised, or a
     /// graduated ward).
     pub fn set_ward_content_policy(&self, policy: Option<ContentPolicy>) {
-        self.0.borrow_mut().set_ward_content_policy(policy);
+        self.engine.borrow_mut().set_ward_content_policy(policy);
     }
 
     /// Set whether the guardian's **Guardian Notify** knob (`content_notify`) is
@@ -89,7 +107,7 @@ impl ContentPolicyState {
     /// counting runs only while on; turning it off drops future counting,
     /// pending counts included.
     pub fn set_ward_content_notify(&self, on: bool) {
-        self.0.borrow_mut().set_ward_content_notify(on);
+        self.engine.borrow_mut().set_ward_content_notify(on);
     }
 
     /// Set the region content policies in force on the declared region's
@@ -97,7 +115,7 @@ impl ContentPolicyState {
     /// (`region-blocking.md` § Where it composes). Fed from
     /// `crate::region::apply_rule_sets`; replaces, never merges.
     pub fn set_region_policies(&self, policies: Vec<fauna_core::region_policy::RegionRuleSet>) {
-        self.0.borrow_mut().set_region_policies(policies);
+        self.engine.borrow_mut().set_region_policies(policies);
     }
 
     /// The content-policy render verdict for a piece of content, keyed on the
@@ -114,7 +132,7 @@ impl ContentPolicyState {
     /// family policy (`region-blocking.md` § Where it composes). A surface that
     /// only needs the verb reads `.verdict`.
     pub fn verdict_for(&self, labels: &[ContentLabelEntry]) -> ComposedVerdict {
-        self.0.borrow().verdict_for(labels)
+        self.engine.borrow().verdict_for(labels)
     }
 
     /// [`Self::verdict_for`] for one identified item, plus the viewer's own
@@ -126,13 +144,15 @@ impl ContentPolicyState {
         author_id: Option<&str>,
         labels: &[ContentLabelEntry],
     ) -> ComposedVerdict {
-        self.0.borrow().verdict_for_item(item_id, author_id, labels)
+        self.engine
+            .borrow()
+            .verdict_for_item(item_id, author_id, labels)
     }
 
     /// Replace the viewer's reported-and-hidden ids — the stored list the
     /// login read, or a report's hide, returns (`crate::report`).
     pub fn set_hidden_content(&self, ids: Vec<String>) {
-        self.0.borrow_mut().set_hidden_content(ids);
+        self.engine.borrow_mut().set_hidden_content(ids);
     }
 
     /// Record any **guardian-floor** render-enforcement on `item_id` for Guardian
@@ -143,7 +163,7 @@ impl ContentPolicyState {
     /// re-counts.
     pub fn note_enforcement(&self, item_id: &str, labels: &[ContentLabelEntry]) {
         let (now, offset) = Self::now_and_offset();
-        self.0
+        self.engine
             .borrow_mut()
             .note_enforcement(item_id, labels, now, offset);
     }
@@ -153,7 +173,7 @@ impl ContentPolicyState {
     /// sends `fauna.family.notify_report(entries, offset)`.
     pub fn take_notify_report(&self) -> Option<(Vec<FamilyContentNotice>, i32)> {
         let (now, _offset) = Self::now_and_offset();
-        let (entries, offset) = self.0.borrow_mut().take_notify_report(now)?;
+        let (entries, offset) = self.engine.borrow_mut().take_notify_report(now)?;
         let entries = entries
             .into_iter()
             .map(|(category, count)| FamilyContentNotice {
@@ -166,7 +186,20 @@ impl ContentPolicyState {
     }
 }
 
-/// Fire-and-forget the post-auth `fauna.spam.get_preferences` read that hydrates
+/// Bind this session's nest for the own-threshold read and fire the post-auth
+/// one (`session::establish`). The reconnect sweep fires the same read again
+/// through the bound nest ([`crate::app::App::apply_resync`]'s
+/// `own_thresholds` arm).
+pub fn attach_session(
+    app: &mut crate::app::App,
+    nest: std::sync::Arc<fauna_client::NestClient>,
+    tx: &tokio::sync::mpsc::UnboundedSender<crate::app::UiMessage>,
+) {
+    app.content_policy.nest = Some(nest);
+    spawn_spam_preferences_check(app, tx);
+}
+
+/// Fire-and-forget the `fauna.spam.get_preferences` read that hydrates
 /// the viewer's OWN thresholds (`family-safety.md` § Content policy — the
 /// every-user own-threshold collapse that un-darks `moderation.md` § Categories &
 /// enforcement item 1).
@@ -177,14 +210,28 @@ impl ContentPolicyState {
 /// they asked to have collapsed would flash before the read landed. The family
 /// half rides `fauna.family.status`, which is fetched here for the same reason.
 ///
-/// A failure leaves the thresholds unset, which composes no own-threshold rule.
-/// That is the honest degrade (the same one an account that never set thresholds
-/// gets) and is logged rather than surfaced: the user did not ask for this read,
-/// and any guardian floor still binds independently.
+/// Fired at login and again on every WS reconnect — the same two moments
+/// `family-client-enforcement.md` § Content policy names for the guardian half:
+/// the login read is the one least likely to succeed, and before the reconnect
+/// re-read a login read that lost the socket left the own-threshold collapse
+/// off for the whole session.
+///
+/// A failure keeps whatever thresholds are loaded (none, on a first read that
+/// failed — which composes no own-threshold rule, the same degrade an account
+/// that never set thresholds gets). It is logged rather than surfaced: the user
+/// did not ask for this read, and any guardian floor still binds independently.
+///
+/// The reply carries the [`crate::app::App::session_generation`] captured here,
+/// so a read still in flight across an identity change never lands on the
+/// incoming account.
 pub fn spawn_spam_preferences_check(
-    nest: std::sync::Arc<fauna_client::NestClient>,
+    app: &crate::app::App,
     tx: &tokio::sync::mpsc::UnboundedSender<crate::app::UiMessage>,
 ) {
+    let Some(nest) = app.content_policy.nest.clone() else {
+        return;
+    };
+    let generation = app.session_generation;
     let tx = tx.clone();
     tokio::spawn(async move {
         let client = fauna_client_spam::SpamClient::new(nest);
@@ -194,7 +241,7 @@ pub fn spawn_spam_preferences_check(
         match client.get_preferences(req).await {
             Ok(prefs) => {
                 let _ = tx.send(crate::app::UiMessage::Data(
-                    crate::app::DataMessage::SpamPreferencesLoaded(prefs),
+                    crate::app::DataMessage::SpamPreferencesLoaded(generation, prefs),
                 ));
             }
             Err(e) => {

@@ -16,12 +16,15 @@ use async_trait::async_trait;
 use fauna_protocol::RpcRequester;
 use fauna_protocol::folders::{
     ConflictReportReply, ConflictReportRequest, ConflictResolveReply, ConflictResolveRequest,
-    FolderDepositsListReply, FolderDepositsListRequest, FolderDepositsRetireReply,
-    FolderDepositsRetireRequest, FolderUpdateReply, FolderUpdateRequest,
-    KIND_FOLDERS_DEPOSITS_LIST, KIND_FOLDERS_DEPOSITS_RETIRE, KIND_FOLDERS_UPDATE,
+    FolderDepositsListReply, FolderDepositsListRequest, FolderDepositsPartReply,
+    FolderDepositsPartRequest, FolderDepositsRetireReply, FolderDepositsRetireRequest,
+    FolderUpdateReply, FolderUpdateRequest, KIND_FOLDERS_DEPOSITS_LIST, KIND_FOLDERS_DEPOSITS_PART,
+    KIND_FOLDERS_DEPOSITS_RETIRE, KIND_FOLDERS_UPDATE,
 };
 
-use fauna_protocol::web::{WebFilesPruneSealedReply, WebFilesPruneSealedRequest};
+#[cfg(feature = "web")]
+use fauna_protocol::web::WebFilesPruneSealedReply;
+use fauna_protocol::web::WebFilesPruneSealedRequest;
 
 use super::{SyncControlApi, SyncControlError};
 
@@ -34,9 +37,11 @@ const CONFLICTS_REPORT_KIND: &str = "fauna.sync.conflicts.report";
 /// review list.
 const CONFLICTS_RESOLVE_KIND: &str = "fauna.sync.conflicts.resolve";
 
-/// WS-RPC kind the complete-set declaration rides
+/// WS-RPC kind the complete-set declaration rides — compiled only with the
+/// `web` feature, so a build that excises web publishing carries no sender.
 /// (`SyncEngine::converge_corpus_to_website`). See
 /// `docs/goal/behavior/web-content-hosting.md` § Content model.
+#[cfg(feature = "web")]
 const WEB_FILES_PRUNE_SEALED_KIND: &str = "fauna.web.files.prune_sealed";
 
 /// The production control plane: any [`RpcRequester`] (natively
@@ -101,6 +106,7 @@ where
         Ok(reply.ok)
     }
 
+    #[cfg(feature = "web")]
     async fn do_prune_sealed_web_files(
         &self,
         req: WebFilesPruneSealedRequest,
@@ -113,6 +119,21 @@ where
         Ok(reply.dropped)
     }
 
+    /// Without the `web` feature the build excises web publishing, so there
+    /// is no sender: the declaration is refused locally, which the caller
+    /// already treats as non-fatal (it logs and proceeds — the trait's
+    /// contract), and no set is ever sent.
+    #[cfg(not(feature = "web"))]
+    async fn do_prune_sealed_web_files(
+        &self,
+        _req: WebFilesPruneSealedRequest,
+    ) -> Result<u32, SyncControlError> {
+        Err(SyncControlError(
+            "sealed web_files prune skipped: web publishing is not compiled into this build"
+                .to_owned(),
+        ))
+    }
+
     async fn do_list_deposits(
         &self,
         req: FolderDepositsListRequest,
@@ -121,6 +142,18 @@ where
             .request(KIND_FOLDERS_DEPOSITS_LIST, req)
             .await
             .map_err(|e| SyncControlError(format!("deposits list failed: {e}")))
+    }
+
+    async fn do_fetch_deposit_part(
+        &self,
+        req: FolderDepositsPartRequest,
+    ) -> Result<Vec<u8>, SyncControlError> {
+        let reply: FolderDepositsPartReply = self
+            .nest
+            .request(KIND_FOLDERS_DEPOSITS_PART, req)
+            .await
+            .map_err(|e| SyncControlError(format!("deposit part fetch failed: {e}")))?;
+        Ok(reply.sealed.into_vec())
     }
 
     async fn do_retire_deposit(
@@ -176,6 +209,13 @@ impl SyncControlApi for WsRpcSyncControl<std::sync::Arc<fauna_client::NestClient
         req: FolderDepositsListRequest,
     ) -> Result<FolderDepositsListReply, SyncControlError> {
         self.do_list_deposits(req).await
+    }
+
+    async fn fetch_deposit_part(
+        &self,
+        req: FolderDepositsPartRequest,
+    ) -> Result<Vec<u8>, SyncControlError> {
+        self.do_fetch_deposit_part(req).await
     }
 
     async fn retire_deposit(

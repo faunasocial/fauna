@@ -95,11 +95,34 @@ pub struct NestInfo {
     /// claimed, *orderable* domain — the URL is derived from the nest's claimed
     /// identity (`handle_domain()`), not any boot env (there is no `FAUNA_DOMAIN`;
     /// domains-and-tls-bootstrap.md § Env contract). `None` on a nest with no iroh
-    /// relay, or a domainless/localhost/IP box (incl. a WireGuard-only relay, which
-    /// advertises `RELAY` but routes via the peer registry, not a URL). The seam's
+    /// relay, or a domainless/localhost/IP box. The seam's
     /// client-side `RelayMode::Custom` dials this when no direct path establishes
     /// (`fauna_iroh::IrohTransport`).
     pub iroh_relay_url: Option<String>,
+    /// The newest published release this nest's update check learned —
+    /// [`newest_release`]; see
+    /// [`fauna_protocol::discovery::NestInfoReply::newest_release`].
+    pub newest_release: Option<String>,
+}
+
+/// The newest published release this nest knows of, for `nest.info`
+/// (`installers/README.md` § Knowing a newer version is out → *The nest's
+/// newest-release field*): read off the update check's watch channel, and
+/// the release's version whether or not this nest runs it — never
+/// `CARGO_PKG_VERSION`, which this anonymous reply coarsens. `None` while the
+/// check is off or has had no answer. Under `test-hooks` a harness-seeded
+/// answer takes its place (`release_test_hook`), so a tier_3 run never
+/// depends on what the real release host says.
+pub fn newest_release(state: &AppState) -> Option<String> {
+    #[cfg(feature = "test-hooks")]
+    if let Some(seeded) = crate::release_test_hook::seeded() {
+        return seeded;
+    }
+    state
+        .update_status
+        .borrow()
+        .as_ref()
+        .and_then(|status| status.newest_release().map(str::to_owned))
 }
 
 /// The build/version capability set this nest advertises on
@@ -150,6 +173,7 @@ pub fn advertised_capabilities(relay_runtime_enabled: bool) -> Vec<String> {
         cfg!(feature = "payments"),
         relay_runtime_enabled,
         cfg!(feature = "p2p-share"),
+        cfg!(feature = "zaps"),
     )
 }
 
@@ -164,7 +188,7 @@ pub fn advertised_capabilities(relay_runtime_enabled: bool) -> Vec<String> {
 /// body the shipped build compiles to and test *that*
 /// (`merge-gate-check.md` § Merge-gate check → *Feature scope*; the in-repo template
 /// is `activitypub::outbound::ap_outbound_client_strict`).
-pub fn capabilities_for(payments: bool, relay: bool, p2p_share: bool) -> Vec<String> {
+pub fn capabilities_for(payments: bool, relay: bool, p2p_share: bool, zaps: bool) -> Vec<String> {
     let mut caps = vec![
         fauna_protocol::discovery::capability::MAIL.to_string(),
         fauna_protocol::discovery::capability::CALENDAR.to_string(),
@@ -230,6 +254,14 @@ pub fn capabilities_for(payments: bool, relay: bool, p2p_share: bool) -> Vec<Str
     if p2p_share {
         caps.push(fauna_protocol::discovery::capability::P2P_SHARE.to_string());
     }
+    // ZAPS: the zap plane, a subset member of `payments`. Conditional on the
+    // build compiling the `zaps` registry member — without it a `payments`-only
+    // nest is indistinguishable from a full one and no surface could hide the
+    // zap rows. The nest's `zaps` cargo feature implies `payments`, so this
+    // arm never advertises zaps without `subscriptions`.
+    if zaps {
+        caps.push(fauna_protocol::discovery::capability::ZAPS.to_string());
+    }
     caps
 }
 
@@ -271,8 +303,8 @@ pub(crate) fn relay_wanted(apex: &str) -> bool {
 /// SAN. Keeping the two in lock-step is load-bearing: the advertised host must
 /// match a name the relay's cert is valid for. A domainless/localhost/IP box (or a
 /// disabled sidecar) yields `None` — the client keeps the `relay` capability but
-/// has no dialable URL, so it uses the WireGuard path or the nest-mediated
-/// fallback. Pure (no `AppState`, no I/O) so it unit-tests directly.
+/// has no dialable URL, so it uses the nest-mediated fallback (the WireGuard path
+/// was deleted 2026-08-23). Pure (no `AppState`, no I/O) so it unit-tests directly.
 pub(crate) fn iroh_relay_public_url(enabled: bool, apex: &str) -> Option<String> {
     (enabled && relay_wanted(apex)).then(|| format!("https://relay.{apex}"))
 }
@@ -348,6 +380,16 @@ pub async fn nest_info_core(state: &AppState) -> NestInfo {
     // both the capability set and the relay-URL field below.
     let iroh_relay_enabled = relay_sidecar_connected(state);
     let capabilities = advertised_capabilities(iroh_relay_enabled);
+    // Test-only: a running e2e nest standing in for one too old for a feature
+    // (`capability_withhold_test_hook`). Production compiles no filter here.
+    #[cfg(feature = "test-hooks")]
+    let capabilities = crate::capability_withhold_test_hook::without_withheld(
+        capabilities,
+        &state
+            .capabilities_withheld
+            .lock()
+            .expect("capabilities_withheld mutex poisoned"),
+    );
 
     // Public iroh relay URL — derived from the nest's *claimed identity*
     // (`handle_domain()`), surfaced only when the sidecar is enabled so a client can
@@ -426,6 +468,7 @@ pub async fn nest_info_core(state: &AppState) -> NestInfo {
         subhandles,
         registration,
         iroh_relay_url,
+        newest_release: newest_release(state),
     }
 }
 
@@ -877,7 +920,7 @@ mod tests {
     #[test]
     fn subscriptions_capability_advertised_iff_the_payments_member_is_built() {
         for relay in [false, true] {
-            let excised = capabilities_for(false, relay, true);
+            let excised = capabilities_for(false, relay, true, false);
             assert!(
                 !capability::supports(&excised, capability::SUBSCRIPTIONS),
                 "a store-safe nest must NOT advertise `subscriptions`: it can mint no \
@@ -894,7 +937,7 @@ mod tests {
                  excised build is a peer without ONE capability, never a fork"
             );
 
-            let full = capabilities_for(true, relay, true);
+            let full = capabilities_for(true, relay, true, true);
             assert!(
                 capability::supports(&full, capability::SUBSCRIPTIONS),
                 "the default nest build ships the payments plane, so it MUST advertise \
@@ -928,7 +971,7 @@ mod tests {
     fn p2p_share_brake_advertised_iff_the_share_plane_is_built() {
         for payments in [false, true] {
             for relay in [false, true] {
-                let excised = capabilities_for(payments, relay, false);
+                let excised = capabilities_for(payments, relay, false, payments);
                 assert!(
                     !capability::supports(&excised, capability::P2P_SHARE),
                     "a nest without the share plane must NOT advertise `p2p-share` \
@@ -943,13 +986,50 @@ mod tests {
                      conflating them would disable device sync fleet-wide"
                 );
 
-                let full = capabilities_for(payments, relay, true);
+                let full = capabilities_for(payments, relay, true, payments);
                 assert!(
                     capability::supports(&full, capability::P2P_SHARE),
                     "a build that compiles the share plane MUST advertise the token — \
                      without this the assertion above is vacuous and would pass against \
                      a token nobody advertises any more. No evidence means a client \
                      refuses to bind, so an accidental omission disables the plane"
+                );
+            }
+        }
+    }
+
+    /// The `zaps` token is advertised iff the build compiles the `zaps`
+    /// gated-feature member (`dynamic-features.md` § Wire & data shape →
+    /// *Capability tokens per gated feature*). A `payments`-only nest is
+    /// otherwise indistinguishable from a full one, so no surface could hide
+    /// the zap rows on that basis.
+    ///
+    /// Driven through [`capabilities_for`] for the same dark-arm
+    /// reason its siblings are (`zaps` is default-ON, so no gate compiles the
+    /// excised nest), and asserted in both directions so the negative cannot
+    /// pass against a token deleted outright.
+    #[test]
+    fn zaps_capability_advertised_iff_the_zaps_member_is_built() {
+        for relay in [false, true] {
+            for p2p_share in [false, true] {
+                // `zaps` excised, `payments` kept: the subset-member case.
+                let payments_only = capabilities_for(true, relay, p2p_share, false);
+                assert!(
+                    !capability::supports(&payments_only, capability::ZAPS),
+                    "a nest built without `zaps` must NOT advertise it, even with \
+                     `payments` (relay={relay}, p2p_share={p2p_share})"
+                );
+                assert!(
+                    capability::supports(&payments_only, capability::SUBSCRIPTIONS),
+                    "excising `zaps` alone keeps provider-rail payments — it is a \
+                     peer without ONE capability, never a fork"
+                );
+
+                let full = capabilities_for(true, relay, p2p_share, true);
+                assert!(
+                    capability::supports(&full, capability::ZAPS),
+                    "a build that compiles `zaps` MUST advertise the token — without \
+                     this the assertion above is vacuous"
                 );
             }
         }
@@ -971,7 +1051,7 @@ mod tests {
                 // brakes, and this is the assertion that would catch someone
                 // "simplifying" the two into one token.
                 for p2p_share in [false, true] {
-                    let caps = capabilities_for(payments, relay, p2p_share);
+                    let caps = capabilities_for(payments, relay, p2p_share, payments);
                     assert!(
                         capability::supports(&caps, capability::PEER_SYNC),
                         "the peer-sync fleet brake must be advertised in every flavor \
@@ -992,7 +1072,7 @@ mod tests {
     #[test]
     fn hidden_tiers_is_advertised_by_every_flavor() {
         for (payments, relay, p2p) in [(true, true, true), (false, false, false)] {
-            let caps = capabilities_for(payments, relay, p2p);
+            let caps = capabilities_for(payments, relay, p2p, payments);
             assert!(
                 fauna_protocol::discovery::capability::supports(
                     &caps,
@@ -1163,6 +1243,46 @@ mod tests {
             info.registration.is_none(),
             "a box with no identity at all advertises no registration posture"
         );
+    }
+
+    /// `nest.info`'s `newest_release` is the newest release the update check
+    /// learned, whether or not this nest runs it, and absent while the check
+    /// has no answer (`installers/README.md` § Knowing a newer version is out
+    /// → *The nest's newest-release field*). Never the nest's own version: the
+    /// field is the release host's public answer, so it tells an anonymous
+    /// reader nothing the `major.minor` coarsening hides.
+    #[tokio::test]
+    async fn nest_info_reports_the_newest_release_the_check_learned_never_its_own_version() {
+        let db = std::sync::Arc::new(crate::db::CacheDb::open_in_memory().unwrap());
+        let mut state = crate::routes::AppState::for_test(db.clone());
+
+        // Check off, or no answer yet: nothing to tell.
+        assert_eq!(nest_info_core(&state).await.newest_release, None);
+
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        state.update_status = rx;
+        // Behind the newest release, and at it: the same answer either way.
+        tx.send_replace(Some(fauna_update::UpdateStatus::Available {
+            version: "9.9.9".into(),
+            release_url: "https://example.com/v9.9.9".into(),
+        }));
+        assert_eq!(
+            nest_info_core(&state).await.newest_release.as_deref(),
+            Some("9.9.9")
+        );
+        tx.send_replace(Some(fauna_update::UpdateStatus::UpToDate {
+            newest: Some("9.9.9".into()),
+        }));
+        let info = nest_info_core(&state).await;
+        assert_eq!(info.newest_release.as_deref(), Some("9.9.9"));
+        assert_ne!(
+            info.newest_release.as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "the field is the release's version, never this build's"
+        );
+        // The repository has published nothing: still nothing to tell.
+        tx.send_replace(Some(fauna_update::UpdateStatus::UpToDate { newest: None }));
+        assert_eq!(nest_info_core(&state).await.newest_release, None);
     }
 
     /// `resolve_handle_core` with a `domain` qualifier that names an **active

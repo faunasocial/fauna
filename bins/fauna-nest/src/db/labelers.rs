@@ -400,13 +400,30 @@ impl CacheDb {
             // already replaced.
             //
             // A `wasm` → `wasm` republish is deliberately NOT touched: those
-            // rows are the drain's output, not this projection's, and the proven
-            // behaviour is that the drain simply rescores them.
+            // rows are the drain's output, not this projection's — the version
+            // bump below is what makes the drain rescore them.
             tx.execute(
                 "DELETE FROM content_scores WHERE factor = ?1 AND content_kind = 'post'",
                 rusqlite::params![factor],
             )
             .context("withdraw list rows on a kind-changing republish")?;
+        }
+
+        // The re-score obligation (frame § Tier-3 → *Re-score obligation*): a
+        // `wasm` labeler's new version raises its registered `model_versions`
+        // watermark, so every row the drain scored under the old version owes a
+        // re-score by the new one. Only an EXISTING registration is raised —
+        // subscribe is what registers a factor, and a publish alone owes no
+        // subscriber anything. Monotonic like `upsert_model_version` (clamped
+        // to the u32 watermark the bus carries).
+        if p.artifact_kind == "wasm" {
+            tx.execute(
+                "UPDATE model_versions
+                    SET version = MAX(version, MIN(?2, 4294967295)), updated_at = ?3
+                  WHERE model_kind = ?1 AND version < MIN(?2, 4294967295)",
+                rusqlite::params![factor, version as i64, now],
+            )
+            .context("raise a subscribed labeler's registered version")?;
         }
         tx.commit().context("commit put_labeler")?;
         Ok(())

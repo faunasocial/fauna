@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The sold-post buyer teaser (gap (2c), `monetization.md` § Per-post pay-to-unlock →
@@ -92,3 +95,4 @@ public struct PostUnlockOfferTeaser: View {
         }
     }
 }
+#endif // !FAUNA_KIDS

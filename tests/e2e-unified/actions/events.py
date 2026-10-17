@@ -55,6 +55,21 @@ class EventsActions:
         # range, making event-creation assertions order-dependent.
         self.driver.click("calendar-view-agenda")
 
+    def reenter(self) -> None:
+        """Land on the Events page through a real page ENTRY, so it re-reads
+        what it loads on entry.
+
+        Tapping the Events tab while Events is already the current page is not
+        an entry on every app: the web SPA's same-route click mounts nothing,
+        so the page's entry load (the calendars) never re-runs, however long
+        the wait. The same "re-enter the page to re-poll" pattern as
+        ``MediaActions.reenter`` and ``FeedActions.reenter``; a waiter keeps
+        its own deadline poll. (The refused-change list is NOT what this is
+        for: an open page repaints it on the store-change notice —
+        ``wait_for_refused_change`` stays on the page by design.)"""
+        self.driver.navigate_to("feed")
+        self.navigate()
+
     def create_calendar(self, name: str) -> None:
         """Create a new calendar and wait until **that** calendar is listed.
 
@@ -653,6 +668,26 @@ class EventsActions:
     def attendee_count(self) -> int:
         return self.driver.count("attendee-item")
 
+    def attendee_statuses(self, summary: str, timeout: float = EVENT_CREATE_BUDGET_S) -> list[str]:
+        """Every `attendee-status` on the open detail of the event titled
+        `summary`, in roster order, once at least one `attendee-item` has
+        painted. Refuses to read a roster unless the open detail is `summary`'s:
+        an earlier event's detail can still be showing (`event_rsvp_count`),
+        and its roster would answer for the wrong event."""
+        deadline = time.monotonic() + timeout
+        while not self._open_detail_is(summary):
+            if time.monotonic() > deadline:
+                raise AssertionError(
+                    f"the open event detail is not {summary!r}: "
+                    f"{self.driver.diagnose('event-detail-summary')}"
+                )
+            time.sleep(0.3)
+        self._wait_for_attendee_item(timeout)
+        return [
+            self.driver.get_text("attendee-status", index=i)
+            for i in range(self.driver.count("attendee-item"))
+        ]
+
     def invite_attendee(self, identifier: str) -> None:
         """Type an attendee identifier into `attendee-invite-field` and Invite.
 
@@ -713,6 +748,13 @@ class EventsActions:
         self.driver.wait_for("event-detail-summary")
         self.invite_attendee(identifier)
 
+    def _open_detail_is(self, summary: str) -> bool:
+        """True when the open event detail shows the event titled `summary`."""
+        try:
+            return summary in self.driver.get_text("event-detail-summary")
+        except Exception:
+            return False
+
     def event_rsvp_count(self, summary: str) -> int:
         """Return the number of attendees for an event.
 
@@ -728,7 +770,11 @@ class EventsActions:
         that module replaced `show_quick_preview`, precisely because a snapshot
         popover never showed a freshly-RSVP'd attendee.
         """
-        if self.driver.count("attendee-item") > 0:
+        # Only an already-open detail of THIS event may short-circuit: linux's
+        # detail is a persistent panel, so after `navigate()` an earlier event's
+        # detail can still be showing — counting its attendees answers for the
+        # wrong event (and `attendee-status` then reads the wrong roster).
+        if self.driver.count("attendee-item") > 0 and self._open_detail_is(summary):
             return self.driver.count("attendee-item")
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
@@ -1125,10 +1171,14 @@ class EventsActions:
         """Wait until a refused-change row naming `title_substring` is on the
         page, and return it.
 
-        **Re-navigates each pass.** The list is loaded with the page's calendar
-        hydration rather than by a poll of its own (the rows change only when
-        the inbound drain refuses something), so re-entering the page is what
-        fetches it — the same shape `_wait_for_calendar` uses.
+        **Stays on the page** — no re-entry. A refusal is the app's own
+        runtime's background write to the account store, a source of the
+        store-change notice like a pump run (`account-runtime.md`
+        § Multi-instance concurrency → *A runtime's own pump is a source of
+        the notice too*, part 2), so an OPEN Events page repaints the list
+        within the notice's latency; this waiter is the witness of that. Until
+        2026-10-11 it re-entered the page each pass (``reenter``), which hid
+        the gap: the row showed only on the next page entry.
         """
         deadline = time.monotonic() + timeout
         seen: list[dict[str, str]] = []
@@ -1144,10 +1194,10 @@ class EventsActions:
             # deadline above, so a slow machine polls more times rather than
             # reading state that has not landed yet.
             time.sleep(1.0)  # sleep-ok: a deadline poll's pacing (convention 14 mechanism 1)
-            self.navigate()
         raise AssertionError(
-            f"no refused-change row naming {title_substring!r} appeared within "
-            f"{timeout}s; rows on the page: {seen!r}"
+            f"no refused-change row naming {title_substring!r} appeared on the "
+            f"OPEN Events page within {timeout}s (the store-change notice should "
+            f"have repainted it with no re-entry); rows on the page: {seen!r}"
         )
 
     def dismiss_refused_change(self, index: int = 0) -> None:
@@ -1477,13 +1527,17 @@ class EventsActions:
         self.driver.click("calendar-export-button")
 
         def _new_ics():
-            if not os.path.isdir(download_dir):
+            # Ask again on every poll: web's and android's `download_dir()`
+            # collect what has arrived SO FAR on each call, where a native
+            # driver's names one fixed directory (drivers/web.py, android.py).
+            current = self.driver.download_dir() or download_dir
+            if not os.path.isdir(current):
                 return None
-            fresh = [n for n in os.listdir(download_dir)
+            fresh = [n for n in os.listdir(current)
                      if n.endswith(".ics") and n not in before]
             if not fresh:
                 return None
-            path = os.path.join(download_dir, fresh[0])
+            path = os.path.join(current, fresh[0])
             # Written in one call, but a read racing the write would see a
             # truncated file: wait until it holds a whole VCALENDAR.
             try:
@@ -1508,8 +1562,13 @@ class EventsActions:
         `calendar-import-button`. Web's `calendar-import-file` is a real
         `<input type=file>` (a browser cannot read a typed path), every other
         app's is a text input a picker fills — the same platform branch as
-        `MediaActions.upload_file`, kept in the action layer."""
-        if self.driver.is_web():
+        `MediaActions.upload_file`, kept in the action layer. android's is a
+        button that opens the system document picker, which no agent can
+        drive, so android sets the file the way web does: its driver stages
+        the bytes on the device and sends a `compose.file` patch naming
+        `calendar-import-file`, which the test agent hands to the import
+        row's own picker staging (`EventsScreen.kt`)."""
+        if self.driver.is_web() or self.driver.is_android():
             self.driver.set_input_files("calendar-import-file", path)
         else:
             self.driver.wait_for("calendar-import-file", timeout=15.0)
@@ -1519,7 +1578,11 @@ class EventsActions:
     def press_import_with_no_file(self) -> None:
         """Press `calendar-import-button` with nothing chosen — the case
         events.md § Import / Export says must answer on `error-message`."""
-        if not self.driver.is_web():
+        if self.driver.is_android():
+            # Its `calendar-import-file` is a picker button: nothing is chosen
+            # until the system picker returns, so there is nothing to clear.
+            self.driver.wait_for("calendar-import-file", timeout=15.0)
+        elif not self.driver.is_web():
             self.driver.wait_for("calendar-import-file", timeout=15.0)
             self.driver.clear_and_type("calendar-import-file", "")
         self.driver.click("calendar-import-button")

@@ -60,14 +60,42 @@ use crate::SetNonceSource;
 pub struct ProjectedRow<'a> {
     pub folder: &'a str,
     pub folder_hash: Option<&'a [u8]>,
+    /// The set's **row** on this nest (`folders.id`) as the projection stamps
+    /// it — what tells two readable sets of one name apart (a member who owns
+    /// `photos` and reads a collaborator's shared `photos`). `None` from a
+    /// producer that stamps none: the row is judged by its set's hash alone,
+    /// the declared degrade (`set-addressing.md` § The row form).
+    pub folder_id: Option<i64>,
     pub row: Option<SyncChange>,
 }
 
 impl ProjectedRow<'_> {
     /// The set's address — what the folder list's row, the nonce source and
-    /// the roster read are all asked by.
-    fn set(&self) -> [u8; 32] {
-        fauna_core::label_custody::set_name_label_salt(self.folder_hash, self.folder)
+    /// the roster read are all asked by: its row when the projection stamps
+    /// one, beside the hash every row carries ([`SetKey`]).
+    fn set(&self) -> SetKey {
+        SetKey {
+            hash: fauna_core::label_custody::set_name_label_salt(self.folder_hash, self.folder),
+            row: self.folder_id,
+        }
+    }
+}
+
+/// One set of a listing, as the judge gathers its binding: by its **row**
+/// (`folders.id`) when the projection stamped one — two readable sets of one
+/// name are then two sets, each judged under its own nonce lineage and roster
+/// (`set-addressing.md` § The row form) — else by its name hash alone, the
+/// declared degrade for a producer that stamps no row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct SetKey {
+    hash: [u8; 32],
+    row: Option<i64>,
+}
+
+impl SetKey {
+    /// The row in the ref form the binding source is asked by.
+    fn folder_ref(&self) -> Option<fauna_core::folder_keys::FolderRef> {
+        self.row.map(fauna_core::folder_keys::FolderRef::Local)
     }
 }
 
@@ -322,8 +350,8 @@ where
         // Each row's set by its hash address, and — for a set with a
         // statement-bearing row — the name the projection gave it (empty for a
         // sealed set, which the projection names by hash alone).
-        let sets: Vec<[u8; 32]> = rows.iter().map(ProjectedRow::set).collect();
-        let mut with_statement: BTreeMap<[u8; 32], &str> = BTreeMap::new();
+        let sets: Vec<SetKey> = rows.iter().map(ProjectedRow::set).collect();
+        let mut with_statement: BTreeMap<SetKey, &str> = BTreeMap::new();
         for (p, set) in rows.iter().zip(&sets).filter(|(p, _)| p.row.is_some()) {
             let name = with_statement.entry(*set).or_insert(p.folder);
             if name.is_empty() {
@@ -336,14 +364,14 @@ where
                 .map(|p| unbound.judge_projection(p.row.as_ref()))
                 .collect());
         }
-        let signed: BTreeSet<[u8; 32]> = rows
+        let signed: BTreeSet<SetKey> = rows
             .iter()
             .zip(&sets)
             .filter(|(p, _)| p.row.as_ref().is_some_and(|r| r.signature.is_some()))
             .map(|(_, set)| *set)
             .collect();
         let mut readers = self.readers(&with_statement, &signed, certs).await?;
-        let judge_all = |readers: &BTreeMap<[u8; 32], RowReader>| -> Vec<RowVerdict> {
+        let judge_all = |readers: &BTreeMap<SetKey, RowReader>| -> Vec<RowVerdict> {
             rows.iter()
                 .zip(&sets)
                 .map(|(p, set)| {
@@ -355,7 +383,7 @@ where
                 .collect()
         };
         let mut verdicts = judge_all(&readers);
-        let unread: BTreeSet<[u8; 32]> = sets
+        let unread: BTreeSet<SetKey> = sets
             .iter()
             .zip(&verdicts)
             .filter(|(_, v)| {
@@ -401,9 +429,9 @@ where
     async fn learn_own_links(
         &self,
         rows: &[ProjectedRow<'_>],
-        sets: &[[u8; 32]],
+        sets: &[SetKey],
         verdicts: &[RowVerdict],
-        readers: &BTreeMap<[u8; 32], RowReader>,
+        readers: &BTreeMap<SetKey, RowReader>,
     ) -> bool {
         let Some(own) = self.own else {
             return false;
@@ -432,13 +460,15 @@ where
     /// `fauna.folders.list` (the shared-with-me rows included — read here for
     /// a binding, never rendered), the served state and — for a set with a
     /// signed row — the nonce from the binding source, and the listing's
-    /// certs.
+    /// certs. A set the projection names by row is bound to THAT row of the
+    /// list and asked of the source by it; one named by hash alone, to the
+    /// first row at its address.
     async fn readers(
         &self,
-        folders: &BTreeMap<[u8; 32], &str>,
-        signed: &BTreeSet<[u8; 32]>,
+        folders: &BTreeMap<SetKey, &str>,
+        signed: &BTreeSet<SetKey>,
         certs: &[EmbedAsBytes],
-    ) -> Result<BTreeMap<[u8; 32], RowReader>, R::Error> {
+    ) -> Result<BTreeMap<SetKey, RowReader>, R::Error> {
         let reply: FoldersListReply = self
             .nest
             .request(
@@ -449,40 +479,40 @@ where
                 },
             )
             .await?;
-        // Rows match by `name_hash`, never the plaintext: a sealed set's row
-        // rests with its `name` scrubbed (`path-sealing.md` § the set-name
-        // plane), and this raw list read renders nothing.
-        let mut bindings: BTreeMap<[u8; 32], ReaderBinding> = BTreeMap::new();
-        for fs in &reply.folders {
-            let row_hash = fauna_core::label_custody::set_name_label_salt(
-                fs.name_hash.as_deref().map(|b| &b[..]),
-                &fs.name,
-            );
-            // The first row at an address wins (the caller's own sets list
-            // first); the same address is what the nonce resolver is asked by.
-            if !folders.contains_key(&row_hash) || bindings.contains_key(&row_hash) {
-                continue;
-            }
+        // A set named by row binds to the list row with that id alone — never
+        // a same-named row beside it. One named by hash alone matches by
+        // `name_hash`, never the plaintext: a sealed set's row rests with its
+        // `name` scrubbed (`path-sealing.md` § the set-name plane), and this
+        // raw list read renders nothing. The first row at an address wins (the
+        // caller's own sets list first); the same address is what the nonce
+        // resolver is asked by.
+        let list_row = |set: &SetKey| {
+            reply.folders.iter().find(|fs| match set.row {
+                Some(id) => fs.id == id,
+                None => {
+                    fauna_core::label_custody::set_name_label_salt(
+                        fs.name_hash.as_deref().map(|b| &b[..]),
+                        &fs.name,
+                    ) == set.hash
+                }
+            })
+        };
+        let account_predecessors = self.account_predecessors();
+        let mut readers = BTreeMap::new();
+        for (set, &name) in folders {
             // A member row names no owner here: this reader holds no
             // marker, so the judge takes the owner off the roster's owner row
             // (`writer-signed-change-records.md` ruling (11)(c)) — never off
             // the list row's `owner_actor_id`. Its rows hold for that read.
-            let owner = match fs.role.as_deref() {
-                Some("member") => None,
-                _ => self.own,
-            };
-            bindings.insert(
-                row_hash,
-                ReaderBinding {
-                    owner,
+            let mut binding = list_row(set)
+                .map(|fs| ReaderBinding {
+                    owner: match fs.role.as_deref() {
+                        Some("member") => None,
+                        _ => self.own,
+                    },
                     ..Default::default()
-                },
-            );
-        }
-        let account_predecessors = self.account_predecessors();
-        let mut readers = BTreeMap::new();
-        for (set, &name) in folders {
-            let mut binding = bindings.remove(set).unwrap_or_default();
+                })
+                .unwrap_or_default();
             binding.account = self.own;
             binding.account_predecessors = account_predecessors.clone();
             // The binding source, asked for EVERY set the projection names
@@ -516,12 +546,15 @@ where
     async fn lineage(
         &self,
         folder: &str,
-        set: &[u8; 32],
+        set: &SetKey,
     ) -> fauna_core::folder_keys::SetNonceLineage {
         let Some(nonces) = self.nonces else {
             return Default::default();
         };
-        match nonces.lookup_lineage(folder, set).await {
+        match nonces
+            .lookup_lineage_at(folder, &set.hash, set.folder_ref().as_ref())
+            .await
+        {
             Ok(lineage) => lineage,
             Err(e) => {
                 tracing::warn!(
@@ -536,11 +569,13 @@ where
     /// The set's writers, or `None` when the read failed (the rows it would
     /// judge stay held, absent from this listing). An owner-only set has no
     /// roster: its writers are the owner alone. Asked through the one funnel
-    /// every set request leaves by (`addressed`): by the hash of the name, or
-    /// — for a sealed set the projection named by hash alone — by that hash,
-    /// since the nest holds no plaintext name for it and neither does this
-    /// judge.
-    async fn roster(&self, folder: &str, set: &[u8; 32]) -> Option<WriterRoster> {
+    /// every set request leaves by (`addressed`): by the set's row when the
+    /// projection named one — the nest then resolves that row alone, never an
+    /// own namesake (`set-addressing.md` § The row form) — beside the hash of
+    /// the name, or — for a sealed set the projection named by hash alone —
+    /// that hash, since the nest holds no plaintext name for it and neither
+    /// does this judge.
+    async fn roster(&self, folder: &str, set: &SetKey) -> Option<WriterRoster> {
         let reply: Result<ActorMembersListReply, R::Error> = self
             .nest
             .request(
@@ -549,7 +584,8 @@ where
                     name: folder.to_string(),
                     name_hash: folder
                         .is_empty()
-                        .then(|| fauna_protocol::ByteBuf::from(set.to_vec())),
+                        .then(|| fauna_protocol::ByteBuf::from(set.hash.to_vec())),
+                    folder_id: set.row,
                     ..Default::default()
                 }),
             )
@@ -597,6 +633,7 @@ where
             .map(|item| ProjectedRow {
                 folder: &item.folder,
                 folder_hash: item.folder_hash.as_deref().map(|b| &b[..]),
+                folder_id: item.folder_id,
                 row: item.as_change_row(),
             })
             .collect();
@@ -790,6 +827,7 @@ mod tests {
         ProjectedRow {
             folder,
             folder_hash: None,
+            folder_id: None,
             row,
         }
     }
@@ -811,6 +849,14 @@ mod tests {
             _name_hash: &[u8; 32],
         ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
             anyhow::bail!("not a key read")
+        }
+
+        /// Keyed by name: no answer by identity.
+        async fn resolve_ref(
+            &self,
+            _folder_ref: &fauna_core::folder_keys::FolderRef,
+        ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+            anyhow::bail!("no set with that identity")
         }
 
         async fn set_lineage(
@@ -1028,6 +1074,161 @@ mod tests {
         );
     }
 
+    /// A binding source with two sets of one name: by hash it answers the
+    /// caller's OWN `photos` (custody's owner-first pick), by row each set's
+    /// own lineage.
+    struct NonceByRow(Vec<(i64, [u8; 32])>);
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl fauna_core::folder_keys::FolderKeyResolver for NonceByRow {
+        async fn resolve(
+            &self,
+            _name_hash: &[u8; 32],
+        ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+            anyhow::bail!("not a key read")
+        }
+
+        async fn resolve_ref(
+            &self,
+            _folder_ref: &fauna_core::folder_keys::FolderRef,
+        ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+            anyhow::bail!("not a key read")
+        }
+
+        async fn set_lineage(
+            &self,
+            _folder: &str,
+            _name_hash: &[u8; 32],
+        ) -> anyhow::Result<fauna_core::folder_keys::SetNonceLineage> {
+            Ok(fauna_core::folder_keys::SetNonceLineage {
+                live: Some(NONCE),
+                ..Default::default()
+            })
+        }
+
+        async fn set_lineage_ref(
+            &self,
+            folder_ref: &fauna_core::folder_keys::FolderRef,
+        ) -> anyhow::Result<Option<fauna_core::folder_keys::SetNonceLineage>> {
+            let fauna_core::folder_keys::FolderRef::Local(id) = folder_ref else {
+                return Ok(None);
+            };
+            Ok(self.0.iter().find(|(row, _)| row == id).map(|(_, nonce)| {
+                fauna_core::folder_keys::SetNonceLineage {
+                    live: Some(*nonce),
+                    ..Default::default()
+                }
+            }))
+        }
+    }
+
+    /// A nest serving one folder list and a roster **per row**: the request's
+    /// `folder_id` picks it; a request naming no row (or an unshared row) is
+    /// answered not-shared — beside an own namesake, the by-name answer is the
+    /// own set's.
+    struct RosterByRow {
+        folders: FoldersListReply,
+        rosters: Vec<(i64, ActorMembersListReply)>,
+        asked: std::sync::Mutex<Vec<Option<i64>>>,
+    }
+
+    impl RpcRequester for RosterByRow {
+        type Error = fauna_client_testkit::ClassifiedError;
+
+        async fn request<Req, Reply>(
+            &self,
+            kind: &'static str,
+            payload: Req,
+        ) -> Result<Reply, Self::Error>
+        where
+            Req: serde::Serialize,
+            Reply: serde::de::DeserializeOwned,
+        {
+            let encoded = match kind {
+                KIND_FOLDERS_LIST => fauna_protocol::encode_canonical(&self.folders),
+                KIND_FOLDERS_MEMBERS_LIST_ACTORS => {
+                    let bytes = fauna_protocol::encode_canonical(&payload).expect("encode request");
+                    let req: ActorMembersListRequest =
+                        fauna_protocol::decode_strict(&bytes).expect("roster request");
+                    self.asked.lock().unwrap().push(req.folder_id);
+                    let Some((_, reply)) = self
+                        .rosters
+                        .iter()
+                        .find(|(row, _)| Some(*row) == req.folder_id)
+                    else {
+                        return Err(fauna_client_testkit::ClassifiedError::Rejected(
+                            RpcError::new(ROSTER_NOT_SHARED, "error.not_shared"),
+                        ));
+                    };
+                    fauna_protocol::encode_canonical(reply)
+                }
+                other => panic!("RosterByRow: unhandled kind {other}"),
+            }
+            .expect("encode reply");
+            Ok(fauna_protocol::decode_strict(&encoded).expect("decode reply"))
+        }
+    }
+
+    /// `set-addressing.md` § The row form, the reader's half: a member who
+    /// owns `photos` and writes into a collaborator's shared `photos` lists
+    /// both sets' rows. Each row names its set's row (`folder_id`) and is
+    /// judged under THAT set's nonce lineage and roster — the shared row is
+    /// never judged under the own namesake's, which would hold it.
+    #[test]
+    fn a_listings_same_named_sets_are_judged_each_by_its_row() {
+        let (owner, me) = (kp(1), kp(2));
+        let (own_row, shared_row) = (7, 9);
+        let nest = RosterByRow {
+            folders: folders(vec![
+                FolderSummary {
+                    id: own_row,
+                    ..own_set("photos")
+                },
+                FolderSummary {
+                    id: shared_row,
+                    ..member_set(&owner)
+                },
+            ]),
+            rosters: vec![(
+                shared_row,
+                roster(&[(&owner, "owner", None), (&me, "member", Some("writer"))]),
+            )],
+            asked: Default::default(),
+        };
+        let source = SetNonceSource::Resolver(std::sync::Arc::new(NonceByRow(vec![
+            (own_row, NONCE),
+            (shared_row, OTHER_NONCE),
+        ])));
+        let judge = ProjectionJudge::new(&nest, Some(me.actor_id().0), Some(&source));
+        let rows = vec![
+            ProjectedRow {
+                folder_id: Some(own_row),
+                ..at("photos", Some(signed(&me, NONCE)))
+            },
+            ProjectedRow {
+                folder_id: Some(shared_row),
+                ..at("photos", Some(signed(&me, OTHER_NONCE)))
+            },
+        ];
+        let verdicts = block_on(judge.judge(&rows, &[])).expect("judged");
+        assert!(
+            matches!(verdicts[0], RowVerdict::Verified { .. }),
+            "own row: {:?}",
+            verdicts[0]
+        );
+        assert!(
+            matches!(verdicts[1], RowVerdict::Verified { .. }),
+            "shared row: {:?}",
+            verdicts[1]
+        );
+        let asked = nest.asked.lock().unwrap().clone();
+        assert!(
+            asked.iter().all(Option::is_some),
+            "every roster read names its row: {asked:?}"
+        );
+    }
+
     /// A roster that could not be read holds the member's row — absent from
     /// this listing, counted as held; an unshared set's roster is the owner
     /// alone, so a stranger's signed row there is refused.
@@ -1130,6 +1331,14 @@ mod tests {
             _name_hash: &[u8; 32],
         ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
             anyhow::bail!("not a key read")
+        }
+
+        /// Keyed by name: no answer by identity.
+        async fn resolve_ref(
+            &self,
+            _folder_ref: &fauna_core::folder_keys::FolderRef,
+        ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+            anyhow::bail!("no set with that identity")
         }
 
         async fn set_lineage(

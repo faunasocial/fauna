@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import uniffi.fauna_client_mail_settings.AliasPolicyView
 import uniffi.fauna_client_mail_settings.AuthPolicyView
+import uniffi.fauna_client_mail_settings.DmarcPolicyView
 import uniffi.fauna_client_mail_settings.ImapPolicyView
 import uniffi.fauna_client_mail_settings.MailPolicyAction
 import uniffi.fauna_client_mail_settings.MailPolicyMachine
@@ -62,6 +63,14 @@ class AdminMailVM @Inject constructor(
     fun setMailEnabled(enabled: Boolean) =
         dispatch(MailPolicyAction.SetMailEnabled(enabled = enabled))
 
+    /** `admin-mail-health-recheck-button`: a fresh blocklist self-check + diagnostics
+     *  run, then a health re-read. */
+    fun recheckHealth() = dispatch(MailPolicyAction.RecheckHealth)
+
+    /** `admin-mail-health-warmup-reset-button` (after the screen's same-button
+     *  two-click confirm): restart the fresh-IP warm-up ramp at day 1. */
+    fun resetWarmup() = dispatch(MailPolicyAction.ResetWarmup)
+
     fun saveSpam(policy: SpamPolicyView) = dispatch(MailPolicyAction.SaveSpam(policy = policy))
     fun saveAuth(policy: AuthPolicyView) = dispatch(MailPolicyAction.SaveAuth(policy = policy))
     fun saveSubmission(policy: SubmissionPolicyView) = dispatch(MailPolicyAction.SaveSubmission(policy = policy))
@@ -72,6 +81,11 @@ class AdminMailVM @Inject constructor(
     /** Publish the opt-in aggregate as the deployment baseline; the outcome lands
      *  in `snapshot.baselinePublishResult`. */
     fun publishSpamBaseline() = dispatch(MailPolicyAction.PublishSpamBaseline)
+
+    /** The standing-publish toggle's own gesture: the machine full-PUTs the
+     *  persisted spam group with the one field flipped and re-reads. */
+    fun setBaselineStandingPublish(enabled: Boolean) =
+        dispatch(MailPolicyAction.SetBaselineStandingPublish(enabled = enabled))
 
     private fun dispatch(action: MailPolicyAction) {
         val m = machine ?: return
@@ -155,6 +169,24 @@ class AdminMailVM @Inject constructor(
                 reservedLocalParts = emptyList(),
                 subaddressingEnabled = false,
                 wildcardPrefixEnabled = false,
+            ),
+            // Pre-hydration placeholder, like every group above: the first
+            // `Refresh` replaces it with the nest's `get_dmarc_policy` answer.
+            // No control renders it yet (the app control waits on rule-A
+            // approval of its ids).
+            dmarc = DmarcPolicyView(
+                policyMode = "reject",
+                subdomainPolicyMode = "reject",
+                pct = 100u.toUByte(),
+                adkimMode = "s",
+                aspfMode = "s",
+                ruaDestination = null,
+                rufPublish = false,
+                rufDestination = null,
+                foMode = "0",
+                riSeconds = 86400u,
+                aggregateRetentionDays = 90u,
+                forensicRetentionDays = 30u,
             ),
             status = MailPolicyStatus.IDLE,
             baselineState = null,

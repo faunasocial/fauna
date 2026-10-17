@@ -338,9 +338,15 @@ OPS_DAY_CELL = 0
 
 def _require_authoring(app) -> None:
     """tui is the lead app for the authoring half (2026-09-27); the other six
-    follow in their batched trickle-down."""
+    follow in their batched trickle-down — each arm that lands widens the
+    admitted set below (linux, web, then android)."""
     _require_surface(app)
-    if not app.driver.is_tui():
+    if not (
+        app.driver.is_tui()
+        or app.driver.is_linux()
+        or app.driver.is_web()
+        or app.driver.is_android()
+    ):
         skip_unbuilt(
             app.driver,
             surface="feature-policy-editor",
@@ -555,8 +561,13 @@ def test_you_set_your_own_limit_and_the_row_above_binds_without_renavigating(
         # Off — a person may turn a gated feature off for themselves.
         editor.choose_off()
         editor.save()
+        # The row's fields are read one at a time, so wait on the whole settled
+        # state: a repaint can land between two reads (e2e-conventions point 14).
         row = app.settings.wait_for_feature_limit_row(
-            P2P_ROW, lambda r: r.get("restriction") == S.features.denied_by_self
+            P2P_ROW,
+            lambda r: r.get("restriction") == S.features.denied_by_self
+            and r.get("status") == S.features.status_restricted
+            and r.get("own_summary") == S.features.authored_off,
         )
         assert row["status"] == S.features.status_restricted, row
         assert row.get("restriction") == S.features.denied_by_self, row
@@ -565,7 +576,10 @@ def test_you_set_your_own_limit_and_the_row_above_binds_without_renavigating(
         # Remove limit — back to no opinion; the row is Available again.
         editor.remove()
         row = app.settings.wait_for_feature_limit_row(
-            P2P_ROW, lambda r: r.get("own_summary") == S.features.authored_none
+            P2P_ROW,
+            lambda r: r.get("own_summary") == S.features.authored_none
+            and r.get("status") == S.features.status_available
+            and "restriction" not in r,
         )
         assert row.get("own_summary") == S.features.authored_none, row
         assert row["status"] == S.features.status_available, row
@@ -771,3 +785,70 @@ def test_a_guardian_limits_a_feature_for_one_child_and_the_child_sees_who_set_it
     finally:
         editor.close_if_open()
         _set_admin_policy(nest_instance, "p2p-share", None)
+
+
+# ── A nest too old for a feature (version-compatibility.md § Dimension 3) ───
+#
+# The client learns the nest's capability set at connect and HIDES a feature
+# whose token is absent, rather than letting the user invoke it into a raw
+# error. Every token but `relay` is compiled into the e2e nest, so the test-only
+# `capability-withhold` hook stands the real running nest in for an older one:
+# it leaves the token out of `fauna.nest.info` and nothing else.
+
+
+def _withhold_capability(nest_instance, token: str, withhold: bool) -> None:
+    """Make the nest stop (or resume) advertising `token`."""
+    import urllib.request
+
+    suffix = "" if withhold else "/clear"
+    req = urllib.request.Request(
+        f"{nest_instance['url']}/api/v1/test/capability-withhold/{token}{suffix}",
+        data=b"",
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10.0) as resp:
+        assert resp.status == 200, f"capability-withhold returned {resp.status}"
+
+
+@pytest.mark.feature("upgrades-never-lose-data")
+def test_a_feature_the_nest_is_too_old_for_is_hidden_not_an_error(
+    admin_app, request, nest_instance, family_pair
+):
+    """The nest stops advertising `subscriptions`; the guardian's feature-limits
+    rows for their ward drop Payments — no row to press, no error painted —
+    while the members the nest still advertises stay. Once the nest advertises
+    the token again, the next connection brings the row back: the hide follows
+    the capability set, not a compiled-in answer.
+
+    The set is read once per connection (`fauna_protocol::nest_info_memo` —
+    a nest's capabilities change only across a restart, which is a reconnect),
+    so each half opens a fresh app session rather than re-reading the page.
+    """
+    app = admin_app
+    app.family.require_feature_limits_supported()
+    guardian_identity, _ward_identity, _guardian_handle, ward_handle = family_pair
+    _withhold_capability(nest_instance, "subscriptions", True)
+    try:
+        _open_ward_feature_limits(app, request, nest_instance, guardian_identity, ward_handle)
+        names = app.family.feature_limit_names()
+        assert names == [S.features.name_zaps, S.features.name_p2p_share], (
+            "a nest that does not advertise `subscriptions` must hide the "
+            f"Payments row and keep the rest, in registry order; got {names}"
+        )
+        assert not app.error_text(), (
+            f"hiding a feature must not surface an error: {app.error_text()!r}"
+        )
+    finally:
+        _withhold_capability(nest_instance, "subscriptions", False)
+
+    _open_ward_feature_limits(app, request, nest_instance, guardian_identity, ward_handle)
+    names = app.family.feature_limit_names()
+    assert names == [
+        S.features.name_payments,
+        S.features.name_zaps,
+        S.features.name_p2p_share,
+    ], (
+        "once the nest advertises `subscriptions` again, a new connection must "
+        f"bring the Payments row back; got {names}"
+    )
+    assert not app.error_text(), app.error_text()

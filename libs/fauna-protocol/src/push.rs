@@ -127,6 +127,16 @@ pub struct UnsubscribeReply {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct PresenceRequest {
     pub device_id: String,
+    /// `true` when the announcing connection is the device's wake stand-in
+    /// (the sync agent), not an app (ruled 2026-10-03). A stand-in's announce
+    /// is a delivery point for the device's `ws-device` row and nothing else:
+    /// it never makes the device present for `web-push`/`apns` and never
+    /// triggers the compatibility rider (`apps/common.md` § Push Notifications
+    /// → *Dispatch Logic*). Absent means an app, so a plain announce encodes
+    /// byte-for-byte as before the field existed, and an older nest reads a
+    /// stand-in's announce as a plain one (`version-compatibility.md` § I4).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stand_in: bool,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -149,12 +159,40 @@ mod tests {
     fn presence_round_trips() {
         assert_round_trips(&PresenceRequest {
             device_id: "dev-1".into(),
-            extra: BTreeMap::new(),
+            ..Default::default()
+        });
+        assert_round_trips(&PresenceRequest {
+            device_id: "dev-1".into(),
+            stand_in: true,
+            ..Default::default()
         });
         assert_round_trips(&PresenceReply {
             ok: true,
             extra: BTreeMap::new(),
         });
+    }
+
+    /// The stand-in flag is additive (`version-compatibility.md` § I4): a plain
+    /// announce encodes exactly as the field-less shape did, and that shape
+    /// decodes as an app announce.
+    #[test]
+    fn a_plain_presence_announce_encodes_without_the_stand_in_field() {
+        #[derive(Serialize)]
+        struct Legacy {
+            device_id: String,
+        }
+        let legacy = encode_canonical(&Legacy {
+            device_id: "dev-1".into(),
+        })
+        .unwrap();
+        let plain = PresenceRequest {
+            device_id: "dev-1".into(),
+            ..Default::default()
+        };
+        assert_eq!(encode_canonical(&plain).unwrap(), legacy);
+        let decoded: PresenceRequest = decode(&legacy).unwrap();
+        assert!(!decoded.stand_in);
+        assert!(decoded.extra.is_empty());
     }
 
     #[test]

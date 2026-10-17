@@ -208,6 +208,33 @@ impl crate::db::CacheDb {
         self.set_singleton_column("nest_web_app_origin", "mode", mode.as_str())
             .await
     }
+
+    /// Read the admin's update-channel choice (`nest/update-channel.md` § The
+    /// channel as nest state). `None` ⇒ no admin has chosen (the caller follows
+    /// the `FAUNA_IMAGE_TAG` seed); a present row whose text is not a channel
+    /// id is an error, not a silent channel — the boot resolve logs it and
+    /// follows the seed, and the admin's next `set` overwrites it.
+    pub async fn get_update_channel(
+        &self,
+    ) -> Result<Option<fauna_provisioning::cloud_init::UpdateChannel>> {
+        let raw: Option<String> = self
+            .get_singleton_column("nest_update_channel", "channel")
+            .await?;
+        raw.map(|s| {
+            fauna_provisioning::cloud_init::UpdateChannel::from_id(&s)
+                .with_context(|| format!("nest_update_channel holds an unknown channel {s:?}"))
+        })
+        .transpose()
+    }
+
+    /// Upsert the admin's update-channel choice (a whole-value replace).
+    pub async fn set_update_channel(
+        &self,
+        channel: fauna_provisioning::cloud_init::UpdateChannel,
+    ) -> Result<()> {
+        self.set_singleton_column("nest_update_channel", "channel", channel.id())
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -229,6 +256,29 @@ mod tests {
             db.get_web_app_origin().await.unwrap(),
             Some(WebAppOrigin::Bundled)
         );
+    }
+
+    #[tokio::test]
+    async fn update_channel_unset_reads_none_then_round_trips() {
+        use fauna_provisioning::cloud_init::UpdateChannel;
+        let db = CacheDb::open_in_memory().unwrap();
+        assert_eq!(db.get_update_channel().await.unwrap(), None);
+        for channel in [UpdateChannel::Dev, UpdateChannel::Stable] {
+            db.set_update_channel(channel).await.unwrap();
+            assert_eq!(db.get_update_channel().await.unwrap(), Some(channel));
+        }
+    }
+
+    /// A row a newer binary wrote with a channel this one does not know is an
+    /// error, never a silent channel: the boot resolve logs it and follows the
+    /// seed, and the admin's next `set` overwrites it.
+    #[tokio::test]
+    async fn an_unknown_stored_update_channel_is_an_error() {
+        let db = CacheDb::open_in_memory().unwrap();
+        db.set_singleton_column("nest_update_channel", "channel", "beta")
+            .await
+            .unwrap();
+        assert!(db.get_update_channel().await.is_err());
     }
 
     #[tokio::test]

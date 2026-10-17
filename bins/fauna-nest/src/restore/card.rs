@@ -17,17 +17,20 @@ pub fn replay_card_manifest_into_sqlite(
     manifest: &CardPlacementManifest,
 ) -> Result<()> {
     // ctag mirrors highestmodseq — the live write path keeps the two in
-    // lockstep; created_at synthesized as 0 (twin of the calendar replay).
+    // lockstep; created_at synthesized as 0; the prune floor rides the
+    // restore (twin of the calendar replay).
     for b in &manifest.addressbooks {
         tx.execute(
             "INSERT INTO bridge_carddav_addressbooks
-                (actor_id, addressbook_id, encrypted_metadata, ctag, highestmodseq, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?4, 0)",
+                (actor_id, addressbook_id, encrypted_metadata, ctag, highestmodseq, created_at,
+                 pruned_modseq)
+             VALUES (?1, ?2, ?3, ?4, ?4, 0, ?5)",
             rusqlite::params![
                 actor.as_slice(),
                 b.addressbook_id.as_slice(),
                 &b.encrypted_metadata,
                 b.highestmodseq as i64,
+                b.pruned_modseq as i64,
             ],
         )
         .context("INSERT bridge_carddav_addressbooks")?;
@@ -77,6 +80,7 @@ mod tests {
             addressbook_id: [0xAAu8; 32],
             encrypted_metadata: vec![0u8; 48],
             highestmodseq: 50,
+            pruned_modseq: 0,
         });
         manifest.tombstones.push(CardTombstoneRef {
             addressbook_id: [0xAAu8; 32],

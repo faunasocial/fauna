@@ -55,9 +55,22 @@ pub fn encode_with_cid<T: Serialize>(v: &T) -> Result<(Cid, Vec<u8>), EncodeErro
 }
 
 /// Strict decode: rejects non-canonical input, returns typed schema mismatch on shape errors.
+///
+/// A schema-mismatch refusal leads with the dotted path of the field that
+/// failed (`scope.actor_id: major type mismatch: …`; nothing for a root-level
+/// mismatch), found by re-running the already-refused decode through
+/// `crate::path_track` — the accepted-input set never passes through it.
 pub fn decode_strict<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DecodeError> {
     crate::canonical::validate_canonical(bytes)?;
-    serde_ipld_dagcbor::from_slice(bytes).map_err(map_decode_error)
+    serde_ipld_dagcbor::from_slice(bytes).map_err(|e| match map_decode_error(e) {
+        DecodeError::SchemaMismatch(msg) => {
+            DecodeError::SchemaMismatch(match crate::path_track::failing_path::<T>(bytes) {
+                Some(path) => format!("{path}: {msg}"),
+                None => msg,
+            })
+        }
+        other => other,
+    })
 }
 
 /// Relaxed decode: tolerates non-canonical input. Use only for debug/inspection tools;

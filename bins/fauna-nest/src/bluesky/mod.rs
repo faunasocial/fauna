@@ -6,6 +6,8 @@ pub mod bluesky_handlers;
 pub mod bridge_provider;
 pub mod db_helpers;
 pub mod dm_leg;
+#[cfg(feature = "test-hooks")]
+pub mod dm_test_hook;
 pub mod dm_worker;
 // `interact_routes` no longer registers any bluesky-specific HTTP route (the
 // `interact/*` twins were ripped); it stays for

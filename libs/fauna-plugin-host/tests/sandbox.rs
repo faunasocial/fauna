@@ -223,6 +223,47 @@ async fn fuel_exhaustion_ends_the_call_and_the_host_survives() {
     assert!(again.fuel_remaining() > 0);
 }
 
+/// A runaway call yields to the executor while it spends its budget: on a
+/// single-threaded runtime a 10 ms ticker keeps firing through the whole spin,
+/// and the spin still ends as `OutOfFuel` — the budget is unchanged, only the
+/// worker is no longer held for all of it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_spinning_call_yields_the_worker_and_still_runs_out_of_fuel() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    let rec = Recorder::new(vec![]);
+    let mut plugin = instance(rec, OutboundPolicy::none()).await;
+    let ticks = Arc::new(AtomicU64::new(0));
+    let ticker = tokio::spawn({
+        let ticks = ticks.clone();
+        async move {
+            let mut every = tokio::time::interval(Duration::from_millis(10));
+            loop {
+                every.tick().await;
+                ticks.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    });
+    tokio::task::yield_now().await;
+    let before = ticks.load(Ordering::Relaxed);
+    let fault = plugin
+        .handle_ingress(IngressRequest {
+            method: "GET".into(),
+            path: "/spin".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    let during = ticks.load(Ordering::Relaxed) - before;
+    ticker.abort();
+    assert!(matches!(fault, PluginFault::OutOfFuel), "{fault}");
+    assert!(
+        during >= 3,
+        "the ticker fired {during} times while the plugin spun: the call held the worker"
+    );
+}
+
 #[tokio::test]
 async fn memory_growth_over_the_cap_is_refused() {
     let rec = Recorder::new(vec![]);

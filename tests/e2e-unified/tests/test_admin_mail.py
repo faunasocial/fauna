@@ -402,7 +402,7 @@ def test_publish_spam_baseline_withheld(admin_app):
 
 #: Apps that render the standing-publish toggle and the baseline state text
 #: (tui is the lead app; the other six follow in their batched trickle-down).
-_STANDING_BUILT_APPS = {"tui"}
+_STANDING_BUILT_APPS = {"tui", "web", "linux", "android", "windows"}
 
 
 def _opted_in_contributors(nest_instance, seal_helper_binary, tag, n=3):
@@ -841,4 +841,205 @@ def test_auth_max_conn_per_ip_save_round_trips(admin_app, nest_instance):
     )
     assert not admin_app.error_text().strip(), (
         f"unexpected error after a valid save: {admin_app.error_text()!r}"
+    )
+
+
+def _spam_now(nest_instance) -> dict:
+    """The nest's persisted spam group, read now."""
+    return _nest_now(
+        nest_instance, lambda c: c.call("fauna.bridges.get_mail_config", {})["spam"]
+    )
+
+
+@pytest.mark.web
+@pytest.mark.feature("admin-mail-policy")
+def test_out_of_order_spam_thresholds_show_the_nest_refusal(admin_app, nest_instance):
+    """Saving a Junk threshold above a non-zero Reject threshold — an order that
+    makes no sense — shows the nest's refusal on the page, and the earlier
+    values stay saved (`admin.md` § 6. Mail: when both are non-zero `junk <
+    reject` must hold; the nest enforces it and the page surfaces the refusal,
+    never fakes green)."""
+    before = _spam_now(nest_instance)
+    junk, reject = "admin-mail-spam-threshold-junk", "admin-mail-spam-threshold-reject"
+
+    admin_app.admin.navigate_mail()
+    assert _wait(admin_app.admin.mail_policy_present), (
+        f"page did not render. error: {admin_app.error_text()!r}"
+    )
+    assert _wait(
+        lambda: admin_app.admin.mail_field_text(junk).strip()
+        == str(before["max_score_before_spam_folder"])
+    ), f"junk did not hydrate; got {admin_app.admin.mail_field_text(junk)!r}"
+
+    admin_app.admin.set_mail_field(junk, "12")
+    admin_app.admin.set_mail_field(reject, "6")
+    admin_app.admin.save_mail_spam()
+
+    assert _wait(lambda: admin_app.error_text().strip()), (
+        "an out-of-order threshold save must show the nest's refusal on the page"
+    )
+    after = _spam_now(nest_instance)
+    assert (
+        after["max_score_before_spam_folder"],
+        after["max_score_before_reject"],
+    ) == (
+        before["max_score_before_spam_folder"],
+        before["max_score_before_reject"],
+    ), (
+        f"the refused save must leave the earlier thresholds saved; before={before!r} "
+        f"after={after!r}; page error {admin_app.error_text()!r}"
+    )
+
+
+@pytest.mark.web
+@pytest.mark.feature("admin-mail-policy")
+def test_non_numeric_entry_keeps_the_saved_value(admin_app, nest_instance):
+    """A numeric field saved with something that is not a number keeps the value
+    already saved (`mail-policy-config.md` § What `0` means on an unsigned knob:
+    each field saves as `parse_count(text).unwrap_or(prev)`) — the nest still
+    holds the earlier value, and the page shows it again after the save."""
+    field = "admin-mail-max-conn-per-min-input"
+    before = _spam_now(nest_instance)["max_conn_per_min"]
+
+    admin_app.admin.navigate_mail()
+    assert _wait(admin_app.admin.mail_policy_present), (
+        f"page did not render. error: {admin_app.error_text()!r}"
+    )
+    assert _wait(lambda: admin_app.admin.mail_field_text(field).strip() == str(before)), (
+        f"{field} did not hydrate to {before}; got {admin_app.admin.mail_field_text(field)!r}"
+    )
+
+    admin_app.admin.set_mail_field(field, "lots")
+    admin_app.admin.save_mail_spam()
+
+    assert _wait(lambda: admin_app.admin.mail_field_text(field).strip() == str(before)), (
+        f"after saving a non-number {field} reads "
+        f"{admin_app.admin.mail_field_text(field)!r}, not the saved {before}; "
+        f"error: {admin_app.error_text()!r}"
+    )
+    assert _spam_now(nest_instance)["max_conn_per_min"] == before, (
+        "a non-numeric entry must keep the value already saved"
+    )
+
+
+def _revoke_contributor_grant(nest_instance, contributor, grant_id: bytes) -> None:
+    """The contributor revokes its own keyless spam-model grant (setup: what the
+    contributor's app does when its owner withdraws the grant)."""
+    with WsRpcAdminClient(
+        nest_instance["url"],
+        actor_id=contributor.actor_id,
+        signing_key=bytes(contributor.recipient["signing_key"]),
+    ) as ws:
+        reply = ws.call("fauna.capabilities.revoke", {"grant_id": grant_id})
+    assert reply.get("ok") is True, f"revoke reply not ok: {reply!r}"
+
+
+@pytest.mark.web
+@pytest.mark.feature("admin-mail-policy")
+def test_publish_result_says_how_many_could_not_be_included(
+    admin_app, nest_instance, mail_bridge_mda, seal_helper_binary, test_user,
+):
+    """When some opted-in members could not be included in a publish, the
+    result says how many (`mail-spam.md` § Cold start; the nest's
+    `skipped_contributors`). Four members opt in; one then revokes the grant
+    the aggregation holder reads through, so the holder merges three and the
+    publish result names the one it could not include. `mail_bridge_mda` is
+    the holder; the session `test_user` is opted out first (the GUI spam tests
+    leave it opted in, which would change both counts)."""
+    from i18n.strings import S
+
+    if app_name(admin_app.driver) not in _STANDING_BUILT_APPS:
+        skip_unbuilt(
+            admin_app.driver,
+            surface="admin-mail-publish-spam-baseline-result",
+            detail="the skipped-contributors note is witnessed on tui first",
+            tracked="the cross-app lift row of the admin-pages witness track",
+        )
+    contributors = []
+    try:
+        ws_api.baseline_contribution_set(nest_instance["port"], test_user, False)
+        grants = []
+        for i in range(4):
+            c, gid = _provision_baseline_contributor(
+                nest_instance=nest_instance, seal_helper_binary=seal_helper_binary,
+                local_part=f"admin-baseline-skip-{i}", token=f"qzskip{i}wx",
+                holder_x25519_pubkey=mail_bridge_mda.x25519_pubkey,
+                domain=mail_bridge_mda.domain,
+            )
+            contributors.append(c)
+            grants.append(gid)
+        _revoke_contributor_grant(nest_instance, contributors[3], grants[3])
+
+        admin_app.admin.navigate_mail()
+        assert _wait(admin_app.admin.mail_policy_present), (
+            f"page did not render. error: {admin_app.error_text()!r}"
+        )
+        admin_app.admin.publish_spam_baseline()
+        note = S.admin.mail_page.spam_baseline_skipped_contributors(count="1")
+        assert _wait(lambda: note in admin_app.admin.publish_spam_baseline_result(), 60.0), (
+            f"the publish result must say one member could not be included; got "
+            f"{admin_app.admin.publish_spam_baseline_result()!r}, error: "
+            f"{admin_app.error_text()!r} (MDA log {mail_bridge_mda.log_file})"
+        )
+    finally:
+        _withdraw_baseline_contributors(nest_instance, contributors)
+
+
+@pytest.mark.feature("admin-mail-policy")
+def test_turning_mail_off_on_the_mail_page_stops_the_mail_server(
+    app, dedicated_mail_nest, request
+):
+    """admin.md § 6 Mail: the page's mail switch is the deployment-wide master
+    switch, so turning it off stops the mail server for everyone on the nest —
+    a mail app that logged in a moment before can no longer open a mailbox.
+
+    A DEDICATED mail nest, never the session venue: flipping the master switch
+    there would take mail down under every later test. The admin turns mail on
+    for themselves from the mail-settings page (the venue's bridges start with
+    every toggle off, as a fresh claim is), logs a mail app in over IMAPS, then
+    flips the switch on the admin Mail page. The MDA answers the change by
+    leaving its listeners (in production its supervisor brings it back bound to
+    whatever is still on — here nothing is), so the same login is refused. The
+    switch's persisted value is read back over the page's own read twin
+    (`get_mail_config`) — an observation, not the act."""
+    from tests.test_mail_settings_controls import (
+        _DEFAULT_PASSWORD,
+        _enable_on_dedicated_nest,
+        _imap_login,
+    )
+
+    handle = dedicated_mail_nest
+    admin_addr = _enable_on_dedicated_nest(app, handle, request)
+
+    def login() -> str:
+        try:
+            return _imap_login(handle, admin_addr, _DEFAULT_PASSWORD)
+        except (OSError, AssertionError) as exc:
+            return f"refused ({type(exc).__name__}: {exc})"
+
+    assert login() == "OK", "with mail on, a mail app logs in over IMAPS"
+
+    app.admin.navigate_mail()
+    assert _wait(app.admin.mail_policy_present), (
+        f"admin Mail page did not render. error: {app.error_text()!r}"
+    )
+    client = _admin_client(handle.nest)
+    with client:
+        assert client.call("fauna.bridges.get_mail_config", {})["mail_enabled"] is True, (
+            "precondition: the deployment switch reads on once the admin's mail is on"
+        )
+        app.admin.toggle_mail_enabled()
+        assert _wait(
+            lambda: client.call("fauna.bridges.get_mail_config", {})["mail_enabled"] is False
+        ), f"the switch never persisted off. error: {app.error_text()!r}"
+
+    last = {}
+
+    def refused() -> bool:
+        last["login"] = login()
+        return last["login"] != "OK"
+
+    assert _wait(refused, timeout=60.0), (
+        "turning mail off must stop the mail server for everyone — a mail app "
+        f"still logs in: {last.get('login')!r}"
     )

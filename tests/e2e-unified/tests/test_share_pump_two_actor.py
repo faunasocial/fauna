@@ -73,17 +73,28 @@ pytestmark = [
     # `_OWNER_APPS`); `--app macos,tui` drives it, `--app macos` alone has no
     # owner to pair with and collects nothing.
     pytest.mark.macos,
+    # windows joined 2026-10-10 as an OWNER and a MEMBER seat (it has
+    # `folder-member-role-select`, and its TestAgent carries the three serve /
+    # probe doors); its real external `fauna-sync-agent` is what the plane's
+    # provisioner drives.
+    pytest.mark.windows,
     # macOS' production spawner is launchd, which an e2e launch must not
     # bootstrap; this marker is what makes its launch construct the private
     # child-agent spawner instead, and the plane's provisioner (its two agent
     # verbs) is built from that spawner — no agent, no provisioner, no plane.
     # A no-op for tui/linux, which direct-spawn their agent already.
     pytest.mark.real_sync_agent,
+    # windows spawns its agent DETACHED: this puts the owner's agent on the
+    # run's own pipe/data dir, gives each fresh windows seat one of its own,
+    # and stitches that agent's log into `app_stderr_text` (which
+    # `await_agent_upload` greps). A no-op on the other apps
+    # (`test_webdav_shared_set.py` precedent).
+    pytest.mark.isolated_sync_agent,
 ]
 
 #: Apps with a landed share-plane leg. Grow this — and the app's own marker
 #: above — together.
-_SUPPORTED_APPS = ("tui", "linux", "macos")
+_SUPPORTED_APPS = ("tui", "linux", "macos", "windows")
 
 #: The apps that can be the OWNER seat of this journey: the choreography has
 #: the owner promote the member to **writer** (readers never bind engines),
@@ -93,7 +104,7 @@ _SUPPORTED_APPS = ("tui", "linux", "macos")
 #: `test_macos_writer_member_decrypts_owner_upload` already runs on macOS. Grow
 #: this the day macOS (or another leg) gains the control, and its own leg is
 #: then also proven as the SERVING seat.
-_OWNER_APPS = ("tui", "linux")
+_OWNER_APPS = ("tui", "linux", "windows")
 
 #: The owner a supported app that cannot own drives its member seat against —
 #: the lead app, which is also the one macOS can host next to macOS.
@@ -147,6 +158,21 @@ def _read_or_none(path):
         return None
 
 
+def _transfer_surface_readout(driver) -> str:
+    """What the six-id surface shows right now, for a failure message (convention 6)."""
+    parts = []
+    for element_id in ("share-serve-status", "share-transfer-list", "share-transfer-item"):
+        try:
+            parts.append(f"{element_id}: count={driver.count(element_id)}")
+        except Exception as exc:  # a readout must never mask the failure it explains
+            parts.append(f"{element_id}: unreadable ({type(exc).__name__})")
+    try:
+        parts.append(f"serve-status text={driver.get_text('share-serve-status')!r}")
+    except Exception as exc:
+        parts.append(f"serve-status text unreadable ({type(exc).__name__})")
+    return "; ".join(parts)
+
+
 def _await_member_file(member_folder, filename, expected, member_app):
     """Deadline-poll until the member's bound folder holds ``filename`` ==
     ``expected`` (convention 14 — the shared ``wait_until``)."""
@@ -169,6 +195,16 @@ def _await_member_file(member_folder, filename, expected, member_app):
             + _agent_diagnosis(member_app, "member")
         ),
     )
+
+
+def _member_access_or_none(ob, index, row):
+    """The member row's access value, or None while the roster re-read that
+    follows ``set_member_access`` has the row unpainted (linux rebuilds the
+    row, so the read is a LookupError for that beat — a poll tick, not a fail)."""
+    try:
+        return ob.member_access(index, row=row)
+    except LookupError:
+        return None
 
 
 def _share_and_reach_peer_barrier(
@@ -223,7 +259,7 @@ def _share_and_reach_peer_barrier(
 
     ob.set_member_access("writer", 0, row=owner_row)
     wait_until(
-        lambda: ob.member_access(0, row=owner_row) == "writer",
+        lambda: _member_access_or_none(ob, 0, owner_row) == "writer",
         15,
         interval=0.5,
         diagnose=lambda: (
@@ -440,9 +476,17 @@ def test_member_pulls_offline_authored_file_from_owner_peer(
         # The surface reports the pull honestly: an item row for this set with
         # a non-refusal state (Dim-3 — a gate refusal would name its tier).
         mb.navigate_folders()
-        assert md.count("share-transfer-item") >= 1, (
-            "[member] the transfer surface lost its rows after the peer pull "
-            f"that just delivered {file_2}"
+        # The Folders page renders its transfer rows after navigation, so a
+        # single read races the render (convention 14): wait for the row.
+        wait_until(
+            lambda: md.count("share-transfer-item") >= 1,
+            _PEER_BARRIER_S,
+            interval=1.0,
+            diagnose=lambda: (
+                "[member] the transfer surface lost its rows after the peer "
+                f"pull that just delivered {file_2}; "
+                f"{_transfer_surface_readout(md)}"
+            ),
         )
         state = md.get_text("share-transfer-state") or ""
         assert "limited" not in state.lower(), (
@@ -463,9 +507,10 @@ def test_member_pulls_offline_authored_file_from_owner_peer(
 #: doors, so this reads the owner app. macOS binds the plane as a member
 #: (`_SUPPORTED_APPS`) but has not wired the three FFI test doors into its own
 #: agent dispatcher, and could not be the owner here yet (`_OWNER_APPS`); it
-#: joins this and `_PROBE_APPS` together with that. The remaining native legs
-#: (windows, iOS, android) join once they bind the plane at all.
-_SERVE_HOLD_APPS = ("tui", "linux")
+#: joins this and `_PROBE_APPS` together with that. windows joined 2026-10-10
+#: with its TestAgent arms; the remaining native legs (iOS, android) join once
+#: they bind the plane at all.
+_SERVE_HOLD_APPS = ("tui", "linux", "windows")
 
 
 @pytest.mark.parametrize(
@@ -610,7 +655,7 @@ def test_an_interrupted_peer_transfer_resumes_without_resending_what_arrived(
 #: Apps whose seat carries the share probe (`offline_share_probe_set`, one
 #: shared call: `share_probe::probe_set_from_args`). Same joining rule as
 #: `_SERVE_HOLD_APPS`.
-_PROBE_APPS = ("tui", "linux")
+_PROBE_APPS = ("tui", "linux", "windows")
 
 
 def _share_plane_seat_trios():
@@ -768,10 +813,22 @@ def test_a_person_the_folder_was_never_shared_with_gets_nothing_readable(
         )
 
     stranger_driver = stranger_app.driver
-    roots = [stranger_driver._tmp_dir]
-    store_root = getattr(stranger_driver, "_resolved_store_root", None)
-    if store_root and not str(store_root).startswith(str(stranger_driver._tmp_dir)):
-        roots.append(store_root)
+    # The per-launch state root: tui/linux/macos hold it as `_tmp_dir`; windows
+    # relocates `%LOCALAPPDATA%` (the ancestor of its data dir) per launch.
+    launch_root = getattr(stranger_driver, "_tmp_dir", None) or getattr(
+        stranger_driver, "_local_appdata", None
+    )
+    assert launch_root, (
+        "[stranger] the driver exposes no per-launch state root to scan for "
+        "leaked plaintext"
+    )
+    roots = [launch_root]
+    for extra in (
+        getattr(stranger_driver, "_resolved_store_root", None),
+        getattr(stranger_driver, "_data_dir", None),
+    ):
+        if extra and not str(extra).startswith(str(launch_root)):
+            roots.append(extra)
     leaked = [hit for root in roots for hit in _files_holding(root, secret.encode())]
     assert not leaked, (
         f"[stranger] the payload's plaintext rests on the stranger's device: {leaked}"

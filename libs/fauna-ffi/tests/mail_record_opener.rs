@@ -498,7 +498,7 @@ fn open_mail_opens_the_oldest_of_five_generations_by_seal_time() {
     );
 }
 
-/// The example.com CalDAV flood, reproduced at its mechanism.
+/// The live-nest CalDAV flood, reproduced at its mechanism.
 ///
 /// An actor whose snapshot carries no `mdk` field
 /// has a snapshot whose sole leaf

@@ -143,6 +143,8 @@ async fn a_locked_out_app_reaches_its_successor_with_no_bearer() {
         &old(),
         &hex::encode(ROOT),
         None,
+        // tui mints its device id at session start, so it stores none here.
+        None,
         &accounts,
         |successor_hex| scratch.path().join(successor_hex).join("mls_state.db"),
     )

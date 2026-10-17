@@ -32,13 +32,17 @@ A routing stub remains at the original location; prior history:
 
 Subprotocol-validated WS upgrade at `GET /api/v1/ws/{actor_id}`:
 
-- Header `Sec-WebSocket-Protocol: fauna.v1, bearer.<token>` required. Wrong
-  subprotocol → **HTTP 426** (`StatusCode::UPGRADE_REQUIRED`) rejected
-  *before* the WS handshake completes, never a WS close frame — axum's
-  `WebSocketUpgrade` cannot set a custom close code pre-upgrade
-  (`bins/fauna-nest/src/routes.rs::ws_handler`; the anonymous
-  `ws_anonymous_handler` and `federation_channel.rs`'s handshake share the
-  identical pre-upgrade-426 shape). Missing subprotocol header → 401.
+- Header `Sec-WebSocket-Protocol: fauna.v1, bearer.<token>` required. A
+  header offering **no Fauna client subprotocol at all** → **HTTP 426**
+  (`StatusCode::UPGRADE_REQUIRED`), rejected *before* the WS handshake
+  completes (`bins/fauna-nest/src/routes.rs::ws_handler`; the anonymous
+  `ws_anonymous_handler` shares the shape, and `federation_channel.rs`'s
+  handshake keeps it as its only refusal). A header offering a Fauna client
+  subprotocol the nest does not serve — `fauna.v<N>` with N other than its
+  own — → the upgrade **completes, selecting the offered token, and the nest
+  closes at once with 4426** (RULED 2026-10-10; the 4426 paragraph below the
+  close-code table owns why and the build it owes). Missing subprotocol
+  header → 401.
 - Token validated against `state.auth.token_store`; mismatch with `actor_id` → 403.
 - Server echoes `fauna.v1` back via `ws.protocols(["fauna.v1"])`.
 
@@ -73,9 +77,9 @@ Close codes (custom in WebSocket private range 4000–4999):
 | Invalid frame / protocol violation | 4400 | Reconnect with backoff (likely a bug) |
 | Internal server error | 1011 | Reconnect with backoff |
 | Backpressure overflow on Reply | 1011 | Reconnect; pending requests fail with `RpcDisconnected` |
-| Subprotocol mismatch | 4426 | Terminal — reconnect loop exits, no retry (see caveat below) |
+| Subprotocol mismatch — the app offered a `fauna.v<N>` the nest does not serve | 4426 | Terminal — reconnect loop exits, no retry (the 4426 paragraph below) |
 
-**4400 and 1011 are emitted for real as of 2026-07-31; 4426 is reserved (never emitted, by construction — see caveat below).**
+**4400 and 1011 are emitted for real as of 2026-07-31; 4426 is emitted for real as of 2026-10-10 (RULED and built that day, the emitter and its one-shot readers in one change — `git log --grep 'nest emits the 4426 close'`) — reserved and never emitted from 2026-07 until then, for the reasons the 4426 paragraph below keeps — and the web verdict arm built and witnessed the same day (`git log --grep 'web reads the 4426'`).**
 `RpcConnection` carries a `fatal_tx` watch holding a `FatalCloseReason`
 (`ProtocolViolation` → 4400, `ReplyOverflow` → 1011); the inbound dispatch loop
 sets it on a Reply/Push-from-client, a text frame, or an undecodable frame, the
@@ -106,36 +110,113 @@ garbage" from "the network blipped". Pinned by
 `u16`, plus a nest-side negative control proving an ordinary disconnect is *not*
 labelled a violation) and the `reply_overflow_*` unit tests in `ws.rs`.
 
-**The `4426` code is reserved but structurally unreachable, by design — the
-terminal behavior it names is real, driven from the pre-upgrade HTTP layer
-instead.** A subprotocol mismatch is rejected at the pre-upgrade HTTP layer
-(above) before any WS ever opens, so a live connection closing with code 4426
-is not a path the server can reach — axum's `WebSocketUpgrade` cannot set a
-close code before the handshake completes. Rather than restructure the server
-around that constraint (accept the upgrade just to immediately close it,
-changing the wire behavior other clients/tests assume), the client classifies
-the pre-upgrade rejection directly: `map_ws_connect_err`
+**The `4426` close is emitted for real — RULED 2026-10-10 — for one caller:
+an app offering a Fauna client subprotocol the nest does not serve.** Until
+that ruling the code was reserved and never emitted, by a design choice this
+paragraph keeps so it is not re-made blind: a subprotocol mismatch was
+rejected at the pre-upgrade HTTP layer alone (above), because axum's
+`WebSocketUpgrade` cannot set a close code before the handshake completes and
+accepting an upgrade just to close it looked like restructuring the server for
+no consumer — every native connector reads the HTTP status of a refused
+upgrade, and the client side classified it directly: `map_ws_connect_err`
 (`libs/fauna-client/src/ws_adapter.rs`) maps HTTP `426` on the upgrade
-response to `NestClientError::SubprotocolMismatch` — the same error an
-already-open connection closing with `4426` would produce
-(`ReconnectSignal::SubprotocolMismatch`,
-`libs/fauna-ws-substrate/src/adapter.rs:46-47,60`) — and
-`ClientChannel::connect_error_is_terminal`
-(`libs/fauna-client/src/reconnect.rs`) treats it the same way an identity
-successor treats a superseded account: the reconnect loop exits immediately
-(`SupervisorError::TerminalRefusal`) instead of backing off and retrying
-forever at the 60 s ceiling. No retry or bearer refresh can fix a genuine
-version skew, so failing fast is correct regardless of which of the two
-mechanisms (pre-upgrade 426, or a hypothetical post-upgrade 4426 close)
-produced it. Proven against a **real** upgrade rejection — a raw TCP listener
+response to `NestClientError::SubprotocolMismatch`, `fauna_anon_client`'s twin
+types the anonymous endpoint's 426 as `AnonClientError::SubprotocolMismatch`,
+and `ClientChannel::connect_error_is_terminal`
+(`libs/fauna-client/src/reconnect.rs`) exits the reconnect loop at once
+(`SupervisorError::TerminalRefusal`) instead of backing off for ever at the
+60 s ceiling. All of that stays. **What changed is that a consumer arrived
+which structurally cannot read the alternative: a browser.** The `WebSocket`
+API reports a refused upgrade as a bare `error` event and a 1006 close — no
+status, no body, no header — so on web an app too old for its nest read its
+own 426 as a network blip and retried until "Cannot connect"
+(`version-compatibility.md` § Dimension 4, *The other direction*). The one
+thing a browser *can* read off a connection the nest answered is a close
+code, and 4426 was reserved for exactly this, every connector's reader kept
+pinned "should the server ever grow a post-upgrade 4426 emission":
+`fauna_ws_substrate::adapter`'s `ReconnectSignal::SubprotocolMismatch`
+(`libs/fauna-ws-substrate/src/adapter.rs`), `fauna_rpc_wasm::adapter`'s
+`4426 => SubprotocolMismatch`, the SPA loop's stop record
+(`client::tests::the_loops_own_close_arm_records_a_subprotocol_mismatch_stop`),
+`supervisor.rs::supervisor_exits_on_subprotocol_mismatch`. So the ruling
+reaches for the reserved code rather than a second observable:
+
+- **The nest's rule, at both client upgrade endpoints** (`ws_handler`,
+  `ws_anonymous_handler`; the federation handshake is NOT in scope — both of
+  its ends are nests, which read the 426). The offered `Sec-WebSocket-Protocol`
+  tokens are classified once, in one helper beside
+  `required_client_subprotocol`. The required token offered → the upgrade as
+  today. No required token but **some `fauna.v<N>`** (decimal N — the grammar
+  of a Fauna client subprotocol, which is per-major) → **complete the upgrade
+  selecting that offered token** (a browser fails the connection unless the
+  server selects one of the tokens it offered, and the native connectors'
+  tungstenite enforces the same), **then send `Close(4426, "subprotocol
+  <required> required")` and end**, awaiting the peer's close echo for at most
+  a couple of seconds so the code reaches it as a clean close — entering
+  **no** dispatcher: no `subscribe_anonymous`, no bearer validation, no
+  `RpcConnection`, no state, so the path is strictly cheaper than an admitted
+  anonymous connection and needs no throttle of its own (the 426 path has
+  none either). No `fauna.v*` offered at all → HTTP 426 as before; no header
+  → 401 as before. The reason text may name the required token: that is the
+  client subprotocol's major, coarser than the `major.minor` every anonymous
+  surface already answers (`version-compatibility.md` § Dimension 3), and no
+  more than the 426 body said.
+- **A cross-major wire rule, kept by every nest from here on.** An app of any
+  earlier major learns it is too old from the code it has decoded since
+  2026-07, whatever either side's version — the rule's whole value is that it
+  still holds when the next major arrives. Within 0.1.x nothing is owed to a
+  peer predating it (`version-compatibility.md` § Dimension 2, the fifth
+  exception).
+- **Every connector reads the close, not only the browser** — one observable
+  for all 7 apps (priorities #1, #3), never a web-only side channel. The
+  readers named above exist; the two one-shot connections gain theirs:
+  `fauna_anon_client`'s adapter records the close code the way
+  `fauna_ws_substrate::adapter` does and `AnonymousNestClient` surfaces a
+  request that failed disconnected after a 4426 as
+  `AnonClientError::SubprotocolMismatch`; `fauna_rpc_wasm::fixed_conn` reads
+  the `GlooAdapter` signal cell the same way and surfaces
+  `WsRpcError::SubprotocolMismatch`. Above both, the shared classifiers map it
+  exactly as they map the 426 today — `silent_challenge_error` to
+  `SilentChallengeOutcome::NeedsUpdate { outdated: OutdatedSide::App }`, the
+  onboarding probe to `ProbeError::AppOutdated`, a stopped supervisor to
+  `SessionEndingVerdict::AppOutdated` (the SPA's `sessionEndingVerdict()`
+  answering `app_outdated`) — so the native connect-time 426 arms stay as the
+  pin for the no-Fauna-token case and the 4426 road lands the identical
+  surface. `version-compatibility.md` § Dimension 4 owns the surface and its
+  status. The nest emitter and the shared-Rust readers are built (2026-10-10,
+  one change — `git log --grep 'nest emits the 4426 close'`), and the web
+  verdict arm with its e2e witness the same day (`git log --grep 'web reads
+  the 4426'`).
+- **What was weighed and set aside.** (a) A coarse accepted-subprotocols
+  field on `GET /api/v1/health`, fetched by the SPA after a failed dial: an
+  HTTP consumer inside an app where WS-RPC is everywhere (`api-layers.md` —
+  health is "not used by Fauna apps"), a CORS question whenever the SPA's
+  stored nest is not its origin, and a verdict inferred from a second request
+  rather than read off the refusal — a web-only mechanism beside the native
+  one. (b) Accept the upgrade and run a dispatcher that refuses every kind
+  with a typed `app_outdated` error: the same accept-then-refuse idea with an
+  open connection and a new error code, where a reserved close code already
+  has every reader. (c) A softer "may be out of date" after N failures: a UX
+  compromise the goal would have had to own. A pre-dial `fauna.nest.info`
+  probe rides the very connection the nest refuses, and its HTTP twin was
+  deleted in the WS-RPC rip.
+
+Proven today against a **real** upgrade rejection — a raw TCP listener
 answering HTTP 426, not a synthesized enum variant
-(`ws_adapter::tests::map_ws_connect_err_classifies_a_real_426_upgrade_rejection`)
+(`ws_adapter::tests::map_ws_connect_err_classifies_a_real_426_upgrade_rejection`,
+`fauna_anon_client`'s `connect_anonymous_classifies_a_426_upgrade_rejection`)
 — plus `reconnect::tests::subprotocol_mismatch_is_terminal` for the terminal
-classification; the synthetic-close-frame test
-(`supervisor.rs::supervisor_exits_on_subprotocol_mismatch`) remains as the
-regression pin for the close-frame code path, should the server ever grow a
-post-upgrade 4426 emission (e.g. a future protocol version negotiated
-mid-connection).
+classification and the close-frame pins named above; and the emitter's own:
+`bins/fauna-nest/tests/subprotocol_handshake.rs` pins a `fauna.v0` offer → 101
+selecting `fauna.v0`, then Close 4426 (on both client endpoints, and before the
+bearer is consulted) and a non-Fauna token → 426, and each one-shot connector
+meets a fake server that answers 101 then 4426 — `fauna-anon-client`'s
+`tests/subprotocol_close.rs` and `fauna-rpc-wasm`'s
+`a_fixed_connection_closed_4426_fails_its_request_as_a_subprotocol_mismatch`,
+each beside a 1000 negative control — while
+`fauna_protocol::auth`'s `a_subprotocol_mismatch_is_needs_update_naming_the_app`
+pins the classifier, read through `RpcErrorClass::is_subprotocol_mismatch`,
+never the error's text.
 
 **Client-side teardown on logout / re-auth (the `1000` row is a client requirement).**
 Clearing or replacing the authenticated session — logout, or re-auth to a
@@ -205,11 +286,10 @@ It is the per-actor twin of `begin_shutdown` (§ Graceful shutdown): the same
 1001** and performs **no drain**. The close code is the whole point — `1001`
 means *reconnect with the bearer you have*, which for a revoked actor is a dead
 credential; `4401` means *clear it and re-authenticate*, and the re-mint then
-leads nowhere: the direct handshake (`auth_core::direct_auth_core`) denies a
-suspended, locked-out, or unregistered actor outright, while challenge/verify
-(`verify_core`) denies a suspended or unregistered one and still mints for a
-locked-out actor, whose fresh bearer is refused at its first use (the
-**standing refusal** paragraph further down this section). Either way the supervisor backs off rather
+leads nowhere: the direct handshake (`auth_core::direct_auth_core`) and
+challenge/verify (`verify_core`) both deny a suspended, locked-out, or
+unregistered actor outright ([`../behavior/login.md`](../behavior/login.md)
+§ Silent Challenge owns the verify path's gates). The supervisor backs off rather
 than spinning. The drain
 is skipped because lockout is an *emergency* control: the socket dies now, not
 after the outbound queue flushes. In-flight handlers are left to finish rather
@@ -439,9 +519,8 @@ still-rejected fresh bearer falls back to backoff (no refresh→401 busy loop).
 That fall-through is also what a **standing refusal** lands on: the upgrade asks
 the bearer's actor's standing and answers a suspended, locked-out or revoked actor
 `401` too ([`api-layers.md`](api-layers.md) § Layer 1: Core Client API → *What
-`caller_class_for_actor` refuses*), and a locked-out actor's re-mint over
-challenge/verify still succeeds today, so its fresh bearer is refused again and
-the supervisor backs off. The Go bridges' in-process redial (`bins/fauna-bridges/internal/wsrpc`, `Dial`)
+`caller_class_for_actor` refuses*), and a locked-out actor's re-mint is refused
+too (§ *Revocation teardown* above), so the supervisor backs off. The Go bridges' in-process redial (`bins/fauna-bridges/internal/wsrpc`, `Dial`)
 applies the same rule for the same reason — a nest restart empties its in-memory
 token store — so a bridge re-mints once instead of re-presenting its cached
 bearer until that bearer nears expiry.
@@ -458,8 +537,9 @@ machine in `Offline { transient: true }` — a state from which `refresh_token`
 (the `fauna.auth.handshake` re-mint) is a no-op, because there is no `Online`
 session to refresh. So `bearer()` falls back to re-running the **silent
 challenge** (`retry_silent_challenge`, which self-guards to the transient case)
-before it gives up; a terminal `Offline` (bad secret, account locked) is left
-untouched. Without this, the supervisor's re-mint would `clear_token()` →
+before it gives up; a non-transient `Offline` (a bad secret; a locked account,
+which is a timed hold the supervisor waits out — *A locked account holds the
+reconnect loop until its unlock time*, below) is left untouched. Without this, the supervisor's re-mint would `clear_token()` →
 `ensure_auth()` → still get nothing and back off forever — the same dead-WS
 strand the upgrade-401 handling exists to prevent.
 
@@ -653,9 +733,9 @@ until then the protocol-level Ping is native-only by design.
 > now runs the standard mechanism in a single task; the app-level wire variants
 > remain for older workers, which answer them but never depend on receiving them.
 >
-> The 2026-05-29 note that this might fix the specific example.com enable-mail
+> The 2026-05-29 note that this might fix the specific live-nest enable-mail
 > freeze was never confirmed and still needs a live VPS repro (human + VPS) —
-> example.com's :443 is fronted by the `fauna-sni-router`, which terminates no TLS
+> that nest's :443 was fronted by the `fauna-sni-router`, which terminates no TLS
 > and imposes no idle timeout of its own on the spliced stream, so a
 > TLS-terminating-proxy idle timeout is not the cause for it as deployed.
 
@@ -763,7 +843,7 @@ and `client::tests::connect_twice_does_not_strand_the_first_supervisor`.
 
 **No dialer outlives its owner.** Retiring on `connect()` covers only an overwrite; a holder that simply lets go of a client — a cache dropping it after a failed request, a mount whose assembly failed half way — used to leave its supervisor dialling for the life of the process, because the supervisor task holds the channel, never the `NestClient`, and dropping the `JoinHandle` does not abort it. So dropping the last handle to a `NestClient` aborts its supervisor and reconnect-derive task (`impl Drop for NestClient`), and the device-principal connect retry (`ws_device_handshake_bearer::spawn_connect_retry`) holds its client only weakly between attempts and ends once every owner has let go. A reconnect loop therefore exists exactly as long as something can still use its connection; a holder that wants a *fresh* connection drops or `disconnect()`s the old client, and a failed request is never a reason to rebuild one — its supervisor reconnects on its own (the sync agent rebuilds its retained control-plane client only once that client's supervisor has stopped, `SyncServiceState::nest_rpc`). This is the 2026-09-24 incident: a sync agent with a dead device credential threw its control-plane client away on every failed once-a-minute read and leaked a retry loop per failed mount, and after four days it was dialling the production nest about eight times a second. Pinned by `client::tests::dropping_a_client_stops_its_dialling`, `ws_device_handshake_bearer::tests::the_retry_ends_when_its_client_is_dropped`, and end to end by `fauna-sync-agent`'s `custodian::tests::a_dead_credential_is_dialled_on_one_ladder_not_one_per_failed_read` (a fake nest answering every upgrade `401`, thirty virtual minutes of failed reads, the dial count held to one ladder). **A superseded identity dials nothing more.** A supersession never un-happens (`succession-propagation.md`), so both bearer mints — the identity's silent challenge (`WsChallengeBearer`) and the store principal's device handshake (`WsDeviceHandshakeBearer`) — latch the `fauna.auth.superseded` refusal and answer every later mint from the latch without dialling; the device principal's latch also reaches its `AuthClient`, so its supervisor's terminal test and its connect retry stop. Before 2026-09-28 the device bearer had no latch and the challenge bearer never read its own, so on windows a retired identity's clients kept presenting its credential after the switch away from it, each bearer read a fresh dial of the budget below. **A holder the session cannot see never pins a dialer:** the local-search resolver a page's search manager holds keeps its index launcher only weakly (`fauna_client_conversations::LauncherLocalIndex`), because the launcher's flush driver lives as long as the launcher and publishes through the identity's `NestClient`; on windows an undisposed manager kept a departed identity's driver retrying once a minute. The same holds for the two seams app glue installs a `ConversationsSession` into: the devices machine's member-row join filter (`fauna-ffi`'s `SessionMlsQuery`) and the feed's room-post keys (`ConversationsSession::weak_room_post_keys`) both keep the session weakly, because a strong hold let every undisposed devices machine or feed manager keep its session — and that session's receive loop and index-lease tasks — alive past the sign-out that ended it (measured on windows 2026-09-29: one leaked session per e2e reset, each retrying against its departed client, until the Folders page drowned in refreshes); a departed session answers what an unwired seam does. Pinned by `folders_author::tests::a_departed_session_answers_not_joined` and `weak_room_post_keys_tests::a_departed_session_opens_nothing`, and by `ws_challenge_bearer::tests::a_latched_supersession_is_answered_without_dialling`, `ws_device_handshake_bearer::tests::a_superseded_principal_stops_dialling` and `fauna-client-conversations`'s `launcher_local_index_tests::a_registered_resolver_does_not_keep_the_launcher_alive`.
 
-**The dial budget — a process-wide backstop keyed on the nest.** A backoff curve paces one loop; nothing in a curve bounds how many loops a process runs, and every dial storm to date was a count bug with every pace correct. So every native client WS dial to a nest — the bearer dial (`fauna_anon_client::tls_dial::dial_ws_trusted`, which the client supervisor and the leaf-crate authenticated connect both take) and the pre-identity dial (`connect_anonymous`, which every handshake mint takes) — first waits on `fauna_ws_substrate::dial_budget`: a token bucket per nest `host:port` per process, a burst of `DIAL_BUDGET_BURST` (256) dials and then one per `DIAL_BUDGET_REFILL` (10 s). **The burst is sized for both legitimate bursts a process makes, and the arithmetic is the constant itself:** `REDEPLOY_RECONNECT_DIALS` (64 — a redeploy drops every connection the process holds and they redial within a second: the session's client, the store principal's, a terminal app's per-feature clients, each a bearer re-mint plus the authenticated dial, measured under 24 on the widest app; the sync agent's control plane, data path and engine clients are that process's own budget) plus `SESSION_STARTS_COVERED` (16) runs of `DIALS_PER_SESSION_START` (12 — the widest session start measured 2026-09-28: the launch's silent challenge, the session client's mint and dial, the store principal's mint and dial, the post-auth silent challenge tui, linux and apple still run beside the session's own mint, and — until its first connect was gated on the grant (below) — the device principal's one to five `not_registered` handshake mints while its grant registration was in flight; the constant keeps that measurement as its ceiling). A process switching accounts back to back — sign out, sign in as another, again — is as correct as one reconnecting, and until 2026-09-28 the burst covered the reconnect alone (64): one e2e app process was paced three sign-ins into a succession journey, about 21 s in, and a person would have been paced after a handful of switches. Sixteen starts within one refill interval is many more than a person makes, and each start is cheaper for every dial it owed to nothing (below); past the burst the refill's six a minute sustains a switch a minute for ever. The refill sits below any correct loop's steady state (one dial per minute at the curve's ceiling), so the budget never paces a correct process and holds a broken one to six dials a minute whatever its loop count. **A correct process opens one authenticated socket per actor** (`transport.md` § the one-WebSocket-per-actor rule): every pass an app runs for a signed-in session rides that session's one client and never builds a one-shot client of its own. A one-shot client costs its own bearer mint and bearer dial, which is how one windows session start spent five dials for one actor until 2026-09-28 (`transport.md` § Implementation status, the windows bullet). Both are Rust constants: no user or admin would choose them (`principles.md` § One configuration surface). The wasm client is out of scope: web runs one reconnect loop per actor by construction (below). Pinned by `dial_budget::tests::a_thousand_dialers_share_one_allowance`, `…::a_redeploy_burst_is_not_paced` and `…::a_run_of_account_switches_is_not_paced` (sixteen session starts after a redeploy reconnect, at the constants above, wait for nothing). **The store principal's first connect waits for its grant (built 2026-09-28).** Until then its connect retry (`ws_device_handshake_bearer::spawn_connect_retry`) dialled `fauna.auth.device_handshake` the moment the account runtime started, racing the enrollment ceremony that registers its grant, and on a machine's first sign-in was refused `not_registered` one to five times before the grant landed — each refusal also spending the nest's failed-credential throttle for that device key (§ *The failed-credential throttle*). Now the account runtime spawns the retry behind a `ConnectGate::AfterGrant` on its grant-registered signal (`AccountStoreHandle::subscribe_grant_registered`): open from assembly when the slot already records a registration for the grant it carries (`PrincipalSlot::grant_registration_row` — every launch after the first), otherwise opened mid-pass by the engine holder the moment `ensure_enrollment_registered` returns a verdict that puts the grant on the nest (so the rest of that pass already rides the principal's connection), and on a co-located non-holder — which runs no pass — by re-reading the shared slot's latch on a 500 ms-to-30 s backoff, a local read and never a dial. It never closes again. The sync agent's host and the conformance tests that start registered pass `ConnectGate::Open`. Pinned by `ws_device_handshake_bearer::tests::a_gated_retry_dials_nothing_until_the_grant_is_registered`, `fauna-sync-engine`'s `account_runtime::tests::the_grant_registration_opens_the_principals_connect_gate`, and end to end by `conformance_account_runtime::v10_the_runtime_authenticates_as_the_store_principal` (a first sign-in against a one-refusal failed-credential bucket: exactly one principal session, the bucket untouched). **One dial a session start still owes to nothing (2026-09-28; shared Rust, the shape decided and the work queued).** tui, linux and apple run a post-auth silent challenge at every sign-in to refresh the registry's handle, domain and tier — a second full `challenge`/`verify` mint for the actor whose session client is minting its own bearer at the same instant, and whose `VerifyReply` carries the same three fields and discards them. The shape: `MintedBearer` keeps the reply's identity, the session client publishes its latest mint's identity on a watch, and the three apps' sign-in refresh reads the watch instead of dialling; the identity re-check that challenge doubled as (`security.md` § Post-auth surfacing, channel 3) is already carried by the session mint's own verdict through the supervisor's session-ending stop, and a handle rename is then caught at every hourly re-mint rather than once at login. The e2e `silent_sign_in` bridge command and windows' TTL refresh loop keep their on-demand dial: that IS the forced re-check. **The budget is per process, so an e2e factory reset clears it.** A native e2e driver keeps one app process across tests and factory-resets it in place, and a reset app stands for a new device — a new process, with a whole burst (`e2e-launch-isolation.md`, convention 10: a verdict never depends on how many tests ran before it). Left alone, the budget couples tests no real device couples: one recovery-kit journey (sign in, create a kit, succeed, lose every device, restore, sign in) spent the whole burst in about 33 s on windows, and the next test's successor then waited 10 s per dial and never reached its closing act. So the e2e flavors carry one seam, `dial_budget::clear_for_test` (feature `test-helpers`; `fauna-ffi`'s `dial_budget_clear_for_test`; compiled out of release, `e2e-automation-surface-gating.md`, convention 15), and each native app's per-test `reset` arm calls it after tearing its clients down. A shipped build has no way to clear the backstop. Pinned by `…::a_cleared_budget_is_a_fresh_process` and `…::clear_for_test_restores_the_process_burst`; windows, macOS and iOS call it since 2026-09-29; the other native apps' reset arms (linux, android, tui) do not yet, which is parity work.
+**The dial budget — a process-wide backstop keyed on the nest.** A backoff curve paces one loop; nothing in a curve bounds how many loops a process runs, and every dial storm to date was a count bug with every pace correct. So every native client WS dial to a nest — the bearer dial (`fauna_anon_client::tls_dial::dial_ws_trusted`, which the client supervisor and the leaf-crate authenticated connect both take) and the pre-identity dial (`connect_anonymous`, which every handshake mint takes) — first waits on `fauna_ws_substrate::dial_budget`: a token bucket per nest `host:port` per process, a burst of `DIAL_BUDGET_BURST` (256) dials and then one per `DIAL_BUDGET_REFILL` (10 s). **The burst is sized for both legitimate bursts a process makes, and the arithmetic is the constant itself:** `REDEPLOY_RECONNECT_DIALS` (64 — a redeploy drops every connection the process holds and they redial within a second: the session's client, the store principal's, a terminal app's per-feature clients, each a bearer re-mint plus the authenticated dial, measured under 24 on the widest app; the sync agent's control plane, data path and engine clients are that process's own budget) plus `SESSION_STARTS_COVERED` (16) runs of `DIALS_PER_SESSION_START` (12 — the widest session start measured 2026-09-28: the launch's silent challenge, the session client's mint and dial, the store principal's mint and dial, the post-auth silent challenge tui, linux and apple then ran beside the session's own mint (since folded onto that mint, below), and — until its first connect was gated on the grant (below) — the device principal's one to five `not_registered` handshake mints while its grant registration was in flight; the constant keeps that measurement as its ceiling). A process switching accounts back to back — sign out, sign in as another, again — is as correct as one reconnecting, and until 2026-09-28 the burst covered the reconnect alone (64): one e2e app process was paced three sign-ins into a succession journey, about 21 s in, and a person would have been paced after a handful of switches. Sixteen starts within one refill interval is many more than a person makes, and each start is cheaper for every dial it owed to nothing (below); past the burst the refill's six a minute sustains a switch a minute for ever. The refill sits below any correct loop's steady state (one dial per minute at the curve's ceiling), so the budget never paces a correct process and holds a broken one to six dials a minute whatever its loop count. **A correct process opens one authenticated socket per actor** (`transport.md` § the one-WebSocket-per-actor rule): every pass an app runs for a signed-in session rides that session's one client and never builds a one-shot client of its own. A one-shot client costs its own bearer mint and bearer dial, which is how one windows session start spent five dials for one actor until 2026-09-28 (`transport.md` § Implementation status, the windows bullet). Both are Rust constants: no user or admin would choose them (`principles.md` § One configuration surface). The wasm client is out of scope: web runs one reconnect loop per actor by construction (below). Pinned by `dial_budget::tests::a_thousand_dialers_share_one_allowance`, `…::a_redeploy_burst_is_not_paced` and `…::a_run_of_account_switches_is_not_paced` (sixteen session starts after a redeploy reconnect, at the constants above, wait for nothing). **The store principal's first connect waits for its grant (built 2026-09-28).** Until then its connect retry (`ws_device_handshake_bearer::spawn_connect_retry`) dialled `fauna.auth.device_handshake` the moment the account runtime started, racing the enrollment ceremony that registers its grant, and on a machine's first sign-in was refused `not_registered` one to five times before the grant landed — each refusal also spending the nest's failed-credential throttle for that device key (§ *The failed-credential throttle*). Now the account runtime spawns the retry behind a `ConnectGate::AfterGrant` on its grant-registered signal (`AccountStoreHandle::subscribe_grant_registered`): open from assembly when the slot already records a registration for the grant it carries (`PrincipalSlot::grant_registration_row` — every launch after the first), otherwise opened mid-pass by the engine holder the moment `ensure_enrollment_registered` returns a verdict that puts the grant on the nest (so the rest of that pass already rides the principal's connection), and on a co-located non-holder — which runs no pass — by re-reading the shared slot's latch on a 500 ms-to-30 s backoff, a local read and never a dial. It never closes again. The sync agent's host and the conformance tests that start registered pass `ConnectGate::Open`. Pinned by `ws_device_handshake_bearer::tests::a_gated_retry_dials_nothing_until_the_grant_is_registered`, `fauna-sync-engine`'s `account_runtime::tests::the_grant_registration_opens_the_principals_connect_gate`, and end to end by `conformance_account_runtime::v10_the_runtime_authenticates_as_the_store_principal` (a first sign-in against a one-refusal failed-credential bucket: exactly one principal session, the bucket untouched). **The post-auth silent challenge is folded onto the session mint (built 2026-10-08 for tui and linux; shared Rust; apple's Swift leg follows).** Until then tui, linux and apple ran a post-auth silent challenge at every sign-in to refresh the registry's handle, domain and tier — a second full `challenge`/`verify` mint for the actor whose session client was minting its own bearer at the same instant, and whose `VerifyReply` carries the same three fields and discarded them. Now `fauna_anon_client::MintedBearer` keeps the reply's identity (`fauna_protocol::auth::MintedIdentity` — `Some` from the silent challenge, `None` from the handshake, device-handshake and custody mints), and every bearer source that mints over the silent challenge publishes its latest successful mint's identity on a watch (`fauna_nest_http::BearerSource::subscribe_self_identity`, surfaced as `AuthClient`/`NestClient::subscribe_self_identity` and, for the UniFFI apps, `FfiNestClient::subscribe_self_identity`): `WsChallengeBearer` on each of its mints, and the launch machine behind a `LaunchMachineBearer` on its launch and on every refresh (a refresh now replaces `LaunchSnapshot::identity` too; only the launch persists it). A refused mint leaves the watch untouched — except that the identity belongs to the account it was confirmed for: a machine reused across an in-process account switch (Android's singleton, tui's long-lived machine) clears it when a launch starts and on an `IdentityChanged` or `Superseded` verdict, and an `Offline` keeps it only while the persisted account is the one it was confirmed for (a public-key fingerprint, not a copy of the secret). tui (`session::spawn_self_identity_follow`) and linux (`FaunaClient::follow_self_identity`) merge every value the watch holds into their account cache through the same merge their forced re-check uses, so the e2e `set_state` login — which skips the launch challenge — gets its handle, domain and tier from the session client's first mint, and a handle rename is caught at every hourly re-mint rather than once at login. The identity re-check that challenge doubled as (`security.md` § Post-auth surfacing, channel 3) is carried by the session mint's own verdict through the supervisor's session-ending stop (`session_ending_escalation` on tui and linux, `FfiNestClient::session_ending_verdict` for the UniFFI apps). The e2e `silent_sign_in` bridge command and windows' TTL refresh loop keep their on-demand dial: that IS the forced re-check. Pinned by `ws_challenge_bearer::tests::a_mint_publishes_its_identity_on_the_watch` and `…::a_refusal_leaves_the_identity_watch_untouched`, `fauna-launch-machine`'s `token_refresh::every_mint_publishes_its_identity_and_a_failure_leaves_it`, and tui's `session::tests::the_session_mints_identity_fills_the_registry_without_a_dial` (with `…::the_follower_stops_when_the_mint_moves_to_another_actor`: a launch machine outlives one session's account, and its next account's identity never lands on the old row). **The budget is per process, so an e2e factory reset clears it.** A native e2e driver keeps one app process across tests and factory-resets it in place, and a reset app stands for a new device — a new process, with a whole burst (`e2e-launch-isolation.md`, convention 10: a verdict never depends on how many tests ran before it). Left alone, the budget couples tests no real device couples: one recovery-kit journey (sign in, create a kit, succeed, lose every device, restore, sign in) spent the whole burst in about 33 s on windows, and the next test's successor then waited 10 s per dial and never reached its closing act. So the e2e flavors carry one seam, `dial_budget::clear_for_test` (feature `test-helpers`, or any debug build; `fauna-ffi`'s `dial_budget_clear_for_test`; compiled out of release, `e2e-automation-surface-gating.md`, convention 15), and each native app's per-test `reset` arm calls it after tearing its clients down. A shipped build has no way to clear the backstop. Pinned by `…::a_cleared_budget_is_a_fresh_process` and `…::clear_for_test_restores_the_process_burst`; every native app's reset arm calls it (windows, macOS and iOS since 2026-09-29; android, linux and tui since 2026-10-11). **The sync agent's half (built 2026-10-11).** The agent is a process of its own with its own budget (above), and it outlives the app's in-place reset — so on tui a module's sign-ins spent the agent's burst and paced a late test's sign-in past its wait, though the app's own budget had just been cleared. A reset's sign-out un-provisions the agent, so the agent clears its budget at every un-provision in an e2e build (`pipe_server::unprovision_now`, behind `debug_assertions` — the profile the harness builds the agent in — or the agent's `test-helpers`, which forwards the substrate's; the substrate's seam carries the same `debug_assertions` arm), on every app that spawns it. Pinned by `fauna-sync-agent`'s `pipe_server::tests::an_unprovision_gives_an_e2e_agent_a_whole_dial_burst`.
 
 **A `429` on the upgrade holds every dial to that nest.** A nest throttling a client's upgrades answers `429 Too Many Requests`, optionally with `Retry-After` in seconds. The dial that reads it records the hold in the same budget (`dial_budget::note_dial_error`), so every dial this process makes to that nest waits it out — not merely the loop that happened to receive it. No `Retry-After` holds for 60 s, and a hold is capped at 15 min so a bogus value cannot park a client for a day. The client classifies the refusal as `NestClientError::Api { status: 429 }`: not an auth rejection (no re-mint), not terminal, and an answered refusal (no demand dials). Pinned by `dial_budget::tests::a_retry_after_holds_the_whole_gate` and `…::a_retry_after_is_capped`.
 
@@ -787,22 +867,38 @@ version skew or a changed nest identity as an offline nest forever. Pinned by
 real HTTP 426) and
 `client::tests::every_supervisor_ending_names_the_error_requests_then_fail_with`.
 The wasm client (`fauna_rpc_wasm`'s `WsRpcClient`) keeps the same record for
-the three endings its loop has: a 1000 close answers `NotConnected`, as a client
-torn down by `close()` does, a 4426 close answers `SubprotocolMismatch`, and a
+the four endings its loop has: a 1000 close answers `NotConnected`, as a client
+torn down by `close()` does, a 4426 close answers `SubprotocolMismatch`, a
 token-provider rejection carrying the wire code `fauna.auth.not_registered` (the
 SPA's `SignInRefusedError`, a re-mint refused after the revocation teardown's
-4401) stops the loop as `Refused` rather than backing off — the one ending of
-the three a current nest does reach, read typed by `sessionEndingVerdict()` and
-routed to the launch surface (`onboarding.md` § Implementation status today, the
-previously-signed-in row). Every other token-provider failure still backs off.
+4401) stops the loop as `Refused` rather than backing off, and one carrying a
+code `RpcError::action` reads as `NeedsUpdate` (the SPA's `NestOutdatedError`,
+`fauna.nest.outdated`: a re-mint met a nest that restarted degraded — the dropped
+connection makes every later dial re-mint, so the browser need not see the
+degraded nest's 401) stops it as `NestOutdated`. Those two are the endings a
+current nest does reach, read typed by `sessionEndingVerdict()`
+(`sign_in_refused` / `nest_outdated`) and routed to the launch surface
+(`onboarding.md` § Implementation status today, the previously-signed-in row;
+`version-compatibility.md` § Dimension 4, the *Mid-session* bullet); both are
+keyed on the rejection's `code` property, never its text. Every other
+token-provider failure still backs off.
 The SPA's connect wait (`rpc.ts`'s `ensureConnected`) reads the record through
 `supervisorStop()`, so a page's call fails at once too (pinned by
 `ensure-connected-stop-contract.test.ts`, under `just web-unit-test`). No
-current nest reaches either close ending. It never closes a per-actor socket with
-1000 (§ Graceful shutdown: 1001), and it answers a mismatch with the
-pre-upgrade HTTP 426, which the browser reports as an ordinary close. On web
-this is therefore parity plus a regression pin for the close-frame path, and a
-version-skewed tab still retries until it reads "Cannot connect". The record's
+current nest reaches the clean ending: it never closes a per-actor socket with
+1000 (§ Graceful shutdown: 1001). The 4426 ending it does reach, since the
+2026-10-10 ruling (§ Connection lifecycle, the 4426 paragraph): an app
+offering a `fauna.v<N>` the nest does not serve gets the upgrade completed and
+a 4426 close in place of the pre-upgrade HTTP 426 a browser cannot read, so
+the loop's stop record is the web road to `SessionEndingVerdict::AppOutdated`
+(`sessionEndingVerdict()` answering `app_outdated`, which `rpc.ts` types as
+`AppOutdatedError` and routes to the launch surface). A re-mint whose
+anonymous dial meets the 4426 stops the loop the same way: the SPA rejects the
+token provider with an `AppOutdatedError` whose `arm` is
+`subprotocol_mismatch` — a 4426 has no wire code, so the rejection carries
+`WsRpcError`'s own tag — and the loop records `SubprotocolMismatch` (pinned by
+`client::tests::a_token_mint_refused_by_a_4426_stops_the_loop_as_app_outdated`
+and the SPA's `stopped-error-verdict-contract.test.ts`). The record's
 *consumers* — a request or connect wait on an already-stopped or
 freshly-parked client — are pinned by
 `client::tests::a_request_on_a_stopped_client_fails_at_once_with_why`,
@@ -1018,7 +1114,7 @@ A third-party principal ([`third-party.md`](third-party.md) § The principal mod
 
 **The token's `exp` bounds the session, and the socket closes at it.** The connection holds a deadline at `exp` and closes `4401` when it passes — closed, not merely refused at its next call, because a Push is not an RPC and an idle socket would otherwise outlive its credential (the bridge's mailbox-subscription case, above). In-flight handlers finish, as in every teardown. There is no in-band re-authentication: a client refreshes its token and dials a new session, and may open the new one before the old one closes. `4401` keeps its one meaning — the credential this connection was opened with is finished; get another — and whether another can be had is the token endpoint's answer, so a revoked principal learns it there (`invalid_grant`) rather than from a close code of its own.
 
-**Revocation — three doors, and what each one needs.** **(a) `fauna.principals.revoke`** deletes the row, and the row is what the dispatch gate reads, so the next RPC on every live session is refused with no further mechanism: the per-actor shape, not the per-token one (*The upgrade window*, above, on why the two differ). That does not excuse the two rules above it. *Losing authority closes the socket:* the revoke sweeps the principal's sessions `4401` after its transaction commits — rows first, then the sweep — because a refused socket left open is still a Push recipient once the event door exists. *The upgrade window:* registration re-reads the principal row once, **after** joining the registry, and closes the connection when the row is gone; with the revoke's delete-before-sweep order one read is total, for exactly the reason it is total for a session. **(b) Every path that strips the account's authority** (the enumeration under *Revocation teardown*) closes the account's principal sessions together with its own sockets — the shared helper sweeps both registries — and the gate's per-RPC account read catches the straggler. **The account's external-apps switch OFF** is a suspension, not a revocation, and takes door (b)'s shape without its finality: the flip sweeps the account's principal sessions `4401` after its write, the per-RPC read refuses until ON, and nothing is deleted (the kill-switch bullet owns it). **(c) One grant family ending closes the sessions its tokens opened (ruled 2026-10-02; owed — the build is the gap is declared in [`transport.md`](transport.md) § Implementation status).** Until this ruling the door read *closes no socket: an access token is not revocable per call anywhere, so that session lives until its token's `exp`, at most 15 minutes* — a tail inherited from the PDS plane, where it is priced by what per-call consultation would cost there ([`../behavior/authorization-server.md`](../behavior/authorization-server.md) § As built → *The grant registry does NOT qualify as access-token revocation*: a bridge-to-nest RPC inside the pure decision function, or a bridge-side cache with a restart hole). Neither cost exists on the nest's own plane: the gate already reads the principal row, the account's authority and the external-apps switch on every RPC, in process, against the canonical rows with no cache in front, and the family's `revoked_at` is one more primary-key read beside them. A tail priced by a cost that is absent is not a price but an omission, and this section's rule — *losing authority closes the socket* — decides it. Three of the endings carry weight of their own. **The per-grant revoke is the user's act** on the connected-apps roster (`fauna.bridges.atproto.revoke_session`; today the `atproto` page's grant row, tomorrow the one roster of [`third-party.md`](third-party.md) § The roster model): a user who revoked and watched the row vanish, while the app's socket served 15 minutes more and — once the push door exists — kept receiving their events, was not given the control [`../principles.md`](../principles.md) § The user always controls their data promises; door (a) is the heavier verb (the whole principal, every family at once) and does not excuse the lighter one from being immediate. **The reuse family-kill is a theft signal** — a replayed refresh token — and the session live under that family may be the thief's. **The forced session-secret rotation is a compromise response**, and one that leaves live sockets for 15 minutes when one registry sweep closes them is half done, for the reason that arm already ends grant rows instead of leaving them to the next read. The honest client loses nothing: `/oauth/revoke` is its own sign-out, and a refresh under an ended family was refused already, so the close only moves a failure its next dial would have met up to 15 minutes earlier. **The shape is door (a)'s, so the three doors share one.** (1) The binding carries the token's `sid` — the family id, which every nest-minted access token already names (`sid` = the grant id = the family's initial refresh `jti`, [`../behavior/authorization-server.md`](../behavior/authorization-server.md) § As built → *Rotation rides the NEST's registry*); a token with no `sid` is refused at the upgrade as `invalid_token`, and the nest mints none. (2) The gate's per-RPC resolve reads the family's row beside the three it reads today — live, or the every-kind refusal — so an ended family bites at the next call with no further mechanism, and the session's own `exp` deadline stays the backstop. (3) Every ending sweeps after its commit, rows first then the sweep, as in door (a), so with the registration's one re-read after joining — extended to the family — one read is total: the per-family endings (the user's revoke, `/oauth/revoke` and the bridge-class `end_session` through their one owner `end_oauth_session`, and the reuse family-kill) close that family's sessions and no sibling family's of the same principal; the forced session-secret rotation closes every principal session, since every family it ends is nest-minted and every principal session was opened under one. The re-point's database step runs before the nest serves and has no socket to close. (4) The close is `4401` with its one meaning — the credential this connection was opened with is finished — and whether another can be had stays the token endpoint's answer (`invalid_grant`). **The forced issuer-key arm closes every principal session for the same reason:** each was admitted under a key the arm drops, and a live session is a token still being honoured after the arm has said no token signed by that key is. Both forced arms are [`../behavior/authorization-server.md`](../behavior/authorization-server.md) § The issuer → *Two rotation arms*; the sweep is one line of each, after the arm's own write. Door (a) stays the whole-principal verb. Pinned, once built, in the revocation census (`bins/fauna-nest/tests/conformance_revocation_teardown.rs`) beside the principal twin: each ending's storage call paired with its sweep.
+**Revocation — three doors, and what each one needs.** **(a) `fauna.principals.revoke`** deletes the row, and the row is what the dispatch gate reads, so the next RPC on every live session is refused with no further mechanism: the per-actor shape, not the per-token one (*The upgrade window*, above, on why the two differ). That does not excuse the two rules above it. *Losing authority closes the socket:* the revoke sweeps the principal's sessions `4401` after its transaction commits — rows first, then the sweep — because a refused socket left open is still a Push recipient once the event door exists. *The upgrade window:* registration re-reads the principal row once, **after** joining the registry, and closes the connection when the row is gone; with the revoke's delete-before-sweep order one read is total, for exactly the reason it is total for a session. **(b) Every path that strips the account's authority** (the enumeration under *Revocation teardown*) closes the account's principal sessions together with its own sockets — the shared helper sweeps both registries — and the gate's per-RPC account read catches the straggler. **The account's external-apps switch OFF** is a suspension, not a revocation, and takes door (b)'s shape without its finality: the flip sweeps the account's principal sessions `4401` after its write, the per-RPC read refuses until ON, and nothing is deleted (the kill-switch bullet owns it). **(c) One grant family ending closes the sessions its tokens opened (ruled 2026-10-02; built 2026-10-12 — [`transport.md`](transport.md) § Implementation status).** Until this ruling the door read *closes no socket: an access token is not revocable per call anywhere, so that session lives until its token's `exp`, at most 15 minutes* — a tail inherited from the PDS plane, where it is priced by what per-call consultation would cost there ([`../behavior/authorization-server.md`](../behavior/authorization-server.md) § As built → *The grant registry does NOT qualify as access-token revocation*: a bridge-to-nest RPC inside the pure decision function, or a bridge-side cache with a restart hole). Neither cost exists on the nest's own plane: the gate already reads the principal row, the account's authority and the external-apps switch on every RPC, in process, against the canonical rows with no cache in front, and the family's `revoked_at` is one more primary-key read beside them. A tail priced by a cost that is absent is not a price but an omission, and this section's rule — *losing authority closes the socket* — decides it. Three of the endings carry weight of their own. **The per-grant revoke is the user's act** on the connected-apps roster (`fauna.bridges.atproto.revoke_session`; today the `atproto` page's grant row, tomorrow the one roster of [`third-party.md`](third-party.md) § The roster model): a user who revoked and watched the row vanish, while the app's socket served 15 minutes more and — once the push door exists — kept receiving their events, was not given the control [`../principles.md`](../principles.md) § The user always controls their data promises; door (a) is the heavier verb (the whole principal, every family at once) and does not excuse the lighter one from being immediate. **The reuse family-kill is a theft signal** — a replayed refresh token — and the session live under that family may be the thief's. **The forced session-secret rotation is a compromise response**, and one that leaves live sockets for 15 minutes when one registry sweep closes them is half done, for the reason that arm already ends grant rows instead of leaving them to the next read. The honest client loses nothing: `/oauth/revoke` is its own sign-out, and a refresh under an ended family was refused already, so the close only moves a failure its next dial would have met up to 15 minutes earlier. **The shape is door (a)'s, so the three doors share one.** (1) The binding carries the token's `sid` — the family id, which every nest-minted access token already names (`sid` = the grant id = the family's initial refresh `jti`, [`../behavior/authorization-server.md`](../behavior/authorization-server.md) § As built → *Rotation rides the NEST's registry*); a token with no `sid` is refused at the upgrade as `invalid_token`, and the nest mints none. (2) The gate's per-RPC resolve reads the family's row beside the three it reads today — live, or the every-kind refusal — so an ended family bites at the next call with no further mechanism, and the session's own `exp` deadline stays the backstop. (3) Every ending sweeps after its commit, rows first then the sweep, as in door (a), so with the registration's one re-read after joining — extended to the family — one read is total: the per-family endings (the user's revoke, `/oauth/revoke` and the bridge-class `end_session` through their one owner `end_oauth_session`, and the reuse family-kill) close that family's sessions and no sibling family's of the same principal; the forced session-secret rotation closes every principal session, since every family it ends is nest-minted and every principal session was opened under one. The re-point's database step runs before the nest serves and has no socket to close. (4) The close is `4401` with its one meaning — the credential this connection was opened with is finished — and whether another can be had stays the token endpoint's answer (`invalid_grant`). **The forced issuer-key arm closes every principal session for the same reason:** each was admitted under a key the arm drops, and a live session is a token still being honoured after the arm has said no token signed by that key is. Both forced arms are [`../behavior/authorization-server.md`](../behavior/authorization-server.md) § The issuer → *Two rotation arms*; the sweep is one line of each, after the arm's own write. Door (a) stays the whole-principal verb. Pinned in the revocation census (`bins/fauna-nest/tests/conformance_revocation_teardown.rs`) beside the principal twin: each ending's storage call paired with its sweep.
 
 ## Graceful shutdown
 
@@ -1077,7 +1173,7 @@ future HTTP mutation route that is genuinely non-idempotent should gate on
 > harness starts a nest in its own process group and stops it gracefully with a
 > Ctrl+Break to that group (`tests/common/nest.py::stop_nest`) — before this its
 > "graceful" stop was a TerminateProcess hard kill. SIGTERM path in
-> `bins/fauna-nest/src/main.rs` (`begin_shutdown` → bounded drain wait →
+> `bins/fauna-nest/src/lib.rs` (`begin_shutdown` → bounded drain wait →
 > `db.flush`); the per-connection drain + 1001 close in
 > `bins/fauna-nest/src/routes.rs` (`run_connection` / `drain_and_close`); the
 > shutdown `watch` + grace constants in `bins/fauna-nest/src/ws.rs`. Proven at
@@ -1099,6 +1195,12 @@ future HTTP mutation route that is genuinely non-idempotent should gate on
 > drives the real accept loop and asserts a post-abort connect is refused —
 > the gap no earlier test covered, since the file's other two tests drive
 > `WsState::begin_shutdown()` directly and never touch the accept loop.
+> **2026-10-13:** the in-flight drain is witnessed on a real nest process too, with no
+> wall-clock dependence: `tests/e2e-unified/tests/api/test_graceful_shutdown_in_flight.py`
+> (tier_3) parks a real write with the `test-hooks` hold-until-shutdown gate, stops
+> the nest with SIGTERM once the nest reports the write parked, and asserts its Reply
+> reaches the socket before the 1001 close and its value survives a restart. The
+> Rust test's "in flight" is still an 80 ms sleep against a 300 ms handler.
 
 ## Pre-identity (anonymous) connection
 

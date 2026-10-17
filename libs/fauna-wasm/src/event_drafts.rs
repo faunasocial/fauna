@@ -106,8 +106,12 @@ mod face {
                 };
                 match EventDrafts::restore_from_bytes(&bytes) {
                     Ok(draft) if draft.is_empty() => Ok(JsValue::UNDEFINED),
-                    Ok(draft) => serde_wasm_bindgen::to_value(&draft)
-                        .map_err(|e| JsValue::from_str(&format!("restore event drafts: {e}"))),
+                    Ok(draft) => crate::rpc::to_js(&draft).map_err(|e| {
+                        JsValue::from_str(&format!(
+                            "restore event drafts: {}",
+                            e.as_string().unwrap_or_default()
+                        ))
+                    }),
                     Err(_) => Ok(JsValue::UNDEFINED),
                 }
             })

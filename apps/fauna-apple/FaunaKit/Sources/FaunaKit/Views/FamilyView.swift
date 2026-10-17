@@ -321,6 +321,9 @@ public struct FamilyView: View {
                 ) {
                     Task { await vm.savePolicy() }
                 }
+                // A policy the nest enforces is written online
+                // (`account-offline-mutation.md` § The offline-mutation contract).
+                .faunaGate("fauna.family.policy.update")
 
                 // ── The guardian-enrolled-device marker (family-safety.md §
                 // Full visibility for young children, Slice F) — one

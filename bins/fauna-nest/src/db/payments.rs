@@ -151,12 +151,39 @@ impl CacheDb {
         external_ref: &str,
         valid_until: Option<i64>,
     ) -> Result<()> {
+        self.insert_payment_claim_with_return_ref(
+            code,
+            author_id,
+            tier_name,
+            provider,
+            external_ref,
+            valid_until,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::insert_payment_claim`] plus the provider's post-checkout
+    /// reference — the key the web paywall return door looks the claim up by
+    /// ([`Self::find_payment_claim_by_return_ref`]).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_payment_claim_with_return_ref(
+        &self,
+        code: &str,
+        author_id: &[u8; 32],
+        tier_name: &str,
+        provider: &str,
+        external_ref: &str,
+        valid_until: Option<i64>,
+        return_ref: Option<&str>,
+    ) -> Result<()> {
         let now = now_epoch_secs();
         let conn = self.conn.lock().await;
         conn.execute(
             "INSERT INTO payment_claim_codes
-             (code, author_id, tier_name, provider, external_ref, valid_until, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (code, author_id, tier_name, provider, external_ref, valid_until, created_at,
+              return_ref)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 code,
                 author_id.as_slice(),
@@ -164,7 +191,8 @@ impl CacheDb {
                 provider,
                 external_ref,
                 valid_until,
-                now
+                now,
+                return_ref
             ],
         )
         .context("insert payment claim")?;
@@ -223,6 +251,32 @@ impl CacheDb {
         .context("find payment claim by external ref")
     }
 
+    /// The web paywall return door's lookup: the claim this author's
+    /// `provider` webhook minted for the checkout whose post-checkout
+    /// reference is `return_ref` (`monetization.md` § Pillar 2 → *Visitor
+    /// entitlement doors* ruling (2)). Scoped to the site owner, so a
+    /// reference never resolves on another creator's site.
+    pub async fn find_payment_claim_by_return_ref(
+        &self,
+        author_id: &[u8; 32],
+        provider: &str,
+        return_ref: &str,
+    ) -> Result<Option<PaymentClaimRow>> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT code, author_id, tier_name, provider, external_ref, valid_until,
+                    created_at, redeemed_by, redeemed_at, voided_at
+             FROM payment_claim_codes
+             WHERE author_id = ?1 AND provider = ?2 AND return_ref = ?3
+               AND return_ref IS NOT NULL
+             ORDER BY created_at DESC LIMIT 1",
+            rusqlite::params![author_id.as_slice(), provider, return_ref],
+            Self::map_claim_row,
+        )
+        .optional()
+        .context("find payment claim by return ref")
+    }
+
     /// Stamp a claim redeemed by `redeemer`. Guarded: only an un-redeemed,
     /// un-voided claim redeems (returns `false` otherwise — the caller maps
     /// that to the precise already-redeemed/voided error by re-reading).
@@ -253,6 +307,27 @@ impl CacheDb {
                 rusqlite::params![code, now],
             )
             .context("void payment claim")?;
+        Ok(changed > 0)
+    }
+
+    /// Stamp `voided_at` on an already-REDEEMED claim (a refund after the
+    /// buyer bound it). Redemption is unaffected — the subscriber row's window
+    /// is voided separately — but the claim code is also the visitor's web
+    /// credential, which honours only `voided_at` (`monetization.md` § Pillar 2
+    /// → *Visitor entitlement doors* ruling (1): revoke = `voided_at`), so a
+    /// refunded bound code must stop opening the web too. Returns `false`
+    /// when the claim is unredeemed (use [`Self::void_payment_claim`]) or
+    /// already voided.
+    pub async fn void_redeemed_payment_claim(&self, code: &str) -> Result<bool> {
+        let now = now_epoch_secs();
+        let conn = self.conn.lock().await;
+        let changed = conn
+            .execute(
+                "UPDATE payment_claim_codes SET voided_at = ?2
+                 WHERE code = ?1 AND redeemed_at IS NOT NULL AND voided_at IS NULL",
+                rusqlite::params![code, now],
+            )
+            .context("void redeemed payment claim")?;
         Ok(changed > 0)
     }
 

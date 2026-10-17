@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.settings
 
+import com.fauna.app.ui.navigation.exitAdminToPrimary
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -12,6 +13,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -21,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
+import kotlinx.coroutines.delay
 import com.fauna.app.R
 import com.fauna.app.ui.components.CopyButton
 import com.fauna.app.ui.components.DisabledControlReasonText
@@ -43,9 +47,12 @@ import uniffi.fauna_client_dns.DomainView
 import uniffi.fauna_client_dns.PendingCertIssue
 import uniffi.fauna_client_dns.RecordVerdict
 import uniffi.fauna_client_dns.VerifyStatus
+import uniffi.fauna_client_dns.recordRecheckSecs
 import uniffi.fauna_client_mail_settings.LocalDomainView
 import uniffi.fauna_client_mail_settings.PrimaryDomainRenameView
+import uniffi.fauna_client_mail_settings.DomainDmarcPolicy
 import uniffi.fauna_client_mail_settings.RoleAddressKind
+import uniffi.fauna_client_mail_settings.dmarcPolicyOptions
 import uniffi.fauna_client_mail_settings.roleAddressOptions
 import social.fauna.generated.Ids
 
@@ -85,6 +92,18 @@ fun AdminDnsScreen(
     val working by vm.working.collectAsState()
     val error by vm.error.collectAsState()
 
+    // The open page's background re-check (`dns-management.md` § Manual + live
+    // verification — the slow cadence): the effect lives exactly as long as the
+    // page is composed, and its first fire is a full period out (opening the page
+    // already verifies once). Cadence and tick are the shared crate's
+    // (`record_recheck_secs`, `background_recheck`); this owns only the timer.
+    LaunchedEffect(vm) {
+        while (true) {
+            delay(recordRecheckSecs().toLong() * 1000L)
+            vm.backgroundRecheck()
+        }
+    }
+
     AdminDnsContent(
         activeDomains = active,
         removedDomains = removed,
@@ -100,7 +119,7 @@ fun AdminDnsScreen(
         pendingCert = pendingCert,
         working = working,
         error = error,
-        onBack = { navController.popBackStack() },
+        onBack = { navController.exitAdminToPrimary() },
         onRefresh = vm::refresh,
         onAddDomain = vm::addDomain,
         onRemoveDomain = vm::removeDomain,
@@ -111,6 +130,7 @@ fun AdminDnsScreen(
         onAbortRename = vm::abortPrimaryRename,
         onSetCatchAll = vm::setCatchAll,
         onSetRoleAddress = vm::setRoleAddress,
+        onSetDmarcPolicy = vm::setDmarcPolicy,
         onSetMode = vm::setMode,
         onSetManageAll = vm::setManageAll,
         onPutCredential = vm::putCredential,
@@ -153,6 +173,7 @@ fun AdminDnsContent(
     onAbortRename: (ByteArray) -> Unit,
     onSetCatchAll: (String, String?) -> Unit,
     onSetRoleAddress: (String, RoleAddressKind, String?) -> Unit,
+    onSetDmarcPolicy: (String, DomainDmarcPolicy) -> Unit,
     onSetMode: (String, Boolean) -> Unit,
     onSetManageAll: (Boolean) -> Unit,
     onPutCredential: (String, List<DnsCredentialField>, String) -> Unit,
@@ -263,7 +284,11 @@ fun AdminDnsContent(
                     checked = manageAll,
                     onCheckedChange = onSetManageAll,
                     enabled = !working,
-                    modifier = Modifier.testTag(Ids.ADMIN_DNS_MANAGE_ALL_TOGGLE),
+                    // The checked-state mirror (`state` = `on`/`off`), off the
+                    // shared `all_domains_managed` projection.
+                    modifier = Modifier
+                        .testTag(Ids.ADMIN_DNS_MANAGE_ALL_TOGGLE)
+                        .semantics { stateDescription = if (manageAll) "on" else "off" },
                 )
             }
 
@@ -325,6 +350,7 @@ fun AdminDnsContent(
                         onRemove = { onRemoveDomain(domain.domain) },
                         onSetCatchAll = { onSetCatchAll(domain.domain, it) },
                         onSetRoleAddress = { role, hex -> onSetRoleAddress(domain.domain, role, hex) },
+                        onSetDmarcPolicy = { onSetDmarcPolicy(domain.domain, it) },
                         onSetMode = { onSetMode(domain.domain, it) },
                         onSetAutoRenew = { onSetAutoRenew(domain.domain, it) },
                         onIssueCert = { onIssueCert(domain.domain) },
@@ -640,6 +666,7 @@ private fun DomainRow(
     onRemove: () -> Unit,
     onSetCatchAll: (String?) -> Unit,
     onSetRoleAddress: (RoleAddressKind, String?) -> Unit,
+    onSetDmarcPolicy: (DomainDmarcPolicy) -> Unit,
     onSetMode: (Boolean) -> Unit,
     onSetAutoRenew: (Boolean) -> Unit,
     onIssueCert: () -> Unit,
@@ -814,6 +841,15 @@ private fun DomainRow(
                     onSet = { onSetRoleAddress(option.kind, it) },
                 )
             }
+
+            // Per-domain published DMARC policy (dmarc-reporting.md § Multi-domain
+            // deployments): reject (default, clears the override) / quarantine / none,
+            // setting `p=` and `sp=` together.
+            DmarcPolicyPicker(
+                current = domain.dmarcPolicy,
+                working = working,
+                onSet = onSetDmarcPolicy,
+            )
 
             // Per-domain TLS-cert lifecycle (status badge + issue/renew + manual-paste
             // complete/cancel + CNAME renewal-delegation; tls-certificates.md § C.4 +
@@ -1277,6 +1313,53 @@ private fun RoleAddressPicker(
         }
     }
     DisabledControlReasonText(roleGate.reason)
+}
+
+/**
+ * The per-domain DMARC policy select (`admin-dns-domain-dmarc-policy-select`).
+ * The options, their order and the tag ↔ policy pairing are the shared
+ * `dmarcPolicyOptions()` catalog's — only the painting is here. Dispatch-on-pick,
+ * like the catch-all picker: the pick IS the `update_local_domain_config` call.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DmarcPolicyPicker(
+    current: DomainDmarcPolicy,
+    working: Boolean,
+    onSet: (DomainDmarcPolicy) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val options = remember { dmarcPolicyOptions() }
+    val selectedLabel = options.firstOrNull { it.policy == current }
+        ?.let { localized(it.label) }.orEmpty()
+
+    val gate = faunaGate("fauna.bridges.update_local_domain_config", enabled = !working)
+    ExposedDropdownMenuBox(
+        expanded = expanded && gate.enabled,
+        onExpandedChange = { if (gate.enabled) expanded = !expanded },
+    ) {
+        OutlinedTextField(
+            value = selectedLabel,
+            onValueChange = {},
+            readOnly = true,
+            enabled = gate.enabled,
+            label = { Text(stringResource(R.string.admin_dns_dmarc_policy_label)) },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier
+                .menuAnchor()
+                .fillMaxWidth()
+                .testTag(Ids.ADMIN_DNS_DOMAIN_DMARC_POLICY_SELECT),
+        )
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(localized(option.label).orEmpty()) },
+                    onClick = { onSet(option.policy); expanded = false },
+                )
+            }
+        }
+    }
+    DisabledControlReasonText(gate.reason)
 }
 
 @Composable

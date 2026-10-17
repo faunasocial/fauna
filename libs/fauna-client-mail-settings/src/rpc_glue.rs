@@ -302,6 +302,17 @@ fn project_import_session(
         error_reason: info.error_reason,
         scope: info.scope,
         date_from: info.date_from,
+        cursors: info
+            .cursors
+            .into_iter()
+            .map(|c| crate::import::ImportMailboxCursorView {
+                mailbox: c.mailbox,
+                last_processed_source_uid: c.last_processed_source_uid,
+                source_uid_validity: c.source_uid_validity,
+            })
+            .collect(),
+        started_at: info.started_at,
+        last_progress_at: info.last_progress_at,
     }
 }
 
@@ -329,6 +340,11 @@ fn fresh_import_session(
         error_reason: String::new(),
         scope,
         date_from,
+        cursors: Vec::new(),
+        // The reply carries only the id; the row was stamped a moment ago, so
+        // the client's clock stands in until the first session read replaces it.
+        started_at: fauna_core::data::Timestamp::now_secs(),
+        last_progress_at: fauna_core::data::Timestamp::now_secs(),
     }
 }
 
@@ -432,6 +448,8 @@ fn project_export_session(
             .unwrap_or_default(),
         stream_generation: info.stream_generation,
         scope,
+        started_at: info.started_at,
+        last_progress_at: info.last_progress_at,
     })
 }
 
@@ -475,6 +493,10 @@ fn fresh_export_session(
         // A freshly started session is stream generation 0 by definition.
         stream_generation: 0,
         scope: Some(scope),
+        // The reply carries only the id; the client's clock stands in until
+        // the first session read replaces it (the import twin's reasoning).
+        started_at: fauna_core::data::Timestamp::now_secs(),
+        last_progress_at: fauna_core::data::Timestamp::now_secs(),
     }
 }
 
@@ -503,12 +525,13 @@ mod native {
     use fauna_protocol::bridge_routing::{
         AddListMemberReply, AddListMemberRequest, AliasControls, AliasPolicy, AliasRow,
         BatchImportListMembersReply, BatchImportListMembersRequest, CreateAccountListReply,
-        CreateAccountListRequest, DeleteAccountListReply, DeleteAccountListRequest, EpochSealKey,
-        FetchConfigReply, GetSpamBaselineStateReply, ImportAliasOutcome, ListAccountAliasesReply,
-        ListAccountAliasesRequest, ListAccountListsReply, ListAccountListsRequest,
-        ListListMembersReply, ListListMembersRequest, MailDomainRenameRow, MailDomainRow,
-        MailHealthReply, ProvisionRecipientMlsPubkeyRequest, PublishSpamBaselineReply,
-        PutAliasPolicyRequest, PutAuthPolicyRequest, PutImapPolicyRequest,
+        CreateAccountListRequest, DeleteAccountListReply, DeleteAccountListRequest,
+        DmarcReportingPolicy, EpochSealKey, FetchConfigReply, GetSpamBaselineStateReply,
+        ImportAliasOutcome, ListAccountAliasesReply, ListAccountAliasesRequest,
+        ListAccountListsReply, ListAccountListsRequest, ListListMembersReply,
+        ListListMembersRequest, MailDomainRenameRow, MailDomainRow, MailHealthReply,
+        ProvisionRecipientMlsPubkeyRequest, PublishSpamBaselineReply, PutAliasPolicyRequest,
+        PutAuthPolicyRequest, PutDmarcPolicyRequest, PutImapPolicyRequest,
         PutOutboundPolicyRequest, PutSpamPolicyRequest, PutSubmissionPolicyRequest,
         ResubscribeListMemberReply, ResubscribeListMemberRequest, SpamHistoryOp,
         UnsubscribeListMemberReply, UnsubscribeListMemberRequest, UpdateAccountListReply,
@@ -523,7 +546,7 @@ mod native {
         PutSpamModelOutcome, RevokeReply, RevokeWrappedMlsBlobRequest,
         RevokeWrappedSubmissionTokenRequest, ServiceUserInfo, SetMailEnabledReply,
         SetMailEnabledRequest, SetMailServingEnabledReply, SetMailServingEnabledRequest,
-        SpamModelHolderCopy,
+        SpamModelHolderCopy, SpamModelPrecondition,
     };
     use tokio::sync::Mutex as AsyncMutex;
 
@@ -541,8 +564,9 @@ mod native {
     };
     use crate::forwarders::{ForwarderMachine, ForwarderNest};
     use crate::import::{
-        ImportSourceNest, ImportTlsMode, MailImportMachine, MailImportNest, MailboxCursor,
-        RetryClock, SourceConnectParams, SourceMailboxView,
+        ImportOAuthHttp, ImportSourceNest, ImportTlsMode, MailImportMachine, MailImportNest,
+        MailboxCursor, RetryClock, SourceAuth, SourceConnectError, SourceConnectFailure,
+        SourceConnectParams, SourceMailboxView,
     };
     use crate::lists::{
         ImportResult, ListDraft, ListMembers, ListView, MailListMembersMachine,
@@ -966,6 +990,14 @@ mod native {
             self.admin.put_alias_policy(req).await.map_err(nest_error)
         }
 
+        async fn get_dmarc_policy(&self) -> Result<DmarcReportingPolicy, NestError> {
+            self.admin.get_dmarc_policy().await.map_err(nest_error)
+        }
+
+        async fn put_dmarc_policy(&self, req: PutDmarcPolicyRequest) -> Result<(), NestError> {
+            self.admin.put_dmarc_policy(req).await.map_err(nest_error)
+        }
+
         async fn get_spam_baseline_state(&self) -> Result<GetSpamBaselineStateReply, NestError> {
             self.admin
                 .get_spam_baseline_state()
@@ -1298,6 +1330,7 @@ mod native {
                     name: m.name,
                     exists: m.exists,
                     uid_validity: m.uid_validity,
+                    sealed_bytes: m.sealed_bytes,
                 })
                 .collect())
         }
@@ -1564,22 +1597,24 @@ mod native {
 
     /// The local file a downloaded archive is written into.
     ///
-    /// **Written under a `.part` name and renamed into place only by
-    /// `finish()`.** § Download flow step 4 refuses a truncated or still-running
-    /// archive, and the machine runs that refusal *before* it finishes the sink
-    /// — but a refusal after the first frames were written would still leave
-    /// those frames on disk, under exactly § Compression wrapper's
-    /// `fauna-export-…zip.zst` name: a file that reads as the user's whole
-    /// mailbox and is not, which is the half-restore the refusal exists to
-    /// prevent. So the bytes land beside the final name, the rename is the one
-    /// moment the archive comes to exist, and a sink dropped unfinished (a
+    /// **Written under a `.part` name and installed under its final name only
+    /// by `finish()`.** § Download flow step 4 refuses a truncated or
+    /// still-running archive, and the machine runs that refusal *before* it
+    /// finishes the sink — but a refusal after the first frames were written
+    /// would still leave those frames on disk, under exactly § Compression
+    /// wrapper's `fauna-export-…zip.zst` name: a file that reads as the user's
+    /// whole mailbox and is not, which is the half-restore the refusal exists
+    /// to prevent. So the bytes land beside the final name, the install is the
+    /// one moment the archive comes to exist, and a sink dropped unfinished (a
     /// refused archive, a dropped stream, a failed write) deletes what it
-    /// wrote. The same rename is why a failed re-download never truncates a
-    /// good archive saved earlier the same day under the same name.
+    /// wrote. The same install, which never replaces a file
+    /// (`install_without_replacing`), is why a failed re-download never
+    /// truncates a good archive saved earlier the same day under the same name.
     struct NativeArchiveFile {
-        /// The name the finished archive is shown under.
+        /// The preferred name; `finish()` installs under it, or a ` (n)` suffix
+        /// of it when it is taken, and shows the name actually used.
         path: std::path::PathBuf,
-        /// Where the bytes accumulate until `finish()`; `None` once renamed.
+        /// Where the bytes accumulate until `finish()`; `None` once installed.
         part: Option<std::path::PathBuf>,
         /// `None` only after `finish()` took it — an `Option` so `Drop` can
         /// close the handle before removing the file (Windows refuses to delete
@@ -1595,9 +1630,22 @@ mod native {
             tokio::fs::create_dir_all(save_dir).await.map_err(|e| {
                 DispatchError::InvalidState(format!("prepare {}: {e}", save_dir.display()))
             })?;
+            // The final name is chosen at `finish()` (a taken name gets a
+            // suffix there, installed without replacing); `path` is the
+            // preferred, unsuffixed one.
             let path = save_dir.join(file_name);
-            let part = save_dir.join(format!("{file_name}.part"));
-            let file = tokio::fs::File::create(&part).await.map_err(|e| {
+            // A name no other writer shares: two saves of
+            // the same export the same day each get their own inode, so
+            // neither can truncate the other's bytes before its install.
+            let part = save_dir.join(format!("{file_name}.{:016x}.part", rand::random::<u64>()));
+            // `create_new` (O_EXCL) never follows a symlink planted at the
+            // name and never reopens another writer's file; the archive is the
+            // whole decrypted mailbox, so it is owner-only from creation.
+            let mut options = tokio::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let file = options.open(&part).await.map_err(|e| {
                 DispatchError::InvalidState(format!("create {}: {e}", part.display()))
             })?;
             Ok(Self {
@@ -1606,6 +1654,211 @@ mod native {
                 file: Some(file),
             })
         }
+    }
+
+    /// One atomic no-replace step of the install — a hard link, or a no-replace
+    /// rename of the `.part` onto the candidate: fails `AlreadyExists` when the
+    /// name is taken and replaces nothing. Parameters of [`install_with`] so a
+    /// test can stand in for a filesystem that refuses either.
+    type NoReplaceFn = fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>;
+
+    /// Install the finished `.part` under `preferred`, or — when that name is
+    /// taken — under ` (2)`, ` (3)`, … before `.zip.zst`, **never replacing**
+    /// a file already there. A plain rename would replace whatever landed at
+    /// the name during the download; a hard link fails `AlreadyExists` instead,
+    /// so the probe and the install are one atomic step. Returns the path used;
+    /// removes the `.part` only after the install, and on any error leaves it
+    /// for `Drop`.
+    async fn install_without_replacing(
+        part: &std::path::Path,
+        preferred: &std::path::Path,
+    ) -> std::io::Result<std::path::PathBuf> {
+        install_with(
+            part,
+            preferred,
+            |from, to| std::fs::hard_link(from, to),
+            rename_no_replace,
+        )
+        .await
+    }
+
+    /// [`install_without_replacing`] over explicit link and rename steps.
+    /// **The hard link is the first choice** (atomic, no second copy on disk).
+    /// On a link error other than `AlreadyExists` — a filesystem with no hard
+    /// links (vfat, exFAT, some SMB shares) — the same candidate is tried by a
+    /// **no-replace rename** of the `.part` ([`rename_no_replace`]): the `.part`
+    /// sits in the destination directory, so the rename moves no bytes and the
+    /// archive's name still comes to exist in one atomic step, whole. Only where
+    /// that is refused too (a platform without the call, a filesystem rejecting
+    /// the flag) does it fall back to an exclusive copy ([`install_by_copy`]),
+    /// whose `create_new` is no-replace on every filesystem, so the user can
+    /// still take their mail out there.
+    async fn install_with(
+        part: &std::path::Path,
+        preferred: &std::path::Path,
+        link: NoReplaceFn,
+        rename: NoReplaceFn,
+    ) -> std::io::Result<std::path::PathBuf> {
+        let name = preferred
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let (stem, ext) = match name.strip_suffix(".zip.zst") {
+            Some(stem) => (stem.to_string(), ".zip.zst"),
+            None => (name.clone(), ""),
+        };
+        let mut candidate = preferred.to_path_buf();
+        // The atomic steps still to try, first choice first; empty → the copy.
+        let mut atomic: &[NoReplaceFn] = &[link, rename];
+        let mut n = 2u32;
+        loop {
+            let attempt = if let Some(&step) = atomic.first() {
+                let (from, to) = (part.to_path_buf(), candidate.clone());
+                tokio::task::spawn_blocking(move || step(&from, &to))
+                    .await
+                    .map_err(std::io::Error::other)?
+            } else {
+                install_by_copy(part, &candidate).await
+            };
+            match attempt {
+                Ok(()) => {
+                    // After a rename the `.part` is already gone.
+                    let _ = tokio::fs::remove_file(part).await;
+                    return Ok(candidate);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    candidate = preferred.with_file_name(format!("{stem} ({n}){ext}"));
+                    n += 1;
+                }
+                // Refused here: retry this same name by the next step.
+                Err(_) if !atomic.is_empty() => atomic = &atomic[1..],
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Rename `from` onto `to` only if `to` does not exist — atomically, in the
+    /// kernel, failing `AlreadyExists` otherwise. `std::fs::rename` replaces, so
+    /// each platform's own call is declared here against the system library
+    /// `std` already links, rather than adding a crate for three declarations:
+    /// `renameat2(RENAME_NOREPLACE)` (glibc ≥ 2.28), `renamex_np(RENAME_EXCL)`
+    /// (macOS/iOS), `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`
+    /// (Windows). Elsewhere it is `Unsupported`, and the install copies.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fn rename_no_replace(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        use std::ffi::{CString, c_char, c_int, c_uint};
+        use std::os::unix::ffi::OsStrExt;
+        unsafe extern "C" {
+            fn renameat2(
+                olddirfd: c_int,
+                oldpath: *const c_char,
+                newdirfd: c_int,
+                newpath: *const c_char,
+                flags: c_uint,
+            ) -> c_int;
+        }
+        const AT_FDCWD: c_int = -100;
+        const RENAME_NOREPLACE: c_uint = 1;
+        let from = CString::new(from.as_os_str().as_bytes())?;
+        let to = CString::new(to.as_os_str().as_bytes())?;
+        // SAFETY: both pointers are NUL-terminated paths living until after the call.
+        let rc = unsafe {
+            renameat2(
+                AT_FDCWD,
+                from.as_ptr(),
+                AT_FDCWD,
+                to.as_ptr(),
+                RENAME_NOREPLACE,
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fn rename_no_replace(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        use std::ffi::{CString, c_char, c_int, c_uint};
+        use std::os::unix::ffi::OsStrExt;
+        unsafe extern "C" {
+            fn renamex_np(from: *const c_char, to: *const c_char, flags: c_uint) -> c_int;
+        }
+        const RENAME_EXCL: c_uint = 0x0000_0004;
+        let from = CString::new(from.as_os_str().as_bytes())?;
+        let to = CString::new(to.as_os_str().as_bytes())?;
+        // SAFETY: both pointers are NUL-terminated paths living until after the call.
+        let rc = unsafe { renamex_np(from.as_ptr(), to.as_ptr(), RENAME_EXCL) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(windows)]
+    fn rename_no_replace(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+        }
+        let wide = |p: &std::path::Path| -> Vec<u16> {
+            p.as_os_str().encode_wide().chain(Some(0)).collect()
+        };
+        let (from, to) = (wide(from), wide(to));
+        // No `MOVEFILE_REPLACE_EXISTING`: a taken name fails `ERROR_ALREADY_EXISTS`.
+        // SAFETY: both pointers are NUL-terminated UTF-16 paths living until after the call.
+        let ok = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) };
+        if ok != 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(not(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "ios",
+        windows
+    )))]
+    fn rename_no_replace(_: &std::path::Path, _: &std::path::Path) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+
+    /// Copy the `.part` to `candidate`, created exclusively (`O_EXCL`: fails
+    /// `AlreadyExists` rather than replace, and never follows a planted
+    /// symlink), owner-only, synced. A copy that fails part-way removes the
+    /// candidate **this call created** — never any other file; the `.part`
+    /// stays for `Drop`. The last resort: unlike the link and the rename, the
+    /// candidate holds a partial file for the length of the copy, and a crash
+    /// mid-copy leaves it there truncated (`mail-export.md` § Download flow
+    /// step 5).
+    async fn install_by_copy(
+        part: &std::path::Path,
+        candidate: &std::path::Path,
+    ) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        // An error here (`AlreadyExists` included) created nothing of ours.
+        let mut dst = options.open(candidate).await?;
+        let copied = async {
+            let mut src = tokio::fs::File::open(part).await?;
+            tokio::io::copy(&mut src, &mut dst).await?;
+            dst.flush().await?;
+            dst.sync_all().await
+        }
+        .await;
+        drop(dst);
+        if copied.is_err() {
+            let _ = tokio::fs::remove_file(candidate).await;
+        }
+        copied
     }
 
     impl Drop for NativeArchiveFile {
@@ -1652,12 +1905,12 @@ mod native {
                 DispatchError::InvalidState(format!("sync {}: {e}", path.display()))
             })?;
             drop(file);
-            tokio::fs::rename(&part, &path).await.map_err(|e| {
+            let installed = install_without_replacing(&part, &path).await.map_err(|e| {
                 DispatchError::InvalidState(format!("save {}: {e}", path.display()))
             })?;
-            // Renamed: nothing is left for `Drop` to remove.
+            // Installed: the `.part` link is gone, nothing is left for `Drop`.
             self.part = None;
-            Ok(path.display().to_string())
+            Ok(installed.display().to_string())
         }
     }
 
@@ -1883,6 +2136,20 @@ mod native {
             ))
         }
 
+        async fn record_client_outcomes(
+            &self,
+            session_id: String,
+            mailbox: String,
+            uid_validity: u32,
+            outcomes: Vec<fauna_protocol::bridge_routing::ClientImportOutcome>,
+        ) -> Result<(), NestError> {
+            self.client
+                .record_outcomes(session_id, mailbox, uid_validity, outcomes)
+                .await
+                .map_err(nest_error)?;
+            Ok(())
+        }
+
         async fn send_unit(
             &self,
             session_id: String,
@@ -1915,32 +2182,95 @@ mod native {
     }
 
     /// [`imap_client::NativeImapConnector::connect`]'s pre-IMAP transport
-    /// faults. A bad hostname or an unparseable trust anchor is a
-    /// configuration mistake the user must fix (never retried); TCP/TLS-level
-    /// failures are transient, same classification as [`imap_error`]'s
-    /// `Transport`/`Eof`.
-    fn native_transport_error(e: imap_client::NativeTransportError) -> NestError {
+    /// faults, classed for the wizard's sentence (§ Wizard steps step 2): a
+    /// bad hostname or a dead socket is "could not reach", a failed handshake
+    /// or an unusable trust anchor is "could not secure".
+    fn native_transport_failure(e: imap_client::NativeTransportError) -> SourceConnectError {
         use imap_client::NativeTransportError;
-        match e {
-            NativeTransportError::InvalidHostname(_) | NativeTransportError::TrustAnchor(_) => {
-                NestError::Rejected(e.to_string())
+        let failure = match e {
+            NativeTransportError::InvalidHostname(_)
+            | NativeTransportError::Connect { .. }
+            | NativeTransportError::Io(_) => SourceConnectFailure::Reach,
+            NativeTransportError::Tls { .. } | NativeTransportError::TrustAnchor(_) => {
+                SourceConnectFailure::Secure
             }
-            NativeTransportError::Connect { .. }
-            | NativeTransportError::Tls { .. }
-            | NativeTransportError::Io(_) => NestError::Transient(e.to_string()),
+        };
+        SourceConnectError::new(failure, e.to_string())
+    }
+
+    /// Open, secure and sign in one source session. Each phase's failure is
+    /// classed by where it happened: before the greeting it is the
+    /// transport's own; during a `STARTTLS` upgrade it is "could not secure";
+    /// a refused `LOGIN` or `AUTHENTICATE XOAUTH2` is "could not sign in", a
+    /// dropped one "could not reach".
+    async fn open_source_session(
+        params: &SourceConnectParams,
+    ) -> Result<imap_client::ImapSession<imap_client::NativeTlsTransport>, SourceConnectError> {
+        use imap_client::ImapClientError;
+        let mode = match params.tls_mode {
+            ImportTlsMode::Implicit => imap_client::TlsMode::Implicit,
+            ImportTlsMode::StartTls => imap_client::TlsMode::StartTls,
+        };
+        let connector = imap_client::NativeImapConnector::new(mode);
+        let transport = connector
+            .connect(&params.host, params.port)
+            .await
+            .map_err(native_transport_failure)?;
+        let mut session = match mode {
+            imap_client::TlsMode::Implicit => imap_client::ImapSession::connect(transport).await,
+            imap_client::TlsMode::StartTls => {
+                imap_client::ImapSession::connect_starttls(transport).await
+            }
         }
+        .map_err(|e| {
+            let failure = match mode {
+                imap_client::TlsMode::StartTls => SourceConnectFailure::Secure,
+                imap_client::TlsMode::Implicit => SourceConnectFailure::Reach,
+            };
+            SourceConnectError::new(failure, e.to_string())
+        })?;
+        let signed_in = match &params.auth {
+            SourceAuth::Password(password) => {
+                session.login(&params.username, password.as_str()).await
+            }
+            SourceAuth::MicrosoftToken { user, access_token } => {
+                session
+                    .authenticate_xoauth2(user, access_token.as_str())
+                    .await
+            }
+        };
+        signed_in.map_err(|e| {
+            let failure = match e {
+                ImapClientError::Transport(_) | ImapClientError::Eof => SourceConnectFailure::Reach,
+                _ => SourceConnectFailure::SignIn,
+            };
+            SourceConnectError::new(failure, e.to_string())
+        })?;
+        Ok(session)
     }
 
     fn source_not_connected() -> NestError {
         NestError::Rejected("not connected to the source server".into())
     }
 
+    type NativeSourceSession = imap_client::ImapSession<imap_client::NativeTlsTransport>;
+
     /// One source connection, native transport. § Throttling's budget lives
     /// inside `ImapSession` itself (per source *server*, not per mailbox), so
     /// this seam holds exactly one session — mirrors
     /// `fauna-ffi::mail_import::FfiMailImportClient`'s internals.
     struct RpcImportSourceNest {
-        session: AsyncMutex<Option<imap_client::ImapSession<imap_client::NativeTlsTransport>>>,
+        session: AsyncMutex<Option<NativeSourceSession>>,
+        /// What `connect` signed in with, kept until `logout` (§ Credential
+        /// handling: the source password lives in client memory until
+        /// LOGOUT). A transport fault drops `session`; the next call opens it
+        /// again from these, so the drive loop's retries — and a Resume after
+        /// the loop paused on a lost connection (§ Failure handling) — reach
+        /// a live server rather than the dead socket.
+        params: AsyncMutex<Option<SourceConnectParams>>,
+        /// The source refused the kept credential on a re-open
+        /// ([`ImportSourceNest::take_sign_in_refused`]).
+        sign_in_refused: std::sync::atomic::AtomicBool,
         clock: imap_client::TokioClock,
     }
 
@@ -1948,37 +2278,70 @@ mod native {
         fn new() -> Self {
             Self {
                 session: AsyncMutex::new(None),
+                params: AsyncMutex::new(None),
+                sign_in_refused: std::sync::atomic::AtomicBool::new(false),
                 clock: imap_client::TokioClock::new(),
             }
         }
+
+        /// The live session, re-opened from the kept parameters when a fault
+        /// dropped it — `true` alongside when it was, since a fresh session
+        /// has no mailbox `EXAMINE`d. A failure to reach or secure the source
+        /// is transient — the loop retries and then pauses. A refused sign-in
+        /// is not: the source has stopped taking the credential (§ Failure
+        /// handling → *Source-side errors*, the `LOGIN` row), so it is
+        /// [`NestError::Rejected`] with the refusal flagged, and the loop ends
+        /// the session asking for new credentials.
+        async fn live_session(
+            &self,
+        ) -> Result<
+            (
+                tokio::sync::MutexGuard<'_, Option<NativeSourceSession>>,
+                bool,
+            ),
+            NestError,
+        > {
+            let mut guard = self.session.lock().await;
+            if guard.is_some() {
+                return Ok((guard, false));
+            }
+            let params = self
+                .params
+                .lock()
+                .await
+                .clone()
+                .ok_or_else(source_not_connected)?;
+            let session = open_source_session(&params).await.map_err(|e| {
+                if e.failure == SourceConnectFailure::SignIn {
+                    self.sign_in_refused
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    NestError::Rejected(e.to_string())
+                } else {
+                    NestError::Transient(e.to_string())
+                }
+            })?;
+            *guard = Some(session);
+            Ok((guard, true))
+        }
+    }
+
+    /// Drop a session a transport fault broke, so the next call re-opens it.
+    fn drop_if_broken<T>(
+        guard: &mut Option<NativeSourceSession>,
+        result: Result<T, NestError>,
+    ) -> Result<T, NestError> {
+        if matches!(result, Err(NestError::Transient(_))) {
+            *guard = None;
+        }
+        result
     }
 
     #[async_trait]
     impl ImportSourceNest for RpcImportSourceNest {
-        async fn connect(&self, params: SourceConnectParams) -> Result<(), NestError> {
-            let mode = match params.tls_mode {
-                ImportTlsMode::Implicit => imap_client::TlsMode::Implicit,
-                ImportTlsMode::StartTls => imap_client::TlsMode::StartTls,
-            };
-            let connector = imap_client::NativeImapConnector::new(mode);
-            let transport = connector
-                .connect(&params.host, params.port)
-                .await
-                .map_err(native_transport_error)?;
-            let mut session = match mode {
-                imap_client::TlsMode::Implicit => {
-                    imap_client::ImapSession::connect(transport).await
-                }
-                imap_client::TlsMode::StartTls => {
-                    imap_client::ImapSession::connect_starttls(transport).await
-                }
-            }
-            .map_err(imap_error)?;
-            session
-                .login(&params.username, params.password.as_str())
-                .await
-                .map_err(imap_error)?;
+        async fn connect(&self, params: SourceConnectParams) -> Result<(), SourceConnectError> {
+            let session = open_source_session(&params).await?;
             *self.session.lock().await = Some(session);
+            *self.params.lock().await = Some(params);
             Ok(())
         }
 
@@ -1991,13 +2354,23 @@ mod native {
                 .map(|m| SourceMailboxView {
                     name: m.name,
                     selectable: m.selectable,
-                    // `LIST` carries no per-mailbox count (only `EXAMINE`
-                    // does); `SourceMailboxOption::message_count`'s own docs
-                    // sanction 0 here — the Confirm estimate is refined once
-                    // `run_import` `EXAMINE`s each selected mailbox.
-                    message_count: 0,
+                    special_use: m.special_use,
                 })
                 .collect())
+        }
+
+        async fn estimate_mailbox(
+            &self,
+            mailbox: &str,
+            since_epoch: Option<i64>,
+        ) -> Result<imap_client::MailboxEstimate, NestError> {
+            let (mut guard, _) = self.live_session().await?;
+            let session = guard.as_mut().ok_or_else(source_not_connected)?;
+            let estimate = session
+                .estimate_mailbox(mailbox, since_epoch)
+                .await
+                .map_err(imap_error);
+            drop_if_broken(&mut guard, estimate)
         }
 
         async fn examine(
@@ -2005,30 +2378,75 @@ mod native {
             mailbox: &str,
             cursor: Option<MailboxCursor>,
         ) -> Result<imap_client::MailboxStatus, NestError> {
-            let mut guard = self.session.lock().await;
+            let (mut guard, _) = self.live_session().await?;
             let session = guard.as_mut().ok_or_else(source_not_connected)?;
-            session
+            let status = session
                 .examine(mailbox, cursor.map(|c| c.source_uid_validity))
                 .await
-                .map_err(imap_error)
+                .map_err(imap_error);
+            drop_if_broken(&mut guard, status)
         }
 
         async fn fetch_window(
             &self,
-            // Not read: `ImapSession::enumerate_uids`/`fetch_messages` act on
-            // whichever mailbox this session currently has `EXAMINE`d, and
+            // Read only when the session was just re-opened:
+            // `ImapSession::enumerate_uids`/`fetch_messages` act on whichever
+            // mailbox this session currently has `EXAMINE`d, and
             // `run_import_inner`'s calling contract always issues an
             // `examine(mailbox, cursor)` immediately before every
-            // `fetch_window(mailbox, cursor, _)` for that same mailbox — so by
-            // the time this runs the session is already on the right one.
+            // `fetch_window(mailbox, cursor, _)` for that same mailbox — so
+            // a session that lived through it is already on the right one,
+            // and only one a fault made us re-open needs it `EXAMINE`d again.
             // `require_selected` inside the session is the backstop if a
             // future caller ever breaks that ordering.
-            _mailbox: &str,
+            mailbox: &str,
             cursor: Option<MailboxCursor>,
             max: usize,
-        ) -> Result<Vec<imap_client::FetchOutcome>, NestError> {
-            let mut guard = self.session.lock().await;
+            max_size_bytes: u64,
+        ) -> Result<crate::import::FetchWindow, NestError> {
+            let (mut guard, reopened) = self.live_session().await?;
             let session = guard.as_mut().ok_or_else(source_not_connected)?;
+            let window = self
+                .fetch_window_on(session, reopened, mailbox, cursor, max, max_size_bytes)
+                .await;
+            drop_if_broken(&mut guard, window)
+        }
+
+        async fn logout(&self) -> Result<(), NestError> {
+            *self.params.lock().await = None;
+            imap_client::logout_and_clear(&self.session)
+                .await
+                .map_err(imap_error)
+        }
+
+        async fn replace_auth(&self, auth: SourceAuth) {
+            if let Some(params) = self.params.lock().await.as_mut() {
+                params.auth = auth;
+            }
+        }
+
+        fn take_sign_in_refused(&self) -> bool {
+            self.sign_in_refused
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl RpcImportSourceNest {
+        async fn fetch_window_on(
+            &self,
+            session: &mut NativeSourceSession,
+            reopened: bool,
+            mailbox: &str,
+            cursor: Option<MailboxCursor>,
+            max: usize,
+            max_size_bytes: u64,
+        ) -> Result<crate::import::FetchWindow, NestError> {
+            if reopened {
+                session
+                    .examine(mailbox, cursor.map(|c| c.source_uid_validity))
+                    .await
+                    .map_err(imap_error)?;
+            }
             let from_uid = cursor.map_or(1, |c| c.last_processed_source_uid + 1);
             // `enumerate_uids` has no cap of its own (§ its own docs), so a
             // large mailbox is re-enumerated from `from_uid` on every window —
@@ -2036,26 +2454,26 @@ mod native {
             // cheapest possible re-fetch pattern; a future pass could cache
             // the enumeration per mailbox inside this seam if it becomes a
             // measured cost.
-            let uids: Vec<u32> = session
+            // § Per-message flow step 1: the size is compared on the
+            // enumeration's `RFC822.SIZE`, so an over-limit body is never
+            // transferred at all.
+            let (too_large, wanted): (Vec<_>, Vec<_>) = session
                 .enumerate_uids(from_uid)
                 .await
                 .map_err(imap_error)?
                 .into_iter()
                 .take(max)
-                .map(|e| e.uid)
-                .collect();
-            let mut out = Vec::with_capacity(uids.len());
+                .partition(|e| e.is_oversize(max_size_bytes));
+            let uids: Vec<u32> = wanted.into_iter().map(|e| e.uid).collect();
+            let mut outcomes = Vec::with_capacity(uids.len());
             session
-                .fetch_messages(&uids, &self.clock, |o| out.push(o))
+                .fetch_messages(&uids, &self.clock, |o| outcomes.push(o))
                 .await
                 .map_err(imap_error)?;
-            Ok(out)
-        }
-
-        async fn logout(&self) -> Result<(), NestError> {
-            imap_client::logout_and_clear(&self.session)
-                .await
-                .map_err(imap_error)
+            Ok(crate::import::FetchWindow {
+                outcomes,
+                too_large,
+            })
         }
     }
 
@@ -2069,6 +2487,28 @@ mod native {
         async fn sleep_ms(&self, ms: u64) {
             fauna_sleep::sleep(std::time::Duration::from_millis(ms)).await;
         }
+
+        fn now_ms(&self) -> u64 {
+            fauna_core::data::Timestamp::now_millis_or_zero()
+        }
+    }
+
+    /// The Microsoft sign-in's HTTPS seam (§ Where the IMAP client runs, the
+    /// `OAuthHttp` row): the shared native `reqwest` impl, behind the
+    /// machine's dyn seam.
+    struct RpcOAuthHttp(imap_client::NativeOAuthHttp);
+
+    #[async_trait]
+    impl ImportOAuthHttp for RpcOAuthHttp {
+        async fn post_form(
+            &self,
+            url: &str,
+            form: &str,
+        ) -> Result<imap_client::OAuthHttpResponse, String> {
+            imap_client::OAuthHttp::post_form(&self.0, url, form)
+                .await
+                .map_err(|e| e.to_string())
+        }
     }
 
     /// Build a [`MailImportMachine`] over a native WS-RPC handle + a native
@@ -2076,16 +2516,29 @@ mod native {
     /// real: the nest half (S9.4) wraps
     /// `fauna_mail::imap_client::MailImportClient`; the source half wraps a
     /// live `ImapSession` over `tokio::net::TcpStream` + `tokio-rustls` (§
-    /// Where the IMAP client runs).
+    /// Where the IMAP client runs). The Outlook source's Microsoft sign-in
+    /// rides `NativeOAuthHttp`, built here beside the source connector, for
+    /// every native app — linux and tui directly, apple, android and windows
+    /// through `fauna-ffi`'s `build_mail_import_machine`.
     pub fn build_mail_import_machine(nest: Arc<NestClient>) -> MailImportMachine {
-        MailImportMachine::new(
+        let machine = MailImportMachine::new(
             Arc::new(RpcMailImportNest {
                 client: imap_client::MailImportClient::new(Arc::clone(&nest)),
                 nest,
             }),
             Arc::new(RpcImportSourceNest::new()),
             Arc::new(RpcRetryClock),
-        )
+        );
+        match imap_client::NativeOAuthHttp::new() {
+            Ok(http) => machine.with_oauth_http(Arc::new(RpcOAuthHttp(http))),
+            Err(e) => {
+                tracing::warn!(
+                    target: "fauna_mail_settings",
+                    "Microsoft sign-in transport unavailable: {e}"
+                );
+                machine
+            }
+        }
     }
 
     // ── MailLists / MailListMembers (user-tier mailing lists) ───────────
@@ -2491,6 +2944,31 @@ mod native {
             Ok(())
         }
 
+        async fn fetch_own_recipient_pubkey(
+            &self,
+            actor_id: [u8; 32],
+        ) -> Result<Option<[u8; 32]>, NestError> {
+            let reply: fauna_protocol::bridge_routing::FetchRecipientMlsPubkeyReply =
+                super::request_idempotent(
+                    &*self.nest,
+                    "fauna.bridges.fetch_recipient_mls_pubkey",
+                    fauna_protocol::bridge_routing::FetchRecipientMlsPubkeyRequest {
+                        actor_id: actor_id.to_vec(),
+                        // The standing key, never the per-epoch one.
+                        mail_new_ingest: false,
+                    },
+                    provision_backoff,
+                )
+                .await?;
+            reply
+                .key
+                .map(|k| {
+                    <[u8; 32]>::try_from(k.mls_pubkey.as_slice())
+                        .map_err(|_| NestError::Rejected("recipient pubkey is not 32 bytes".into()))
+                })
+                .transpose()
+        }
+
         async fn nest_supports(&self, token: &str) -> Result<bool, NestError> {
             let reply: NestInfoReply = super::request_idempotent(
                 &*self.nest,
@@ -2594,9 +3072,16 @@ mod native {
             sample_count: u32,
             history_op: Option<SpamHistoryOp>,
             holder_copy: Option<SpamModelHolderCopy>,
+            expected_model: Option<SpamModelPrecondition>,
         ) -> Result<PutSpamModelOutcome, NestError> {
             MailAccountClient::new(Arc::clone(&self.nest))
-                .put_spam_model(sealed_model, sample_count, history_op, holder_copy)
+                .put_spam_model(
+                    sealed_model,
+                    sample_count,
+                    history_op,
+                    holder_copy,
+                    expected_model,
+                )
                 .await
                 .map_err(|e| NestError::Rejected(format!("put_spam_model: {e}")))
         }
@@ -2717,6 +3202,65 @@ mod native {
             // The aftermath's mail burn never hydrates the served state.
             None,
         ))
+    }
+
+    /// The connect-time refresh's one trigger for every native app: run
+    /// [`MailSettingsMachine::refresh_epoch_schedule`] over `nest`'s own
+    /// session now, and again after every reconnect of it, until the client
+    /// is dropped (`mail-credentials.md` § Hard revoke → *Published before the
+    /// nest moves*, rule (4): "a reconnect in a running process (a laptop
+    /// waking) runs the connect-time refresh"). Each app spawns the returned
+    /// future once per signed-in client, at its post-auth edge; a per-app
+    /// reconnect leg of its own is what this replaces.
+    ///
+    /// Holds the client only weakly between passes, so it never keeps a
+    /// signed-out session alive: the reconnect watch closes when the client
+    /// drops, and the loop ends there. Best-effort and log-only, as every
+    /// caller's was — a failed pass re-converges at the next connect. A
+    /// bearer-only connection (no identity of its own) has no mail custody to
+    /// refresh, and ends the loop at once.
+    pub fn refresh_epoch_schedule_on_every_connect(
+        nest: &Arc<NestClient>,
+        mail: Arc<dyn MailStore>,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        // Subscribed before the first pass, so a reconnect landing while it
+        // runs is seen as a change and runs a pass of its own.
+        let mut reconnects = nest.subscribe_reconnects();
+        let nest = Arc::downgrade(nest);
+        async move {
+            loop {
+                let Some(client) = nest.upgrade() else {
+                    return;
+                };
+                let Some(machine) = build_mail_settings_machine_for_session(
+                    client,
+                    Arc::clone(&mail),
+                    // The refresh never touches the grant log.
+                    Arc::new(fauna_client_config::NoLedgerStore),
+                ) else {
+                    tracing::debug!(
+                        "mail epoch schedule refresh: a bearer-only connection holds no \
+                         mail custody; nothing to refresh on its connects"
+                    );
+                    return;
+                };
+                match machine.refresh_epoch_schedule().await {
+                    Ok(()) => tracing::debug!(
+                        "mail epoch schedule refresh: no-op or republished (mail disabled \
+                         no-ops silently)"
+                    ),
+                    Err(e) => tracing::warn!(
+                        "mail epoch schedule refresh failed (best-effort; re-converges \
+                         next connect): {e}"
+                    ),
+                }
+                // The machine holds the client strongly; drop it before the wait.
+                drop(machine);
+                if reconnects.changed().await.is_err() {
+                    return; // The client is gone: signed out.
+                }
+            }
+        }
     }
 
     /// The post-claim serving enablement over the native transport — the ONE
@@ -2990,8 +3534,258 @@ mod native {
             std::fs::remove_dir_all(dir).unwrap();
         }
 
-        /// A failed re-download the same day must not truncate the good archive
-        /// an earlier download saved under the same name.
+        const NAME_2: &str = "fauna-export-alice-mbox-2026-09-25 (2).zip.zst";
+
+        /// Two saves of the same export under the same name — two apps the same
+        /// day — must each own their bytes, and neither may replace the other's
+        /// finished archive: the name is chosen at `finish()` and the second
+        /// finisher finds the first's file already there and takes ` (2)`.
+        #[tokio::test]
+        async fn two_concurrent_saves_of_one_name_leave_two_whole_archives() {
+            let dir = scratch_dir("concurrent");
+            let mut first: Box<dyn ArchiveFileSink> =
+                Box::new(NativeArchiveFile::create(&dir, NAME).await.unwrap());
+            first.write(b"AAAA").await.unwrap();
+            // The second opens and writes while the first is mid-flight.
+            let mut second: Box<dyn ArchiveFileSink> =
+                Box::new(NativeArchiveFile::create(&dir, NAME).await.unwrap());
+            second.write(b"BB").await.unwrap();
+            first.write(b"AAAA").await.unwrap();
+            second.write(b"BB").await.unwrap();
+            first.finish().await.unwrap();
+            second.finish().await.unwrap();
+            assert_eq!(listing(&dir), vec![NAME_2.to_string(), NAME.to_string()]);
+            assert_eq!(std::fs::read(dir.join(NAME)).unwrap(), b"AAAAAAAA");
+            assert_eq!(std::fs::read(dir.join(NAME_2)).unwrap(), b"BBBB");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        /// A file already under the archive's name — an earlier same-day export,
+        /// or anything the user put there — is never replaced: the new archive
+        /// lands as ` (2)` and the original stays byte for byte.
+        #[tokio::test]
+        async fn a_taken_name_gets_a_suffix_and_the_original_is_untouched() {
+            let dir = scratch_dir("taken");
+            std::fs::write(dir.join(NAME), b"the user's earlier file").unwrap();
+            std::fs::write(dir.join(NAME_2), b"and a second one").unwrap();
+            let mut sink: Box<dyn ArchiveFileSink> =
+                Box::new(NativeArchiveFile::create(&dir, NAME).await.unwrap());
+            sink.write(b"new archive").await.unwrap();
+            let shown = sink.finish().await.unwrap();
+            let name_3 = "fauna-export-alice-mbox-2026-09-25 (3).zip.zst";
+            assert_eq!(shown, dir.join(name_3).display().to_string());
+            assert_eq!(
+                std::fs::read(dir.join(NAME)).unwrap(),
+                b"the user's earlier file"
+            );
+            assert_eq!(
+                std::fs::read(dir.join(NAME_2)).unwrap(),
+                b"and a second one"
+            );
+            assert_eq!(std::fs::read(dir.join(name_3)).unwrap(), b"new archive");
+            assert_eq!(
+                listing(&dir),
+                vec![NAME_2.to_string(), name_3.to_string(), NAME.to_string()]
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        /// The archive is the whole decrypted mailbox: owner-only while it is
+        /// being written, and still owner-only under its final name.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn the_archive_is_owner_only_from_creation() {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = scratch_dir("mode");
+            let mut sink: Box<dyn ArchiveFileSink> =
+                Box::new(NativeArchiveFile::create(&dir, NAME).await.unwrap());
+            sink.write(b"x").await.unwrap();
+            let part = std::fs::read_dir(&dir)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode();
+            assert_eq!(mode(&part) & 0o777, 0o600, "the .part");
+            sink.finish().await.unwrap();
+            assert_eq!(mode(&dir.join(NAME)) & 0o777, 0o600, "the final file");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        /// A filesystem with no hard links (vfat/exFAT: `EPERM`) — the stand-in
+        /// for the link step.
+        fn no_hard_links(_: &std::path::Path, _: &std::path::Path) -> std::io::Result<()> {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        }
+
+        fn write_part(dir: &std::path::Path, bytes: &[u8]) -> std::path::PathBuf {
+            let part = dir.join(format!("{NAME}.0000000000000001.part"));
+            std::fs::write(&part, bytes).unwrap();
+            part
+        }
+
+        /// A filesystem or platform that refuses the no-replace rename too
+        /// (Linux `EINVAL` for an unsupported flag) — the stand-in for the
+        /// rename step, leaving only the copy.
+        fn no_rename(_: &std::path::Path, _: &std::path::Path) -> std::io::Result<()> {
+            Err(std::io::Error::from_raw_os_error(22))
+        }
+
+        /// Without hard links the archive is renamed into place, not copied:
+        /// the final name is the `.part`'s own inode — it came to exist in one
+        /// atomic step, whole, and never held a partial file — and no second
+        /// copy ever took space on the volume.
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[tokio::test]
+        async fn without_hard_links_the_archive_installs_by_no_replace_rename() {
+            use std::os::unix::fs::MetadataExt;
+            let dir = scratch_dir("nolink-rename");
+            let part = write_part(&dir, b"whole archive");
+            let inode = std::fs::metadata(&part).unwrap().ino();
+            let used = super::install_with(
+                &part,
+                &dir.join(NAME),
+                no_hard_links,
+                super::rename_no_replace,
+            )
+            .await
+            .unwrap();
+            assert_eq!(used, dir.join(NAME));
+            assert_eq!(std::fs::read(&used).unwrap(), b"whole archive");
+            assert_eq!(
+                std::fs::metadata(&used).unwrap().ino(),
+                inode,
+                "renamed, not copied"
+            );
+            assert_eq!(listing(&dir), vec![NAME.to_string()], "the .part is gone");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            windows
+        ))]
+        #[tokio::test]
+        async fn without_hard_links_a_taken_name_still_gets_a_suffix() {
+            let dir = scratch_dir("nolink-taken");
+            std::fs::write(dir.join(NAME), b"the user's earlier file").unwrap();
+            let part = write_part(&dir, b"new archive");
+            let used = super::install_with(
+                &part,
+                &dir.join(NAME),
+                no_hard_links,
+                super::rename_no_replace,
+            )
+            .await
+            .unwrap();
+            assert_eq!(used, dir.join(NAME_2));
+            assert_eq!(std::fs::read(&used).unwrap(), b"new archive");
+            assert_eq!(
+                std::fs::read(dir.join(NAME)).unwrap(),
+                b"the user's earlier file"
+            );
+            assert_eq!(listing(&dir), vec![NAME_2.to_string(), NAME.to_string()]);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        /// The rename step itself never replaces: onto a taken name it fails
+        /// `AlreadyExists` and both files stay byte for byte.
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            windows
+        ))]
+        #[test]
+        fn the_no_replace_rename_refuses_a_taken_name() {
+            let dir = scratch_dir("rename-taken");
+            std::fs::write(dir.join(NAME), b"the user's earlier file").unwrap();
+            let part = write_part(&dir, b"new archive");
+            let err = super::rename_no_replace(&part, &dir.join(NAME)).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+            assert_eq!(
+                std::fs::read(dir.join(NAME)).unwrap(),
+                b"the user's earlier file"
+            );
+            assert_eq!(std::fs::read(&part).unwrap(), b"new archive");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        /// The rename step moves the `.part` onto a free name — on every
+        /// platform with the call, Windows included, where the inode pin above
+        /// cannot run: a stand-in that refused (and so let the install copy)
+        /// fails here.
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            windows
+        ))]
+        #[test]
+        fn the_no_replace_rename_moves_the_part_onto_a_free_name() {
+            let dir = scratch_dir("rename-free");
+            let part = write_part(&dir, b"whole archive");
+            super::rename_no_replace(&part, &dir.join(NAME)).unwrap();
+            assert_eq!(std::fs::read(dir.join(NAME)).unwrap(), b"whole archive");
+            assert_eq!(listing(&dir), vec![NAME.to_string()], "the .part is gone");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn without_hard_links_or_rename_the_archive_installs_by_exclusive_copy() {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = scratch_dir("nolink");
+            let part = write_part(&dir, b"whole archive");
+            let used = super::install_with(&part, &dir.join(NAME), no_hard_links, no_rename)
+                .await
+                .unwrap();
+            assert_eq!(used, dir.join(NAME));
+            assert_eq!(std::fs::read(&used).unwrap(), b"whole archive");
+            let mode = std::fs::metadata(&used).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+            assert_eq!(listing(&dir), vec![NAME.to_string()], "the .part is gone");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        #[tokio::test]
+        async fn without_hard_links_or_rename_a_taken_name_still_gets_a_suffix() {
+            let dir = scratch_dir("nolink-norename-taken");
+            std::fs::write(dir.join(NAME), b"the user's earlier file").unwrap();
+            let part = write_part(&dir, b"new archive");
+            let used = super::install_with(&part, &dir.join(NAME), no_hard_links, no_rename)
+                .await
+                .unwrap();
+            assert_eq!(used, dir.join(NAME_2));
+            assert_eq!(std::fs::read(&used).unwrap(), b"new archive");
+            assert_eq!(
+                std::fs::read(dir.join(NAME)).unwrap(),
+                b"the user's earlier file"
+            );
+            assert_eq!(listing(&dir), vec![NAME_2.to_string(), NAME.to_string()]);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        /// The copy fails after its candidate was created (the source is
+        /// unreadable): the candidate is removed, no other file is touched, and
+        /// the error comes back.
+        #[tokio::test]
+        async fn a_failed_copy_removes_its_own_candidate_and_nothing_else() {
+            let dir = scratch_dir("nolink-fail");
+            std::fs::write(dir.join(NAME), b"the user's earlier file").unwrap();
+            let missing = dir.join("no-such.part");
+            let err = super::install_by_copy(&missing, &dir.join(NAME_2))
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+            assert_eq!(listing(&dir), vec![NAME.to_string()]);
+            assert_eq!(
+                std::fs::read(dir.join(NAME)).unwrap(),
+                b"the user's earlier file"
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
         #[tokio::test]
         async fn a_refused_redownload_keeps_the_earlier_archive_intact() {
             let dir = scratch_dir("redownload");
@@ -3020,7 +3814,7 @@ pub use native::{
     build_mail_list_members_machine, build_mail_lists_machine, build_mail_policy_machine,
     build_mail_settings_machine, build_mail_settings_machine_for_session, build_mail_spam_machine,
     build_relay_provision_machine, build_webdav_policy_machine, dispatch_bridge_approval,
-    dispatch_post_claim_serving_enablement,
+    dispatch_post_claim_serving_enablement, refresh_epoch_schedule_on_every_connect,
 };
 
 // The wasm twin of `native`, over the browser `WsRpcClient` (gloo-net
@@ -3051,12 +3845,13 @@ mod wasm {
     use fauna_protocol::bridge_routing::{
         AddListMemberReply, AddListMemberRequest, AliasControls, AliasPolicy, AliasRow,
         BatchImportListMembersReply, BatchImportListMembersRequest, CreateAccountListReply,
-        CreateAccountListRequest, DeleteAccountListReply, DeleteAccountListRequest, EpochSealKey,
-        FetchConfigReply, GetSpamBaselineStateReply, ImportAliasOutcome, ListAccountAliasesReply,
-        ListAccountAliasesRequest, ListAccountListsReply, ListAccountListsRequest,
-        ListListMembersReply, ListListMembersRequest, MailDomainRenameRow, MailDomainRow,
-        MailHealthReply, ProvisionRecipientMlsPubkeyRequest, PublishSpamBaselineReply,
-        PutAliasPolicyRequest, PutAuthPolicyRequest, PutImapPolicyRequest,
+        CreateAccountListRequest, DeleteAccountListReply, DeleteAccountListRequest,
+        DmarcReportingPolicy, EpochSealKey, FetchConfigReply, GetSpamBaselineStateReply,
+        ImportAliasOutcome, ListAccountAliasesReply, ListAccountAliasesRequest,
+        ListAccountListsReply, ListAccountListsRequest, ListListMembersReply,
+        ListListMembersRequest, MailDomainRenameRow, MailDomainRow, MailHealthReply,
+        ProvisionRecipientMlsPubkeyRequest, PublishSpamBaselineReply, PutAliasPolicyRequest,
+        PutAuthPolicyRequest, PutDmarcPolicyRequest, PutImapPolicyRequest,
         PutOutboundPolicyRequest, PutSpamPolicyRequest, PutSubmissionPolicyRequest,
         ResubscribeListMemberReply, ResubscribeListMemberRequest, SpamHistoryOp,
         UnsubscribeListMemberReply, UnsubscribeListMemberRequest, UpdateAccountListReply,
@@ -3073,7 +3868,7 @@ mod wasm {
         PutSpamModelOutcome, RevokeReply, RevokeWrappedMlsBlobRequest,
         RevokeWrappedSubmissionTokenRequest, ServiceUserInfo, SetMailEnabledReply,
         SetMailEnabledRequest, SetMailServingEnabledReply, SetMailServingEnabledRequest,
-        SpamModelHolderCopy,
+        SpamModelHolderCopy, SpamModelPrecondition,
     };
     use fauna_rpc_wasm::WsRpcClient;
 
@@ -3091,7 +3886,7 @@ mod wasm {
     use crate::forwarders::{ForwarderMachine, ForwarderNest};
     use crate::import::{
         ImportSourceNest, MailImportMachine, MailImportNest, MailboxCursor, RetryClock,
-        SourceConnectParams, SourceMailboxView,
+        SourceConnectError, SourceConnectFailure, SourceConnectParams, SourceMailboxView,
     };
     use crate::lists::{
         ImportResult, ListDraft, ListMembers, ListView, MailListMembersMachine,
@@ -3503,6 +4298,14 @@ mod wasm {
             self.admin.put_alias_policy(req).await.map_err(nest_error)
         }
 
+        async fn get_dmarc_policy(&self) -> Result<DmarcReportingPolicy, NestError> {
+            self.admin.get_dmarc_policy().await.map_err(nest_error)
+        }
+
+        async fn put_dmarc_policy(&self, req: PutDmarcPolicyRequest) -> Result<(), NestError> {
+            self.admin.put_dmarc_policy(req).await.map_err(nest_error)
+        }
+
         async fn get_spam_baseline_state(&self) -> Result<GetSpamBaselineStateReply, NestError> {
             self.admin
                 .get_spam_baseline_state()
@@ -3828,6 +4631,7 @@ mod wasm {
                     name: m.name,
                     exists: m.exists,
                     uid_validity: m.uid_validity,
+                    sealed_bytes: m.sealed_bytes,
                 })
                 .collect())
         }
@@ -4191,6 +4995,20 @@ mod wasm {
             ))
         }
 
+        async fn record_client_outcomes(
+            &self,
+            session_id: String,
+            mailbox: String,
+            uid_validity: u32,
+            outcomes: Vec<fauna_protocol::bridge_routing::ClientImportOutcome>,
+        ) -> Result<(), NestError> {
+            self.client
+                .record_outcomes(session_id, mailbox, uid_validity, outcomes)
+                .await
+                .map_err(nest_error)?;
+            Ok(())
+        }
+
         async fn send_unit(
             &self,
             session_id: String,
@@ -4211,12 +5029,24 @@ mod wasm {
 
     #[async_trait(?Send)]
     impl ImportSourceNest for RpcImportSourceNest {
-        async fn connect(&self, _params: SourceConnectParams) -> Result<(), NestError> {
-            Err(super::import_source_unimpl("(web IMAP transport) connect"))
+        async fn connect(&self, _params: SourceConnectParams) -> Result<(), SourceConnectError> {
+            Err(SourceConnectError::new(
+                SourceConnectFailure::Reach,
+                super::import_source_unimpl("(web IMAP transport) connect").to_string(),
+            ))
         }
         async fn list_source_mailboxes(&self) -> Result<Vec<SourceMailboxView>, NestError> {
             Err(super::import_source_unimpl(
                 "(web IMAP transport) list_source_mailboxes",
+            ))
+        }
+        async fn estimate_mailbox(
+            &self,
+            _mailbox: &str,
+            _since_epoch: Option<i64>,
+        ) -> Result<imap_client::MailboxEstimate, NestError> {
+            Err(super::import_source_unimpl(
+                "(web IMAP transport) estimate_mailbox",
             ))
         }
         async fn examine(
@@ -4231,7 +5061,8 @@ mod wasm {
             _mailbox: &str,
             _cursor: Option<MailboxCursor>,
             _max: usize,
-        ) -> Result<Vec<imap_client::FetchOutcome>, NestError> {
+            _max_size_bytes: u64,
+        ) -> Result<crate::import::FetchWindow, NestError> {
             Err(super::import_source_unimpl(
                 "(web IMAP transport) fetch_window",
             ))
@@ -4257,9 +5088,17 @@ mod wasm {
         async fn sleep_ms(&self, ms: u64) {
             fauna_sleep::sleep(std::time::Duration::from_millis(ms)).await;
         }
+
+        fn now_ms(&self) -> u64 {
+            fauna_core::data::Timestamp::now_millis_or_zero()
+        }
     }
 
-    /// Build a [`MailImportMachine`] over the browser `WsRpcClient`. The nest
+    /// Build a [`MailImportMachine`] over the browser `WsRpcClient`. The
+    /// Microsoft sign-in is a typed not-yet here — no `with_oauth_http`, so
+    /// `microsoft_signin_available` reads `false`: Microsoft's `/devicecode`
+    /// and `/token` send no CORS headers, and the sign-in lands with the
+    /// relay (§ Where the IMAP client runs). The nest
     /// half is real; the source half is a stub (see the section note above) —
     /// `hydrate`/`list_sessions` (viewing a session a native app started) and
     /// resume/pause/cancel on an existing session still work, but `Connect`
@@ -4656,6 +5495,31 @@ mod wasm {
             Ok(())
         }
 
+        async fn fetch_own_recipient_pubkey(
+            &self,
+            actor_id: [u8; 32],
+        ) -> Result<Option<[u8; 32]>, NestError> {
+            let reply: fauna_protocol::bridge_routing::FetchRecipientMlsPubkeyReply =
+                super::request_idempotent(
+                    &self.nest,
+                    "fauna.bridges.fetch_recipient_mls_pubkey",
+                    fauna_protocol::bridge_routing::FetchRecipientMlsPubkeyRequest {
+                        actor_id: actor_id.to_vec(),
+                        // The standing key, never the per-epoch one.
+                        mail_new_ingest: false,
+                    },
+                    provision_backoff,
+                )
+                .await?;
+            reply
+                .key
+                .map(|k| {
+                    <[u8; 32]>::try_from(k.mls_pubkey.as_slice())
+                        .map_err(|_| NestError::Rejected("recipient pubkey is not 32 bytes".into()))
+                })
+                .transpose()
+        }
+
         async fn nest_supports(&self, token: &str) -> Result<bool, NestError> {
             let reply: NestInfoReply = super::request_idempotent(
                 &self.nest,
@@ -4759,9 +5623,16 @@ mod wasm {
             sample_count: u32,
             history_op: Option<SpamHistoryOp>,
             holder_copy: Option<SpamModelHolderCopy>,
+            expected_model: Option<SpamModelPrecondition>,
         ) -> Result<PutSpamModelOutcome, NestError> {
             MailAccountClient::new(self.nest.clone())
-                .put_spam_model(sealed_model, sample_count, history_op, holder_copy)
+                .put_spam_model(
+                    sealed_model,
+                    sample_count,
+                    history_op,
+                    holder_copy,
+                    expected_model,
+                )
                 .await
                 .map_err(|e| NestError::Rejected(format!("put_spam_model: {e}")))
         }
@@ -4900,7 +5771,7 @@ pub use wasm::{
 
 /// Fault-injection coverage for [`request_idempotent`] — the regression guard
 /// for the user-reported enable-mail freeze against a flaky remote nest
-/// (example.com). A real GUI + WS-proxy reproduction would be timing-racy (the
+/// (the live nest). A real GUI + WS-proxy reproduction would be timing-racy (the
 /// drop has to coincide with a provision in flight) and is gated on the shared
 /// AT-SPI bus; a scripted fake transport reproduces the *exact* failure shape —
 /// a mid-flight disconnect mapped to [`NestError::Transient`] — deterministically
@@ -4921,7 +5792,7 @@ mod tests {
         Ok,
         /// A transport fault (mid-flight WS drop / timeout): `is_rejection()`
         /// is false, so `nest_error` maps it to `Transient` and the helper
-        /// retries — the exact class of the example.com disconnect storm.
+        /// retries — the exact class of the live-nest disconnect storm.
         Transient,
         /// A server rejection (e.g. permission denied): `is_rejection()` true →
         /// `Rejected`, returned without retry.

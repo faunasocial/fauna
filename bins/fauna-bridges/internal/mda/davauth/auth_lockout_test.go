@@ -200,7 +200,7 @@ func TestCalDAVReportAuthEventCarriesSourceIP(t *testing.T) {
 // as the CalDAV Basic-auth username. The auth middleware must resolve that
 // bare username under the box's PrimaryDomain instead of 401-ing it as
 // "malformed username" — which 401-loops Apple Calendar into a "Connecting…"
-// hang before discovery even starts (live evidence: example.com MDA logged
+// hang before discovery even starts (live evidence: the live nest MDA logged
 // `caldav: AUTH failed reason="malformed username"` against a correctly
 // configured Calendar account). Mirrors how every mainstream CalDAV server
 // (Nextcloud / SOGo / Radicale / Baïkal) accepts a bare username.

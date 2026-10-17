@@ -111,6 +111,11 @@ pub async fn download_snapshot_file_bytes(
                  files carry a restorable manifest"
             ),
         })?;
+    let set = fauna_client_snapshots::SnapshotSet::of(&snapshot);
+    // The snapshot reader's nonce source: this seat's custody — the resolver
+    // the listing read above already rendered sealed paths through.
+    let snapshot_nonces = crate::snapshots_client::folder_key_resolver(&nest_rpc, &secret)
+        .map(fauna_client_sync::SetNonceSource::Resolver);
 
     // The walk itself is `!Send` — the throwaway `SyncEngine` owns a rusqlite
     // `SyncDb`, whose connection must be created, used and dropped on ONE thread.
@@ -139,13 +144,20 @@ pub async fn download_snapshot_file_bytes(
                     nest_url,
                     fauna_core::identity::ActorKeypair::from_secret(secret),
                 ));
-                let engine = build_restore_engine(auth, nest_rpc, device, &hex::encode(secret));
+                let engine = build_restore_engine(
+                    auth,
+                    nest_rpc,
+                    device,
+                    &hex::encode(secret),
+                    snapshot_nonces,
+                );
+                // The ONE snapshot entry reader, per-file door
+                // (`backup-restore.md` § Security Properties → Integrity):
+                // the entry, sealed or plaintext, licensed by the judged
+                // change row of the snapshot's set that named its manifest
+                // under its path, before any byte.
                 engine
-                    .download_file_bytes_by_manifest(
-                        file.manifest_hash,
-                        file.content_key_version,
-                        &file.relative_path,
-                    )
+                    .download_snapshot_entry_bytes(&set, &file)
                     .await
                     .map_err(|e| format!("download {path:?} from snapshot {snapshot_id}: {e:#}"))
             });

@@ -12,7 +12,9 @@ use fauna_core::scoring::{
     AlgorithmLabeler, LabelSource, LabelerInput, LabelerOutput, LabelerPostInput, ScorerLimits,
     sign_labeler_metadata,
 };
-use fauna_labeler::{LabelerAbiNewer, run_published_labeler};
+use fauna_labeler::{
+    LABELER_FEED_MAX_CPU_MICROSECONDS, LabelerAbiNewer, PreparedLabeler, run_published_labeler,
+};
 
 const CAT_LABELER_WAT: &str =
     include_str!("../../../tests/e2e-unified/fixtures/labeler/cat_labeler.wat");
@@ -158,4 +160,87 @@ fn a_module_declaring_revision_one_explicitly_still_labels() {
     .unwrap();
     assert_eq!(hit.len(), 1);
     assert_eq!(hit[0].category, "cat");
+}
+
+/// The cat fixture signed with a declared CPU budget of `cpu_microseconds`.
+fn signed_metadata_with_cpu(
+    publisher: &ActorKeypair,
+    wasm: &[u8],
+    cpu_microseconds: u64,
+) -> Vec<u8> {
+    let mut meta: AlgorithmLabeler =
+        fauna_core::encoding::canonical_decode(&signed_metadata(publisher, wasm)).unwrap();
+    meta.resource_limits.max_cpu_microseconds = cpu_microseconds;
+    meta.signature = Vec::new();
+    let signed = sign_labeler_metadata(publisher.signing_key(), meta).unwrap();
+    fauna_core::encoding::canonical_encode(&signed).unwrap()
+}
+
+#[test]
+fn a_prepared_labeler_is_verified_once_and_runs_over_many_items() {
+    // The prepare/run split (`content-moderation-and-ranking.md` § Tier-3 →
+    // *Where it runs*, invariant (a)): every guard runs in `prepare`, and `run`
+    // takes neither the metadata nor the module bytes — so a position looping
+    // one labeler over many items cannot skip a guard, and pays for none twice.
+    let publisher = ActorKeypair::from_secret([3u8; 32]);
+    let wasm = CAT_LABELER_WAT.as_bytes();
+    let metadata = signed_metadata(&publisher, wasm);
+    let prepared = PreparedLabeler::prepare(&metadata, wasm, &publisher.actor_id()).unwrap();
+    assert_eq!(prepared.metadata().version, 1);
+
+    let encode = |text: &str| fauna_labeler::encode_labeler_input(&text_input(text)).unwrap();
+    let hit = prepared.run(&encode("my cat is asleep"), &[]).unwrap();
+    assert_eq!(hit.len(), 1);
+    assert_eq!(hit[0].category, "cat");
+    let miss = prepared.run(&encode("the weather is nice"), &[]).unwrap();
+    assert!(miss.is_empty());
+    let again = prepared.run(&encode("another cat"), &[]).unwrap();
+    assert_eq!(
+        again.len(),
+        1,
+        "the compiled module answers every run alike"
+    );
+    assert_eq!(again[0].category, "cat");
+}
+
+#[test]
+fn prepare_refuses_what_the_one_boundary_refuses() {
+    let publisher = ActorKeypair::from_secret([3u8; 32]);
+    let wasm = CAT_LABELER_WAT.as_bytes();
+    let metadata = signed_metadata(&publisher, wasm);
+    let other = ActorKeypair::from_secret([4u8; 32]);
+    let err = PreparedLabeler::prepare(&metadata, wasm, &other.actor_id())
+        .err()
+        .expect("a module prepared under another labeler's id is refused");
+    assert!(format!("{err:#}").contains("verify"), "got: {err:#}");
+
+    let newer = signed_metadata_at(&publisher, wasm, LabelerOutput { label_abi: 2 });
+    let err = PreparedLabeler::prepare_for_feed(&newer, wasm, &publisher.actor_id())
+        .err()
+        .expect("a newer label revision is refused at prepare");
+    assert!(
+        err.downcast_ref::<LabelerAbiNewer>().is_some(),
+        "got: {err:#}"
+    );
+}
+
+#[test]
+fn the_feed_position_clamps_the_cpu_budget_to_its_own_ceiling() {
+    // Invariant (d): an interactive position bounds a module tighter than a
+    // background holder does; a publisher declaring less keeps its lower limit.
+    let publisher = ActorKeypair::from_secret([3u8; 32]);
+    let wasm = CAT_LABELER_WAT.as_bytes();
+    let generous = signed_metadata_with_cpu(&publisher, wasm, 900_000);
+
+    let feed = PreparedLabeler::prepare_for_feed(&generous, wasm, &publisher.actor_id()).unwrap();
+    assert_eq!(
+        feed.cpu_limit_microseconds(),
+        LABELER_FEED_MAX_CPU_MICROSECONDS
+    );
+    let holder = PreparedLabeler::prepare(&generous, wasm, &publisher.actor_id()).unwrap();
+    assert_eq!(holder.cpu_limit_microseconds(), 900_000);
+
+    let modest = signed_metadata_with_cpu(&publisher, wasm, 20_000);
+    let feed = PreparedLabeler::prepare_for_feed(&modest, wasm, &publisher.actor_id()).unwrap();
+    assert_eq!(feed.cpu_limit_microseconds(), 20_000);
 }

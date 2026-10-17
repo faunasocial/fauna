@@ -208,9 +208,7 @@ pub fn render_feeds(
     manager: &Arc<LinuxFeedManager>,
     rt: &Handle,
 ) {
-    while let Some(child) = feeds_list.first_child() {
-        feeds_list.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(feeds_list);
     for feed in feeds {
         feeds_list.append(&build_feed_row(&feed.feed_id, &feed.name, manager, rt));
     }
@@ -223,9 +221,7 @@ pub fn render_bridge_feeds(
     manager: &Arc<LinuxFeedManager>,
     rt: &Handle,
 ) {
-    while let Some(child) = bridge_list.first_child() {
-        bridge_list.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(bridge_list);
     for sub in bridge_feeds {
         bridge_list.append(&build_bridge_feed_row(sub.id, &sub.name, manager, rt));
     }

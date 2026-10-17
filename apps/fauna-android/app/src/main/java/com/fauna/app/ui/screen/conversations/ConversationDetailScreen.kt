@@ -48,7 +48,13 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.BuildConfig
 import com.fauna.app.R
+import com.fauna.app.ui.components.RoomLabelerRows
 import com.fauna.app.core.ContentPolicyInputs
+import com.fauna.app.core.RegionPlaneHost
+import com.fauna.app.core.RegionSubject
+import com.fauna.app.ui.components.RegionBlockWitness
+import com.fauna.app.ui.components.RegionPlaceholder
+import com.fauna.ffi.FfiRegionPlaceholder
 import com.fauna.app.core.ExifStripper
 import com.fauna.app.ui.components.C2paBadge
 import com.fauna.app.ui.components.ComposeMarkerPlan
@@ -91,6 +97,11 @@ import uniffi.fauna_conversations.RoomSettingsDraft
 import uniffi.fauna_conversations.RoomSettingsEdit
 import uniffi.fauna_conversations.roomClassAttrToken
 import uniffi.fauna_conversations.roomClassLabel
+import uniffi.fauna_conversations.roomNoticeAttrToken
+import uniffi.fauna_conversations.roomNoticeFor
+import uniffi.fauna_conversations.roomNoticeLabel
+import uniffi.fauna_conversations.roomPendingInviteText
+import uniffi.fauna_conversations.roomSettingsToggleNestRead
 import uniffi.fauna_conversations.roomHistoryPolicyEditorChoices
 import uniffi.fauna_conversations.roomHistoryPolicyLabel
 import uniffi.fauna_conversations.roomHistoryPolicyToken
@@ -295,6 +306,10 @@ fun ConversationDetailScreen(
         else vm.memberMarksForThread(threadId, memberReviewRoster)
     }
 
+    // Leaving for the list closes the thread (conversations.md § When a thread
+    // is read) — later arrivals in it flag unread again.
+    ClearSelectionOnLeave(manager)
+
     ConversationDetailContent(
         detail = detail,
         // Snapshot-driven add-participant overlay state (null = hidden). The
@@ -315,6 +330,11 @@ fun ConversationDetailScreen(
         // FFI fault degrades to `false` so the page's own errors stay
         // reachable if the probe itself breaks.
         receiveStopped = runCatching { manager.receiveStopped() }.getOrDefault(false),
+        // The sixth `error-message` truth (`ui/conversations.md` § Errors &
+        // edge cases): a newer build's conversation state. Armed by
+        // `ConversationsManagerHost` on the observed manager; same
+        // FFI-fault-degrades posture as [receiveStopped].
+        stateNeedsNewerApp = runCatching { manager.engineStateNeedsNewerApp() }.getOrDefault(false),
         // The floor of the `error-message` stack (`ui/conversations.md` §
         // Errors & edge cases → *A fifth truth*): received mail this run that
         // could not open under the account's key set — same FFI-fault-degrades
@@ -381,11 +401,28 @@ fun ConversationDetailScreen(
                 done(allLanded)
             }
         },
+        // A pending invitation's withdraw acts at once, outside Save's staged set
+        // (`fauna.conversations.room.revoke_invite`); the manager re-lists on
+        // success and puts a refusal on `error-message`.
+        onWithdrawRoomInvite = { inviteeActorHex ->
+            scope.launch { runCatching { manager.withdrawRoomInvite(threadId, inviteeActorHex) } }
+        },
+        // `room-leave-confirm` -> `manager.leaveRoom`: one verb, the class picks
+        // the door inside the backend. The thread stays in the leaver's list; a
+        // refusal rides the page's `error-message`.
+        onLeaveRoom = {
+            scope.launch { runCatching { manager.leaveRoom(threadId) } }
+        },
         onAddParticipantInputChange = {
             // Typing owes a probe — same rule as new-thread compose.
             manager.setAddParticipantRecipientInput(it)
             scope.launch { manager.resolveRecipient() }
         },
+        onAddParticipantAcceptSuggestion = { index ->
+            // `accept_suggestion(i)` on the active picker (overlay first).
+            scope.launch { manager.acceptSuggestion(index.toUInt()) }
+        },
+        onAddParticipantRemoveChip = { index -> manager.removeRecipientChip(index.toUInt()) },
         onAddParticipantAccept = {
             // Same probe-then-commit flow as new-thread compose; the manager
             // routes resolve/accept to whichever picker is active — here the
@@ -571,6 +608,10 @@ fun ConversationDetailContent(
     // the policy changed.
     onApplyRoomSettings: (List<RoomSettingsEdit>, (Boolean) -> Unit) -> Unit =
         { _, done -> done(false) },
+    // `room-pending-invite-withdraw-button[i]`: takes the invitee's actor hex.
+    onWithdrawRoomInvite: (String) -> Unit = {},
+    // `room-leave-confirm`: the walk-out, outside Save's staged set.
+    onLeaveRoom: () -> Unit = {},
     onReplyAll: (String) -> Unit = {},
     onAddReplyRecipient: (String) -> Unit = {},
     onRemoveReplyRecipient: (TypedAddress) -> Unit = {},
@@ -599,6 +640,14 @@ fun ConversationDetailContent(
     // apple's `ConversationsVM.pageError` / windows's `ActiveSendErrorReason` /
     // tui's `sync_page_error`.
     receiveStopped: Boolean = false,
+    // The sixth `error-message` truth (`ui/conversations.md` § Errors & edge
+    // cases): a newer build wrote this account's conversation state with a
+    // breaking change (`ConversationsManager::engine_state_needs_newer_app`).
+    // A STANDING condition, no engine so nothing to fail, never cleared by a
+    // gesture: TOP precedence here (android has no served-elsewhere arm),
+    // above [receiveStopped]. Mirrors linux `page_error_text` / tui's
+    // `sync_page_error`.
+    stateNeedsNewerApp: Boolean = false,
     // The floor of the `error-message` stack (`ui/conversations.md` § Errors &
     // edge cases → *A fifth truth*, 2026-09-15): received mail this run the
     // client could not open under the account's current key set
@@ -610,6 +659,8 @@ fun ConversationDetailContent(
     unopenableMail: UInt = 0u,
     onAddParticipantInputChange: (String) -> Unit = {},
     onAddParticipantAccept: () -> Unit = {},
+    onAddParticipantAcceptSuggestion: (Int) -> Unit = { onAddParticipantAccept() },
+    onAddParticipantRemoveChip: (Int) -> Unit = {},
     onAddParticipantConfirm: () -> Unit = {},
     onAddParticipantCancel: () -> Unit = {},
     onBodyChange: (String) -> Unit = {},
@@ -738,7 +789,9 @@ fun ConversationDetailContent(
             // cleared by a gesture (`ui/conversations.md` § Errors & edge
             // cases → *A fifth truth*).
             val pageErrorReason: LocalizedText? =
-                if (receiveStopped) {
+                if (stateNeedsNewerApp) {
+                    LocalizedText(key = "conversations.errors.state_needs_newer_app", args = emptyMap())
+                } else if (receiveStopped) {
                     LocalizedText(key = "conversations.errors.receive_stopped", args = emptyMap())
                 } else {
                     pageError
@@ -816,6 +869,7 @@ fun ConversationDetailContent(
                             )
                         }
                     } else {
+                        val regionRevision by RegionPlaneHost.revision.collectAsState()
                         LazyColumn(
                             state = listState,
                             modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
@@ -833,9 +887,19 @@ fun ConversationDetailContent(
                                 // which has no plane identity and paints no report verb.
                                 val senderActor = messageSenderActorHex(msg)
                                 val reportKey = msg.planeRef?.recordDigest
-                                val reported = remember(reportKey, senderActor, contentPolicyInputs) {
-                                    contentPolicyInputs.isReported(reportKey, senderActor)
+                                // The composed verdict — the guardian floor, the viewer's
+                                // own thresholds and reports, and the region content
+                                // policy, in shared Rust (`RegionPlaneHost.render`); the
+                                // region's placeholder rides along when it drove the verb.
+                                val decision = remember(msg, contentPolicyInputs, regionRevision) {
+                                    RegionPlaneHost.render(
+                                        msg.labels,
+                                        contentPolicyInputs,
+                                        RegionSubject.message(msg.messageId, msg.body, reportKey, senderActor),
+                                    )
                                 }
+                                val reported = decision.reported
+                                RegionBlockWitness("conversation:${msg.messageId}", decision.isRegionBlocked)
                                 val reportTarget = remember(msg.messageId, msg.isOwn, msg.body, senderActor) {
                                     messageReportTarget(msg, senderActor)
                                 }
@@ -872,12 +936,12 @@ fun ConversationDetailContent(
                                     // floor + the viewer's own thresholds, resolved in
                                     // shared Rust; a `block` collapses ahead of the muted
                                     // arm (never revealable), a `collapse` behind a reveal.
-                                    contentVerdict = if (reported) "block" else contentPolicyInputs.verdictFor(msg.labels),
+                                    contentVerdict = decision.verdict,
+                                    regionPlaceholder = decision.placeholder,
                                     // Reactions / delete affordances — capability-gated,
                                     // never rail-branched (rule #5). delete is further
-                                    // gated on msg.isOwn inside the bubble.
+                                    // gated on msg.canDelete inside the bubble.
                                     supportsReactions = detail.capabilities.supportsReactions,
-                                    supportsMessageDelete = detail.capabilities.supportsMessageDelete,
                                     // Mark-as-spam on any received message — the
                                     // live `Insert` consumer, routed to the VM
                                     // (mail-spam.md § Wire shapes). Silent no-op
@@ -944,6 +1008,11 @@ fun ConversationDetailContent(
                         draft = draft,
                         detail = detail,
                         onDraftChange = { roomSettingsDraft = it },
+                        onWithdrawInvite = onWithdrawRoomInvite,
+                        onLeave = {
+                            roomSettingsDraft = null
+                            onLeaveRoom()
+                        },
                         onSave = { staged ->
                             // The edits are diffed HERE, where `detail` is
                             // non-null, and the verdict comes back so this
@@ -967,6 +1036,8 @@ fun ConversationDetailContent(
                         state = ap,
                         onInputChange = onAddParticipantInputChange,
                         onAccept = onAddParticipantAccept,
+                        onAcceptSuggestion = onAddParticipantAcceptSuggestion,
+                        onRemoveChip = onAddParticipantRemoveChip,
                         onConfirm = onAddParticipantConfirm,
                         onCancel = onAddParticipantCancel,
                         displayAddress = displayAddress,
@@ -1050,10 +1121,13 @@ private fun RoomSettingsDialog(
     draft: RoomSettingsDraft,
     detail: ThreadDetail,
     onDraftChange: (RoomSettingsDraft) -> Unit,
+    onWithdrawInvite: (String) -> Unit,
+    onLeave: () -> Unit,
     onSave: (RoomSettingsDraft) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val caps: ThreadCapabilities = detail.capabilities
+    var leaveConfirmVisible by remember { mutableStateOf(false) }
     // The list every staging call and every read below indexes against, so a
     // gesture resolves by identity rather than by position
     // (`RoomSettingsDraft::slot_of`).
@@ -1077,6 +1151,7 @@ private fun RoomSettingsDialog(
                         roomJoinRuleToken(it) to roomJoinRuleLabel(it)
                     },
                     onSelect = { token -> onDraftChange(roomSettingsSetJoinRule(draft, token)) },
+                    enabled = caps.canSetPolicy,
                 )
                 Text(
                     stringResource(R.string.conversations_unified_room_history_policy_label),
@@ -1091,6 +1166,7 @@ private fun RoomSettingsDialog(
                     onSelect = { token ->
                         onDraftChange(roomSettingsSetHistoryPolicy(draft, token))
                     },
+                    enabled = caps.canSetPolicy,
                 )
                 // One row per member, indexed exactly like
                 // `thread-member-chip[i]` so a driver's index means the same
@@ -1153,11 +1229,121 @@ private fun RoomSettingsDialog(
                         }
                     }
                 }
+                // The home nest's read, only where there is one to stage — a
+                // community room whose answer this device has read
+                // (`RoomSettingsDraft.nestRead`). Staged like the admin switches:
+                // Save commits it as a rotation. Greyed unless the viewer may set
+                // policy; `checked` rides `stateDescription`.
+                draft.nestRead?.let { reads ->
+                    TextButton(
+                        onClick = { onDraftChange(roomSettingsToggleNestRead(draft)) },
+                        enabled = caps.canSetPolicy,
+                        modifier = Modifier
+                            .testTag(Ids.ROOM_NEST_READ_TOGGLE)
+                            .semantics { stateDescription = if (reads) "true" else "false" },
+                    ) {
+                        Text(
+                            stringResource(
+                                if (reads) {
+                                    R.string.conversations_unified_room_nest_read_yes
+                                } else {
+                                    R.string.conversations_unified_room_nest_read_no
+                                },
+                            ),
+                        )
+                    }
+                }
+                // The room's labeler set (`room-labeler-toggle[i]` +
+                // `room-labeler-inspect-button[i]`), painted only while
+                // `draft.labelers` is set. The catalog lives in the `noKids`
+                // source set, so the rows come through the kids-excision seam.
+                RoomLabelerRows(
+                    draft = draft,
+                    canSetPolicy = caps.canSetPolicy,
+                    onDraftChange = onDraftChange,
+                )
+                // Pending invitations, off the LIVE detail (the home nest serves
+                // the list after a floor read and a withdrawal removes a row).
+                // The whole section is ABSENT while `pendingInvites` is null (not
+                // served) or empty alike. Every row is one the nest served
+                // because this viewer may withdraw it, so the button is live on
+                // every row; withdrawing acts at once with no confirm.
+                detail.room?.pendingInvites?.takeIf { it.isNotEmpty() }?.let { pending ->
+                    Text(
+                        stringResource(R.string.conversations_unified_room_pending_invites_label),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    val withdrawGate = faunaGate("fauna.conversations.room.revoke_invite")
+                    pending.forEach { invite ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                roomPendingInviteText(invite),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag(Ids.ROOM_PENDING_INVITE)
+                                    .semantics {
+                                        stateDescription = if (invite.lapsed) "true" else "false"
+                                    },
+                            )
+                            TextButton(
+                                onClick = { onWithdrawInvite(invite.inviteeActorHex) },
+                                enabled = withdrawGate.enabled,
+                                modifier = Modifier.testTag(Ids.ROOM_PENDING_INVITE_WITHDRAW_BUTTON),
+                            ) {
+                                Text(stringResource(R.string.conversations_unified_room_pending_invite_withdraw))
+                            }
+                        }
+                    }
+                    DisabledControlReasonText(withdrawGate.reason)
+                }
+                // The walk-out, below the staged controls and OUTSIDE Save's
+                // staged set: leaving is an immediate act, not a policy edit.
+                // Greyed — never hidden — for the owner, who hands the room
+                // over first; the capability is RE-CHECKED when the confirm
+                // opens, not only at paint.
+                TextButton(
+                    onClick = { if (caps.canLeaveRoom) leaveConfirmVisible = true },
+                    enabled = caps.canLeaveRoom,
+                    modifier = Modifier.testTag(Ids.ROOM_LEAVE_BUTTON),
+                ) {
+                    Text(stringResource(R.string.conversations_unified_room_leave))
+                }
+                if (leaveConfirmVisible) {
+                    val leaveGate = faunaGate("fauna.conversations.room.leave")
+                    AlertDialog(
+                        onDismissRequest = { leaveConfirmVisible = false },
+                        title = { Text(stringResource(R.string.conversations_unified_room_leave)) },
+                        text = { Text(detail.label) },
+                        confirmButton = {
+                            Column {
+                                TextButton(
+                                    onClick = {
+                                        leaveConfirmVisible = false
+                                        onLeave()
+                                    },
+                                    enabled = caps.canLeaveRoom && leaveGate.enabled,
+                                    modifier = Modifier.testTag(Ids.ROOM_LEAVE_CONFIRM),
+                                ) {
+                                    Text(stringResource(R.string.common_leave))
+                                }
+                                DisabledControlReasonText(leaveGate.reason)
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { leaveConfirmVisible = false }) {
+                                Text(stringResource(R.string.common_cancel))
+                            }
+                        },
+                    )
+                }
             }
         },
         confirmButton = {
+            // Greyed for a member, who opens this surface to read it and to
+            // leave: every staged edit behind it is owner-or-admin work.
             TextButton(
                 onClick = { onSave(draft) },
+                enabled = caps.canSetPolicy,
                 modifier = Modifier.testTag(Ids.ROOM_SETTINGS_SAVE_BUTTON),
             ) {
                 Text(stringResource(R.string.common_save))
@@ -1187,6 +1373,8 @@ private fun AddParticipantDialog(
     state: AddParticipantState,
     onInputChange: (String) -> Unit,
     onAccept: () -> Unit,
+    onAcceptSuggestion: (Int) -> Unit,
+    onRemoveChip: (Int) -> Unit,
     onConfirm: () -> Unit,
     onCancel: () -> Unit,
     displayAddress: (TypedAddress) -> String,
@@ -1200,6 +1388,8 @@ private fun AddParticipantDialog(
                 state = state.picker,
                 onInputChange = onInputChange,
                 onAccept = onAccept,
+                onAcceptSuggestion = onAcceptSuggestion,
+                onRemoveChip = onRemoveChip,
                 displayAddress = displayAddress,
                 bridgeLabels = bridgeLabels,
             )
@@ -1308,15 +1498,14 @@ private fun ThreadHeader(
                     )
                 }
             }
-            // The policy editor's door: painted whenever the thread is a room,
-            // greyed unless the viewer may set the policy — a policy-less room greys
-            // it too, having nothing to edit (`ui/conversations.md` § Element
-            // IDs). Absent, like the class statement below, where the rail
-            // models no room.
+            // The policy editor's door: painted AND LIVE whenever the thread is a
+            // room — the walk-out lives inside it and is a plain member's verb,
+            // so the greying moves inside, per control (`ui/conversations.md`
+            // § Element IDs). Absent, like the class statement below, where the
+            // rail models no room.
             if (detail.room != null) {
                 IconButton(
                     onClick = onRoomSettings,
-                    enabled = caps.canSetPolicy,
                     modifier = Modifier.testTag(Ids.THREAD_ROOM_SETTINGS_BUTTON),
                 ) {
                     Icon(
@@ -1343,6 +1532,21 @@ private fun ThreadHeader(
                     .testTag(Ids.THREAD_ROOM_CLASS)
                     .semantics { stateDescription = roomClassAttrToken(room.`class`) },
             )
+            // `thread-room-notice` — the one honest line a room with a standing
+            // caveat carries: shared `roomNoticeFor` decides which state speaks
+            // (awaiting-key wins), `roomNoticeLabel` is the copy and
+            // `roomNoticeAttrToken` the `state` token (rides `stateDescription`).
+            // Absent while neither fact holds.
+            roomNoticeFor(room.awaitingKey, room.moderationUnverified)?.let { notice ->
+                Text(
+                    roomNoticeLabel(notice),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .testTag(Ids.THREAD_ROOM_NOTICE)
+                        .semantics { stateDescription = roomNoticeAttrToken(notice) },
+                )
+            }
             // The family gate's marker in the detail, the row's twin — the
             // thread below it stays fully readable (`family-safety.md` § The
             // bridge-DM gate).
@@ -1566,15 +1770,18 @@ private fun MessageBubble(
     // also hides): the `block` notice names that act — "You reported this" — not a
     // policy. `contentVerdict` is already `block` when this is set.
     reported: Boolean = false,
+    // The region's placeholder when the region drove the verdict
+    // (region-blocking.md § The blocked render) — painted AHEAD of the family
+    // arms below; a revealed `collapse` shares [contentRevealed].
+    regionPlaceholder: FfiRegionPlaceholder? = null,
     // `dm-message-report-button` (moderation.md § User-initiated reporting): `null`
     // paints nothing — own messages and mail/bridged messages have no verb.
     onReport: (() -> Unit)? = null,
     // Reactions / delete (conversations.md § Reactions & message delete) —
     // capability-gated, never rail-branched. `onToggleReaction` takes the emoji;
-    // delete is sender-only (gated on msg.isOwn here too, defence-in-depth with
-    // the manager). `onMoreReaction` opens the native picker (hosted upstream).
+    // delete is gated on msg.canDelete (the sender, or a viewer who governs the
+    // room; the manager re-checks). `onMoreReaction` opens the native picker (hosted upstream).
     supportsReactions: Boolean = false,
-    supportsMessageDelete: Boolean = false,
     // Mark-as-spam gate — true on a received message (!is_own), independent of the
     // rail (mail training silently no-ops when mail isn't enabled). conversations
     // surface of mail-spam.md § Wire shapes.
@@ -1626,6 +1833,24 @@ private fun MessageBubble(
                 localized(legalTakedownTombstone(legalTakedownRef)).orEmpty(),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            MessageTimestamp(msg.timestampMs, isSelected)
+        }
+        return
+    }
+
+    // A REGION verdict paints the region's own placeholder (the region, its
+    // authority, the authority's reason verbatim) — the same verb as the family
+    // arm below, better attributed; a revealed region `collapse` falls through to
+    // the ordinary arms (linux's `message_bubble.rs` order).
+    if (regionPlaceholder != null && (regionPlaceholder.verb == "block" || !contentRevealed)) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).selectedMessageMark(isSelected),
+        ) {
+            RegionPlaceholder(
+                regionPlaceholder,
+                witnessKey = "conversation:${msg.messageId}",
+                onReveal = { contentRevealed = true },
             )
             MessageTimestamp(msg.timestampMs, isSelected)
         }
@@ -1906,11 +2131,11 @@ private fun MessageBubble(
         // participant but self (conversations.md § Participants vs. reply recipients).
         Row(verticalAlignment = Alignment.CenterVertically) {
             // ⋯ per-bubble actions — shown iff ≥1 action is available (react OR
-            // own-deletable), so mail bubbles stay clean. Capability-gated, never
+            // deletable), so mail bubbles stay clean. Capability-gated, never
             // rail-branched (rule #5).
             MessageActionsMenu(
                 canReact = supportsReactions,
-                canDelete = supportsMessageDelete && msg.isOwn,
+                canDelete = msg.canDelete,
                 // Mark-as-spam is offered on any received message (you flag
                 // others' content, not your own), never rail-branched — it
                 // silently no-ops when mail isn't enabled. Mirrors linux's

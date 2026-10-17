@@ -189,7 +189,10 @@ async fn reply_door(
             .map_err(|e| ApiError::internal(format!("db error: {e}")))?;
     drop(conn);
     if !admitted {
-        return Err(ApiError::bad_request(REPLY_NEEDS_LINK));
+        return Err(ApiError::refused(
+            fauna_protocol::RpcError::CODE_BLUESKY_NOT_LINKED,
+            REPLY_NEEDS_LINK,
+        ));
     }
     Ok(Json(json!({
         "action": action,
@@ -324,6 +327,10 @@ mod reply_door_tests {
             .expect_err("no link must refuse");
         assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
         assert!(err.message.contains("Bluesky page"), "{}", err.message);
+        assert_eq!(
+            err.code,
+            Some(fauna_protocol::RpcError::CODE_BLUESKY_NOT_LINKED)
+        );
     }
 
     /// D7: an actor whose ATProto identity this nest hosts is refused even

@@ -3,6 +3,7 @@ using System.Collections.ObjectModel;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using FaunaApp.Core.Logs;
 using FaunaApp.Core.Services;
 using uniffi.fauna_client_mail_settings;
 using uniffi.fauna_ffi;
@@ -154,6 +155,25 @@ public partial class MailSpamViewModel : ObservableObject
         finally
         {
             IsLoading = false;
+        }
+    }
+
+    /// <summary>Re-read the training history off a push or a reconnect rather than a
+    /// visit — <c>StaleSurfaces.mail_spam</c>: an undo or reset made on another device
+    /// (mail-spam.md § Reset step 6, § Undo step 4). The machine's own hydrate + snapshot
+    /// only: no spinner and no error clear, so it never disturbs what the user is
+    /// looking at (the panel keeps its reset confirm armed). A failed re-read leaves the
+    /// history as it was — the next visit or reconnect recovers it.</summary>
+    public async Task ResyncAsync()
+    {
+        try
+        {
+            await _machine.Hydrate();
+            Apply(_machine.Snapshot());
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Warn("MailSpamViewModel", $"spam history resync failed: {ex.Message}");
         }
     }
 

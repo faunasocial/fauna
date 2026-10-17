@@ -29,7 +29,11 @@
  *  takes an `Option<u64>` because a native clock read can fail, and a failed
  *  read prunes nothing. `Date.now()` has no failure mode, so that arm has no
  *  counterpart here — the direction it protects (never drop a live own id) is
- *  the same one this file takes by construction.
+ *  the same one this file takes by construction. The opposite direction holds
+ *  for `currentAt`: the Rust twin's `current_at(None)` answers `None` (it
+ *  feeds `keep_token_id`, where naming a possibly-dead id signs the user out
+ *  everywhere), and this file's unconditional `expiresAt > now` filter is the
+ *  same rule, so the two cannot drift back apart.
  */
 
 /** One session id this browser minted, plus the deadline that retires it. */
@@ -40,14 +44,25 @@ export class OwnSessionIds {
   #entries: Entry[] = [];
 
   /** Record a freshly-minted session id. Re-recording an id already held
-   *  refreshes its deadline and moves it to the end rather than duplicating
-   *  it, so a re-mint returning the same id cannot make one session paint as
-   *  two. An empty id (defensively guarded) is not recorded — an
-   *  unnamed session is not an own session. */
+   *  refreshes its deadline rather than duplicating it, so a re-mint returning
+   *  the same id cannot make one session paint as two. An empty id
+   *  (defensively guarded) is not recorded — an unnamed session is not an own
+   *  session.
+   *
+   *  Entries stay in DEADLINE order, not arrival order — the one difference
+   *  from the Rust twin, which records every id at its mint, so its arrival
+   *  order IS mint order. Web records one id late: the launch token, minted by
+   *  the launch machine and recorded when the launch path primes the cache,
+   *  possibly after `getAuthToken` minted a newer bearer. Every own token has
+   *  the same lifetime, so the later deadline is the later mint, and `currentAt`
+   *  (the keep-id) stays the newest session rather than whichever arrived last. */
   record(id: string, expiresAt: number): void {
     if (!id) return;
-    this.#entries = this.#entries.filter((e) => e.id !== id);
-    this.#entries.push({ id, expiresAt });
+    const rest = this.#entries.filter((e) => e.id !== id);
+    let at = rest.length;
+    while (at > 0 && rest[at - 1].expiresAt > expiresAt) at--;
+    rest.splice(at, 0, { id, expiresAt });
+    this.#entries = rest;
   }
 
   /** Drop every id whose deadline has passed `now` (Unix **seconds**). */
@@ -63,7 +78,7 @@ export class OwnSessionIds {
     return this.#entries.filter((e) => e.expiresAt > now).map((e) => e.id);
   }
 
-  /** The **current** id — the most recently recorded one still live at `now`.
+  /** The **current** id — the newest (latest-deadline) one still live at `now`.
    *  This is what `keep_token_id` is read from, at call time and never from a
    *  previously painted list: a renewal between paint and press must not name
    *  a dead token. */

@@ -46,6 +46,7 @@ public sealed partial class FamilyPage : Page
             _vm.Approvals.CollectionChanged += (_, _) => UpdateNoApprovalsText();
             _vm.IncomingTransfers.CollectionChanged += (_, _) => UpdateIncomingTransfersSectionVisibility();
             _vm.Devices.CollectionChanged += (_, _) => UpdateNoWardDevicesText();
+            _vm.BlockedPeers.CollectionChanged += (_, _) => UpdateNoBlockedPeersText();
             Bindings.Update();
         }
     }
@@ -57,6 +58,7 @@ public sealed partial class FamilyPage : Page
         ApprovalsList.ItemsSource = _vm.Approvals;
         IncomingTransfersList.ItemsSource = _vm.IncomingTransfers;
         DevicesList.ItemsSource = _vm.Devices;
+        BlockedPeersList.ItemsSource = _vm.BlockedPeers;
         PopulateSelect(UnknownSenderSelect, FaunaFfiMethods.UnknownSenderOptions(), _vm.PolicyUnknownSenderMail, failClosed: "hold");
         PopulateSelect(FeedSourcesSelect, FaunaFfiMethods.FeedSourcesOptions(), _vm.PolicyFeedSources, failClosed: "block");
         PopulateSelect(UnknownPeerDmSelect, FaunaFfiMethods.UnknownPeerDmOptions(), _vm.PolicyUnknownPeerDm, failClosed: "hold");
@@ -72,6 +74,7 @@ public sealed partial class FamilyPage : Page
         UpdatePolicyEditorVisibility();
         UpdateIncomingTransfersSectionVisibility();
         UpdateNoWardDevicesText();
+        UpdateNoBlockedPeersText();
     }
 
     private void ViewModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -345,6 +348,23 @@ public sealed partial class FamilyPage : Page
         if (toggle.IsOn == row.GuardianMarked) return;
         var ok = await _vm.DeviceMarkAsync(row, toggle.IsOn);
         if (!ok) toggle.IsOn = row.GuardianMarked;
+    }
+
+    /// <summary><c>family-blocked-peer-allow-button</c> — un-deny the peer on THIS
+    /// row. The row comes from the button's own DataContext (the nest's record, whole),
+    /// never an index into <see cref="FamilyViewModel.BlockedPeers"/>, so a concurrent
+    /// refetch that reorders the list cannot route the click at a different person
+    /// (family-safety.md § The bridge-DM gate → <i>The un-deny surface</i>).</summary>
+    private async void AllowBlockedPeer_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm is null || sender is not Button { DataContext: FamilyBlockedPeerRow row }) return;
+        await _vm.AllowBlockedPeerAsync(row);
+    }
+
+    private void UpdateNoBlockedPeersText()
+    {
+        if (_vm is null) return;
+        NoBlockedPeersText.Visibility = _vm.BlockedPeers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void UpdateGuardianSectionVisibility()

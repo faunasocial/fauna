@@ -182,11 +182,17 @@ fn posts_get_handler() -> RpcHandler {
             // (the HTTP twin read it from an optional bearer; here the
             // WS-RPC plane always carries the authed actor).
             match get_post_core(&state, Some(actor_id), post_id).await {
-                GetPostOutcome::Found(bytes) => encode_reply(&PostGetReply {
-                    body: serde_bytes::ByteBuf::from(bytes),
-                    legal_takedown: None,
-                    extra: std::collections::BTreeMap::new(),
-                }),
+                GetPostOutcome::Found(bytes) => {
+                    let author_display =
+                        crate::feed_routes::bridged_author_display_best_effort(&state, &bytes)
+                            .await;
+                    encode_reply(&PostGetReply {
+                        body: serde_bytes::ByteBuf::from(bytes),
+                        legal_takedown: None,
+                        author_display,
+                        extra: std::collections::BTreeMap::new(),
+                    })
+                }
                 // Taken down under legal obligation: withhold the body (empty)
                 // and carry the tombstone reference so the client renders
                 // "removed under legal obligation [reference]" in its place
@@ -197,6 +203,7 @@ fn posts_get_handler() -> RpcHandler {
                         reference,
                         extra: std::collections::BTreeMap::new(),
                     }),
+                    author_display: None,
                     extra: std::collections::BTreeMap::new(),
                 }),
                 GetPostOutcome::NotFound => Err(not_found("post not found")),

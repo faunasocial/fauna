@@ -16,11 +16,11 @@
   // setter) are driven by the shared machine; a row's undo runs client-side
   // (its delta is sealed to the actor) and rides `put_spam_model`. A refusal
   // renders via `error`, never faked green.
-  import { identity } from '$lib/store';
-  import { mailSpamMachine, spamThresholdOverrideGet, spamThresholdOverrideSet } from '$lib/rpc';
+  import { identity, reconnectTick } from '$lib/store';
+  import { mailSpamMachine, onPushEvent, spamThresholdOverrideGet, spamThresholdOverrideSet, staleSurfacesForPushKind } from '$lib/rpc';
   import { ensureWasm, trainingLabelBadge, trainingSourceBadge, parseCount } from '$lib/wasm';
   import { resolveLocalized } from '$lib/i18n/localized';
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { t } from '$lib/i18n/strings';
   import type { WasmMailSpamMachine } from '../../../static/fauna_wasm.js';
   import { IDS } from '$lib/generated/uiIds';
@@ -72,6 +72,26 @@
     if (snap?.error) error = snap.error;
   }
 
+  // The history open here follows an undo or a reset on another device
+  // (`StaleSurfaces::mail_spam`, mail-spam.md § Undo step 4, § Reset step 6):
+  // the push re-runs the machine's own hydrate. Page-gated by construction —
+  // this section is mounted only while the Spam page shows, and a visit
+  // re-reads anyway. `armedReset` is local state the hydrate never touches,
+  // so a push never disarms the confirm the user is looking at. A reconnect
+  // re-reads too: a push sent while the socket was down is never replayed.
+  let unsubPush: (() => void) | null = null;
+  let unsubReconnect: (() => void) | null = null;
+
+  async function rehydrate(): Promise<void> {
+    if (!machine) return;
+    try {
+      await machine.hydrate();
+      applySnapshot();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
   onMount(async () => {
     const id = $identity;
     if (!id?.secretHex) return;
@@ -83,12 +103,26 @@
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
+    unsubPush = onPushEvent((kind) => {
+      if (staleSurfacesForPushKind(kind).mail_spam) void rehydrate();
+    });
+    // `reconnectTick` fires once on subscribe — skip that seed value.
+    let firstTick = true;
+    unsubReconnect = reconnectTick.subscribe(() => {
+      if (firstTick) { firstTick = false; return; }
+      void rehydrate();
+    });
     try {
       const value = await spamThresholdOverrideGet(id.secretHex);
       thresholdInput = value != null ? String(value) : '';
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
+  });
+
+  onDestroy(() => {
+    unsubPush?.();
+    unsubReconnect?.();
   });
 
   /** Commit the threshold input on Enter — no separate save button (tui's
@@ -184,6 +218,7 @@
       <input
         type="checkbox"
         data-testid={IDS.MAIL_SPAM_CONTRIBUTE_BASELINE_TOGGLE}
+        data-state={snap?.contribute_baseline ? 'on' : 'off'}
         checked={snap?.contribute_baseline ?? false}
         disabled={busy}
         onchange={onContributeToggle}

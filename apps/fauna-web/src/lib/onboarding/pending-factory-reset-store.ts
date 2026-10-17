@@ -27,7 +27,9 @@ export interface PendingFactoryResetRecord {
 }
 
 /**
- * Returns the persisted record for the ACTIVE account, or `null`. A partial
+ * Returns the persisted record for the account THIS TAB serves (its pin when
+ * it is pinned to a non-active account, else the active one — the wasm seam
+ * binds, `AccountRegistry::tab_launch_persistence`), or `null`. A partial
  * or unparseable slot reads as absent rather than seeding the wizard with
  * bogus data (the registry adapter's opaque-JSON contract).
  */

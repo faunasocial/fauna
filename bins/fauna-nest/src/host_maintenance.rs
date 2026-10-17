@@ -77,6 +77,14 @@ const READINESS_FILE: &str = "nest-readiness";
 /// Host side: `/opt/fauna/maintenance-host/host-status`.
 const HOST_STATUS_FILE: &str = "host-status";
 
+/// Filename the host coordinator writes into the root-owned [`HOST_STATE_SUBDIR`]:
+/// one `address=<ip>` line per global-unicast address the **host** holds — the
+/// IP bridge cert's second source, which the nest cannot see from inside its
+/// bridge network (`tls-certificates.md` § B-IP *When*; format owner
+/// `installers/vps.md` § Host OS Maintenance → 3). Host side:
+/// `/opt/fauna/maintenance-host/host-addresses`.
+const HOST_ADDRESSES_FILE: &str = "host-addresses";
+
 /// Flag the nest writes into the read-write [`MAINTENANCE_SUBDIR`] on the admin
 /// `fauna.admin.request_host_restart` kind. The host `fauna-reboot-coordinator`
 /// reads it as `/opt/fauna/maintenance/restart-requested` (symlink-safe), reboots
@@ -234,6 +242,43 @@ pub fn read_host_status_from_db_path(db_path: &str) -> HostStatus {
     match crate::mail_enable::data_dir_from_db_path(db_path) {
         Some(dir) => read_host_status(&dir),
         None => HostStatus::default(),
+    }
+}
+
+/// Parse the coordinator's `host-addresses` body: every `address=<ip>` line
+/// whose value parses as an IP. Unknown keys and unparseable values are
+/// ignored — a host-written fact read defensively, never a request; the nest's
+/// own classifier (`acme::ip_bridge_addresses`) still decides what is
+/// orderable. Pure + unit-testable (no filesystem).
+pub fn parse_host_addresses(body: &str) -> Vec<std::net::IpAddr> {
+    body.lines()
+        .filter_map(|line| line.split_once('='))
+        .filter(|(key, _)| key.trim() == "address")
+        .filter_map(|(_, value)| value.trim().parse().ok())
+        .collect()
+}
+
+/// Read `<data_dir>/maintenance-host/host-addresses` from the read-only
+/// root-owned mount — never the container-owned rw `maintenance` dir, where a
+/// compromised nest could plant one. Empty when the mount/file is absent
+/// (dev / desktop / bare-metal / a hand-deployed compose, or a host that hasn't
+/// written it yet), which leaves the bridge to the nest's own interface table.
+pub fn read_host_addresses(data_dir: &Path) -> Vec<std::net::IpAddr> {
+    let path = data_dir.join(HOST_STATE_SUBDIR).join(HOST_ADDRESSES_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(body) => parse_host_addresses(&body),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Resolve the data dir from the configured db path then
+/// [`read_host_addresses`] — the same resolution [`read_host_status_from_db_path`]
+/// uses, so both host→nest files are read from one place. An empty/in-memory
+/// db path yields an empty set.
+pub fn read_host_addresses_from_db_path(db_path: &str) -> Vec<std::net::IpAddr> {
+    match crate::mail_enable::data_dir_from_db_path(db_path) {
+        Some(dir) => read_host_addresses(&dir),
+        None => Vec::new(),
     }
 }
 
@@ -471,6 +516,61 @@ mod tests {
         .unwrap();
         // No host-state dir → default "nothing pending", forged file ignored.
         assert_eq!(read_host_status(dir.path()), HostStatus::default());
+    }
+
+    #[test]
+    fn parse_host_addresses_reads_address_lines_defensively() {
+        // One `address=<ip>` line per host address; unknown keys, junk values
+        // and keyless lines are ignored, never an error.
+        let body = "address=93.184.216.34\n\
+                    address=2a01:4f8::1\n\
+                    generated_at=17\n\
+                    address=not-an-ip\n\
+                    address= 203.0.113.9 \n\
+                    garbage\n";
+        assert_eq!(
+            parse_host_addresses(body),
+            vec![
+                "93.184.216.34".parse::<std::net::IpAddr>().unwrap(),
+                "2a01:4f8::1".parse().unwrap(),
+                "203.0.113.9".parse().unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn read_host_addresses_reads_the_root_owned_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let host_state = dir.path().join(HOST_STATE_SUBDIR);
+        std::fs::create_dir(&host_state).unwrap();
+        std::fs::write(
+            host_state.join(HOST_ADDRESSES_FILE),
+            "address=93.184.216.34\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_host_addresses(dir.path()),
+            vec!["93.184.216.34".parse::<std::net::IpAddr>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn read_host_addresses_ignores_rw_maintenance_dir() {
+        // A compromised nest owns the rw `maintenance` dir; an address set it
+        // plants there must NOT feed a CA order — only the root-owned `:ro`
+        // host-state dir is read (mirrors read_host_status_ignores_rw_maintenance_dir).
+        let dir = tempfile::tempdir().unwrap();
+        let rw = dir.path().join(MAINTENANCE_SUBDIR);
+        std::fs::create_dir(&rw).unwrap();
+        std::fs::write(rw.join(HOST_ADDRESSES_FILE), "address=93.184.216.34\n").unwrap();
+        assert!(read_host_addresses(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn read_host_addresses_is_empty_without_the_mount() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_host_addresses(dir.path()).is_empty());
+        assert!(read_host_addresses_from_db_path("").is_empty());
     }
 
     #[test]

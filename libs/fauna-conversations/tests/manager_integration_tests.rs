@@ -5021,6 +5021,39 @@ fn engine_served_elsewhere_flips_and_ticks_only_on_change() {
     );
 }
 
+/// **The newer-build state flag** (`ui/conversations.md` § Errors & edge cases,
+/// the sixth standing truth): defaults false, flips and ticks observers on a
+/// real change only, independent of the served-elsewhere flag.
+#[test]
+fn engine_state_needs_newer_app_flips_and_ticks_only_on_change() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingObserver(Arc<AtomicUsize>);
+    impl SnapshotObserver for CountingObserver {
+        fn on_changed(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let m = ConversationsManager::new();
+    let ticks = Arc::new(AtomicUsize::new(0));
+    m.add_observer(Arc::new(CountingObserver(Arc::clone(&ticks))));
+
+    assert!(!m.engine_state_needs_newer_app(), "must default false");
+
+    m.set_engine_state_needs_newer_app(true);
+    assert!(m.engine_state_needs_newer_app());
+    assert!(!m.engine_served_elsewhere(), "a separate standing flag");
+    assert_eq!(ticks.load(Ordering::SeqCst), 1, "a real flip must tick");
+
+    m.set_engine_state_needs_newer_app(true);
+    assert_eq!(ticks.load(Ordering::SeqCst), 1, "same value must not tick");
+
+    m.set_engine_state_needs_newer_app(false);
+    assert!(!m.engine_state_needs_newer_app());
+    assert_eq!(ticks.load(Ordering::SeqCst), 2, "clearing is a real flip");
+}
+
 // ── The attachment store's key is a CLAIM until it is verified ──
 //
 // `conversations.md` § Attachments states attachments are "content-addressed by

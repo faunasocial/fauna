@@ -118,6 +118,13 @@ use crate::error::{MlsError, Result};
 /// policy-bearing room's `required_capabilities` names it.
 pub const ROOM_POLICY_EXTENSION_TYPE: u16 = 0xF0A1;
 
+/// The most consecutive retained policy versions one roster read serves (the
+/// request's `policy_version_span`), and the most a member asks for in one: a
+/// constant, not a knob, since no user or admin would choose it. The nest caps
+/// whatever was asked at this; a member asks for no more, so a run is never cut
+/// short by a cap it could not see.
+pub const MAX_POLICY_VERSION_SPAN: u32 = 16;
+
 /// Domain tag every room-policy signature covers, framed exactly like the
 /// succession plane's records: `[tag_len: u8] ‖ tag ‖ canonical_dag_cbor(policy)`
 /// (`fauna_core::recovery`, *Why detached, domain-tagged signatures*).

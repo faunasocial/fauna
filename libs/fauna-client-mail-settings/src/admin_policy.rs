@@ -25,19 +25,22 @@
 //! **Submission** (`put_submission_policy`), **IMAP** (`put_imap_policy`), and
 //! **Outbound** (`put_outbound_policy`) — covering every widget archetype the page
 //! needs (bool toggle, integer field, string dropdown, string-list, integer-list).
-//! The nest-side **alias** policy (`put_alias_policy`) needs its own read twin
-//! (`get_alias_policy`, owed) before it folds in.
+//! Two nest-consumed groups hydrate from their own read twins rather than
+//! `get_mail_config`: the **alias** policy (`get_alias_policy` /
+//! `put_alias_policy`) and the deployment-wide **DMARC** catalog
+//! (`get_dmarc_policy` / `put_dmarc_policy` — the published record's tags and
+//! the two inbound-report retentions, `dmarc-reporting.md`).
 
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use fauna_protocol::MaybeSendSync;
 use fauna_protocol::bridge_routing::{
-    AliasPolicy, AuthPolicy, FetchConfigReply, GetSpamBaselineStateReply, ImapPolicy,
-    MailHealthCheck, MailHealthReply, OutboundPolicy, PublishSpamBaselineReply,
-    PutAliasPolicyRequest, PutAuthPolicyRequest, PutImapPolicyRequest, PutOutboundPolicyRequest,
-    PutSpamPolicyRequest, PutSubmissionPolicyRequest, SpamPolicyThresholds,
-    SubmissionPolicyThresholds,
+    AliasPolicy, AuthPolicy, DmarcAlignment, DmarcForensicOptions, DmarcMode, DmarcReportingPolicy,
+    FetchConfigReply, GetSpamBaselineStateReply, ImapPolicy, MailHealthCheck, MailHealthReply,
+    OutboundPolicy, PublishSpamBaselineReply, PutAliasPolicyRequest, PutAuthPolicyRequest,
+    PutDmarcPolicyRequest, PutImapPolicyRequest, PutOutboundPolicyRequest, PutSpamPolicyRequest,
+    PutSubmissionPolicyRequest, SpamPolicyThresholds, SubmissionPolicyThresholds,
 };
 use serde::{Deserialize, Serialize};
 
@@ -380,8 +383,9 @@ impl OutboundPolicyView {
 pub struct AliasPolicyView {
     /// Per-account cap on user-added exact aliases (default 20).
     pub exact_aliases_max: u32,
-    /// Reserved local-part list — role addresses users cannot claim
-    /// (full-replace on save; empty clears the reservation).
+    /// The admin's additions to the reserved local-parts (full-replace on
+    /// save; empty clears the additions only — the six role names stay
+    /// reserved whatever this holds, and the nest never reports them here).
     pub reserved_local_parts: Vec<String>,
     /// `+suffix` sub-addressing enabled (default `true`).
     pub subaddressing_enabled: bool,
@@ -409,6 +413,99 @@ impl AliasPolicyView {
             reserved_local_parts: Some(self.reserved_local_parts),
             subaddressing_enabled: Some(self.subaddressing_enabled),
             wildcard_prefix_enabled: Some(self.wildcard_prefix_enabled),
+            // Forward-compat catch-all (transport.md rule 4); nothing to
+            // carry forward on a locally-built request.
+            extra: Default::default(),
+        }
+    }
+}
+
+/// The deployment-wide **DMARC** catalog as the `admin-mail` form renders and
+/// edits it — the ten tags of the published `_dmarc.<domain>` record plus the
+/// two inbound-report retentions (`dmarc-reporting.md` § Record shape,
+/// § Retention). Field-identical to the wire [`DmarcReportingPolicy`] (the
+/// effective override-or-default policy), the enumerated tags carried as their
+/// RFC 7489 tag strings (the page's picker convention, as `fcrdns_mode`). Like
+/// the alias group it projects from its **own** read twin (`get_dmarc_policy`),
+/// because the catalog is consumed nest-side — by the DNS surface's record
+/// assembler and the daily prunes — never projected to the bridge.
+///
+/// The record tags beyond the forensic opt-in get no control on the page
+/// (nobody has a reason to choose them deployment-wide today, and the
+/// per-domain policy select on `admin-dns` covers softening one domain —
+/// `dmarc-reporting.md` § Multi-domain deployments); the view carries them so
+/// a Save round-trips them unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct DmarcPolicyView {
+    /// `p=` tag: `reject` (default) / `quarantine` / `none`.
+    pub policy_mode: String,
+    /// `sp=` tag, same values.
+    pub subdomain_policy_mode: String,
+    /// `pct=`, `0`–`100`.
+    pub pct: u8,
+    /// `adkim=`: `s` (default) / `r`.
+    pub adkim_mode: String,
+    /// `aspf=`: `s` (default) / `r`.
+    pub aspf_mode: String,
+    /// `rua=`: a full `mailto:` URI, or `None` for the deployment-wide
+    /// processor `mailto:dmarc-report@<primary-domain>`.
+    pub rua_destination: Option<String>,
+    /// The forensic-report opt-in (`admin-mail-dmarc-ruf-publish-toggle`): off
+    /// by default — forensic reports carry third-party recipients' addresses.
+    pub ruf_publish: bool,
+    /// `ruf=`: as `rua_destination`; published only when `ruf_publish` is set.
+    pub ruf_destination: Option<String>,
+    /// `fo=` tag: one of [`DmarcForensicMode`]'s tags (`0`/`1`/`d`/`s`);
+    /// published only when `ruf_publish` is set.
+    pub fo_mode: String,
+    /// `ri=` seconds.
+    pub ri_seconds: u32,
+    /// Days an inbound aggregate report is kept (default 90, at most 365).
+    pub aggregate_retention_days: u32,
+    /// Days an inbound forensic report is kept (default 30, at most 90 — the
+    /// payload is third-party PII).
+    pub forensic_retention_days: u32,
+}
+
+impl From<DmarcReportingPolicy> for DmarcPolicyView {
+    fn from(p: DmarcReportingPolicy) -> Self {
+        Self {
+            policy_mode: p.policy_mode.as_tag().to_string(),
+            subdomain_policy_mode: p.subdomain_policy_mode.as_tag().to_string(),
+            pct: p.pct,
+            adkim_mode: p.adkim_mode.as_tag().to_string(),
+            aspf_mode: p.aspf_mode.as_tag().to_string(),
+            rua_destination: p.rua_destination,
+            ruf_publish: p.ruf_publish,
+            ruf_destination: p.ruf_destination,
+            fo_mode: p.fo_mode.as_tag().to_string(),
+            ri_seconds: p.ri_seconds,
+            aggregate_retention_days: p.aggregate_retention_days,
+            forensic_retention_days: p.forensic_retention_days,
+        }
+    }
+}
+
+impl DmarcPolicyView {
+    /// Full-PUT request: every field sent `Some(_)` (a replace, not a merge).
+    /// A tag string the wire enums do not know is sent as `None` — the catalog
+    /// default — rather than refused here; the nest validates the rest (the
+    /// retention ceilings, the `mailto:` destinations).
+    fn into_put_request(self) -> PutDmarcPolicyRequest {
+        PutDmarcPolicyRequest {
+            policy_mode: DmarcMode::from_tag(&self.policy_mode),
+            subdomain_policy_mode: DmarcMode::from_tag(&self.subdomain_policy_mode),
+            pct: Some(self.pct),
+            adkim_mode: DmarcAlignment::from_tag(&self.adkim_mode),
+            aspf_mode: DmarcAlignment::from_tag(&self.aspf_mode),
+            rua_destination: self.rua_destination,
+            ruf_publish: Some(self.ruf_publish),
+            ruf_destination: self.ruf_destination,
+            fo_mode: DmarcForensicOptions::from_tag(&self.fo_mode),
+            ri_seconds: Some(self.ri_seconds),
+            aggregate_retention_days: Some(self.aggregate_retention_days),
+            forensic_retention_days: Some(self.forensic_retention_days),
             // Forward-compat catch-all (transport.md rule 4); nothing to
             // carry forward on a locally-built request.
             extra: Default::default(),
@@ -593,6 +690,9 @@ pub struct MailPolicySnapshot {
     /// The nest-side **alias** policy sub-struct (`put_alias_policy`). Hydrated
     /// from the *separate* `get_alias_policy` read twin (not `FetchConfigReply`).
     pub alias: AliasPolicyView,
+    /// The deployment-wide **DMARC** catalog (`put_dmarc_policy`). Hydrated
+    /// from the *separate* `get_dmarc_policy` read twin, like the alias group.
+    pub dmarc: DmarcPolicyView,
     pub status: MailPolicyStatus,
     /// Outcome of the last `PublishSpamBaseline` action (`None` until the admin
     /// clicks the publish-baseline button). Rendered in the Spam group as the
@@ -620,17 +720,24 @@ impl MailPolicySnapshot {
     /// The auto-enable-for-new-users policy defaults **on** (the works-out-of-box
     /// invariant; unset ⇒ ON — `mail-policy-config.md` § Tier-2).
     fn defaults() -> Self {
-        Self::from_config(FetchConfigReply::default(), AliasPolicy::default(), true)
+        Self::from_config(
+            FetchConfigReply::default(),
+            AliasPolicy::default(),
+            DmarcReportingPolicy::default(),
+            true,
+        )
     }
 
-    /// Build the rendered snapshot from the three admin reads: the overlaid
+    /// Build the rendered snapshot from the four admin reads: the overlaid
     /// effective config (`get_mail_config`) for the five projected groups + the
     /// mail-enable toggle, the effective alias policy (`get_alias_policy`) for the
-    /// alias group, and the new-user auto-enable policy (`fauna.setup.status`) —
-    /// the latter two are not projected into `FetchConfigReply`.
+    /// alias group, the effective DMARC catalog (`get_dmarc_policy`) for the
+    /// DMARC group, and the new-user auto-enable policy (`fauna.setup.status`) —
+    /// the latter three are not projected into `FetchConfigReply`.
     fn from_config(
         reply: FetchConfigReply,
         alias: AliasPolicy,
+        dmarc: DmarcReportingPolicy,
         auto_enable_mail_for_new_users: bool,
     ) -> Self {
         Self {
@@ -642,6 +749,7 @@ impl MailPolicySnapshot {
             imap: reply.imap.into(),
             outbound: reply.outbound.into(),
             alias: alias.into(),
+            dmarc: dmarc.into(),
             status: MailPolicyStatus::Idle,
             baseline_publish_result: None,
             baseline_state: None,
@@ -677,6 +785,11 @@ pub enum MailPolicyAction {
     /// Persist the whole nest-side alias-policy sub-struct (full PUT via
     /// `put_alias_policy`; re-read via `get_alias_policy`).
     SaveAlias { policy: AliasPolicyView },
+    /// Persist the whole deployment-wide DMARC catalog (full PUT via
+    /// `put_dmarc_policy`; re-read via `get_dmarc_policy`). The nest refuses a
+    /// retention past its ceiling or a destination that is not a `mailto:` URI
+    /// (`fauna.protocol.malformed`), surfaced via [`MailPolicySnapshot::error`].
+    SaveDmarc { policy: DmarcPolicyView },
     /// Publish the current aggregate of opt-in users' models as the deployment
     /// baseline (`fauna.bridges.publish_spam_baseline`). Admin-only, no payload
     /// (caller-scoped). Aggregate-only reply; the k-anonymity floor withholds
@@ -732,6 +845,11 @@ pub trait MailPolicyNest: MaybeSendSync {
     async fn get_alias_policy(&self) -> Result<AliasPolicy, NestError>;
     /// `fauna.bridges.put_alias_policy`.
     async fn put_alias_policy(&self, req: PutAliasPolicyRequest) -> Result<(), NestError>;
+    /// `fauna.bridges.get_dmarc_policy` — the effective deployment-wide DMARC
+    /// catalog (the DMARC group's read twin; not in `FetchConfigReply`).
+    async fn get_dmarc_policy(&self) -> Result<DmarcReportingPolicy, NestError>;
+    /// `fauna.bridges.put_dmarc_policy`.
+    async fn put_dmarc_policy(&self, req: PutDmarcPolicyRequest) -> Result<(), NestError>;
     /// `fauna.bridges.publish_spam_baseline` — aggregate opt-in users' trained
     /// models into the deployment baseline (admin-only). Aggregate-only reply
     /// (no contributor identity); withheld below the k-anonymity floor
@@ -772,20 +890,22 @@ impl MailPolicyMachine {
 
     async fn refresh(&self) -> Result<(), DispatchError> {
         self.set_status(MailPolicyStatus::Loading);
-        // Three reads per refresh: `get_mail_config` for the five projected groups
-        // + the mail-enable toggle, the separate `get_alias_policy` twin for the
-        // alias group, and `fauna.setup.status` for the new-user auto-enable
-        // policy — the latter two are not in `FetchConfigReply` (consumed
-        // nest-side / client-read). mail-policy-config.md § Implementation status.
+        // Four reads per refresh: `get_mail_config` for the five projected groups
+        // + the mail-enable toggle, the separate `get_alias_policy` and
+        // `get_dmarc_policy` twins for the two nest-consumed groups, and
+        // `fauna.setup.status` for the new-user auto-enable policy — the latter
+        // three are not in `FetchConfigReply` (consumed nest-side /
+        // client-read). mail-policy-config.md § Implementation status.
         let reply = self.nest.get_mail_config().await?;
         let alias = self.nest.get_alias_policy().await?;
+        let dmarc = self.nest.get_dmarc_policy().await?;
         let auto_enable = self.nest.get_auto_enable_mail_for_new_users().await?;
-        // A fourth read for the baseline state text, a fifth for the health
+        // A fifth read for the baseline state text, a sixth for the health
         // readout.
         let baseline_state = Some(self.nest.get_spam_baseline_state().await?.into());
         let health = Some(self.nest.mail_health().await?.into());
         let mut snap = self.inner.lock().expect("snapshot mutex");
-        *snap = MailPolicySnapshot::from_config(reply, alias, auto_enable);
+        *snap = MailPolicySnapshot::from_config(reply, alias, dmarc, auto_enable);
         snap.baseline_state = baseline_state;
         snap.health = health;
         snap.status = MailPolicyStatus::Idle;
@@ -882,6 +1002,14 @@ impl MailPolicyMachine {
         self.refresh().await
     }
 
+    async fn save_dmarc(&self, policy: DmarcPolicyView) -> Result<(), DispatchError> {
+        self.set_status(MailPolicyStatus::Working);
+        self.nest
+            .put_dmarc_policy(policy.into_put_request())
+            .await?;
+        self.refresh().await
+    }
+
     async fn publish_spam_baseline(&self) -> Result<(), DispatchError> {
         self.set_status(MailPolicyStatus::Working);
         // The reply IS the outcome — there is nothing to re-read (the published
@@ -933,6 +1061,7 @@ impl MailPolicyMachine {
                 MailPolicyAction::SaveImap { policy } => self.save_imap(policy).await,
                 MailPolicyAction::SaveOutbound { policy } => self.save_outbound(policy).await,
                 MailPolicyAction::SaveAlias { policy } => self.save_alias(policy).await,
+                MailPolicyAction::SaveDmarc { policy } => self.save_dmarc(policy).await,
                 MailPolicyAction::PublishSpamBaseline => self.publish_spam_baseline().await,
                 MailPolicyAction::SetBaselineStandingPublish { enabled } => {
                     self.set_baseline_standing_publish(enabled).await
@@ -1093,6 +1222,89 @@ pub fn fcrdns_mode_options() -> Vec<ReachPolicyOption> {
         .collect()
 }
 
+/// The DMARC `fo=` picker's values (`admin-mail-dmarc-fo-mode-select`), in
+/// render order — which failures make a peer MTA send a forensic report
+/// (RFC 7489 §6.3); meaningful only once the forensic opt-in is on.
+/// Catalog: `mail-policy-config.md` § DMARC; values `dmarc-reporting.md`
+/// § Record shape. The wire enum is `fauna_protocol::bridge_routing::DmarcForensicOptions`;
+/// this is its picker mirror, carrying the RFC tag [`DmarcPolicyView::fo_mode`]
+/// holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DmarcForensicMode {
+    /// `1` — any check failed (the default).
+    AnyFailure,
+    /// `0` — every check failed.
+    AllFail,
+    /// `d` — a DKIM signature failed.
+    Dkim,
+    /// `s` — SPF failed.
+    Spf,
+}
+
+impl DmarcForensicMode {
+    /// Render order — the default first.
+    pub const ORDER: [DmarcForensicMode; 4] =
+        [Self::AnyFailure, Self::AllFail, Self::Dkim, Self::Spf];
+
+    /// The RFC 7489 tag — what the wire carries and the picker round-trips.
+    pub fn as_str(&self) -> &'static str {
+        DmarcForensicOptions::from(*self).as_tag()
+    }
+
+    /// The i18n key for this value's picker label.
+    pub fn label_key(&self) -> &'static str {
+        match self {
+            Self::AnyFailure => "admin.mail_page.dmarc_fo_any_failure",
+            Self::AllFail => "admin.mail_page.dmarc_fo_all_fail",
+            Self::Dkim => "admin.mail_page.dmarc_fo_dkim",
+            Self::Spf => "admin.mail_page.dmarc_fo_spf",
+        }
+    }
+
+    /// Read a tag, falling back to [`AnyFailure`](Self::AnyFailure) — the
+    /// shipped default — for anything unrecognised.
+    pub fn from_wire_or_default(token: &str) -> Self {
+        Self::ORDER
+            .into_iter()
+            .find(|m| m.as_str() == token)
+            .unwrap_or(Self::AnyFailure)
+    }
+
+    /// Index of a tag in [`ORDER`](Self::ORDER) — what a position-addressed
+    /// widget sets on hydrate; unknown tags land on the default's position.
+    pub fn index_of_wire(token: &str) -> usize {
+        let m = Self::from_wire_or_default(token);
+        Self::ORDER
+            .into_iter()
+            .position(|c| c == m)
+            .expect("ORDER contains every variant")
+    }
+}
+
+impl From<DmarcForensicMode> for DmarcForensicOptions {
+    fn from(m: DmarcForensicMode) -> Self {
+        match m {
+            DmarcForensicMode::AnyFailure => DmarcForensicOptions::AnyFailure,
+            DmarcForensicMode::AllFail => DmarcForensicOptions::AllFail,
+            DmarcForensicMode::Dkim => DmarcForensicOptions::Dkim,
+            DmarcForensicMode::Spf => DmarcForensicOptions::Spf,
+        }
+    }
+}
+
+/// The canonical DMARC `fo=` picker options, in render order. Exported over
+/// UniFFI — see [`fcrdns_mode_options`].
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn dmarc_forensic_mode_options() -> Vec<ReachPolicyOption> {
+    DmarcForensicMode::ORDER
+        .into_iter()
+        .map(|m| ReachPolicyOption {
+            value: m.as_str().to_string(),
+            label: LocalizedText::key(m.label_key()),
+        })
+        .collect()
+}
+
 /// The canonical IMAP `delete_nonempty` picker options, in render order.
 /// Exported over UniFFI — see [`fcrdns_mode_options`].
 #[cfg_attr(feature = "uniffi", uniffi::export)]
@@ -1236,6 +1448,9 @@ mod tests {
         /// `FetchConfigReply`), so it is a separate cell read/written by the
         /// `get_alias_policy` / `put_alias_policy` seam methods.
         alias: StdMutex<AliasPolicy>,
+        /// The deployment-wide DMARC catalog, the same way (`get_dmarc_policy` /
+        /// `put_dmarc_policy`).
+        dmarc: StdMutex<DmarcReportingPolicy>,
         /// The new-user auto-enable policy singleton (unset ⇒ ON), surfaced on
         /// `fauna.setup.status` and written by `set_auto_enable_mail_for_new_users`
         /// — also not in `FetchConfigReply`.
@@ -1277,6 +1492,7 @@ mod tests {
             Self {
                 cfg: StdMutex::new(FetchConfigReply::default()),
                 alias: StdMutex::new(AliasPolicy::default()),
+                dmarc: StdMutex::new(DmarcReportingPolicy::default()),
                 auto_enable: StdMutex::new(true),
                 baseline_agg: StdMutex::new((0, 0)),
                 baseline_skipped: StdMutex::new(0),
@@ -1462,6 +1678,35 @@ mod tests {
             Ok(())
         }
 
+        async fn get_dmarc_policy(&self) -> Result<DmarcReportingPolicy, NestError> {
+            Ok(self.dmarc.lock().unwrap().clone())
+        }
+
+        async fn put_dmarc_policy(&self, req: PutDmarcPolicyRequest) -> Result<(), NestError> {
+            // Full PUT: `None` ⇒ the catalog default (the real handler replaces
+            // the stored overrides whole), the destinations keep their
+            // `Option` (None = the processor address).
+            let d = DmarcReportingPolicy::default();
+            let mut p = self.dmarc.lock().unwrap();
+            p.policy_mode = req.policy_mode.unwrap_or(d.policy_mode);
+            p.subdomain_policy_mode = req.subdomain_policy_mode.unwrap_or(d.subdomain_policy_mode);
+            p.pct = req.pct.unwrap_or(d.pct);
+            p.adkim_mode = req.adkim_mode.unwrap_or(d.adkim_mode);
+            p.aspf_mode = req.aspf_mode.unwrap_or(d.aspf_mode);
+            p.rua_destination = req.rua_destination;
+            p.ruf_publish = req.ruf_publish.unwrap_or(d.ruf_publish);
+            p.ruf_destination = req.ruf_destination;
+            p.fo_mode = req.fo_mode.unwrap_or(d.fo_mode);
+            p.ri_seconds = req.ri_seconds.unwrap_or(d.ri_seconds);
+            p.aggregate_retention_days = req
+                .aggregate_retention_days
+                .unwrap_or(d.aggregate_retention_days);
+            p.forensic_retention_days = req
+                .forensic_retention_days
+                .unwrap_or(d.forensic_retention_days);
+            Ok(())
+        }
+
         async fn publish_spam_baseline(&self) -> Result<PublishSpamBaselineReply, NestError> {
             let (contributors, agg_samples) = *self.baseline_agg.lock().unwrap();
             // Mirror the real handler's k-anonymity floor: withhold below
@@ -1595,7 +1840,10 @@ mod tests {
         assert!(!snap.auth.enforce_dkim);
         // The alias group's pre-hydrate placeholder is the catalog default too.
         assert_eq!(snap.alias.exact_aliases_max, 20);
-        assert_eq!(snap.alias.reserved_local_parts.len(), 6);
+        assert!(
+            snap.alias.reserved_local_parts.is_empty(),
+            "no admin additions"
+        );
         assert!(snap.alias.subaddressing_enabled);
         assert!(snap.alias.wildcard_prefix_enabled);
         assert_eq!(snap.status, MailPolicyStatus::Idle);
@@ -1869,7 +2117,10 @@ mod tests {
         m.hydrate().await.unwrap();
         let snap = m.snapshot();
         assert_eq!(snap.alias.exact_aliases_max, 20);
-        assert_eq!(snap.alias.reserved_local_parts.len(), 6);
+        assert!(
+            snap.alias.reserved_local_parts.is_empty(),
+            "no admin additions"
+        );
         assert!(snap.alias.subaddressing_enabled);
         assert!(snap.alias.wildcard_prefix_enabled);
         assert!(snap.error.is_none());
@@ -1896,6 +2147,92 @@ mod tests {
         // The unmentioned wildcard toggle keeps its persisted value.
         assert!(snap.alias.wildcard_prefix_enabled);
         assert!(snap.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn hydrate_projects_dmarc_catalog_via_separate_read() {
+        // The DMARC group hydrates from `get_dmarc_policy`, not `get_mail_config`
+        // — the shipped record tags and retentions, as RFC tag strings.
+        let m = machine();
+        m.hydrate().await.unwrap();
+        let snap = m.snapshot();
+        assert_eq!(
+            snap.dmarc,
+            DmarcPolicyView::from(DmarcReportingPolicy::default())
+        );
+        assert_eq!(snap.dmarc.policy_mode, "reject");
+        assert_eq!(snap.dmarc.adkim_mode, "s");
+        assert_eq!(snap.dmarc.fo_mode, "1");
+        assert!(
+            !snap.dmarc.ruf_publish,
+            "forensic reports are off by default"
+        );
+        assert_eq!(snap.dmarc.aggregate_retention_days, 90);
+        assert_eq!(snap.dmarc.forensic_retention_days, 30);
+        assert!(snap.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn save_dmarc_full_put_persists_and_rereads() {
+        let m = machine();
+        m.hydrate().await.unwrap();
+        let mut dmarc = m.snapshot().dmarc;
+        dmarc.ruf_publish = true;
+        dmarc.fo_mode = "d".into();
+        dmarc.forensic_retention_days = 60;
+        m.dispatch(MailPolicyAction::SaveDmarc { policy: dmarc })
+            .await
+            .unwrap();
+        let snap = m.snapshot();
+        assert!(snap.dmarc.ruf_publish);
+        assert_eq!(snap.dmarc.fo_mode, "d");
+        assert_eq!(snap.dmarc.forensic_retention_days, 60);
+        // The untouched tags round-trip unchanged.
+        assert_eq!(snap.dmarc.policy_mode, "reject");
+        assert_eq!(snap.dmarc.aggregate_retention_days, 90);
+        assert!(snap.error.is_none());
+    }
+
+    #[test]
+    fn dmarc_view_put_request_carries_every_field_and_parses_tags() {
+        let mut view = DmarcPolicyView::from(DmarcReportingPolicy::default());
+        view.policy_mode = "quarantine".into();
+        view.aspf_mode = "r".into();
+        view.fo_mode = "s".into();
+        view.ruf_publish = true;
+        let req = view.into_put_request();
+        assert_eq!(req.policy_mode, Some(DmarcMode::Quarantine));
+        assert_eq!(req.subdomain_policy_mode, Some(DmarcMode::Reject));
+        assert_eq!(req.aspf_mode, Some(DmarcAlignment::Relaxed));
+        assert_eq!(req.fo_mode, Some(DmarcForensicOptions::Spf));
+        assert_eq!(req.ruf_publish, Some(true));
+        assert_eq!(req.pct, Some(100));
+        assert_eq!(req.aggregate_retention_days, Some(90));
+        // An unknown tag is sent as the catalog default, never refused here.
+        let mut odd = DmarcPolicyView::from(DmarcReportingPolicy::default());
+        odd.fo_mode = "x".into();
+        assert_eq!(odd.into_put_request().fo_mode, None);
+    }
+
+    #[test]
+    fn dmarc_forensic_mode_catalog_round_trips_the_rfc_tags() {
+        let options = dmarc_forensic_mode_options();
+        assert_eq!(
+            options.iter().map(|o| o.value.as_str()).collect::<Vec<_>>(),
+            vec!["1", "0", "d", "s"]
+        );
+        for m in DmarcForensicMode::ORDER {
+            assert_eq!(DmarcForensicMode::from_wire_or_default(m.as_str()), m);
+            assert_eq!(
+                DmarcForensicOptions::from_tag(m.as_str()),
+                Some(DmarcForensicOptions::from(m))
+            );
+        }
+        assert_eq!(
+            DmarcForensicMode::from_wire_or_default("nope"),
+            DmarcForensicMode::AnyFailure
+        );
+        assert_eq!(DmarcForensicMode::index_of_wire("d"), 2);
     }
 
     #[tokio::test]

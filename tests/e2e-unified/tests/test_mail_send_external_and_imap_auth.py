@@ -109,7 +109,7 @@ def test_one_credential_sends_to_external_and_imap_authenticates(
     app.mail_settings.navigate()
     assert app.mail_settings.is_page_visible(), "mail-settings page must be reachable"
     mua_secret = rt._client_enable_mail(app, "plain")
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "enabling mail (PLAIN) must mint the first credential; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )

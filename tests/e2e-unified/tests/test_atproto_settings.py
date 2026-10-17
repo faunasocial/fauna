@@ -65,8 +65,12 @@ android's e2e still needs the emulator-host-gated device run every android track
 but the UI it would exercise is already built and unit-proven, so the parity gap
 drains now and the run's pass/fail cell fills later.
 """
+import time
+
 import pytest
 
+from helpers.budgets import RPC_ROUNDTRIP_S
+from helpers.waiting import wait_until
 from i18n.strings import S
 
 pytestmark = [pytest.mark.tier_3]
@@ -305,6 +309,67 @@ def test_hosted_ladder_through_the_card(atproto_hosted_logged_in_app):
     )
     assert bs.is_delete_presence_visible(), (
         "a deactivated identity stays visible (delete-presence retained after stepping off)"
+    )
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.android
+@pytest.mark.feature("atproto")
+def test_a_stepped_down_identity_shows_marked_deactivated(atproto_hosted_logged_in_app):
+    """After stepping down from hosting, the hosted identity is still shown —
+    marked as deactivated — so the user can see what stepping back up restores
+    (`docs/goal/ui/atproto.md` § Errors & edge cases; catalog `atproto` 23).
+
+    The ladder test above proves the delete-presence action survives the step
+    down; this one reads the identity summary itself, which is the thing the
+    outcome promises the user sees. tui first; the other apps gain the marker in
+    the cross-app lift."""
+    app = atproto_hosted_logged_in_app
+    bs = app.atproto_settings
+    bs.navigate()
+    assert bs.is_page_visible(), f"atproto page not reachable. error: {app.error_text()!r}"
+    _reset_to_off(bs)
+    assert bs.wait_for_depth_enabled("hosted_visible"), (
+        f"hosted visible must be selectable on a public domain. "
+        f"gate={bs.depth_gate_marker('hosted_visible')!r} error={bs.page_error_text()!r}"
+    )
+
+    bs.select_depth("hosted_visible")
+    assert bs.wait_for_card(), f"entering hosting must stage the card. error={bs.page_error_text()!r}"
+    bs.confirm_transition()
+    assert bs.wait_for_depth_level("hosted_visible"), (
+        f"confirm must apply the transition. level={bs.depth_level()!r} error={bs.page_error_text()!r}"
+    )
+    assert bs.is_hosted_handle_visible(), "the hosted identity summary renders while hosting"
+    hosted = bs.hosted_handle_text()
+
+    bs.select_depth("off")
+    assert bs.wait_for_card(), "stepping off a hosted level must stage a card"
+    bs.confirm_transition()
+    assert bs.wait_for_depth_level("off"), (
+        f"confirm must step off. level={bs.depth_level()!r} error={bs.page_error_text()!r}"
+    )
+    deactivated = S.atproto_settings.identity_status_deactivated
+    summary = wait_until(
+        lambda: (
+            bs.hosted_handle_text()
+            if bs.is_hosted_handle_visible() and deactivated in bs.hosted_handle_text()
+            else ""
+        ),
+        15.0,
+        diagnose=lambda: (
+            f"the identity must still show after stepping down, marked "
+            f"{deactivated!r}; visible={bs.is_hosted_handle_visible()} "
+            f"summary={bs.hosted_handle_text()!r} (while hosting: {hosted!r}) "
+            f"error={bs.page_error_text()!r}"
+        ),
+    )
+    handle = next((w for w in hosted.split() if w.startswith("@")), "")
+    assert not handle or handle in summary, (
+        f"the deactivated summary must name the same identity that was hosted "
+        f"({handle!r}); got {summary!r}"
     )
 
 
@@ -593,6 +658,183 @@ def test_lapse_reads_as_reauthorize_here(atproto_hosted_logged_in_app):
 
     bs.revoke_delegation()
     assert bs.wait_for_delegation(present=False)
+
+
+@pytest.mark.tui
+@pytest.mark.feature("atproto")
+def test_an_unsigned_posting_permission_shows_as_a_mismatch(
+    atproto_hosted_logged_in_app, atproto_hosted_nest
+):
+    """A stored posting permission this account never signed is shown as a
+    mismatch, never as a grant (`atproto-pds-full.md` § App surface — the
+    client verifies the cert under its own identity key; catalog `atproto` 34).
+
+    The nest verifies a cert before it stores one, so no gesture can put a
+    foreign cert there — which is exactly the case the client-side check exists
+    for: a nest (or its database) that substitutes a cert. The one seam is
+    therefore the nest's own row (`atproto_authoring_keys.cert`), overwritten on
+    this test-owned nest with a cert built by the SAME shared-Rust minter every
+    app uses, for the account's own authoring sub-key, but signed by a key that
+    is not this account's. tui first; the other apps gain the marker in the
+    cross-app lift."""
+    import os
+    import sqlite3
+
+    from fauna_ffi import build_authoring_delegation_cert
+
+    app = atproto_hosted_logged_in_app
+    bs = app.atproto_settings
+    bs.ensure_hosted_full()
+    assert bs.wait_for_fullpds_visible(), (
+        f"the full-PDS panel must be present. error: {bs.page_error_text()!r}"
+    )
+    if not bs.is_delegation_row_visible():
+        bs.authorize_delegation()
+    assert bs.wait_for_delegation(present=True), (
+        f"an honest grant must render first, or its absence below proves "
+        f"nothing. error: {bs.page_error_text()!r}"
+    )
+
+    actor_id = bytes.fromhex(atproto_hosted_nest["user"]["actor_id_hex"])
+    conn = sqlite3.connect(atproto_hosted_nest["db_path"], timeout=10.0)
+    try:
+        row = conn.execute(
+            "SELECT k_pub FROM atproto_authoring_keys WHERE actor_id = ?", (actor_id,)
+        ).fetchone()
+        assert row is not None, "authorizing must have stored the account's authoring key"
+        now_micros = int(time.time() * 1_000_000)
+        foreign = build_authoring_delegation_cert(
+            os.urandom(32), bytes(row[0]), ["Post", "UpdateProfile"],
+            created_at_micros=now_micros,
+            expires_at_micros=now_micros + 3_600_000_000,
+        )
+        updated = conn.execute(
+            "UPDATE atproto_authoring_keys SET cert = ? WHERE actor_id = ?",
+            (foreign, actor_id),
+        ).rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    assert updated == 1, f"expected to replace one stored cert, replaced {updated}"
+
+    try:
+        app.driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+        bs.navigate()
+        # The localized sentence up to its `({message})` tail — the detail is the
+        # verifier's own text, asserted separately below.
+        prefix = S.atproto_settings.error_delegation_untrusted(message="").split("(")[0].strip()
+        error = wait_until(
+            lambda: bs.current_error_text() if prefix in bs.current_error_text() else "",
+            RPC_ROUNDTRIP_S,
+            diagnose=lambda: (
+                f"the foreign cert must surface as the untrusted-authorization "
+                f"error; error={bs.current_error_text()!r} "
+                f"row visible={bs.is_delegation_row_visible()} "
+                f"status={bs.delegation_status()!r}"
+            ),
+        )
+        assert "not signed by this account" in error, (
+            f"the mismatch must be the signature check's, not a malformed cert: {error!r}"
+        )
+        # The error and the withheld row are folded into the same snapshot, so
+        # the error being up is the causal barrier for the row's absence.
+        assert not bs.is_delegation_row_visible(), (
+            "a cert this account never signed must never render as a grant"
+        )
+        assert bs.delegation_status() == "", (
+            f"no liveness may be shown for an unverified cert, got {bs.delegation_status()!r}"
+        )
+    finally:
+        # Re-authorizing overwrites the stored cert with an honest one, so the
+        # module-scoped nest is left as a sibling expects to find it.
+        bs.authorize_delegation()
+        assert bs.wait_for_delegation(present=True), (
+            f"re-authorizing must replace the foreign cert. error: {bs.page_error_text()!r}"
+        )
+        bs.revoke_delegation()
+        assert bs.wait_for_delegation(present=False), (
+            f"cleanup revoke failed. error: {bs.page_error_text()!r}"
+        )
+
+
+@pytest.mark.tui
+@pytest.mark.feature("atproto")
+def test_an_app_password_is_shown_again_on_another_device(
+    request, atproto_hosted_logged_in_app, atproto_hosted_nest
+):
+    """An app password minted on one device is shown again later on another
+    device of the same account (`atproto-pds-full.md` § Implementation status
+    today — the secret rides the account plane's `fauna.state.atproto` row;
+    catalog `atproto` 28).
+
+    Re-navigating on the minting seat proves nothing: tui keeps a per-session
+    reveal cache. So the second read is a SECOND seat — the same identity, a
+    distinct device id, a fresh empty state root — which can only show the
+    secret by reading it back from the synced plane. tui first; the other apps
+    gain the marker in the cross-app lift."""
+    from conftest import _alice_extra_seat
+    from helpers.waiting import account_pump_role, await_account_runtime_assembled
+
+    app = atproto_hosted_logged_in_app
+    bs = app.atproto_settings
+    bs.ensure_hosted_full()
+    assert bs.wait_for_fullpds_visible(), (
+        f"the full-PDS panel must be present to mint. error: {bs.page_error_text()!r}"
+    )
+    before = bs.credential_count()
+    bs.mint_credential()
+    assert bs.wait_for_credential_count(before + 1), (
+        f"minting should add one credential row. error: {bs.page_error_text()!r}"
+    )
+    index = before
+    secret = bs.reveal_credential_secret(index)
+    assert secret and secret != S.atproto_settings.reveal_button, (
+        f"mint must show the secret inline first, got {secret!r}. "
+        f"error: {bs.page_error_text()!r}"
+    )
+
+    seat_gen = _alice_extra_seat(
+        "tui", request, atproto_hosted_nest["user"], atproto_hosted_nest,
+        screenshot_tag="atproto-second-device",
+    )
+    seat_b, seat_b_driver = next(seat_gen)
+    try:
+        # The plane is reachable only once the second seat's account runtime
+        # has assembled — a task off the login path with no other signal.
+        if account_pump_role(seat_b_driver) is not None:
+            await_account_runtime_assembled(seat_b_driver)
+        bs_b = seat_b.atproto_settings
+
+        def _revealable_on_b():
+            seat_b_driver.set_state({"nav": {"stack": [{"view": "feed"}]}})
+            bs_b.navigate()
+            return (
+                bs_b.wait_for_fullpds_visible()
+                and bs_b.wait_for_credential_count(before + 1)
+                and bs_b.is_credential_revealable(index)
+            )
+
+        wait_until(
+            _revealable_on_b,
+            RPC_ROUNDTRIP_S * 3,
+            diagnose=lambda: (
+                f"the second device must list the credential with its secret "
+                f"revealable; level={bs_b.depth_level()!r} "
+                f"rows={bs_b.credential_count()} (want {before + 1}) "
+                f"error={bs_b.current_error_text()!r}"
+            ),
+        )
+        shown = bs_b.reveal_credential_secret(index)
+        assert shown == secret, (
+            f"the second device must reveal the SAME secret the first minted; "
+            f"got {shown!r}. error: {bs_b.current_error_text()!r}"
+        )
+    finally:
+        seat_gen.close()
+        bs.revoke_credential(index)
+        assert bs.wait_for_credential_count(before), (
+            f"cleanup revoke failed. error: {bs.page_error_text()!r}"
+        )
 
 
 # ── "Delete my Bluesky presence": the confirm ceremony (ui/atproto.md § User actions row 4) ──

@@ -173,15 +173,13 @@ Split verbatim out of [`account-data-plane.md`](account-data-plane.md) on 2026-0
 
 *The entries below were carried verbatim out of [`account-data-plane.md`](account-data-plane.md) § Implementation status today, which stays the home of the cross-cutting entries no single plane owns.*
 
-- **Ruled, NOT built (2026-10-04): `fauna.family.policy.update` is
+- **Built (2026-10-11; ruled 2026-10-04): `fauna.family.policy.update` is
   `OnlineOnly`** (§ The offline-mutation contract → *A policy the nest
-  enforces is written online*). The shared table still says `OfflineSafe`, so
-  on every app that declares the kind the family screen's policy save — and,
-  on tui, the guardian feature-limit editor's Save and Remove — stays live
-  with no nest and fails into the page's error. The build is one table entry
-  plus the tests that pin the old class (tui's
-  `family_declares_the_exact_kind_per_gesture` names it three times); each
-  app's gate follows from the table wherever the kind is already declared.
+  enforces is written online*). The shared table carries the one entry, so on
+  every app that declares the kind the family screen's policy save and the
+  guardian feature-limit editor's Save and Remove desensitize with no nest;
+  tui pins it (`family_declares_the_exact_kind_per_gesture`,
+  `the_policy_writes_are_desensitized_offline_and_live_online`).
 
 - **Built — W4 per-kind offline classification (2026-08-10):
   `libs/fauna-protocol/src/offline_class.rs`.** The inventory half of § The
@@ -366,11 +364,16 @@ Split verbatim out of [`account-data-plane.md`](account-data-plane.md) on 2026-0
   leg that genuinely needs a nest; declaring the permissive leg would leave a
   control live that cannot finish, which `serve_set`'s own contract warns about
   by name. **(iii) A surface can be network-shaped and still have no kind at
-  all** — every mail-export gesture declares `None` because the export seam
-  issues no wire call today: each RPC resolves to a client-side `unimplemented`
-  rejection naming a kind that is not registered, so declaring it would red I7.
-  That is the media-page point from the other direction (there, a live byte
-  path with no kind; here, a kind-shaped name with no live path).
+  all** — the mail-export gestures were the case while the export backend was
+  unbuilt: each RPC resolved to a client-side `unimplemented` rejection naming a
+  kind that was not registered, so declaring it would have red I7. That is the
+  media-page point from the other direction (there, a live byte path with no
+  kind; here, a kind-shaped name with no live path). The backend has since
+  landed: the `fauna.bridges.*_export_session` kinds are registered
+  (`OnlineOnly`, `Read` for the lists and chunk fetch —
+  `libs/fauna-protocol/src/offline_class.rs`) and the drive loop runs on all
+  seven apps, yet tui's `settings::Action::MailExport*` arms still declare
+  `None` — a stale declaration to re-classify, not a standing exemption.
 
   Three settings gestures remain open under the state-dependent case — the alias
   and list submits (create vs. update) and the alias active toggle (revoke vs.
@@ -1786,19 +1789,31 @@ Split verbatim out of [`account-data-plane.md`](account-data-plane.md) on 2026-0
   arms are "needs a nest" and "issues nothing" — a `faunaGate` call takes a
   kind, not an absence, so the *call* is what becomes conditional.
 
-  **What the eleven absences say, and why the ledger is a tripwire rather than
-  an exemption.** Five `fauna.recovery.*` share one expiring reason — android
-  renders no recovery surface at all, ui.yaml declares `recovery-kit-*` and
-  `recovery-entry-*` and UiIds generates every constant with no composable
-  referencing one — which is the exact shape apple's five had before
-  `RecoveryKitSection` landed and failed all five together. Four
-  `bridges.*_import_session` name the unbuilt mail-import wizard;
-  `bridges.set_auto_enable_mail_for_new_users` names a generated toggle id with
-  no render site; `custody.hosting.remove` names the unbuilt user-plane
-  custody-held card, and carries a warning against "fixing" it by pointing
-  android's already-declared **admin**-plane `fauna.admin.custody_hosting.remove`
-  at the other string. Every entry becomes an error the day android declares its
-  kind, so the ledger cannot rot into a silent exemption.
+  **What the first eleven absences said, and why the ledger is a tripwire
+  rather than an exemption.** Five `fauna.recovery.*` shared one expiring
+  reason — android rendered no recovery surface at all, ui.yaml declares
+  `recovery-kit-*` and `recovery-entry-*` and UiIds generated every constant
+  with no composable referencing one — which is the exact shape apple's five
+  had before `RecoveryKitSection` landed and failed all five together (they
+  expired when android's `RecoveryKitSection` declared them). Four
+  `bridges.*_import_session` named the mail-import wizard, since built
+  (android's `MailImportScreen`, noKids flavor); re-graded 2026-10-11, its four
+  controls carried no gate, so those entries recorded owed gates, as did the
+  five export kinds tui declared that day for android's and apple's export
+  wizards; `custody.hosting.remove` named the then-unbuilt user-plane
+  custody-held card (re-graded 2026-10-11: the card and its remove button
+  rendered since 2026-10-08 with no gate, so the entry recorded an owed gate,
+  not an absence). **All ten owed-gate entries EXPIRED 2026-10-12** when the
+  import wizard's Start/Pause/Resume/Cancel, the export wizard's
+  Start/Pause/Resume/Cancel/Discard and the custody-held remove button each
+  declared their kind (`faunaGate` on the control, the reason beside it, the
+  Back/Download siblings left live), each pinned by an offline/online
+  Robolectric pair in `OfflineGateTest`. The custody entry had carried a
+  warning against "fixing" it by pointing android's already-declared
+  **admin**-plane `fauna.admin.custody_hosting.remove` at the user-plane string —
+  two kinds on two pages, registered OnlineOnly separately — which the
+  declaration respects. Every remaining entry still becomes an error the day
+  android declares its kind, so the ledger cannot rot into a silent exemption.
 
   14 more Robolectric cases across three classes, four of them converse cases
   that discriminate a composing gate from a replacing one: a Dim-3 `zaps` deny,

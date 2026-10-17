@@ -755,6 +755,15 @@ pub const MAX_VERIFIED_CHAIN_LEN: usize = 64;
 /// answers empty: a broken, reordered, truncated or over-long reply fails
 /// closed.
 ///
+/// **Over-long replies truncate here, where the other two walkers reject.**
+/// [`verify_registration_chain`] and the recovery client's succession-path walk
+/// refuse a reply past [`MAX_VERIFIED_CHAIN_LEN`] outright, because they must
+/// consume the whole chain to authorize it. This walk stops at `signer`, so
+/// links past that point are never read: capping the walk at the bound caps the
+/// verification work identically and cannot change the answer for a signer
+/// inside it. Both rules fail closed; the divergence is deliberate and pinned
+/// by `proven_predecessors_truncates_where_its_siblings_reject`.
+///
 /// **Why `new_sig` alone is enough here, and only here.** The question is not
 /// "is this succession authorized" (that is `recovery_sig` under the known
 /// chain head — [`SignedIdentitySuccession::verify`] — and a reader of someone
@@ -1798,6 +1807,61 @@ mod tests {
             .sign(&head_key, new.signing_key(), None)
             .unwrap();
         assert!(verify_succession_against_chain(&stmt, &long, None).is_err());
+    }
+
+    /// `n` genuinely valid links `keys[i] → keys[i+1]`, each carrying its
+    /// successor's own `new_sig` — the shape `proven_predecessors` walks.
+    fn succession_path_of(keys: &[ActorKeypair]) -> Vec<SignedIdentitySuccession> {
+        keys.windows(2)
+            .map(|pair| {
+                let recovery = RecoveryKey::generate();
+                succession(pair[0].actor_id(), pair[1].actor_id(), &recovery, 2)
+                    .sign(&recovery, pair[1].signing_key(), None)
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn proven_predecessors_walks_a_path_at_the_bound_and_proves_nothing_past_it() {
+        let keys: Vec<ActorKeypair> = (0..=MAX_VERIFIED_CHAIN_LEN + 1)
+            .map(|_| ActorKeypair::generate())
+            .collect();
+
+        // Exactly at the bound: a fully valid path ending at the signer still
+        // proves every predecessor, so the empty answer below is the bound and
+        // not some accident of path building.
+        let at_bound = succession_path_of(&keys[..=MAX_VERIFIED_CHAIN_LEN]);
+        assert_eq!(at_bound.len(), MAX_VERIFIED_CHAIN_LEN);
+        let signer = keys[MAX_VERIFIED_CHAIN_LEN].actor_id();
+        assert_eq!(
+            proven_predecessors(&signer, &keys[0].actor_id(), &at_bound).len(),
+            MAX_VERIFIED_CHAIN_LEN
+        );
+
+        // One link past it: the signer is only reached at link 65, so the walk
+        // proves nothing on work grounds alone, every `new_sig` still valid.
+        let past_bound = succession_path_of(&keys);
+        let signer = keys[MAX_VERIFIED_CHAIN_LEN + 1].actor_id();
+        assert!(proven_predecessors(&signer, &keys[0].actor_id(), &past_bound).is_empty());
+    }
+
+    #[test]
+    fn proven_predecessors_truncates_where_its_siblings_reject() {
+        // The deliberate divergence from `verify_registration_chain` and the
+        // recovery client's path walk, which refuse an over-long reply outright:
+        // the walk stops at the signer, so material past it was never read and
+        // an over-long reply whose signer sits inside the bound still proves it.
+        let keys: Vec<ActorKeypair> = (0..=MAX_VERIFIED_CHAIN_LEN + 1)
+            .map(|_| ActorKeypair::generate())
+            .collect();
+        let long_path = succession_path_of(&keys);
+        assert!(long_path.len() > MAX_VERIFIED_CHAIN_LEN);
+        let signer = keys[10].actor_id();
+        assert_eq!(
+            proven_predecessors(&signer, &keys[0].actor_id(), &long_path).len(),
+            10
+        );
     }
 
     #[test]

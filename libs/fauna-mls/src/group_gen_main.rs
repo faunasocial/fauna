@@ -31,6 +31,16 @@
 //! (the read-state relaunch witness posts the second while the recipient's app
 //! is closed).
 //!
+//! A body given as the literal [`FUTURE_BODY_ARG`] (`--future-body`) is sealed,
+//! at its place in the stream, as a message a LATER build would send: a
+//! top-level `ChannelMessageBody` variant this build has no arm for, so the
+//! recipient's decode of that one record fails and the inbound walk skips it
+//! (`version-compatibility.md` § MLS application-message payloads). It goes
+//! through the test-only raw sealer (`MlsEngine::encrypt_payload_for_test`), so
+//! the mode exists only in a `--features test-helpers` build of this helper —
+//! the e2e harness builds it that way; any other build refuses the argument.
+//! Used by `test_conversations_unknown_message_kind.py`.
+//!
 //! Scheduling mode: `mls-group-gen --scheduling <secret_hex> <keypackage_hex>
 //! <imip_hex>` seals the raw RFC 5322 iMIP `imip_hex` as a one-off *scheduling*
 //! delivery through [`MlsEngine::build_scheduling_delivery`] — the one builder
@@ -44,6 +54,68 @@ use fauna_core::data::Timestamp;
 use fauna_core::identity::ActorKeypair;
 use fauna_mls::engine::MlsEngine;
 use fauna_mls::types::{ChannelMessage, ChannelMessageBody};
+
+/// The message-list argument that seals a later build's message kind instead
+/// of a text body — see the module docs.
+const FUTURE_BODY_ARG: &str = "--future-body";
+
+/// Seal one application message of a kind a LATER build sends: the same wire
+/// shape as [`ChannelMessage`] (canonical CBOR sorts the map keys, and external
+/// tagging makes the variant name the body's map key), with a top-level body
+/// variant this build has no arm for. Returned as the canonical-cbor
+/// `ChannelEnvelope::Application` the ordinary bodies are posted as.
+#[cfg(feature = "test-helpers")]
+fn seal_future_body(
+    engine: &MlsEngine,
+    channel_id: &fauna_mls::types::ChannelId,
+    sender: fauna_core::identity::ActorId,
+    sequence: u64,
+) -> anyhow::Result<Vec<u8>> {
+    use fauna_mls::types::ChannelEnvelope;
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    enum LaterBody {
+        Hologram { frames: u32 },
+    }
+    #[derive(Serialize)]
+    struct LaterChannelMessage {
+        sender: fauna_core::identity::ActorId,
+        sequence: u64,
+        channel_epoch: u64,
+        body: LaterBody,
+        timestamp: Timestamp,
+    }
+    let payload = fauna_cbor::encode_canonical(&LaterChannelMessage {
+        sender,
+        sequence,
+        channel_epoch: 0,
+        body: LaterBody::Hologram { frames: 24 },
+        timestamp: Timestamp::now(),
+    })?;
+    // A payload this build CAN decode would make every witness built on this
+    // mode vacuous — refuse to emit one.
+    anyhow::ensure!(
+        fauna_cbor::decode_strict::<ChannelMessage>(&payload).is_err(),
+        "the future body decodes as a known ChannelMessage — it pins nothing"
+    );
+    let ciphertext = engine
+        .encrypt_payload_for_test(channel_id, &payload)
+        .map_err(|e| anyhow::anyhow!("seal the future body: {e:?}"))?;
+    Ok(fauna_cbor::encode_canonical(
+        &ChannelEnvelope::Application(ciphertext),
+    )?)
+}
+
+#[cfg(not(feature = "test-helpers"))]
+fn seal_future_body(
+    _engine: &MlsEngine,
+    _channel_id: &fauna_mls::types::ChannelId,
+    _sender: fauna_core::identity::ActorId,
+    _sequence: u64,
+) -> anyhow::Result<Vec<u8>> {
+    anyhow::bail!("{FUTURE_BODY_ARG} needs a `--features test-helpers` build of mls-group-gen")
+}
 
 /// `--scheduling <secret_hex> <keypackage_hex> <imip_hex>` — see the module docs.
 fn scheduling(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
@@ -121,7 +193,14 @@ fn main() -> anyhow::Result<()> {
     // group in order — the same shape `FaunaMlsBackend::post_app_message` posts
     // (`sequence` numbers this throwaway sender's stream from 1; `channel_epoch`
     // is app-level metadata only — the MLS framing carries the crypto epoch).
+    // A `--future-body` entry takes its own `sequence` slot, so the ordinary
+    // bodies after it continue the stream past it.
     for (sequence, body) in (1u64..).zip(message_bodies) {
+        if body == FUTURE_BODY_ARG {
+            let envelope = seal_future_body(&engine, &channel_id, self_actor, sequence)?;
+            println!("{}", hex::encode(envelope));
+            continue;
+        }
         let message = ChannelMessage {
             sender: self_actor,
             sequence,

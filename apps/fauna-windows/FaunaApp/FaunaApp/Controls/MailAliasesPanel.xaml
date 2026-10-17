@@ -81,15 +81,14 @@
             <TextBlock x:Name="SheetTitle" Style="{StaticResource BodyStrongTextBlockStyle}"
                        Text="{loc:Localize Key=mail_aliases/form_title}" />
 
-            <!-- mail-aliases-add-sheet-kind-picker — single value-via-state toggle:
-                 unchecked = Exact (default), checked = Wildcard prefix. Disposable
-                 mints via the dedicated generate button, not this sheet
-                 (mail-aliases.md § Aliases UX). Read-only on Edit (kind immutable).
-                 A ToggleButton (toggles on Invoke), not a Click handler — its state
-                 is read at submit time, so no handler is wired. -->
-            <ToggleButton x:Name="KindPicker"
-                          AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddSheetKindPicker}"
-                          Content="{loc:Localize Key=mail_aliases/kind_wildcard_label}" />
+            <!-- mail-aliases-add-sheet-kind-picker — a three-way stepper: each press
+                 steps Exact -> Wildcard prefix -> Disposable -> Exact, and the current
+                 selection is carried as the element's HelpText (`kind` attr: `exact` |
+                 `wildcard` | `disposable`; the tui/android shape, mail-aliases.md
+                 § Layout). Read-only (disabled) on Edit — kind is immutable. -->
+            <Button x:Name="KindPicker"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddSheetKindPicker}"
+                    Click="KindPicker_Click" />
 
             <TextBox x:Name="PatternInput"
                      AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddSheetPatternInput}"
@@ -104,13 +103,14 @@
                      AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddSheetRatePerHourInput}"
                      PlaceholderText="{loc:Localize Key=mail_aliases/rate_per_hour_placeholder}" />
 
-            <!-- ttl/uses — disposable-only, minted via the generate button (not this
-                 sheet), so hidden in the seed; present in the tree for ui.yaml
-                 conformance (same as MailSettingsPanel's conditional fields). -->
-            <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddSheetTtlInput}"
+            <!-- ttl/uses — Disposable only: the mint takes how many days the address
+                 lasts and how many messages it accepts (empty = the per-user default). -->
+            <TextBox x:Name="TtlInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddSheetTtlInput}"
                      PlaceholderText="{loc:Localize Key=mail_aliases/ttl_placeholder}"
                      Visibility="Collapsed" />
-            <TextBox AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddSheetUsesInput}"
+            <TextBox x:Name="UsesInput"
+                     AutomationProperties.AutomationId="{x:Bind ids:Ids.MailAliasesAddSheetUsesInput}"
                      PlaceholderText="{loc:Localize Key=mail_aliases/uses_placeholder}"
                      Visibility="Collapsed" />
 

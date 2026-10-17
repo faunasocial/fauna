@@ -507,8 +507,10 @@ def test_a_subscribed_labelers_trust_renews_with_its_epoch_keys(
     new end (a dropped key set would leave the new end's epoch uncovered
     whenever the boundary is crossed, and the nest would refuse the bump).
 
-    tui only: the lead app builds the grant-wired catalog machine that mints
-    the subscription's grant; the six still build the grant-less one.
+    tui only (the `@pytest.mark.tui` mark): every app now builds the
+    grant-wired catalog machine that mints the subscription's grant (since
+    2026-09-29), but the journey's driving seam is the tui's; the other apps'
+    legs are not wired.
     """
     from helpers.labeler_publish import FIXTURES, publish_wasm_labeler
 

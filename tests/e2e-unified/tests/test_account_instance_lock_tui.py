@@ -40,7 +40,9 @@ Coverage:
    id and exited it mid-ceremony), renders the successor's closing-act kit,
    comes back up authenticated as the successor, and keeps its sweep view —
    which, from the seat whose engine the first instance's role lock refused,
-   is the genuine ``no_engine`` arm no other journey produces.
+   is the genuine ``no_engine`` arm no other journey produces. The first
+   (plain) seat follows the account to the successor too: its next connect
+   meets the supersession and it adopts the successor this install holds.
 5. **A bound launch follows the chain** — after case 4's ceremony a THIRD
    instance launched bound to the RETIRED id comes up as the successor: the
    binding names the account, the account is the successor now, and the
@@ -70,7 +72,10 @@ from actions import ActionLayer
 from common import build_registry_seed, create_actor_and_register
 from conftest import _seeded_environment
 from drivers import create_driver
-from helpers.instance_guard import is_app_alive, wait_alive_until
+from helpers.instance_guard import (
+    await_first_seat_follows_the_account,
+    wait_alive_until,
+)
 from helpers.succession_ceremony import (
     SECRET_HEX_LEN,
     SUCCESSION_AND_RELAUNCH_S,
@@ -159,6 +164,19 @@ def _shared_instance_world():
         "credential_dir": os.path.join(base, "credentials"),
         "keyring_app": f"fauna-e2e-tui-instance-world-{os.path.basename(base)}",
     }
+
+
+def _await_first_seat_follows(first, old_actor, new_actor):
+    """The plain first seat follows the account to the successor
+    (:func:`helpers.instance_guard.await_first_seat_follows_the_account`),
+    diagnosed with its own captured stderr."""
+    return await_first_seat_follows_the_account(
+        first,
+        old_actor,
+        new_actor,
+        SUCCESSION_AND_RELAUNCH_S,
+        diagnose=lambda: f"First seat's captured stderr, tail:\n{first.app_stderr_text()[-8000:]}",
+    )
 
 
 def _wait_authenticated(driver):
@@ -346,8 +364,11 @@ def test_tui_bound_launch_onto_the_served_account_coexists(
                     break
             assert CONVERGED_TERM in seen, (
                 "the first instance's write never became visible in the second "
-                f"within {CONVERGENCE_BUDGET_S:.0f}s — the shared-store "
-                f"notification floor is not converging; second saw {seen!r}"
+                f"within {CONVERGENCE_BUDGET_S:.0f}s — a fresh visit to the "
+                "second's page does not read what the shared store holds; "
+                f"second saw {seen!r}, its error-message "
+                f"{second_app.error_text()!r}. The second's captured stderr, "
+                f"tail:\n{second.app_stderr_text()[-6000:]}"
             )
 
             # And the first's own conversations page carries no refusal — the
@@ -467,10 +488,14 @@ def test_tui_a_bound_instance_survives_its_own_succession(
        arm without fault injection, and the one that could never survive
        producing it before. The shared retry-gate helper then asserts the
        button renders on it and that a press answers.
-    4. **The first instance is untouched by the second's ceremony** — still
-       alive, still serving; what its next connect does about the superseded
-       identity is the own-device-fleet leg (`succession-aftermath.md`
-       § Propagation), not this case's subject.
+    4. **The first instance follows the account** — it survives the second's
+       ceremony and comes to serve the successor: the nest ends the retired
+       identity's sessions at the succession, the first seat's next connect
+       meets the supersession (`succession-propagation.md` § Propagation →
+       *Own device fleet*), and it adopts the verified successor this install
+       already holds (:func:`helpers.instance_guard.await_first_seat_follows_the_account`).
+       ⚠ Until 2026-10-11 this asserted only "still authenticated", which held
+       whether the seat followed or stranded on the retired id.
 
     ⚠ Do NOT "simplify" this into a lone bound launch: the first instance is
     what makes the seat *bound* in practice (a plain second launch renders the
@@ -560,14 +585,8 @@ def test_tui_a_bound_instance_survives_its_own_succession(
             assert sweep_owes_work(sweep), f"a no_engine sweep owes work; {sweep!r}"
             assert_the_retry_affordance_matches_the_sweep(app, sweep)
 
-            # ── 4. the first instance is untouched ───────────────────────────
-            assert is_app_alive(first) is not False, (
-                "the first instance must survive the second's ceremony"
-            )
-            fstate = first.get_state()
-            assert bool(fstate.get("session", {}).get("authenticated")), (
-                f"the first instance must still be serving; got {fstate.get('session')!r}"
-            )
+            # ── 4. the first instance follows the account ────────────────────
+            _await_first_seat_follows(first, old_actor, new_actor)
         finally:
             second.teardown()
     finally:
@@ -588,16 +607,18 @@ def test_tui_a_launch_bound_to_a_retired_id_comes_up_as_the_successor(
     ``active`` moved to the successor. A THIRD instance is then launched with
     ``FAUNA_BOUND_ACCOUNT=<old>`` — the shape of a spawn command minted before
     its spawner could observe the succession. The binding names an account, and
-    the account is the successor now: ``resolve_launch_binding`` walks the
-    chain and re-points the process binding before tui resolves its session
-    (from ``active``, tui having no bound session build), so the holder's
-    bound-or-refuse meets the successor on both sides. Until 2026-08-27 this
+    the account is the successor now: ``session::stored_account`` /
+    ``session::launch_persistence`` call ``resolve_launch_binding``, which
+    walks the chain and re-points the process binding before the bound session
+    resolves, so the holder's bound-or-refuse meets the successor on both
+    sides. Until 2026-08-27 this
     launch exited — ``[launch-refused] for <successor>: launched bound to
     <retired> but the session resolved a different account`` — which is what
     the failure message quotes if it comes back.
 
-    The first (plain) seat still serves the retired id throughout; what it
-    does about being superseded is the own-device-fleet leg, not this case's.
+    The first (plain) seat follows the account to the successor too, as in
+    case 4 — asserted after the third seat, so the two adoptions are read
+    independently.
     """
     seed, user_actor = _seed_one_account(nest_instance)
     world = _shared_instance_world()
@@ -671,8 +692,8 @@ def test_tui_a_launch_bound_to_a_retired_id_comes_up_as_the_successor(
             finally:
                 third.teardown()
 
-            # The first seat is untouched by either launch.
-            assert is_app_alive(first) is not False
+            # The first seat followed the account, as in case 4.
+            _await_first_seat_follows(first, old_actor, new_actor)
         finally:
             second.teardown()
     finally:

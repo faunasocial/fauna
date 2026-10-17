@@ -501,6 +501,55 @@
                     </StackPanel>
                 </StackPanel>
 
+
+                <!-- ── Section 6: Pending admin actions (admin.md § Pending admin
+                     actions): the standing co-admin approve / veto surface. The
+                     title carries admin-users-pending-section (empty-state line or
+                     counted title); a vertical row layout (description / when /
+                     approvals over the two one-click controls) so nothing overflows
+                     the narrow content column. ─────────────────────────────────── -->
+                <StackPanel Spacing="8">
+                    <TextBlock x:Name="PendingActionsTitleText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminUsersPendingSection}"
+                               Style="{StaticResource SubtitleTextBlockStyle}"
+                               TextWrapping="Wrap"
+                               Text="{loc:Localize Key=admin/users_page/section_pending}" />
+                    <ItemsControl x:Name="PendingActionsList">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Spacing="8" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:AdminPendingActionRow">
+                                <StackPanel Spacing="4" Padding="8,8"
+                                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                            BorderThickness="0,0,0,1"
+                                            AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminPendingActionItem}"
+                                            AutomationProperties.Name="{x:Bind Description}">
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminPendingActionDescription}"
+                                               TextWrapping="Wrap"
+                                               Text="{x:Bind Description}" />
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminPendingActionExecuteAfter}"
+                                               Opacity="0.7" FontSize="12" TextWrapping="Wrap"
+                                               Text="{x:Bind ExecuteAfterText}" />
+                                    <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminPendingActionApprovals}"
+                                               Opacity="0.7" FontSize="12" TextWrapping="Wrap"
+                                               Text="{x:Bind ApprovalsText}" />
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminPendingActionApproveButton}"
+                                                Click="ApprovePendingAction_Click"
+                                                Content="{loc:Localize Key=admin/users_page/pending_approve}" />
+                                        <Button AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminPendingActionCancelButton}"
+                                                Click="CancelPendingAction_Click"
+                                                Content="{loc:Localize Key=settings/pending_actions/cancel}" />
+                                    </StackPanel>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+
             </StackPanel>
         </ScrollViewer>
     </Grid>

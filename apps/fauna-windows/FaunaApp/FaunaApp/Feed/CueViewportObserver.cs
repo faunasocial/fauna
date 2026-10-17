@@ -154,7 +154,7 @@ internal sealed class CueViewportObserver
                 continue; // not yet connected to the visual tree
             }
             // media_played_pm is always null — no client has any video-playback UI yet.
-            rows.Add(new CueRow(post.PostId, top, container.ActualHeight, post.HasMedia, null));
+            rows.Add(new CueRow(post.PostId, top, container.ActualHeight, post.PlaysMedia, null));
         }
 
         var monoNowMs = (ulong)Environment.TickCount64;
@@ -190,13 +190,9 @@ internal sealed class CueViewportObserver
         {
             try
             {
-                await manager.RecordObservation(
-                    o.contentId,
-                    o.isMedia,
-                    o.mediaPlayedPm,
-                    o.dwellMsAtSkipVisibility,
-                    o.dwellMsAtLongVisibility,
-                    o.observedAtMs);
+                // Relayed whole: the tracker stamped how each exposure ended
+                // (endedBy), and the shell has no honest way of its own to know it.
+                await manager.RecordObservation(o);
             }
             catch (Exception ex)
             {

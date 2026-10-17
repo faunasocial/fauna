@@ -8,7 +8,7 @@
 //! - **On-demand** (`LocationMode::OnDemand`) — a cfapi provider root + the
 //!   placeholder/hydration loop, **plus the same watch→upload half the always-resident
 //!   root runs**. On-demand is a *storage* choice, never a *direction* choice: a change
-//!   to a tracked file **must** be uploaded (USER-ratified 2026-07-14, `file-sync.md`
+//!   to a tracked file **must** be uploaded (USER-ratified 2026-07-14, `on-demand-files.md`
 //!   § On-Demand Files → *Sync direction*, which supersedes the old "download-only by
 //!   design" clause — that was an implementation fact written down as intent).
 //! - **Always-resident** (`LocationMode::Always`) — a file watcher + the upload
@@ -37,7 +37,7 @@
 //!
 //! [`crate::bridge`] remains the "what one engine serves" layer (byte/placeholder
 //! serving + engine construction); this is the "multiplex N engines" layer. See
-//! `docs/goal/behavior/file-sync.md` § On-Demand Files (*Hosting multiple
+//! `docs/goal/behavior/on-demand-files.md` § On-Demand Files (*Hosting multiple
 //! on-demand folders*) and `docs/goal/architecture/apps/windows.md`
 //! § On-demand hydration host.
 
@@ -108,7 +108,7 @@ impl EngineMapping {
 /// Select the folders to serve: one [`EngineMapping`] per folder — in **either**
 /// mode — that carries a **binding** ([`LocationConfig::binding`](crate::config::LocationConfig::binding):
 /// a label and a parseable ref). A folder with no binding is **unbound** —
-/// logged and skipped, never served under a manufactured name (`file-sync.md`
+/// logged and skipped, never served under a manufactured name (`on-demand-files.md`
 /// § On-Demand Files: *"the host never manufactures a folder name"*), nor
 /// under a name alone.
 ///
@@ -183,7 +183,7 @@ pub fn plan_engines(config: &SyncConfig) -> Vec<EngineMapping> {
 /// a folder to a *different* folder restarts too — without it the "live +
 /// unchanged" branch kept serving the old folder — and so the stop/restart paths
 /// can tell [`full_teardown_location`] which on-disk root a retiring on-demand
-/// engine was registered on. The **actor scope** (`file-sync.md` § Multi-account ×
+/// engine was registered on. The **actor scope** (`on-demand-files-apple.md` § Multi-account ×
 /// File Provider, consequence 3) is included so a per-actor re-scope restarts the
 /// engine under the incoming actor's state dir: windows switches accounts on the
 /// *provision* path (it sends no Unprovision to stop engines first, unlike macOS's
@@ -357,6 +357,10 @@ struct LocationEngineSpec {
     /// The agent's sibling registry ([`crate::peer_files`]): every engine asks
     /// this account's other devices for chunk bodies before the nest.
     siblings: Arc<fauna_sync_engine::sibling_chunks::SiblingChannels>,
+    /// The agent's folder-DB registry ([`crate::peer_files::FolderDbs`]):
+    /// every running engine registers its state DB, which the peer leg's
+    /// folder row and manifest doors read.
+    folder_dbs: Arc<crate::peer_files::FolderDbs>,
 }
 
 impl LocationEngineSpec {
@@ -367,6 +371,7 @@ impl LocationEngineSpec {
         paths: SyncPaths,
         state: Weak<SyncServiceState>,
         siblings: Arc<fauna_sync_engine::sibling_chunks::SiblingChannels>,
+        folder_dbs: Arc<crate::peer_files::FolderDbs>,
     ) -> Self {
         Self {
             capability,
@@ -380,6 +385,7 @@ impl LocationEngineSpec {
             predecessors: inputs.predecessors,
             relay_seat: RelaySeat::new(),
             siblings,
+            folder_dbs,
         }
     }
 }
@@ -412,6 +418,7 @@ impl EngineSpec for LocationEngineSpec {
         let mode = desc.mode;
         let relay_seat = Arc::clone(&self.relay_seat);
         let siblings = Arc::clone(&self.siblings);
+        let folder_dbs = Arc::clone(&self.folder_dbs);
 
         Box::pin(async move {
             // Per-folder state DBs live under the resolved data-root
@@ -481,15 +488,18 @@ impl EngineSpec for LocationEngineSpec {
                 folder_ref,
             ));
 
-            // Build through the shared one builder (`on-demand-files.md` § Shared
+            // Build through the shared one builder (`on-demand-files-shared-sets.md` § Shared
             // sets on a capability host → *One mechanism*, question 2): it reads
             // the set's row — a cross-nest set's custody record — over the control
             // plane, keys the engine from custody under the capability's
             // `BackupKey`, and for a cross-nest set graduates the home nest's pin
             // and dials its byte plane there. The control plane is connected first
             // because the build reads over it; its supervisor re-dials on its own
-            // from then on, so the roots below do not connect again.
-            let nest_rpc = crate::bridge::agent_control_plane(capability, nest_base_url, actor_id);
+            // from then on, so the roots below do not connect again. It announces
+            // the device as a wake stand-in, as every agent connection of the
+            // account does (`agent_control_plane`).
+            let nest_rpc =
+                crate::bridge::agent_control_plane(capability, nest_base_url, actor_id, device_id);
             // The machine's change-record signer: the principal writer key the
             // app's enrollment ceremony certified with `SyncWrite`. Load-only —
             // absent (not enrolled yet, or a `[RenewBearer]`-only grant) the
@@ -528,6 +538,15 @@ impl EngineSpec for LocationEngineSpec {
             else {
                 return; // cancelled before a build succeeded
             };
+            // A build that finished after its cancel — the cancel is noticed
+            // only between attempts — registers nothing and runs no loop: its
+            // replacement may already be registered (`EngineInbox`).
+            if cancel.is_cancelled() {
+                return;
+            }
+            // The home nest the relay seat announces the folder by (read before
+            // the edge takes the basis).
+            let serve_home = built.serve_home_nest_url();
             // The refresh edge: a tick whose row read no longer answers the basis
             // the build resolved from (binding, access or floor moved, or the
             // floor still ahead of the generation held) wakes the content-key
@@ -563,7 +582,11 @@ impl EngineSpec for LocationEngineSpec {
             // The folder joins this host's announce from here and leaves it
             // when the root below returns and drops the inbox — an engine that
             // is not running is not announced (`file-sync.md` § Relay serving).
-            let serve = relay_seat.register(&folder_ref);
+            let serve = relay_seat.register(&folder_ref, serve_home.as_deref());
+            // And its rows reach this account's other devices for as long as
+            // it runs — the nest-down row half (`crate::peer_files`).
+            let _folder_db =
+                folder_dbs.register(folder_ref.to_wire(), folder_ref.state_db_path(&state_dir));
             match mode {
                 LocationMode::OnDemand => {
                     run_on_demand_root(
@@ -612,6 +635,7 @@ impl EngineSpec for LocationEngineSpec {
             self.capability.clone(),
             self.nest_base_url.clone(),
             self.actor_id,
+            self.device_id,
         );
         Some(Box::pin(run_relay_seat(
             Arc::clone(&self.relay_seat),
@@ -667,18 +691,26 @@ async fn run_relay_seat(seat: Arc<RelaySeat>, client: Arc<NestClient>, device_id
 /// a held-deletes apply, or a share ingest could reach the WRONG same-named
 /// engine. Name-only IPC verbs resolve the ref through
 /// `pipe_server::resolve_engine_key`.
+///
+/// Each registration is one run, under its own id, in a per-run
+/// [`EngineRegistry`]: a route goes to the newest run of the folder, and a
+/// deregister removes only its own run — so a cancelled run that registers
+/// after its replacement (and then deregisters) never costs the replacement
+/// its channels. The run's cancel check after the build narrows that window;
+/// the registry closes it.
 struct EngineInbox {
     state: Weak<SyncServiceState>,
     key: String,
-    wake_tx: mpsc::Sender<()>,
-    cmd_tx: mpsc::Sender<always_resident::EngineCommand>,
+    run: u64,
 }
 
+/// The id the next [`EngineInbox`] registration takes, process-wide — the
+/// registries outlive every host.
+static NEXT_ENGINE_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl EngineInbox {
-    /// Mint both channels and register their senders under `key`, replacing a
-    /// previous engine's entries (an engine restart — key rotation, mode flip —
-    /// registers before the old run deregisters). Returns the receivers the
-    /// engine's loop drains.
+    /// Mint both channels and register their senders under `key` as the
+    /// folder's newest run. Returns the receivers the engine's loop drains.
     async fn register(
         state: &Weak<SyncServiceState>,
         key: String,
@@ -693,47 +725,36 @@ impl EngineInbox {
         // Capacity 2: a rare, user-initiated verb; a queued command waits for
         // the loop's current arm — busy is not full.
         let (cmd_tx, cmd_rx) = mpsc::channel::<always_resident::EngineCommand>(2);
+        let run = NEXT_ENGINE_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(st) = state.upgrade() {
             st.wake_senders
                 .lock()
                 .await
-                .insert(key.clone(), wake_tx.clone());
+                .insert(key.clone(), run, wake_tx);
             st.engine_cmd_senders
                 .lock()
                 .await
-                .insert(key.clone(), cmd_tx.clone());
+                .insert(key.clone(), run, cmd_tx);
         }
         let inbox = Self {
             state: state.clone(),
             key,
-            wake_tx,
-            cmd_tx,
+            run,
         };
         (inbox, wake_rx, cmd_rx)
     }
 
-    /// Deregister on exit — but only entries that are still this engine's. An
-    /// engine restart spawns a fresh `run` that overwrites the entries with its
-    /// own channels; `same_channel` keeps us from removing the newer engine's.
+    /// Deregister on exit — this run's entries only; another run of the same
+    /// folder, registered before or after, keeps its own.
     async fn deregister(self) {
         let Some(st) = self.state.upgrade() else {
             return;
         };
-        let mut wakes = st.wake_senders.lock().await;
-        if wakes
-            .get(&self.key)
-            .is_some_and(|cur| cur.same_channel(&self.wake_tx))
-        {
-            wakes.remove(&self.key);
-        }
-        drop(wakes);
-        let mut cmds = st.engine_cmd_senders.lock().await;
-        if cmds
-            .get(&self.key)
-            .is_some_and(|cur| cur.same_channel(&self.cmd_tx))
-        {
-            cmds.remove(&self.key);
-        }
+        st.wake_senders.lock().await.remove(&self.key, self.run);
+        st.engine_cmd_senders
+            .lock()
+            .await
+            .remove(&self.key, self.run);
     }
 }
 
@@ -930,10 +951,18 @@ impl ProgressFold {
                 // A re-`FileStarted` for a path already open (a resumed
                 // transfer) replaces its entry rather than double-counting the
                 // file; its credited bytes start over with it.
+                //
+                // Every counter saturates: `size` is the manifest's declared
+                // `total_size`, which any member of a shared folder writes, so
+                // a hostile pair of sizes must not overflow the sum (shipped
+                // profiles run `overflow-checks`, `build-system.md` § Shipped-
+                // profile overflow checks) and kill the drain that also
+                // carries `DeletesHeld`. Saturating, not clamping the size at
+                // the emit, matches `reseed_pull.rs`'s sum of the same field.
                 if let Some(prev) = self.open.remove(path) {
-                    self.files_total -= 1;
-                    self.bytes_total -= prev.size;
-                    self.bytes_done -= prev.done;
+                    self.files_total = self.files_total.saturating_sub(1);
+                    self.bytes_total = self.bytes_total.saturating_sub(prev.size);
+                    self.bytes_done = self.bytes_done.saturating_sub(prev.done);
                 }
                 self.open.insert(
                     path.clone(),
@@ -942,8 +971,8 @@ impl ProgressFold {
                         done: 0,
                     },
                 );
-                self.files_total += 1;
-                self.bytes_total += *size;
+                self.files_total = self.files_total.saturating_add(1);
+                self.bytes_total = self.bytes_total.saturating_add(*size);
                 self.moved = true;
             }
             P::ChunkDone { path, bytes } => {
@@ -957,7 +986,7 @@ impl ProgressFold {
                 if let Some(f) = self.open.get_mut(path) {
                     let credit = (*bytes).min(f.size - f.done);
                     f.done += credit;
-                    self.bytes_done += credit;
+                    self.bytes_done = self.bytes_done.saturating_add(credit);
                     self.moved = true;
                 }
             }
@@ -968,8 +997,8 @@ impl ProgressFold {
                 // transfers no chunks at all, and a byte counter fed by
                 // `ChunkDone` alone would sit at 0% and then jump.
                 if let Some(f) = self.open.remove(path) {
-                    self.bytes_done += f.size - f.done;
-                    self.files_done += 1;
+                    self.bytes_done = self.bytes_done.saturating_add(f.size - f.done);
+                    self.files_done = self.files_done.saturating_add(1);
                     self.moved = true;
                 }
             }
@@ -1225,7 +1254,7 @@ struct RootReach;
 /// One root's line in [`SyncServiceState::on_demand_mount_errors`]: an
 /// on-demand root whose placeholder surface could not be mounted says why here,
 /// and `ListLocations` carries the code to the app's binding row
-/// (`on-demand-files.md` § Linux FUSE binding, the lifecycle rule — the
+/// (`on-demand-files-linux.md` § Linux FUSE binding, the lifecycle rule — the
 /// per-location refusal the boot probe cannot see). The entry is this root's and
 /// ends with it: dropping the report — the root's task ending, however it ends —
 /// removes it, so no row is ever handed a failure no running root stands behind.
@@ -1344,7 +1373,7 @@ fn root_dir(reach: &RootReach, path: &Path) -> PathBuf {
 /// cfapi sync root on windows, a FUSE mount over the directory on linux — route
 /// its requests here, and serve placeholders until cancelled.
 ///
-/// **Two-way since 2026-07-14** (`file-sync.md` § On-Demand Files → *Sync direction*).
+/// **Two-way since 2026-07-14** (`on-demand-files.md` § On-Demand Files → *Sync direction*).
 /// `serve_hydration_root` runs the shared `always_resident` watcher/debouncer/uploader
 /// alongside the read callbacks, so a local edit to a tracked file is uploaded exactly as
 /// it would be from an always-resident folder — no second uploader, no new user-facing
@@ -1384,7 +1413,7 @@ async fn run_on_demand_root(
     //
     // A linux FUSE root ALWAYS boots fresh: its placeholders are never on the
     // disk, so a seen mark is never true of it, and one that arrived with an
-    // inherited state DB must not meet the sweep (`on-demand-files.md` § Linux
+    // inherited state DB must not meet the sweep (`on-demand-files-linux.md` § Linux
     // FUSE binding, the dehydrate rule, obligation 3).
     #[cfg(windows)]
     let fresh_registration = !crate::cfapi_host::registration_survived(&path);
@@ -1568,14 +1597,13 @@ async fn drive_always_resident_root(
     let _ = always_resident::LocalWriteHost::converge(&*engine, &folder).await;
 
     // The once-per-start corpus passes — the pre-bind (M2) re-seal (ungated; see
-    // this fn's doc comment), phase 4's audience convergence (an audience flip
-    // made real for the back-catalogue), and the post-succession re-seal (the
-    // agent is the process that holds the retired owner keys on desktop,
-    // `sync-agent.md` § Credential model, so it is the one positioned to move
-    // the bytes off them). The SAME sequence the on-demand root runs through
-    // `HydrationHost::converge_corpus_at_start` — one home, so the two modes
-    // cannot drift on what a start owes the corpus.
-    always_resident::converge_corpus_at_start(&engine, &folder).await;
+    // this fn's doc comment), phase 4's audience convergence, and the
+    // post-succession re-seal (the agent is the process that holds the retired
+    // owner keys on desktop, `sync-agent.md` § Credential model) — run inside
+    // `run_watch_loop`, right behind its eager first pull: a re-seal ahead of
+    // the pull reissued whatever head this seat last saw, burying a peer's
+    // newer edit (`mls-group-key-material.md` § M2 → *(B) Reclaim*). The SAME
+    // fn the on-demand root runs after its startup fold.
 
     // This set's **nest-authoritative** cadence, read off the already-open control
     // plane via the shared resolver — never a client-invented constant
@@ -1731,7 +1759,7 @@ pub(crate) async fn reconcile_resolved(state: &Arc<SyncServiceState>) -> Result<
     };
 
     // Which actor's scoped state dir the engines serve — part of each engine's
-    // identity (`file-sync.md` § Multi-account × File Provider, consequence 3), so a
+    // identity (`on-demand-files-apple.md` § Multi-account × File Provider, consequence 3), so a
     // per-actor re-scope forces a rebuild under the incoming actor's DBs. `None`
     // until a capability is provisioned; set on every layout (production and
     // `--data-dir` alike) by `apply_actor_scope`. Read once from the shared `Arc` slot.
@@ -1839,6 +1867,7 @@ pub(crate) async fn reconcile_resolved(state: &Arc<SyncServiceState>) -> Result<
                 // strong handle here would close the cycle and leak the service.
                 Arc::downgrade(state),
                 state.peer_files.siblings(),
+                state.peer_files.folder_dbs(),
             );
             // The peer leg's chunk door serves through this host's seat from
             // now on (`crate::peer_files`).
@@ -1967,7 +1996,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_mount_is_reported_for_its_root_and_retracted_with_it() {
         let tmp = tempfile::tempdir().unwrap();
-        let state = service_state(SyncPaths::new(Some(tmp.path().to_path_buf())));
+        let state = service_state(SyncPaths::at(tmp.path().to_path_buf()));
         let path = Path::new("/srv/outside-the-admitted-set");
         let code = |state: &Arc<SyncServiceState>| {
             state
@@ -2014,7 +2043,7 @@ mod tests {
     #[tokio::test]
     async fn an_engine_inbox_registers_both_senders_and_deregisters_only_its_own() {
         let tmp = tempfile::tempdir().unwrap();
-        let state = service_state(SyncPaths::new(Some(tmp.path().to_path_buf())));
+        let state = service_state(SyncPaths::at(tmp.path().to_path_buf()));
         let weak = Arc::downgrade(&state);
         let key = test_ref("docs").to_wire();
 
@@ -2037,8 +2066,8 @@ mod tests {
             "a routed command reaches the receiver the engine's loop drains"
         );
 
-        // An engine restart registers before the old run deregisters.
-        let (second, _wake_rx2, _cmd_rx2) = EngineInbox::register(&weak, key.clone()).await;
+        // A second run registers before the old run deregisters.
+        let (second, mut wake_rx2, mut cmd_rx2) = EngineInbox::register(&weak, key.clone()).await;
         first.deregister().await;
         assert!(
             state
@@ -2046,20 +2075,79 @@ mod tests {
                 .lock()
                 .await
                 .get(&key)
-                .is_some_and(|cur| cur.same_channel(&second.wake_tx)),
+                .is_some_and(|tx| tx.try_send(()).is_ok())
+                && wake_rx2.try_recv().is_ok(),
             "the old run must not remove the restarted engine's nudge sender"
         );
+        let (reply, _reply_rx) = tokio::sync::oneshot::channel();
         assert!(
             state
                 .engine_cmd_senders
                 .lock()
                 .await
                 .get(&key)
-                .is_some_and(|cur| cur.same_channel(&second.cmd_tx)),
+                .is_some_and(|tx| tx
+                    .try_send(always_resident::EngineCommand::ApplyHeldDeletes { reply })
+                    .is_ok())
+                && cmd_rx2.try_recv().is_ok(),
             "the old run must not remove the restarted engine's command sender"
         );
 
         second.deregister().await;
+        assert!(state.wake_senders.lock().await.is_empty());
+        assert!(state.engine_cmd_senders.lock().await.is_empty());
+    }
+
+    /// A cancelled run may register AFTER its replacement did — the
+    /// account-change host rebuild drops the old host without joining it, and
+    /// the registries outlive hosts — and only then return and deregister.
+    /// Neither step may cost the new run its channels: the nudge and the
+    /// command still reach the receivers the new run's loop drains. The relay
+    /// seat's twin registry is pinned the same way
+    /// (`a_cancelled_run_registering_after_its_replacement_never_withdraws_it`).
+    #[tokio::test]
+    async fn a_cancelled_run_registering_after_its_replacement_keeps_the_new_runs_channels() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = service_state(SyncPaths::at(tmp.path().to_path_buf()));
+        let weak = Arc::downgrade(&state);
+        let key = test_ref("docs").to_wire();
+
+        let (new, mut new_wake_rx, mut new_cmd_rx) =
+            EngineInbox::register(&weak, key.clone()).await;
+        let (old, _old_wake_rx, _old_cmd_rx) = EngineInbox::register(&weak, key.clone()).await;
+        old.deregister().await;
+
+        let nudged = state
+            .wake_senders
+            .lock()
+            .await
+            .get(&key)
+            .is_some_and(|tx| tx.try_send(()).is_ok());
+        assert!(nudged, "the folder's nudge must still be routable");
+        assert!(
+            new_wake_rx.try_recv().is_ok(),
+            "the nudge reaches the new run's loop"
+        );
+        let (reply, _reply_rx) = tokio::sync::oneshot::channel();
+        let routed = state
+            .engine_cmd_senders
+            .lock()
+            .await
+            .get(&key)
+            .is_some_and(|tx| {
+                tx.try_send(always_resident::EngineCommand::ApplyHeldDeletes { reply })
+                    .is_ok()
+            });
+        assert!(routed, "the folder's command must still be routable");
+        assert!(
+            matches!(
+                new_cmd_rx.try_recv(),
+                Ok(always_resident::EngineCommand::ApplyHeldDeletes { .. })
+            ),
+            "the command reaches the new run's loop"
+        );
+
+        new.deregister().await;
         assert!(state.wake_senders.lock().await.is_empty());
         assert!(state.engine_cmd_senders.lock().await.is_empty());
     }
@@ -2104,7 +2192,7 @@ mod tests {
     #[tokio::test]
     async fn a_host_built_for_one_actor_is_rebuilt_when_another_actor_provisions() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = crate::config::SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = crate::config::SyncPaths::at(tmp.path().to_path_buf());
         let state = service_state(paths);
 
         // Actor A provisions and binds a folder → the host is built under A.
@@ -2193,7 +2281,7 @@ mod tests {
     #[tokio::test]
     async fn a_bearer_rotation_reuses_the_running_host() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = crate::config::SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = crate::config::SyncPaths::at(tmp.path().to_path_buf());
         let state = service_state(paths);
 
         *state.capability.write().await = Some(capability_for(0xAA));
@@ -2349,7 +2437,7 @@ mod tests {
     #[tokio::test]
     async fn park_revoked_set_marks_every_folder_of_that_set_and_no_others() {
         let tmp = tempfile::tempdir().unwrap();
-        let paths = SyncPaths::new(Some(tmp.path().to_path_buf()));
+        let paths = SyncPaths::at(tmp.path().to_path_buf());
         let mut someone_elses_photos =
             location(r"C:\their-photos", LocationMode::Always, Some("photos"));
         someone_elses_photos.folder_id = Some(FolderRef::Foreign([0xcd; 32]).to_wire());
@@ -2481,7 +2569,7 @@ mod tests {
             crate::config::SyncConfig::default(),
             shutdown_tx,
             ev,
-            crate::config::SyncPaths::new(Some(tmp.path().to_path_buf())),
+            crate::config::SyncPaths::at(tmp.path().to_path_buf()),
         );
 
         let drain = tokio::spawn(drive_progress_notifications(
@@ -2539,7 +2627,7 @@ mod tests {
             crate::config::SyncConfig::default(),
             shutdown_tx,
             ev,
-            crate::config::SyncPaths::new(Some(tmp.path().to_path_buf())),
+            crate::config::SyncPaths::at(tmp.path().to_path_buf()),
         );
 
         let drain = tokio::spawn(drive_progress_notifications(
@@ -2717,6 +2805,40 @@ mod tests {
         assert_eq!(snap.files_done, 0);
         assert_eq!(snap.bytes_total, 400);
         assert_eq!(snap.bytes_done, 40);
+    }
+
+    /// A member-authored manifest declares its own `total_size`, which arrives
+    /// here as `FileStarted.size`. Sizes summing past `u64::MAX`, then
+    /// re-starts of the same paths, must not panic the fold: the drain that
+    /// runs it also carries `DeletesHeld`, `DeletesSkippedUnreadable` and
+    /// `PublicAudience`, so a panic would strand those views for the engine.
+    #[test]
+    fn hostile_declared_sizes_saturate_instead_of_panicking_the_fold() {
+        let mut fold = ProgressFold::default();
+        fold.observe(&started("a.bin", u64::MAX));
+        fold.observe(&started("b.bin", u64::MAX));
+        assert_eq!(fold.snapshot("documents").bytes_total, u64::MAX);
+
+        // Re-`FileStarted` subtracts each prior size from the saturated total.
+        fold.observe(&started("a.bin", u64::MAX));
+        fold.observe(&started("b.bin", u64::MAX));
+        fold.observe(&PE::ChunkDone {
+            path: "a.bin".to_string(),
+            bytes: u64::MAX,
+        });
+        fold.observe(&PE::ChunkDone {
+            path: "b.bin".to_string(),
+            bytes: u64::MAX,
+        });
+        fold.observe(&PE::FileDone {
+            path: "a.bin".to_string(),
+        });
+        fold.observe(&PE::FileDone {
+            path: "b.bin".to_string(),
+        });
+        let snap = fold.snapshot("documents");
+        assert_eq!(snap.files_done, 2);
+        assert_eq!(snap.bytes_done, u64::MAX);
     }
 
     /// The dedup trap: `ChunkDone` fires only for chunks that were actually
@@ -3240,7 +3362,7 @@ mod tests {
 
     #[test]
     fn engine_stamp_distinguishes_actor_scope() {
-        // Per-actor sync-state scoping (`file-sync.md` § Multi-account × File
+        // Per-actor sync-state scoping (`on-demand-files-apple.md` § Multi-account × File
         // Provider, consequence 3): an engine serving actor A's scoped state dir is
         // a DIFFERENT engine than one serving actor B's, even for the same set /
         // binding / folder / mode. Windows re-scopes on the *provision* path (it

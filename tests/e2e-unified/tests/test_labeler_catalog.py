@@ -51,16 +51,13 @@ tested one tier down; add per-test marks to the file's other tests as their
 own bridge dependencies (or lack thereof) are checked the same way.
 """
 
-import base64
 import sqlite3
 import time
 from pathlib import Path
 
 import pytest
 
-from clients.ws_rpc_admin_client import WsRpcAdminClient
-from common.auth import create_actor_and_register
-from helpers.labeler_publish import publish_wasm_labeler
+from helpers.labeler_publish import new_publisher, publish_labeler_version, publish_wasm_labeler
 from helpers.nest_trust_setup import login_as_admin, seed_mda_holder
 from i18n.strings import S
 
@@ -114,14 +111,6 @@ def _publish_text_model_labeler(
     is precisely why the badge under test cannot be reached through a UI gesture,
     and convention 8 carve-out (b) covers it: this is fixture setup arranging the
     precondition, and the mutation under test is the catalog *render*."""
-    admin = nest_instance["admin"]
-    publisher = create_actor_and_register(
-        nest_instance["port"], base_url=nest_instance["url"],
-        admin_signing_key=admin["signing_key"],
-    )
-    pub_seed = bytes(publisher["signing_key"])
-    labeler_id = publisher["actor_id_bytes"]  # == algorithm_id (verify key)
-
     artifact = run_seal_helper(
         "encode-text-model-artifact",
         {
@@ -135,42 +124,38 @@ def _publish_text_model_labeler(
             "ngrams": [{"ngram": "kittens", "more": 3, "less": 0}],
         },
     )
-    metadata_blob = run_seal_helper(
-        "publish-labeler",
-        {
-            "signing_seed_b64": base64.b64encode(pub_seed).decode(),
-            # `wasm_bytes` carries the artifact for every non-wasm kind — the
-            # field name is kept for in-major wire compat; the hash/size binding
-            # and the signature verify are identical for all three kinds.
-            "wasm_b64": base64.b64encode(artifact).decode(),
-            "version": 1,
-            "needs_text": True,
-            "needs_hashtags": False,
-            "needs_media_metadata": False,
-            "needs_author": False,
-            "max_memory_bytes": 16 * 1024 * 1024,
-            "max_cpu_microseconds": 100_000,
-            "updated_at": int(time.time()),
-        },
+    return _publish_data_artifact(run_seal_helper, nest_instance, artifact, "text-model")
+
+
+def _publish_list_labeler(run_seal_helper, nest_instance) -> str:
+    """Publish a PUBLIC curated ``list`` labeler naming one content id. The
+    artifact is the canonical dag-cbor ``LabelerListArtifact``
+    (``fauna_core::scoring``) encoded here, because the one app path that
+    publishes a List is the trained-topic flow, which is not under test.
+    Returns the row's ``factor`` string."""
+    import cbor2
+
+    artifact = cbor2.dumps(
+        {"entries": [{"content_id": b"\x01" * 32, "score": 500}]}, canonical=True
     )
-    pub_ws = WsRpcAdminClient(nest_instance["url"], actor_id=labeler_id, signing_key=pub_seed)
-    with pub_ws:
-        reply = pub_ws.call(
-            "fauna.labelers.publish",
-            {
-                "metadata_blob": metadata_blob,
-                "wasm_bytes": artifact,
-                "content_kind": "post",
-                "artifact_kind": "text-model",
-            },
-        )
-    assert reply.get("ok") is True, (
-        f"text-model publish reply not ok: {reply!r} — the nest gate accepts an "
-        f"unrecognized artifact version on purpose (the version is the "
-        f"subscriber's contract, not the nest's), so a refusal here is a real "
-        f"regression, not this fixture reaching too far"
+    return _publish_data_artifact(run_seal_helper, nest_instance, artifact, "list")
+
+
+def _publish_data_artifact(
+    run_seal_helper, nest_instance, artifact: bytes, artifact_kind: str
+) -> str:
+    """Sign and publish a non-``wasm`` PUBLIC (``post``) artifact as a fresh
+    registered User whose keypair IS the ``algorithm_id``. Returns the row's
+    ``factor`` string. (The nest gate accepts an unrecognized text-model version
+    on purpose — the version is the subscriber's contract, not the nest's — so a
+    refused publish here is a real regression, not this fixture reaching too
+    far.)"""
+    labeler_id, pub_seed = new_publisher(nest_instance)
+    publish_labeler_version(
+        run_seal_helper, nest_instance["url"], labeler_id, pub_seed, artifact,
+        version=1, content_kind="post", artifact_kind=artifact_kind,
     )
-    return "labeler:" + bytes(reply["labeler_id"]).hex()
+    return "labeler:" + labeler_id.hex()
 
 
 @pytest.mark.tui
@@ -352,6 +337,172 @@ def test_labeler_catalog_browse_inspect_subscribe_unsubscribe(
     )
 
 
+def _tamper_stored_artifact(nest, labeler_id: bytes) -> None:
+    """Flip one byte of the artifact the nest stores for `labeler_id`, leaving
+    its signed metadata alone — the nest now serves bytes the publisher never
+    signed, which is exactly the lying-nest case the client-side re-verify
+    exists for. Fixture setup arranging the precondition (convention 8 carve-out
+    (b)): no app gesture can make a nest lie, and the mutation under test is the
+    subscribe."""
+    conn = sqlite3.connect(nest["db_path"], timeout=10.0)
+    try:
+        (stored,) = conn.execute(
+            "SELECT wasm_bytes FROM labelers WHERE labeler_id = ?", (labeler_id,)
+        ).fetchone()
+        tampered = bytearray(stored)
+        tampered[-1] ^= 0xFF
+        conn.execute(
+            "UPDATE labelers SET wasm_bytes = ? WHERE labeler_id = ?",
+            (bytes(tampered), labeler_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _subscription_count(nest, actor_id_hex: str, labeler_id: bytes) -> int:
+    """How many `labeler_subscriptions` rows bind `actor_id_hex` to `labeler_id`."""
+    conn = sqlite3.connect(nest["db_path"], timeout=10.0)
+    try:
+        (n,) = conn.execute(
+            "SELECT COUNT(*) FROM labeler_subscriptions"
+            " WHERE owner_actor = ? AND labeler_id = ?",
+            (bytes.fromhex(actor_id_hex), labeler_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    return n
+
+
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.tui
+@pytest.mark.windows
+@pytest.mark.android
+@pytest.mark.feature("community-labelers")
+def test_a_labeler_whose_signature_does_not_check_out_cannot_be_subscribed(
+    logged_in_app, nest_instance, run_seal_helper, test_user
+):
+    """A labeler whose stored artifact no longer matches what its publisher
+    signed shows as unverified and cannot be subscribed to
+    (``content-moderation-and-ranking.md`` § Tier-3: "``verified`` reads false
+    and subscribe stays disabled").
+
+    The subscribe is clicked straight from the catalog row, never after an
+    inspect, because that is the path a bypass would take: the shared machine
+    re-inspects at the gesture, refuses, names why on ``error-message`` and
+    opens the panel on the failing view; the row then paints its subscribe
+    disabled, and the nest holds no subscription."""
+    app = logged_in_app
+    cat = app.labeler_catalog
+
+    labeler_id, factor = _publish_post_labeler(run_seal_helper, nest_instance)
+    _tamper_stored_artifact(nest_instance, labeler_id)
+
+    cat.navigate_catalog()
+    index = cat.find_index_by_factor(factor)
+    assert index is not None, (
+        f"the tampered labeler never appeared in the catalog — the browse is "
+        f"metadata-only, so tampering the bytes must not hide it; "
+        f"error={app.error_text()!r}"
+    )
+    assert cat.is_subscribe_visible(index), "an unsubscribed row offers subscribe"
+
+    cat.subscribe(index)
+
+    assert cat.wait_for_inspect_panel(True), (
+        f"the refused subscribe should open the panel on the failing view; "
+        f"error={app.error_text()!r}"
+    )
+    metadata = cat.inspect_metadata_text()
+    assert "verified: false" in metadata, (
+        f"the panel must show the labeler as unverified: {metadata!r}"
+    )
+    assert app.error_text() == S.labeler_catalog.error_subscribe_unverified, (
+        f"the refusal must say why on error-message; got {app.error_text()!r}"
+    )
+    assert not cat.is_subscribe_enabled(index), (
+        "with the panel showing it unverified, the row's subscribe stays disabled"
+    )
+    assert not cat.is_unsubscribe_visible(index), "the row must not flip to subscribed"
+    assert _subscription_count(
+        nest_instance, test_user["actor_id_hex"], labeler_id
+    ) == 0, "the nest must hold no subscription for an unverified labeler"
+
+
+# A label-output revision no build reads (and none soon will) — any revision
+# past ``fauna_core::scoring::LABEL_ABI_CURRENT`` does, so only "newer than this
+# build" is load-bearing, and a literal far ahead survives the next bump.
+_NEWER_LABEL_ABI = 999
+
+
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.tui
+@pytest.mark.android
+@pytest.mark.windows
+@pytest.mark.feature("community-labelers")
+def test_a_labeler_newer_than_this_app_reads_inert_and_cannot_be_subscribed(
+    logged_in_app, nest_instance, run_seal_helper, test_user
+):
+    """A ``wasm`` labeler whose module declares a label-output revision newer
+    than this app reads shows that revision, says it needs a newer app, and
+    cannot be subscribed to (``content-moderation-and-ranking.md`` § Tier-3 →
+    *The output half of the ``label()`` ABI*, position (ii): "reads **inert and
+    says so** with subscribe disabled").
+
+    The revision is the module's own SIGNED declaration, so what only a real
+    stack proves is that it survives end to end: the nest's publish gate stores
+    it unexamined (position (iii) — an older nest must not refuse a newer
+    app's artifact), inspect hands back the signed metadata, and the shared
+    machine reads the stamp against this build's ``LABEL_ABI_CURRENT``. The
+    labeler still verifies — newer is not tampered — so the refusal must name
+    the newer-app reason, never the signature one. Subscribe is clicked from
+    the row without an inspect first, the path a bypass would take."""
+    app = logged_in_app
+    cat = app.labeler_catalog
+
+    labeler_id = publish_wasm_labeler(
+        run_seal_helper, nest_instance, _CAT_WAT_PATH, label_abi=_NEWER_LABEL_ABI
+    )
+    factor = "labeler:" + labeler_id.hex()
+
+    cat.navigate_catalog()
+    index = cat.find_index_by_factor(factor)
+    assert index is not None, (
+        f"the newer-revision labeler never appeared in the catalog — the nest "
+        f"must store a revision it does not read; error={app.error_text()!r}"
+    )
+    assert cat.is_subscribe_visible(index), "an unsubscribed row offers subscribe"
+
+    cat.subscribe(index)
+
+    assert cat.wait_for_inspect_panel(True), (
+        f"the refused subscribe should open the panel on the labeler; "
+        f"error={app.error_text()!r}"
+    )
+    metadata = cat.inspect_metadata_text()
+    assert f"label_abi: {_NEWER_LABEL_ABI}" in metadata, (
+        f"the panel must show the declared revision: {metadata!r}"
+    )
+    assert "verified: true" in metadata, (
+        f"a newer revision is not tampering — the labeler still verifies: {metadata!r}"
+    )
+    assert S.labeler_catalog.inspect_needs_newer_app in metadata, (
+        f"the panel must SAY the labeler needs a newer app: {metadata!r}"
+    )
+    assert app.error_text() == S.labeler_catalog.inspect_needs_newer_app, (
+        f"the refusal must name the newer-app reason; got {app.error_text()!r}"
+    )
+    assert not cat.is_subscribe_enabled(index), (
+        "with the panel showing it needs a newer app, the row's subscribe stays disabled"
+    )
+    assert not cat.is_unsubscribe_visible(index), "the row must not flip to subscribed"
+    assert _subscription_count(
+        nest_instance, test_user["actor_id_hex"], labeler_id
+    ) == 0, "the nest must hold no subscription for a labeler this app cannot read"
+
+
 @pytest.fixture
 def labeler_grant_nest(request, nest_mode, tmp_path_factory):
     """A dedicated fresh nest — own admin, own grant table, own holder roster
@@ -419,6 +570,7 @@ def _wait_on_nest(read, predicate, what: str, budget_s: float = 20.0):
 @pytest.mark.web
 @pytest.mark.android
 @pytest.mark.macos
+@pytest.mark.windows
 @pytest.mark.feature("community-labelers")
 def test_subscribing_a_mail_labeler_trusts_the_mail_service_with_it_and_unsubscribing_withdraws_it(
     app, labeler_grant_nest, run_seal_helper
@@ -445,10 +597,9 @@ def test_subscribing_a_mail_labeler_trusts_the_mail_service_with_it_and_unsubscr
 
     Every app builds the grant-wired catalog machine (§ Implementation status
     today, leg 5); android skips at the action layer (its e2e is
-    emulator-gated fleet-wide). macos is journey-proven. windows and ios are
-    wired but not yet journey-proven on their own machines, so their marks
-    land with that verification rather than promising a witness nobody has
-    run.
+    emulator-gated fleet-wide). macos and windows are journey-proven. ios is
+    wired but not yet journey-proven on its own machine, so its mark lands
+    with that verification rather than promising a witness nobody has run.
     """
     import cbor2
 
@@ -551,6 +702,110 @@ def test_subscribing_a_mail_labeler_trusts_the_mail_service_with_it_and_unsubscr
     assert any(t.startswith(minted_prefix) and short in t for t in texts), (
         f"History keeps the mint beside the revoke, got {texts!r}"
     )
+
+
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.tui
+@pytest.mark.windows
+@pytest.mark.android
+@pytest.mark.feature("community-labelers")
+def test_a_mail_labeler_that_cannot_run_says_so_and_a_keyless_labeler_trusts_nothing(
+    app, labeler_grant_nest, run_seal_helper
+):
+    """Three promises of the subscribe that are all about what is NOT minted
+    (``content-moderation-and-ranking.md`` § Tier-3 → *Subscribing = minting a
+    capability*), on one dedicated nest so its grant table is this test's own:
+
+    - a ``wasm`` mail labeler subscribed while the nest has no mail service, and
+      then while the account has no mail, is RECORDED and SAYS on
+      ``error-message`` that it cannot run yet — the two honest degrades, each
+      with no grant behind the subscription;
+    - a public-post labeler, a curated list and a text model each subscribe
+      with no notice and no trust: with a mail service enrolled and mail on
+      (so a mint COULD happen), the nest holds no grant and the Nests page
+      shows the not-trusted state;
+    - a labeler already subscribed to can be inspected again.
+
+    Mutations are the app's subscribe and inspect gestures; the published
+    labelers, the enrolled ``mda`` holder and the enabled mail are fixture
+    preconditions (convention 8 carve-out (b))."""
+    nest = labeler_grant_nest
+    login_as_admin(app, nest, device_id="test-device-labeler-degrade")
+    cat = app.labeler_catalog
+
+    def subscribe_by_factor(factor: str) -> int:
+        cat.navigate_catalog()
+        index = cat.find_index_by_factor(factor)
+        assert index is not None, (
+            f"published labeler {factor!r} not in the catalog; error={app.error_text()!r}"
+        )
+        cat.subscribe(index)
+        assert cat.wait_for_subscribed_state(index, subscribed=True), (
+            f"subscribe did not flip {factor!r}; error={app.error_text()!r}"
+        )
+        return index
+
+    # ── A mail labeler with no mail service to trust: recorded, says so.
+    no_holder = publish_wasm_labeler(run_seal_helper, nest, _CAT_WAT_PATH, content_kind="mail")
+    subscribe_by_factor("labeler:" + no_holder.hex())
+    assert app.error_text() == S.labeler_catalog.subscribed_without_mail_holder, (
+        f"with no mail service the page must say the labeler cannot run yet; "
+        f"got {app.error_text()!r}"
+    )
+    assert _subscription_grant_id(nest, no_holder) is None, (
+        "the subscription is recorded, with no grant behind it"
+    )
+
+    # ── A mail service, but no mail on this account: recorded, says so.
+    seed_mda_holder(nest, bridge_id="labeler-degrade-mda")
+    no_mail = publish_wasm_labeler(run_seal_helper, nest, _CAT_WAT_PATH, content_kind="mail")
+    subscribe_by_factor("labeler:" + no_mail.hex())
+    assert app.error_text() == S.labeler_catalog.subscribed_without_mail, (
+        f"with mail off the page must say the labeler cannot run until it is "
+        f"set up; got {app.error_text()!r}"
+    )
+    assert _subscription_grant_id(nest, no_mail) is None
+
+    # ── Keyless kinds trust nothing, even where a mint could happen.
+    app.mail_settings.navigate()
+    app.mail_settings.ensure_mail_enabled()
+    _, post_factor = _publish_post_labeler(run_seal_helper, nest)
+    keyless = {
+        "post": post_factor,
+        "list": _publish_list_labeler(run_seal_helper, nest),
+        "text-model": _publish_text_model_labeler(
+            run_seal_helper, nest,
+            version=_SUPPORTED_ARTIFACT_VERSION, name="a model that needs no key",
+        ),
+    }
+    for kind, factor in keyless.items():
+        subscribe_by_factor(factor)
+        assert not app.has_error(), (
+            f"a {kind} labeler needs no trust, so its subscribe owes no notice; "
+            f"got {app.error_text()!r}"
+        )
+    assert _owner_grant_rows(nest) == [], (
+        "no subscription on this page may have minted a grant: the two mail "
+        "labelers had nothing to trust, the other three need nothing"
+    )
+    app.linked_nests.navigate()
+    assert app.nest_trust.is_empty_state_visible(), (
+        f"the Nests page must show no trust for any of these labelers; "
+        f"{app.nest_trust.grant_count()} grant row(s), error={app.error_text()!r}"
+    )
+
+    # ── Inspect again after subscribing.
+    cat.navigate_catalog()
+    index = cat.find_index_by_factor(post_factor)
+    assert index is not None
+    assert cat.is_unsubscribe_visible(index), "the row reads subscribed"
+    cat.inspect(index)
+    assert cat.wait_for_inspect_panel(True), (
+        f"a subscribed labeler must still open the inspect panel; error={app.error_text()!r}"
+    )
+    metadata = cat.inspect_metadata_text()
+    assert "verified: true" in metadata, f"the re-inspect renders its metadata: {metadata!r}"
 
 
 @pytest.mark.macos

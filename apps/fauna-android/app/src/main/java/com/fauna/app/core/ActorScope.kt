@@ -89,8 +89,14 @@ class ActorScope @Inject constructor(
      * on-disk state are different obligations with different callers
      * (`account-scoping.md` § Erasure follows scope). Sign-out drops *then*
      * erases; a switch only drops.
+     *
+     * [identityEnds] is `false` only for a client rebuild that keeps the SAME
+     * identity (the e2e `session` patch re-establishing the signed-in actor):
+     * the identity's standing critical alerts and the sweep loop re-checking
+     * them survive (`critical-alerts.md` § Mechanism → *Lifetime*). Windows'
+     * `DropActorScopedState(identityEnds)` is the twin.
      */
-    fun dropActorScopedState() {
+    fun dropActorScopedState(identityEnds: Boolean = true) {
         // Count the teardown at its initiation, before anything below runs —
         // the e2e session generation (`fauna_e2e_agent::SESSION_GENERATION_KEY`).
         // This is the one door every teardown site calls, so the count cannot
@@ -103,6 +109,6 @@ class ActorScope @Inject constructor(
         // The session rails: the FFI clients, the six pumps, the auto-renew
         // cadence, the conversations receive session, the drafts autosave, and
         // the critical-alert banner keyed to the departing DID.
-        api.clearAuth()
+        api.clearAuth(identityEnds)
     }
 }

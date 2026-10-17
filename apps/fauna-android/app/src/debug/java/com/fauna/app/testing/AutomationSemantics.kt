@@ -28,6 +28,9 @@ data class NodeFacts(
     val isChecked: Boolean,
     val isEnabled: Boolean,
     val isClickable: Boolean,
+    /** `AccessibilityNodeInfo.isEditable` — a text field a user can type into;
+     *  a read-only field (an `ExposedDropdownMenuBox` anchor) is not. */
+    val isEditable: Boolean = false,
     /** The node's on-screen rect as `"x,y,w,h"` ([AutomationSemantics.frameOf]) —
      *  the `frame` attribute. Accessibility bounds are CLIPPED to the visible
      *  part, as windows' UIA rects are; `null` when not read. */
@@ -43,6 +46,9 @@ data class NodeFacts(
 object AutomationSemantics {
     /** The accessibility class Compose reports for a `Role.DropdownList` node. */
     const val SPINNER_CLASS = "android.widget.Spinner"
+
+    /** The accessibility class Compose reports for a text field. */
+    const val EDIT_TEXT_CLASS = "android.widget.EditText"
 
     /**
      * `GET /element/attr?attr=[name]`. The precedence mirrors linux's agent:
@@ -61,7 +67,7 @@ object AutomationSemantics {
         // `state` / `checked`: the two names the cross-app tests read a toggle
         // by (tui publishes `checked` for every checkbox; `state` is the older
         // idiom) — same answer, same precedence.
-        "state", "checked" -> painted(node)
+        "state", "checked" -> paintedAttr(node, name)
             ?: if (node.isCheckable) flag(node.isChecked) else null
         // `frame`: the node's own screen geometry, never a painted value —
         // what `actions/events.py`'s day-timeline measurement reads (windows
@@ -74,9 +80,41 @@ object AutomationSemantics {
         // `stateDescription` (a `TokenSelect` anchor's is its SELECTED token).
         "options" -> null
         // Any other name — `class`, `role`, `copied`, `kind`, … — is the one
-        // string attribute a node can publish, on its `stateDescription`.
-        else -> painted(node)
+        // string attribute a node can publish, on its `stateDescription`; a
+        // node publishing several packs them there ([packedValue]).
+        else -> paintedAttr(node, name)
     }
+
+    /**
+     * The per-key reading of a `stateDescription` that carries SEVERAL
+     * attributes — the reader half of
+     * [com.fauna.app.ui.util.AutomationAttributePack], the same grammar
+     * windows' bridge holds (`tests/e2e-unified/flaui-bridge/PackedAttr.cs`):
+     * two or more `key=value` pairs joined by `;`, each key lowercase kebab
+     * (`[a-z][a-z0-9-]*`), a value running from its key's first `=` to the
+     * next `;`, `%` written `%25` and `;` written `%3B`.
+     *
+     * Returns `null` when [painted] is NOT a pack — the caller keeps it
+     * verbatim, since most nodes publish one bare value (a token, an id that
+     * may end in base64 `=`); otherwise a holder whose `value` is [key]'s
+     * unescaped value, or `null` when the pack names no such key (the
+     * attribute is not set).
+     */
+    fun packedValue(painted: String?, key: String): Packed? {
+        if (painted.isNullOrEmpty()) return null
+        val pairs = painted.split(';')
+        if (pairs.size < 2) return null
+        var found: String? = null
+        for (pair in pairs) {
+            val eq = pair.indexOf('=')
+            if (eq <= 0 || !isKey(pair.substring(0, eq))) return null
+            if (found == null && pair.substring(0, eq) == key) found = unescape(pair.substring(eq + 1))
+        }
+        return Packed(found)
+    }
+
+    /** [packedValue]'s answer for a pack: [value] is `null` when the key is absent. */
+    data class Packed(val value: String?)
 
     /**
      * What `GET /element/text` answers for a select's anchor: the selected
@@ -87,6 +125,17 @@ object AutomationSemantics {
      */
     fun selectedToken(node: NodeFacts): String? =
         if (node.className == SPINNER_CLASS) painted(node) else null
+
+    /**
+     * Whether [node] anchors a menu the `options` read may open: a
+     * [com.fauna.app.ui.components.TokenSelect] anchor ([SPINNER_CLASS]), or
+     * the READ-ONLY text field an `ExposedDropdownMenuBox` anchors with
+     * `menuAnchor()` — the admin guardian, web-apex and DNS pickers, which
+     * paint the option's label in the field and keep no token. An editable
+     * text field is never a picker: its `options` stay `null`.
+     */
+    fun isMenuAnchor(node: NodeFacts): Boolean =
+        node.className == SPINNER_CLASS || (node.className == EDIT_TEXT_CLASS && !node.isEditable)
 
     /**
      * Whether [node] is the menu option `select(anchorId, value)` should
@@ -140,6 +189,20 @@ object AutomationSemantics {
 
     private fun painted(node: NodeFacts): String? =
         node.stateDescription?.takeIf { it.isNotEmpty() }
+
+    /** [name]'s painted value: its key's value out of a pack, else the bare paint. */
+    private fun paintedAttr(node: NodeFacts, name: String): String? {
+        val bare = painted(node)
+        val packed = packedValue(bare, name) ?: return bare
+        return packed.value?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun isKey(key: String): Boolean =
+        key.isNotEmpty() && key[0] in 'a'..'z' && key.all { it in 'a'..'z' || it in '0'..'9' || it == '-' }
+
+    // `%3B` before `%25`: the writer escaped `%` first, so a literal "%3B" in a
+    // value was written "%253B" — undoing `%25` first would turn it into `;`.
+    private fun unescape(value: String): String = value.replace("%3B", ";").replace("%25", "%")
 
     private fun flag(on: Boolean): String = if (on) "true" else "false"
 }

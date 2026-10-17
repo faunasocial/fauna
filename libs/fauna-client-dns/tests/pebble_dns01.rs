@@ -34,7 +34,7 @@
 //! [`PEBBLE_SERIAL`] — safe to run the whole file in one invocation.
 //!
 //! Besides the issuance acceptance, this file holds the **minimum reproduction
-//! of the 2026-07-23 live example.com renewal failure**
+//! of the 2026-07-23 live nest renewal failure**
 //! ([`dns01_order_goes_invalid_when_published_txt_is_not_yet_resolvable`]): the
 //! provider's control plane accepts the `_acme-challenge` publish but its
 //! authoritative data plane does not serve it by validation time, so the CA
@@ -54,8 +54,8 @@ use hickory_proto::rr::rdata::{CNAME, TXT};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 
 use fauna_client_dns::{
-    Dns01OrderConfig, Dns01ResolvabilityProbe, DnsAction, DnsManagementMachine, DnsNest,
-    DnsNestError, DnsProviderError, DnsProviderSeam, ManualOrderTestSeam, PublishRecord,
+    AcmeOrderTestSeam, Dns01OrderConfig, Dns01ResolvabilityProbe, DnsAction, DnsManagementMachine,
+    DnsNest, DnsNestError, DnsProviderError, DnsProviderSeam, PublishRecord,
     begin_dns01_order_with_http, complete_dns01_order, obtain_certificate_dns01_with_http,
     pure_begin_dns01_order_with_http, pure_complete_dns01_order,
     pure_obtain_certificate_dns01_with_http,
@@ -813,11 +813,7 @@ impl DnsNest for RecordingNest {
         Ok(true)
     }
     async fn cert_status(&self, _domains: Vec<String>) -> Result<CertStatusReply, DnsNestError> {
-        Ok(CertStatusReply {
-            desired_sans: vec![],
-            extra: Default::default(),
-            statuses: vec![],
-        })
+        Ok(CertStatusReply::default())
     }
     async fn probe_txt_visible(
         &self,
@@ -894,7 +890,7 @@ fn valid_target_id() -> Vec<u8> {
 /// `resume_manual_issue`'s live re-open had no end-to-end run, because
 /// [`DnsManagementMachine`] hardcoded [`Dns01OrderConfig::lets_encrypt`] and the
 /// rest of this file drives `begin_dns01_order`/`complete_dns01_order` directly,
-/// never the machine. [`fauna_client_dns::ManualOrderTestSeam`] closes that gap:
+/// never the machine. [`fauna_client_dns::AcmeOrderTestSeam`] closes that gap:
 /// begin through a machine carrying it, DROP the machine (the process-local
 /// [`fauna_client_dns::Dns01OrderInProgress`] does not survive a page
 /// navigation or app restart — that is the whole C2 bug), REBUILD a fresh one
@@ -941,7 +937,7 @@ async fn manual_resume_survives_a_machine_rebuild_against_pebble() {
 
     let seam = || {
         let ca_pem = pebble.ca_pem.clone();
-        ManualOrderTestSeam {
+        AcmeOrderTestSeam {
             directory_url: PEBBLE_DIR_URL.to_string(),
             http_client: Box::new(move || pebble_http_client(&ca_pem)),
             probe: None,
@@ -956,7 +952,7 @@ async fn manual_resume_survives_a_machine_rebuild_against_pebble() {
         Arc::new(UnreachableProviderSeam),
         test_signing_key(),
     )
-    .with_manual_order_test_seam(seam());
+    .with_acme_order_test_seam(seam());
 
     machine1
         .dispatch(DnsAction::BeginManualIssueCert {
@@ -1009,7 +1005,7 @@ async fn manual_resume_survives_a_machine_rebuild_against_pebble() {
         Arc::new(UnreachableProviderSeam),
         test_signing_key(),
     )
-    .with_manual_order_test_seam(seam());
+    .with_acme_order_test_seam(seam());
 
     machine2
         .hydrate()
@@ -1098,7 +1094,7 @@ async fn manual_resume_survives_a_machine_rebuild_against_pebble() {
 // ── the 2026-07-23 live-failure reproduction ─────────────────────────────────
 
 /// A [`DnsProviderSeam`] modeling the Hetzner Cloud DNS shape that broke the
-/// live example.com renewal: `publish` **succeeds** — the provider's control
+/// live nest renewal: `publish` **succeeds** — the provider's control
 /// plane accepted the write (the 2xx `create_record` checks; the record shows
 /// on an API GET, which `find_records` mirrors here) — but the authoritative
 /// data plane the CA queries (the in-process responder) never serves it within
@@ -1196,12 +1192,12 @@ impl DnsProviderSeam for ControlPlaneOnlySeam {
     }
 }
 
-/// **Minimum reproduction of the 2026-07-23 live example.com renewal failure**: the provider accepts the
+/// **Minimum reproduction of the 2026-07-23 live nest renewal failure**: the provider accepts the
 /// `_acme-challenge` publish (control plane) but its authoritative NS does not
 /// serve the TXT by the time the CA validates → both authorizations fail →
 /// the order goes `Invalid` → the driver surfaces the exact diagnostic the
 /// live run logged ("order became invalid …; the CA could not validate the
-/// DNS-01 authorization(s) for [example.com, mail.example.com]").
+/// DNS-01 authorization(s) for [example.net, mail.example.net]").
 ///
 /// `propagation_wait: ZERO` stands for *any wait shorter than the provider's
 /// data-plane serve lag* — the seam never serves the record, so the outcome is
@@ -1230,7 +1226,7 @@ async fn dns01_order_goes_invalid_when_published_txt_is_not_yet_resolvable() {
         published_log: Arc::new(Mutex::new(Vec::new())),
         teardown_log: Arc::new(Mutex::new(Vec::new())),
     };
-    // Two SANs, mirroring the live order ([example.com, mail.example.com]) — both
+    // Two SANs, mirroring the live order ([example.net, mail.example.net]) — both
     // authorizations fail together, as observed.
     let domains = vec![
         "home.example.test".to_string(),

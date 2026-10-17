@@ -44,6 +44,11 @@ public class AdminVM {
     // Pending requests section
     public var inviteRequests: [FfiAdminInviteRequest] = []
 
+    // Pending admin actions section (admin.md § Pending admin actions) — every
+    // account's still-`pending` delayed admin action, the standing co-admin
+    // approve / veto surface.
+    public var pendingActions: [FfiAdminPendingAction] = []
+
     // Registration section — the raw wire posture (`nil`/unrecognized ⇒ render
     // read-only, never coerced — public-mode.md § Implementation status today).
     public var registrationMode: String?
@@ -157,6 +162,7 @@ public class AdminVM {
         await loadUsers()
         await loadInviteCodes()
         await loadInviteRequests()
+        await loadPendingActions()
         await loadRegistration()
     }
 
@@ -291,6 +297,8 @@ public class AdminVM {
         do {
             try await admin().adminsAdd(actorId: user.actorId)
             await loadUsers()
+            // The grant is a pending admin action: the standing section shows it.
+            await loadPendingActions()
         } catch {
             actionError = error.localizedDescription
         }
@@ -306,6 +314,7 @@ public class AdminVM {
         do {
             try await admin().adminsRemove(actorId: user.actorId)
             await loadUsers()
+            await loadPendingActions()
         } catch {
             actionError = error.localizedDescription
         }
@@ -388,7 +397,8 @@ public class AdminVM {
         let trimmedHandle = handle.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             try await admin().usersCreate(
-                actorId: actorId, tier: tier, handle: trimmedHandle.isEmpty ? nil : trimmedHandle)
+                actorId: actorId, tier: tier, handle: trimmedHandle.isEmpty ? nil : trimmedHandle,
+                guardianActor: nil, ageBand: nil)
             await loadUsers()
         } catch {
             actionError = error.localizedDescription
@@ -447,6 +457,44 @@ public class AdminVM {
         } catch {
             actionError = error.localizedDescription
         }
+    }
+
+    // MARK: - Pending admin actions section (admin.md § Pending admin actions)
+
+    /// `fauna.admin.pending_actions.list`, narrowed to still-`pending` rows (the
+    /// console offers approve / cancel only on a live action).
+    public func loadPendingActions() async {
+        do {
+            let all = try await admin().pendingActionsList()
+            pendingActions = all.filter { $0.isPending }
+        } catch {
+            actionError = error.localizedDescription
+        }
+    }
+
+    /// Add this admin's approval (`admin-pending-action-approve-button`). The
+    /// nest refuses self-approval and a row no longer pending — surfaced via
+    /// `actionError`; re-list either way so the section ends on the live state.
+    public func approvePendingAction(id: Int64) async {
+        actionError = nil
+        do {
+            try await admin().pendingActionApprove(id: id)
+        } catch {
+            actionError = error.localizedDescription
+        }
+        await loadPendingActions()
+    }
+
+    /// Cancel (veto) a pending admin action (`admin-pending-action-cancel-button`)
+    /// — one click, no confirm.
+    public func cancelPendingAction(id: Int64) async {
+        actionError = nil
+        do {
+            try await admin().pendingActionCancel(id: id)
+        } catch {
+            actionError = error.localizedDescription
+        }
+        await loadPendingActions()
     }
 
     // MARK: - Pending requests section

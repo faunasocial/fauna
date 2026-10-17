@@ -1855,6 +1855,38 @@ async fn a_skipped_change_names_the_device_that_is_behind() {
     assert_eq!(info, vec!["docs: a.txt (phone)", "docs: b.txt (cccccccc)"]);
 }
 
+/// A cured skipped change leaves the review list: the page fetches resolved
+/// rows too (the review history), but a resolved `catchup_failed` row says
+/// nothing true any more — the device caught up — so it clears on its own
+/// (`ui/folders.md` § Conflicts). Every other resolved row stays.
+#[tokio::test]
+async fn a_cured_skipped_change_clears_from_the_review_list() {
+    let (m, nest, _) = setup();
+    let root = fauna_core::crypto::BackupKey::from_bytes([3u8; 32]);
+    m.set_label_custody(fauna_core::label_custody::LabelCustody::owner_only(
+        root.clone(),
+    ));
+    nest.set_devices(vec![device("bb", "phone")]);
+    let cured = SyncConflict {
+        resolved_at: Some(1_700_000_100),
+        ..skipped_change(5, &root, "a.txt")
+    };
+    let resolved_edit = SyncConflict {
+        resolved_at: Some(1_700_000_100),
+        ..sealed_conflict(7, &root, "c.txt")
+    };
+    nest.set_conflicts(vec![
+        cured,
+        skipped_change(6, &root, "b.txt"),
+        resolved_edit,
+    ]);
+
+    m.refresh().await;
+
+    let ids: Vec<i64> = m.snapshot().conflicts.iter().map(|c| c.id).collect();
+    assert_eq!(ids, vec![6, 7], "only the cured skip leaves the list");
+}
+
 /// Answers a BOUND set's content keys for one set, addressed by its
 /// `name_hash` — and owner-only for every other hash, so a lookup by a
 /// scrubbed row's blank plaintext finds no content keys.
@@ -1883,6 +1915,14 @@ impl fauna_core::folder_keys::FolderKeyResolver for BoundByHashResolver {
                 fauna_core::folder_keys::ResolvedCustody::owner_only()
             },
         )
+    }
+
+    /// Keyed by name: no answer by identity.
+    async fn resolve_ref(
+        &self,
+        _folder_ref: &fauna_core::folder_keys::FolderRef,
+    ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+        anyhow::bail!("no set with that identity")
     }
 }
 
@@ -2034,8 +2074,8 @@ async fn a_scrubbed_folder_row_renders_its_sealed_name_by_hash() {
     );
     let owner = fauna_core::crypto::BackupKey::from_bytes([3u8; 32]);
     m.set_label_custody(fauna_core::label_custody::LabelCustody::new(
-        Some(Arc::new(BoundByHashResolver {
-            set: bound_name,
+        Some(Arc::new(BoundByRowResolver {
+            bound_id: 1,
             keys: content,
         })),
         Some(owner.clone()),
@@ -2087,6 +2127,115 @@ async fn a_scrubbed_folder_row_renders_its_sealed_name_by_hash() {
         snap.folders[1].retention_policy.as_deref(),
         Some(r#"{"keep_last":3}"#),
         "the sealed retention policy opens with the name"
+    );
+    assert!(snap.error.is_none());
+}
+
+/// Answers a BOUND set's content keys for the row `bound_id`, by its identity
+/// only, and owner-only for every other row. By NAME it answers owner-only for
+/// every hash — the custody a same-named own set's owner-first search gives —
+/// so the bound row's keys are reachable only by its row (`set-addressing.md`
+/// § The row form).
+struct BoundByRowResolver {
+    bound_id: i64,
+    keys: fauna_core::folder_keys::FolderContentKeys,
+}
+
+#[async_trait::async_trait]
+impl fauna_core::folder_keys::FolderKeyResolver for BoundByRowResolver {
+    async fn resolve(
+        &self,
+        _name_hash: &[u8; 32],
+    ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+        Ok(fauna_core::folder_keys::ResolvedCustody::owner_only())
+    }
+
+    async fn resolve_ref(
+        &self,
+        folder_ref: &fauna_core::folder_keys::FolderRef,
+    ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+        Ok(match folder_ref {
+            fauna_core::folder_keys::FolderRef::Local(id) if *id == self.bound_id => {
+                fauna_core::folder_keys::ResolvedCustody::ContentKeyed(
+                    fauna_core::folder_keys::ResolvedFolderKeys {
+                        mls_group_id: Some(vec![0xaa]),
+                        content_keys: Some(self.keys.clone()),
+                        home_nest_url: None,
+                        home_nest_actor_id: None,
+                    },
+                )
+            }
+            _ => fauna_core::folder_keys::ResolvedCustody::owner_only(),
+        })
+    }
+}
+
+/// A member who owns `photos` and has joined a collaborator's `photos` lists
+/// BOTH: each row's sealed name renders under its own row's custody, never the
+/// custody its name resolves to. Rendering by the name hash answered the own
+/// set's owner-only custody for both rows, so the shared row's content-key seal
+/// never opened and the row dropped from the page.
+#[tokio::test]
+async fn a_joined_member_row_beside_an_own_namesake_renders_by_its_row() {
+    let (m, nest, _) = setup();
+    let name = "photos";
+    let content = fauna_core::folder_keys::FolderContentKeys::genesis([4u8; 32], 1_000);
+    let content_root = fauna_core::path_crypto::LabelRoot::content_key(
+        *content.current_key(),
+        content.current_version(),
+    );
+    let owner = fauna_core::crypto::BackupKey::from_bytes([3u8; 32]);
+    let owner_root = fauna_core::path_crypto::LabelRoot::owner_of(&owner);
+    m.set_label_custody(fauna_core::label_custody::LabelCustody::new(
+        Some(Arc::new(BoundByRowResolver {
+            bound_id: 21,
+            keys: content,
+        })),
+        Some(owner),
+    ));
+    m.set_mls_query(Arc::new(JoinedGroups(vec!["aa".into()])));
+    let scrubbed =
+        |row: WireFolderSummary, root: &fauna_core::path_crypto::LabelRoot| WireFolderSummary {
+            name: String::new(),
+            name_hash: Some(fauna_protocol::ByteBuf::from(
+                fauna_core::path_crypto::set_name_hash(name).to_vec(),
+            )),
+            name_sealed: Some(fauna_protocol::ByteBuf::from(
+                fauna_core::label_custody::seal_set_name(root, name)
+                    .unwrap()
+                    .unwrap(),
+            )),
+            ..row
+        };
+    nest.set_folders(vec![
+        scrubbed(
+            WireFolderSummary {
+                id: 29,
+                ..folder(name)
+            },
+            &owner_root,
+        ),
+        scrubbed(
+            WireFolderSummary {
+                id: 21,
+                ..member_set(name, "aa")
+            },
+            &content_root,
+        ),
+    ]);
+
+    m.refresh().await;
+
+    let snap = m.snapshot();
+    let rows: Vec<(i64, &str)> = snap
+        .folders
+        .iter()
+        .map(|f| (f.id, f.name.as_str()))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![(29, name), (21, name)],
+        "the own row and the joined member row each render under their own row's custody"
     );
     assert!(snap.error.is_none());
 }
@@ -2368,7 +2517,63 @@ async fn an_unopenable_selective_sync_pair_keeps_its_row_without_lists() {
     assert_eq!(snap.folders[0].name, "docs");
     assert_eq!(snap.folders[0].include_paths, None);
     assert_eq!(snap.folders[0].exclude_paths, None);
+    // "Could not open" is carried beside the `None`, so the editor can tell it
+    // from "no list" (finding).
+    assert!(snap.folders[0].include_paths_unreadable);
+    assert!(snap.folders[0].exclude_paths_unreadable);
     assert!(snap.error.is_none());
+}
+
+/// A list that is genuinely absent (or readable) is never flagged unreadable.
+#[tokio::test]
+async fn a_readable_or_absent_selective_sync_list_is_not_flagged_unreadable() {
+    let (m, nest, _) = setup();
+    let root = fauna_core::crypto::BackupKey::from_bytes([3u8; 32]);
+    m.set_label_custody(fauna_core::label_custody::LabelCustody::owner_only(
+        root.clone(),
+    ));
+    nest.set_folders(vec![
+        sealed_paths_set("docs", &root, &["/docs"], &[".git"]),
+        folder("empty"),
+    ]);
+
+    m.refresh().await;
+
+    for f in m.snapshot().folders {
+        assert!(!f.include_paths_unreadable, "{}", f.name);
+        assert!(!f.exclude_paths_unreadable, "{}", f.name);
+    }
+}
+
+/// The bug: the editor showed an unopenable list as blank and its save
+/// always sent `Some(parsed)`, overwriting the stored seal with nothing. The
+/// machine now refuses the save and sends nothing, so the seal is unchanged.
+#[tokio::test]
+async fn a_save_over_an_unopenable_selective_sync_list_is_refused() {
+    let (m, nest, _) = setup();
+    let sealer = fauna_core::crypto::BackupKey::from_bytes([3u8; 32]);
+    m.set_label_custody(fauna_core::label_custody::LabelCustody::owner_only(
+        fauna_core::crypto::BackupKey::from_bytes([9u8; 32]),
+    ));
+    nest.set_folders(vec![sealed_paths_set(
+        "docs",
+        &sealer,
+        &["/docs"],
+        &[".git"],
+    )]);
+    m.refresh().await;
+
+    m.set_folder_paths("docs".into(), Some(vec![]), Some(vec![]))
+        .await;
+
+    assert!(
+        !nest
+            .calls()
+            .iter()
+            .any(|c| matches!(c, FakeCall::SetFolderPaths { .. })),
+        "nothing may reach the nest: the stored seal must stay as it was"
+    );
+    assert!(m.snapshot().error.is_some(), "the refusal is surfaced");
 }
 
 /// The expand-phase shape: plaintext still resting, no seal — a keyless reader
@@ -2624,6 +2829,27 @@ async fn set_folder_website_enabled_forwards_the_flag_alone() {
     );
 }
 
+#[tokio::test]
+async fn set_folder_exclusive_editing_forwards_the_flag_alone() {
+    let (m, nest, _) = setup();
+    m.set_folder_exclusive_editing("db".into(), true).await;
+    m.set_folder_exclusive_editing("db".into(), false).await;
+    assert_eq!(
+        nest.calls(),
+        vec![
+            FakeCall::SetFolderExclusiveEditing {
+                name: "db".into(),
+                on: true,
+            },
+            FakeCall::SetFolderExclusiveEditing {
+                name: "db".into(),
+                on: false,
+            },
+        ],
+        "both directions ride the one write — its own `folders.update` field"
+    );
+}
+
 /// **The point applies whole.** A place edit sends the seat's full flag triple,
 /// never just the box that moved — the nest writes the point, not a delta, and a
 /// caller that sent one flag would silently clear the other two.
@@ -2678,6 +2904,7 @@ async fn a_failed_phase_4_write_surfaces_on_the_page_error() {
         // Reuses tui's existing key for the same failure, not a twin of it.
         ("website", "devices.error_serve_website"),
         ("place", "devices.error_set_place"),
+        ("exclusive", "devices.error_set_exclusive_editing"),
     ] {
         let (m, nest, _) = setup();
         let failure = Err(DevicesApiError::Transient {
@@ -2692,6 +2919,10 @@ async fn a_failed_phase_4_write_surfaces_on_the_page_error() {
             "website" => {
                 nest.set_website_response(failure);
                 m.set_folder_website_enabled("docs".into(), true).await
+            }
+            "exclusive" => {
+                nest.set_exclusive_editing_response(failure);
+                m.set_folder_exclusive_editing("docs".into(), true).await
             }
             _ => {
                 nest.set_place_response(failure);

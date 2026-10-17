@@ -11,7 +11,10 @@
 use std::sync::Arc;
 
 use fauna_archive::ArchiveSource;
+use fauna_archive::model::Rsvp;
 use fauna_core::MaybeSendSync;
+use fauna_core::ical::AttendeeInfo;
+use fauna_core::rsvp::RsvpState;
 
 use crate::state::ArchiveMarker;
 
@@ -82,8 +85,66 @@ pub struct ImportedEvent {
     pub end: Option<fauna_core::data::Timestamp>,
     pub location: Option<String>,
     pub url: Option<String>,
-    /// `going` / `interested` / `declined` / `invited` — `fauna_status` vocabulary.
-    pub rsvp: String,
+    /// The owner's own answer, as the archive recorded it. Kept in the
+    /// archive's vocabulary rather than folded onto `fauna_status`'s, because
+    /// `Hosted` and `Joined` both read "going" there and only one of them makes
+    /// the owner the event's organizer ([`ImportedEvent::owner_reply`]).
+    pub rsvp: Rsvp,
+}
+
+/// How an imported event carries the owner's own answer in the stored VEVENT
+/// (`archive-import.md` § What each category becomes, the events row: "own
+/// RSVP"; the representation is `caldav-server.md` § Event resources and
+/// § RSVP semantics).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OwnerReply {
+    /// The `ORGANIZER` CAL-ADDRESS — the owner for an event they hosted, else
+    /// empty: `ORGANIZER` is the event's author, and the archive never names
+    /// the host's address, so an absent line is the honest one.
+    pub organizer: String,
+    /// The roster: the owner alone, with the `PARTSTAT` of their answer.
+    /// Everyone else stays in the sealed model (attendee lists are not
+    /// imported).
+    pub attendees: Vec<AttendeeInfo>,
+    /// `true` when the answer was Interested — the sidecar marker that refines
+    /// the wire `TENTATIVE` (the asymmetric rule).
+    pub interested: bool,
+}
+
+impl ImportedEvent {
+    /// The owner's answer as `ORGANIZER` + roster + sidecar marker, for the
+    /// owner whose CAL-ADDRESS is `owner_email`. An empty address yields no
+    /// roster and no organizer: there is nobody to write the answer against.
+    #[must_use]
+    pub fn owner_reply(&self, owner_email: &str) -> OwnerReply {
+        if owner_email.is_empty() {
+            return OwnerReply {
+                organizer: String::new(),
+                attendees: vec![],
+                interested: false,
+            };
+        }
+        let state = match self.rsvp {
+            Rsvp::Joined | Rsvp::Hosted => RsvpState::Going,
+            Rsvp::Interested => RsvpState::Interested,
+            Rsvp::Declined => RsvpState::Declined,
+            Rsvp::Invited | Rsvp::Unknown => RsvpState::Invited,
+        };
+        OwnerReply {
+            organizer: if self.rsvp == Rsvp::Hosted {
+                owner_email.to_string()
+            } else {
+                String::new()
+            },
+            attendees: vec![AttendeeInfo {
+                name: String::new(),
+                email: owner_email.to_string(),
+                partstat: state.partstat().to_string(),
+                fauna_status: state.as_str().to_string(),
+            }],
+            interested: state == RsvpState::Interested,
+        }
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -550,5 +611,98 @@ pub mod fakes {
         fn file_name(&self, path: &str) -> String {
             path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
         }
+    }
+}
+
+#[cfg(test)]
+mod owner_reply_tests {
+    use fauna_archive::model::Rsvp;
+    use fauna_core::data::Timestamp;
+
+    use super::ImportedEvent;
+
+    fn event(rsvp: Rsvp) -> ImportedEvent {
+        ImportedEvent {
+            uid: "archive:facebook:1".into(),
+            summary: "Picnic".into(),
+            description: None,
+            start: Timestamp(0),
+            end: None,
+            location: None,
+            url: None,
+            rsvp,
+        }
+    }
+
+    /// (organizes?, PARTSTAT, fauna status, interested marker) per answer.
+    #[test]
+    fn each_answer_lands_as_the_owners_own_roster_line() {
+        let me = "me@fauna.test";
+        for (rsvp, organizes, partstat, status, interested) in [
+            (Rsvp::Hosted, true, "ACCEPTED", "going", false),
+            (Rsvp::Joined, false, "ACCEPTED", "going", false),
+            (Rsvp::Interested, false, "TENTATIVE", "interested", true),
+            (Rsvp::Declined, false, "DECLINED", "declined", false),
+            (Rsvp::Invited, false, "NEEDS-ACTION", "invited", false),
+            (Rsvp::Unknown, false, "NEEDS-ACTION", "invited", false),
+        ] {
+            let reply = event(rsvp).owner_reply(me);
+            assert_eq!(reply.organizer.is_empty(), !organizes, "{rsvp:?} organizer");
+            assert_eq!(reply.attendees.len(), 1, "{rsvp:?} roster");
+            assert_eq!(reply.attendees[0].email, me);
+            assert_eq!(reply.attendees[0].partstat, partstat, "{rsvp:?} PARTSTAT");
+            assert_eq!(reply.attendees[0].fauna_status, status, "{rsvp:?} status");
+            assert_eq!(reply.interested, interested, "{rsvp:?} interested");
+        }
+    }
+
+    /// What `put_event` stores is what the Events page reads back: the reply
+    /// rendered into the VEVENT survives the roster parse with its PARTSTAT,
+    /// and `ORGANIZER` appears only for the hosted event.
+    #[test]
+    fn the_stored_vevent_reads_the_owners_answer_back() {
+        use fauna_core::ical::{EventFields, parse_ical_attendees, render_stored_event};
+        use fauna_core::rsvp::RsvpState;
+
+        let me = "me@fauna.test";
+        for (rsvp, status) in [
+            (Rsvp::Joined, "going"),
+            (Rsvp::Declined, "declined"),
+            (Rsvp::Interested, "tentative"),
+            (Rsvp::Hosted, "going"),
+        ] {
+            let reply = event(rsvp).owner_reply(me);
+            let fields = EventFields {
+                summary: "Picnic".into(),
+                dtstart: "2021-08-26T17:46:40Z".into(),
+                dtend: "2021-08-26T18:46:40Z".into(),
+                uid: "archive:facebook:1".into(),
+                ..Default::default()
+            };
+            let ics = render_stored_event(&fields, &reply.attendees, &reply.organizer, 0);
+            let roster = parse_ical_attendees(&ics);
+            assert_eq!(roster.len(), 1, "{rsvp:?}: {ics}");
+            assert!(roster[0].email.eq_ignore_ascii_case(me), "{rsvp:?}: {ics}");
+            // The verbatim projection: Interested is recovered only from the
+            // sidecar marker `reply.interested` carries, never from the wire.
+            assert_eq!(
+                RsvpState::from_partstat_verbatim(&roster[0].partstat).as_str(),
+                status,
+                "{rsvp:?}: {ics}"
+            );
+            assert_eq!(
+                ics.contains("ORGANIZER"),
+                rsvp == Rsvp::Hosted,
+                "{rsvp:?}: {ics}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_owner_address_writes_no_roster_and_no_organizer() {
+        let reply = event(Rsvp::Hosted).owner_reply("");
+        assert!(reply.organizer.is_empty());
+        assert!(reply.attendees.is_empty());
+        assert!(!reply.interested);
     }
 }

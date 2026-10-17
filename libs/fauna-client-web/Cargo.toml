@@ -20,14 +20,17 @@ fauna-core = { path = "../fauna-core", default-features = false }
 # `RpcRequester` + the typed `fauna.web.*` request/reply pairs (one source of
 # truth shared with the nest handlers). default-features = false drops the `p2p`
 # default so the crate stays wasm-safe; `js` forwarded on wasm below.
-fauna-protocol = { path = "../fauna-protocol", default-features = false }
+# `web`: this crate IS the `fauna.web.*` plane, so it carries the plane's
+# kind-catalog entries wherever it is linked (fauna-protocol's `web` feature —
+# a build that excises the plane drops this crate, and the catalog text with it).
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["web"] }
 serde = { workspace = true }
 serde_bytes = "0.11"
 uniffi = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
-fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js"] }
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["js", "web"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }

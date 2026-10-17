@@ -264,6 +264,69 @@ pub fn version_retention_write(edit: &VersionRetentionEdit) -> VersionRetentionW
     }
 }
 
+// ── The refresh rule: staged edits survive a re-read ───────────────────────
+//
+// Every app re-reads its folder rows on every store change, and a busy account
+// changes its store between the typing and the save — so an editor that
+// re-seeds on each refresh puts the nest's values back under the user's cursor,
+// and the save then sends the OLD policy with no error (tui's live red,
+// 2026-10-06). The rule is one comparison, but it is a rule every app's refresh
+// path must ask the same way, so it lives here beside the prefill it guards.
+
+/// The editor's six buffers as one comparable value — the four policy controls
+/// plus the version-retention pair, because one `folder-nest-save-button`
+/// sends all six.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct NestPlaceForm {
+    pub policy: NestPlaceEdit,
+    pub version_retention: VersionRetentionEdit,
+}
+
+/// Seed all six buffers from a folder row — [`nest_place_edit_from_row`] and
+/// [`version_retention_edit_from_bounds`] side by side, nothing more.
+pub fn nest_place_form_from_row(
+    nest_snapshots: Option<bool>,
+    nest_snapshot_quiet_secs: Option<i64>,
+    retention_policy: Option<String>,
+    version_retention_max_versions: u32,
+    version_retention_max_age_days: u32,
+) -> NestPlaceForm {
+    NestPlaceForm {
+        policy: nest_place_edit_from_row(
+            nest_snapshots,
+            nest_snapshot_quiet_secs,
+            retention_policy,
+        ),
+        version_retention: version_retention_edit_from_bounds(
+            version_retention_max_versions,
+            version_retention_max_age_days,
+        ),
+    }
+}
+
+/// What a refreshed folder row does to the editor: `Some(fresh)` — paint it,
+/// and record it as the new seed — or `None` — leave the boxes as they are.
+///
+/// The boxes move only while they still hold `seeded`, what the app last
+/// painted into them (nobody has typed), or when there is no seed on record:
+/// the first paint, or a save that RELEASED the boxes (the app drops its seed
+/// when `folder-nest-save-button` sends them), which is how the save's own
+/// refresh shows what the nest actually stored rather than what was typed. A
+/// staged edit in any one box holds all six, the version pair included, since
+/// they leave together. A policy another device changed meanwhile does not
+/// override a staged edit either: the user's save is the newer intent.
+pub fn nest_place_reseed(
+    seeded: Option<&NestPlaceForm>,
+    on_screen: &NestPlaceForm,
+    fresh: NestPlaceForm,
+) -> Option<NestPlaceForm> {
+    match seeded {
+        Some(seeded) if seeded != on_screen => None,
+        _ => Some(fresh),
+    }
+}
+
 /// Serialize the two retention boxes back to the nest's opaque JSON.
 ///
 /// A blank box rides as `0`, the nest's own spelling of "that bound is unset" —

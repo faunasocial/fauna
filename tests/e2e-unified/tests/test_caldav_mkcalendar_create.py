@@ -3,7 +3,7 @@ dedicated MKCALENDAR verb, end-to-end through the real binary stack.
 
 The symmetric WRITE companion to `test_caldav_discovery_sequence.py` (which pins
 the READ/discovery WALK). The user's macOS Calendar.app hand-proof
-against example.com found CONNECT + READ + SYNC worked live but **creating a
+against the live nest found CONNECT + READ + SYNC worked live but **creating a
 calendar in Calendar.app failed** — the alert "This is not a location that
 supports this request". Root cause: macOS issues the dedicated RFC 4791 §5.3.1
 `MKCALENDAR` verb, which emersion/go-webdav routes nowhere (it knows only `MKCOL`)
@@ -98,7 +98,7 @@ def test_macos_style_mkcalendar_create_then_event_round_trip(app, dedicated_mail
     app.mail_settings.navigate()
     assert app.mail_settings.is_page_visible(), "mail-settings page must be reachable"
     app.mail_settings.enable_mail_plain(_PASSWORD)
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "enabling mail must mint the default credential; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )

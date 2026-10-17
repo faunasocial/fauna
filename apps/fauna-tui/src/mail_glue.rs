@@ -230,13 +230,13 @@ pub fn build_atproto_settings_machine(
     )
 }
 
-/// Opportunistically refresh the published mail content-sealing epoch
-/// schedule on every successful (re)connect
+/// One pass of the published mail content-sealing epoch schedule refresh
 /// (`docs/goal/architecture/encryption-at-rest.md` § Capability tiering →
-/// *Content-sealing epochs*), mirroring linux's
-/// `FaunaClient::refresh_mail_epoch_schedule` posture exactly: fired at the
-/// same universal post-auth hook `session::establish` wires everything else
-/// off, best-effort/log-only. Delegates to the shared, idempotent
+/// *Content-sealing epochs*), for the session patch's post-auth edge
+/// (`session::reconverge_post_auth`). The every-(re)connect trigger is the
+/// shared `rpc_glue::refresh_epoch_schedule_on_every_connect`, which
+/// `session::establish` spawns once per client; this is the extra pass a
+/// same-client patch takes. Best-effort/log-only. Delegates to the shared, idempotent
 /// `MailSettingsMachine::refresh_epoch_schedule`, which no-ops when mail
 /// isn't enabled (no MSEK) — so this is always safe to call unconditionally.
 /// Without it, a schedule published at enable-mail time slides stale past

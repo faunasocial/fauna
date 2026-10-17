@@ -153,10 +153,22 @@ pub(crate) fn test_engine_with_nest_client(
     folder: &str,
     nest_client: Arc<fauna_client::NestClient>,
 ) -> SyncEngine {
+    test_engine_with_nest_client_keyed(watch_dir, folder, nest_client, None)
+}
+
+/// [`test_engine_with_nest_client`] holding an owner seal key — what a pass
+/// that seals anything (the set-name stamp, a re-seal) needs before it puts a
+/// frame on the caller's control plane.
+pub(crate) fn test_engine_with_nest_client_keyed(
+    watch_dir: std::path::PathBuf,
+    folder: &str,
+    nest_client: Arc<fauna_client::NestClient>,
+    backup_key: Option<fauna_core::crypto::OwnerSealKey>,
+) -> SyncEngine {
     test_engine_inner_over(
         watch_dir,
         Some(folder),
-        None,
+        backup_key,
         None,
         None,
         None,
@@ -619,6 +631,96 @@ async fn an_absent_residency_reading_keeps_an_own_record() {
     assert_eq!(engine.db().residency_reading().unwrap(), None);
 
     assert!(!engine.is_dehydration_safe("mine.txt"));
+}
+
+/// The binding's three questions, one gate: what the holder-keeps clause
+/// keeps (row-only, so a binding refuses before the OS frees anything), the
+/// list of such bodies (re-read after every posture refresh — the flip), and
+/// whether the disk still is the recorded content (what an in-sync assertion
+/// may vouch for, kept body or not).
+#[tokio::test]
+async fn the_kept_bodies_follow_the_residency_reading() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(watch.path().to_path_buf()).with_metadata_only_residency(false);
+    record_own_write(&engine, watch.path(), "mine.txt", b"recorded while full");
+    // A fetched body and a record that never landed sit beside it.
+    let fetched_manifest = fauna_core::data::ContentHash::from_digest_raw([0x77; 32]);
+    engine
+        .db()
+        .upsert_entry(
+            "theirs.txt",
+            None,
+            None,
+            Some(fetched_manifest),
+            SyncState::Placeholder,
+            0,
+            0,
+            5,
+            1,
+            None,
+        )
+        .unwrap();
+    std::fs::write(watch.path().join("theirs.txt"), b"bytes").unwrap();
+    engine
+        .mark_hydrated(
+            "theirs.txt",
+            fauna_core::data::ContentHash::of_raw(b"bytes"),
+        )
+        .unwrap();
+    let unrecorded = fauna_core::data::ContentHash::of_raw(b"never recorded");
+    std::fs::write(watch.path().join("pending.txt"), b"never recorded").unwrap();
+    engine
+        .db()
+        .upsert_entry(
+            "pending.txt",
+            Some(unrecorded),
+            None,
+            None,
+            SyncState::Synced,
+            0,
+            0,
+            14,
+            1,
+            None,
+        )
+        .unwrap();
+
+    assert!(
+        !engine.keeps_own_record("mine.txt"),
+        "a full folder keeps nothing"
+    );
+    assert!(engine.kept_own_records().unwrap().is_empty());
+    assert!(engine.is_recorded_content("mine.txt"));
+
+    engine.install_residency(Some(true));
+    assert!(
+        engine.keeps_own_record("mine.txt"),
+        "the flip reaches the record"
+    );
+    assert!(
+        !engine.keeps_own_record("theirs.txt"),
+        "a fetched body is not kept"
+    );
+    assert!(
+        !engine.keeps_own_record("absent.txt"),
+        "no row, nothing recorded to keep"
+    );
+    assert_eq!(
+        engine.kept_own_records().unwrap(),
+        vec!["mine.txt".to_string()],
+        "only a body this device's own record vouches for — not a fetched one, not a \
+         record that never landed"
+    );
+    assert!(
+        engine.is_recorded_content("mine.txt") && !engine.is_dehydration_safe("mine.txt"),
+        "the disk still is the recorded content; only freeing it is refused"
+    );
+
+    std::fs::write(watch.path().join("mine.txt"), b"edited since").unwrap();
+    assert!(
+        !engine.is_recorded_content("mine.txt"),
+        "an edit since the record is not the recorded content"
+    );
 }
 
 /// A rebuild over a state DB that holds a *full* reading, on a binding whose
@@ -1718,6 +1820,140 @@ async fn a_recreation_after_an_applied_tombstone_is_not_a_conflict() {
         "the tombstone already applied once — declining its replay against a \
          recreation is not an overruled delete"
     );
+}
+
+// ---- the on-demand fold's deletes — the same verdict, the disk before the row ----
+//
+// An on-demand root runs no `apply_remote_changes`: its fold reports a remote delete
+// of a live row (`PlaceholderFold::deleted`) and the host applies it through
+// `SyncEngine::apply_folded_delete`, with the binding's removal as `remove`
+// (`delete-propagation.md` § *How a delete travels*).
+
+/// A peer's delete of `rel`, as the fold reports it.
+fn folded(rel: &str) -> crate::engine::FoldedDelete {
+    crate::engine::FoldedDelete {
+        relative_path: rel.to_string(),
+        deleting_device: Some("bb".repeat(32)),
+    }
+}
+
+/// A settled copy the disk re-hashes to: the binding removes the file while the row
+/// still stands, the row goes only after, and the removal-echo suppression is armed so
+/// the watcher's `Removed` for our own unlink is not recorded back as a user delete.
+#[tokio::test]
+async fn a_folded_delete_removes_an_in_sync_copy_before_its_row() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(watch.path().to_path_buf());
+    seed_tracked_file(&engine, watch.path(), "notes.txt", b"synced v1");
+    let full = watch.path().join("notes.txt");
+
+    let outcome = engine
+        .apply_folded_delete(&folded("notes.txt"), |p| {
+            assert_eq!(p, full.as_path(), "the binding removes the row's own file");
+            assert!(
+                engine.db().get_entry("notes.txt").unwrap().is_some(),
+                "the row must still stand while the disk is touched — dropped first, a \
+                 failed removal would strand the file for ever"
+            );
+            std::fs::remove_file(p).map_err(Into::into)
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, crate::engine::FoldedDeleteOutcome::Applied);
+    assert!(!full.exists(), "the file left the disk");
+    assert!(
+        engine.db().get_entry("notes.txt").unwrap().is_none(),
+        "the row is hard-removed (a tombstone would block a later re-create)"
+    );
+    assert!(
+        engine.was_recent_removal("notes.txt"),
+        "the removal-echo suppression is armed for our own unlink"
+    );
+}
+
+/// A removal the binding fails: the row stays (the fold reads the whole log, so its
+/// next pass reports the delete again) and the suppression is disarmed — no event of
+/// ours is coming, and a later genuine delete must not be swallowed.
+#[tokio::test]
+async fn a_failed_folded_delete_removal_keeps_the_row_for_the_next_pass() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(watch.path().to_path_buf());
+    seed_tracked_file(&engine, watch.path(), "notes.txt", b"synced v1");
+    let full = watch.path().join("notes.txt");
+
+    let result = engine
+        .apply_folded_delete(&folded("notes.txt"), |_| {
+            Err(anyhow::anyhow!("the file is open in another process"))
+        })
+        .await;
+
+    assert!(result.is_err(), "the failure is the caller's to log");
+    assert!(full.exists());
+    assert_eq!(
+        engine.db().get_entry("notes.txt").unwrap().map(|e| e.state),
+        Some(SyncState::Synced),
+        "the row stays for the next pass"
+    );
+    assert!(
+        !engine.was_recent_removal("notes.txt"),
+        "nothing was removed, so the suppression is disarmed"
+    );
+}
+
+/// An unsynced edit on a settled row (the mid-debounce shape): the verdict the
+/// resident pull runs keeps the bytes and records the delete-vs-edit conflict; the
+/// binding is never asked to remove anything.
+#[tokio::test]
+async fn a_folded_delete_never_destroys_an_unsynced_edit() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(watch.path().to_path_buf());
+    seed_tracked_file(&engine, watch.path(), "notes.txt", b"synced v1");
+    let full = watch.path().join("notes.txt");
+    std::fs::write(&full, b"the unsynced edit").unwrap();
+
+    let outcome = engine
+        .apply_folded_delete(&folded("notes.txt"), |p| {
+            panic!("an unsynced edit must never reach the binding's removal: {p:?}")
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, crate::engine::FoldedDeleteOutcome::KeptConflict);
+    assert_eq!(std::fs::read(&full).unwrap(), b"the unsynced edit");
+    assert!(engine.db().get_entry("notes.txt").unwrap().is_some());
+    let conflicts = engine.db().list_unresolved_conflicts().unwrap();
+    assert!(
+        conflicts
+            .iter()
+            .any(|(_, path, kind, _, _)| path == "notes.txt" && kind == "delete_declined"),
+        "the declined delete is a `delete_declined` conflict (locally, with the nest \
+         unreachable); got {conflicts:?}"
+    );
+}
+
+/// A row that moved since the fold: a local delete made it `LocallyDeleted` (the delete
+/// this device owes is moot — the row goes, as the fold settles it), or it is gone.
+#[tokio::test]
+async fn a_folded_delete_of_a_row_settled_since_the_fold_is_moot() {
+    let watch = tempfile::tempdir().unwrap();
+    let engine = test_engine(watch.path().to_path_buf());
+    seed_tracked_row(&engine, "owed.txt", b"deleted here too");
+    engine
+        .db()
+        .update_state("owed.txt", SyncState::LocallyDeleted)
+        .unwrap();
+    let never =
+        |p: &std::path::Path| -> anyhow::Result<()> { panic!("nothing is left to remove: {p:?}") };
+
+    for rel in ["owed.txt", "never-tracked.txt"] {
+        let outcome = engine
+            .apply_folded_delete(&folded(rel), never)
+            .await
+            .unwrap();
+        assert_eq!(outcome, crate::engine::FoldedDeleteOutcome::Moot, "{rel}");
+        assert!(engine.db().get_entry(rel).unwrap().is_none(), "{rel}");
+    }
 }
 
 // ---- the fold evidence bound (3) reads (`crate::succession_drain`) ----

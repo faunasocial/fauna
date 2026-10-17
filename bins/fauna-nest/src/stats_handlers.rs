@@ -91,28 +91,23 @@ fn get_handler() -> RpcHandler {
             let req: StatsGetRequest = decode(&payload).map_err(malformed)?;
 
             // A set is named by its hash alone once the app's funnel takes the
-            // plaintext off (`fauna_protocol::folders::addressed`), so either
-            // carrier selects the per-folder arm — never the nest-wide one.
-            let name_hash = crate::routes::parse_name_hash(&req.name_hash, |m| invalid_request(m))?;
-            let folder = match (req.folder, name_hash) {
-                (Some(name), _) => Some(name),
-                (None, Some(_)) => Some(String::new()),
-                (None, None) => None,
-            };
-            match folder {
-                Some(name) => {
+            // plaintext off (`fauna_protocol::folders::addressed`), or by its
+            // row (`set-addressing.md` § The row form), so any carrier selects
+            // the per-folder arm — never the nest-wide one.
+            let per_folder =
+                (req.folder.is_some() || req.name_hash.is_some() || req.folder_id.is_some())
+                    .then(|| crate::routes::parse_set_address(&req, |m| invalid_request(m)))
+                    .transpose()?;
+            match per_folder {
+                Some(address) => {
                     // Per-folder (the twin's `?folder=` branch), owner-scoped
                     // (ST-1): not yours / missing → `not_found` (a 404 that also
                     // hides whether the set exists for another user).
-                    let s = crate::backup::stats::compute_folder_stats(
-                        &state.db,
-                        &name,
-                        name_hash.as_ref(),
-                        &actor_id,
-                    )
-                    .await
-                    .map_err(internal)?
-                    .ok_or_else(not_found)?;
+                    let s =
+                        crate::backup::stats::compute_folder_stats(&state.db, address, &actor_id)
+                            .await
+                            .map_err(internal)?
+                            .ok_or_else(not_found)?;
                     encode_reply(&StatsGetReply::Folder {
                         folder: s.folder,
                         snapshot_count: s.snapshot_count,

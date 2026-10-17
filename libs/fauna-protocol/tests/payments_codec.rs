@@ -197,3 +197,21 @@ fn claims_list_reply_roundtrip() {
     });
     roundtrip(ClaimsListReply::default());
 }
+
+// ── claims.void ─────────────────────────────────────────────────
+
+#[test]
+fn claim_void_request_roundtrip() {
+    roundtrip(ClaimVoidRequest {
+        code: "ABCD2345EF".into(),
+        extra: Default::default(),
+    });
+}
+
+#[test]
+fn claim_void_reply_roundtrip() {
+    roundtrip(ClaimVoidReply {
+        voided_at: Timestamp(1_750_000_004_000_000),
+        extra: Default::default(),
+    });
+}

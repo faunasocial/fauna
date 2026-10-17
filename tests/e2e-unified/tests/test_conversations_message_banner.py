@@ -180,11 +180,14 @@ def test_new_message_raises_a_banner_except_in_the_open_thread(logged_in_app):
         "shared tracker seeds silently on its first non-empty snapshot."
     )
 
-    # ── Seed the tracker, and assert the seeding batch when it is ours ──────
+    # ── Seed the tracker, and assert the seeding batch stayed silent ────────
     # After this inject the tracker is certainly seeded, whichever way the
-    # account was loaded. When the account was EMPTY at login this inject is
-    # itself the seeding snapshot, so the same rule applies to it and is worth
-    # asserting; when it was not, the assertion above already covered the seed.
+    # account was loaded. WHICH snapshot seeded it is the tracker's to say, not
+    # the thread list read above: the rails load asynchronously, so a list read
+    # before the login load landed looks empty while the load seeds the tracker
+    # a moment later — and `alpha` is then genuinely new, rightly bannered (a
+    # 2026-10-12 sweep red read exactly that as a seed that fired). So the
+    # silent-seed rule is asserted against the batch the tracker names.
     planted = banners["started"]
     alpha = conv.inject_and_resolve_thread(
         rail="FaunaMls",
@@ -193,13 +196,18 @@ def test_new_message_raises_a_banner_except_in_the_open_thread(logged_in_app):
         body="the thread that seeds the tracker",
     )
     waiting.await_banner_pass_after(d, planted, what="the seeding thread")
-    if not threads_at_login:
-        assert waiting.fired_banner_threads(d) == [], (
-            "the FIRST batch of threads this app ever saw raised a banner "
-            f"({waiting.fired_banner_threads(d)}). The account was empty at "
-            "login, so this inject is the seeding snapshot and is silent by the "
-            "same rule the login load follows."
-        )
+    seeded_with = waiting.require_message_banners(d).get("seeded_with")
+    assert seeded_with, (
+        "the banner log names no seeding batch after a non-empty snapshot "
+        f"({waiting.message_banners(d)}) — `message_banners_json` owes "
+        "`seeded_with` (fauna_conversations::notification)."
+    )
+    fired_from_seed = [t for t in waiting.fired_banner_threads(d) if t in seeded_with]
+    assert fired_from_seed == [], (
+        f"thread(s) {fired_from_seed} of the snapshot that seeded the tracker "
+        f"raised a banner (seeding batch: {seeded_with}). The seeding snapshot "
+        "is silent — the login load is not news."
+    )
 
     # ── Rule 1: a message in a thread you do not have open raises a banner ──
     before = waiting.fired_banner_threads(d)

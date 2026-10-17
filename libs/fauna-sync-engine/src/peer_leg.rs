@@ -79,7 +79,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
 use fauna_account_store::backend::StoreBackend;
-use fauna_account_store::sqlite::SqliteBackend;
+use fauna_account_store::sqlite::{ReplicaSealKey, SqliteBackend};
 use fauna_account_store::store::AccountStore;
 use fauna_account_store::types::WriterId;
 use fauna_core::device_endpoints::DeviceEndpoints;
@@ -133,6 +133,13 @@ pub struct PeerFileSync {
     /// for, through the one serve core (the agent passes its relay seat's
     /// `RelaySeat::serve_peer`).
     pub file_chunks: fauna_peer_sync::FileChunkFn,
+    /// The folder row door's source: a folder's held change rows, from the
+    /// folder's own state DB (`SyncDbShareStore::rows_since` —
+    /// `p2p.md` § Same-account nest-down folder transfer).
+    pub folder_changes: fauna_peer_sync::FolderChangesFn,
+    /// The folder manifest door's source: a folder's retained manifests
+    /// (`SyncDbShareStore::retained_manifest_bytes`).
+    pub folder_manifests: fauna_peer_sync::FolderManifestFn,
     /// The pull half: the registry the dial pass fills with the siblings it
     /// admitted, which the host's engines ask before the nest
     /// (`SyncEngine::with_sibling_chunks`).
@@ -181,6 +188,9 @@ pub(crate) struct PeerLegState {
     /// The per-actor store dir — the serve side opens its own connection to
     /// it (the store's multi-connection posture, the W2.6 serve shape).
     store_dir: PathBuf,
+    /// The replica seal key the serve connection opens sealed rows with
+    /// — `None` only in tests that build the state over a plain store.
+    seal_key: Option<ReplicaSealKey>,
     actor_id_hex: String,
     node: Option<PeerNode>,
     /// The bound transport, kept beside the node for the DIAL half:
@@ -240,6 +250,7 @@ impl PeerLegState {
         PeerLegState {
             factory,
             store_dir,
+            seal_key: None,
             actor_id_hex,
             node: None,
             transport: None,
@@ -252,6 +263,12 @@ impl PeerLegState {
             removed_devices: WithdrawalSnapshot::underived(),
             custodied_exclusions: Default::default(),
         }
+    }
+
+    /// The serve connection opens the replica with `key`.
+    pub(crate) fn with_seal_key(mut self, key: ReplicaSealKey) -> Self {
+        self.seal_key = Some(key);
+        self
     }
 }
 
@@ -506,8 +523,11 @@ where
     let account: [u8; 32] = fauna_core::hex32::decode(&state.actor_id_hex)
         .map_err(|e| anyhow::anyhow!("peer leg: actor id: {e}"))?;
     let writer = WriterId(writer_key.verifying_key().to_bytes());
-    let serve_backend =
-        SqliteBackend::open(&state.store_dir).context("peer leg: open serve backend")?;
+    let serve_backend = match &state.seal_key {
+        Some(key) => SqliteBackend::open_with_key(&state.store_dir, key.clone()),
+        None => SqliteBackend::open(&state.store_dir),
+    }
+    .context("peer leg: open serve backend")?;
     let serve_store = AccountStore::open(serve_backend, &state.actor_id_hex, writer)
         .await
         .context("peer leg: open serve store")?;
@@ -548,6 +568,13 @@ where
             // chunk pull is that core's further consumer (`file-sync.md`
             // § Relay serving).
             file_chunks: binding.file_sync.as_ref().map(|f| f.file_chunks.clone()),
+            // A sibling's folder rows and the manifests they name, from the
+            // folders this host runs engines for — the nest-down row half.
+            folder_changes: binding.file_sync.as_ref().map(|f| f.folder_changes.clone()),
+            folder_manifests: binding
+                .file_sync
+                .as_ref()
+                .map(|f| f.folder_manifests.clone()),
             quotas: QuotaConfig::default(),
             now,
         },
@@ -574,11 +601,24 @@ where
     Ok(PeerLegPass::Bound)
 }
 
-/// A generous per-sibling ceiling for the whole dial → admit → walk → pull
-/// interaction — a budget a green run never pays (convention 14), sized so a
-/// black-holed candidate set cannot stall the pump for the pass's whole
-/// lifetime times the fleet size.
+/// A generous per-sibling ceiling for each half of the interaction — the
+/// connect + admission, run concurrently across the pass's targets, and the
+/// walk + pull, run one target after another — a budget a green run never
+/// pays (convention 14), sized so a black-holed candidate set cannot stall the
+/// pump for the pass's whole lifetime times the fleet size.
 const PER_SIBLING_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The connect half's own ceiling — the dial plus the channel open, before any
+/// admission or walk ([`dial_and_open_channel`], shared by the sibling and
+/// custody dial passes). Every pass-bound command waits for the pass
+/// (`account-client-lifecycle.md` § The client-side lifecycle → *Commands and
+/// passes*), so a target nobody answers for — an offline sibling, the
+/// previous launch's dead endpoint — may cost the pass only this, never the
+/// whole-interaction budget nor the transport's own connect timeout (~30 s,
+/// measured on a fresh-store tui prologue 2026-10-12). Sized like
+/// `PER_SIBLING_BUDGET`, a budget a green run never pays: a reachable peer
+/// connects, relay fallback included, in a fraction of it.
+pub(crate) const CONNECT_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The dial pass (the pull half of the peer leg): for every sibling
 /// the store's device-endpoints entries name, dial over the SAME transport
@@ -647,6 +687,10 @@ where
     let file_siblings = state.file_sync.as_ref().map(|f| Arc::clone(&f.siblings));
     if let Some(registry) = &file_siblings {
         registry.set_nest(nest);
+        // Before the dials, and before the empty-target return below: a
+        // sibling this pass no longer dials — a removal merged since its
+        // admission — must not keep the channel it was admitted on.
+        registry.retain_only(&siblings);
     }
     // The owner-side custodian dials (W8.5 P5): custodians this account
     // granted custody to, from the fleet-only `custodian-endpoints` rows the
@@ -679,31 +723,58 @@ where
     // device's relay plane either.
     let removed_devices = &state.removed_devices;
     let custodied_exclusions = &state.custodied_exclusions;
-    for target in targets {
-        let attempt = tokio::time::timeout(
+    // Every target connects and admits AT ONCE, so a pass with several
+    // unreachable siblings pays one connect budget, not one each; the walks
+    // then run one after another, as they always have — each holds the store
+    // (`account-sync-plane.md` § The peer leg → *Discovery*). Admission rides
+    // with the connect, never with the walk: the serving node drops a
+    // connection whose dialer has not opened its stream within
+    // `INBOUND_STREAM_ACCEPT_TIMEOUT`, so a channel left unspoken until an
+    // earlier target's walk ended would be dropped before its turn.
+    let connected = futures_util::future::join_all(targets.iter().map(|target| {
+        tokio::time::timeout(
             PER_SIBLING_BUDGET,
-            dial_one(
+            connect_and_admit_sibling(
                 transport,
-                &target,
+                target,
                 &witness.wire,
                 &account,
-                store,
-                schedule,
-                trust,
-                writer_key,
-                slot,
-                content_scopes,
                 revoked,
                 removed_devices,
                 custodied_exclusions,
                 own_endpoints,
-                nest,
             ),
         )
-        .await;
+    }))
+    .await;
+    for (target, connected) in targets.into_iter().zip(connected) {
+        let attempt = match connected {
+            Ok(Ok((channel, peer_endpoints))) => tokio::time::timeout(
+                PER_SIBLING_BUDGET,
+                walk_sibling(
+                    &channel,
+                    store,
+                    schedule,
+                    trust,
+                    writer_key,
+                    slot,
+                    content_scopes,
+                    nest,
+                ),
+            )
+            .await
+            .map(|walked| {
+                walked.map(|(applied, pulled)| (applied, pulled, peer_endpoints, channel))
+            }),
+            Ok(Err(e)) => Ok(Err(e)),
+            Err(elapsed) => Err(elapsed),
+        };
         match attempt {
             Ok(Ok((applied, pulled, peer_endpoints, channel))) => {
                 report.admitted += 1;
+                if channel.path() == fauna_transport::PathKind::Relay {
+                    report.admitted_relayed += 1;
+                }
                 report.applied += applied;
                 report.blocks_fetched += pulled.fetched;
                 report.blocks_relay_deferred += pulled.relay_deferred;
@@ -743,6 +814,47 @@ where
     Ok(Some(report))
 }
 
+/// The custodian dial pass's NEST arm, as the pump runs it
+/// ([`crate::custodian_nest_restore`]): the account and the revocation view
+/// are this leg's, the identity is the slot's enrollment witness. Deliberately
+/// NOT gated on the leg being bound — the arm rides the nest wire, never the
+/// peer plane — only on enrollment (`None` while this machine carries no
+/// `DeviceAuthorization`, the one thing the fleet handshake cannot do without).
+#[allow(clippy::too_many_arguments)] // see dial_pass
+pub(crate) async fn custodian_nest_arm<B>(
+    state: &PeerLegState,
+    store: &AccountStore<B>,
+    schedule: &fauna_core::crypto::AccountStateKeySchedule,
+    trust: &crate::generation_tip::GenerationTrust,
+    writer_key: &SigningKey,
+    slot: &dyn PrincipalCustody,
+    content_scopes: &[fauna_protocol::scope::ContentScope],
+    nest: fauna_transport::NestPath,
+) -> Result<Option<crate::custodian_nest_restore::NestArmReport>>
+where
+    B: StoreBackend,
+{
+    let Some(witness) = slot.device_authorization() else {
+        return Ok(None);
+    };
+    let account: [u8; 32] = fauna_core::hex32::decode(&state.actor_id_hex)
+        .map_err(|e| anyhow::anyhow!("peer leg: actor id: {e}"))?;
+    crate::custodian_nest_restore::nest_custodian_arm(
+        store,
+        account,
+        schedule,
+        trust,
+        writer_key,
+        &witness.wire,
+        Some(slot),
+        content_scopes,
+        &state.revoked,
+        crate::custodian_nest_restore::NestArmTrigger::Pass(nest),
+    )
+    .await
+    .map(Some)
+}
+
 /// Dial a target's transport candidates and open the peer channel on the
 /// resulting connection — shared by the sibling dial pass ([`dial_one`])
 /// and the custody dial pass (`custody_leg::dial_one_owner`), which
@@ -753,18 +865,23 @@ pub(crate) async fn dial_and_open_channel(
     transport: &Arc<dyn PeerTransport>,
     target: &fauna_peer_sync::PeerDialTarget,
 ) -> Result<Arc<fauna_peer_channel::PeerChannel>> {
-    let conn = transport
-        .dial(
-            fauna_transport::EndpointKey::from_bytes(target.node_id),
-            target.candidates.clone(),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("dial: {e}"))?;
-    Ok(Arc::new(
-        fauna_peer_channel::PeerChannel::open(conn)
+    let connect = async {
+        let conn = transport
+            .dial(
+                fauna_transport::EndpointKey::from_bytes(target.node_id),
+                target.candidates.clone(),
+            )
             .await
-            .context("peer channel")?,
-    ))
+            .map_err(|e| anyhow::anyhow!("dial: {e}"))?;
+        Ok(Arc::new(
+            fauna_peer_channel::PeerChannel::open(conn)
+                .await
+                .context("peer channel")?,
+        ))
+    };
+    tokio::time::timeout(CONNECT_BUDGET, connect)
+        .await
+        .map_err(|_| anyhow::anyhow!("dial: no answer within {CONNECT_BUDGET:?}"))?
 }
 
 /// One content scope's walk + missing-block pull over an open channel —
@@ -795,35 +912,23 @@ pub(crate) async fn walk_and_pull_content_scope<B: StoreBackend>(
         .with_context(|| format!("{pull_context} {scope}"))
 }
 
-/// One sibling: dial → channel → mutual admission → the walks.
+/// One sibling's connect half: dial → channel → mutual admission. Runs
+/// concurrently across the pass's targets ([`dial_pass`]); the walks are
+/// [`walk_sibling`]'s, serially after.
 #[allow(clippy::too_many_arguments)] // see dial_pass
-async fn dial_one<B>(
+async fn connect_and_admit_sibling(
     transport: &Arc<dyn PeerTransport>,
     target: &fauna_peer_sync::PeerDialTarget,
     own_witness: &fauna_core::encoding::EmbedAsBytes,
     account: &[u8; 32],
-    store: &AccountStore<B>,
-    schedule: &fauna_core::crypto::AccountStateKeySchedule,
-    trust: &crate::generation_tip::GenerationTrust,
-    writer_key: &SigningKey,
-    slot: &dyn PrincipalCustody,
-    content_scopes: &[fauna_protocol::scope::ContentScope],
     revoked: &WithdrawalSnapshot<Vec<u8>>,
     removed_devices: &WithdrawalSnapshot<[u8; 32]>,
     custodied_exclusions: &fauna_peer_sync::admission::CustodiedExclusions,
     own_endpoints: Option<&DeviceEndpoints>,
-    nest: fauna_transport::NestPath,
 ) -> Result<(
-    usize,
-    fauna_peer_sync::PullReport,
-    Option<DeviceEndpoints>,
     Arc<fauna_peer_channel::PeerChannel>,
-)>
-where
-    B: StoreBackend,
-{
-    use fauna_protocol::account_state::{ACCOUNT_STATE_FLEET_SCOPE, ACCOUNT_STATE_SCOPE};
-
+    Option<DeviceEndpoints>,
+)> {
     let channel = dial_and_open_channel(transport, target).await?;
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -854,7 +959,28 @@ where
     .await
     .context("admission")?;
 
-    let requester = fauna_peer_sync::PeerRequester::new(Arc::clone(&channel));
+    Ok((channel, outcome.peer_endpoints))
+}
+
+/// One admitted sibling's walks: the two class-2 planes, then every content
+/// scope's feed walk and block pull.
+#[allow(clippy::too_many_arguments)] // see dial_pass
+async fn walk_sibling<B>(
+    channel: &Arc<fauna_peer_channel::PeerChannel>,
+    store: &AccountStore<B>,
+    schedule: &fauna_core::crypto::AccountStateKeySchedule,
+    trust: &crate::generation_tip::GenerationTrust,
+    writer_key: &SigningKey,
+    slot: &dyn PrincipalCustody,
+    content_scopes: &[fauna_protocol::scope::ContentScope],
+    nest: fauna_transport::NestPath,
+) -> Result<(usize, fauna_peer_sync::PullReport)>
+where
+    B: StoreBackend,
+{
+    use fauna_protocol::account_state::{ACCOUNT_STATE_FLEET_SCOPE, ACCOUNT_STATE_SCOPE};
+
+    let requester = fauna_peer_sync::PeerRequester::new(Arc::clone(channel));
     let mut applied = 0usize;
     let mut pulled = fauna_peer_sync::PullReport::default();
     // The two class-2 planes, custody attached to both — the production
@@ -886,7 +1012,7 @@ where
         let pull = walk_and_pull_content_scope(
             store,
             &requester,
-            &channel,
+            channel,
             cs,
             "content walk",
             "blocks pull",
@@ -897,7 +1023,7 @@ where
         pulled.missing += pull.missing;
         pulled.relay_deferred += pull.relay_deferred;
     }
-    Ok((applied, pulled, outcome.peer_endpoints, channel))
+    Ok((applied, pulled))
 }
 
 /// Take the listener down: the node (its accept loop and every inbound
@@ -1022,7 +1148,10 @@ where
     row
 }
 
-async fn fetch_nest_facts<R: RpcRequester>(rpc: &R) -> Result<PeerLegNestFacts> {
+/// One live `fauna.nest.info` read, as the facts the peer leg and the
+/// ceremony seat's bind doors both bind from: the capability list (rule 7's
+/// brake) and the relay URL this device's nest advertises.
+pub async fn fetch_nest_facts<R: RpcRequester>(rpc: &R) -> Result<PeerLegNestFacts> {
     let reply: NestInfoReply = rpc
         .request(NODE_INFO_KIND, NestInfoRequest::default())
         .await
@@ -1090,9 +1219,17 @@ mod tests {
              is the bound nest's walk alone (`succession-aftermath.md` § Re-key \
              scope → *Which walks carry*)"
         );
+        assert!(
+            !production.contains("ext_plane("),
+            "the peer leg derives an `ext:<kind>` plane: the driver's are handed \
+             the bound nest's predecessor schedules (`account_driver::pass::\
+             bound_ext_plane`), and one here must be handed none \
+             (`succession-aftermath.md` § Re-key scope → *Which walks carry*)"
+        );
         for retired in [
             "with_predecessor_mint_keys(",
             "with_predecessor_machinery_keys(",
+            ".predecessor_schedules()",
         ] {
             assert!(
                 !production.contains(retired),
@@ -1245,57 +1382,59 @@ mod tests {
 
     // ──  PER_SIBLING_BUDGET's witness ───────
 
-    /// The sibling-dial twin of `custody_leg`'s
-    /// `a_stalled_owner_device_does_not_block_the_next_owner_device`:
-    /// `PER_SIBLING_BUDGET`'s elapsed arm must not stop the sequential
-    /// `targets` loop — a sibling that blows its budget is counted `failed`,
-    /// and the NEXT sibling in the same pass is still dialed.
-    ///
-    /// `#[tokio::test(start_paused = true)]` turns the 120 s budget into an
-    /// instant clock advance (convention 14). The OUTER
-    /// `tokio::time::timeout` is the mutation-verification guard: delete the
-    /// inner wrapper from `dial_pass` and the slow sibling's dial hangs with
-    /// no timer anywhere else in the test for the paused clock to advance
-    /// to — the outer guard turns that into a red `.expect()` panic instead
-    /// of a hung test.
-    #[tokio::test(start_paused = true)]
-    async fn a_stalled_sibling_does_not_block_the_next_sibling() {
-        struct HangsForOneNode {
-            hangs: [u8; 32],
-            dialed: Arc<std::sync::Mutex<Vec<[u8; 32]>>>,
+    /// A dialer whose dial never answers for the `hangs` nodes and refuses
+    /// every other one at once, recording the order it was asked in.
+    struct HangsForNodes {
+        hangs: Vec<[u8; 32]>,
+        dialed: Arc<std::sync::Mutex<Vec<[u8; 32]>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl PeerTransport for HangsForNodes {
+        async fn dial(
+            &self,
+            peer: fauna_transport::EndpointKey,
+            _candidates: fauna_transport::PathCandidates,
+        ) -> Result<Box<dyn fauna_transport::PeerConn>, fauna_transport::TransportError> {
+            self.dialed.lock().unwrap().push(*peer.as_bytes());
+            if self.hangs.contains(peer.as_bytes()) {
+                // Never resolves — the slow sibling. No timer of its own;
+                // only the (inner, or absent-under-mutation outer) budget can
+                // ever make this `.await` return.
+                std::future::pending::<()>().await;
+                unreachable!("a pending future never resolves");
+            }
+            Err(fauna_transport::TransportError::NoPath)
         }
 
-        #[async_trait::async_trait]
-        impl PeerTransport for HangsForOneNode {
-            async fn dial(
-                &self,
-                peer: fauna_transport::EndpointKey,
-                _candidates: fauna_transport::PathCandidates,
-            ) -> Result<Box<dyn fauna_transport::PeerConn>, fauna_transport::TransportError>
-            {
-                self.dialed.lock().unwrap().push(*peer.as_bytes());
-                if *peer.as_bytes() == self.hangs {
-                    // Never resolves — the slow sibling. No timer of its
-                    // own; only the (inner, or absent-under-mutation outer)
-                    // budget can ever make this `.await` return.
-                    std::future::pending::<()>().await;
-                    unreachable!("a pending future never resolves");
-                }
-                Err(fauna_transport::TransportError::NoPath)
-            }
-
-            async fn listen(
-                &self,
-            ) -> Result<fauna_transport::IncomingConns, fauna_transport::TransportError>
-            {
-                Err(fauna_transport::TransportError::Unsupported)
-            }
-
-            fn local_identity(&self) -> fauna_transport::EndpointKey {
-                fauna_transport::EndpointKey::from_bytes([0; 32])
-            }
+        async fn listen(
+            &self,
+        ) -> Result<fauna_transport::IncomingConns, fauna_transport::TransportError> {
+            Err(fauna_transport::TransportError::Unsupported)
         }
 
+        fn local_identity(&self) -> fauna_transport::EndpointKey {
+            fauna_transport::EndpointKey::from_bytes([0; 32])
+        }
+    }
+
+    /// What one stalled-dial pass did: its report, the order the nodes were
+    /// dialed in, the verified siblings by id (the dial order), and how long
+    /// the pass took on the paused clock.
+    struct StalledPass {
+        report: DialPass,
+        dialed: Vec<[u8; 32]>,
+        siblings: Vec<[u8; 32]>,
+        elapsed: std::time::Duration,
+    }
+
+    /// One dial pass over `siblings` verified siblings, the lowest `hanging`
+    /// of which never answer. The OUTER `tokio::time::timeout` is the
+    /// mutation-verification guard: delete the inner budgets and a hung dial
+    /// has no timer anywhere else in the test for the paused clock to advance
+    /// to — the outer guard turns that into a red `.expect()` panic instead of
+    /// a hung test.
+    async fn stalled_dial_pass(siblings: u8, hanging: usize) -> StalledPass {
         let dir = tempfile::tempdir().unwrap();
         let key = SigningKey::from_bytes(&[9; 32]);
         let key_pub = key.verifying_key().to_bytes();
@@ -1340,17 +1479,16 @@ mod tests {
         )
         .expect("persist device authorization");
 
-        // Two verified siblings (a sibling is a dial candidate only while it
-        // is one). `states_of_kind` orders by key, so `sibling_dial_targets`
-        // yields the lower id first regardless of insertion order — that one
-        // is the slow sibling.
-        let mut siblings = [
-            SigningKey::from_bytes(&[0x61; 32]),
-            SigningKey::from_bytes(&[0x62; 32]),
-        ];
-        siblings.sort_by_key(|k| k.verifying_key().to_bytes());
-        let [slow_node, fast_node] = siblings.each_ref().map(|k| k.verifying_key().to_bytes());
-        for sibling in &siblings {
+        // Verified siblings (a sibling is a dial candidate only while it is
+        // one). `states_of_kind` orders by key, so `sibling_dial_targets`
+        // yields them by id regardless of insertion order — the lowest ones
+        // are the slow siblings.
+        let mut keys: Vec<SigningKey> = (0..siblings)
+            .map(|i| SigningKey::from_bytes(&[0x61 + i; 32]))
+            .collect();
+        keys.sort_by_key(|k| k.verifying_key().to_bytes());
+        let ids: Vec<[u8; 32]> = keys.iter().map(|k| k.verifying_key().to_bytes()).collect();
+        for sibling in &keys {
             stage_enrollment(&store, &account, sibling).await;
             stage_endpoints(&store, sibling.verifying_key().to_bytes()).await;
         }
@@ -1358,8 +1496,8 @@ mod tests {
         let dialed: Arc<std::sync::Mutex<Vec<[u8; 32]>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut state = PeerLegState::new(None, dir.path().to_path_buf(), actor_hex);
-        state.transport = Some(Arc::new(HangsForOneNode {
-            hangs: slow_node,
+        state.transport = Some(Arc::new(HangsForNodes {
+            hangs: ids[..hanging].to_vec(),
             dialed: Arc::clone(&dialed),
         }));
 
@@ -1372,6 +1510,7 @@ mod tests {
             trusted_holders: Default::default(),
         };
 
+        let started = tokio::time::Instant::now();
         let report = tokio::time::timeout(
             PER_SIBLING_BUDGET * 3,
             dial_pass(
@@ -1390,21 +1529,73 @@ mod tests {
         .await
         .expect(
             "dial_pass must return within an outer budget — if this fires, the inner \
-             PER_SIBLING_BUDGET timeout is gone and the slow sibling hung the whole pass",
+             budgets are gone and a slow sibling hung the whole pass",
         )
         .unwrap()
         .expect("a bound transport with an enrolled slot yields a report");
+        let elapsed = started.elapsed();
+        let dialed = dialed.lock().unwrap().clone();
+        StalledPass {
+            report,
+            dialed,
+            siblings: ids,
+            elapsed,
+        }
+    }
 
-        assert_eq!(report.targets, 2);
+    /// The sibling-dial twin of `custody_leg`'s
+    /// `a_stalled_owner_device_does_not_block_the_next_owner_device`: a
+    /// sibling whose dial never answers must not stop the pass — it is
+    /// counted `failed`, and the NEXT sibling in the same pass is still
+    /// dialed — and it costs the pass `CONNECT_BUDGET`, never the
+    /// whole-interaction `PER_SIBLING_BUDGET`.
+    ///
+    /// `#[tokio::test(start_paused = true)]` turns the budgets into instant
+    /// clock advances (convention 14); delete only the connect budget and the
+    /// elapsed assertion reds.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_sibling_does_not_block_the_next_sibling() {
+        let pass = stalled_dial_pass(2, 1).await;
+        let [slow_node, fast_node] = [pass.siblings[0], pass.siblings[1]];
+
+        assert_eq!(pass.report.targets, 2);
         assert_eq!(
-            report.failed, 2,
+            pass.report.failed, 2,
             "the elapsed slow sibling and the fast refusal both count as failed"
         );
-        assert_eq!(report.admitted, 0);
+        assert_eq!(pass.report.admitted, 0);
         assert_eq!(
-            *dialed.lock().unwrap(),
+            pass.dialed,
             vec![slow_node, fast_node],
             "the fast sibling must still be dialed after the slow one blows its budget"
+        );
+        // A target that never answers costs the pass its connect budget, not
+        // the whole-interaction one: every pass-bound command waits for the
+        // pass (a fresh-store tui prologue spent 30 of its 31 s dialing the
+        // previous launch's dead endpoint, measured 2026-10-12).
+        assert_eq!(
+            pass.elapsed, CONNECT_BUDGET,
+            "an unanswered dial must give up at CONNECT_BUDGET"
+        );
+    }
+
+    /// Several unanswered siblings cost the pass ONE connect budget, not one
+    /// each (`account-sync-plane.md` § The peer leg → *Discovery*): every
+    /// target connects at once, and only the walks run one after another.
+    /// Dial the targets one by one again and this pass ends at two budgets.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_siblings_cost_the_pass_one_connect_budget_between_them() {
+        let pass = stalled_dial_pass(3, 2).await;
+
+        assert_eq!(pass.report.targets, 3);
+        assert_eq!(pass.report.failed, 3);
+        assert_eq!(
+            pass.dialed, pass.siblings,
+            "every sibling is dialed, the slow ones included"
+        );
+        assert_eq!(
+            pass.elapsed, CONNECT_BUDGET,
+            "two unanswered dials must cost the pass one CONNECT_BUDGET between them"
         );
     }
 

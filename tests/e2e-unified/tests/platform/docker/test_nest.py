@@ -43,7 +43,11 @@ except Exception:
 pytestmark = [pytest.mark.skipif(not HAS_DOCKER, reason="Docker not available"), pytest.mark.tier_4, pytest.mark.self_contained_docker, pytest.mark.web]
 
 
-DOMAIN = "localhost"
+# What `fauna.setup.status` reports for a box that has never been given a domain:
+# discovery surfaces read `handle_domain_if_set()`, which omits the `localhost`
+# placeholder, so a domainless box answers "unknown"
+# (`domains-and-tls-bootstrap.md` § runtime-surface rule).
+DOMAINLESS_SETUP_STATUS_DOMAIN = "unknown"
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────
@@ -71,7 +75,8 @@ def nest_container(docker_image):
     name = f"fauna-nest-e2e-{port}"
     claim_code = "TE5T01"
     # No FAUNA_DOMAIN: the entrypoint is domainless now (it ignores the var).
-    # The box boots on the `localhost` identity fallback; a domained claim (see
+    # The box boots on the `localhost` TLS floor (`handle_domain()`), but discovery
+    # surfaces report "unknown" for it; a domained claim (see
     # test_real_hostname_serves_floor_https_under_acme) is what gives it a real
     # identity.
     start_container(name, port, env={
@@ -118,7 +123,7 @@ def test_docker_image_structure(docker_image):
     # (e2e-automation-surface-gating.md § Implementation status today → the Go
     # bridges' leg): the image's fauna-atproto-bridge is the production flavor,
     # so none of the e2e seam literals — the hostile-rotation flag name and the
-    # three FAUNA_ATPROTO_* harness redirect variables — may appear in it. The
+    # five FAUNA_ATPROTO_* harness redirect variables — may appear in it. The
     # recipe-level witness proves the justfile's build; this proves the
     # Dockerfile's, the one build path no recipe runs. `grep -a` inside the
     # image (the runtime layer has no binutils, so no `strings`); grep exits 1
@@ -128,6 +133,8 @@ def test_docker_image_structure(docker_image):
         "FAUNA_ATPROTO_FAKE_DNS_URL",
         "FAUNA_ATPROTO_PLC_DIRECTORY_URL",
         "FAUNA_ATPROTO_PROXY_FIXTURES",
+        "FAUNA_ATPROTO_PERMISSION_SET_FIXTURES",
+        "FAUNA_ATPROTO_RELAY_URL",
     ):
         result = subprocess.run(
             ["docker", "run", "--rm", "--entrypoint", "grep", docker_image,
@@ -207,7 +214,7 @@ def test_docker_nest_setup_status(nest_container):
     port, _ = nest_container
     with WsRpcAnonClient(f"https://127.0.0.1:{port}") as anon:
         data = anon.call("fauna.setup.status", {})
-    assert data["domain"] == DOMAIN
+    assert data["domain"] == DOMAINLESS_SETUP_STATUS_DOMAIN
     assert data["admin_exists"] is False
 
 

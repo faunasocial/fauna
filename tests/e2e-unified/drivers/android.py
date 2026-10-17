@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -77,6 +78,23 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         if not isinstance(files, list):
             raise RuntimeError(f"bridge GET /app-log answered without a files list: {reply!r}")
         return files
+
+    def get_clipboard_text(self) -> str | None:
+        """The system clipboard's plain text, read on the device by the
+        androidTest bridge's ``GET /clipboard/text`` (``ClipboardManager``, the
+        service the app's copy buttons write to) — the windows / linux / apple
+        contract: ``None`` when the clipboard holds no text; a bridge refusal
+        raises rather than reading empty.
+
+        The consumer is the copy journeys — outcome 13
+        (``helpers/recovery_restore.py::copy_the_shown_kit``) — not the
+        ceremony outcomes 6-9, which read the secret off the display. The
+        clipboard is device-wide, so a caller compares against a read taken
+        BEFORE its copy."""
+        reply = self._get("/clipboard/text")
+        if "error" in reply:
+            raise RuntimeError(f"android clipboard read refused: {reply['error']}")
+        return reply.get("text")
 
     def app_log_text(self) -> str | None:
         """This launch's on-disk app log — the client's own account of itself,
@@ -166,6 +184,20 @@ class AndroidBridgeDriver(HttpBridgeDriver):
             runs = self.call_command("compose_text_runs")
             return None if runs is None else json.dumps(runs)
         return super().get_attr(element_id, attribute, index, scope=scope)
+
+    #: Commit-on-Enter inputs: a ``click`` on one is the commit, the type-then-click
+    #: idiom the shared action layer uses for every app (``actions/custody.py``
+    #: ``set_held_budget``). A UiAutomator tap only focuses a Compose text field,
+    #: so the driver presses the field's own commit gesture instead — a hardware
+    #: Enter, which a single-line field performs as its IME action (pinned by
+    #: ``DevicesRosterContentTest.aHardwareEnterCommitsTheBudgetToo``).
+    COMMIT_ON_ENTER_INPUTS = frozenset({"custody-held-budget-input"})
+
+    def click(self, element_id: str, index: int = 0, *, scope: str | None = None) -> None:
+        if element_id in self.COMMIT_ON_ENTER_INPUTS and index == 0:
+            self.press_key(element_id, "Enter", scope=scope)
+            return
+        super().click(element_id, index, scope=scope)
 
     #: Ids whose ``type_text`` the UiAutomator bridge cannot perform, because the
     #: typed text lands in a hosted native widget with no test id rather than in
@@ -261,6 +293,8 @@ class AndroidBridgeDriver(HttpBridgeDriver):
                 check=True, capture_output=True, timeout=60,
             )
 
+        self._apply_permission_grants()
+
         # ADB port-forward: local port -> device port. `adb forward` listens on
         # the machine running the adb SERVER. With a local server that is this
         # machine and any free port will do; with a remote one (`adb_server`,
@@ -320,8 +354,9 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         self._wait_for_health(timeout=30)
 
         # Kept for `preserve_state_across_relaunch()`, which pins into it, and
-        # for the relaunch a real `recover()` will run from it.
+        # for the relaunch `recover()` runs from it.
         self._launch_config = config
+        self._note_store_owner(config)
         self._mark_log_baseline()
         self._post("/session", self._session_body(config))
 
@@ -367,14 +402,10 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         android twin of `IOSDriver.preserve_state_across_relaunch`; see the base
         contract.
 
-        **False while this driver cannot relaunch at all.** android's `recover()`
-        is still the base bridge health-probe (`supports_cold_relaunch()` is
-        False), so "the store
-        survives the relaunch" has no relaunch to survive, and a True here would
-        turn every caller's honest skip into a test that asserts a relaunch that
-        never happened. The pin itself is ready: once `recover()` relaunches
-        from `_launch_config`, the pinned `_PRESERVE_STORE_KEY` withholds the
-        seed overwrite and this answers True with no further change.
+        `recover()` relaunches from `_launch_config` via `_session_body`, so the
+        pinned `_PRESERVE_STORE_KEY` withholds the seed overwrite and the new
+        process reads back the store the old one wrote. Answers False before
+        any launch (no config to pin) or if the driver ever stops relaunching.
         """
         config = getattr(self, "_launch_config", None)
         if config is None or not self.supports_cold_relaunch():
@@ -385,7 +416,97 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         self._record_relaunch_pin(config, (self._PRESERVE_STORE_KEY,))
         return True
 
-    def teardown(self) -> None:
+    def recover(self) -> bool:
+        """Relaunch the app under test in place — the windows shape.
+
+        The instrumentation bridge, the adb forward (and its lease) and every
+        recorded reverse stay up: only the app process is cycled, by the
+        bridge's own `DELETE /session` (`stopApp`) then `POST /session`
+        (`launchApp`, which itself `am force-stop`s first). Tearing the bridge
+        down and relaunching would zero `_reverse_ports` and lose every port the
+        tests added beyond the launch config.
+
+        The relaunched app comes back SIGNED OUT, like every other driver's: the
+        bridge forwards whatever credential file the previous process left in
+        filesDir (`AppLauncher.launchApp`), so an unpinned relaunch whose config
+        carries no `seed_credentials` posts an explicit EMPTY seed, which the
+        bridge writes over that file. A pinned relaunch
+        (`preserve_state_across_relaunch`) withholds the seed altogether via
+        `_session_body`, so the new process reads back the store the old one wrote.
+        """
+        if not self._await_health():
+            return False
+        config = getattr(self, "_launch_config", None)
+        if config is None:
+            # launch() was never called; nothing to relaunch
+            self._bridge_dead = False
+            return True
+        self._bridge_dead = False
+        try:
+            self._delete("/session")
+        except Exception:
+            self._bridge_dead = True
+            return False
+        body = self._session_body(config)
+        if not config.get(self._PRESERVE_STORE_KEY):
+            # The empty seed below erases the store with every enrollment in it
+            # still live nest-side (a relaunch signs nothing out): keep what it
+            # held, so a later teardown can still retire it.
+            self._vault_slots_before_erase()
+            body.setdefault("seed_credentials", {})
+        # Re-take the log baseline so the pinned "per-launch" scope stays true:
+        # the relaunched process's log is read from here, not from the dead
+        # instance's tail.
+        self._mark_log_baseline()
+        try:
+            self._post("/session", body)
+        except Exception:
+            self._bridge_dead = True
+            return False
+        return True
+
+    # --- A discarded driver retires its machine (convention 10) ---
+
+    def _note_store_owner(self, config: dict) -> None:
+        """Record, at each `launch()`, whose store this machine's is. A seeded
+        launch is a store the CALLER wrote (`AndroidLaunchHarness`), whose
+        relaunch is `teardown()` + an unseeded `launch()` resuming it — so once
+        any launch of this driver was seeded, the flag stays set."""
+        self._store_caller_owned = (
+            getattr(self, "_store_caller_owned", False)
+            or config.get("seed_credentials") is not None
+        )
+
+    def _discards_machine_at_teardown(self) -> bool:
+        """True when this driver's teardown throws its machine away: no launch
+        of it was seeded (a seeded store is the caller's, which a later launch
+        resumes) and no `preserve_state_across_relaunch()` pin keeps it.
+
+        android's store is the app's filesDir on the device, which outlives the
+        driver; what makes a teardown a discard is that nothing this driver was
+        asked to keep rests there. A later unseeded launch on the same device
+        then finds the machine as its retirement left it — signed out."""
+        return not getattr(self, "_store_caller_owned", False) and not getattr(
+            self, "_preserve_pinned_keys", None
+        )
+
+    def _current_slots(self) -> dict[str, dict] | None:
+        """The on-device credential file's account-store slots, read over the
+        bridge (`_attached_slots`)."""
+        return self._attached_slots()
+
+    def _vault_slots_before_erase(self) -> None:
+        """Fold the store's slots into the driver's vault before an unpinned
+        relaunch's empty seed erases them — the base `_retire_discarded_machine`
+        reads the vault for an actor an earlier launch of this machine held.
+        Only on a machine the teardown will discard; never fails the relaunch."""
+        if not self._discards_machine_at_teardown():
+            return
+        slots = self._current_slots()
+        if slots:
+            self.__dict__.setdefault("_principal_slot_vault", {}).update(slots)
+
+    def _stop_app(self) -> None:
         try:
             self._delete("/session")
         except Exception:
@@ -551,6 +672,112 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         elif os.path.exists(local):
             os.remove(local)
         return self._widget_mirror
+
+    #: A path under the app's private data directory that `app_data_exists`
+    #: will ask about: relative, `/`-separated segments of letters, digits,
+    #: `.`, `_` and `-`, never `..`. The path is spelled into a device shell
+    #: command line, so nothing else may reach it.
+    _APP_DATA_SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
+
+    def app_data_exists(self, rel_path: str) -> bool:
+        """Whether ``rel_path`` exists under the app's private data directory
+        (``/data/user/0/social.fauna.fauna``: ``files/…``, ``databases/…``).
+
+        The account-scoped directories (`AccountStores.kt`: ``<filesDir>/<actor>``
+        and ``<databases>/<actor>``) are on-device, where no host path reaches
+        them on any venue, and the bridge runs inside the very app whose erase
+        is under test. So the witness reads from OUTSIDE the app, the way
+        ``widget_dir()`` does: ``run-as`` (the e2e build is debuggable) starts in
+        the data directory. ``exec-out`` does not reliably carry the remote exit
+        status, so the answer is a marker the device shell prints only on
+        success.
+        """
+        parts = rel_path.split("/")
+        if not parts or any(
+            p in ("", ".", "..") or not self._APP_DATA_SEGMENT.fullmatch(p) for p in parts
+        ):
+            raise ValueError(f"not a plain relative app-data path: {rel_path!r}")
+        result = subprocess.run(
+            [*self._adb_cmd(), "exec-out",
+             f'run-as social.fauna.fauna sh -c "test -e {rel_path} && echo FAUNA_PRESENT"'],
+            capture_output=True, timeout=15,
+        )
+        return b"FAUNA_PRESENT" in result.stdout
+
+    def app_data_listing(self, rel_dir: str = "files", max_depth: int = 4) -> list[str]:
+        """Every path under ``rel_dir`` of the app's private data directory, to
+        ``max_depth`` levels — a diagnostic for a store the harness cannot find
+        ("nothing there" vs "somewhere else"), read from outside the app the way
+        ``app_data_exists`` is. Empty when the directory is absent."""
+        self._require_plain_app_path(rel_dir)
+        result = subprocess.run(
+            [*self._adb_cmd(), "exec-out", "run-as", "social.fauna.fauna",
+             "find", rel_dir, "-maxdepth", str(int(max_depth))],
+            capture_output=True, timeout=30,
+        )
+        return sorted(
+            line for line in result.stdout.decode(errors="replace").splitlines()
+            if line.startswith(rel_dir)
+        )
+
+    def custodian_store_blob_paths(self) -> list[str]:
+        """Every sealed blob file the in-app custodian store holds, as paths
+        relative to the app data directory.
+
+        The store lives INSIDE the app sandbox — ``<filesDir>/<actor-hex>/
+        backup-custodian/blobs/<2-hex>/<64-hex>`` (``AccountStores.custodianStoreBaseDir``
+        + the shared ``custodian_store_root``) — where no host path reaches it, so
+        the disk half of the orphaned-store witness reads it the way
+        ``app_data_exists`` does: ``run-as`` (the e2e build is debuggable). Files
+        only, like ``helpers.sync_agent_config.custodian_store_blobs``.
+        """
+        result = subprocess.run(
+            [*self._adb_cmd(), "exec-out", "run-as", "social.fauna.fauna",
+             "find", "files", "-type", "f", "-path", "*/backup-custodian/blobs/*"],
+            capture_output=True, timeout=30,
+        )
+        return sorted(
+            line for line in result.stdout.decode(errors="replace").splitlines()
+            if "/backup-custodian/blobs/" in line
+        )
+
+    def _require_plain_app_path(self, rel_path: str) -> None:
+        parts = rel_path.split("/")
+        if not parts or any(
+            p in ("", ".", "..") or not self._APP_DATA_SEGMENT.fullmatch(p) for p in parts
+        ):
+            raise ValueError(f"not a plain relative app-data path: {rel_path!r}")
+
+    def grant_photos_access(self) -> None:
+        """Pre-grant the photo library read permission before ``launch()``
+        starts the app — the android twin of the iOS driver's method of the same
+        name. Turning on photo backup (`photo-backup-enable-toggle`) asks for it
+        through the system permission dialog (`FoldersScreen.kt`'s
+        ``PhotoBackupSection``), which belongs to the permission controller, not
+        the app, so no in-app driver reaches it; ``pm grant`` answers it up
+        front, as a user who already allowed access would have. Applied by
+        ``launch()`` right after the install, since a grant needs the package."""
+        self._grant_photos = True
+
+    def _apply_permission_grants(self) -> None:
+        if not getattr(self, "_grant_photos", False):
+            return
+        # The same split the screen's own request makes: the READ_MEDIA_* pair
+        # from API 33, READ_EXTERNAL_STORAGE below it.
+        sdk = subprocess.run(
+            [*self._adb_cmd(), "shell", "getprop", "ro.build.version.sdk"],
+            check=True, capture_output=True, text=True, timeout=15,
+        ).stdout.strip()
+        permissions = (
+            ("android.permission.READ_MEDIA_IMAGES", "android.permission.READ_MEDIA_VIDEO")
+            if sdk.isdigit() and int(sdk) >= 33
+            else ("android.permission.READ_EXTERNAL_STORAGE",)
+        )
+        for permission in permissions:
+            subprocess.run(
+                [*self._adb_cmd(), "shell", "pm", "grant", "social.fauna.fauna", permission],
+                check=True, capture_output=True, timeout=15,
+            )
 
     def press_system_back(self) -> None:
         """Send the system back — the phone's back gesture/button — through the

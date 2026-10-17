@@ -97,15 +97,15 @@ impl TrainedTopicsError {
     /// (`General { msg }`) and the wasm door already hand their shells, so it
     /// is three surfaces to one, not a coin flip.
     ///
-    /// `BlankName` deliberately keeps the crate's own sentence: no dedicated
-    /// string exists for it and none is invented here — the same fallback
-    /// apple's `mapPublishError` and android's raw `e.message` already take.
-    /// Near-unreachable anyway, since every shell refuses a blank buffer
-    /// before the round trip.
+    /// `BlankName` reads the shared `trained_factor_blank_name` string, the one
+    /// apple's `TrainedTopicsVM` already paints. A shell refuses a blank buffer
+    /// before the round trip, and paints this same sentence when it does — so
+    /// the user is told why nothing was created rather than left with a
+    /// silent no-op (`docs/features/trained-topics.md` outcome 13).
     pub fn localized(&self) -> String {
         match self {
             Self::Cap(max) => personalization::trained_factor_cap(&max.to_string()),
-            Self::BlankName => self.to_string(),
+            Self::BlankName => personalization::TRAINED_FACTOR_BLANK_NAME.to_string(),
             Self::Config(msg) | Self::Model(msg) => msg.clone(),
         }
     }
@@ -422,12 +422,13 @@ mod tests {
         }
     }
 
-    /// A blank name keeps the crate's own sentence — no i18n string exists for
-    /// it, and none is invented here. It must not collapse onto the cap's.
+    /// A blank name reads the shared `trained_factor_blank_name` string — the
+    /// one apple's `TrainedTopicsVM` already paints — never the crate's
+    /// lower-case `Display`. It must not collapse onto the cap's.
     #[test]
     fn a_blank_name_localizes_to_its_own_sentence() {
         let blank = TrainedTopicsError::BlankName.localized();
-        assert_eq!(blank, TrainedTopicsError::BlankName.to_string());
+        assert_eq!(blank, personalization::TRAINED_FACTOR_BLANK_NAME);
         assert_ne!(
             blank,
             TrainedTopicsError::Cap(TRAINED_FACTORS_MAX).localized()

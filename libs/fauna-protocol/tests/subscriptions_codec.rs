@@ -394,6 +394,7 @@ fn status_get_reply_with_tier_roundtrip() {
         tier: Some("gold".into()),
         expires_at: Some(Timestamp(1_700_000_000_000_000)),
         auto_approve: true,
+        follow_pending: false,
         extra: Default::default(),
     });
 }
@@ -404,8 +405,37 @@ fn status_get_reply_no_tier_roundtrip() {
         tier: None,
         expires_at: None,
         auto_approve: false,
+        follow_pending: true,
         extra: Default::default(),
     });
+}
+
+/// `follow_pending` is additive: `false` is omitted on the wire, so a reply
+/// without the key decodes as `false` and an older reader's bytes are unchanged.
+#[test]
+fn status_get_reply_follow_pending_is_omitted_when_false() {
+    let reply = StatusGetReply {
+        tier: None,
+        expires_at: None,
+        auto_approve: false,
+        follow_pending: false,
+        extra: Default::default(),
+    };
+    let bytes = fauna_protocol::encode_canonical(&reply).unwrap();
+    let value: fauna_protocol::Value = fauna_protocol::decode_strict(&bytes).unwrap();
+    let fauna_protocol::Value::Map(map) = value else {
+        panic!("a map");
+    };
+    assert!(!map.contains_key("follow_pending"), "{map:?}");
+}
+
+#[test]
+fn encaps_key_publish_roundtrip() {
+    roundtrip(EncapsKeyPublishRequest {
+        mlkem_encaps_key: serde_bytes::ByteBuf::from(vec![7u8; 1184]),
+        extra: Default::default(),
+    });
+    roundtrip(EncapsKeyPublishReply::default());
 }
 
 // ── requests.list ─────────────────────────────────────────────

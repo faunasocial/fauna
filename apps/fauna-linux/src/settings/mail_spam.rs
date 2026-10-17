@@ -51,7 +51,7 @@ use fauna_client_moderation::ModerationClient;
 use fauna_client_moderation::moderation::ModerationReportShareStatusReply;
 
 use crate::i18n::strings::mail_spam as S;
-use crate::testid::set_test_id;
+use crate::testid::{set_test_attr, set_test_id};
 
 /// Handles to the widgets the snapshot renders into. GTK objects are
 /// reference-counted, so cloning this is cheap and shares the same widgets.
@@ -246,17 +246,32 @@ pub fn build_mail_spam_page() -> adw::PreferencesPage {
     // `connect_map`). The settings shell builds every sub-page once at app init,
     // so without this the list would only ever show its build-time hydrate
     // (empty at a fresh start) until a reset/undo/toggle dispatch.
-    if let Some(refresh) = wire_machine(widgets) {
+    if let Some((refresh, history)) = wire_machine(widgets) {
         page.connect_map(move |_| refresh());
+        // The page already open on another device's undo or reset
+        // (`StaleSurfaces::mail_spam`): page-gated on GTK's map state, the same
+        // fact `connect_map` fires on — a visit re-reads anyway, and a mail
+        // app's batch Junk move is one push per lesson. Only the history is
+        // re-read, and `render` never touches the reset button, so a push
+        // never disarms the confirm the user is looking at.
+        let weak = page.downgrade();
+        crate::settings::set_mail_spam_rehydrate_handler(Rc::new(move || {
+            if weak.upgrade().is_some_and(|p| p.is_mapped()) {
+                history();
+            }
+        }));
     }
 
     page
 }
 
+/// The two closures `wire_machine` hands back: the full refresh and the history-only reload.
+type MachineHooks = (Rc<dyn Fn()>, Rc<dyn Fn()>);
+
 /// Connect the page to the shared `MailSpamMachine`, hydrate on mount, and wire
 /// every interaction. No-op (page stays at static placeholders) when no client
 /// is available — e.g. the unit test, which has no registered client.
-fn wire_machine(widgets: SpamWidgets) -> Option<Rc<dyn Fn()>> {
+fn wire_machine(widgets: SpamWidgets) -> Option<MachineHooks> {
     let client = crate::settings::get_client()?;
     // `Err` only on an unrecoverable identity fault (launch has validated the
     // secret to reach Online); the page stays at static placeholders if so.
@@ -339,11 +354,14 @@ fn wire_machine(widgets: SpamWidgets) -> Option<Rc<dyn Fn()>> {
     // change out-of-band — a third-party MUA's `\Junk`, another user on this nest
     // crossing k, another device editing the override).
     let refresh_ctx = Rc::clone(&ctx);
-    Some(Rc::new(move || {
+    let refresh: Rc<dyn Fn()> = Rc::new(move || {
         hydrate_and_render(&refresh_ctx);
         hydrate_report_share(&refresh_ctx);
         hydrate_threshold_override(&refresh_ctx);
-    }))
+    });
+    // The push re-read: the training history and contribution flag only.
+    let history: Rc<dyn Fn()> = Rc::new(move || hydrate_and_render(&ctx));
+    Some((refresh, history))
 }
 
 /// Run `machine.hydrate()` on the tokio runtime (retrying while the WS socket
@@ -504,6 +522,18 @@ fn render(ctx: &Rc<SpamCtx>, snap: &MailSpamSnapshot) {
         w.contribute_toggle.set_active(snap.contribute_baseline);
         ctx.syncing.set(false);
     }
+    // The uniform `state` read (`driver.get_attr(id, "state")` → on/off), the
+    // switch's own answer — painted every render, not only on a change, so the
+    // first snapshot's "off" is readable too.
+    set_test_attr(
+        &w.contribute_toggle,
+        "state",
+        if snap.contribute_baseline {
+            "on"
+        } else {
+            "off"
+        },
+    );
 
     // Training-history list: tear down the previous rows, rebuild from the
     // snapshot.

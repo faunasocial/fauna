@@ -121,6 +121,15 @@ pub struct PostGetReply {
     /// normal reply is byte-identical to before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legal_takedown: Option<LegalTakedownMarker>,
+    /// The bridged author's display face — the single-post read's twin of
+    /// `FeedPostItem.author_display` (`bridges.md` § Unified feed ingestion →
+    /// *Bridged authors*), so a post opened through the deep-link door names
+    /// its author as the timeline card does. Present only for a post whose
+    /// author has a `bridge_authors` projection row; absent (and omitted from
+    /// the wire) for every native post, so a native reply is byte-identical to
+    /// before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_display: Option<crate::feed::AuthorDisplay>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -575,8 +584,33 @@ mod tests {
         PostGetReply {
             body: ByteBuf::from(vec![0x01, 0x02, 0x03, 0x04, 0x05]),
             legal_takedown: None,
+            author_display: None,
             extra: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn post_get_reply_author_display_round_trips_and_is_additive() {
+        // A native reply omits the field: its wire is byte-identical to a
+        // reply built before `author_display` existed.
+        let native = sample_get_reply();
+        let native_bytes = encode_canonical(&native).unwrap();
+        let decoded: PostGetReply = decode(&native_bytes).unwrap();
+        assert!(decoded.author_display.is_none());
+        let with = PostGetReply {
+            author_display: Some(crate::feed::AuthorDisplay {
+                handle: Some("alice.bsky.social".into()),
+                display_name: Some("Alice".into()),
+                avatar_url: None,
+                extra: BTreeMap::new(),
+            }),
+            ..sample_get_reply()
+        };
+        let with_bytes = encode_canonical(&with).unwrap();
+        assert_ne!(native_bytes, with_bytes, "Some adds the field");
+        let decoded: PostGetReply = decode(&with_bytes).unwrap();
+        assert_eq!(with, decoded);
+        assert_eq!(encode_canonical(&decoded).unwrap(), with_bytes);
     }
 
     #[test]
@@ -605,6 +639,7 @@ mod tests {
         let bare = encode_canonical(&PostGetReply {
             body: ByteBuf::from(vec![0x01, 0x02, 0x03, 0x04, 0x05]),
             legal_takedown: None,
+            author_display: None,
             extra: BTreeMap::new(),
         })
         .unwrap();
@@ -617,6 +652,7 @@ mod tests {
                 reference: "EU-DSA-2024/12345".into(),
                 extra: BTreeMap::new(),
             }),
+            author_display: None,
             extra: BTreeMap::new(),
         };
         let bytes = encode_canonical(&taken).unwrap();

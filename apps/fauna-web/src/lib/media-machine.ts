@@ -35,6 +35,27 @@ export interface MediaItemSummary {
    *  item's folder; `share-links.md` § Which files can be linked). Paint the
    *  control only when true: absent otherwise, never inert. */
   share_link_eligible: boolean;
+  /** The `media-folder-filter` value that scopes the browse to THIS item's own
+   *  set — an own set's name, a shared set's `local:<id>`, a followed scope's
+   *  value. What a detail path hands `setFilter` instead of `folder`, so it
+   *  lands in this item's set and never a same-named one (`media.md` § The
+   *  filter and the upload target address the row, (b)). */
+  filter_value: string;
+}
+
+/** One `media-folder-filter` option, identity beside label. Mirrors
+ *  `fauna_media_machine::snapshots::MediaFolderOption`. Render
+ *  `<option value={value}>{label}</option>`; hand `value` back to `setFilter`
+ *  verbatim and never parse it. */
+export interface MediaFolderOption {
+  /** The set name; two options may share one (own set + a shared namesake). */
+  name: string;
+  /** The set's `FolderRef` wire string, or null for an item-only set. */
+  folder_id: string | null;
+  /** The select value. */
+  value: string;
+  /** The display label — the name, or `<name> (<owner>)` on a shared set. */
+  label: string;
 }
 
 /** The open share-link create surface (`share-link-create-modal`).
@@ -116,6 +137,11 @@ export interface FileVersionSummary {
    *  323). Drives `file-version-pruned-badge` + `file-version-undelete-button`,
    *  present ONLY on pruned rows. */
   pruned: boolean;
+  /** The version's set row (nest-stamped; `null` from a nest that stamps
+   *  none) — opaque here, round-tripped into `restoreVersion()` so the
+   *  restore records into the version's own set (media.md § Encryption at
+   *  rest → *A set is addressed by its row*). */
+  folder_id?: number | null;
 }
 
 /** One followed public folder, as `media-folder-filter` offers it — a browse
@@ -149,6 +175,9 @@ export interface MediaPageSnapshot {
   /** Distinct readable-set names that have media — the `media-folder-filter`
    *  options (alongside the all-media default). */
   folders: string[];
+  /** One option per offered set — what `media-folder-filter` renders from
+   *  (a same-named pair is two entries; `folders` deduplicates by name). */
+  folder_options: MediaFolderOption[];
   /** Followed public folders offered as browse **scopes**, after the own-set
    *  options. Empty until the platform wires the followed source, which is the
    *  correct render for a page that has not built the surface. */
@@ -167,6 +196,9 @@ export interface MediaPageSnapshot {
   descending: boolean;
   /** Active `media-folder-filter`: a set name, or null for the all-media default. */
   filter: string | null;
+  /** The active option's label (a shared set's `<name> (<owner>)`), or null in
+   *  all-media — never re-derived by the app. */
+  filter_label: string | null;
   /** Active `media-view-toggle`: true = thumbnail grid, false = list. */
   view_grid: boolean;
   /** Page-level `error-message` (last refresh/gesture failure); null when clear. */

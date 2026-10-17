@@ -529,6 +529,15 @@ func uniffiCheckChecksums() {
 			panic("fauna_bridge_atproto: uniffi_fauna_bridge_atproto_checksum_func_parse_include_scope: UniFFI API checksum mismatch")
 		}
 	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_bridge_atproto_checksum_func_service_auth_max_lifetime_secs()
+		})
+		if checksum != 18056 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_bridge_atproto: uniffi_fauna_bridge_atproto_checksum_func_service_auth_max_lifetime_secs: UniFFI API checksum mismatch")
+		}
+	}
 }
 
 type FfiConverterUint32 struct{}
@@ -554,6 +563,30 @@ func (FfiConverterUint32) Read(reader io.Reader) uint32 {
 type FfiDestroyerUint32 struct{}
 
 func (FfiDestroyerUint32) Destroy(_ uint32) {}
+
+type FfiConverterUint64 struct{}
+
+var FfiConverterUint64INSTANCE = FfiConverterUint64{}
+
+func (FfiConverterUint64) Lower(value uint64) C.uint64_t {
+	return C.uint64_t(value)
+}
+
+func (FfiConverterUint64) Write(writer io.Writer, value uint64) {
+	writeUint64(writer, value)
+}
+
+func (FfiConverterUint64) Lift(value C.uint64_t) uint64 {
+	return uint64(value)
+}
+
+func (FfiConverterUint64) Read(reader io.Reader) uint64 {
+	return readUint64(reader)
+}
+
+type FfiDestroyerUint64 struct{}
+
+func (FfiDestroyerUint64) Destroy(_ uint64) {}
 
 type FfiConverterInt64 struct{}
 
@@ -3452,5 +3485,14 @@ func ParseIncludeScope(scope string) IncludeScope {
 		return GoRustBuffer{
 			inner: C.uniffi_fauna_bridge_atproto_fn_func_parse_include_scope(FfiConverterStringINSTANCE.Lower(scope), _uniffiStatus),
 		}
+	}))
+}
+
+// [`MAX_LIFETIME_SECS`] for the Go bridge — uniffi cannot export a bare
+// `const`, and a hard-coded Go copy could drift, at which point the nest
+// would promise a lifetime the bridge does not mint.
+func ServiceAuthMaxLifetimeSecs() uint64 {
+	return FfiConverterUint64INSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_fauna_bridge_atproto_fn_func_service_auth_max_lifetime_secs(_uniffiStatus)
 	}))
 }

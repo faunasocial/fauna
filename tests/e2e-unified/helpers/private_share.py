@@ -54,13 +54,28 @@ def text_content(lines: int = 4000) -> bytes:
     return "".join(f"{i:06d} {secrets.token_hex(20)}\n" for i in range(lines)).encode("ascii")
 
 
-def seed_private_link(nest: dict, owner: dict, content: bytes, filename: str) -> PrivateLink:
+def seed_private_link(
+    nest: dict, owner: dict, content: bytes, filename: str, lifetime_secs: int = 3600
+) -> PrivateLink:
     """Upload ``content`` as an owner-only sealed file of ``owner`` and make a
-    private link to it, valid for an hour."""
+    private link to it, valid for ``lifetime_secs`` (an hour by default)."""
+    manifest_bytes, chunks, _ = upload_owner_file(nest, owner, content)
+    return link_to_uploaded(nest, owner, manifest_bytes, chunks, content, filename, lifetime_secs)
+
+
+def link_to_uploaded(
+    nest: dict,
+    owner: dict,
+    manifest_bytes: bytes,
+    chunks,
+    content: bytes,
+    filename: str,
+    lifetime_secs: int = 3600,
+) -> PrivateLink:
+    """Make a private link to a file already uploaded by :func:`upload_owner_file`."""
     secret = bytes(owner["signing_key"])
-    manifest_bytes, chunks, _ = _upload_owner_file(nest, owner, content)
     record, url = fauna_ffi.harness_create_private_link(
-        nest["url"], secret, manifest_bytes, filename, 3600
+        nest["url"], secret, manifest_bytes, filename, lifetime_secs
     )
     assert record["key_in_fragment"] is True, record
     return PrivateLink(content, filename, record, url, len(chunks))
@@ -73,7 +88,7 @@ def seed_owner_file(
     current version of ``path`` in the owner-only ``folder`` — what a synced
     desktop writes — through ``device_id``, already registered. Returns the
     file's chunk count (the number of ``/chunk/<i>`` arms a link to it has)."""
-    _, chunks, manifest_hash = _upload_owner_file(nest, owner, content)
+    _, chunks, manifest_hash = upload_owner_file(nest, owner, content)
     # The production record seam, which seals the path under the owner root —
     # a private folder's record without one is refused (`path_seal_required`).
     sync_changes_record(
@@ -90,7 +105,7 @@ def seed_owner_file(
     return len(chunks)
 
 
-def _upload_owner_file(nest: dict, owner: dict, content: bytes):
+def upload_owner_file(nest: dict, owner: dict, content: bytes):
     """Seal ``content`` under the owner root (the shared seal path) and post
     its chunks, then its manifest. Returns (manifest bytes, chunks, manifest
     hash hex)."""

@@ -22,8 +22,8 @@ class AdminActions:
     def navigate_dashboard(self) -> None:
         """Navigate to the admin dashboard and wait for stats to load.
 
-        The stat-card values load asynchronously (admin-status check →
-        fetch_admin_stats / fetch_admin_server_status → card update), so the
+        The stat-card values load asynchronously (the dashboard
+        snapshot read on every entry to the page → card update), so the
         heading appearing does NOT mean the data is in. Poll until the Users and
         Version cards have non-empty values before returning, so card reads don't
         race the fetch. (The card *value* markers start empty and only fill once
@@ -138,13 +138,21 @@ class AdminActions:
         """
         row = f"admin-nav-row[{page_id}]"
         if not self.driver.is_visible(row):
-            if self.driver.is_mobile():
-                self.driver.click("settings-tab")
-            self.driver.wait_for("admin-tab", timeout=timeout)
-            self.driver.click("admin-tab")
+            self.enter_by_click(timeout)
             self.driver.wait_for(row, timeout=timeout)
         self.driver.click(row)
         self.driver.wait_for(canary, timeout=timeout)
+
+    def enter_by_click(self, timeout: float = 15.0) -> None:
+        """Step into the admin area the way a human does: the gated
+        ``admin-tab`` (ui.yaml ``navigation.gated_tabs``) — a sidebar row on
+        desktop and tui, the in-Settings entry on mobile, so ``settings-tab``
+        opens first there. Waits for nothing past the click: what the entry
+        lands on is the caller's assertion."""
+        if self.driver.is_mobile():
+            self.driver.click("settings-tab")
+        self.driver.wait_for("admin-tab", timeout=timeout)
+        self.driver.click("admin-tab")
 
     def open_dns_by_click(self) -> None:
         """``admin-dns`` by clicks (``open_page_by_click``); the always-present
@@ -278,6 +286,46 @@ class AdminActions:
         held credential covers the domain) or ``"Manual"``."""
         return [t or "" for t in self.driver.get_texts("admin-dns-domain-mode")]
 
+    def dns_records(self, domain_index: int) -> list[dict[str, str]]:
+        """Every ``admin-dns-record`` row the page lists under the domain at
+        ``domain_index`` — ``{name, type, value, status}`` read from the row's
+        own leaves, scoped to that ``admin-dns-domain`` section, so a value is
+        paired with its name by the row and never by position across the page."""
+        scope = f"admin-dns-domain[{domain_index}]"
+        fields = {
+            "name": "admin-dns-record-name",
+            "type": "admin-dns-record-type",
+            "value": "admin-dns-record-value",
+            "status": "admin-dns-record-status",
+        }
+        # The four columns are four reads of a live page, which re-renders on its
+        # own (the background re-check, a fold landing): a render between two
+        # reads leaves them one row apart. Re-read until one pass agrees — a
+        # consistent snapshot, not a wait on time — and fail only when none does.
+        for _ in range(5):
+            columns = {
+                key: [t or "" for t in self.driver.get_texts(eid, scope=scope)]
+                for key, eid in fields.items()
+            }
+            rows = len(columns["name"])
+            if all(len(c) == rows for c in columns.values()):
+                break
+        assert all(len(c) == rows for c in columns.values()), (
+            f"admin-dns-record leaves out of step under {scope}: "
+            f"{ {k: len(v) for k, v in columns.items()} }"
+        )
+        return [{key: columns[key][i] for key in fields} for i in range(rows)]
+
+    def copy_dns_record(self, domain_index: int, record_index: int) -> None:
+        """Click the copy button of one record (`admin-dns-record-copy-button`),
+        scoped to its domain's section; read the clipboard with
+        ``helpers.copy_button``."""
+        self.driver.click(
+            "admin-dns-record-copy-button",
+            index=record_index,
+            scope=f"admin-dns-domain[{domain_index}]",
+        )
+
     def refresh_dns(self) -> None:
         """Re-fetch the DNS record matrix + held credentials
         (`admin-dns-refresh-button` → an async `fauna.dns.list_records` /
@@ -323,6 +371,23 @@ class AdminActions:
         `admin-dns-cert-cancel-button` affordances render (scoped to the section)."""
         scope = f"admin-dns-domain[{domain_index}]"
         return self.driver.count("admin-dns-cert-complete-button", scope=scope) > 0
+
+    def cancel_manual_cert(self, domain_index: int) -> None:
+        """Abandon the pending manual-paste issuance for the domain at
+        ``domain_index`` (`admin-dns-cert-cancel-button` →
+        `DnsAction::CancelManualIssueCert`), scoped to that domain's section.
+        Callers poll for the paste card to clear rather than asserting here."""
+        self.driver.click(
+            "admin-dns-cert-cancel-button", scope=f"admin-dns-domain[{domain_index}]"
+        )
+
+    def complete_manual_cert(self, domain_index: int) -> None:
+        """Tell the CA the pasted challenge is published
+        (`admin-dns-cert-complete-button` → `DnsAction::CompleteManualIssueCert`),
+        scoped to that domain's section. Callers poll the cert status."""
+        self.driver.click(
+            "admin-dns-cert-complete-button", scope=f"admin-dns-domain[{domain_index}]"
+        )
 
     def auto_renew_present(self, domain_index: int) -> bool:
         """True iff the per-domain auto-renew checkbox (`admin-dns-domain-auto-renew`)
@@ -423,6 +488,12 @@ class AdminActions:
         self.driver.click("admin-dns-manage-all-toggle")
         time.sleep(1)
 
+    def manage_all_state(self) -> str | None:
+        """The master switch's checked state (`admin-dns-manage-all-toggle`) —
+        ``"on"`` / ``"off"`` from the `state` test-attr: on iff every active
+        domain is effectively managed."""
+        return self.driver.get_attr("admin-dns-manage-all-toggle", "state")
+
     def set_catch_all(self, value: str, index: int = 0) -> None:
         """Designate (or clear with the "None" option) a domain's catch-all actor
         via the per-row picker (`admin-dns-domain-catch-all-select`, indexed by
@@ -437,6 +508,23 @@ class AdminActions:
         """The display text currently selected in a domain's catch-all picker
         (`admin-dns-domain-catch-all-select`)."""
         return self.driver.get_text("admin-dns-domain-catch-all-select", index=index) or ""
+
+    def set_dmarc_policy(self, policy: str, index: int = 0) -> None:
+        """Choose a domain's published DMARC policy on its row
+        (`admin-dns-domain-dmarc-policy-select`, indexed by active domain).
+        `policy` is the RFC 7489 tag — ``reject`` (the default), ``quarantine``
+        or ``none`` — the raw value the select round-trips on all 7 apps. Drives
+        the shared ``LocalDomainMachine``'s ``UpdateConfig`` →
+        ``fauna.bridges.update_local_domain_config``; callers poll the nest for
+        the outcome."""
+        self.driver.select("admin-dns-domain-dmarc-policy-select", policy, index=index)
+
+    def dmarc_policy_selected(self, index: int = 0) -> str:
+        """The RFC 7489 tag a domain's DMARC policy picker currently shows
+        (`admin-dns-domain-dmarc-policy-select`)."""
+        return (
+            self.driver.get_text("admin-dns-domain-dmarc-policy-select", index=index) or ""
+        )
 
     def set_role_address(self, role: str, value: str, index: int = 0) -> None:
         """Designate (or clear with the "Admin (default)" option) a domain's per-role
@@ -508,8 +596,11 @@ class AdminActions:
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(0.5)
-        self.driver.type_text("admin-aliases-forwarder-add-pattern-input", local_part)
-        self.driver.type_text("admin-aliases-forwarder-add-target-input", target)
+        # clear_and_type, not type_text: a form that keeps its drafts after a
+        # create (tui does) would otherwise run two targets together on the
+        # next add, and the nest refuses that as malformed.
+        self.driver.clear_and_type("admin-aliases-forwarder-add-pattern-input", local_part)
+        self.driver.clear_and_type("admin-aliases-forwarder-add-target-input", target)
         self.driver.click("admin-aliases-forwarder-add-submit-button")
         time.sleep(1)
 
@@ -590,6 +681,11 @@ class AdminActions:
             self.driver.click("admin-nest-takedown-type-conversation-radio")
         if restore:
             self.driver.click("admin-nest-takedown-restore-checkbox")
+
+    def takedown_cite(self, reference: str) -> None:
+        """Type the legal reference alone — the one field *open takedown*
+        leaves for the admin (its pre-fill carries the content id and kind)."""
+        self.driver.fill("admin-nest-takedown-reference-input", reference)
 
     def takedown_arm(self) -> None:
         """Arm the inline confirm (the first of the two-step dispatch)."""
@@ -740,6 +836,33 @@ class AdminActions:
             },
         })
 
+    def open_custody_hosting(self) -> None:
+        """Open the Held-Custody page by its rail row, the gesture a human
+        makes, from inside the admin shell — where the row carries its id
+        (``admin-nav-row[admin-custody-hosting]``: tui, web, linux today);
+        elsewhere by the nav patch.
+
+        The pre-answer window needs the gesture on the apps that paint the
+        page around a pending read: some apps' nav patch waits for the read
+        it triggers, while a click paints first. tui is neither — its click
+        AWAITS the sub-page's read before it acks, exactly as its nav patch
+        does (only ops that outlive a click are spawned), so on tui a held
+        read is observed through `/app/state` from a thread
+        (`test_admin_custody_hosting.py`'s tui twin)."""
+        row = "admin-nav-row[admin-custody-hosting]"
+        if self.driver.count(row) > 0:
+            self.driver.click(row)
+        else:
+            self.navigate_custody_hosting()
+
+    def reopen_custody_hosting(self) -> None:
+        """Leave the Held-Custody page for the admin dashboard and come back,
+        so the page reads the registry afresh. A nav patch onto the page an
+        app already shows need not re-read it (web reads on mount), so a poll
+        waiting for a row to appear or leave re-enters the page each try."""
+        self.driver.set_state({"nav": {"stack": [{"view": "admin"}]}})
+        self.navigate_custody_hosting()
+
     def hosting_registry_answered(self) -> bool:
         """True once the nest has ANSWERED the registry read.
 
@@ -762,6 +885,17 @@ class AdminActions:
     def hosting_row_host(self, index: int = 0) -> str:
         """The abbreviated actor id of the host that deposited row `index`."""
         return self.driver.get_text("admin-custody-hosting-host", index=index)
+
+    def hosting_row_index(self, host_hex: str) -> int | None:
+        """The index of the row deposited by the host whose actor id is
+        `host_hex`, or None when no rendered row names it. The registry is
+        nest-wide, so a test finds ITS row by its host, never by position.
+        The rendered id is abbreviated, so the match is on its leading eight
+        hex digits (the shape every app's abbreviation keeps)."""
+        for i in range(self.hosting_row_count()):
+            if self.hosting_row_host(i)[:8] == host_hex[:8]:
+                return i
+        return None
 
     def hosting_row_url(self, index: int = 0) -> str:
         """The owner-nest URL row `index` makes this nest dial, verbatim."""
@@ -804,12 +938,14 @@ class AdminActions:
         relying on this returning "loaded". The page renders with the SAME
         component IDs as the client Settings → Logs page, so the shared
         `LogsActions` accessors (`app.logs.entry_count` / `.set_level` / `.copy`)
-        drive it once navigated here.
+        drive it once navigated here. Returns once the landmark is up (or its
+        budget is spent — callers assert `logs_page_visible()`); no fixed settle
+        (convention 14).
         """
         self.driver.set_state({
             "nav": {"stack": [{"view": "admin"}, {"view": "admin", "id": "admin-logs"}]},
         })
-        time.sleep(1)
+        self.logs_page_visible()
 
     def logs_page_visible(self, timeout: float = 15.0) -> bool:
         """True once the admin Logs page landmark (`admin-logs-heading`) is
@@ -1022,6 +1158,14 @@ class AdminActions:
         if self.driver.count("admin-nest-region-authority") == 0:
             return ""
         return self.driver.get_text("admin-nest-region-authority")
+
+    def region_staleness_text(self) -> str:
+        """`admin-nest-region-staleness` — the warning the region section paints
+        only while the nest itself reports its authority channel unreached.
+        Empty string when absent."""
+        if self.driver.count("admin-nest-region-staleness") == 0:
+            return ""
+        return self.driver.get_text("admin-nest-region-staleness")
 
     def declare_region(self, code: str) -> None:
         """Type a region code and press save — `fauna.admin.region.set`. A
@@ -1323,6 +1467,14 @@ class AdminActions:
         latest self-check lists the outbound IP)."""
         return self.driver.count("admin-mail-health-delist-link") > 0
 
+    def mail_health_delist_target(self) -> str:
+        """Where the removal link (`admin-mail-health-delist-link`) leads: the
+        de-listing URL every app publishes on it as its `href` attribute
+        (`drivers/base.py::get_attr`). Read as an attribute, not the text,
+        because only tui prints the URL beside the label (a terminal copies a
+        link rather than opening it)."""
+        return self.driver.get_attr("admin-mail-health-delist-link", "href") or ""
+
     def recheck_mail_health(self) -> None:
         """Click `admin-mail-health-recheck-button` (the shared
         `MailPolicyAction::RecheckHealth`: a blocklist self-check + a diagnostics
@@ -1424,12 +1576,16 @@ class AdminActions:
 
     def tier_add_section_visible(self) -> bool:
         """Whether the add-a-tier form anchor is shown on admin-settings
-        (`admin-settings-tier-add-section`)."""
-        return self.driver.is_visible("admin-settings-tier-add-section")
+        (`admin-settings-tier-add-section`). The form sits below the tier list,
+        so a long page can leave it one scroll away: bring it into view first."""
+        return self.driver.is_visible_scrolled("admin-settings-tier-add-section")
 
     def tier_name(self, *, index: int = 0) -> str:
-        """The name shown on the `index`-th `admin-settings-tier-item` row."""
-        return self.driver.get_text("admin-settings-tier-item", index=index)
+        """The name shown on the `index`-th `admin-settings-tier-item` row. The
+        name is the row's first token: tui's row text is the bare name, while a
+        GUI row's text also carries its cap labels."""
+        text = self.driver.get_text("admin-settings-tier-item", index=index).strip()
+        return text.split()[0] if text else ""
 
     def tier_names(self) -> list[str]:
         """Every tier definition row's name, in list order."""
@@ -1671,18 +1827,56 @@ class AdminActions:
     #     public-mode.md § Registration & Identity; user-approved IDs 2026-08-15) ---
 
     def admit_user(self, actor_hex: str, handle: str | None = None,
-                   tier: str = "free") -> None:
+                   tier: str = "free", guardian: str | None = None) -> None:
         """Admit a known actor id directly (one ``fauna.admin.users.create``
         call from the Admit section). ``handle=None`` leaves the handle field
         blank — the deliberate handle-less admission (`public-mode.md`
         § A handle-less account). Does not wait for the nest outcome: the
         durable truth (the admitted actor authenticates / the handle indexes)
-        is what a caller polls, so the assertion stays latency-independent."""
+        is what a caller polls, so the assertion stays latency-independent.
+
+        ``guardian``, when given, is a user's label/handle to select in
+        ``admin-users-admit-guardian-select`` — the admitted account becomes
+        supervised by that guardian (`family-safety.md` § The guardianship
+        link, *Set at admission*). Requires a ``handle`` (the nest refuses a
+        supervised handle-less admission)."""
         self.driver.clear_and_type("admin-users-admit-actor-input", actor_hex)
         if handle is not None:
             self.driver.clear_and_type("admin-users-admit-handle-input", handle)
         self._pick_tier("admin-users-admit-tier-select", tier)
+        if guardian is not None:
+            self.driver.select("admin-users-admit-guardian-select", guardian)
+        # The page renders Admit always-enabled; what desensitizes it is the
+        # app's offline gate (`account-offline-mutation.md` § The offline-mutation
+        # contract, class 3 — `fauna.admin.users.create` is online-only) while
+        # the admin's transport is not `connected`. A full feature run can
+        # catch the app mid-reconnect here (tui, 2026-10-13: the click was
+        # refused under convention 11 after an earlier admission, green when
+        # rerun alone), so wait for the caused state — the button enabled
+        # again — as a user would (convention 14), never a sleep.
+        try:
+            self.driver.wait_until_enabled("admin-users-admit-button", timeout=30.0)
+        except TimeoutError as e:
+            raise TimeoutError(f"{e}; {self.driver.diagnose('connection-status')}") from e
         self.driver.click("admin-users-admit-button")
+
+    def require_admit_guardian_supported(self) -> None:
+        """Skip unless this app renders the Admit section's guardian picker
+        (e2e convention 7 — the platform check lives in the action layer).
+        tui led; linux, web and android followed; the apple pair and windows
+        follow in their trickle-down legs."""
+        d = self.driver
+        if not (d.is_tui() or d.is_linux() or d.is_web() or d.is_android()):
+            from helpers.app_surface import skip_unbuilt
+
+            skip_unbuilt(
+                self.driver,
+                surface="admin-users-admit-guardian-select",
+                detail="built on tui, linux, web and android; the apple "
+                       "pair and windows follow in their trickle-down legs",
+                tracked=" (Admit-section guardian "
+                        "picker trickle-down)",
+            )
 
     def user_count(self) -> int:
         """Count users in the admin user list."""
@@ -1711,14 +1905,33 @@ class AdminActions:
         The displayed ``user-actor-id`` is truncated for readability — both web and
         linux show ``<first-12>…`` — so match the full hex by *prefix* rather than
         by exact string (12 hex chars is 48 bits: collision-free in practice).
+
+        Nor is the row reliably on the FIRST page. The list is one
+        `fauna.admin.users.list` page at a time (`admin.md` § 2 Section 5), and a
+        whole-suite run admits far more than one default page of accounts to the
+        session nest, so the oldest account — the box claimer, the session admin
+        every cut-off and roster test reads — leaves page 1 part-way through the
+        sweep. So walk the pages the way a user would: rewind to the first page,
+        then forward through `admin-users-next-page` until the row turns up, and
+        leave the list on the page that holds it (the returned index is a row on
+        THAT page — read it before navigating anywhere else).
         """
-        ids = self.user_actor_ids()
-        for i, shown in enumerate(ids):
-            prefix = shown.rstrip("….")  # drop a trailing ellipsis ("…" or "...")
-            if prefix and actor_hex.startswith(prefix):
-                return i
+        while self.pagination_present() and self.prev_page_enabled():
+            self.prev_page()
+        seen: list[str] = []
+        while True:
+            ids = self.user_actor_ids()
+            seen.extend(ids)
+            for i, shown in enumerate(ids):
+                prefix = shown.rstrip("….")  # drop a trailing ellipsis ("…" or "...")
+                if prefix and actor_hex.startswith(prefix):
+                    return i
+            if not (self.pagination_present() and self.next_page_enabled()):
+                break
+            self.next_page()
         raise AssertionError(
-            f"actor {actor_hex[:12]}… not in the user list; ids={ids!r} "
+            f"actor {actor_hex[:12]}… not on any page of the user list; "
+            f"{len(seen)} rows read, ids={seen!r} "
             f"error={self.driver.get_text('error-message') if self.driver.count('error-message') else ''!r}"
         )
 
@@ -1858,9 +2071,25 @@ class AdminActions:
         `admin-users-evict-button` (one click → `fauna.admin.users.evict` with a
         default reason/category). The list refetches and the row rebuilds with
         the cancel-eviction control (the user is not deleted — eviction is a
-        warn→suspend→delete timeline)."""
+        warn→suspend→delete timeline). Returns once the row has flipped."""
         self.driver.click("admin-users-evict-button", scope=f"user-row[{index}]")
-        time.sleep(1.5)
+        self._await_eviction_flip(index, active=True)
+
+    def _await_eviction_flip(self, index: int, *, active: bool, budget_s: float = 15.0) -> None:
+        """Deadline-poll row ``index`` until its cut-off control shows the
+        ``active`` side — the evict/cancel click's own caused transition
+        (convention 14), in place of a fixed settle. Raises, self-diagnosing,
+        when the row never flips (convention 6)."""
+        deadline = time.monotonic() + budget_s
+        while self.user_eviction_active(index) != active:
+            if time.monotonic() >= deadline:
+                control = "admin-users-cancel-eviction-button" if active else "admin-users-evict-button"
+                raise AssertionError(
+                    f"row {index} never flipped to eviction_active={active} within {budget_s}s; "
+                    f"{self.driver.diagnose(control)} "
+                    f"error={self.driver.get_text('error-message') if self.driver.count('error-message') else ''!r}"
+                )
+            time.sleep(0.3)  # sleep-ok: pacing between poll iterations, not a settle-wait
 
     def user_evict_available(self, index: int = 0) -> bool:
         """True when row `index` offers `admin-users-evict-button` — i.e. no
@@ -1891,9 +2120,10 @@ class AdminActions:
     def cancel_user_eviction(self, index: int = 0) -> None:
         """Cancel the in-flight eviction at row `index`
         (`admin-users-cancel-eviction-button` → `fauna.admin.users.cancel_eviction`);
-        the list refetches and the row rebuilds with the evict control again."""
+        the list refetches and the row rebuilds with the evict control again.
+        Returns once the row has flipped back."""
         self.driver.click("admin-users-cancel-eviction-button", scope=f"user-row[{index}]")
-        time.sleep(1.5)
+        self._await_eviction_flip(index, active=False)
 
     # --- Admin-role roster (Users section, admin.md § Admin continuity and
     # succession — the two per-row grant/revoke controls, `admins_add`/
@@ -2014,9 +2244,7 @@ class AdminActions:
         the app disables it, and driving a disabled control is the illegal act
         convention 11 forbids. Guard with `next_page_enabled()`.
         """
-        self.driver.wait_until_enabled("admin-users-next-page", timeout=10.0)
-        self.driver.click("admin-users-next-page")
-        time.sleep(1.0)
+        self._turn_page("admin-users-next-page")
 
     def prev_page(self) -> None:
         """Go to the previous Users page (`admin-users-prev-page`).
@@ -2024,9 +2252,30 @@ class AdminActions:
         As with `next_page`, the caller owns the bound check —
         `prev_page_enabled()` — because at offset 0 the app disables this.
         """
-        self.driver.wait_until_enabled("admin-users-prev-page", timeout=10.0)
-        self.driver.click("admin-users-prev-page")
-        time.sleep(1.0)
+        self._turn_page("admin-users-prev-page")
+
+    def _turn_page(self, control: str, timeout: float = 15.0) -> None:
+        """Click a page control and wait until the rendered rows are the new
+        page's — the observable, never a fixed delay (convention 14). Two
+        adjacent pages never share a row (one offset step apart over one
+        ordering), so a changed id list is the page having turned; an
+        unchanged one at the deadline raises, naming the rows still shown
+        (convention 6)."""
+        before = self.user_actor_ids()
+        self.driver.wait_until_enabled(control, timeout=10.0)
+        self.driver.click(control)
+        deadline = time.monotonic() + timeout
+        after = before
+        while time.monotonic() < deadline:
+            after = self.user_actor_ids()
+            if after and after != before:
+                return
+            time.sleep(0.2)
+        raise AssertionError(
+            f"{control} was clicked but the Users list never turned: still "
+            f"{after!r} after {timeout:.0f}s. "
+            f"{self.driver.diagnose('admin-users-pagination')}"
+        )
 
     # --- Invite codes (the Users hub's "Invite" section) ---
 
@@ -2277,3 +2526,34 @@ class AdminActions:
         """Approve a pending request at its selected tier (+ guardian + band); the list refetches."""
         self.driver.click("invite-request-row-approve-button", index=index)
         time.sleep(1.5)
+
+    def deny_request(self, index: int = 0, reason: str | None = None) -> None:
+        """Turn the pending request at row ``index`` down
+        (`invite-request-row-deny-button` → `fauna.admin.invite_requests.deny`),
+        typing ``reason`` into the row's `invite-request-row-deny-reason-field`
+        first when given (`admin.md` § 2 → Section 1: the reason is optional and
+        rides the deny). Does not wait: the caller polls the row leaving the
+        pending list and the requester's own status read."""
+        if reason is not None:
+            self.driver.clear_and_type("invite-request-row-deny-reason-field", reason, index=index)
+        self.driver.click("invite-request-row-deny-button", index=index)
+
+    def delete_invite_code(self, code: str) -> None:
+        """Delete the listed invite ``code`` with its row's
+        `admin-settings-invite-delete-button` (→ `fauna.admin.invite_codes.delete`).
+        The rows, values and delete buttons are parallel lists on every app, so
+        the code's own position picks its button — never a guessed index. Does
+        not wait: the caller polls the code leaving the list."""
+        values = self._invite_code_values()
+        assert code in values, f"invite code {code!r} is not in the rendered list: {values!r}"
+        self.driver.click("admin-settings-invite-delete-button", index=values.index(code))
+
+    def invite_code_values(self) -> list[str]:
+        """Every listed invite code's token — the pollable public form of the
+        list `mint_invite_code` diffs against."""
+        return self._invite_code_values()
+
+    def invite_guardian_options(self) -> list[str]:
+        """The open invite form's guardian picker options, as painted (the
+        `none` sentinel plus one handle per account the picker offers)."""
+        return self.driver.option_texts("admin-users-invite-guardian-select")

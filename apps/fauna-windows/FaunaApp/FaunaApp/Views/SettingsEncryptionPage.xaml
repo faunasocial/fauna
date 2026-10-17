@@ -26,7 +26,32 @@
             <StackPanel Spacing="12">
                 <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Text="{loc:Localize Key=settings/encryption_page/title}" />
                 <TextBlock x:Name="MlsStatusText" Text="{loc:Localize Key=common/loading}" Opacity="0.7" />
-                <TextBlock x:Name="KeyPackageCountText" Opacity="0.7" FontSize="12" />
+
+                <!-- Low-supply flag (direct-messages.md § Key Package Management): read-only,
+                     present in the automation tree ONLY while the shared threshold calls the
+                     count low (Collapsed = absent). Never an auto-mint trigger. -->
+                <TextBlock x:Name="LowWarningText"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.EncryptionKeypackageLowWarning}"
+                           Visibility="Collapsed"
+                           TextWrapping="Wrap"
+                           Foreground="{ThemeResource SystemFillColorCautionBrush}" />
+
+                <TextBlock Text="{loc:Localize Key=settings/encryption_page/mls_key_packages}" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                <TextBlock Text="{loc:Localize Key=settings/encryption_page/mls_description}" Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBlock Text="{loc:Localize Key=settings/encryption_page/available_key_packages}" Opacity="0.7" />
+                    <!-- Bare count (loading copy before the first read) — AutomationId only,
+                         no static Name, so get_text reads the live text. -->
+                    <TextBlock x:Name="KeyPackageCountText"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.EncryptionKeypackageCount}"
+                               Text="{loc:Localize Key=common/loading}" />
+                </StackPanel>
+
+                <TextBlock Text="{loc:Localize Key=settings/encryption_page/refresh_keys_description}" Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
+                <Button x:Name="RefreshKeysButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.EncryptionKeypackageRefreshButton}"
+                        Click="RefreshKeysButton_Click"
+                        Content="{loc:Localize Key=settings/encryption_page/refresh_keys}" />
             </StackPanel>
         </StackPanel>
     </ScrollViewer>

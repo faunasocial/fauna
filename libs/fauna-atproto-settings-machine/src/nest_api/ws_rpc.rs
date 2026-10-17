@@ -186,6 +186,7 @@ where
                 tombstone_requested: i.tombstone_requested,
                 did: i.did,
             }),
+            public_post_count: reply.public_post_count,
         })
     }
 
@@ -310,9 +311,10 @@ where
         &self,
         consent_id: Vec<u8>,
         approved: bool,
+        folder: Option<i64>,
     ) -> Result<bool, AtprotoSettingsApiError> {
         self.atproto
-            .resolve_consent(consent_id, approved)
+            .resolve_consent(consent_id, approved, folder)
             .await
             .map(|r| r.resolved)
             .map_err(map_err)
@@ -464,8 +466,9 @@ mod native {
             &self,
             consent_id: Vec<u8>,
             approved: bool,
+            folder: Option<i64>,
         ) -> Result<bool, AtprotoSettingsApiError> {
-            self.do_resolve_consent(consent_id, approved).await
+            self.do_resolve_consent(consent_id, approved, folder).await
         }
         async fn mint_grant(&self, grant_blob: Vec<u8>) -> Result<(), AtprotoSettingsApiError> {
             self.do_mint_grant(grant_blob).await
@@ -624,8 +627,9 @@ mod wasm {
             &self,
             consent_id: Vec<u8>,
             approved: bool,
+            folder: Option<i64>,
         ) -> Result<bool, AtprotoSettingsApiError> {
-            self.do_resolve_consent(consent_id, approved).await
+            self.do_resolve_consent(consent_id, approved, folder).await
         }
         async fn mint_grant(&self, grant_blob: Vec<u8>) -> Result<(), AtprotoSettingsApiError> {
             self.do_mint_grant(grant_blob).await

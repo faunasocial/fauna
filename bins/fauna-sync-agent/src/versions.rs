@@ -20,6 +20,7 @@
 use fauna_client_sync::SyncClient;
 use fauna_client_sync::restore_branch::{RestoreDecision, restore_decision};
 use fauna_client_sync::row_judge::{ReaderSeat, retain_judged};
+use fauna_core::folder_keys::FolderRef;
 use fauna_ipc::sync::{FileVersionEntry, FileVersionListInfo};
 use fauna_protocol::RpcRequester;
 use fauna_protocol::files::FilesVersionsListReply;
@@ -66,12 +67,17 @@ pub fn to_version_list(
 /// actor id and custody-resolved set nonces). A version that does not verify
 /// is absent from the menu, so it is never offered for restore.
 ///
+/// `row` is the binding's ref: a same-nest set's row narrows the list to it
+/// among same-named sets (`set-addressing.md` § The row form → *Whoever holds
+/// the row sends it*); a foreign set stamps none and keeps the name forms.
+///
 /// `rel` must already be the forward-slash, folder-relative path
 /// (`path_map::resolve_to_folder_rel` guarantees this — it normalizes `\` → `/`).
 pub async fn list_file_versions<R>(
     sync: &SyncClient<R>,
     path: &str,
     folder: &str,
+    row: FolderRef,
     rel: &str,
     seat: &ReaderSeat,
 ) -> Result<FileVersionListInfo, String>
@@ -81,7 +87,7 @@ where
 {
     let hash = fauna_core::sync::path_hash(rel);
     let judged = sync
-        .versions_list_judged(hash, folder, false, seat)
+        .versions_list_judged(hash, folder, false, seat, Some(row))
         .await
         .map_err(|e| format!("list file versions: {e}"))?;
     let (versions, _) = retain_judged(judged, "fauna.files.versions.list");
@@ -194,6 +200,7 @@ pub trait InheritedReseal {
 pub async fn restore_file_version<R>(
     sync: &SyncClient<R>,
     folder: &str,
+    row: FolderRef,
     device_id: &str,
     rel: &str,
     version_num: i64,
@@ -210,7 +217,7 @@ where
 {
     let hash = fauna_core::sync::path_hash(rel);
     let listing = sync
-        .versions_list_judged(hash, folder, true, seat)
+        .versions_list_judged(hash, folder, true, seat, Some(row))
         .await
         .map_err(|e| format!("get file version {version_num}: {e}"))?;
     // Ruling (10)(b): the current identity vouches for a manifest through any
@@ -272,6 +279,9 @@ where
             size_bytes,
             info.content_key_version,
             path_sealed,
+            // The binding's row, as the listing above: the seal is the
+            // binding's, so the row the record names is too.
+            Some(row),
         )
         .await
         .map_err(|e| format!("restore version {version_num}: {e}"))?;
@@ -367,6 +377,9 @@ mod tests {
         }
     }
 
+    /// The binding's row every call here names.
+    const ROW: FolderRef = FolderRef::Local(7);
+
     fn version(seq: i64, size: i64, created_at: i64) -> FileVersionInfo {
         FileVersionInfo {
             version_num: seq,
@@ -430,6 +443,7 @@ mod tests {
             &sync,
             r"C:\Sync\docs\report.txt",
             "docs",
+            ROW,
             "docs/report.txt",
             &seat(),
         )
@@ -454,6 +468,8 @@ mod tests {
         assert!(fauna_protocol::folders::SetAddressed::addresses(
             &req, "docs"
         ));
+        // And narrowed to the binding's row among same-named sets.
+        assert_eq!(req.folder_id, Some(7));
     }
 
     #[tokio::test]
@@ -463,6 +479,7 @@ mod tests {
             &sync,
             r"C:\Sync\docs\report.txt",
             "docs",
+            ROW,
             "docs/report.txt",
             &ReaderSeat::default(),
         )
@@ -576,6 +593,7 @@ mod tests {
         let restored = restore_file_version(
             &sync,
             "docs",
+            ROW,
             "dev-1",
             "docs/report.txt",
             42,
@@ -607,6 +625,11 @@ mod tests {
             &list, "docs"
         ));
         assert_eq!(
+            list.folder_id,
+            Some(7),
+            "the lookup names the binding's row"
+        );
+        assert_eq!(
             list.include_pruned,
             Some(true),
             "a soft-pruned version stays restorable"
@@ -617,6 +640,7 @@ mod tests {
         assert!(fauna_protocol::folders::SetAddressed::addresses(
             &rec, "docs"
         ));
+        assert_eq!(rec.folder_id, Some(7), "the record names the binding's row");
         assert_eq!(rec.device_id, "dev-1");
         // The nest re-derives `path_hash(path)`, so `path` must be the same
         // forward-slash relative path we looked the version up by.
@@ -651,6 +675,7 @@ mod tests {
         let err = restore_file_version(
             &sync,
             "docs",
+            ROW,
             "dev-1",
             "docs/report.txt",
             42,
@@ -686,6 +711,7 @@ mod tests {
         let err = restore_file_version(
             &sync,
             "docs",
+            ROW,
             "dev-1",
             "docs/report.txt",
             42,
@@ -789,6 +815,7 @@ mod tests {
             &sync,
             r"C:\Sync\docs\report.txt",
             "docs",
+            ROW,
             "docs/report.txt",
             &seat(),
         )
@@ -808,6 +835,7 @@ mod tests {
         let err = restore_file_version(
             &sync,
             "docs",
+            ROW,
             "dev-1",
             "docs/report.txt",
             42,
@@ -880,6 +908,7 @@ mod tests {
             &sync,
             r"C:\Sync\docs\report.txt",
             "docs",
+            ROW,
             "docs/report.txt",
             &successor_seat,
         )
@@ -899,6 +928,7 @@ mod tests {
         let restored = restore_file_version(
             &sync,
             "docs",
+            ROW,
             "dev-1",
             "docs/report.txt",
             42,
@@ -947,6 +977,7 @@ mod tests {
         let err = restore_file_version(
             &sync,
             "docs",
+            ROW,
             "dev-1",
             "docs/report.txt",
             42,
@@ -974,6 +1005,7 @@ mod tests {
         let restored = restore_file_version(
             &sync,
             "docs",
+            ROW,
             "dev-1",
             "docs/report.txt",
             43,
@@ -994,6 +1026,7 @@ mod tests {
         let restored = restore_file_version(
             &sync,
             "docs",
+            ROW,
             "dev-1",
             "docs/report.txt",
             44,
@@ -1029,6 +1062,7 @@ mod tests {
         restore_file_version(
             &sync,
             "docs",
+            ROW,
             "dev-1",
             "docs/report.txt",
             42,
@@ -1100,6 +1134,7 @@ mod tests {
             &sync,
             r"C:\Sync\docs\report.txt",
             "docs",
+            ROW,
             "docs/report.txt",
             &lineage_seat,
         )
@@ -1120,6 +1155,7 @@ mod tests {
         let restored = restore_file_version(
             &sync,
             "docs",
+            ROW,
             "dev-1",
             "docs/report.txt",
             50,
@@ -1213,6 +1249,7 @@ mod tests {
         let restored = restore_file_version(
             &SyncClient::new(Arc::clone(&with_certs)),
             "docs",
+            ROW,
             "dev-1",
             "docs/report.txt",
             42,
@@ -1228,6 +1265,7 @@ mod tests {
         let err = restore_file_version(
             &SyncClient::new(Arc::clone(&without_certs)),
             "docs",
+            ROW,
             "dev-1",
             "docs/report.txt",
             42,

@@ -155,6 +155,43 @@ public class AdminUsersViewModelTests
     }
 
     [Fact]
+    public async Task Load_ListsPendingAdminActions_WithTheSharedDescriptionAndApprovals()
+    {
+        var rpc = SeededRpc();
+        rpc.NextAdminPendingActions = new[]
+        {
+            MockNestRpcClient.MakeAdminPendingAction(3, JoinerActor, "Grant the admin role", requiresQuorum: 2,
+                approvals: new[] { "aa" }),
+        };
+        var vm = new AdminUsersViewModel(rpc);
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Contains("AdminPendingActionsList", rpc.Calls);
+        var row = Assert.Single(vm.PendingActions);
+        Assert.Equal(3, row.Id);
+        Assert.StartsWith("Grant the admin role", row.Description);
+        Assert.False(string.IsNullOrEmpty(row.ApprovalsText));
+    }
+
+    [Fact]
+    public async Task ApproveAndCancelPendingAction_CallTheKinds_ThenRelist()
+    {
+        var rpc = SeededRpc();
+        rpc.NextAdminPendingActions = new[] { MockNestRpcClient.MakeAdminPendingAction(3, JoinerActor) };
+        var vm = new AdminUsersViewModel(rpc);
+        await vm.LoadCommand.ExecuteAsync(null);
+        var before = rpc.Calls.Count(c => c == "AdminPendingActionsList");
+
+        await vm.ApprovePendingActionAsync(vm.PendingActions[0]);
+        await vm.CancelPendingActionAsync(vm.PendingActions[0]);
+
+        Assert.Contains("AdminPendingActionApprove", rpc.Calls);
+        Assert.Contains("AdminPendingActionCancel", rpc.Calls);
+        Assert.Equal(before + 2, rpc.Calls.Count(c => c == "AdminPendingActionsList"));
+    }
+
+    [Fact]
     public async Task ChangeUserTier_CallsUpdateWithActorAndTier_ThenRefetches()
     {
         var rpc = SeededRpc();

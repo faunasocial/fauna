@@ -5,7 +5,7 @@ import Foundation
 /// The macOS entry point — a thin shell over `FaunaMacOSLib`, compiled by BOTH the
 /// SwiftPM `FaunaMacOS` executable (mac-app / mac-debug / e2e) and the `.xcodeproj`
 /// `Fauna` app target (the appex-carrying bundle), so the two build worlds share one
-/// entry point and cannot drift (M2 slice 3b, file-sync.md § On-Demand Files →
+/// entry point and cannot drift (M2 slice 3b, on-demand-files-apple.md § On-Demand Files →
 /// Apple File Provider binding).
 @main
 enum FaunaMacOSMain {

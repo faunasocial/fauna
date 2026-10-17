@@ -80,30 +80,38 @@ public record ContactInfo(string ActorId, string? Handle, ContactStatus Status, 
     public string StatusLabel =>
         Strings.Resolve(
             uniffi.fauna_ffi.FaunaFfiMethods.ContactStatusLabel(Status.ToString().ToLowerInvariant()));
+}
 
-    /// <summary>
-    /// The row's name: the handle, or the shared short id when the row carries none
-    /// (a federated peer — contacts.md § State & data shape). Never empty, because
-    /// <c>ContactsPage.xaml</c> binds it as the <c>contact-row</c> root's
-    /// <c>AutomationProperties.Name</c> too, and a <c>Grid</c> root with no Name is
-    /// pruned from UI Automation. A binding to the nullable <see cref="Handle"/> could
-    /// not guarantee that: <c>FallbackValue</c> does not cover a null value.
-    /// </summary>
-    public string DisplayLabel =>
-        string.IsNullOrEmpty(Handle) ? uniffi.fauna_ffi.FaunaFfiMethods.ShortId(ActorId) : Handle;
+/// <summary>One painted roster row: the wire row plus the names the shared overlay
+/// face answered for it (<c>ContactOverlayNames</c>; contacts.md § The private
+/// overlay → <i>Where the nickname paints</i>). <see cref="Name"/> is the
+/// <c>contact-name</c> line — the viewer's nickname, else the handle, else the
+/// canonical short id — and is NEVER empty, because <c>ContactsPage.xaml</c> binds it as
+/// the <c>contact-row</c> root's <c>AutomationProperties.Name</c> too, and a
+/// <c>Grid</c> root with no Name is pruned from UI Automation.
+/// <see cref="PublicName"/> (<c>contact-public-name</c>) is the public name a
+/// nickname replaced and <see cref="Labels"/> (<c>contact-labels</c>) the viewer's
+/// label line; each is null when absent, and the element is then collapsed. Built
+/// only by <c>ContactsViewModel</c>; no field here is windows-derived.</summary>
+public sealed record ContactRow(ContactInfo Contact, string Name, string? PublicName, string? Labels)
+{
+    public string ActorId => Contact.ActorId;
+    public ContactStatus Status => Contact.Status;
+    public string StatusLabel => Contact.StatusLabel;
 }
 
 /// <summary>A pending incoming knock. <c>fauna.knocks.list</c> carries the sender's
-/// actor id but no handle, so the row shows the id.</summary>
-public record KnockInfo(string ActorId, string? Summary, ulong Timestamp)
+/// actor id but no handle.</summary>
+public record KnockInfo(string ActorId, string? Summary, ulong Timestamp);
+
+/// <summary>One painted knock card: the <c>knock-sender</c> text is the shared
+/// resolver's answer for the sender (the viewer's nickname, else the canonical short
+/// id — <c>peer_label(None, None, id)</c>), never empty because it is also the
+/// <c>knock-card</c> root's <c>AutomationProperties.Name</c>.</summary>
+public sealed record KnockRow(KnockInfo Knock, string SenderLabel)
 {
-    /// <summary>
-    /// The <c>knock-sender</c> text, "Sender ID display" (ui.yaml): the shared short id
-    /// of the sender, web's shape (<c>shortId(knock.sender)</c>). Also the
-    /// <c>knock-card</c> root's <c>AutomationProperties.Name</c>, so it must never be
-    /// empty; see <see cref="ContactInfo.DisplayLabel"/> for why.
-    /// </summary>
-    public string SenderLabel => uniffi.fauna_ffi.FaunaFfiMethods.ShortId(ActorId);
+    public string ActorId => Knock.ActorId;
+    public string? Summary => Knock.Summary;
 }
 
 public record SnapshotInfo(

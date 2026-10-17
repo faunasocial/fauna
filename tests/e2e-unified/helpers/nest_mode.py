@@ -10,7 +10,7 @@ this one owns the *nest* axis's.
     docker       the real image + `docker/` sidecars under s6 supervision.
                  Heavy to build, then ephemeral: the true deployment artifact,
                  provable before a production release.
-    live         an already-deployed real box (default example.com). Zero
+    live         an already-deployed real box (default the dev nest). Zero
                  provisioning, but shared and STATEFUL — the only mode that
                  catches works-on-fresh-only bugs.
 
@@ -213,11 +213,15 @@ BOX_DECLARATIONS = (BOX_SHARED, BOX_DISPOSABLE)
 
 #: The hosts a run may declare disposable — the staging boxes, and nothing
 #: else (`testing.md` § The shared-box rule, user ruling 2026-10-04:
-#: `dev.example.com` from every dev machine, `test.example.com` from CI; example.com
-#: is never a test target). Pinned in `test_nest_mode_axis.py` against the
+#: the dev nest from every dev machine, the test nest from CI; a production
+#: or acceptance nest is never a test target. `dev.example.com` is the dev nest until
+#: its re-creation as `dev.fauna.build`; the `fauna.build` pair joined
+#: 2026-10-13 when the one image workflow began verifying on them). Pinned in `test_nest_mode_axis.py` against the
 #: image workflows' `VERIFY_HOST`, so the box the pipeline verifies on is
 #: always one the gate can declare.
-DISPOSABLE_BOX_HOSTS = frozenset({"dev.example.com", "test.example.com"})
+DISPOSABLE_BOX_HOSTS = frozenset({
+    "dev.example.com", "dev.fauna.build", "test.fauna.build",
+})
 
 
 def live_url(mode: NestMode) -> str:

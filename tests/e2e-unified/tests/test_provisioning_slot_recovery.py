@@ -195,7 +195,7 @@ def test_the_exit_retires_the_slot_so_a_relaunch_no_longer_resumes_the_box(
     rather than the assertion racing a page that has not painted yet
     (convention 14).
     """
-    if app_name(app.driver) not in ("tui", "windows"):
+    if app_name(app.driver) not in ("tui", "windows", "web", "linux", "android", "macos", "ios"):
         skip_unbuilt(
             app.driver,
             surface="awaiting-dns-fallthrough-button",

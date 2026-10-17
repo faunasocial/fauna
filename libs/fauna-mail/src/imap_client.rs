@@ -43,12 +43,21 @@
 //! `wasm32-unknown-unknown`). So [`throttle::FetchThrottle`] is a **pure**
 //! decision function over a caller-supplied millisecond clock, and the one
 //! await point rides an [`ImapClock`] impl.
+//!
+//! # The third seam: the Outlook sign-in's HTTPS POST
+//!
+//! The Outlook source authenticates with a Microsoft token
+//! ([`ImapSession::authenticate_xoauth2`]) obtained through the OAuth 2.0
+//! device-code grant ([`oauth_device`], § Microsoft sign-in — the device-code
+//! grant). Its only I/O is a form POST, so it rides an [`OAuthHttp`] impl
+//! beside the other two seams — native: [`NativeOAuthHttp`] over `reqwest`.
 
 pub mod batch;
 mod connection;
 pub mod internaldate;
 #[cfg(feature = "imap-client-native")]
 pub mod native;
+pub mod oauth_device;
 pub mod send;
 pub mod session;
 #[cfg(feature = "tls-test-fixtures")]
@@ -59,10 +68,17 @@ pub mod transport;
 pub use batch::{BatchPacker, ImportUnit};
 #[cfg(feature = "imap-client-native")]
 pub use native::{
-    NativeImapConnector, NativeTlsTransport, NativeTransportError, TokioClock, logout_and_clear,
+    NativeImapConnector, NativeOAuthHttp, NativeTlsTransport, NativeTransportError, TokioClock,
+    logout_and_clear,
+};
+pub use oauth_device::{
+    DeviceAuthorization, DeviceFlow, FlowOutcome, MICROSOFT, MicrosoftIdentity, OAuthClient,
+    OAuthError, OAuthHttp, OAuthHttpResponse, PollStep, TokenGrant,
 };
 pub use send::{ImportUnitReply, MailImportClient};
-pub use session::{FetchOutcome, ImapSession, MailboxStatus, SourceMailbox, UidEntry};
+pub use session::{
+    FetchOutcome, ImapSession, MailboxEstimate, MailboxStatus, SourceMailbox, SpecialUse, UidEntry,
+};
 pub use throttle::{FetchThrottle, ThrottleDecision};
 pub use transport::{ImapClock, ImapTransport, TlsMode};
 

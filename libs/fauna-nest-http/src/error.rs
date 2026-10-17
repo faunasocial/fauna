@@ -98,6 +98,33 @@ pub enum ApiError {
     /// `superseded_successor`. The successor is **claimed, not proven** — the
     /// consumer verifies it against the registration chain before naming it.
     Superseded { new_actor_id_hex: String },
+    /// The nest answered the bearer mint with `fauna.nest.outdated` — it booted
+    /// in the degraded needs-update mode (`version-compatibility.md` § 2.2) and
+    /// signs nobody in until a newer binary is deployed.
+    ///
+    /// Its own variant for the reason [`Self::SignInRefused`] has one: as
+    /// [`Self::Transport`] (or a flattened [`Self::Status`]) a reconnect
+    /// supervisor re-mints it forever behind "Connecting…", where the honest
+    /// answer is the app's non-retry update surface (§ Dimension 4). Raised by
+    /// both bearer sources — `WsChallengeBearer` off the handshake's refusal,
+    /// `LaunchMachineBearer` off the machine's own verdict.
+    NestOutdated,
+    /// The nest refused this app's WebSocket subprotocol before the upgrade
+    /// (HTTP 426) — the app is too old for the nest it is minting against,
+    /// typically because the nest was upgraded under a signed-in session.
+    ///
+    /// Its own variant, **not** folded into [`Self::NestOutdated`] although
+    /// both mean "an update is needed and no retry helps": the two name
+    /// opposite sides of the skew, so they are different session-ending
+    /// verdicts (`SessionEndingVerdict::AppOutdated` vs `::NestOutdated`),
+    /// different remedies (the user updates the app; the admin deploys a newer
+    /// nest) and different localized text — one variant would have to be split
+    /// again by every consumer, from nothing. Maps to the authenticated
+    /// connect's own `NestClientError::SubprotocolMismatch`, so a mint-first
+    /// reconnect stops exactly as a connect-first one does. Raised by both
+    /// bearer sources — `WsChallengeBearer` off the mint's own upgrade,
+    /// `LaunchMachineBearer` off the machine's `OutdatedSide::App` verdict.
+    SubprotocolMismatch,
 }
 
 impl fmt::Display for ApiError {
@@ -116,6 +143,10 @@ impl fmt::Display for ApiError {
             // The unverified sentence: the claimed successor is not named.
             ApiError::Superseded { .. } => {
                 f.write_str(fauna_i18n::strings::onboarding::launch::IDENTITY_SUPERSEDED)
+            }
+            ApiError::NestOutdated => f.write_str(fauna_i18n::strings::error::nest::OUTDATED),
+            ApiError::SubprotocolMismatch => {
+                f.write_str(fauna_i18n::strings::errors::SUBPROTOCOL_MISMATCH)
             }
         }
     }
@@ -141,7 +172,9 @@ impl ApiError {
             ApiError::Status { code, .. } => matches!(code, 408 | 429 | 500..=599),
             ApiError::NestIdentityChanged { .. }
             | ApiError::SignInRefused
-            | ApiError::Superseded { .. } => false,
+            | ApiError::Superseded { .. }
+            | ApiError::NestOutdated
+            | ApiError::SubprotocolMismatch => false,
         }
     }
 }

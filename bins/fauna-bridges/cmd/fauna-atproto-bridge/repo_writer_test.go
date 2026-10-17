@@ -130,7 +130,10 @@ func TestTheRustBlobWalkSeesTheRefsTheGoEncoderReallyWrites(t *testing.T) {
 				t.Fatalf("encode: %v", err)
 			}
 			w := &funnelRepoWriter{}
-			got := w.ExtractBlobRefs(recordCBOR)
+			got, err := w.ExtractBlobRefs(recordCBOR)
+			if err != nil {
+				t.Fatalf("walk: %v", err)
+			}
 			if len(got) != 1 || got[0] != cid {
 				t.Fatalf("the walk saw %v over the bytes this encoder really "+
 					"produces, want exactly [%s] — an unseen ref is an "+

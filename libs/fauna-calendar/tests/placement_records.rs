@@ -58,6 +58,7 @@ fn manifest_roundtrip() {
             calendar_id: [0x42; 32],
             encrypted_metadata: vec![1, 2, 3, 4, 5],
             highestmodseq: 1_005,
+            pruned_modseq: 0,
         }],
         events: vec![EventPlacement {
             calendar_id: [0x42; 32],

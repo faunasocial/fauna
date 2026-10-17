@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The shared **Connected apps** Settings sub-page (macOS + iOS, one FaunaKit
@@ -292,7 +295,13 @@ public struct ConnectedAppsView: View {
         }()
         let scopes = row.scopeDescriptions.map { "  • \(renderLocalizedText($0))" }
         var facts: [String] = []
-        if !row.connected { facts.append(L.connectedApps.notConnected) }
+        // A paused row says why it cannot act and how to undo it; "not
+        // connected" is only for a row nothing but itself holds back.
+        if row.paused {
+            facts.append(L.connectedApps.paused)
+        } else if !row.connected {
+            facts.append(L.connectedApps.notConnected)
+        }
         facts.append(L.connectedApps.created(time: formatUnixLocalMs(ms: row.createdAtMillis)))
         facts.append(
             row.lastUsedAtMillis.map { L.connectedApps.lastUsed(time: formatUnixLocalMs(ms: $0)) }
@@ -354,7 +363,14 @@ public struct ConnectedAppsView: View {
         .automationValue(
             Ids.connectedAppsItem,
             text: { itemText },
-            attributes: { burned ? ["revoked": "true"] : [:] }
+            attributes: {
+                // Every row reports whether it can act — `paused` (the
+                // account's external-apps switch is OFF), `connected`, or
+                // `not_connected` — beside the words.
+                var attrs = ["status": row.paused ? "paused" : (row.connected ? "connected" : "not_connected")]
+                if burned { attrs["revoked"] = "true" }
+                return attrs
+            }
         )
         .automationScope(Ids.connectedAppsItem, index: index)
     }
@@ -486,3 +502,4 @@ private func consentSetLines(_ sets: [ConsentSetRow]) -> [String] {
     }
     return lines
 }
+#endif // !FAUNA_KIDS

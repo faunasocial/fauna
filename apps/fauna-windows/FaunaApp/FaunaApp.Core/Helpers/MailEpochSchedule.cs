@@ -8,8 +8,8 @@ namespace FaunaApp.Core.Helpers;
 /// <summary>
 /// Content-sealing epoch-schedule refresh glue — the windows leg of linux
 /// <c>FaunaClient::refresh_mail_epoch_schedule</c> / tui
-/// <c>spawn_refresh_mail_epoch_schedule</c> / android
-/// <c>MailEnableGlueVM.refreshMailEpochSchedule</c> / web
+/// <c>spawn_refresh_mail_epoch_schedule</c> /
+/// android <c>KidsExcisedApi.startMailEpochRefresh</c> (the shared UniFFI trigger) / web
 /// <c>refreshMailEpochSchedule</c>
 /// (<c>encryption-at-rest.md</c> § Capability tiering → Content-sealing epochs).
 /// <para>

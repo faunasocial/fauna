@@ -58,6 +58,15 @@ pub fn elements(_w: &Wizard) -> Vec<Element> {
             true,
             Action::BeginRecoveryEntry,
         ),
+        // The third optional entry: not a recovery at all — it LOCKS an account
+        // from a device the owner will not sign in on, and persists nothing
+        // (`ui/sessions.md` § The signed-out door). The label says so.
+        Element::button(
+            ids::EMERGENCY_LOCKOUT_ENTRY_BUTTON,
+            t::EMERGENCY_LOCKOUT_ENTRY,
+            true,
+            Action::BeginEmergencyLockoutEntry,
+        ),
     ]
 }
 

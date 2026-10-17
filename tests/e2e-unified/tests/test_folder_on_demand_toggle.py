@@ -1,5 +1,15 @@
-"""tier_3 — the per-set apple on-demand presence toggle (`folder-on-demand-toggle`),
-app-UI driven (on-demand-files.md § Apple File Provider binding / folders.md § Binding).
+"""tier_3 — the per-set on-demand presence toggle (`folder-on-demand-toggle`),
+app-UI driven (on-demand-files-apple.md § Apple File Provider binding and § Android SAF
+DocumentsProvider binding / folders.md § Binding).
+
+Android carries the same set-level toggle ("Show in Files", user-approved
+2026-09-30) over its SAF DocumentsProvider and the same shared preference store
+(`FfiOnDemandPrefsStore`), so the store-backed journeys below are marked for it
+too. Its stronger presence is a watched-directory ingress rather than a bound
+location, which no android bridge seam can seed, so the bound-folder journey
+stays macOS-only and android's yield is pinned by Robolectric
+(`FoldersContentTest`, `DevicesVMOnDemandTest`). No android device venue runs
+these arms yet (testing.md § Default app and nest mode).
 
 Apple's on-demand affordance is **set-level, not location-level** (a sanctioned
 deviation from the windows `folder-location-mode-toggle` shape): an FP domain
@@ -35,13 +45,14 @@ import pytest
 
 pytestmark = [pytest.mark.tier2, pytest.mark.tier_3]
 
-# `folder-on-demand-toggle` is macos+ios `platform_elements` (ui.yaml
-# § folders) — the other five apps render nothing here, by design rather
+# `folder-on-demand-toggle` is macos+ios+android `platform_elements` (ui.yaml
+# § folders) — the other four apps render nothing here, by design rather
 # than by lag, so they are DESELECTED by the absent marker rather than
 # skipped in-body (convention 7: a skip is not coverage, and an app that
 # was never supposed to have the surface must not inflate the skip count).
 # Both apple targets render the ONE shared FaunaKit `FolderOnDemandToggle`,
-# so this is a single renderer proven on two shells. The marks sit on each
+# so this is a single renderer proven on two shells; android renders its
+# Compose twin over the same shared store. The marks sit on each
 # test rather than the module because a module mark is unioned into every
 # test's set, and the bound-folder journey below can drive macOS alone.
 
@@ -60,11 +71,12 @@ def _create_expanded_sync_folder(b) -> str:
 
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("files-on-demand")
 def test_folder_on_demand_toggle_defaults_on_and_a_flip_survives_re_entry(logged_in_app):
     """Auto-appear default-ON, and the per-set flip persists to the device-local store.
 
-    `on-demand-files.md` § Apple File Provider binding, *Auto-appear default-ON*
+    `on-demand-files-apple.md` § Apple File Provider binding, *Auto-appear default-ON*
     (user decision 2026-07-18): "A folder the device participates in
     appears in Finder/Files automatically as placeholders (metadata cost only);
     the toggle hides it per set per device."
@@ -83,12 +95,12 @@ def test_folder_on_demand_toggle_defaults_on_and_a_flip_survives_re_entry(logged
     name = _create_expanded_sync_folder(b)
 
     assert b.on_demand_toggle_visible(), (
-        "a owner row must render folder-on-demand-toggle on apple; "
+        "an owner row must render folder-on-demand-toggle on apple and android; "
         f"{app.driver.diagnose('folder-on-demand-toggle')} error={app.error_text()!r}"
     )
     assert b.on_demand_toggle_state() == "on", (
         "auto-appear is default-ON for a set this device participates in "
-        "(on-demand-files.md § Apple File Provider binding); got "
+        "(on-demand-files-apple.md § Apple File Provider binding); got "
         f"{b.on_demand_toggle_state()!r}"
     )
 
@@ -130,7 +142,7 @@ def test_folder_on_demand_toggle_defaults_on_and_a_flip_survives_re_entry(logged
 
 # macOS alone: the module runs on both apple targets, but this one journey needs a
 # local-folder BINDING to arbitrate against, and iOS has no binding surface
-# (`on-demand-files.md` § Apple File Provider binding: "iOS has no binding
+# (`on-demand-files-apple.md` § Apple File Provider binding: "iOS has no binding
 # surface, so there the rule reduces to FP-domain-or-RemoteOnly"). That is a
 # witness that can drive only macOS — MARKED for it, never a `declared_absence`
 # on ios (feature-catalog.md § Cell semantics, the marked-witness rule,
@@ -142,7 +154,7 @@ def test_folder_on_demand_toggle_defaults_on_and_a_flip_survives_re_entry(logged
 def test_folder_on_demand_toggle_yields_to_a_bound_folder(logged_in_app):
     """Arbitration: a bound always-resident folder outranks the on-demand toggle.
 
-    `on-demand-files.md` § Apple File Provider binding (ratified 2026-07-19): "a
+    `on-demand-files-apple.md` § Apple File Provider binding (ratified 2026-07-19): "a
     bound location outranks the on-demand toggle ... so a bound set never gets an
     FP domain ... and unbinding lets the toggle decide again (the domain
     reappears, default ON)". The *coordinator* half of that rule (the shared-Rust
@@ -183,7 +195,7 @@ def test_folder_on_demand_toggle_yields_to_a_bound_folder(logged_in_app):
         "a set with a bound always-resident folder must NOT offer the on-demand "
         "toggle — the binding is its one local presence, and the presence plan "
         "would refuse the domain the toggle appears to promise "
-        f"(on-demand-files.md § Apple File Provider binding); state="
+        f"(on-demand-files-apple.md § Apple File Provider binding); state="
         f"{b.on_demand_toggle_state()!r} error={app.error_text()!r}"
     )
     assert not app.has_error(), f"binding raised an error: {app.error_text()!r}"
@@ -206,13 +218,14 @@ def test_folder_on_demand_toggle_yields_to_a_bound_folder(logged_in_app):
 
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.feature("files-on-demand")
 def test_folder_on_demand_toggle_on_enrols_a_place_less_device_once(
     logged_in_app, nest_instance, test_user
 ):
     """Turning the toggle ON is the enrol gesture — exactly one default place.
 
-    `on-demand-files.md` § Apple File Provider binding, *Auto-appear default-ON*:
+    `on-demand-files-apple.md` § Apple File Provider binding, *Auto-appear default-ON*:
     on an owner row where this device holds no place "the toggle is still
     *offered* … and turning it on is the **enrol gesture**: it writes this
     device's place at the default point … through `fauna.folders.places.set`".
@@ -286,13 +299,14 @@ def test_folder_on_demand_toggle_on_enrols_a_place_less_device_once(
 
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.android
 @pytest.mark.real_conversations
-@pytest.mark.parametrize("folder_share_recipient_app", ["macos", "ios"], indirect=True)
+@pytest.mark.parametrize("folder_share_recipient_app", ["macos", "ios", "android"], indirect=True)
 @pytest.mark.feature("files-on-demand")
 def test_folder_on_demand_toggle_on_a_member_row_is_hide_only(folder_share_recipient_app):
     """A folder shared WITH the account carries the toggle too — hide-only.
 
-    `on-demand-files.md` § Shared sets on a capability host, decision 3 (the
+    `on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 3 (the
     user's answer 2026-09-30): a shared folder appears in Finder/Files by
     default once accepted, and `folder-on-demand-toggle` "renders on a member's
     row as well as an owner's, so a member can hide it … the toggle on a

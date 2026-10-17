@@ -14,13 +14,16 @@ use std::sync::Arc;
 use gtk::prelude::*;
 
 use fauna_conversations::{
-    ConversationsManager,
+    ConversationsManager, RoomInvitationSnapshot,
     snapshot::{GuardianState, ThreadSummary, next_sort_order},
 };
 
 pub struct ConversationList {
     pub root: gtk::Box,
     list_box: gtk::ListBox,
+    invitations_box: gtk::Box,
+    /// Runs the accept/decline round trips (`room.accept_invite`, `inbox.ack`).
+    rt: tokio::runtime::Handle,
     /// Held so `render` can wire each row's clickable card to
     /// `manager.select_thread`.
     manager: Arc<ConversationsManager>,
@@ -32,7 +35,11 @@ pub struct ConversationList {
 }
 
 impl ConversationList {
-    pub fn new(manager: Arc<ConversationsManager>, actor_id_hex: String) -> Self {
+    pub fn new(
+        manager: Arc<ConversationsManager>,
+        actor_id_hex: String,
+        rt: tokio::runtime::Handle,
+    ) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
         // Header bar: page-heading | new-conversation-button | conversation-sort.
@@ -102,6 +109,16 @@ impl ConversationList {
         }
         root.append(&search);
 
+        // The community-room invitations standing for this account, atop the
+        // list and below its own controls. Absent (hidden, empty) while none
+        // stands; rebuilt by `render_invitations` off the snapshot.
+        let invitations_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        invitations_box.set_margin_start(8);
+        invitations_box.set_margin_end(8);
+        invitations_box.set_margin_bottom(4);
+        invitations_box.set_visible(false);
+        root.append(&invitations_box);
+
         // ListBox in a scrolled window.
         let list_box = gtk::ListBox::new();
         list_box.set_selection_mode(gtk::SelectionMode::Single);
@@ -125,8 +142,72 @@ impl ConversationList {
         Self {
             root,
             list_box,
+            invitations_box,
             manager,
+            rt,
             actor_id_hex,
+        }
+    }
+
+    /// Paint `room-invitation[i]` with its accept/decline pair. The rows are
+    /// already verified against their signers in shared Rust and the sentence is
+    /// shared too (`RoomInvitationSnapshot::text`); this only lays them out.
+    /// Accept follows the manager into the room's thread (it selects it on
+    /// success, so the observer tick switches the detail pane); decline tells
+    /// the room nothing.
+    pub fn render_invitations(&self, invitations: &[RoomInvitationSnapshot]) {
+        while let Some(child) = self.invitations_box.first_child() {
+            self.invitations_box.remove(&child);
+        }
+        self.invitations_box.set_visible(!invitations.is_empty());
+        for invitation in invitations {
+            let id = invitation.id;
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+
+            let text = gtk::Label::new(Some(&invitation.text()));
+            text.set_halign(gtk::Align::Start);
+            text.set_hexpand(true);
+            text.set_wrap(true);
+            text.set_xalign(0.0);
+            crate::testid::set_test_id(&text, ids::ROOM_INVITATION);
+            crate::testid::set_test_attr(&text, "role", invitation.role.attr_token());
+            row.append(&text);
+
+            let accept = gtk::Button::with_label(crate::i18n::strings::common::ACCEPT);
+            accept.add_css_class("suggested-action");
+            crate::testid::set_test_id(&accept, ids::ROOM_INVITATION_ACCEPT_BUTTON);
+            crate::offline_gate::declare_wire_kind(
+                &accept,
+                "fauna.conversations.room.accept_invite",
+            );
+            {
+                let m = self.manager.clone();
+                let rt = self.rt.clone();
+                accept.connect_clicked(move |_| {
+                    let m = m.clone();
+                    rt.spawn(async move {
+                        let _ = m.accept_room_invitation(id).await;
+                    });
+                });
+            }
+            row.append(&accept);
+
+            let decline = gtk::Button::with_label(crate::i18n::strings::common::DECLINE);
+            crate::testid::set_test_id(&decline, ids::ROOM_INVITATION_DECLINE_BUTTON);
+            crate::offline_gate::declare_wire_kind(&decline, "fauna.inbox.ack");
+            {
+                let m = self.manager.clone();
+                let rt = self.rt.clone();
+                decline.connect_clicked(move |_| {
+                    let m = m.clone();
+                    rt.spawn(async move {
+                        m.decline_room_invitation(id).await;
+                    });
+                });
+            }
+            row.append(&decline);
+
+            self.invitations_box.append(&row);
         }
     }
 
@@ -144,9 +225,7 @@ impl ConversationList {
         }
 
         // Clear existing rows.
-        while let Some(child) = self.list_box.first_child() {
-            self.list_box.remove(&child);
-        }
+        crate::views::layout::clear_list_box_rows(&self.list_box);
 
         let mut selected_row: Option<gtk::ListBoxRow> = None;
         for t in threads {
@@ -334,7 +413,10 @@ mod tests {
             let actor =
                 "ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55".to_string();
             let manager = ConversationsManager::new();
-            let list = ConversationList::new(manager, actor.clone());
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("rt");
+            let list = ConversationList::new(manager, actor.clone(), rt.handle().clone());
             list.render(&[thread(1_700_000_000_000)], None);
 
             let snapshot = crate::backup_audit::store(&actor)
@@ -365,6 +447,57 @@ mod tests {
             assert_eq!(
                 crate::automation::find::text_of(&card),
                 "Q4 budget divider-change"
+            );
+        });
+    }
+    /// The invitation rows paint the shared sentence under the three ids, carry
+    /// the `role` attribute, and leave the tree again while none stands.
+    #[test]
+    fn invitations_paint_their_three_ids_and_retreat_when_none_stand() {
+        crate::testid::run_on_gtk_thread(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("rt");
+            let list = ConversationList::new(
+                ConversationsManager::new(),
+                "ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55ee55".to_string(),
+                rt.handle().clone(),
+            );
+            let root: gtk::Widget = list.root.clone().upcast();
+            assert!(
+                crate::testid::find_by_test_id(&root, ids::ROOM_INVITATION).is_none(),
+                "no invitation stands, no row"
+            );
+
+            let invitation = RoomInvitationSnapshot {
+                id: 7,
+                inviter_display: "alice@example.test".into(),
+                role: fauna_conversations::RoomRole::Admin,
+            };
+            list.render_invitations(std::slice::from_ref(&invitation));
+            let row = crate::testid::find_by_test_id(&root, ids::ROOM_INVITATION)
+                .expect("room-invitation paints");
+            assert_eq!(crate::automation::find::text_of(&row), invitation.text());
+            assert!(
+                row.css_classes()
+                    .iter()
+                    .any(|c| c == "test-attr-role-admin"),
+                "the row carries its role"
+            );
+            for id in [
+                ids::ROOM_INVITATION_ACCEPT_BUTTON,
+                ids::ROOM_INVITATION_DECLINE_BUTTON,
+            ] {
+                assert!(
+                    crate::testid::find_by_test_id(&root, id).is_some(),
+                    "{id} paints beside the row"
+                );
+            }
+
+            list.render_invitations(&[]);
+            assert!(
+                crate::testid::find_by_test_id(&root, ids::ROOM_INVITATION).is_none(),
+                "declined or accepted, the row is gone"
             );
         });
     }

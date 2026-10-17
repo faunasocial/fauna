@@ -12,10 +12,19 @@
 // This module exists ONLY in builds made for testing (testing.md § convention
 // 15): its sole importer is `$lib/e2e-automation`.
 
-import { accountDeviceSetState, accountPumpCycles, accountPumpNow } from '$lib/wasm';
+import {
+  accountDeviceSetState,
+  accountPumpCycles,
+  accountPumpNow,
+  accountReadMarkerState,
+} from '$lib/wasm';
 import { registerE2eCommands } from '$lib/e2e-commands';
 
-const ACCOUNT_RUNTIME_COMMANDS = ['account_pump_now', 'device_set_state'] as const;
+const ACCOUNT_RUNTIME_COMMANDS = [
+  'account_pump_now',
+  'device_set_state',
+  'read_marker_state',
+] as const;
 
 /** Register the account runtime's commands and install the
  *  `account_pump_cycles` accessor. Called once from `$lib/e2e-automation`. */
@@ -33,6 +42,14 @@ export function registerAccountRuntimeCommands(): void {
         throw new Error('device_set_state needs a `device_id_hex` string');
       }
       return accountDeviceSetState(id);
+    }
+    if (action === 'read_marker_state') {
+      // Same reader shape as `device_set_state`: a missing id is a loud refusal.
+      const id = payload?.channel_id_hex;
+      if (typeof id !== 'string') {
+        throw new Error('read_marker_state needs a `channel_id_hex` string');
+      }
+      return accountReadMarkerState(id);
     }
     // Fire-and-forget by contract: the barrier is `account_pump_cycles`,
     // never this ack (the pass itself may outlast a command's budget).

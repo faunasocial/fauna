@@ -3,6 +3,7 @@ using System.Collections.ObjectModel;
 using System.Linq;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using FaunaApp.Core.Helpers;
 using FaunaApp.Core.Services;
 using uniffi.fauna_client_moderation;
 using uniffi.fauna_ffi;
@@ -18,7 +19,8 @@ namespace FaunaApp.Core.ViewModels;
 /// (<see cref="IModerationLocalDetections"/>), merged through the one shared
 /// <c>fauna_client_moderation::merge_queue</c> façade (moderation.md § Layout &amp;
 /// flow). A local row's <c>train-correction-button</c> removes the client-side flag; a
-/// server row's submits <c>fauna.moderation.train</c>.
+/// server row's runs the one shared correction flow
+/// (<c>MailSettingsMachine.TrainModerationCorrection</c>).
 ///
 /// <para>The spam-filtering <b>preferences</b> (<c>fauna.spam.{get,set}_preferences</c>)
 /// live on Settings → Privacy (the canonical <c>spam-moderation-controls</c> home,
@@ -60,9 +62,9 @@ public partial class ModerationViewModel : ViewModelBase
     // The client half of the queue: the conversations session's post-decrypt local
     // detections. Null when there is no MLS session (→ the server rows alone).
     private readonly IModerationLocalDetections? _local;
-    // The sealed spam-model client-write path (1d — mail-spam.md § Encrypted-mode
-    // interaction). Null → no sealed-write path → the correction always takes the
-    // server-side fauna.moderation.train (e.g. mail not enabled).
+    // The shared-Rust correction seam (the sealed spam-model write + the always-run
+    // fauna.moderation.train; mail-spam.md § Encrypted-mode interaction). Always supplied
+    // in production; null only in queue-read tests, where a server-row correction fails.
     private readonly ISpamModelClientWrite? _spamWrite;
 
     internal ModerationViewModel(
@@ -180,26 +182,14 @@ public partial class ModerationViewModel : ViewModelBase
             else
             {
                 // A server row lists the caller's OWN flagged content, so the correction
-                // is "not spam" (verdict "ham") — it down-weights the false positive in the
-                // caller's Bayesian model. When the nest advertises spam-model-sealed-at-rest
-                // (1d — mail-spam.md § Encrypted-mode interaction), write the re-sealed model
-                // client-side over the fetched post body (mirroring linux train_moderation_flow),
-                // else degrade to the server-side fauna.moderation.train. The capability
-                // pre-check is load-bearing: a blind sealed write against a v-older nest would
-                // double-seal → the user's model becomes unreadable → user-data loss
-                // (version-compatibility.md I1/I2). ServerPath / an empty body also degrade.
-                var trainedClientSide = false;
-                if (_spamWrite is not null && await _spamWrite.SealedSpamWriteAvailableAsync())
-                {
-                    var text = await _rpc.PostBodyTextAsync(action.ContentId);
-                    if (!string.IsNullOrEmpty(text))
-                    {
-                        var res = await _spamWrite.TrainSpamModelClientAsync(text, isSpam: false);
-                        trainedClientSide = res.Sealed;
-                    }
-                }
-                if (!trainedClientSide)
-                    await _rpc.ModerationTrainAsync(action.ContentId, "ham");
+                // is "not spam" — it down-weights the false positive in the caller's
+                // Bayesian model. One shared flow owns both halves (the sealed model write
+                // when the nest allows it, then fauna.moderation.train ALWAYS for the read
+                // gate + report capture; moderation.md § Training correction submission):
+                // MailSettingsMachine.train_moderation_correction.
+                if (_spamWrite is null)
+                    throw new InvalidOperationException("no mail settings machine to run the training correction");
+                await _spamWrite.TrainModerationCorrectionAsync(action.ContentId, isSpam: false);
             }
             // Reflect the correction: re-read the queue.
             await RefreshQueueAsync();
@@ -238,20 +228,40 @@ public partial class ModerationViewModel : ViewModelBase
     private static ModerationRow MapRow(QueueRow r)
     {
         var style = FaunaFfiMethods.ContentLabelStyle(r.category);
+        string? actionLabel = r.action is byte action
+            ? Strings.Resolve(FaunaFfiMethods.ObligationActionLabel(action))
+            : null;
+        // per-mille (0–1000) → whole percent, rounded half-up, single-sourced via
+        // the shared fauna_core::format::confidence_percent (no per-app
+        // (m + 5) / 10 — value-formatting.md § Confidence percent).
+        var confidencePercent = (int)FaunaFfiMethods.ConfidencePercent(r.confidencePerMille);
         return new ModerationRow(
             ContentId: r.contentId,
             ContentType: r.contentType,
             CategoryLabel: Strings.Resolve(style.label),
             CategoryIcon: style.icon,
             CategoryAccent: style.accent,
-            ActionLabel: r.action is byte action
-                ? Strings.Resolve(FaunaFfiMethods.ObligationActionLabel(action))
-                : string.Empty,
-            // per-mille (0–1000) → whole percent, rounded half-up, single-sourced via
-            // the shared fauna_core::format::confidence_percent (no per-app
-            // (m + 5) / 10 — value-formatting.md § Confidence percent).
-            ConfidencePercent: (int)FaunaFfiMethods.ConfidencePercent(r.confidencePerMille),
-            IsLocal: r.source == QueueRowSource.Local);
+            ActionLabel: actionLabel ?? string.Empty,
+            ConfidencePercent: confidencePercent,
+            IsLocal: r.source == QueueRowSource.Local,
+            BadgeAttributes: BadgeAttributes(r.category, confidencePercent, actionLabel));
+    }
+
+    /// <summary>The <c>content-label-badge</c>'s automation attributes (moderation.md
+    /// § Element IDs → <i>Queue row facts</i>): <c>confidence</c>, the whole percent with
+    /// its <c>%</c> exactly as the row paints it, and <c>action</c>, the resolved action
+    /// label — absent on a local detection, which carries none. UIA gives the badge one
+    /// HelpText, so they ride one <see cref="AutomationAttributePack"/>; the shared
+    /// category key the badge styles from rides with them, so a local row's pack still
+    /// holds two pairs. A lone pair would read back as a bare value
+    /// (<c>flaui-bridge/PackedAttr.cs</c>), answering <c>action</c> with the whole
+    /// <c>confidence=…</c> pair instead of nothing.</summary>
+    internal static string BadgeAttributes(string category, int confidencePercent, string? actionLabel)
+    {
+        var confidence = ("confidence", $"{confidencePercent}%");
+        return actionLabel is null
+            ? AutomationAttributePack.Pack(("category", category), confidence)
+            : AutomationAttributePack.Pack(("category", category), confidence, ("action", actionLabel));
     }
 }
 
@@ -273,6 +283,8 @@ public record ReportLedgerRowView(string ReportId, string Line, bool CanWithdraw
 /// never a fabricated action (§ Don't do these). <see cref="ContentId"/> is the content
 /// ref the <c>train-correction-button</c> acts on (a server row trains
 /// <c>fauna.moderation.train</c>; a local row removes the client-side flag).
+/// <see cref="BadgeAttributes"/> is the badge's packed HelpText
+/// (<see cref="ModerationViewModel.BadgeAttributes"/>).
 /// </summary>
 public record ModerationRow(
     string ContentId,
@@ -282,4 +294,5 @@ public record ModerationRow(
     string CategoryAccent,
     string ActionLabel,
     int ConfidencePercent,
-    bool IsLocal);
+    bool IsLocal,
+    string BadgeAttributes);

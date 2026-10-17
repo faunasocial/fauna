@@ -32,7 +32,8 @@ use fauna_protocol::conversations::{
     ChannelFetchRequest, ChannelListForActorReply, ChannelListForActorRequest,
     ChannelSendRemoteRequest, ChannelSendReply, ChannelSendRequest,
     ConversationBlobWriteTokenGetReply, ConversationBlobWriteTokenGetRequest,
-    KIND_CONVERSATIONS_BLOB_WRITE_TOKEN_GET, KeypackageCountReply, KeypackageCountRequest,
+    KIND_CONVERSATIONS_BLOB_WRITE_TOKEN_GET, KeypackageAddressableReply,
+    KeypackageAddressableRequest, KeypackageCountReply, KeypackageCountRequest,
     KeypackageFetchReply, KeypackageFetchRequest, KeypackageUploadReply, KeypackageUploadRequest,
     RoomAcceptInviteRemoteRequest, RoomAcceptInviteReply, RoomAcceptInviteRequest,
     RoomBackfillGenerationsReply, RoomBackfillGenerationsRequest, RoomCreateReply,
@@ -61,9 +62,10 @@ use fauna_client::NestClient;
 // (smtp-server.md § Message size limits — the reader half).
 #[cfg(not(target_arch = "wasm32"))]
 use fauna_client::NestPublicChunkFetcher;
-// The MLS replica-plane transport seam both `NestMlsReplicaTransport` (native, over
-// `Arc<NestClient>`) and `WsMlsReplicaTransport` (wasm, over `WsRpcClient`) implement —
-// on both targets now that the web leg has the wasm twin.
+// The MLS replica-plane transport seam `WsMlsReplicaTransport` (wasm, over
+// `WsRpcClient`) implements here; its native twin `NestMlsReplicaTransport` rests
+// in `fauna-client-mls-sync` and is re-exported below.
+#[cfg(target_arch = "wasm32")]
 use fauna_client_mls_sync::{MlsReplicaTransport, MlsTransportError, PutOutcome, ReplicaBase};
 
 // The nest-backed inbound-mail read-feed source (`NestMailInboundSource`) — native
@@ -172,7 +174,8 @@ pub use index_lease::{FIRST_ANSWER_CEILING, IndexLeaseSeat};
 mod custody_ceremony_glue;
 #[cfg(not(target_arch = "wasm32"))]
 pub use custody_ceremony_glue::{
-    CustodyCeremonyObserver, CustodyMintCandidate, SessionCustodyPoster, StoreCustodyCeremonySink,
+    CustodyCeremonyIngestCounts, CustodyCeremonyObserver, CustodyMintCandidate,
+    SessionCustodyPoster, StoreCustodyCeremonySink, custody_ceremony_ingest_counts,
     custody_mint_candidates, mint_candidates_from_channels,
 };
 
@@ -698,17 +701,38 @@ where
     }
 
     /// `fauna.conversations.keypackage.count` — non-destructive count
-    /// of remaining non-expired key packages for `target_actor_id`.
-    /// Pure read; replay-safe at 5 s. Used by senders to gauge whether
-    /// `keypackage.fetch` will succeed before initiating a chat.
+    /// of the caller's own remaining non-expired one-time key packages
+    /// (the top-up gauge). Pure read; replay-safe at 5 s. **Owner-only:**
+    /// `own_actor_id` must be the bearer's own id — the nest refuses any
+    /// other target with `fauna.conversations.permission_denied`; another
+    /// actor's reachability is [`Self::keypackage_addressable`].
     pub async fn keypackage_count(
         &self,
-        target_actor_id: impl Into<String>,
+        own_actor_id: impl Into<String>,
     ) -> Result<KeypackageCountReply, R::Error> {
         self.nest
             .request(
                 "fauna.conversations.keypackage.count",
                 KeypackageCountRequest {
+                    actor_id: own_actor_id.into(),
+                    extra: std::collections::BTreeMap::new(),
+                },
+            )
+            .await
+    }
+
+    /// `fauna.conversations.keypackage.addressable` — whether a same-nest
+    /// actor holds ≥1 usable key package (one-time or last-resort): the
+    /// boolean reachability probe for a bare actor id. Pure read; replay-safe
+    /// at 5 s; never discloses a count.
+    pub async fn keypackage_addressable(
+        &self,
+        target_actor_id: impl Into<String>,
+    ) -> Result<KeypackageAddressableReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.conversations.keypackage.addressable",
+                KeypackageAddressableRequest {
                     actor_id: target_actor_id.into(),
                     extra: std::collections::BTreeMap::new(),
                 },
@@ -845,10 +869,13 @@ where
     /// `at_policy_version` asks the room to also serve the signed policy it
     /// held at that version, and its birth salt
     /// ([`RoomListRosterRequest::at_policy_version`]); `None` is the plain read.
+    /// `policy_version_span` asks for a run of consecutive versions from there
+    /// ([`RoomListRosterRequest::policy_version_span`]).
     pub async fn room_list_roster(
         &self,
         room_id: impl Into<String>,
         at_policy_version: Option<u64>,
+        policy_version_span: Option<u32>,
     ) -> Result<RoomListRosterReply, R::Error> {
         self.nest
             .request(
@@ -856,6 +883,7 @@ where
                 RoomListRosterRequest {
                     room_id: room_id.into(),
                     at_policy_version,
+                    policy_version_span,
                     extra: std::collections::BTreeMap::new(),
                 },
             )
@@ -873,13 +901,14 @@ where
     /// why an old own-nest's clean `permission_denied` is the degradation that
     /// must fail loud instead.
     ///
-    /// `at_policy_version` is forwarded to the room's home unchanged, as on
-    /// [`Self::room_list_roster`].
+    /// `at_policy_version` and `policy_version_span` are forwarded to the
+    /// room's home unchanged, as on [`Self::room_list_roster`].
     pub async fn room_list_roster_remote(
         &self,
         room_id: impl Into<String>,
         nest_url: impl Into<String>,
         at_policy_version: Option<u64>,
+        policy_version_span: Option<u32>,
     ) -> Result<RoomListRosterReply, R::Error> {
         self.nest
             .request(
@@ -888,6 +917,7 @@ where
                     room_id: room_id.into(),
                     nest_url: nest_url.into(),
                     at_policy_version,
+                    policy_version_span,
                     extra: std::collections::BTreeMap::new(),
                 },
             )
@@ -1986,8 +2016,12 @@ where
     // the same `RoomListRosterReply`, because the relay forwards the room
     // home's reply unchanged.
     let read = match home_nest_url {
-        Some(url) => client.room_list_roster_remote(channel_hex, url, None).await,
-        None => client.room_list_roster(channel_hex, None).await,
+        Some(url) => {
+            client
+                .room_list_roster_remote(channel_hex, url, None, None)
+                .await
+        }
+        None => client.room_list_roster(channel_hex, None, None).await,
     };
     let reply = match read {
         Ok(reply) => reply,
@@ -2060,34 +2094,75 @@ where
     R: RpcRequester,
     R::Error: RpcErrorClass,
 {
-    use fauna_conversations::backend::RoomPolicyVersionRead;
+    use fauna_conversations::backend::{RoomPolicyVersionRead, RoomPolicyVersionsRead};
+    match read_policy_versions(client, channel_hex, home_nest_url, version, None).await {
+        RoomPolicyVersionsRead::Served {
+            mut policies,
+            birth_salt,
+        } => {
+            let policy = policies.swap_remove(0);
+            RoomPolicyVersionRead::Served { policy, birth_salt }
+        }
+        RoomPolicyVersionsRead::NotHeld => RoomPolicyVersionRead::NotHeld,
+        RoomPolicyVersionsRead::Unavailable => RoomPolicyVersionRead::Unavailable,
+    }
+}
+
+/// The run form of [`read_policy_version`], behind
+/// [`fauna_conversations::backend::RoomRosterReader::read_policy_versions`]:
+/// the same roster read asked with `policy_version_span`. A nest older than the
+/// field ignores it and serves the one `policy_at_version` — which is returned
+/// as a run of one, so the caller's walk simply continues from there. Never an
+/// empty run: an answer without the first version is `NotHeld`.
+async fn read_policy_versions<R>(
+    client: &ConversationsClient<R>,
+    channel_hex: String,
+    home_nest_url: Option<String>,
+    from: u64,
+    span: Option<u32>,
+) -> fauna_conversations::backend::RoomPolicyVersionsRead
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass,
+{
+    use fauna_conversations::backend::RoomPolicyVersionsRead;
     let read = match home_nest_url {
         Some(url) => {
             client
-                .room_list_roster_remote(channel_hex, url, Some(version))
+                .room_list_roster_remote(channel_hex, url, Some(from), span)
                 .await
         }
-        None => client.room_list_roster(channel_hex, Some(version)).await,
+        None => client.room_list_roster(channel_hex, Some(from), span).await,
     };
     match read {
-        Ok(reply) => match reply.policy_at_version {
-            Some(policy) => RoomPolicyVersionRead::Served {
-                policy: policy.into_vec(),
-                birth_salt: reply
-                    .birth_salt
-                    .and_then(|salt| <[u8; 32]>::try_from(salt.as_slice()).ok()),
-            },
-            None => RoomPolicyVersionRead::NotHeld,
-        },
+        Ok(reply) => {
+            let policies: Vec<Vec<u8>> = match (reply.policy_versions, reply.policy_at_version) {
+                (Some(run), _) if !run.is_empty() => {
+                    run.into_iter().map(|p| p.into_vec()).collect()
+                }
+                (_, Some(policy)) => vec![policy.into_vec()],
+                _ => Vec::new(),
+            };
+            if policies.is_empty() {
+                RoomPolicyVersionsRead::NotHeld
+            } else {
+                RoomPolicyVersionsRead::Served {
+                    policies,
+                    birth_salt: reply
+                        .birth_salt
+                        .and_then(|salt| <[u8; 32]>::try_from(salt.as_slice()).ok()),
+                }
+            }
+        }
         Err(e)
             if e.as_rpc_error()
                 .is_some_and(|rpc| rpc.code == "fauna.conversations.permission_denied") =>
         {
-            RoomPolicyVersionRead::NotHeld
+            RoomPolicyVersionsRead::NotHeld
         }
         Err(e) => {
             tracing::debug!(error = %e, "policy-version read failed — the record stays unpainted");
-            RoomPolicyVersionRead::Unavailable
+            RoomPolicyVersionsRead::Unavailable
         }
     }
 }
@@ -2600,6 +2675,16 @@ impl fauna_conversations::backend::RoomRosterReader for NestConversationsRpc {
     ) -> fauna_conversations::backend::RoomPolicyVersionRead {
         read_policy_version(&self.client, channel_hex, home_nest_url, version).await
     }
+
+    async fn read_policy_versions(
+        &self,
+        channel_hex: String,
+        home_nest_url: Option<String>,
+        from: u64,
+        span: u32,
+    ) -> fauna_conversations::backend::RoomPolicyVersionsRead {
+        read_policy_versions(&self.client, channel_hex, home_nest_url, from, Some(span)).await
+    }
 }
 
 // The community class's generation read, on the same object for the same
@@ -2800,6 +2885,14 @@ impl fauna_conversations::backend::ConversationsRpc for NestConversationsRpc {
             .keypackage_count(actor_id_hex)
             .await
             .map(|r| r.count)
+            .map_err(conv_rpc_error)
+    }
+
+    async fn keypackage_addressable(&self, actor_id_hex: String) -> Result<bool, ConvRpcError> {
+        self.client
+            .keypackage_addressable(actor_id_hex)
+            .await
+            .map(|r| r.addressable)
             .map_err(conv_rpc_error)
     }
 
@@ -3070,50 +3163,13 @@ fn refuse_blob_body_over_limit(len: u64) -> Result<(), ConvRpcError> {
 
 // ── Native MLS replica transport (`NestMlsReplicaTransport`) ───────────────────
 
-/// Native [`MlsReplicaTransport`] seam impl — the `fauna.mls.{get,put}` sealed
-/// replica plane (cross-device MLS group-state sync, `docs/goal/behavior/devices.md`
-/// § Cross-device MLS group-state sync) over `Arc<NestClient>`.
-///
-/// The seam keeps `MlsStateSync` / `FaunaCommitGate` non-generic (the dyn-erased
-/// transport, design § "dyn-erasure"); this adapter is the one native place the
-/// seam meets the wire, delegating to `fauna_client_mls_sync`'s
-/// `rpc_transport_{get,put}` helpers (which own the encode + the
-/// `fauna.mls.conflict` → [`PutOutcome::Conflict`] classification). Shared by
-/// every native app, exactly as [`NestConversationsRpc`] above is — wired
-/// once per client via `MlsStateSync::new(Box::new(NestMlsReplicaTransport::new(nest)), …)`.
-/// The wasm twin is [`WsMlsReplicaTransport`] over `WsRpcClient` (below).
+/// The native [`MlsReplicaTransport`] adapter over `Arc<NestClient>` — rests in
+/// `fauna-client-mls-sync` (one native place the seam meets the wire), so the
+/// recovery crate's sweep retry, which sits below this crate, reads the parked
+/// retired leaf through the same adapter. Re-exported here so every app's
+/// existing import stands.
 #[cfg(not(target_arch = "wasm32"))]
-pub struct NestMlsReplicaTransport {
-    nest: Arc<NestClient>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl NestMlsReplicaTransport {
-    pub fn new(nest: Arc<NestClient>) -> Self {
-        Self { nest }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[async_trait::async_trait]
-impl MlsReplicaTransport for NestMlsReplicaTransport {
-    async fn get(&self, path: String) -> Result<Option<Vec<u8>>, MlsTransportError> {
-        fauna_client_mls_sync::rpc_transport_get(&self.nest, path).await
-    }
-
-    async fn get_hash(&self, path: String) -> Result<Option<[u8; 32]>, MlsTransportError> {
-        fauna_client_mls_sync::rpc_transport_get_hash(&self.nest, path).await
-    }
-
-    async fn put(
-        &self,
-        path: String,
-        blob: Vec<u8>,
-        base: ReplicaBase,
-    ) -> Result<PutOutcome, MlsTransportError> {
-        fauna_client_mls_sync::rpc_transport_put(&self.nest, path, blob, base).await
-    }
-}
+pub use fauna_client_mls_sync::NestMlsReplicaTransport;
 
 // ── Wasm MLS replica transport (`WsMlsReplicaTransport`) ───────────────────────
 
@@ -3222,6 +3278,8 @@ fn push_event_to_conv(
                 w.set_name_sealed.as_deref().map(|b| &b[..]),
                 w.set_name_hash.as_deref().map(|b| &b[..]),
             ),
+            // The home nest's residency stamp — seeds the foreign-set record.
+            residency: w.residency,
         })),
         PushEvent::ChannelMessage(_) => Some(ConvPushEvent::ChannelMessage),
         _ => None,
@@ -6519,6 +6577,9 @@ impl InboxApply for SessionInboxApply {
                         welcome.set_name_sealed.as_deref().map(|b| &b[..]),
                         welcome.set_name_hash.as_deref().map(|b| &b[..]),
                     ),
+                    // The home nest's residency stamp — seeds the foreign-set
+                    // record so the member's seat arms before any federated read.
+                    residency: welcome.residency,
                 },
             )
             .await
@@ -6729,6 +6790,62 @@ impl FolderGateSink for NestFolderGate<fauna_rpc_wasm::WsRpcClient> {
     async fn drop_roster_row(&self, group_id_hex: String, home_nest_url: Option<String>) {
         self.drop_roster_row_inner(group_id_hex, home_nest_url)
             .await
+    }
+}
+
+/// The nest-backed **contact roster** source
+/// ([`fauna_conversations::backend::ContactRosterSource`]): the recipient
+/// picker's contacts (`docs/goal/ui/conversations.md` § Where logic lives →
+/// *Recipient suggestions*, source 2) read over `fauna.contacts.list`. One
+/// implementation for every app — native sessions register it beside
+/// [`NestFolderGate`], web through `libs/fauna-wasm` — so the engine crate
+/// stays contacts-free. Same dual-shim shape as [`NestFolderGate`], for the
+/// same `Send`-inference reason.
+pub struct NestContactRoster<R: RpcRequester> {
+    contacts: ContactsClient<R>,
+}
+
+impl<R: RpcRequester + Clone> NestContactRoster<R> {
+    pub fn new(nest: R) -> Self {
+        Self {
+            contacts: ContactsClient::new(nest),
+        }
+    }
+
+    async fn roster_inner(&self) -> Result<Vec<fauna_conversations::RosterEntry>, String> {
+        let reply = self
+            .contacts
+            .contacts_list()
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(reply
+            .contacts
+            .into_iter()
+            .map(|c| fauna_conversations::RosterEntry {
+                actor_id_hex: c.peer_id,
+                handle: c.handle,
+                domain: c.domain,
+                status: c.status,
+            })
+            .collect())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+impl fauna_conversations::backend::ContactRosterSource for NestContactRoster<Arc<NestClient>> {
+    async fn roster(&self) -> Result<Vec<fauna_conversations::RosterEntry>, String> {
+        self.roster_inner().await
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[async_trait::async_trait(?Send)]
+impl fauna_conversations::backend::ContactRosterSource
+    for NestContactRoster<fauna_rpc_wasm::WsRpcClient>
+{
+    async fn roster(&self) -> Result<Vec<fauna_conversations::RosterEntry>, String> {
+        self.roster_inner().await
     }
 }
 
@@ -6943,6 +7060,16 @@ impl fauna_conversations::backend::RoomRosterReader for WsConversationsRpc {
     ) -> fauna_conversations::backend::RoomPolicyVersionRead {
         read_policy_version(&self.client, channel_hex, home_nest_url, version).await
     }
+
+    async fn read_policy_versions(
+        &self,
+        channel_hex: String,
+        home_nest_url: Option<String>,
+        from: u64,
+        span: u32,
+    ) -> fauna_conversations::backend::RoomPolicyVersionsRead {
+        read_policy_versions(&self.client, channel_hex, home_nest_url, from, Some(span)).await
+    }
 }
 
 // The community class's generation read, browser side — the same shared helper
@@ -7148,6 +7275,14 @@ impl fauna_conversations::backend::ConversationsRpc for WsConversationsRpc {
             .keypackage_count(actor_id_hex)
             .await
             .map(|r| r.count)
+            .map_err(conv_rpc_error)
+    }
+
+    async fn keypackage_addressable(&self, actor_id_hex: String) -> Result<bool, ConvRpcError> {
+        self.client
+            .keypackage_addressable(actor_id_hex)
+            .await
+            .map(|r| r.addressable)
             .map_err(conv_rpc_error)
     }
 
@@ -7414,6 +7549,15 @@ mod tests {
     use super::*;
     use fauna_client_testkit::{RecordingRequester, block_on};
     use fauna_core::identity::ActorKeypair;
+
+    #[test]
+    fn the_mark_seen_chunk_size_equals_the_nests_request_cap() {
+        // `fauna-conversations` cannot see `fauna-protocol`; this crate sees both.
+        assert_eq!(
+            fauna_conversations::backends::smtp::MARK_SEEN_BATCH_MAX,
+            fauna_protocol::email::INBOX_FLAG_WRITE_MAX_UIDS
+        );
+    }
 
     #[test]
     fn constructor_builds_with_default_nest_client() {
@@ -7808,6 +7952,12 @@ mod tests {
             "fauna.conversations.keypackage.count" => {
                 fauna_protocol::encode_canonical(&KeypackageCountReply {
                     count: 0,
+                    extra: Default::default(),
+                })
+            }
+            "fauna.conversations.keypackage.addressable" => {
+                fauna_protocol::encode_canonical(&KeypackageAddressableReply {
+                    addressable: false,
                     extra: Default::default(),
                 })
             }
@@ -8266,6 +8416,17 @@ mod tests {
         let (kind, payload) = rec.recorded();
         assert_eq!(kind, "fauna.conversations.keypackage.count");
         let req: conversations::KeypackageCountRequest =
+            fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(req.actor_id, hex32());
+    }
+
+    #[test]
+    fn keypackage_addressable_composes_kind_and_payload() {
+        let (rec, c) = client();
+        block_on(c.keypackage_addressable(hex32())).expect("infallible mock");
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.conversations.keypackage.addressable");
+        let req: conversations::KeypackageAddressableRequest =
             fauna_protocol::decode_strict(&payload).expect("decodes");
         assert_eq!(req.actor_id, hex32());
     }
@@ -9472,6 +9633,11 @@ mod tests {
             Ok(vec![])
         }
         async fn keypackage_count(&self, _a: String) -> Result<u64, ConvRpcError> {
+            Err(ConvRpcError::Rejected {
+                message: "not reached by a Welcome-ingest-only test".into(),
+            })
+        }
+        async fn keypackage_addressable(&self, _a: String) -> Result<bool, ConvRpcError> {
             Err(ConvRpcError::Rejected {
                 message: "not reached by a Welcome-ingest-only test".into(),
             })

@@ -69,9 +69,10 @@ func (s *Session) Create(mailbox string, _ *imap.CreateOptions) error {
 
 // Delete implements emersion/go-imap's Session.Delete. Maps to
 // `fauna.bridges.delete_mailbox`; the non-empty-policy gate
-// (`mail.imap.delete_nonempty`) is read server-side from
-// `ImapPolicy::default()` — under the default `forbidden` policy a
-// non-empty mailbox returns `NO Mailbox is not empty` (RFC 9051
+// (`mail.imap.delete_nonempty`) is read nest-side at each DELETE from the
+// admin-effective policy (catalog default ⊕ `put_imap_policy`) — under the
+// default `forbidden` policy a non-empty mailbox returns
+// `NO Mailbox is not empty` (RFC 9051
 // §6.3.5 lets either stance stand; the safer default per the goal
 // doc § Write surface DELETE row).
 func (s *Session) Delete(mailbox string) error {

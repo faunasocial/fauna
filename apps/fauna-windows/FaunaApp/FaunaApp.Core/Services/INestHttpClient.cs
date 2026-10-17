@@ -60,7 +60,8 @@ public interface INestHttpClient : IAsyncDisposable
 
     // ── Configuration ──
     // Node info (version / domain) moved to WS-RPC: the admin dashboard reads the
-    // running version from fauna.admin.status (INestRpcClient.AdminStatusAsync);
+    // running version through the shared card set
+    // (INestRpcClient.AdminDashboardSnapshotAsync);
     // the GET /api/v1/node-info HTTP twin was deleted nest-side.
 
     Task ConfigureAsync(string? nestUrl, CancellationToken ct = default);
@@ -220,6 +221,14 @@ public interface INestHttpClient : IAsyncDisposable
     /// nest-relative (<see cref="NestContentPath"/>) — the bearer never leaves the nest.</summary>
     Task<byte[]> GetContentAsync(string path, CancellationToken ct = default);
 
+    /// <summary>The nest URL this client was configured with — the string the WS login
+    /// minted its bearer on, so the authority the shared-Rust pin store keys on. For a
+    /// consumer that reads the nest through a shared-Rust leg of its own: the inline
+    /// player's pinned ranged reader (render-model.md § D6c → Inline playback, answer 1).
+    /// Never a URL to hand an OS component, which would dial it against the OS trust store
+    /// alone (security.md § Transport trust → <i>The native-player leg</i>).</summary>
+    string NestUrl { get; }
+
     // Email Filters (`fauna.email.filters.*`, INestRpcClient) — the HTTP twins
     // were deleted nest-side.
 
@@ -228,6 +237,6 @@ public interface INestHttpClient : IAsyncDisposable
     // admin-users hub over the fauna.admin.* WS-RPC kinds (FfiAdminClient,
     // libs/fauna-ffi/src/admin.rs). The dashboard stats (fauna.admin.stats) and
     // the is-admin gate (fauna.account.am_i_admin) also moved to WS-RPC
-    // (INestRpcClient.AdminStatsAsync / AmIAdminAsync) — the /admin/api/stats
+    // (INestRpcClient.AdminDashboardSnapshotAsync / AmIAdminAsync) — the /admin/api/stats
     // twin was deleted nest-side, so this HTTP client carries neither.
 }

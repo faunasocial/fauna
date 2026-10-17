@@ -6,6 +6,7 @@ import com.fauna.app.core.ApiClient
 import com.fauna.app.core.ContentPolicyInputs
 import com.fauna.app.core.ContentPolicyStore
 import com.fauna.app.core.FamilyNotifyStore
+import com.fauna.app.core.SuccessionAftermathHost
 import com.fauna.app.core.conversations.ConversationsManagerHost
 import uniffi.fauna_conversations.ConversationsManager
 import uniffi.fauna_conversations.ConversationsSnapshot
@@ -37,6 +38,7 @@ class ConversationsVM @Inject constructor(
     private val api: ApiClient,
     private val contentPolicyStore: ContentPolicyStore,
     private val familyNotifyStore: FamilyNotifyStore,
+    private val aftermath: SuccessionAftermathHost,
 ) : ViewModel() {
 
     /** Observable snapshot of all conversations state (shared Rust). */
@@ -56,6 +58,23 @@ class ConversationsVM @Inject constructor(
             val newest = snapshot?.threads?.maxOfOrNull { it.lastActivityMs } ?: return@onEach
             runCatching { api.backupAuditObserve(newest) }
         }.launchIn(viewModelScope)
+        // The store-change notice ([ApiClient.storeChangedTick]): an open
+        // conversation's muted-word list is a store read, so a word added on
+        // another device collapses its bubbles with no re-open. Only once a
+        // detail has mounted the list — nothing else here reads it.
+        viewModelScope.launch {
+            api.storeChangedTick.collect {
+                if (mutedKeywordsMounted) readMutedKeywords()
+            }
+        }
+        // The aftermath's raises have settled: re-read the review roster the
+        // chip pair reads (`succession-aftermath.md` § Propagation), but only
+        // once a detail has mounted it — the same gate as the muted words.
+        viewModelScope.launch {
+            aftermath.configStageSettled.collect {
+                if (memberReviewRosterMounted) loadMemberReviewRoster()
+            }
+        }
     }
 
     /**
@@ -149,6 +168,17 @@ class ConversationsVM @Inject constructor(
      *  guardian's policy change reaches the conversation render on the next detail open. */
     fun loadMutedKeywords() {
         contentPolicyStore.refresh()
+        mutedKeywordsMounted = true
+        readMutedKeywords()
+    }
+
+    /** Whether a conversation detail has loaded [mutedKeywords] — the gate on the
+     *  store-change notice's re-read. */
+    private var mutedKeywordsMounted = false
+
+    /** The muted-word read alone. A failed read keeps the list; an equal answer
+     *  publishes nothing ([mutedKeywords] is a StateFlow). */
+    private fun readMutedKeywords() {
         viewModelScope.launch {
             runCatching { api.mutedKeywordsList().keywords }.getOrNull()?.let { mutedKeywords.value = it }
         }
@@ -199,9 +229,12 @@ class ConversationsVM @Inject constructor(
     val memberReviewRoster =
         kotlinx.coroutines.flow.MutableStateFlow<List<com.fauna.ffi.FfiMemberReview>>(emptyList())
 
+    private var memberReviewRosterMounted = false
+
     /** Load ONCE on detail mount (`LaunchedEffect(Unit)`, mirroring
      *  [loadMutedKeywords]) — the first of the two ratified refresh points. */
     fun loadMemberReviewRoster() {
+        memberReviewRosterMounted = true
         viewModelScope.launch {
             runCatching { api.memberReviewList() }.getOrNull()?.let { memberReviewRoster.value = it }
         }

@@ -77,8 +77,20 @@ _SEAM_RE = re.compile(
 _DTS_NAME_RE = re.compile(r"^\s*(?:readonly\s+)?([A-Za-z_$][\w$]*)\s*[(:]", re.MULTILINE)
 
 
+# wasm-bindgen's own glue exports in the `InitOutput` interface. Its closure-invoke
+# shims are numbered by count (`wasm_bindgen_<hash>___convert__closures_____invoke_______true__3_`),
+# so a test flavor holding one more closure than production declares a shim
+# production lacks — glue nobody wrote, not a misplaced `#[cfg]`. Left out of the
+# flavor diff only; assertion (3) still scans the whole production artifact.
+_BINDGEN_GLUE_RE = re.compile(r"^(?:wasm_bindgen_|__wbindgen|__wbg_)")
+
+
 def _names(dts: Path) -> set[str]:
-    return set(_DTS_NAME_RE.findall(dts.read_text(encoding="utf-8", errors="replace")))
+    return {
+        n
+        for n in _DTS_NAME_RE.findall(dts.read_text(encoding="utf-8", errors="replace"))
+        if not _BINDGEN_GLUE_RE.match(n)
+    }
 
 
 def _hits(path: Path) -> list[str]:

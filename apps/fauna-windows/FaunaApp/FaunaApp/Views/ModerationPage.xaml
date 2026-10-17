@@ -54,10 +54,13 @@
                                     <StackPanel Grid.Column="0" Spacing="4">
                                         <!-- content-label-badge: icon + category label + action, styled
                                              entirely from the shared content_label_style map (icon + accent
-                                             colour) — no hard-coded category strings/colours. -->
+                                             colour) — no hard-coded category strings/colours. Its HelpText
+                                             packs the row's `confidence` / `action` facts (moderation.md
+                                             § Element IDs → Queue row facts; ModerationViewModel.BadgeAttributes). -->
                                         <StackPanel Orientation="Horizontal" Spacing="6"
                                                     AutomationProperties.AutomationId="content-label-badge"
-                                                    AutomationProperties.Name="{Binding CategoryLabel}">
+                                                    AutomationProperties.Name="{Binding CategoryLabel}"
+                                                    AutomationProperties.HelpText="{Binding BadgeAttributes}">
                                             <TextBlock Text="{Binding CategoryIcon}" VerticalAlignment="Center" />
                                             <TextBlock Text="{Binding CategoryLabel}"
                                                        Foreground="{Binding CategoryAccent, Converter={StaticResource HexBrush}}"

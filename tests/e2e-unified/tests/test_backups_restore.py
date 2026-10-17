@@ -46,6 +46,7 @@ pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.linux,
     pytest.mark.web,
+    pytest.mark.android,
     pytest.mark.windows,
     pytest.mark.macos,
     pytest.mark.ios,

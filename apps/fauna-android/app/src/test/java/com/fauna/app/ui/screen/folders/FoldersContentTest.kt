@@ -2,11 +2,17 @@ package com.fauna.app.ui.screen.folders
 
 import android.content.Context
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.core.app.ApplicationProvider
 import com.fauna.app.R
 import com.fauna.app.ui.util.LocalConnectionState
+import com.fauna.app.ui.viewmodel.OnDemandRow
+import com.fauna.app.ui.viewmodel.OnDemandRowKey
+import androidx.compose.ui.semantics.SemanticsProperties
 import com.fauna.ffi.FfiConnectionState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -30,6 +36,7 @@ import uniffi.fauna_folders_machine.FolderWizardSnapshot
 import uniffi.fauna_folders_machine.FolderWizardStep
 import uniffi.fauna_folders_machine.NameSnapshot
 import uniffi.fauna_folders_machine.NestPlaceEdit
+import uniffi.fauna_folders_machine.NestPlaceForm
 import uniffi.fauna_folders_machine.VersionRetentionEdit
 import uniffi.fauna_folders_machine.NestSnapshotsOption
 import uniffi.fauna_folders_machine.ReviewSnapshot
@@ -64,6 +71,7 @@ class FoldersContentTest {
 
     private fun folder(
         name: String,
+        id: Long = 1L,
         mlsGroupId: String? = null,
         webdavEnabled: Boolean = false,
         role: String? = null,
@@ -95,14 +103,19 @@ class FoldersContentTest {
         audience: String = "private",
         // The website toggle — what the paywall row keys on.
         websiteEnabled: Boolean = false,
+        // A sealed selective-sync list this device could not open.
+        includePathsUnreadable: Boolean = false,
+        excludePathsUnreadable: Boolean = false,
     ) = FolderSummary(
-        id = 1L,
+        id = id,
         name = name,
         retentionPolicy = retentionPolicy,
         cachedSnapshotCount = 2L,
         cachedTotalBytes = 0L,
         cachedLastSnapshotAt = null,
         includePaths = null,
+        includePathsUnreadable = includePathsUnreadable,
+        excludePathsUnreadable = excludePathsUnreadable,
         excludePaths = null,
         mlsGroupId = mlsGroupId,
         role = role,
@@ -297,6 +310,7 @@ class FoldersContentTest {
         nestSnapshotsOptions: List<NestSnapshotsOption> = nestSnapshotOptions,
         nestPlaceEdits: Map<String, NestPlaceEdit> = emptyMap(),
         versionRetentionEdits: Map<String, VersionRetentionEdit> = emptyMap(),
+        onDemand: Map<OnDemandRowKey, OnDemandRow> = emptyMap(),
     ) {
         composeTestRule.setContent {
             FoldersContent(
@@ -312,8 +326,15 @@ class FoldersContentTest {
                 pendingShares = pendingShares,
                 conflictBadgeLabels = conflictBadgeLabels,
                 nestSnapshotsOptions = nestSnapshotsOptions,
-                nestPlaceEdits = nestPlaceEdits,
-                versionRetentionEdits = versionRetentionEdits,
+                // The two fixture maps are folded into the one comparable form the
+                // shared refresh rule takes (what `nestPlaceFormFromRow` yields).
+                nestPlaceForms = (nestPlaceEdits.keys + versionRetentionEdits.keys).associateWith { name ->
+                    NestPlaceForm(
+                        policy = nestPlaceEdits[name] ?: NestPlaceEdit("default", "", "", ""),
+                        versionRetention = versionRetentionEdits[name] ?: VersionRetentionEdit("", ""),
+                    )
+                },
+                onDemand = onDemand,
             )
         }
     }
@@ -342,7 +363,7 @@ class FoldersContentTest {
         // onSavePaths now takes the RAW field text (not a pre-split list) — parsing
         // (parsePathsField) moved to the VM boundary so Content stays FFI-free; an
         // untouched field is empty text, not a pre-split empty list.
-        var saved: Triple<String, String, String>? = null
+        var saved: Triple<String, String?, String?>? = null
         render(actions = FoldersActions(onSavePaths = { name, inc, exc -> saved = Triple(name, inc, exc) }))
         // Selective-sync controls hidden until the row expands.
         composeTestRule.onNodeWithTag("folder-include-paths").assertDoesNotExist()
@@ -351,6 +372,23 @@ class FoldersContentTest {
         composeTestRule.onNodeWithTag("folder-exclude-paths").assertExists()
         composeTestRule.onNodeWithTag("folder-save-paths").performScrollTo().performClick()
         assertEquals(Triple("photos", "", ""), saved)
+    }
+
+    @Test
+    fun unreadableSelectiveSyncListPaintsAsUnavailableAndSavesAsUnchanged() {
+        // A list this device could not open renders read-only as the unavailable
+        // string under the same ids, and the save sends `null` ("leave unchanged")
+        // for it — never a blank over the stored seal.
+        var saved: Triple<String, String?, String?>? = null
+        render(
+            snapshot = snapshot(folders = listOf(folder("photos", includePathsUnreadable = true))),
+            actions = FoldersActions(onSavePaths = { name, inc, exc -> saved = Triple(name, inc, exc) }),
+        )
+        composeTestRule.onNodeWithText("Selective Sync").performClick()
+        composeTestRule.onNodeWithTag("folder-include-paths").assertTextContains("Unavailable on this device")
+        composeTestRule.onNodeWithTag("folder-exclude-paths").assertExists()
+        composeTestRule.onNodeWithTag("folder-save-paths").performScrollTo().performClick()
+        assertEquals(Triple("photos", null, ""), saved)
     }
 
     @Test
@@ -753,6 +791,62 @@ class FoldersContentTest {
         assertNull(sent)
         composeTestRule.onNodeWithTag("folder-nest-save-button").performScrollTo().performClick()
         assertEquals(listOf("photos", "default", "120", "", "", "", ""), sent)
+    }
+
+    /**
+     * Renders ONE folder whose injected nest-place seed the test can change
+     * afterwards — the refresh path (`backup-restore.md` § 8b): the returned
+     * function stands for "the store ticked and the row now carries this policy".
+     */
+    private fun renderWithLiveNestPlaceSeed(initial: NestPlaceEdit): (NestPlaceEdit) -> Unit {
+        var current by mutableStateOf(initial)
+        composeTestRule.setContent {
+            FoldersContent(
+                snapshot(folders = listOf(folder("photos"))),
+                FoldersActions(),
+                WizardActions(),
+                nestSnapshotsOptions = nestSnapshotOptions,
+                nestPlaceForms = mapOf(
+                    "photos" to NestPlaceForm(current, VersionRetentionEdit("", "")),
+                ),
+            )
+        }
+        return { next -> composeTestRule.runOnIdle { current = next } }
+    }
+
+    @Test
+    fun aStagedNestPlaceEditStandsWhenThePolicyChangesUnderneath() {
+        // § 8b: "a policy another device changed meanwhile does not override a
+        // staged edit" — the shared `nestPlaceReseed` rule. Keying the boxes on the
+        // recomputed seed wiped the typed value the moment the stored policy moved.
+        val refresh = renderWithLiveNestPlaceSeed(NestPlaceEdit("default", "", "", ""))
+        expandFirstFolderRow()
+        composeTestRule.onNodeWithTag("folder-nest-quiet-input").performScrollTo().performTextInput("120")
+        refresh(NestPlaceEdit("default", "300", "", ""))
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("folder-nest-quiet-input").performScrollTo().assertTextContains("120")
+    }
+
+    @Test
+    fun anUntouchedNestPlaceEditorFollowsAChangedSeed() {
+        // The other half of the rule: nobody typed, so the boxes still hold what was
+        // last painted and the refreshed policy shows.
+        val refresh = renderWithLiveNestPlaceSeed(NestPlaceEdit("default", "", "", ""))
+        expandFirstFolderRow()
+        refresh(NestPlaceEdit("default", "300", "", ""))
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("folder-nest-quiet-input").performScrollTo().assertTextContains("300")
+    }
+
+    @Test
+    fun aSaveReleasesTheBoxesSoTheNextRefreshShowsWhatTheNestStored() {
+        val refresh = renderWithLiveNestPlaceSeed(NestPlaceEdit("default", "", "", ""))
+        expandFirstFolderRow()
+        composeTestRule.onNodeWithTag("folder-nest-quiet-input").performScrollTo().performTextInput("120")
+        composeTestRule.onNodeWithTag("folder-nest-save-button").performScrollTo().performClick()
+        refresh(NestPlaceEdit("default", "300", "", ""))
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("folder-nest-quiet-input").performScrollTo().assertTextContains("300")
     }
 
     @Test
@@ -1630,5 +1724,67 @@ class FoldersContentTest {
         // commits, so a blanket grey cannot pass this case.
         composeTestRule.onNodeWithTag("folder-destination-attach-select")
             .performScrollTo().assertIsEnabled()
+    }
+
+    // ── folder-on-demand-toggle ("Show in Files") — on-demand-files-android.md § Android
+    // SAF DocumentsProvider binding; § Shared sets on a capability host, decision 3 ──
+
+    private fun onDemandRow(folder: FolderSummary, shown: Boolean = true, stronger: Boolean = false) =
+        OnDemandRowKey.of(folder) to OnDemandRow("local%3A" + folder.id + "@" + "aa".repeat(32), shown, stronger)
+
+    private fun ownAndShared() = listOf(
+        folder("photos", id = 1L),
+        folder("docs", id = 2L, role = "member", mlsGroupId = "cd".repeat(16), ownerDisplay = "alice"),
+    )
+
+    @Test
+    fun onDemandToggleRendersOnOwnerAndMemberRowsWithTheirReading() {
+        val (own, shared) = ownAndShared()
+        render(
+            snapshot(folders = listOf(own, shared)),
+            onDemand = mapOf(onDemandRow(own, shown = true), onDemandRow(shared, shown = false)),
+        )
+        val toggles = composeTestRule.onAllNodesWithTag("folder-on-demand-toggle")
+        toggles.assertCountEquals(2)
+        toggles[0].assertIsOn()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "on"))
+        toggles[1].assertIsOff()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "off"))
+        composeTestRule.onAllNodesWithText(context.getString(R.string.devices_show_on_demand_files))
+            .assertCountEquals(2)
+    }
+
+    @Test
+    fun onDemandToggleFlipReportsTheRowAndTheNewValue() {
+        val (own, shared) = ownAndShared()
+        val flips = mutableListOf<Pair<String, Boolean>>()
+        render(
+            snapshot(folders = listOf(own, shared)),
+            actions = FoldersActions(onSetOnDemand = { f, on -> flips += f.name to on }),
+            onDemand = mapOf(onDemandRow(own, shown = true), onDemandRow(shared, shown = false)),
+        )
+        val toggles = composeTestRule.onAllNodesWithTag("folder-on-demand-toggle")
+        toggles[0].performScrollTo().performClick()
+        toggles[1].performScrollTo().performClick()
+        // The Content decides nothing: the owner/member split (enrol vs hide-only)
+        // is the VM's — DevicesVMOnDemandTest pins it.
+        assertEquals(listOf("photos" to false, "docs" to true), flips)
+    }
+
+    @Test
+    fun aSetAWatchedDirectoryFeedsShowsWhyInPlaceOfTheToggle() {
+        // The stronger presence: a watched-directory ingress outranks the ambient
+        // default, so the row explains instead of offering a switch that cannot act.
+        val own = folder("photos", id = 1L)
+        render(snapshot(folders = listOf(own)), onDemand = mapOf(onDemandRow(own, stronger = true)))
+        composeTestRule.onNodeWithTag("folder-on-demand-toggle").assertDoesNotExist()
+        composeTestRule.onNodeWithText(context.getString(R.string.devices_on_demand_bound_hint)).assertExists()
+    }
+
+    @Test
+    fun aRowWithNoOnDemandReadingRendersNoToggle() {
+        // No session or no resolvable set ref → nothing to steer → no control.
+        render(snapshot(folders = listOf(folder("photos"))))
+        composeTestRule.onNodeWithTag("folder-on-demand-toggle").assertDoesNotExist()
     }
 }

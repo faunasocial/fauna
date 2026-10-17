@@ -90,7 +90,7 @@ def _require_placeholder_host(app) -> None:
         capability="per-binding on-demand switch on a macOS host (a bound location is always-resident)",
         doc=(
             "docs/goal/behavior/on-demand-files.md § On-Demand Files — \"on macOS a "
-            "bound location is always-resident by design (§ Apple File Provider binding)\""
+            "bound location is always-resident by design (on-demand-files-apple.md § Apple File Provider binding)\""
         ),
     )
 

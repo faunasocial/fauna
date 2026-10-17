@@ -29,6 +29,36 @@
 //! the owner's custody first ([`ConsentFolder`]); the twin is mintable only
 //! over a set that custody marks served.
 //!
+//! The `fauna:personalization:rw` scope's twin (`authorization-server.md`
+//! § Scope grammar → *The fifth arm*) rides the consent's one grant beside
+//! the records tuples, under the caller's id: two `content.read` tuples, the
+//! delegable pairs of `fauna.state.personalization` and
+//! `fauna.personalization.model` ([`crate::personalization_scope_wraps`]) —
+//! no manifest, and refused with [`ExtConsentError::NoHolderKey`] when the
+//! ceremony attested no key to wrap to.
+//!
+//! A `fauna:folder:deposit:<id>` scope's twin (`file-sync.md` § Third-party
+//! deposit ingress) rides the consent's one grant too: one keyless `deposit`
+//! tuple per folder ([`crate::folder_deposit_scope_wraps`]), wrapping nothing
+//! — the audit + revocation record the nest's deposit door re-resolves at
+//! every deposit. The account's ownership of the folder is the nest's check;
+//! here a deposit needs only an attested holder key to name.
+//!
+//! A bare folder-plane scope (`fauna:folder:deposit`, `fauna:folder:read` —
+//! the folder plane's qualifier is the user's, `authorization-server.md`
+//! § Scope grammar) names no folder until the card's choice qualifies it:
+//! the caller qualifies the row with [`approved_scopes`] first, and a bare
+//! scope that still reaches the planner is refused
+//! ([`ExtConsentError::FolderUnchosen`]), never resolved keyless.
+//!
+//! An oracle scope (`fauna:identity:op:<class>`, `key-material-hierarchy.md`
+//! § Audience: deployment infrastructure → *The oracle*) declares one
+//! keyless `identity.op` tuple per named class ([`identity_op_classes`],
+//! [`crate::identity_op_scope`]) in that same one grant, under the caller's
+//! id. The tuple wraps no key: the class's custodian performs it against
+//! the live grant row, and the principal's revoke ends it with the rest of
+//! the grant.
+//!
 //! A request carrying no twin-bearing scope has nothing to mint here (an
 //! empty list), and the caller resolves it as it always has.
 
@@ -43,8 +73,9 @@ use fauna_protocol::merge_policy::AdmittedKinds;
 
 use crate::grant_log::{self, GrantEventSigner};
 use crate::{
-    DEFAULT_GRANT_WINDOW_SECS, MintGrantError, ext_kinds_scope_wraps, folder_principal_generation,
-    folder_principal_grant_id, folder_read_scope_wraps,
+    DEFAULT_GRANT_WINDOW_SECS, MintGrantError, ext_kinds_scope_wraps, folder_deposit_scope_wraps,
+    folder_principal_generation, folder_principal_grant_id, folder_read_scope_wraps,
+    personalization_scope_wraps,
 };
 
 /// What a records consent will grant, decided before anything is written.
@@ -109,6 +140,15 @@ pub enum ExtConsentError {
          can read it"
     )]
     FolderNotServed(String),
+    /// A bare folder-plane scope with no folder chosen for it — the card's
+    /// choice qualifies it (`authorization-server.md` § Consent → *The card
+    /// chooses the folder*).
+    #[error("choose the folder this app may use")]
+    FolderUnchosen,
+    /// A folder chosen for a request naming no bare folder-plane scope —
+    /// nothing takes the choice, and the nest would refuse it.
+    #[error("this request takes no folder choice")]
+    FolderChoiceNotTaken,
     /// A served folder whose content keys this device's custody does not hold
     /// — nothing to wrap, so nothing is granted (fail closed).
     #[error("this device holds no keys for \"{0}\"")]
@@ -138,12 +178,82 @@ pub struct ConsentFolder {
     pub custody: fauna_core::data::FoldersConfig,
 }
 
-/// Whether approving a consent naming `scope` mints a twin — a `records` or a
-/// `folder:read` scope.
+/// Whether approving a consent naming `scope` mints a twin — a `records`, a
+/// `folder:read`, a `folder:deposit`, the `personalization:rw` or an
+/// `identity:op` scope. A bare folder-plane scope names none until
+/// [`approved_scopes`] qualifies it.
 #[must_use]
 pub fn names_twin_scope(scope: &str) -> bool {
     fauna_bridge_atproto::fauna_scope::records_qualifier(scope).is_some()
         || fauna_bridge_atproto::fauna_scope::folder_read_qualifier(scope).is_some()
+        || fauna_bridge_atproto::fauna_scope::folder_deposit_qualifier(scope).is_some()
+        || names_personalization(scope)
+        || fauna_bridge_atproto::fauna_scope::identity_op_qualifier(scope).is_some()
+}
+
+/// A consent row's `scopes` as an approve grants them: every bare
+/// folder-plane scope qualified by the card's chosen `folder`
+/// (`fauna_scope::qualify_bare_scopes`, the string the nest records), every
+/// other scope untouched — what the caller hands
+/// [`prepare_ext_consent_grant`] and resolves with. A row carrying no bare
+/// scope takes no choice.
+///
+/// # Errors
+/// [`ExtConsentError::FolderUnchosen`] (a bare scope, no choice),
+/// [`ExtConsentError::FolderChoiceNotTaken`] (a choice, no bare scope),
+/// [`ExtConsentError::FolderUnknown`] (a choice that is no folder id).
+pub fn approved_scopes(
+    scopes: &[String],
+    folder: Option<i64>,
+) -> Result<Vec<String>, ExtConsentError> {
+    let bare = scopes
+        .iter()
+        .any(|s| fauna_bridge_atproto::fauna_scope::user_qualified_bare_arm(s).is_some());
+    match (bare, folder) {
+        (false, None) => Ok(scopes.to_vec()),
+        (false, Some(_)) => Err(ExtConsentError::FolderChoiceNotTaken),
+        (true, None) => Err(ExtConsentError::FolderUnchosen),
+        (true, Some(id)) => fauna_bridge_atproto::fauna_scope::qualify_bare_scopes(scopes, id)
+            .ok_or(ExtConsentError::FolderUnknown(id)),
+    }
+}
+
+/// The folder ids `scopes`' `folder:deposit` scopes name, sorted, no
+/// duplicates — one keyless `deposit` tuple each in the consent's grant.
+#[must_use]
+pub fn folder_deposit_ids(scopes: &[String]) -> Vec<i64> {
+    let mut ids: Vec<i64> = scopes
+        .iter()
+        .filter_map(|s| fauna_bridge_atproto::fauna_scope::folder_deposit_qualifier(s))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Whether `scope` is the `fauna:personalization:rw` arm — whose twin, the
+/// registry kind's and the model kind's delegable pairs, rides the consent's
+/// one grant ([`crate::personalization_scope_wraps`]).
+#[must_use]
+pub fn names_personalization(scope: &str) -> bool {
+    fauna_bridge_atproto::fauna_scope::arm_of(scope)
+        == Some(fauna_bridge_atproto::fauna_scope::FaunaScopeArm::PersonalizationRw)
+}
+
+/// The oracle classes `scopes`' `fauna:identity:op:<class>` scopes name,
+/// in table order, no duplicates — each one keyless `identity.op` tuple the
+/// consent's grant declares ([`crate::identity_op_scope`]).
+#[must_use]
+pub fn identity_op_classes(scopes: &[String]) -> Vec<fauna_core::identity_op::IdentityOpClass> {
+    fauna_core::identity_op::IdentityOpClass::ALL
+        .iter()
+        .copied()
+        .filter(|class| {
+            scopes.iter().any(|s| {
+                fauna_bridge_atproto::fauna_scope::identity_op_qualifier(s) == Some(*class)
+            })
+        })
+        .collect()
 }
 
 /// The folder ids `scopes`' `folder:read` scopes name, sorted, no duplicates —
@@ -315,10 +425,13 @@ struct PlannedGrant {
 }
 
 /// Steps (1)–(3) of the consent-time mint for `consent`, ending at the grants
-/// the caller may deposit, in order: the records grant first (under the
-/// caller's `grant_id`), then one grant per `folder:read` scope in folder-id
-/// order (each under its derived id) — empty when the request names no
-/// twin-bearing scope, and a folder-only consent mints no records grant.
+/// the caller may deposit, in order: the consent's one grant first (under the
+/// caller's `grant_id` — the records tuples, the personalization twin and the
+/// keyless `deposit` tuples), then one grant per `folder:read` scope in
+/// folder-id order (each under its derived id) — empty when the request names
+/// no twin-bearing scope, and a folder-read-only consent mints no consent
+/// grant. `consent`'s scopes are the approve's ([`approved_scopes`]); a bare
+/// folder-plane scope left in them refuses.
 /// `folders` is the caller's custody resolution of every id
 /// [`folder_read_ids`] names (a missing one refuses). `grant_id` and
 /// `now_secs` come from the caller (this crate has no clock or entropy of its
@@ -347,6 +460,13 @@ pub async fn prepare_ext_consent_grant(
     grant_id: [u8; 16],
     now_secs: u64,
 ) -> Result<Vec<PreparedExtGrant>, ExtConsentError> {
+    if consent
+        .scopes
+        .iter()
+        .any(|s| fauna_bridge_atproto::fauna_scope::user_qualified_bare_arm(s).is_some())
+    {
+        return Err(ExtConsentError::FolderUnchosen);
+    }
     let names_records = consent
         .scopes
         .iter()
@@ -358,7 +478,18 @@ pub async fn prepare_ext_consent_grant(
         None
     };
     let folder_ids = folder_read_ids(&consent.scopes);
-    if records.is_none() && folder_ids.is_empty() {
+    let personalization = consent.scopes.iter().any(|s| names_personalization(s));
+    let deposit_ids = folder_deposit_ids(&consent.scopes);
+    let op_scopes: Vec<ScopeWraps> = identity_op_classes(&consent.scopes)
+        .into_iter()
+        .map(|class| (crate::identity_op_scope(class), Vec::new()))
+        .collect();
+    if records.is_none()
+        && folder_ids.is_empty()
+        && !personalization
+        && deposit_ids.is_empty()
+        && op_scopes.is_empty()
+    {
         return Ok(Vec::new());
     }
     let holder = match &records {
@@ -369,16 +500,31 @@ pub async fn prepare_ext_consent_grant(
     let twins = plan_folder_reads(&folder_ids, folders)?;
 
     let mut planned = Vec::with_capacity(1 + twins.len());
+    // The consent's one grant, under the caller's id: the records tuples, the
+    // personalization twin and the keyless deposit tuples share a lifecycle —
+    // each ends with the principal — so they ride one blob and one `Mint`.
+    let mut consent_scopes = Vec::new();
+    let mut consent_kinds = Vec::new();
     if let Some(plan) = records {
         let now_ms = i64::try_from(now_secs.saturating_mul(1000)).unwrap_or(i64::MAX);
         owner
             .manifests
             .publish(&consent.client_id, &plan.manifest, now_ms)
             .await?;
+        consent_scopes = ext_kinds_scope_wraps(owner.delegable, &plan.kinds, plan.writer.as_ref());
+        consent_kinds = plan.kinds;
+    }
+    if personalization {
+        consent_scopes.extend(personalization_scope_wraps(owner.delegable));
+    }
+    consent_scopes.extend(folder_deposit_scope_wraps(&deposit_ids));
+    // The oracle's keyless tuples end with the principal too.
+    consent_scopes.extend(op_scopes);
+    if !consent_scopes.is_empty() {
         planned.push(PlannedGrant {
             grant_id,
-            scopes: ext_kinds_scope_wraps(owner.delegable, &plan.kinds, plan.writer.as_ref()),
-            kinds: plan.kinds,
+            scopes: consent_scopes,
+            kinds: consent_kinds,
             folders: Vec::new(),
             replaced: false,
         });
@@ -888,6 +1034,42 @@ mod tests {
         assert_eq!(opened, [(1, vec![0xC1; 32]), (2, vec![0xC2; 32])]);
     }
 
+    /// The principal's side of that twin: its holder key opens the grant into
+    /// the set's whole generation list — the bundle the `Fauna-Folder-Keys`
+    /// header carries, which the MDA's decode reads back unchanged — and a
+    /// foreign key, or a blob that is no folder twin, opens nothing.
+    #[tokio::test]
+    async fn the_principal_opens_its_twin_into_the_keys_header_bundle() {
+        use fauna_core::folder_keys::FolderContentKeys;
+        let owner = Owner::new();
+        let (holder_sk, holder_pk) = generate_x25519_keypair();
+        let mut c = consent(&[FOLDER_READ], holder_pk, None);
+        c.fauna_manifest = None;
+        let folders = BTreeMap::from([(42, folder("photos", true))]);
+        let prepared = owner.prepare(&c, &folders).await.unwrap();
+        let blob = GrantBlob::from_canonical_bytes(&prepared[0].blob_bytes).unwrap();
+
+        let keys = crate::open_folder_read_keys(&blob, &holder_sk).unwrap();
+        let mut versions: Vec<(u64, [u8; 32])> = keys
+            .generations()
+            .map(|g| (g.version, g.key.to_array()))
+            .collect();
+        versions.sort_by_key(|(v, _)| *v);
+        assert_eq!(versions, [(1, [0xC1; 32]), (2, [0xC2; 32])]);
+        assert_eq!(keys.current.version, 2, "the newest generation is current");
+        let header = keys.to_header_value().unwrap();
+        assert_eq!(FolderContentKeys::from_header_value(&header).unwrap(), keys);
+
+        let (stranger, _) = generate_x25519_keypair();
+        assert!(crate::open_folder_read_keys(&blob, &stranger).is_err());
+        let no_folder = GrantBlob {
+            scope: Vec::new(),
+            wrapped_keys: Vec::new(),
+            ..blob
+        };
+        assert!(crate::open_folder_read_keys(&no_folder, &holder_sk).is_err());
+    }
+
     /// An unserved folder is refused with the card's reason, and nothing is
     /// recorded — the approve never flips the serve flag.
     #[tokio::test]
@@ -982,6 +1164,73 @@ mod tests {
         assert_eq!(twin_blob.scope, [ScopeTuple::folder_read(&hash)]);
     }
 
+    /// An oracle scope alone mints ONE keyless grant under the caller's id —
+    /// one `identity.op` tuple per named class, no wrap, one `Mint` — and
+    /// publishes no manifest row; a sovereign name is no oracle scope at all.
+    #[tokio::test]
+    async fn an_oracle_scope_mints_one_keyless_identity_op_grant() {
+        use fauna_core::identity_op::IdentityOpClass;
+        let owner = Owner::new();
+        let (_, holder_pk) = generate_x25519_keypair();
+        let c = consent(
+            &[
+                "fauna:identity:op:post.author",
+                "fauna:identity:op:nostr.sign_event",
+                "fauna:identity:op:atproto.plc_rotate",
+                "fauna:feed:read",
+            ],
+            holder_pk,
+            None,
+        );
+
+        let prepared = owner.prepare(&c, &BTreeMap::new()).await.unwrap();
+
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].grant_id, [9; 16]);
+        assert!(owner.manifests.row(CLIENT).is_none());
+        assert_eq!(owner.minted(), [vec![9u8; 16]]);
+        let blob = GrantBlob::from_canonical_bytes(&prepared[0].blob_bytes).unwrap();
+        assert_eq!(
+            blob.scope,
+            [
+                crate::identity_op_scope(IdentityOpClass::NostrSignEvent),
+                crate::identity_op_scope(IdentityOpClass::PostAuthor),
+            ]
+        );
+        assert!(
+            blob.wrapped_keys.is_empty(),
+            "the tuple is keyless: the key stays with its custodian"
+        );
+    }
+
+    /// Records and an oracle scope share the consent's ONE primary grant: the
+    /// records tuples and the `identity.op` tuple, under the caller's id.
+    #[tokio::test]
+    async fn records_and_an_oracle_scope_share_one_grant() {
+        use fauna_core::identity_op::IdentityOpClass;
+        let owner = Owner::new();
+        let (_, holder_pk) = generate_x25519_keypair();
+        let c = consent(
+            &[
+                "fauna:records:rw:ext.app.example.*",
+                "fauna:identity:op:post.author",
+            ],
+            holder_pk,
+            Some([0x5A; 32]),
+        );
+
+        let prepared = owner.prepare(&c, &BTreeMap::new()).await.unwrap();
+
+        assert_eq!(prepared.len(), 1);
+        let blob = GrantBlob::from_canonical_bytes(&prepared[0].blob_bytes).unwrap();
+        // 2 kinds × (read + write), and the oracle tuple.
+        assert_eq!(blob.scope.len(), 5);
+        assert!(
+            blob.scope
+                .contains(&crate::identity_op_scope(IdentityOpClass::PostAuthor))
+        );
+    }
+
     /// Records and two folders mint three grants, the twins in folder-id
     /// order, each under its own set's derived id.
     #[tokio::test]
@@ -1055,12 +1304,254 @@ mod tests {
     fn twin_scopes_and_folder_ids() {
         assert!(names_twin_scope("fauna:records:rw:ext.app.example.*"));
         assert!(names_twin_scope(FOLDER_READ));
-        assert!(!names_twin_scope("fauna:folder:deposit:42"));
+        assert!(names_twin_scope("fauna:folder:deposit:42"));
+        assert!(
+            !names_twin_scope("fauna:folder:deposit"),
+            "a bare arm names no folder until the card's choice qualifies it"
+        );
         assert!(!names_twin_scope("fauna:feed:read"));
         let scopes: Vec<String> = ["fauna:folder:read:7", FOLDER_READ, "fauna:folder:read:7"]
             .iter()
             .map(ToString::to_string)
             .collect();
         assert_eq!(folder_read_ids(&scopes), [7, 42]);
+    }
+
+    // ── The fifth arm's twin (`authorization-server.md` § Scope grammar →
+    // *The fifth arm*) ──
+
+    const PERSONALIZATION: &str = "fauna:personalization:rw";
+
+    /// The pair a holder unwraps from `blob`'s tuple over `kind`.
+    fn unwrapped(blob: &GrantBlob, owner: &[u8; 32], holder_sk: &[u8; 32], kind: &str) -> Vec<u8> {
+        let w = blob
+            .wrapped_keys
+            .iter()
+            .find(|w| w.scope.kind.as_deref() == Some(kind))
+            .expect("the tuple is wrapped");
+        fauna_mls::wrapped_blob::unseal_capability(w, owner, holder_sk).unwrap()
+    }
+
+    /// The arm alone mints the consent's one grant under the caller's id: two
+    /// `content.read` tuples — the registry kind and the model kind — each
+    /// wrapping exactly the owner's delegable pair for that kind, one `Mint`,
+    /// no manifest needed and no row published.
+    #[tokio::test]
+    async fn the_personalization_arm_mints_the_registry_and_model_pairs() {
+        let owner = Owner::new();
+        let (holder_sk, holder_pk) = generate_x25519_keypair();
+        let mut c = consent(&[PERSONALIZATION, "openid"], holder_pk, None);
+        c.fauna_manifest = None;
+        assert!(c.scopes.iter().any(|s| names_twin_scope(s)));
+
+        let prepared = owner.prepare(&c, &BTreeMap::new()).await.unwrap();
+
+        assert_eq!(prepared.len(), 1);
+        let prepared = &prepared[0];
+        assert_eq!(prepared.grant_id, [9; 16]);
+        assert!(prepared.kinds.is_empty() && prepared.folders.is_empty());
+        assert!(owner.manifests.row(CLIENT).is_none(), "no manifest row");
+        assert_eq!(owner.minted(), [prepared.grant_id.to_vec()]);
+        let blob = GrantBlob::from_canonical_bytes(&prepared.blob_bytes).unwrap();
+        assert_eq!(
+            blob.scope,
+            [
+                ScopeTuple::delegable_kind_read("fauna.state.personalization"),
+                ScopeTuple::delegable_kind_read("fauna.personalization.model"),
+            ]
+        );
+        let owner_id = owner.kp.actor_id().0;
+        for kind in crate::PERSONALIZATION_GRANT_KINDS {
+            let (entry_key, item_blind) = owner.delegable.for_kind(kind).to_grant();
+            assert_eq!(
+                unwrapped(&blob, &owner_id, &holder_sk, kind),
+                [entry_key, item_blind].concat(),
+                "{kind}: the ordinary delegable unit"
+            );
+        }
+        let opened = crate::open_personalization_keys(&blob, &holder_sk).unwrap();
+        let mut kinds: Vec<&str> = opened.iter().map(|k| k.kind()).collect();
+        kinds.sort_unstable();
+        assert_eq!(
+            kinds,
+            ["fauna.personalization.model", "fauna.state.personalization"]
+        );
+        assert!(
+            crate::open_ext_kind_keys(&blob, &holder_sk)
+                .unwrap()
+                .is_empty(),
+            "the twin opens no ext kind"
+        );
+    }
+
+    /// Nothing to wrap to: a ceremony with no attested holder key refuses the
+    /// arm with the records arm's own refusal, and records nothing.
+    #[tokio::test]
+    async fn the_personalization_arm_without_a_holder_key_is_refused() {
+        let owner = Owner::new();
+        let mut c = consent(&[PERSONALIZATION], [1; 32], None);
+        c.holder_x25519 = None;
+        let err = owner.prepare(&c, &BTreeMap::new()).await.unwrap_err();
+        assert!(matches!(err, ExtConsentError::NoHolderKey));
+        assert!(owner.ledger.current().grant_events.is_empty());
+    }
+
+    /// Beside records, the twin rides the records grant — one blob, one
+    /// `Mint` — and each opener opens only its own kinds.
+    #[tokio::test]
+    async fn records_and_the_personalization_arm_share_the_consents_grant() {
+        let owner = Owner::new();
+        let (holder_sk, holder_pk) = generate_x25519_keypair();
+        let c = consent(
+            &["fauna:records:rw:ext.app.example.*", PERSONALIZATION],
+            holder_pk,
+            Some([0x5A; 32]),
+        );
+
+        let prepared = owner.prepare(&c, &BTreeMap::new()).await.unwrap();
+
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].kinds.len(), 2);
+        assert_eq!(owner.minted(), [vec![9u8; 16]]);
+        let blob = GrantBlob::from_canonical_bytes(&prepared[0].blob_bytes).unwrap();
+        // 2 kinds × (read + write) + the twin's two reads.
+        assert_eq!(blob.scope.len(), 6);
+        assert_eq!(
+            crate::open_ext_kind_keys(&blob, &holder_sk).unwrap().len(),
+            2
+        );
+        assert_eq!(
+            crate::open_personalization_keys(&blob, &holder_sk)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    // ── The folder deposit twin (`file-sync.md` § Third-party deposit
+    // ingress; `third-party-kinds.md` § *Who mints the consent-time grant*:
+    // the keyless tuple rides the consent's one grant) ──
+
+    const DEPOSIT: &str = "fauna:folder:deposit:7";
+
+    /// A consent naming a deposit scope and an attested holder key plans one
+    /// keyless `deposit` tuple over the folder into the consent's one grant —
+    /// under the caller's id, one recorded `Mint`, no manifest, no wraps.
+    #[tokio::test]
+    async fn a_deposit_scope_plans_one_keyless_tuple_into_the_consents_grant() {
+        let owner = Owner::new();
+        let (_, holder_pk) = generate_x25519_keypair();
+        let mut c = consent(&[DEPOSIT, DEPOSIT], holder_pk, None);
+        c.fauna_manifest = None;
+
+        let prepared = owner.prepare(&c, &BTreeMap::new()).await.unwrap();
+
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].grant_id, [9; 16]);
+        assert!(prepared[0].kinds.is_empty() && prepared[0].folders.is_empty());
+        assert!(!prepared[0].replaced);
+        assert_eq!(owner.minted(), [vec![9u8; 16]]);
+        assert!(owner.manifests.row(CLIENT).is_none(), "no manifest row");
+        let blob = GrantBlob::from_canonical_bytes(&prepared[0].blob_bytes).unwrap();
+        assert_eq!(blob.scope, [ScopeTuple::folder_deposit(7)]);
+        assert!(blob.wrapped_keys.is_empty(), "deposit is keyless");
+    }
+
+    /// Beside records, the deposit tuples ride the records grant — one blob,
+    /// one `Mint`.
+    #[tokio::test]
+    async fn records_and_a_deposit_scope_share_the_consents_grant() {
+        let owner = Owner::new();
+        let (_, holder_pk) = generate_x25519_keypair();
+        let c = consent(
+            &[
+                "fauna:records:rw:ext.app.example.*",
+                "fauna:folder:deposit:9",
+                DEPOSIT,
+            ],
+            holder_pk,
+            None,
+        );
+
+        let prepared = owner.prepare(&c, &BTreeMap::new()).await.unwrap();
+
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(owner.minted(), [vec![9u8; 16]]);
+        let blob = GrantBlob::from_canonical_bytes(&prepared[0].blob_bytes).unwrap();
+        let deposits: Vec<&ScopeTuple> = blob
+            .scope
+            .iter()
+            .filter(|t| t.class == ScopeTuple::CLASS_DEPOSIT)
+            .collect();
+        assert_eq!(
+            deposits,
+            [
+                &ScopeTuple::folder_deposit(7),
+                &ScopeTuple::folder_deposit(9)
+            ],
+            "one tuple per folder, in folder-id order"
+        );
+        assert_eq!(blob.scope.len(), 4, "2 kinds' reads + 2 deposits");
+    }
+
+    /// No attested holder key → the consent cannot be granted, the records
+    /// arm's own answer; nothing is recorded.
+    #[tokio::test]
+    async fn a_deposit_scope_without_a_holder_key_is_refused() {
+        let owner = Owner::new();
+        let mut c = consent(&[DEPOSIT], [1; 32], None);
+        c.holder_x25519 = None;
+        let err = owner.prepare(&c, &BTreeMap::new()).await.unwrap_err();
+        assert!(matches!(err, ExtConsentError::NoHolderKey));
+        assert!(owner.ledger.current().grant_events.is_empty());
+    }
+
+    /// A bare folder-plane scope reaching the planner unqualified is refused
+    /// before anything is written — never resolved keyless.
+    #[tokio::test]
+    async fn a_bare_folder_scope_reaching_the_planner_is_refused() {
+        let owner = Owner::new();
+        for bare in ["fauna:folder:deposit", "fauna:folder:read"] {
+            let c = consent(&[bare], [1; 32], None);
+            let err = owner.prepare(&c, &BTreeMap::new()).await.unwrap_err();
+            assert!(
+                matches!(err, ExtConsentError::FolderUnchosen),
+                "{bare}: {err}"
+            );
+        }
+        assert!(owner.ledger.current().grant_events.is_empty());
+    }
+
+    /// The card's choice qualifies every bare folder-plane scope; a bare row
+    /// with no choice, a choice on a row that takes none, and a choice that
+    /// is no folder id are each refused.
+    #[test]
+    fn the_cards_choice_qualifies_the_bare_scopes() {
+        let scopes = |s: &[&str]| s.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(
+            approved_scopes(&scopes(&["fauna:folder:deposit", "openid"]), Some(7)).unwrap(),
+            scopes(&[DEPOSIT, "openid"])
+        );
+        assert_eq!(
+            approved_scopes(&scopes(&[DEPOSIT]), None).unwrap(),
+            scopes(&[DEPOSIT]),
+            "a qualified row takes no choice"
+        );
+        assert!(matches!(
+            approved_scopes(&scopes(&["fauna:folder:deposit"]), None),
+            Err(ExtConsentError::FolderUnchosen)
+        ));
+        assert!(matches!(
+            approved_scopes(&scopes(&[DEPOSIT]), Some(7)),
+            Err(ExtConsentError::FolderChoiceNotTaken)
+        ));
+        assert!(matches!(
+            approved_scopes(&scopes(&["fauna:folder:deposit"]), Some(0)),
+            Err(ExtConsentError::FolderUnknown(0))
+        ));
+        assert_eq!(
+            folder_deposit_ids(&scopes(&["fauna:folder:deposit:9", DEPOSIT, DEPOSIT])),
+            [7, 9]
+        );
     }
 }

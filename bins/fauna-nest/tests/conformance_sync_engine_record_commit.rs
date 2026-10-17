@@ -310,7 +310,7 @@ async fn strip_signature(db: &CacheDb, seq: i64) {
 /// landed as.
 async fn newest_seq(nest_client: &Arc<fauna_client::NestClient>) -> i64 {
     fauna_client_sync::SyncClient::new(Arc::clone(nest_client))
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list")
         .changes
@@ -353,7 +353,7 @@ async fn a_successful_record_commits_the_row_to_the_uploaded_manifest() {
     // of the engine's own local row.
     let ctl = fauna_client_sync::SyncClient::new(nest_client);
     let listed = ctl
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list");
     assert_eq!(
@@ -415,7 +415,7 @@ async fn an_engine_with_a_signer_records_rows_that_verify_on_the_way_back() {
     assert!(outcome.recorded, "the nest accepts the signed record");
 
     let listed = fauna_client_sync::SyncClient::new(nest_client)
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list");
     let row = &listed.changes[0];
@@ -479,7 +479,7 @@ async fn a_head_signed_under_a_retired_nonce_is_re_recorded_under_the_live_one()
 
     assert_eq!(engine.rerecord_under_live_nonce().await.unwrap(), 1);
     let rows = fauna_client_sync::SyncClient::new(Arc::clone(&nest_client))
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list")
         .changes;
@@ -563,7 +563,7 @@ async fn a_delete_head_re_recorded_only_counts_when_the_door_lands_a_new_row() {
         "the real door lands the re-signed delete"
     );
     let rows = fauna_client_sync::SyncClient::new(Arc::clone(&nest_client))
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list")
         .changes;
@@ -593,7 +593,7 @@ async fn resign_as(
     nonce: [u8; 32],
 ) {
     let rows = fauna_client_sync::SyncClient::new(Arc::clone(nest_client))
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list")
         .changes;
@@ -741,7 +741,7 @@ async fn a_device_with_no_state_adopts_the_nests_history_heads_once_under_its_ma
 
     assert_eq!(engine.rerecord_under_live_nonce().await.unwrap(), 1);
     let rows = fauna_client_sync::SyncClient::new(Arc::clone(&nest_client))
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list")
         .changes;
@@ -923,7 +923,7 @@ async fn a_device_holding_state_re_records_only_what_it_holds() {
     resign_as(&db, &nest_client, unknown_seq, &predecessor, SET_NONCE).await;
     // An entry for `unknown.txt` at that head whose signer is not recorded.
     let unknown_row = fauna_client_sync::SyncClient::new(Arc::clone(&nest_client))
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list")
         .changes
@@ -974,7 +974,7 @@ async fn a_device_holding_state_re_records_only_what_it_holds() {
 
     assert_eq!(engine.rerecord_under_live_nonce().await.unwrap(), 1);
     let rows = fauna_client_sync::SyncClient::new(Arc::clone(&nest_client))
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list")
         .changes;
@@ -1012,6 +1012,7 @@ async fn a_device_holding_state_re_records_only_what_it_holds() {
         .versions_list(
             fauna_core::sync::path_hash("held.txt"),
             Some(FOLDER.to_string()),
+            None,
         )
         .await
         .expect("versions.list")
@@ -1143,7 +1144,7 @@ async fn a_content_keyed_history_head_is_re_signed_over_the_same_manifest() {
 
     assert_eq!(engine.rerecord_under_live_nonce().await.unwrap(), 1);
     let rows = fauna_client_sync::SyncClient::new(Arc::clone(&nest_client))
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list")
         .changes;
@@ -1164,6 +1165,7 @@ async fn a_content_keyed_history_head_is_re_signed_over_the_same_manifest() {
         .versions_list(
             fauna_core::sync::path_hash("bound.txt"),
             Some(FOLDER.to_string()),
+            None,
         )
         .await
         .expect("versions.list")
@@ -1179,7 +1181,7 @@ async fn listed_rows(
     nest_client: &Arc<fauna_client::NestClient>,
 ) -> Vec<fauna_protocol::sync::SyncChange> {
     fauna_client_sync::SyncClient::new(Arc::clone(nest_client))
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list")
         .changes
@@ -1483,7 +1485,7 @@ async fn a_reader_applies_only_the_rows_that_verify() {
     );
     set_stored_nonce(SET_NONCE).await;
     let last_seq = fauna_client_sync::SyncClient::new(Arc::clone(&nest_client))
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list")
         .changes
@@ -1550,7 +1552,7 @@ async fn a_record_signed_under_another_sets_nonce_is_refused() {
     let outcome = engine.upload_file(rel).await.expect("upload_file");
     assert!(!outcome.recorded, "a wrong-set binding never lands");
     let listed = fauna_client_sync::SyncClient::new(nest_client)
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list");
     assert!(listed.changes.is_empty());
@@ -1583,7 +1585,7 @@ async fn a_successful_record_retains_the_own_change_row() {
 
     let ctl = fauna_client_sync::SyncClient::new(nest_client);
     let listed = ctl
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list");
     assert_eq!(listed.changes.len(), 1);
@@ -1678,7 +1680,7 @@ async fn an_offline_minted_pending_row_upgrades_in_place_at_the_real_ack() {
 
     let ctl = fauna_client_sync::SyncClient::new(nest_client);
     let listed = ctl
-        .changes_list(Some(FOLDER.to_string()), None, 0)
+        .changes_list(Some(FOLDER.to_string()), None, 0, None)
         .await
         .expect("changes.list");
     assert_eq!(listed.changes.len(), 1, "the nest holds exactly one record");

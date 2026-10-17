@@ -74,6 +74,16 @@ pub fn task_delegation_option_label(option: JsValue, labels: JsValue) -> Result<
     to_js(&fauna_core::delegation::option_label(&option, &labels))
 }
 
+/// The stable cross-app picker key for one option. See
+/// [`task_delegation_option_label`] for the input shape; the decision lives in
+/// `fauna_core::delegation::option_key` (mirrors `fauna-ffi`'s
+/// `task_delegation_option_key`).
+#[wasm_bindgen(js_name = taskDelegationOptionKey)]
+pub fn task_delegation_option_key(option: JsValue) -> Result<String, JsValue> {
+    let option: PinOption = from_js(option)?;
+    Ok(fauna_core::delegation::option_key(&option))
+}
+
 #[wasm_bindgen]
 pub struct WasmTaskDelegationView {
     view: Rc<TaskDelegationView<WsRpcClient>>,

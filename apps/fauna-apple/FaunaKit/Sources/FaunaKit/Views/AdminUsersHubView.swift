@@ -71,6 +71,12 @@ public struct AdminUsersHubView: View {
                 inviteSection
                 Divider()
                 usersSection
+                Divider()
+                AdminPendingActionsSection(
+                    pendingActions: vm.pendingActions,
+                    onApprove: { id in Task { await vm.approvePendingAction(id: id) } },
+                    onCancel: { id in Task { await vm.cancelPendingAction(id: id) } }
+                )
 
                 if let err = vm.actionError {
                     Text(err)

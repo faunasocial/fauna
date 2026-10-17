@@ -46,9 +46,9 @@ Two apps on one machine, so it runs where both are available. The reader is a
 the last app to adopt it, 2026-10-06 — before that its seat read through the
 AV-only external-open handoff, which is why the shared file was an ``.mp4``
 until then): **web** (the browser download is the observed plaintext) and
-**tui**, **linux**, **macOS**, **iOS** and **windows** (the file their
-dialog-less e2e save writes into ``driver.download_dir()``; android's seat
-launches, its driver has no read-back yet — see ``_MEMBER_SEATS``) — each app's ``NestFolderKeyResolver`` resolves
+**tui**, **linux**, **macOS**, **iOS**, **windows** and **android** (the file
+their dialog-less e2e save writes into ``driver.download_dir()`` — android's a
+host mirror of the device's, refreshed by each call) — each app's ``NestFolderKeyResolver`` resolves
 the set's content keys from the same custody. The first two tests were written
 when tui had no folder wizard or share UI, so their owner is linux — or macOS,
 which gives the apple member arms an owner on macOS, or windows, which gives
@@ -527,10 +527,9 @@ def _download_and_read(member_app, member_driver, media, name: str, expected: by
 # same seat: an app that binds no folder (web, iOS, android) cannot own a
 # bound-folder witness, so the member seat IS its column for them.
 #
-# android: the seat launches (a launch-gate app, like apple), and the removal
-# witness reads only the Media listing. The three witnesses that DOWNLOAD need
-# a read-back seam android's driver does not have yet (`download_dir()`), and
-# say so by failing at that assertion — never a skip.
+# android: the seat launches (a launch-gate app, like apple) and downloads like
+# the other natives; its `download_dir()` is a host mirror of the device's,
+# refreshed on each call, so `wait_for_downloaded_file` re-reads it every poll.
 _MEMBER_SEATS = [
     pytest.param("tui", marks=pytest.mark.tui),
     pytest.param("web", marks=pytest.mark.web),

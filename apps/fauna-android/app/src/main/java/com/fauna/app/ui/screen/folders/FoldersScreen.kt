@@ -41,6 +41,8 @@ import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.DevicesVM
+import com.fauna.app.ui.viewmodel.OnDemandRow
+import com.fauna.app.ui.viewmodel.OnDemandRowKey
 import com.fauna.app.ui.viewmodel.PhotoBackupVM
 import com.fauna.ffi.FfiFolderActorMember
 import com.fauna.ffi.FfiFolderDevice
@@ -57,6 +59,7 @@ import uniffi.fauna_folders_machine.FolderWizardSnapshot
 import uniffi.fauna_folders_machine.FolderWizardStep
 import uniffi.fauna_folders_machine.MemberAccessOption
 import uniffi.fauna_folders_machine.NestPlaceEdit
+import uniffi.fauna_folders_machine.NestPlaceForm
 import uniffi.fauna_folders_machine.NestSnapshotsOption
 import uniffi.fauna_folders_machine.VersionRetentionEdit
 import uniffi.fauna_folders_machine.WizardDevice
@@ -71,7 +74,10 @@ import social.fauna.generated.Ids
  * expanded; the folder wizard/list/conflicts moved here from the retired
  * top-level Peers page — the roster stays on Settings → Devices). Android has
  * **no** local-folder binding (mobile sync model — `folder-location-*` is desktop
- * `platform_elements`), so this page is folder create/config + conflicts only.
+ * `platform_elements`); its one per-device presence control is the set-level
+ * `folder-on-demand-toggle` ("Show in Files" — the set under the Fauna root of
+ * the system file browser, `on-demand-files-android.md` § Android SAF DocumentsProvider
+ * binding) on every row.
  *
  * Drives off the same shared [DevicesVM]/[DevicesSnapshot] as the roster, rendering
  * the folder / conflict / wizard slices. Stateless [FoldersContent] is split out
@@ -99,6 +105,7 @@ fun FoldersScreen(
     val offlineShareChanges by vm.offlineShareChanges.collectAsState()
     val groupShares by vm.groupShares.collectAsState()
     val offlineShareError by vm.offlineShareError.collectAsState()
+    val onDemand by vm.onDemand.collectAsState()
     val appMessages = LocalAppMessages.current
 
     // The co-present affordance's whole paint, from shared Rust (the view, its
@@ -127,6 +134,10 @@ fun FoldersScreen(
     }
 
     LaunchedEffect(Unit) { vm.start() }
+    // Each row's "Show in Files" reading, re-read from the device-local store
+    // whenever the folder list changes (never held only in view state).
+    val folderList = snapshot?.folders
+    LaunchedEffect(folderList) { folderList?.let { vm.loadOnDemand(it) } }
 
     // Single `error-message` surface: the page error, falling back to the open
     // wizard's submit error. Both flow to the navigation shell's banner.
@@ -176,8 +187,14 @@ fun FoldersScreen(
             folderDestinationPlaces = folderDestinationPlaces,
             canServeWebdav = canServeWebdav,
             ownTiers = ownTiers,
+            // Each governed folder's `folder-lease-status` line, resolved in shared
+            // Rust (FFI) here and injected so the Content stays FFI-free.
+            folderLeaseStatuses = snapshot?.folders.orEmpty()
+                .mapNotNull { f -> vm.folderLeaseStatus(f)?.let { f.name to it } }
+                .toMap(),
             defaultConflictPolicy = defaultConflictPolicy,
             pendingShares = pendingShares,
+            onDemand = onDemand,
             // Per-conflict localized badge text, computed here (FFI) and injected as
             // plain data — keeps FoldersContent FFI-free for Robolectric (mirrors
             // nestSnapshotsOptions below). Keyed by conflict id.
@@ -189,17 +206,14 @@ fun FoldersScreen(
             // above. The prefill is the SHARED rule set (blank for unset, blank for a
             // zero retention bound), never re-derived per app.
             nestSnapshotsOptions = com.fauna.ffi.nestSnapshotsOptions(),
-            nestPlaceEdits = snapshot?.folders.orEmpty().associate { folder ->
-                folder.name to com.fauna.ffi.nestPlaceEditFromRow(
+            // The editor's six buffers per folder as ONE comparable value (the four
+            // policy controls plus the version-retention pair), seeded by the shared
+            // `nestPlaceFormFromRow`.
+            nestPlaceForms = snapshot?.folders.orEmpty().associate { folder ->
+                folder.name to com.fauna.ffi.nestPlaceFormFromRow(
                     folder.nestSnapshots,
                     folder.nestSnapshotQuietSecs,
                     folder.retentionPolicy,
-                )
-            },
-            // The version-retention SIBLING pair's prefill, same
-            // "computed here (FFI), injected as plain data" shape as nestPlaceEdits.
-            versionRetentionEdits = snapshot?.folders.orEmpty().associate { folder ->
-                folder.name to com.fauna.ffi.versionRetentionEditFromBounds(
                     folder.versionRetentionMaxVersions,
                     folder.versionRetentionMaxAgeDays,
                 )
@@ -220,11 +234,13 @@ fun FoldersScreen(
                 onServeWebdav = vm::serveSetFolder,
                 onSetConflictPolicy = vm::setFolderConflictPolicy,
                 onSetResidency = vm::setFolderResidency,
+                onSetExclusiveEditing = vm::setFolderExclusiveEditing,
                 onPaywallSet = vm::paywallSetFolder,
                 onSetDefaultConflictPolicy = vm::setDefaultConflictPolicy,
                 onAcceptShare = vm::acceptPendingShare,
                 onDeclineShare = vm::declinePendingShare,
                 onLeaveFolder = vm::leaveFolder,
+                onSetOnDemand = vm::setFolderOnDemand,
                 onOpenOfflineShare = { vm.openOfflineSharePanel(OfflinePanel.INITIATE) },
                 onOpenOfflineReceive = { vm.openOfflineSharePanel(OfflinePanel.RECEIVE) },
                 onOfflinePeerCodeChanged = vm::setOfflinePeerCode,
@@ -248,7 +264,9 @@ fun FoldersScreen(
             // params) because it's a self-contained VM + Android permission-launcher
             // concern, not FFI/snapshot data (mirrors how MediaScreen wraps the pure
             // MediaContent rather than folding VM state into it).
-            photoBackupSection = { PhotoBackupSection() },
+            // Not composed in the kids build: photo backup is outside item (4)'s Kept set
+            // and the kids manifest declares none of its permissions.
+            photoBackupSection = { if (!BuildConfig.KIDS) PhotoBackupSection() },
             offlineShare = offlineShare,
             groupInvitations = groupShares.invitations,
             groupScopes = groupShares.scopes,
@@ -265,7 +283,7 @@ data class FoldersActions(
      * field text (not pre-split lists): parsing runs at the VM boundary via the
      * shared `parsePathsField` so this stays a pure UI callback (Content is FFI-free).
      */
-    val onSavePaths: (name: String, includeText: String, excludeText: String) -> Unit = { _, _, _ -> },
+    val onSavePaths: (name: String, includeText: String?, excludeText: String?) -> Unit = { _, _, _ -> },
     /**
      * Commit the nest place's snapshot policy (`folder-nest-save-button`) — the RAW
      * text of the six controls, exactly like [onSavePaths] passes raw field text:
@@ -345,6 +363,12 @@ data class FoldersActions(
      * itself (`folder-residency-confirm`) before this is ever called.
      */
     val onSetResidency: (name: String, residency: String) -> Unit = { _, _ -> },
+    /**
+     * Turn a folder's exclusive editing on or off (`folder-exclusive-editing-toggle`,
+     * owner row only; `ui/folders.md` § Exclusive editing). Non-optimistic — the
+     * switch paints `FolderSummary.exclusiveEditing` after the machine's refresh.
+     */
+    val onSetExclusiveEditing: (name: String, on: Boolean) -> Unit = { _, _ -> },
     /** Paywall a set to a subscription tier (`folder-paywall-tier-select`, website-enabled rows only; v1 set-only). */
     val onPaywallSet: (name: String, mlsGroupIdHex: String?, tier: String) -> Unit = { _, _, _ -> },
     /** Save the default conflict policy for NEW folders (`sync-default-conflict-policy-select`). */
@@ -356,6 +380,12 @@ data class FoldersActions(
     val onDeclineShare: (inboxId: Long) -> Unit = {},
     /** Leave a set shared WITH us (`folder-leave-button`); groupIdHex = the set's mls_group_id. */
     val onLeaveFolder: (groupIdHex: String) -> Unit = {},
+    /**
+     * Flip a row's "Show in Files" (`folder-on-demand-toggle`). The VM persists
+     * the preference, enrols on an OWNER row turned ON, and re-plans — a
+     * member's row is hide-only (`DevicesVM.setFolderOnDemand`).
+     */
+    val onSetOnDemand: (folder: FolderSummary, shown: Boolean) -> Unit = { _, _ -> },
     // ── Co-present offline share — p2p.md § Offline share initiation ──
     /** `offline-share-button` — open the initiator panel. */
     val onOpenOfflineShare: () -> Unit = {},
@@ -444,6 +474,11 @@ fun FoldersContent(
     // machine can't own it) — injected like canServeWebdav. Empty ⇒ select disabled
     // + "create a tier first" hint.
     ownTiers: List<String> = emptyList(),
+    // Per-folder `folder-lease-status` line, keyed by folder name — present only
+    // while the folder is lease-governed (`ui/folders.md` § Exclusive editing),
+    // from the shared `devicesFolderLeaseStatus`. Never probed: asking takes the
+    // lease.
+    folderLeaseStatuses: Map<String, LocalizedText> = emptyMap(),
     // The persisted default-conflict-policy preference for new sets
     // (sync-default-conflict-policy-select's current value); null renders as "auto".
     defaultConflictPolicy: String? = null,
@@ -451,6 +486,11 @@ fun FoldersContent(
     // welcomes (folders.md § Sharing, Recipient side). Injected (like
     // folderActors) so the Content stays FFI-free.
     pendingShares: List<FfiPendingShare> = emptyList(),
+    // Each row's `folder-on-demand-toggle` reading (the device-local preference
+    // + the stronger presence), keyed by [OnDemandRowKey] — read by the VM from
+    // the shared store and injected so the Content stays FFI-free. A row absent
+    // here renders no toggle.
+    onDemand: Map<OnDemandRowKey, OnDemandRow> = emptyMap(),
     // Per-conflict localized `conflict-type-badge` text (the resolution when
     // resolved, else the conflict type), keyed by conflict id — computed by the
     // shared `conflictBadgeLabel` FFI fn at the Screen level and injected so this
@@ -460,15 +500,17 @@ fun FoldersContent(
     // label) from the shared `nestSnapshotsOptions()` — injected so the Content
     // stays FFI-free under Robolectric.
     nestSnapshotsOptions: List<NestSnapshotsOption> = emptyList(),
-    // Per-folder prefill for the five `folder-nest-*` controls, keyed by folder
-    // name — computed by the shared `nestPlaceEditFromRow` at the Screen level
-    // (like conflictBadgeLabels) so this Content never re-derives the two rules it
-    // owns: an unset knob shows BLANK, and so does a ZERO retention bound.
-    nestPlaceEdits: Map<String, NestPlaceEdit> = emptyMap(),
-    // Per-folder prefill for the version-retention SIBLING pair,
-    // same "computed at the Screen level" shape as nestPlaceEdits above — never
-    // folded into it (its own `folders.version_retention` wire field).
-    versionRetentionEdits: Map<String, VersionRetentionEdit> = emptyMap(),
+    // Per-folder prefill for the six nest-place buffers (the five `folder-nest-*`
+    // controls plus the version-retention pair), keyed by folder name — computed by
+    // the shared `nestPlaceFormFromRow` at the Screen level (like conflictBadgeLabels)
+    // so this Content never re-derives the rules it owns: an unset knob shows
+    // BLANK, and so does a ZERO retention bound.
+    nestPlaceForms: Map<String, NestPlaceForm> = emptyMap(),
+    // The shared refresh rule (`backup-restore.md` § 8b): when the injected form
+    // changes, whether the boxes follow it or hold a staged edit. Defaults to the
+    // FFI `nestPlaceReseed` every app asks; a test may inject a stand-in.
+    nestPlaceReseed: (NestPlaceForm?, NestPlaceForm, NestPlaceForm) -> NestPlaceForm? =
+        { seeded, onScreen, fresh -> com.fauna.ffi.nestPlaceReseed(seeded, onScreen, fresh) },
     // photo-backup-controls (ui.yaml `used_in: [folders]`; media.md § Photo-backup
     // reframe) — the "Photo Library" set's config, injected as a
     // composable slot so this Content stays FFI/VM-free (default no-op for tests
@@ -556,8 +598,9 @@ fun FoldersContent(
                 // has actually MLS-joined reach here: the machine's injected MlsQuery
                 // join-filter drops rostered-but-un-joined rows server-side
                 // (folders.md § Sharing) — this Content just renders what it's given.
+                val onDemandRow = onDemand[OnDemandRowKey.of(folder)]
                 if (folder.role == "member") {
-                    MemberFolderRow(folder, actions)
+                    MemberFolderRow(folder, actions, onDemandRow, folderLeaseStatuses[folder.name])
                 } else {
                     FolderRow(
                         folder,
@@ -568,8 +611,10 @@ fun FoldersContent(
                         canServeWebdav = canServeWebdav,
                         ownTiers = ownTiers,
                         nestSnapshotsOptions = nestSnapshotsOptions,
-                        nestPlaceEdit = nestPlaceEdits[folder.name],
-                        versionRetentionEdit = versionRetentionEdits[folder.name],
+                        nestPlaceForm = nestPlaceForms[folder.name],
+                        nestPlaceReseed = nestPlaceReseed,
+                        onDemand = onDemandRow,
+                        leaseStatus = folderLeaseStatuses[folder.name],
                     )
                 }
             }
@@ -655,8 +700,10 @@ private fun FolderRow(
     canServeWebdav: Boolean,
     ownTiers: List<String>,
     nestSnapshotsOptions: List<NestSnapshotsOption> = emptyList(),
-    nestPlaceEdit: NestPlaceEdit? = null,
-    versionRetentionEdit: VersionRetentionEdit? = null,
+    nestPlaceForm: NestPlaceForm? = null,
+    nestPlaceReseed: (NestPlaceForm?, NestPlaceForm, NestPlaceForm) -> NestPlaceForm?,
+    onDemand: OnDemandRow? = null,
+    leaseStatus: LocalizedText? = null,
 ) {
     var expanded by remember(folder.name) { mutableStateOf(false) }
     var include by remember(folder.name) {
@@ -722,6 +769,7 @@ private fun FolderRow(
                             modifier = Modifier.testTag(Ids.FOLDER_SHARED_BADGE),
                         )
                     }
+                    LeaseStatusText(leaseStatus)
                 }
                 TextButton(onClick = { expanded = !expanded }) {
                     Text(
@@ -803,6 +851,39 @@ private fun FolderRow(
                 )
             }
 
+            // Exclusive editing (`folder-exclusive-editing-toggle`) on the owner
+            // row only, default off (`ui/folders.md` § Exclusive editing). NON-
+            // optimistic: the Switch paints the nest's `exclusiveEditing`, which
+            // the machine's post-write refresh repaints — a refused write leaves
+            // it showing what the folder actually is. Keyless, its own
+            // `folders.update` field.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    stringResource(R.string.devices_folder_exclusive_editing),
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                Switch(
+                    checked = folder.exclusiveEditing,
+                    onCheckedChange = { checked ->
+                        actions.onSetExclusiveEditing(folder.name, checked)
+                    },
+                    modifier = Modifier
+                        .testTag(Ids.FOLDER_EXCLUSIVE_EDITING_TOGGLE)
+                        .semantics {
+                            stateDescription = if (folder.exclusiveEditing) "on" else "off"
+                        },
+                )
+            }
+
+            // Per-set "Show in Files" (`folder-on-demand-toggle`) on every owner
+            // row — a folder has no type (`ui/folders.md`); ON here is also the
+            // enrol gesture (the VM's `ensure_place`).
+            onDemand?.let { FolderOnDemandToggle(folder, it, actions) }
+
             // Per-set "paywall to tier" control (`folder-paywall-tier-select`,
             // website-enabled rows only) — folders.md § Web paywall / monetization.md
             // § Pillar 2. Structural sibling of the webdav toggle above:
@@ -823,16 +904,21 @@ private fun FolderRow(
             }
 
             if (expanded) {
+                // A list this device could not open renders read-only as
+                // unavailable (same id), never as a blank editable field; the
+                // save below sends `null` ("leave unchanged") for it.
                 OutlinedTextField(
-                    value = include,
+                    value = if (folder.includePathsUnreadable) stringResource(R.string.devices_paths_unavailable) else include,
                     onValueChange = { include = it },
+                    enabled = !folder.includePathsUnreadable,
                     label = { Text(stringResource(R.string.devices_include_paths)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag(Ids.FOLDER_INCLUDE_PATHS),
                 )
                 OutlinedTextField(
-                    value = exclude,
+                    value = if (folder.excludePathsUnreadable) stringResource(R.string.devices_paths_unavailable) else exclude,
                     onValueChange = { exclude = it },
+                    enabled = !folder.excludePathsUnreadable,
                     label = { Text(stringResource(R.string.devices_exclude_paths)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag(Ids.FOLDER_EXCLUDE_PATHS),
@@ -840,7 +926,11 @@ private fun FolderRow(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = {
-                            actions.onSavePaths(folder.name, include, exclude)
+                            actions.onSavePaths(
+                                folder.name,
+                                include.takeUnless { folder.includePathsUnreadable },
+                                exclude.takeUnless { folder.excludePathsUnreadable },
+                            )
                         },
                         modifier = Modifier.testTag(Ids.FOLDER_SAVE_PATHS),
                     ) { Text(stringResource(R.string.devices_save_paths)) }
@@ -873,8 +963,8 @@ private fun FolderRow(
                 NestPlaceSection(
                     folderName = folder.name,
                     options = nestSnapshotsOptions,
-                    seed = nestPlaceEdit,
-                    versionRetentionSeed = versionRetentionEdit,
+                    seed = nestPlaceForm,
+                    reseed = nestPlaceReseed,
                     onSave = actions.onSaveNestPlace,
                 )
 
@@ -970,7 +1060,7 @@ private fun FolderRow(
  * here would have to send its three siblings with it, committing half-typed values
  * the user had not saved.
  *
- * The `seed` comes from the shared `nestPlaceEditFromRow`, which owns the rules
+ * The `seed` comes from the shared `nestPlaceFormFromRow`, which owns the rules
  * this render must not re-derive: an unset knob shows BLANK, and so does a ZERO
  * retention bound (zero is the nest's own spelling of unset, so rendering it would
  * turn "nothing chosen" into a bound the owner appears to have picked). The four
@@ -982,27 +1072,46 @@ private fun FolderRow(
 private fun NestPlaceSection(
     folderName: String,
     options: List<NestSnapshotsOption>,
-    seed: NestPlaceEdit?,
-    versionRetentionSeed: VersionRetentionEdit?,
+    seed: NestPlaceForm?,
+    reseed: (NestPlaceForm?, NestPlaceForm, NestPlaceForm) -> NestPlaceForm?,
     onSave: (String, String, String, String, String, String, String) -> Unit,
 ) {
-    // Re-key on the seed itself, not just the folder: a push refresh carrying the
-    // SAME persisted policy leaves half-typed edits alone (data-class equality),
-    // while a policy that actually changed under us re-seeds the boxes.
-    var snapshots by remember(folderName, seed) { mutableStateOf(seed?.snapshots.orEmpty()) }
-    var quiet by remember(folderName, seed) { mutableStateOf(seed?.quietSecs.orEmpty()) }
-    var retentionSnapshots by remember(folderName, seed) {
-        mutableStateOf(seed?.retentionSnapshots.orEmpty())
+    // The boxes are keyed on the folder only. `painted` is what was last put into
+    // them (null once a save released them): when a refreshed row carries a new
+    // form, the shared `nestPlaceReseed` rule decides whether the boxes follow it
+    // or hold a staged edit (`backup-restore.md` § 8b — "a refresh never overwrites
+    // a staged edit", a policy another device changed meanwhile included).
+    var painted by remember(folderName) { mutableStateOf(seed) }
+    var snapshots by remember(folderName) { mutableStateOf(seed?.policy?.snapshots.orEmpty()) }
+    var quiet by remember(folderName) { mutableStateOf(seed?.policy?.quietSecs.orEmpty()) }
+    var retentionSnapshots by remember(folderName) {
+        mutableStateOf(seed?.policy?.retentionSnapshots.orEmpty())
     }
-    var retentionDays by remember(folderName, seed) { mutableStateOf(seed?.retentionDays.orEmpty()) }
+    var retentionDays by remember(folderName) { mutableStateOf(seed?.policy?.retentionDays.orEmpty()) }
     // The version-retention SIBLING pair — its own family, sent
     // whole on the SAME folder-nest-save-button click (file-versions.md §
     // Retention ruling 1), never folded into the snapshot retention above.
-    var versionRetentionCount by remember(folderName, versionRetentionSeed) {
-        mutableStateOf(versionRetentionSeed?.count.orEmpty())
+    var versionRetentionCount by remember(folderName) {
+        mutableStateOf(seed?.versionRetention?.count.orEmpty())
     }
-    var versionRetentionDays by remember(folderName, versionRetentionSeed) {
-        mutableStateOf(versionRetentionSeed?.days.orEmpty())
+    var versionRetentionDays by remember(folderName) {
+        mutableStateOf(seed?.versionRetention?.days.orEmpty())
+    }
+    LaunchedEffect(seed) {
+        if (seed == null || seed == painted) return@LaunchedEffect
+        val onScreen = NestPlaceForm(
+            policy = NestPlaceEdit(snapshots, quiet, retentionSnapshots, retentionDays),
+            versionRetention = VersionRetentionEdit(versionRetentionCount, versionRetentionDays),
+        )
+        reseed(painted, onScreen, seed)?.let { fresh ->
+            snapshots = fresh.policy.snapshots
+            quiet = fresh.policy.quietSecs
+            retentionSnapshots = fresh.policy.retentionSnapshots
+            retentionDays = fresh.policy.retentionDays
+            versionRetentionCount = fresh.versionRetention.count
+            versionRetentionDays = fresh.versionRetention.days
+            painted = fresh
+        }
     }
     var expanded by remember { mutableStateOf(false) }
 
@@ -1095,6 +1204,9 @@ private fun NestPlaceSection(
     )
     Button(
         onClick = {
+            // The save RELEASES the boxes: with no seed on record the next refresh
+            // paints what the nest actually stored, not what was typed.
+            painted = null
             onSave(
                 folderName,
                 snapshots,
@@ -1604,36 +1716,112 @@ private fun PendingShareRow(share: FfiPendingShare, actions: FoldersActions) {
  * that affordance — a manual one-shot scan, no watcher; see the ruling.) The row
  * therefore does not expand: no path editors, no delete, no share, no
  * location binding, no webdav toggle. Carries the recipient `folder-shared-badge` variant
- * ("Shared by ‹handle›", the precomputed `FolderSummary.ownerDisplay`) and the
- * `folder-leave-button` — the android twin of apple's `memberFolderRow`.
+ * ("Shared by ‹handle›", the precomputed `FolderSummary.ownerDisplay`), the
+ * `folder-leave-button` and the hide-only `folder-on-demand-toggle` — the android
+ * twin of apple's `memberFolderRow`.
  */
 @Composable
-private fun MemberFolderRow(folder: FolderSummary, actions: FoldersActions) {
+private fun MemberFolderRow(
+    folder: FolderSummary,
+    actions: FoldersActions,
+    onDemand: OnDemandRow? = null,
+    leaseStatus: LocalizedText? = null,
+) {
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.FOLDER_ROW)) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth().padding(12.dp),
-        ) {
-            Text(
-                folder.name,
-                style = MaterialTheme.typography.titleSmall,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                stringResourceFmt(R.string.devices_shared_by, folder.ownerDisplay),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.testTag(Ids.FOLDER_SHARED_BADGE),
-            )
-            // `mls_group_id` is always present on a member row (the join-filter
-            // proves we joined the group); the guard is belt-and-braces.
-            folder.mlsGroupId?.takeIf { it.isNotEmpty() }?.let { groupId ->
-                TextButton(
-                    onClick = { actions.onLeaveFolder(groupId) },
-                    modifier = Modifier.testTag(Ids.FOLDER_LEAVE_BUTTON),
-                ) { Text(stringResource(R.string.common_leave)) }
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    folder.name,
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    stringResourceFmt(R.string.devices_shared_by, folder.ownerDisplay),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.testTag(Ids.FOLDER_SHARED_BADGE),
+                )
+                // `mls_group_id` is always present on a member row (the join-filter
+                // proves we joined the group); the guard is belt-and-braces.
+                folder.mlsGroupId?.takeIf { it.isNotEmpty() }?.let { groupId ->
+                    TextButton(
+                        onClick = { actions.onLeaveFolder(groupId) },
+                        modifier = Modifier.testTag(Ids.FOLDER_LEAVE_BUTTON),
+                    ) { Text(stringResource(R.string.common_leave)) }
+                }
             }
+            // A reader has no body to expand and most needs to see the lock.
+            LeaseStatusText(leaseStatus)
+            // "Show in Files" on a folder shared with the account — hide-only: the
+            // membership is the seat, so the flip writes no place
+            // (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 3).
+            onDemand?.let { FolderOnDemandToggle(folder, it, actions) }
         }
+    }
+}
+
+/**
+ * The `folder-lease-status` line on a folder row's header (`ui/folders.md` §
+ * Exclusive editing) — owner AND member rows, drawn only while [status] is
+ * non-null (the folder is lease-governed). The reading is resolved in shared
+ * Rust; this only paints it. Never the hex id.
+ */
+@Composable
+private fun LeaseStatusText(status: LocalizedText?) {
+    val line = localized(status) ?: return
+    Text(
+        line,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.testTag(Ids.FOLDER_LEASE_STATUS),
+    )
+}
+
+/**
+ * Per-set, per-device "Show in Files" (`folder-on-demand-toggle`,
+ * `on-demand-files-android.md` § Android SAF DocumentsProvider binding) — the set's
+ * presence under the Fauna root of the system file browser, **default ON**,
+ * remembered in the device-local store the shared plan reads. A set a
+ * watched-directory ingress feeds is presented that stronger way instead, so
+ * the row shows why in place of the toggle (apple's bound-location caption).
+ * The Switch's `stateDescription` carries the "on"/"off" read the e2e driver
+ * takes, like `folder-webdav-toggle`'s checked state.
+ */
+@Composable
+private fun FolderOnDemandToggle(folder: FolderSummary, row: OnDemandRow, actions: FoldersActions) {
+    if (row.stronger) {
+        Text(
+            stringResource(R.string.devices_on_demand_bound_hint),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        return
+    }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                stringResource(R.string.devices_show_on_demand_files),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                stringResource(R.string.devices_show_on_demand_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(
+            checked = row.shown,
+            onCheckedChange = { checked -> actions.onSetOnDemand(folder, checked) },
+            modifier = Modifier
+                .testTag(Ids.FOLDER_ON_DEMAND_TOGGLE)
+                .semantics { stateDescription = if (row.shown) "on" else "off" },
+        )
     }
 }
 
@@ -2253,6 +2441,8 @@ fun PhotoBackupControlsContent(
     pendingCount: Int,
     lastError: String?,
     actions: PhotoBackupActions,
+    /** Items in the in-flight pass (0 before the pass has counted them); [pendingCount] counts down from it. */
+    passTotal: Int = 0,
 ) {
     SectionHeader(stringResource(R.string.folders_photo_library_section))
     Row(
@@ -2326,11 +2516,29 @@ fun PhotoBackupControlsContent(
                 modifier = Modifier.testTag(Ids.PHOTO_BACKUP_SYNC_NOW_BUTTON),
             ) { Text(stringResource(R.string.photo_backup_sync_now)) }
             if (isSyncing) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp).testTag(Ids.PHOTO_BACKUP_SYNC_PROGRESS),
-                    strokeWidth = 2.dp,
-                )
-                Text(stringResource(R.string.photo_backup_backup_in_progress), style = MaterialTheme.typography.bodySmall)
+                // The in-flight pass's POSITION ("Syncing 3 of 5..."), not just THAT one
+                // runs (folders.md § Photo backup: "the phone shows how far it has
+                // got"). The indeterminate wording survives for the one moment it is
+                // honest — before the pass has counted its items.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.semantics(mergeDescendants = true) {}.testTag(Ids.PHOTO_BACKUP_SYNC_PROGRESS),
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Text(
+                        if (passTotal > 0) {
+                            stringResourceFmt(
+                                R.string.photo_backup_syncing,
+                                (passTotal - pendingCount).coerceAtLeast(0),
+                                passTotal,
+                            )
+                        } else {
+                            stringResource(R.string.photo_backup_backup_in_progress)
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
         }
         lastError?.let {
@@ -2352,8 +2560,8 @@ fun PhotoBackupSection(vm: PhotoBackupVM = hiltViewModel()) {
     val context = LocalContext.current
     val syncedCount by vm.syncedCount.collectAsState(initial = 0)
     val isSyncing by vm.isSyncing.collectAsState()
-    val uploadedCount by vm.uploadedCount.collectAsState()
-    val totalScanned by vm.totalScanned.collectAsState()
+    val pendingCount by vm.pendingCount.collectAsState()
+    val passTotal by vm.passTotal.collectAsState()
     val lastError by vm.lastError.collectAsState()
     val autoBackup by vm.autoBackup.collectAsState()
 
@@ -2382,7 +2590,8 @@ fun PhotoBackupSection(vm: PhotoBackupVM = hiltViewModel()) {
         autoBackup = autoBackup,
         isSyncing = isSyncing,
         syncedCount = syncedCount,
-        pendingCount = (totalScanned - uploadedCount).coerceAtLeast(0),
+        pendingCount = pendingCount,
+        passTotal = passTotal,
         lastError = lastError,
         actions = PhotoBackupActions(
             onSetAutoBackup = { enabled ->

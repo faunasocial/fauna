@@ -1590,8 +1590,7 @@ def test_folder_conflict_policy_round_trip(logged_in_app, nest_instance, test_us
     )
 
     # And back again — the edit is not one-way.
-    if not b.conflict_policy_count():
-        row = b.find_and_expand_folder(name)
+    row = b.open_conflict_policy_row(name)
     b.set_conflict_policy("auto", row=row)
     seen = _wait_policy(nest_url, test_user, name, {None, "auto"})
     assert seen in (None, "auto"), (

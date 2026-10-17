@@ -373,6 +373,13 @@ pub struct SnapshotListRequest {
     /// `SnapshotCreateFolderRequest::name_hash`. Ignored in message-kind mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -407,6 +414,13 @@ pub struct SnapshotCreateFolderRequest {
     /// never silently ignored. Wire-additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     /// [`Self::tags`], sealed by the creating client — the display copy of
     /// `snapshots.tags` (path-sealing S6-d, `docs/goal/behavior/file-sync.md`
     /// § Sealed names & paths). Opaque to the nest, which stores it and never
@@ -686,6 +700,13 @@ pub struct SnapshotPruneRequest {
     /// `SnapshotCreateFolderRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -761,6 +782,13 @@ pub struct SnapshotPruneSetPolicyRequest {
     /// [`SnapshotCreateFolderRequest::name_hash`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -804,6 +832,13 @@ pub struct SnapshotCheckRequest {
     /// `SnapshotCreateFolderRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_hash: Option<ByteBuf>,
+    /// The set's **row** on this nest (`folders.id`): when present the nest
+    /// resolves the request by this row alone, under the kind's own gate, and
+    /// never consults the name forms beside it
+    /// ([`SetAddress::Row`](crate::folders::SetAddress::Row);
+    /// `set-addressing.md` § The row form). Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i64>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }

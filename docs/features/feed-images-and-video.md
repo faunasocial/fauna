@@ -47,6 +47,14 @@ Stamped 2026-09-19 at 3ac2cf0c74.
    - `tests/e2e-unified/tests/test_feed.py::test_a_forged_c2pa_assertion_paints_no_provenance_badge`
 12. [app] Tapping a video on a post plays it right there, and it never starts on its own — `docs/goal/architecture/render-model.md` § D6 — Feed body adopts the same `RenderDocument`
    - `tests/e2e-unified/tests/test_feed_video_playback.py::test_tapping_a_video_plays_it_in_place`
+   - `tests/e2e-unified/tests/test_feed_video_playback.py::test_a_video_plays_against_a_self_signed_nest`
+   - `tests/e2e-unified/tests/test_feed_video_playback.py::test_a_video_played_to_its_end_reads_its_whole_length`
+13. [app] A video on a post from the fediverse shows nothing from its server until you tap it, then plays through your nest — `docs/goal/architecture/render-model.md` § D6 — Feed body adopts the same `RenderDocument`
+   - `tests/e2e-unified/tests/test_feed_video_playback.py::test_tapping_a_bridged_video_plays_it_through_the_ticketed_proxy`
+14. [app] A video you are playing keeps playing when the feed refreshes or a new post arrives above it — `docs/goal/architecture/render-model.md` § D6 — Feed body adopts the same `RenderDocument`
+   - `tests/e2e-unified/tests/test_feed_video_playback.py::test_a_playing_video_survives_a_feed_reload`
+15. [app] You can leave the feed in the middle of a video and come back to it: the app carries on, and the video is there to play again — `docs/goal/architecture/render-model.md` § D6 — Feed body adopts the same `RenderDocument`
+   - `tests/e2e-unified/tests/test_feed_video_playback.py::test_leaving_the_feed_while_a_video_plays_keeps_the_app_running`
 
 ## Status
 
@@ -54,7 +62,7 @@ Stamped 2026-09-19 at 3ac2cf0c74.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | |
-| linux | ⚠ partial | 0.1.2-dev+c4a95c20 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | |
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |
@@ -76,6 +84,11 @@ Stamped 2026-09-19 at 3ac2cf0c74.
 | 8 | app | `tests/e2e-unified/tests/test_feed.py::test_post_image_strips_exif_gps_before_the_nest_stores_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_gated_post_compose.py::test_a_restricted_post_s_picture_opens_for_an_entitled_reader` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_feed.py::test_a_picture_is_uploaded_when_you_post_so_writing_time_never_loses_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_feed.py::test_a_forged_c2pa_assertion_paints_no_provenance_badge` | windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 12 | app | `tests/e2e-unified/tests/test_feed_video_playback.py::test_tapping_a_video_plays_it_in_place` | web (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_feed.py::test_a_forged_c2pa_assertion_paints_no_provenance_badge` | web (linux): passed, linux (linux): failed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 12 | app | `tests/e2e-unified/tests/test_feed_video_playback.py::test_tapping_a_video_plays_it_in_place` | web (linux): passed, linux (linux): passed, windows (windows): passed |
+| 12 | app | `tests/e2e-unified/tests/test_feed_video_playback.py::test_a_video_plays_against_a_self_signed_nest` | web (linux): skipped, linux (linux): passed, windows (windows): passed |
+| 12 | app | `tests/e2e-unified/tests/test_feed_video_playback.py::test_a_video_played_to_its_end_reads_its_whole_length` | web (linux): passed, linux (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_feed_video_playback.py::test_tapping_a_bridged_video_plays_it_through_the_ticketed_proxy` | web (linux): passed, linux (linux): passed, windows (windows): passed |
+| 14 | app | `tests/e2e-unified/tests/test_feed_video_playback.py::test_a_playing_video_survives_a_feed_reload` | web (linux): passed, linux (linux): passed, windows (windows): passed |
+| 15 | app | `tests/e2e-unified/tests/test_feed_video_playback.py::test_leaving_the_feed_while_a_video_plays_keeps_the_app_running` | web (linux): passed, linux (linux): passed, windows (windows): passed |
 <!-- features-render:end -->

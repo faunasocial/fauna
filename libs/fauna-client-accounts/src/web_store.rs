@@ -21,6 +21,27 @@ fn local_storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok().flatten()
 }
 
+/// The `sessionStorage` key of this tab's account pin — the browser twin of
+/// [`crate::BOUND_ACCOUNT_ENV`] (`account-scoping.md` § Concurrent instances →
+/// *Web*). The SPA's `$lib/tabPin` writes it; this is its Rust-side reader, so
+/// the two must name the same key.
+pub const TAB_PIN_KEY: &str = "fauna_tab_account";
+
+/// This tab's account pin, normalized like the launch binding, or `None` for an
+/// unpinned tab — and for one whose `sessionStorage` cannot be read, which then
+/// behaves as the primary, the SPA's own degrade (`$lib/tabPin::tabPin`). Pass
+/// it to [`crate::AccountRegistry::tab_launch_persistence`].
+pub fn tab_pin() -> Option<String> {
+    let raw = web_sys::window()?
+        .session_storage()
+        .ok()
+        .flatten()?
+        .get_item(TAB_PIN_KEY)
+        .ok()
+        .flatten();
+    crate::parse_bound_account(raw.as_deref())
+}
+
 /// localStorage-backed [`SecretStore`] — the browser twin of native
 /// `CredentialStore`. Stateless: every call goes straight to the global
 /// `window.localStorage`. Best-effort like native stores — a quota /

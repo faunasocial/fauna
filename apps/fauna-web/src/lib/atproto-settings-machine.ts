@@ -238,8 +238,8 @@ export interface DeleteConfirmCardModel {
    *  disable so a second press cannot send a second sweep. */
   in_progress: boolean;
   /** The `atproto-delete-tombstone` opt-in (S5 slice 5b) — the machine's
-   *  `RetireIdentityOptIn`. Not rendered on web yet (the tui-first
-   *  trickle-down); mirrored so the type matches what wasm hands over. */
+   *  `RetireIdentityOptIn`, rendered as a checkbox that forwards
+   *  the tick to `setDeleteRetireIdentity`. */
   retire_identity: RetireIdentityOptIn;
 }
 
@@ -264,6 +264,9 @@ export interface TransitionCardModel {
   /** Render the `atproto-history-backfill` checkbox (only a minting move
    *  offers it). */
   show_history_backfill: boolean;
+  /** The checkbox's text with the nest's public-post count composed in —
+   *  render verbatim, never re-author. */
+  history_backfill_label: LocalizedText;
   /** A confirm is in flight (a PLC mint round-trips) — the confirm/cancel
    *  controls disable. */
   in_progress: boolean;

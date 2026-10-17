@@ -10,9 +10,10 @@ the `_acme-challenge` paste surface + complete/cancel). The order core runs on
 `acme_pure` twin over RustCrypto), so web's button is **enabled**
 (it issues natively too); the seal target is the connected nest's own id.
 
-**Scope caveat.** There is **no ACME CA in the
-tier_3 env**, so the order round-trip cannot be driven here — clicking the button
-reaches a CA that is not present and errors. The CA half (account → order →
+**Scope caveat.** This file runs with **no ACME
+CA**, so the order round-trip cannot be driven here — clicking the button reaches
+a CA that is not present and errors. The manual paste card against a real CA is
+`test_admin_dns_cert_manual_issue.py`'s, under the `acme_pebble` stack. The CA half (account → order →
 DNS-01-validate → finalize → fetch, including the manual two-phase + delegated
 paths) is covered by the shared machine's pebble test
 (`libs/fauna-client-dns/tests/pebble_dns01.rs`, Docker-gated) + the CA-free unit

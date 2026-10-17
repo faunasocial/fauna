@@ -51,6 +51,7 @@ from helpers.mail_wire import (
     _poke_outbound_bridge,
     _wait_for_tagged,
     dkim_signature_tag,
+    verify_each_dkim_signature,
 )
 from i18n.strings import S
 
@@ -252,12 +253,10 @@ def test_list_send_stamps_rfc8058_headers(nest_instance, mail_bridge_mta):
     signature is cryptographically valid AND aligned to the From domain — the same
     `dkim=pass` bar a real receiver (Gmail) applies, now over the list-send path.
     """
-    import dkim  # dkimpy — independent verifier, fleet venv dep
-
     handle = mail_bridge_mta
     domain = handle.domain
-    assert handle.dkim_public_dns_value, (
-        "fixture read no DKIM record — the list-signing proof cannot run"
+    assert handle.dkim_records, (
+        "fixture read no DKIM records — the list-signing proof cannot run"
     )
     user = _fresh_user(nest_instance)
     token = f"listdkim-{int(time.time() * 1000)}"
@@ -297,17 +296,12 @@ def test_list_send_stamps_rfc8058_headers(nest_instance, mail_bridge_mta):
     for name in ("list-id", "list-unsubscribe", "list-unsubscribe-post"):
         assert name in h_low, f"{name} missing from the DKIM h= set: {h_tag!r}"
 
-    # (c) the signature cryptographically verifies + is From-aligned (DMARC).
-    expected_query = f"{handle.dkim_selector}._domainkey.{domain}.".encode()
-    seen: list[bytes] = []
-
-    def dnsfunc(name, timeout=5):
-        seen.append(name)
-        return handle.dkim_public_dns_value if name == expected_query else None
-
-    assert dkim.verify(received, dnsfunc=dnsfunc), (
-        "dkimpy rejected the list mail's DKIM-Signature — it would fail dkim=pass "
-        f"at a real receiver. dnsfunc queries: {seen!r}. First 700 bytes:\n{received[:700]!r}"
+    # (c) both signatures cryptographically verify + are From-aligned (DMARC).
+    verified, seen = verify_each_dkim_signature(received, domain, handle.dkim_records)
+    assert verified == list(handle.dkim_records), (
+        f"dkimpy verified {verified!r} of {list(handle.dkim_records)!r} on the list "
+        f"mail — it would fail dkim=pass at a real receiver. dnsfunc queries: "
+        f"{seen!r}. First 900 bytes:\n{received[:900]!r}"
     )
     assert dkim_signature_tag(received, "d") == domain, (
         "DKIM d= is not aligned to the From: list domain — DMARC would fail"

@@ -73,8 +73,8 @@ Stamped 2026-09-19 at 8ac16765e4.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | |
-| linux | ⚠ partial | 0.1.2-dev+c4a95c20 standalone |
+| web | ✅ full | |
+| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | |
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |
@@ -110,10 +110,10 @@ Stamped 2026-09-19 at 8ac16765e4.
 | 10 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_mailbox_less_attendee_materializes_invite_on_events_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_calendar_visibility.py::test_calendar_visibility_filters_the_displayed_union` | web (linux): passed, linux (linux): passed, windows (windows): failed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_calendar_visibility.py::test_no_calendar_picked_shows_every_calendar_and_picking_one_narrows` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): error |
-| 13 | app | `tests/e2e-unified/tests/test_events.py::test_calendar_exported_to_a_file_imports_into_another_calendar` | macos (macos): passed, ios (macos): passed, tui (linux): error |
-| 13 | app | `tests/e2e-unified/tests/test_events.py::test_calendar_import_with_no_file_chosen_says_so` | macos (macos): passed, ios (macos): passed, tui (linux): error |
+| 13 | app | `tests/e2e-unified/tests/test_events.py::test_calendar_exported_to_a_file_imports_into_another_calendar` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): error |
+| 13 | app | `tests/e2e-unified/tests/test_events.py::test_calendar_import_with_no_file_chosen_says_so` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): error |
 | 14 | app | `tests/e2e-unified/tests/test_events.py::test_day_timeline_bands_all_day_events_and_sets_clashes_side_by_side` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): error |
-| 15 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_a_co_attendees_forged_cancel_leaves_the_invite_on_the_events_page` | web (linux): passed, tui (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_a_refused_cancel_is_listed_on_the_events_page` | tui (linux): passed |
-| 17 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_a_succeeded_organizers_cancel_removes_the_invite_from_the_events_page` | web (linux): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_a_co_attendees_forged_cancel_leaves_the_invite_on_the_events_page` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_a_refused_cancel_is_listed_on_the_events_page` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 17 | app | `tests/e2e-unified/tests/test_caldav_autoschedule_mailbox_less.py::test_a_succeeded_organizers_cancel_removes_the_invite_from_the_events_page` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

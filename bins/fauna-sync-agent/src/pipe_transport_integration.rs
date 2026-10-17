@@ -124,7 +124,7 @@ async fn request_with_timeout(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_pipe_query_and_event_roundtrip() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let paths = SyncPaths::new(Some(tmp.path().to_path_buf()));
+    let paths = SyncPaths::at(tmp.path().to_path_buf());
 
     // One bound on-demand folder so `resolve_to_folder_rel` maps both the query
     // path and the dehydrate event path to (folder="docs", rel="sub/a.txt").
@@ -280,7 +280,7 @@ async fn real_pipe_query_and_event_roundtrip() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn duplicate_agent_in_second_logon_session_terminates_instead_of_degrading() {
     let holder_tmp = tempfile::tempdir().expect("holder tempdir");
-    let holder_paths = SyncPaths::new(Some(holder_tmp.path().to_path_buf()));
+    let holder_paths = SyncPaths::at(holder_tmp.path().to_path_buf());
     let (_holder_shutdown_tx, holder_shutdown_rx) = tokio::sync::watch::channel(false);
     let (holder_event_tx, _) = tokio::sync::broadcast::channel(16);
     let holder_state = SyncServiceState::new(

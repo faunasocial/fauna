@@ -14,7 +14,7 @@
 //! [`FolderKeyReader`] its custody comes from: the seat's account store on an
 //! identity-holding app (the share host's pump), the mounted store or a
 //! capability host's cold fleet replica on a host that resolves every set's
-//! keys in-process at its own re-resolve edges (`on-demand-files.md` § Shared
+//! keys in-process at its own re-resolve edges (`on-demand-files-shared-sets.md` § Shared
 //! sets on a capability host → *One mechanism*, decision 1′). Keeping the
 //! produce path here (priority #2) means the security-critical fail-closed
 //! decision is resolved once, not re-implemented per host.

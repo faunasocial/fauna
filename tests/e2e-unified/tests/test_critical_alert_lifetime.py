@@ -288,25 +288,18 @@ def test_signing_out_takes_every_standing_alert_with_it(app, nest_instance, requ
 
 
 # The apps whose own switcher suite gives this arm a launch shape
-# (`test_account_switcher_<app>.py`): tui, linux, windows, macOS and iOS seed
-# the registry at launch (apple into the Keychain; windows reads the registry
-# alone, its legacy mirror retired), web seeds localStorage and re-boots over
-# it.
-SWITCH_APPS = ("tui", "linux", "web", "windows", "macos", "ios")
-
-# Parametrized so the arm is COUNTED on these apps, then declared unbuilt rather
-# than silently absent (convention 7): android has no switcher suite to lend
-# this arm its launch shape, and its state names no `session.actor_id` for a
-# registry-seeded launch, which `_await_actor` reads. android joins
-# `SWITCH_APPS` as its switcher leg lands.
-UNBUILT_SWITCH_APPS = ("android",)
+# (`test_account_switcher_<app>.py`): tui, linux, windows, macOS, iOS and
+# android seed the registry at launch (apple into the Keychain, android into its
+# on-device credential file over the bridge; windows reads the registry alone,
+# its legacy mirror retired), web seeds localStorage and re-boots over it.
+SWITCH_APPS = ("tui", "linux", "web", "windows", "macos", "ios", "android")
 
 
 def _switch_apps() -> list[str]:
     from conftest import get_available_apps
 
     available = get_available_apps()
-    return [a for a in SWITCH_APPS + UNBUILT_SWITCH_APPS if a in available]
+    return [a for a in SWITCH_APPS if a in available]
 
 
 def _launch_two_account_seat(switch_app, request, nest_instance, user_a, user_b):
@@ -340,9 +333,13 @@ def _launch_two_account_seat(switch_app, request, nest_instance, user_a, user_b)
 
     url = nest_instance["url"]
     if switch_app in ("macos", "ios"):
-        from tests.test_account_switcher_apple import _app_launch_config
+        from helpers.app_launch import app_launch_config
 
-        launch = _app_launch_config(switch_app, request)
+        launch = app_launch_config(switch_app, request)
+    elif switch_app == "android":
+        from tests.test_account_switcher_android import _launch_config
+
+        launch = _launch_config(request)
     else:
         launch = {"app_path": request.getfixturevalue(f"{switch_app}_app_path")}
     seed = build_registry_seed(
@@ -401,16 +398,6 @@ def test_switching_accounts_takes_every_standing_alert_with_it(
     """
     from actions import ActionLayer
     from common import create_actor_and_register
-    from helpers.app_surface import skip_unbuilt
-
-    if switch_app in UNBUILT_SWITCH_APPS:
-        skip_unbuilt(
-            switch_app,
-            surface="a two-account switcher launch shape (test_account_switcher_android.py)",
-            detail="no android switcher suite seeds the registry and awaits the "
-            "seeded actor yet, so this arm has no launch to drive",
-            tracked="",
-        )
 
     admin_sk = nest_instance["admin"]["signing_key"]
     user_a = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)

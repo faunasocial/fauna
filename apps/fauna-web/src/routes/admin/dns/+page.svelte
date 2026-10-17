@@ -22,6 +22,7 @@
   // tests/e2e-unified/ui.yaml § admin-dns. Prior art: the linux page above + the
   // onboarding DNS-credential form (`routes/onboarding/+page.svelte`).
   import { identity } from '$lib/store';
+  import { copyAndConfirm } from '$lib/copy-confirm';
   import {
     dnsManagementMachineWithCredentials,
     localDomainMachine,
@@ -35,8 +36,11 @@
     certStatusView,
     hexFull,
     roleAddressOptions,
+    dmarcPolicyOptions,
+    recordRecheckSecs,
     adminPickerOption,
     type RoleAddressOption,
+    type DmarcPolicyOption,
   } from '$lib/wasm';
   import { graceCountdown } from '$lib/value-format';
   import { onMount } from 'svelte';
@@ -103,6 +107,9 @@
     // was never set, or was last set/cleared by an admin.
     catch_all_cleared_by_succession_at: number | null;
     role_address_overrides: RoleAddressOverrideView[];
+    // The domain's published DMARC policy as serde spells it (`Reject` /
+    // `Quarantine` / `Monitor`); compared against `DmarcPolicyOption.policy`.
+    dmarc_policy: string;
   }
   // One deployment actor offered in the catch-all picker, sourced from
   // `fauna.admin.users.list` (`admin.md` § Users). `hex` keys the current-
@@ -280,6 +287,10 @@
   // effective-mode projection are current).
   async function refreshDnsMatrix(): Promise<void> {
     if (!dnsMachine) return;
+    // The refresh button re-reads the domain rows too, so a change made outside
+    // this page (a succession clearing a catch-all) shows without a reload.
+    await ldMachine?.dispatch('Refresh');
+    applySnapshots();
     await dnsMachine.dispatch('Refresh');
     applySnapshots();
     await dnsMachine.dispatch({ VerifyRecords: { domain: null } });
@@ -296,36 +307,49 @@
     try {
       await ensureWasm();
       ROLE_ADDRESS_ROLES = roleAddressOptions();
+      DMARC_POLICIES = dmarcPolicyOptions();
       dnsMachine = await dnsManagementMachineWithCredentials(id.secretHex);
       ldMachine = await localDomainMachine(id.secretHex);
-      // Both fetches fire on load; the CRUD list + record matrix are independent.
-      await Promise.all([ldMachine.hydrate(), dnsMachine.hydrate()]);
-      applySnapshots();
+      // The deployment actors offered by the per-domain catch-all and
+      // role-address pickers: every account on the nest, never one page
+      // (admin.md § 2 → *Which accounts a picker offers*). Fetched beside the
+      // domain list, so a row never paints a picker missing its members. A
+      // failure here must not break the rest of the page — the picker degrades
+      // to "None" + any current designation kept visible.
+      const actorsReady = adminUsersListAll(id.secretHex).then(
+        (users) => {
+          // Option text is `adminPickerOption` (the two-halves rule's display
+          // half): the handle, else full hex, never the raw editable label —
+          // shared by both the catch-all and role-address pickers below, which
+          // both read this one `actors` array.
+          actors = users.map((u) => ({
+            id: toBytes(u.actor_id),
+            label: adminPickerOption(u),
+            hex: actorHex(u.actor_id),
+          }));
+        },
+        () => {
+          // Non-fatal: the catch-all picker just can't offer new actors yet.
+        },
+      );
+      // The fetches fire together and each renders as it lands: the domain list
+      // is the local-domains CRUD's and must never wait on the DNS machine's
+      // credential store (a runtime still coming up holds that one back).
+      const ld = ldMachine;
+      const dns = dnsMachine;
+      await Promise.all([
+        Promise.all([ld.hydrate(), actorsReady]).then(() => {
+          applySnapshots();
+          loading = false;
+        }),
+        dns.hydrate().finally(applySnapshots),
+      ]);
       // Overlay live public-DNS verdicts onto the rendered matrix.
       await dnsMachine.dispatch({ VerifyRecords: { domain: null } });
       applySnapshots();
       // Overlay the served-cert health badge (pure read; renders on web too).
       await dnsMachine.dispatch('RefreshCertStatus');
       applySnapshots();
-      // The deployment actors offered by the per-domain catch-all and
-      // role-address pickers: every account on the nest, never one page
-      // (admin.md § 2 → *Which accounts a picker offers*). A failure here must
-      // not break the rest of the page — the picker degrades to "None" + any
-      // current designation kept visible.
-      try {
-        const users = await adminUsersListAll(id.secretHex);
-        // Option text is `adminPickerOption` (the two-halves rule's display
-        // half): the handle, else full hex, never the raw editable label —
-        // shared by both the catch-all and role-address pickers below, which
-        // both read this one `actors` array.
-        actors = users.map((u) => ({
-          id: toBytes(u.actor_id),
-          label: adminPickerOption(u),
-          hex: actorHex(u.actor_id),
-        }));
-      } catch {
-        // Non-fatal: the catch-all picker just can't offer new actors yet.
-      }
       // Resolve the connected nest's own id (the cert-issuance seal target). A
       // failure here must not break the page — issuance buttons just stay inert
       // until it resolves (the rest of admin-dns is read/config-only).
@@ -340,6 +364,39 @@
     } finally {
       loading = false;
     }
+  });
+
+  // The open page's background re-check (`dns-management.md` § Manual + live
+  // verification — the slow cadence): every `recordRecheckSecs()` the shared
+  // `backgroundRecheck` re-reads the matrix and verifies it, re-publishing a
+  // managed record public DNS no longer serves. The cadence and the tick are the
+  // shared crate's; the page owns only the timer, which lives exactly as long as
+  // the page is mounted. The first fire is a full period out — mounting already
+  // verifies once — and each fire re-reads the cadence before re-arming.
+  onMount(() => {
+    let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const arm = () => {
+      timer = setTimeout(tick, recordRecheckSecs() * 1000);
+    };
+    const tick = async () => {
+      if (!live) return;
+      if (dnsMachine) {
+        try {
+          await dnsMachine.backgroundRecheck();
+        } finally {
+          if (live) applySnapshots();
+        }
+      }
+      if (live) arm();
+    };
+    void ensureWasm().then(() => {
+      if (live) arm();
+    });
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
   });
 
   function openAddForm(): void {
@@ -413,7 +470,10 @@
     if (!ldMachine) return;
     const target = active.find((d) => d.domain === renameTarget && !d.is_primary);
     if (!target) return;
-    const days = renameGraceDays.trim() === '' ? null : Number(renameGraceDays);
+    // `bind:value` on a `type="number"` input yields a number (or null when
+    // blank), not the string the state is initialised with — normalise first.
+    const rawDays = String(renameGraceDays ?? '').trim();
+    const days = rawDays === '' ? null : Number(rawDays);
     renameSheetOpen = false;
     try {
       await ldMachine.dispatch({
@@ -617,6 +677,39 @@
     }
   }
 
+  // ── Per-domain DMARC policy (`admin-dns-domain-dmarc-policy-select`) ──
+  // dmarc-reporting.md § Multi-domain deployments: `reject` (the default, which
+  // clears the domain's override), `quarantine`, `none`; sets `p=` and `sp=`
+  // together. A RAW-VALUE picker: each `<option value>` is the RFC 7489 tag from
+  // the shared `dmarc_policy_options()` catalog (what the e2e reads and selects);
+  // the localized label only paints. The write maps the tag back to the policy
+  // through the catalog's `policy` field — `none` is not a variant name.
+  // Filled in `onMount` after `ensureWasm()`, like `ROLE_ADDRESS_ROLES`.
+  let DMARC_POLICIES = $state<DmarcPolicyOption[]>([]);
+
+  // Set one domain's policy. `UpdateConfig` with only `dmarc_policy` set, so no
+  // other per-domain knob is touched; the machine re-reads the row.
+  async function setDmarcPolicy(domain: string, tag: string): Promise<void> {
+    if (!ldMachine) return;
+    const opt = DMARC_POLICIES.find((o) => o.value === tag);
+    if (!opt) return;
+    try {
+      await ldMachine.dispatch({
+        UpdateConfig: {
+          domain,
+          mta_sts_max_age_seconds: null,
+          mta_sts_cert_mode: null,
+          spf_record: null,
+          dmarc_policy: opt.policy,
+        },
+      });
+      applySnapshots();
+    } catch (e) {
+      applySnapshots();
+      if (!error) error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
   // ── Managed mode: credentials + per-domain mode ──────────────────────
 
   function openAddCred(): void {
@@ -697,12 +790,17 @@
     }
   }
 
-  async function copyValue(value: string): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(value);
-    } catch {
-      // Clipboard may be unavailable (no permission / headless) — non-fatal.
-    }
+  // The record a copy button last put on the clipboard — painted as that
+  // button's `data-copied` (the copy-button contents contract), keyed by the
+  // record so only its own row's button reports it.
+  let copiedRecord = $state<string | null>(null);
+  function recordKey(r: DnsRecordRow): string {
+    return `${r.record_type} ${r.name} ${r.expected}`;
+  }
+
+  async function copyValue(r: DnsRecordRow): Promise<void> {
+    await copyAndConfirm(r.expected);
+    copiedRecord = recordKey(r);
   }
 
   // ── Cert lifecycle (tls-certificates.md § C.4 / § B tier 3) ──────────
@@ -998,7 +1096,8 @@
       <button
         class="btn"
         data-testid={IDS.ADMIN_DNS_RECORD_COPY_BUTTON}
-        onclick={() => copyValue(r.expected)}
+        data-copied={copiedRecord === recordKey(r) ? r.expected : undefined}
+        onclick={() => copyValue(r)}
       >{t.admin.dns.copy}</button>
     </div>
     {#if r.record_type === 'PTR'}
@@ -1027,6 +1126,7 @@
     class="btn"
     class:active={allManaged}
     data-testid={IDS.ADMIN_DNS_MANAGE_ALL_TOGGLE}
+    data-state={allManaged ? 'on' : 'off'}
     onclick={toggleManageAll}
   >{t.admin.dns.manage_all}</button>
 
@@ -1224,6 +1324,21 @@
             onchange={(e) => setCatchAll(d.domain, ca.ids[(e.currentTarget as HTMLSelectElement).selectedIndex])}
           >
             {#each ca.options as opt}<option value={opt}>{opt}</option>{/each}
+          </select>
+        </div>
+
+        <!-- Per-domain DMARC policy (admin-dns-domain-dmarc-policy-select;
+             dmarc-reporting.md § Multi-domain deployments). Raw-value picker: the
+             option `value` is the RFC 7489 tag, the localized label paints. -->
+        <div class="catch-all-row">
+          <span class="caption">{t.admin.dns.dmarc_policy_label}</span>
+          <select
+            class="add-input"
+            data-testid={IDS.ADMIN_DNS_DOMAIN_DMARC_POLICY_SELECT}
+            value={DMARC_POLICIES.find((o) => o.policy === d.dmarc_policy)?.value}
+            onchange={(e) => setDmarcPolicy(d.domain, (e.currentTarget as HTMLSelectElement).value)}
+          >
+            {#each DMARC_POLICIES as opt}<option value={opt.value}>{resolveLocalized(opt.label)}</option>{/each}
           </select>
         </div>
 

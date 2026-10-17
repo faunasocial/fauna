@@ -120,6 +120,11 @@ ENV CARGO_UNSTABLE_CHECKSUM_FRESHNESS=true
 #   `relay` feature. Every released image builds it, here and only here: it is
 #   never folded into the fauna-nest group, so iroh-relay's tree is compiled
 #   into the relay binary and into nothing else.
+#   fauna-updater (nest/update-channel.md § The updater — the second binary of
+#   this image, run as its own container holding only the Docker socket) is a
+#   SEPARATE invocation of its own, never joined to another: the dependencies
+#   only it needs (the Docker Engine client; a Sigstore verifier later) must
+#   never feature-unify into the nest's build.
 FROM rust-base AS rust-native
 ARG FAUNA_BUILD_COMMIT=dev
 ENV FAUNA_BUILD_COMMIT=${FAUNA_BUILD_COMMIT}
@@ -188,15 +193,18 @@ RUN --mount=type=cache,id=cargo-registry-native,target=/usr/local/cargo/registry
     cargo build --locked --release -p fauna-nest -p fauna-sandbox -p fauna-sni-router --features bluesky,nostr,activitypub \
     && cargo build --locked --release -p fauna-ffi --no-default-features --features labeler \
     && cargo build --locked --release -p fauna-iroh-relay --features fauna-iroh-relay/relay \
+    && cargo build --locked --release -p fauna-updater \
     && strip /src/target/release/fauna-nest \
     && strip /src/target/release/fauna-sandbox \
     && strip /src/target/release/fauna-sni-router \
     && strip /src/target/release/fauna-iroh-relay \
+    && strip /src/target/release/fauna-updater \
     && mkdir -p /out \
     && cp /src/target/release/fauna-nest \
           /src/target/release/fauna-sandbox \
           /src/target/release/fauna-sni-router \
           /src/target/release/fauna-iroh-relay \
+          /src/target/release/fauna-updater \
           /src/target/release/libfauna_ffi.so /out/
 # NB: libfauna_ffi.so is deliberately NOT stripped — the bridges-builder
 # stage links the Go bridge against it via cgo, and the final image loads it at
@@ -311,7 +319,7 @@ RUN --mount=type=cache,id=cargo-registry-wasm,target=/usr/local/cargo/registry \
 # what we release. Kept equal to bins/fauna-bridges/go.mod's `toolchain`
 # directive (the single source of truth) by a dedicated merge-gate toolchain-sync
 # gate. Bump both together — § Go toolchain pin in build-system.md.
-FROM --platform=$BUILDPLATFORM golang:1.26.8-bookworm@sha256:a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d AS bridges-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS bridges-builder
 WORKDIR /src
 # Cap Go's build parallelism to match the Rust stages (see the global BUILD_JOBS
 # comment) so the mail-bridge cross-compile doesn't spike the shared host.
@@ -501,6 +509,9 @@ COPY --from=rust-native /out/fauna-sandbox /usr/local/bin/fauna-sandbox
 # carries the cap itself and raises it into the ambient set (which survives
 # no_new_privs) before exec'ing the bridge, letting the sandboxed MTA/MDA still
 # bind 25/465/587 / 993/143 (main.rs raise_net_bind_ambient).
+# The nest finds it at this path and wraps every ffmpeg transcode in its
+# `transcode` profile (bins/fauna-nest/src/video/transcode.rs SANDBOX_BIN): that
+# profile raises no ambient cap, so ffmpeg execs with none.
 RUN setcap cap_net_bind_service=+ep /usr/local/bin/fauna-sandbox
 
 # fauna-sni-router fronts container :443 as the non-root `fauna-router` user (the
@@ -508,6 +519,12 @@ RUN setcap cap_net_bind_service=+ep /usr/local/bin/fauna-sandbox
 # setcap lets it bind the privileged port, same as the mail bridge below.
 COPY --from=rust-native /out/fauna-sni-router /usr/local/bin/fauna-sni-router
 RUN setcap cap_net_bind_service=+ep /usr/local/bin/fauna-sni-router
+
+# The Fauna updater (nest/update-channel.md § The updater): never run by this
+# image's own entrypoint — the bundles run it as a second container of the
+# same image with `entrypoint: ["/usr/local/bin/fauna-updater"]`, holding the
+# Docker socket and nothing else.
+COPY --from=rust-native /out/fauna-updater /usr/local/bin/fauna-updater
 
 # Mail bridge (cgo) + its FFI shared library + the supervisor sidekick.
 # libfauna_ffi.so goes to /usr/local/lib (matched by the binary's rpath);
@@ -563,7 +580,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 # release pipeline's promotion gate can bind to THIS ARTIFACT and not merely to
 # a commit string — two builds of one commit are otherwise indistinguishable to
 # it, and a container the pipeline never built could satisfy the gate while
-# :latest moved to the one it did (see build-system.md § Image tags & channels).
+# :latest moved to the one it did (see image-pipeline.md § Image tags & channels).
 #
 # Deliberately placed LAST and read at RUNTIME (bins/fauna-nest/src/
 # build_identity.rs owns the rationale), unlike FAUNA_BUILD_COMMIT which the
@@ -597,7 +614,14 @@ ENV FAUNA_BUILD_COMMIT=${FAUNA_BUILD_COMMIT}
 # "org.opencontainers.image.revision"}}'` instead of a behavioural inference
 # (closes the other half of testing.md class (7)) — a `dev` value on a local build is expected and excluded from the
 # 40-hex assertion the same way `FAUNA_BUILD_ID`'s test-hooks default is.
+# The product version, as the label the updater's never-downgrade decision
+# reads off the running image and off a channel head's config blob without a
+# pull (nest/update-channel.md § The decision): the workspace version, passed
+# by both build drivers as they pass FAUNA_BUILD_COMMIT. Empty on a build that
+# passes none, which the decision reads as version zero.
+ARG FAUNA_VERSION=
 LABEL org.opencontainers.image.revision=${FAUNA_BUILD_COMMIT} \
+      org.opencontainers.image.version=${FAUNA_VERSION} \
       org.opencontainers.image.source="https://github.com/faunasocial/fauna"
 
 ENTRYPOINT ["/entrypoint.sh"]

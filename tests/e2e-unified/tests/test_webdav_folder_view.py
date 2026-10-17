@@ -42,7 +42,6 @@ import uuid
 
 import pytest
 
-from helpers.app_surface import app_name, skip_unbuilt
 from helpers.waiting import wait_until
 from helpers.webdav_roundtrip import enable_mail_and_client, unthrottled, wait_status
 
@@ -63,22 +62,6 @@ pytestmark = [
 #: `fauna.media.list` only when the page is ENTERED (`MediaActions.reenter`), so
 #: each tick re-enters; the ceiling covers a loaded simulator's page loads.
 FOLDER_VIEW_S = 90.0
-
-
-def _pre_serve_reseal_unwired(app, what: str) -> None:
-    """The flipping client's re-seal of a folder's pre-serve files
-    (`webdav-server.md` § Key model (c)) runs only when the app's serve face
-    names its recording device; windows' does not yet, so on windows a file the
-    Media page put into the folder before serving still rests under the owner
-    key and the mount cannot open it. Every other app wires it.
-    """
-    if app_name(app.driver) == "windows":
-        skip_unbuilt(
-            app.driver,
-            surface="the windows serve face's recording device for the pre-serve re-seal",
-            detail=what,
-            tracked="",
-        )
 
 
 def _dav_ok(resp, what: str) -> None:
@@ -201,12 +184,9 @@ def test_mount_edits_show_in_the_apps_folder_view(app, dedicated_mail_nest, requ
     assert not app.has_error(), f"the journey surfaced an error: {app.error_text()!r}"
 
 
-# Not web yet: web's Media upload records chunk-manifest heads, and the
-# pre-serve re-seal fails them on the content-address check ("the nest served a
-# different blob for the pre-serve upload"), so the file never reaches the
-# mount.
 @pytest.mark.ios
 @pytest.mark.android
+@pytest.mark.web
 @pytest.mark.feature("files-in-standard-apps")
 def test_serving_a_folder_the_app_already_filled_reaches_its_files(
     app, dedicated_mail_nest, request, tmp_path
@@ -215,11 +195,6 @@ def test_serving_a_folder_the_app_already_filled_reaches_its_files(
     mount byte-identically once the app serves the folder (the one-time re-seal
     of the existing files under the served folder's key — `webdav-server.md`
     § Key model)."""
-    _pre_serve_reseal_unwired(
-        app,
-        "a Media upload made before serving rests under the owner key and the "
-        "windows serve face does not yet run the flipping client's re-seal",
-    )
     handle = dedicated_mail_nest
     handle.assert_mta_running()
     client, _nest, _admin_addr = enable_mail_and_client(app, handle, request)

@@ -1,11 +1,11 @@
 package mailfauna
 
-// AutoReply (Sieve vacation) shared-Rust surface (`smtp-server.md` § Email
-// filter rules). The loop-guard predicate and the RFC 5322 reply composer live
-// in shared Rust (`fauna_mail::filter::auto_reply_decision` /
-// `fauna_mail::outbound::autoreply::compose_auto_reply`, uniffi-exported) — the
-// perimeter-scorer split, like `Evaluate`. This file is the single
-// fauna_mail import surface for them.
+// AutoReply (Sieve vacation) shared-Rust surface (`email-filters.md`, the
+// AutoReply action). The loop-guard predicate lives in shared Rust
+// (`fauna_mail::filter::auto_reply_decision`, uniffi-exported) — the
+// perimeter-scorer split, like `Evaluate`. The reply itself is composed by the
+// nest, never here (`mail-multidomain.md` § From: header ownership → Per door,
+// nest-side). This file is the single fauna_mail import surface for it.
 
 import (
 	faunaMail "github.com/faunasocial/fauna/libs/fauna-mail-go/fauna_mail"
@@ -25,18 +25,9 @@ const (
 	AutoReplyGateSuppressNotInRecipients = faunaMail.AutoReplyGateSuppressNotInRecipients
 )
 
-// AutoReplyMessage is the input to the RFC 5322 auto-reply composer.
-type AutoReplyMessage = faunaMail.AutoReplyMessage
-
 // AutoReplyDecision applies the RFC 5230 §4.4/§4.6 + RFC 3834 loop guards. Pure:
 // it reads only the envelope sender, the message headers, the delivery recipient
 // address, and our hosted domains — all available at the plaintext floor.
 func AutoReplyDecision(envelopeFrom string, headers []FilterHeader, recipientAddr string, localDomains []string) AutoReplyGate {
 	return faunaMail.AutoReplyDecision(envelopeFrom, headers, recipientAddr, localDomains)
-}
-
-// ComposeAutoReply builds the RFC 5322 wire bytes for a vacation auto-reply
-// (`Auto-Submitted: auto-replied`, null-sender-bound by the caller at enqueue).
-func ComposeAutoReply(msg AutoReplyMessage) []byte {
-	return faunaMail.ComposeAutoReply(msg)
 }

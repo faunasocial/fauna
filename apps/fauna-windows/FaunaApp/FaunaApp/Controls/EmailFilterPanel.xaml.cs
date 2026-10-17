@@ -94,10 +94,45 @@ public sealed partial class EmailFilterPanel : UserControl
     {
         this.InitializeComponent();
         FilterList.ItemsSource = _filters;
+        Unloaded += (_, _) => InheritedFilterMarks.Changed -= OnInheritedMarksChanged;
+    }
+
+    /// <summary>The store-change notice's mark arm (account-runtime.md § A runtime's
+    /// own pump is a source of the notice too): the shell re-reads the succession
+    /// ledger's filter marks on each notice and raises
+    /// <see cref="InheritedFilterMarks.Changed"/> only when the set changed, on
+    /// whatever thread read it — hop to this panel's, then repaint just the marks
+    /// (no nest round trip; the rules and the open edit form are untouched).</summary>
+    private void OnInheritedMarksChanged() => DispatcherQueue.TryEnqueue(RepaintMarks);
+
+    private void RepaintMarks()
+    {
+        for (var i = 0; i < _filters.Count; i++)
+        {
+            var item = _filters[i];
+            var visibility = InheritedFilterMarks.Contains(item.Id)
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+            if (item.MarkVisibility == visibility) continue;
+            // FilterItem is not observable: replace the row (a copy, so the list
+            // sees a new item) rather than mutate it.
+            _filters[i] = new FilterItem
+            {
+                Id = item.Id,
+                Name = item.Name,
+                Action = item.Action,
+                Rules = item.Rules,
+                ActionValue = item.ActionValue,
+                EditVisibility = item.EditVisibility,
+                MarkVisibility = visibility,
+            };
+        }
     }
 
     private async void Panel_Loaded(object sender, RoutedEventArgs e)
     {
+        InheritedFilterMarks.Changed -= OnInheritedMarksChanged;
+        InheritedFilterMarks.Changed += OnInheritedMarksChanged;
         await LoadFiltersAsync();
     }
 

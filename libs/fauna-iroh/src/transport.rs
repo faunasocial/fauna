@@ -62,7 +62,35 @@ pub async fn peer_leg_transport(
     secret: [u8; 32],
     relay_url: Option<&str>,
 ) -> Result<(Arc<dyn PeerTransport>, Vec<SocketAddr>), TransportError> {
-    let mut builder = IrohTransport::builder(secret);
+    peer_leg_build(IrohTransport::builder(secret), relay_url).await
+}
+
+/// [`peer_leg_transport`] trusting `relay_roots` (DER certificates) for the
+/// relay's TLS in place of the platform roots — the test-relay injection
+/// point its docs name, for a harness whose relay serves a certificate no
+/// public CA issued (a docker nest under a test domain). Every other step is
+/// [`peer_leg_transport`]'s own; no shipped app calls this.
+pub async fn peer_leg_transport_trusting(
+    secret: [u8; 32],
+    relay_url: Option<&str>,
+    relay_roots: Vec<Vec<u8>>,
+) -> Result<(Arc<dyn PeerTransport>, Vec<SocketAddr>), TransportError> {
+    let roots: Vec<rustls::pki_types::CertificateDer<'static>> = relay_roots
+        .into_iter()
+        .map(rustls::pki_types::CertificateDer::from)
+        .collect();
+    peer_leg_build(
+        IrohTransport::builder(secret).ca_tls_config(CaTlsConfig::custom_roots(roots)),
+        relay_url,
+    )
+    .await
+}
+
+/// The body [`peer_leg_transport`] and [`peer_leg_transport_trusting`] share.
+async fn peer_leg_build(
+    mut builder: IrohTransportBuilder,
+    relay_url: Option<&str>,
+) -> Result<(Arc<dyn PeerTransport>, Vec<SocketAddr>), TransportError> {
     if let Some(url) = relay_url {
         match url.parse::<RelayUrl>() {
             Ok(url) => builder = builder.relay_url(url),
@@ -86,15 +114,25 @@ pub async fn peer_leg_transport(
 /// crate is exactly the "app side" for every native (non-mobile) app, and
 /// both consumers already depend on `fauna-sync-engine` with the same
 /// features this needs.
+///
+/// The seat binds with the relay URL its door read from the nest facts
+/// (`behavior/p2p.md` § The relay → *The cross-user seat and the relay*) and
+/// reports back only a relay it could use: a URL that does not parse binds
+/// direct-only (as [`peer_leg_transport`] does) and the binding says `None`,
+/// so the seat never advertises a relay it does not hold.
 pub fn ceremony_transport() -> fauna_sync_engine::offline_share::CeremonyTransportFactory {
-    Arc::new(|secret| {
+    Arc::new(|inputs| {
         Box::pin(async move {
-            let (transport, bound_addrs) = peer_leg_transport(secret, None)
+            let relay_url = inputs
+                .relay_url
+                .filter(|url| url.parse::<RelayUrl>().is_ok());
+            let (transport, bound_addrs) = peer_leg_transport(inputs.secret, relay_url.as_deref())
                 .await
                 .map_err(|e| format!("peer transport: {e}"))?;
             Ok(fauna_sync_engine::offline_share::CeremonyBinding {
                 transport,
                 bound_addrs,
+                relay_url,
             })
         })
     })
@@ -978,5 +1016,136 @@ mod tests {
         if let Ok(Ok(_)) = result {
             panic!("dial succeeded with the relay down — a silent direct path!");
         }
+    }
+
+    // ---- the cross-user seat's relay (`behavior/p2p.md` § The relay → *The
+    // cross-user seat and the relay*: the measurement its build lands first). ----
+
+    /// A relay URL nothing answers at: `refused` names a loopback port no
+    /// socket holds, else a TEST-NET-1 address (RFC 5737) the network drops in
+    /// silence — the two shapes an unreachable nest takes.
+    fn dead_relay_url(refused: bool) -> String {
+        if refused {
+            let port = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .expect("reserve a port")
+                .local_addr()
+                .expect("reserved addr")
+                .port();
+            format!("https://127.0.0.1:{port}")
+        } else {
+            "https://192.0.2.1:443".to_string()
+        }
+    }
+
+    /// One direct-only dial by LAN candidate from a fresh production endpoint
+    /// (`peer_leg_transport`, bound with `relay`) to `target`: how long the
+    /// bind took and how long the dial took.
+    async fn timed_lan_dial(
+        secret: [u8; 32],
+        relay: Option<&str>,
+        target: EndpointKey,
+        lan: &[SocketAddr],
+    ) -> (Duration, Duration) {
+        let started = std::time::Instant::now();
+        let (dialer, _bound) = peer_leg_transport(secret, relay).await.expect("bind");
+        let bound_in = started.elapsed();
+        let candidates = PathCandidates {
+            lan_endpoints: lan.to_vec(),
+            wan_endpoint: None,
+            relay_available: false,
+        };
+        let started = std::time::Instant::now();
+        let conn = tokio::time::timeout(Duration::from_secs(10), dialer.dial(target, candidates))
+            .await
+            .expect("a direct-only LAN dial timed out")
+            .expect("a direct-only LAN dial");
+        let dialed_in = started.elapsed();
+        assert_eq!(conn.peer_identity(), target);
+        assert_eq!(
+            conn.path(),
+            PathKind::Lan,
+            "a LAN candidate dial goes direct"
+        );
+        (bound_in, dialed_in)
+    }
+
+    /// An endpoint built with a relay nothing answers at dials a LAN candidate
+    /// with `relay_available: false` as fast and as surely as a relay-less one —
+    /// the fear the ceremony seat recorded ("an unreachable relay is worse than
+    /// a direct dial that simply fails"), made a number before the seat binds
+    /// with its nest's relay (`behavior/p2p.md` § The relay → *The cross-user
+    /// seat and the relay*, ruling 2). Both dead shapes are measured, a refused
+    /// port and a black-holed address, and every trial is a fresh endpoint, so
+    /// no dial rides an earlier one's state. The numbers print beside the
+    /// verdict for the build ledger (`p2p-shared-set-build.md`).
+    #[tokio::test]
+    async fn an_unreachable_relay_leaves_a_direct_lan_dial_as_fast_and_sure() {
+        const TRIALS: u8 = 5;
+        // A relay-bound dial's median may trail the relay-less median by at
+        // most this much.
+        const SLACK: Duration = Duration::from_millis(250);
+
+        let lan_ips = fauna_peer_sync::lan::discover_lan_candidates();
+        assert!(
+            !lan_ips.is_empty(),
+            "this measurement needs a private IPv4 interface to dial across"
+        );
+        let (listener, bound) = peer_leg_transport([0x7a; 32], None)
+            .await
+            .expect("listener bind");
+        let target = listener.local_identity();
+        let lan = fauna_core::device_endpoints::lan_socket_addr_candidates(&bound, &lan_ips);
+        let mut incoming = listener.listen().await.expect("listen");
+        // Hold every accepted connection, so no dial's handshake races a drop
+        // on the listening side.
+        let accepted = tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let mut held = Vec::new();
+            while let Some(conn) = incoming.next().await {
+                held.push(conn);
+            }
+            held
+        });
+
+        fn median(mut v: Vec<Duration>) -> Duration {
+            v.sort();
+            v[v.len() / 2]
+        }
+        let shapes = [
+            ("relay-less", None),
+            ("relay at a refused port", Some(dead_relay_url(true))),
+            (
+                "relay at a black-holed address",
+                Some(dead_relay_url(false)),
+            ),
+        ];
+        let mut report = Vec::new();
+        let mut medians = Vec::new();
+        for (shape, (label, relay)) in (0u8..).zip(shapes) {
+            let mut binds = Vec::new();
+            let mut dials = Vec::new();
+            for trial in 0..TRIALS {
+                let secret = [0x10 + shape * TRIALS + trial; 32];
+                let (b, d) = timed_lan_dial(secret, relay.as_deref(), target, &lan).await;
+                binds.push(b);
+                dials.push(d);
+            }
+            let line = format!(
+                "{label}: bind median {:?}, dial median {:?}, dials {dials:?}",
+                median(binds),
+                median(dials.clone()),
+            );
+            eprintln!("[seat-relay measurement] {line}");
+            report.push(line);
+            medians.push(median(dials));
+        }
+        for m in &medians[1..] {
+            assert!(
+                *m <= medians[0] + SLACK,
+                "a dead relay slowed the direct dial past the bound: {report:#?}"
+            );
+        }
+        drop(listener);
+        accepted.abort();
     }
 }

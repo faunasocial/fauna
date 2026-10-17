@@ -208,4 +208,103 @@ mod tests {
         // A device that cannot name itself offers only an orphaned store.
         assert!(backup_reseed_rows(rows, String::new(), false).is_empty());
     }
+
+    use fauna_client_backup::reseed::{
+        DeliveredCorpus, DeliveredSet, SetAxis, SetOutcome, SetResult,
+    };
+
+    fn mail() -> DeliveredSet {
+        DeliveredSet {
+            set_name: "__mail".into(),
+            axis: SetAxis::Segment,
+            folder_display_name: None,
+            folder_label: None,
+        }
+    }
+
+    fn outcome(set_outcome: SetOutcome) -> ReseedOutcome {
+        ReseedOutcome {
+            delivered: DeliveredCorpus {
+                sets: vec![mail()],
+                ..Default::default()
+            },
+            sets: vec![SetResult {
+                set: mail(),
+                outcome: set_outcome,
+            }],
+        }
+    }
+
+    /// A connection that can never reach a nest, failing every call at once.
+    async fn unreachable_nest() -> Arc<FfiNestClient> {
+        let nest = FfiNestClient::new("ws://127.0.0.1:1".into(), vec![7u8; 32]).expect("client");
+        nest.nest_arc().disconnect().await;
+        nest
+    }
+
+    /// `finish` folds a partial outcome into the shared lines and the verdict,
+    /// and does NOT re-enroll: the data is not all back, so this device must
+    /// not become the seeded nest's custodian. The torn-down nest proves the
+    /// re-enrollment never ran — had it, it would have failed and said so.
+    ///
+    /// Mutation check: dropping the `if is_whole` gate in `finish` reds the
+    /// `reenroll_error` assertion.
+    #[tokio::test]
+    async fn a_partial_outcome_folds_its_lines_and_skips_the_reenrollment() {
+        let nest = unreachable_nest().await;
+        let partial = outcome(SetOutcome::Refused {
+            refusal: fauna_client_backup::reseed::SetRefusal::FolderUnnamed,
+            detail: String::new(),
+        });
+        let expected = result_lines(&partial);
+        let result = finish(&nest, partial, "aa11").await;
+
+        assert!(result.stopped.is_none(), "a verdict is not a stop");
+        assert!(!result.is_whole, "a refused set is never a restore");
+        assert_eq!(
+            result.result_lines, expected,
+            "the lines are the shared `result_lines`, never re-phrased here"
+        );
+        assert!(
+            result.reenroll_error.is_none(),
+            "a partial outcome must not re-enroll this device"
+        );
+    }
+
+    /// A whole outcome re-enrolls — and a re-enrollment that cannot read the
+    /// seeded box's identity reports that failure rather than guessing an
+    /// empty destination list (which would mint a second row for a device
+    /// that may already have one). The verdict stands beside it: the data IS
+    /// back.
+    ///
+    /// Mutation check: replacing `reenroll`'s `bound_nest_id` arm with a
+    /// silent `None` reds the `reenroll_error` assertion.
+    #[tokio::test]
+    async fn a_whole_outcome_reenrolls_and_reports_a_failed_reenrollment() {
+        let nest = unreachable_nest().await;
+        let whole = outcome(SetOutcome::Materialized {
+            segments: vec![0],
+            records: 3,
+        });
+        assert!(whole.is_whole(), "precondition: the fixture is whole");
+        let expected = result_lines(&whole);
+        let result = finish(&nest, whole, "aa11").await;
+
+        assert!(result.stopped.is_none());
+        assert!(result.is_whole);
+        assert_eq!(result.result_lines, expected);
+        assert!(
+            result.reenroll_error.is_some(),
+            "a whole outcome runs the re-enrollment, and its failure is reported"
+        );
+    }
+
+    /// The stopped record carries the reason and nothing else, so a shell can
+    /// never paint a verdict beside a stop.
+    #[test]
+    fn a_stop_carries_only_its_reason() {
+        let stop = FfiReseedResult::stopped("why");
+        assert_eq!(stop.stopped.as_deref(), Some("why"));
+        assert!(stop.result_lines.is_empty() && !stop.is_whole && stop.reenroll_error.is_none());
+    }
 }

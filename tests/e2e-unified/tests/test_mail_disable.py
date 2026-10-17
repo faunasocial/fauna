@@ -53,7 +53,7 @@ def test_disable_mail_revokes_all_credentials_via_confirm_dialog(dedicated_actor
     # Provision a second credential so disabling exercises the *bulk* revoke
     # (every row), not just a single-credential revoke.
     app.mail_settings.add_credential("Phone")
-    assert app.mail_settings.wait_for_credential_count_at_least(2, timeout=12.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(2, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "expected ≥2 credentials before disabling; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
@@ -81,7 +81,7 @@ def test_disable_mail_revokes_all_credentials_via_confirm_dialog(dedicated_actor
     # mints a fresh credential under the SAME key, so mail sealed before the
     # disable stays openable.
     app.mail_settings.enable_mail("Default")
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "re-enable should mint a fresh credential after disable; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )

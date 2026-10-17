@@ -173,6 +173,12 @@ mod tests {
             ) -> Result<bool, crate::StoreError> {
                 unreachable!()
             }
+            async fn publish(&self) -> Result<(), crate::StoreError> {
+                unreachable!()
+            }
+            async fn walk(&self) -> Result<(), crate::StoreError> {
+                unreachable!()
+            }
         }
         assert_eq!(block_on(dav_store_context(&Broken, [9; 32])), None);
     }

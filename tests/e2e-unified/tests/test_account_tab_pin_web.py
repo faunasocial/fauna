@@ -26,6 +26,7 @@ tier_3: needs a real ``fauna-nest`` binary (``nest_instance``); web app only.
 """
 from __future__ import annotations
 
+import secrets
 import time
 
 import pytest
@@ -422,3 +423,126 @@ def test_web_launching_again_comes_up_on_the_running_identity_and_offers_the_oth
         if tab_b is not None:
             tab_b.teardown()
         tab_a.teardown()
+
+
+# Outcome 6 of `docs/features/second-identity-in-its-own-window.md` — "the place
+# you asked to go back to is already gone" — through web's own door, ruled
+# 2026-09-28 (`account-scoping.md` § Concurrent instances → *What "the place you
+# asked to go back to is already gone" means on web*): a tab whose pin names an
+# account that no longer resolves drops the pin and starts normally, on the
+# store-active account or the launch flow. A user reaches it through the
+# browser's reopen-closed-tab / session restore, which restores the tab's
+# `sessionStorage` — and with it a pin to an account removed meanwhile (removal
+# refuses while a tab serves the account, so that tab was closed first). The
+# seed below is exactly the state such a restored tab carries. The door is
+# `$lib/store`'s `accountsBoot` continuation: pinned + unresolvable after the
+# succession walk → `clearTabPin()` + one reload.
+def _await_path(driver, expected, *, budget_s=60):
+    """Wait until the page's ``location.pathname`` is ``expected`` — a deadline
+    poll through the navigation, never a settle-sleep (convention 14)."""
+    deadline = time.monotonic() + budget_s
+    last = None
+    while time.monotonic() < deadline:
+        last = _eval_settled(driver, "location.pathname", what="reading the path")
+        if last == expected:
+            return
+        time.sleep(0.5)
+    raise AssertionError(f"the page never reached {expected!r} within {budget_s}s, last at {last!r}")
+
+
+def _gone_actor(like: str) -> str:
+    """An actor id of the right shape that no registry entry names — the
+    removed account a restored tab's pin still points at."""
+    return secrets.token_hex(len(like) // 2)
+
+
+@pytest.mark.feature("second-identity-in-its-own-window")
+@pytest.mark.parametrize(
+    "landing",
+    ["/app/conversations", "/app/settings/account"],
+    ids=["conversations", "settings-account"],
+)
+def test_web_a_tab_pinned_to_a_gone_account_starts_on_the_running_identity(
+    nest_instance, spa_url, landing
+):
+    """A tab whose pin names a gone account comes back up on the store-active
+    identity, re-pinned to it — never blank, never an error. The settings arm
+    is the cold load of a settings sub-page: its script once read the core wasm
+    chunk before ``ensureWasm()`` and threw, so ``onMount`` never reached the
+    store's drop-the-gone-pin door and the tab stayed parked."""
+    seed, user_actor, user_secret, admin_actor, _admin_secret = _seed_two_accounts(
+        nest_instance, spa_url
+    )
+    tab = create_driver("web")
+    tab.launch({"url": spa_url + "/app/"})
+    try:
+        _auth_on_account_page(tab, seed, user_secret, "user", user_actor, spa_url)
+        _await_session_actor(tab, user_actor, what="the tab serves the user")
+        assert _active_secret(tab) == user_secret, (
+            "precondition: the store-active account is the user — the identity a "
+            "tab whose pin is gone must start on"
+        )
+
+        # The restored tab sits where a user leaves one, reached by a real page
+        # load (not the injected Account nav).
+        tab.eval_js(f"(() => {{ setTimeout(() => location.assign({landing!r}), 0); return true; }})()")
+        _await_path(tab, landing)
+
+        gone = _gone_actor(user_actor)
+        assert gone not in (user_actor, admin_actor)
+        tab.eval_js(f"sessionStorage.setItem({PIN_KEY!r}, {gone!r})")
+        tab.hard_reload()
+
+        # The pin is the evidence: only the boot's drop-and-reload turns a gone
+        # pin into the running identity's (the unpinned reload re-pins to it).
+        try:
+            _await_pin(tab, user_actor, what="the gone pin is replaced by the running identity's")
+        except AssertionError as e:
+            after = _eval_settled(tab, "location.pathname", what="reading the path")
+            console = "\n".join(tab.console_log()[-40:])
+            raise AssertionError(f"{e}; path {after!r}; page console tail:\n{console}") from None
+        _await_session_actor(
+            tab, user_actor, what="the tab starts normally on the store-active identity"
+        )
+        # Not blank: the app renders, and its switcher lists both live identities.
+        tab.set_state(ACCOUNT_PAGE_NAV)
+        tab.wait_for(SWITCHER_LIST, timeout=60)
+        tab.wait_for(SWITCHER_ITEM, timeout=30)
+        assert tab.count(SWITCHER_ITEM) == 2, (
+            f"the restarted tab's switcher must list both live identities, "
+            f"listed {tab.count(SWITCHER_ITEM)}"
+        )
+        assert tab.is_absent("error-message"), "a gone pin must not surface as an error"
+        assert tab.is_absent(ADMIN_TAB), "the tab started as the admin, not the running identity"
+    finally:
+        tab.teardown()
+
+
+@pytest.mark.feature("second-identity-in-its-own-window")
+def test_web_a_tab_pinned_to_a_gone_account_with_none_left_lands_on_the_launch_flow(
+    nest_instance, spa_url
+):
+    """The same gone pin in a profile with no account left lands on the launch
+    flow — the "start normally" of a browser that holds no identity."""
+    tab = create_driver("web")
+    tab.launch({"url": spa_url + "/app/"})
+    try:
+        # An empty profile: `/app/` routes to the launch flow.
+        tab.wait_for("create-identity-button", timeout=60)
+
+        gone = _gone_actor("0" * 64)
+        # Enter the app pinned to the gone account — the restored tab. The
+        # navigation is deferred so the evaluate returns before the context goes.
+        app_url = spa_url + "/app/"
+        tab.eval_js(
+            f"(() => {{ sessionStorage.setItem({PIN_KEY!r}, {gone!r});"
+            f" setTimeout(() => location.assign({app_url!r}), 0); return true; }})()"
+        )
+        # The pin is dropped (written before the navigation, it reads `gone`
+        # until the boot continuation clears it) ...
+        _await_pin(tab, None, what="the gone pin is dropped")
+        # ... and the one reload lands on the launch flow, not a parked tab.
+        tab.wait_for("create-identity-button", timeout=60)
+        assert _pin(tab) is None, "the reload must not re-pin to an account that is gone"
+    finally:
+        tab.teardown()

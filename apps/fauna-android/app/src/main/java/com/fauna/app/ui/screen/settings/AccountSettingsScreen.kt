@@ -25,15 +25,11 @@ import com.fauna.app.ui.components.IdentityExportSection
 import com.fauna.app.ui.components.RecoveryKitSection
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.faunaGate
-import com.fauna.app.ui.util.localized
-import com.fauna.app.ui.util.localizedNested
-import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.shareFileBytes
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.AccountSettingsVM
 import kotlinx.coroutines.launch
 import social.fauna.generated.Ids
-import uniffi.fauna_core.LocalizedText
 
 @Composable
 fun AccountSettingsScreen(
@@ -63,8 +59,6 @@ fun AccountSettingsScreen(
     val accounts by vm.accounts.collectAsState()
     val activeActorId by vm.activeActorId.collectAsState()
     val switchError by vm.switchError.collectAsState()
-    val quotaData by vm.quota.collectAsState()
-    val featuresData by vm.features.collectAsState()
     val pendingActions by vm.pendingActions.collectAsState()
     val pendingActionsError by vm.pendingActionsError.collectAsState()
 
@@ -137,8 +131,6 @@ fun AccountSettingsScreen(
         deviceId = deviceId,
         secretHex = secretHex,
         handle = handle,
-        quotaData = quotaData,
-        featuresData = featuresData,
         pendingActions = pendingActions,
         newHandle = newHandle,
         changingHandle = changingHandle,
@@ -257,8 +249,6 @@ fun AccountSettingsContent(
     deviceId: String?,
     secretHex: String?,
     handle: String?,
-    quotaData: com.fauna.ffi.FfiQuotaGetReply?,
-    featuresData: List<com.fauna.ffi.FfiFeatureRow>?,
     pendingActions: List<com.fauna.ffi.FfiPendingActionSummary>?,
     newHandle: String,
     changingHandle: Boolean,
@@ -285,17 +275,6 @@ fun AccountSettingsContent(
     // § Short id), injected FFI-free so the Robolectric harness stays off the
     // native path — the idiom every other Content composable uses.
     shortId: (String) -> String = { com.fauna.ffi.shortId(it) },
-    // Shared `fauna_core::format::quota_fraction`/`quota_percent`
-    // (value-formatting.md § Quota fraction), injected FFI-free for the same
-    // reason.
-    quotaFraction: (Long, Long) -> Double = { used, max -> com.fauna.ffi.quotaFraction(used, max) },
-    quotaPercent: (Long, Long) -> UInt = { used, max -> com.fauna.ffi.quotaPercent(used, max) },
-    // `ValueFormat.byteSize`'s own native half (`fauna_core::format::byte_size`),
-    // injected FFI-free; the Context-dependent resolution half
-    // (`resolveLocalized`) touches no native code and stays inline below —
-    // `cellValueText` (used by [FeatureLimitQuotaCell]) is the same way and
-    // needs no injection at all.
-    byteSize: (kotlin.ULong) -> LocalizedText = { com.fauna.ffi.byteSize(it) },
     // Shared `fauna_protocol::pending_actions::describe_pending_action`
     // (settings.md § Pending actions) — what a scheduled action will do, as
     // one sentence; injected FFI-free for the same Robolectric reason.
@@ -311,7 +290,6 @@ fun AccountSettingsContent(
 ) {
     val context = LocalContext.current
     val appMessages = LocalAppMessages.current
-    val byteSizeText = { bytes: Long -> resolveLocalized(context, byteSize(bytes.toULong())) ?: "" }
 
     Scaffold(
         topBar = { AccountSettingsTopBar(onBack = onBack) }
@@ -369,103 +347,6 @@ fun AccountSettingsContent(
                         fullValue = deviceId ?: "",
                         onCopied = { appMessages.showInfo(context.getString(R.string.settings_account_page_copied_clipboard)) },
                     )
-                }
-            }
-
-            // Storage Quota Section
-            quotaData?.let { q ->
-                Card(modifier = Modifier.fillMaxWidth().testTag(Ids.QUOTA_SECTION)) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(stringResource(R.string.common_storage), style = MaterialTheme.typography.titleMedium)
-                        Spacer(Modifier.height(12.dp))
-
-                        // Headline bar tracks the storage resource; the rows
-                        // below break out the distinct inbox / storage /
-                        // device quotas the rich fauna.quota.get reply carries.
-                        val storageUsed = q.storage.usedBytes
-                        val storageLimit = q.storage.maxBytes
-                        // Shared `fauna_core::format::quota_fraction` — the
-                        // 0.0..=1.0 bar-fill fraction (guards maxBytes <= 0 → 0,
-                        // clamps over-quota → 1), single-sourced with
-                        // linux/web/windows (value-formatting.md § Quota fraction);
-                        // replaces a hand-rolled guard/clamp that could divide-by-
-                        // zero on a zero quota.
-                        val progress = quotaFraction(storageUsed, storageLimit).toFloat()
-                        LinearProgressIndicator(
-                            progress = { progress },
-                            modifier = Modifier.fillMaxWidth().height(8.dp).testTag(Ids.SETTINGS_STORAGE_BAR),
-                        )
-                        Spacer(Modifier.height(8.dp))
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                "${byteSizeText(storageUsed)} / ${byteSizeText(storageLimit)}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.testTag(Ids.SETTINGS_STORAGE_TEXT)
-                            )
-                            Text(
-                                "${quotaPercent(storageUsed, storageLimit)}%",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        Spacer(Modifier.height(8.dp))
-
-                        Text(
-                            "${stringResource(R.string.common_inbox)}: ${byteSizeText(q.inbox.usedBytes)} / ${byteSizeText(q.inbox.maxBytes)}",
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.testTag(Ids.QUOTA_INBOX)
-                        )
-                        Text(
-                            "${stringResource(R.string.common_storage)}: ${byteSizeText(storageUsed)} / ${byteSizeText(storageLimit)}",
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.testTag(Ids.QUOTA_STORAGE)
-                        )
-                        Text(
-                            "${stringResource(R.string.common_devices)}: ${q.devices.used} / ${q.devices.max}",
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.testTag(Ids.QUOTA_DEVICES)
-                        )
-                    }
-                }
-            }
-
-            // Feature Limits Section — the gated-feature plane's transparency
-            // read (`feature-limits-section`, `dynamic-features.md` §
-            // Transparency & auditability, boundary 4: "no silent gates").
-            // Placed directly after Quota as its sibling "what bounds me"
-            // surface (`settings.md` § Layout & flow item 2b). This block
-            // paints; it decides nothing — every judgement (which cells
-            // survived the tier meet, per-cell tier attribution, available/
-            // restricted/hidden) is `FfiFeaturesClient.rows()`'s output,
-            // mirroring tui's `feature_limits_elements` and linux's
-            // `views::status::update_features` field-for-field.
-            featuresData?.let { rows ->
-                // A `hidden` row means this nest build does not carry the
-                // feature at all (its capability token is absent) —
-                // filtered client-side, not in the shared crate, same as
-                // every other app.
-                val visible = rows.filter { it.affordance != "hidden" }
-                Card(modifier = Modifier.fillMaxWidth().testTag(Ids.FEATURE_LIMITS_SECTION)) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            stringResource(R.string.features_section_title),
-                            style = MaterialTheme.typography.titleMedium,
-                        )
-                        Spacer(Modifier.height(12.dp))
-                        if (visible.isEmpty()) {
-                            Text(
-                                stringResource(R.string.features_empty),
-                                modifier = Modifier.testTag(Ids.FEATURE_LIMITS_EMPTY),
-                            )
-                        } else {
-                            visible.forEach { row -> FeatureLimitRow(row) }
-                        }
-                    }
                 }
             }
 
@@ -796,78 +677,6 @@ fun DeleteAccountConfirmDialog(
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         }
     )
-}
-
-/**
- * One `feature-limits-row` — a registry member's name, status, restriction (if
- * any), and its bound cells. Mirrors tui's `feature_limits_elements` /
- * linux's `views::status::update_features` field-for-field so the answer to
- * "why can't I do this" cannot differ across apps (priority #1).
- */
-@Composable
-private fun FeatureLimitRow(row: com.fauna.ffi.FfiFeatureRow) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 6.dp)
-            .testTag(Ids.FEATURE_LIMITS_ROW),
-    ) {
-        Text(
-            localized(row.name) ?: "",
-            style = MaterialTheme.typography.titleSmall,
-            modifier = Modifier.testTag(Ids.FEATURE_LIMITS_NAME),
-        )
-        Text(
-            localized(row.status) ?: "",
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.testTag(Ids.FEATURE_LIMITS_STATUS),
-        )
-        // Only when something actually blocks — boundary 4's "no silent
-        // gates" half. `localizedNested`, not `localized`: the sentence's
-        // `{window}` is itself an i18n key.
-        row.restriction?.let { reason ->
-            Text(
-                localizedNested(reason) ?: "",
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.testTag(Ids.FEATURE_LIMITS_RESTRICTION),
-            )
-        }
-        row.cells.forEach { cell -> FeatureLimitQuotaCell(cell) }
-    }
-}
-
-/**
- * One `feature-limits-quota` cell — per CELL, not per row: the meet takes the
- * MIN per (dimension, window), so two bounds on one feature can come from
- * different tiers.
- */
-@Composable
-private fun FeatureLimitQuotaCell(cell: com.fauna.ffi.FfiLimitCell) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 12.dp)
-            .testTag(Ids.FEATURE_LIMITS_QUOTA),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Text(
-            localizedNested(cell.label) ?: "",
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.testTag(Ids.FEATURE_LIMITS_QUOTA_LABEL),
-        )
-        Text(
-            com.fauna.app.ui.util.cellValueText(context, cell),
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.testTag(Ids.FEATURE_LIMITS_QUOTA_VALUE),
-        )
-        Text(
-            localized(cell.tierLabel) ?: "",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.testTag(Ids.FEATURE_LIMITS_QUOTA_TIER),
-        )
-    }
 }
 
 /**

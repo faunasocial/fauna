@@ -13,7 +13,12 @@ pub mod autoreply;
 pub mod backscatter;
 pub mod classifier;
 pub mod dane;
+// The DMARC aggregate-report sender reuses the receive side's `Disposition`
+// and gzip helper (docs/goal/behavior/dmarc-reporting.md § Outbound
+// aggregate-report sender).
 pub mod dkim;
+#[cfg(feature = "dmarc-report")]
+pub mod dmarc;
 pub mod dsn;
 pub mod metrics;
 pub mod mta_sts;

@@ -48,6 +48,14 @@ pub const MIN_LIMIT: i64 = 1;
 /// follow it instead of their compiled-in constant.
 pub const MAX_LIMIT: i64 = 100;
 
+/// Largest `offset` the nest will serve. The nest fetches `limit + offset` rows
+/// from each sub-query and discards the first `offset`, so an unbounded offset
+/// lets one query load the whole matching corpus. A request beyond it is clamped
+/// DOWN to this silently (as `limit` is) — paging deeper than this many hits is
+/// not a supported way to read results; narrow the query instead. Lowering it is
+/// benign skew; raising it is a wire-behavior change like [`MAX_LIMIT`].
+pub const MAX_OFFSET: i64 = 10_000;
+
 // ── fauna.search.query ─────────────────────────────────────────────────
 
 /// Full-text search scoped to the calling actor (implicit — the WS-RPC
@@ -72,7 +80,7 @@ pub struct SearchQueryRequest {
     /// Page size; the handler defaults to 20 and clamps to `[1, 100]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
-    /// Page offset; the handler defaults to 0 (floored at 0).
+    /// Page offset; the handler defaults to 0 and clamps to `[0, MAX_OFFSET]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<i64>,
     #[serde(flatten, default)]
@@ -122,6 +130,15 @@ mod tests {
             limit: Some(50),
             offset: Some(10),
             extra: BTreeMap::new(),
+        }
+    }
+
+    /// The offset ceiling plus the largest page must stay a sane SQL `LIMIT`.
+    #[test]
+    fn the_fetch_window_is_bounded() {
+        const {
+            assert!(MAX_OFFSET >= 0);
+            assert!(MAX_LIMIT + MAX_OFFSET <= 100_000);
         }
     }
 

@@ -25,8 +25,18 @@
 // - **The store-change notice** (`$lib/store-change`) is relayed from the
 //   started runtime to the open store-backed pages, and ends with it.
 //
-// A start that fails leaves the tab on the blob rail and says so in the log —
-// the native degrade posture; nothing on any page waits on it.
+// A start that fails leaves the tab with no account store and says so in the
+// log — the native degrade posture; nothing on any page waits on it.
+//
+// **Order is the contract.** The shared host (`AccountRuntimeHost`, the same
+// claim and generation guard every native seat holds its runtime in) applies
+// starts and stops in the order they reach it. So a stop is issued to it AT
+// ONCE, never after the in-flight start settles — a stop deferred behind that
+// start reached the host after the NEXT account's start and took the incoming
+// runtime instead of the departing one, leaving the tab with none ("the
+// account runtime is not running" on every store-backed page after an in-tab
+// switch). A start bails before it reaches the host when a stop has landed
+// since it was asked for, and waits out the stops still closing a store.
 //
 // **The account port** (`account-client-lifecycle.md` § The client-side
 // lifecycle → *The account port*): a page machine in another wasm chunk
@@ -57,6 +67,12 @@ let starting: Promise<void> | null = null;
 /** Whether `starting` settled STARTED — the runtime is up and the account
  *  store readable. False while the start is in flight and after a failed one. */
 let started = false;
+/** Bumped by every stop: a start asked for under an older value was
+ *  superseded before it reached the host, and must not reach it. */
+let epoch = 0;
+/** The stops issued so far, settled — what a start waits out, so a store a
+ *  stop is still closing is released before the next one opens. */
+let stopping: Promise<unknown> = Promise.resolve();
 /** The account a sign-out stop has run for and whose identity this tab has not
  *  dropped yet. No runtime starts for it in between: a manager rebuilt inside
  *  that window would re-open the store the erase is about to delete. Cleared
@@ -79,7 +95,10 @@ export function startAccountRuntimeFor(
   if (runtimeActor === actorId || signedOutActor === actorId) return;
   runtimeActor = actorId;
   started = false;
-  const attempt: Promise<void> = startAccountRuntime(secretHex, manager).then(
+  const askedAt = epoch;
+  const attempt: Promise<void> = stopping
+    .then(() => startAccountRuntime(secretHex, manager, () => epoch === askedAt))
+    .then(
     () => {
       // Only the attempt still in the slot speaks: a stop (or the next
       // account's start) since then owns the flag.
@@ -92,15 +111,15 @@ export function startAccountRuntimeFor(
       );
     },
     (e) => {
+      // A start a stop superseded is the switch working, not a failure.
+      if (starting !== attempt) return;
       logMessage(
         'warn',
         'fauna_web::account_runtime',
-        `account runtime not started — this tab stays on the blob rail: ${e}`,
+        `account runtime not started — this tab has no account store: ${e}`,
       );
-      if (starting === attempt) {
-        runtimeActor = null;
-        starting = null;
-      }
+      runtimeActor = null;
+      starting = null;
     },
   );
   starting = attempt;
@@ -118,24 +137,24 @@ export function sharedAccountPort(secretHex: string): SharedAccountPort {
   };
 }
 
-/** Stop this tab's runtime for `reason`. Waits for an in-flight start to
- *  settle first, so the store it opened is the one shut down.
+/** Stop this tab's runtime for `reason`. Issued to the host at once (the
+ *  header's *Order is the contract*): it takes the runtime installed now and
+ *  the one still assembling, waiting that assembly out and stopping it the
+ *  same way, and never a start asked for after this call.
  *
  *  A `'sign-out'` stop is bounded by the hosts' one stop budget, the in-flight
  *  start waited out inside it: the user asked to be signed out, so a stop that
  *  overruns is logged and the erase proceeds anyway. A tab with no runtime
  *  retires nothing and returns at once. */
 export async function stopAccountRuntime(reason: StopReason): Promise<void> {
-  const pending = starting;
+  epoch += 1;
   signedOutActor = reason === 'sign-out' ? runtimeActor : null;
   runtimeActor = null;
   starting = null;
   started = false;
-  const stop = (async () => {
-    if (pending) await pending;
-    if (reason === 'sign-out') await accountRuntimeShutdownForSignOut();
-    else await accountRuntimeShutdown();
-  })();
+  const stop: Promise<void> =
+    reason === 'sign-out' ? accountRuntimeShutdownForSignOut() : accountRuntimeShutdown();
+  stopping = Promise.allSettled([stopping, stop]);
   if (reason !== 'sign-out') return stop;
   let lapse: ReturnType<typeof setTimeout> | undefined;
   const lapsed = new Promise<'lapsed'>((resolve) => {

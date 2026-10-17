@@ -599,6 +599,7 @@ mod tests {
             tier: Some("silver".into()),
             expires_at: Some(Timestamp(42)),
             auto_approve: true,
+            follow_pending: false,
             extra: Default::default(),
         };
         let ffi: FfiSubscriptionStatus = proto.into();

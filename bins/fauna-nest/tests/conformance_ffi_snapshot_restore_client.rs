@@ -34,7 +34,7 @@
 //! # Why headless, and what is genuinely left to a Mac
 //!
 //! This is the `conformance_*_client.rs` vehicle its sibling
-//! `conformance_file_provider_client.rs` established and `file-sync.md`
+//! `conformance_file_provider_client.rs` established and `on-demand-files.md`
 //! § On-Demand Files → *Headless-first testing* ratified: drive the FFI host
 //! **directly** against a real nest, with no app, no OS surface and no human in
 //! the loop. `FfiSyncEngineHost` is plain async Rust, so the mechanism needs no
@@ -116,21 +116,68 @@ struct Nest {
     db: Arc<CacheDb>,
     /// A bearer for the owner, for the capture engine's HTTP chunk uploads.
     owner_bearer: String,
-    folder_id: i64,
     /// The chunk store's backing dir. Held (not `mem::forget`-leaked as the
     /// sibling FP conformance does) so the ~KBs go away with the test: every
     /// request the restore issues has been awaited by the time this drops.
     _blob_dir: tempfile::TempDir,
 }
 
-/// Start a real in-process nest serving the auth + sync + filesync + folder
-/// WS-RPC kinds and the chunk-store HTTP byte routes over a bound `TcpListener`,
-/// with the owner registered and an owner-only folder pre-created.
+impl Nest {
+    /// [`FOLDER`]'s row as the nest holds it — its id, and the set nonce every
+    /// record into it is signed under.
+    async fn set_row(&self) -> fauna_nest::db::FolderRow {
+        // Addressed by the set's name hash: a seat-created set rests sealed
+        // from birth (no plaintext name on the row), a directly created one
+        // carries both.
+        let owner = ActorKeypair::from_secret(OWNER_SECRET).actor_id().0;
+        if let Some(row) = self
+            .db
+            .get_folder_for_actor_by_name_hash(
+                &fauna_core::path_crypto::set_name_hash(FOLDER),
+                &owner,
+            )
+            .await
+            .unwrap()
+        {
+            return row;
+        }
+        self.db
+            .get_folder_for_actor(FOLDER, &owner)
+            .await
+            .unwrap()
+            .expect("the set exists on the nest")
+    }
+}
+
+/// How [`FOLDER`] comes to exist on the nest.
+enum SetCreation {
+    /// The fixture writes the row and [`SET_NONCE`] straight into the DB, and
+    /// no custody exists anywhere — the keyless negative arm's shape.
+    Direct,
+    /// Nothing is pre-created: the restoring seat creates the set through its
+    /// own production door (`FfiFoldersClient::create` → `create_set`), which
+    /// mints the nonce into the account plane's custody — where the seat's
+    /// licence read resolves it from — and stores it on the nest's row. The
+    /// capture engine then signs under the nonce read back off that row.
+    BySeat,
+}
+
+/// The nest's deployment identity — the escrow-receipt signer the account
+/// plane's first custody write (a [`SetCreation::BySeat`] create) deposits
+/// its generation against, as the sibling seed-holding fixtures pin it.
+fn deployment_key() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[0x66; 32])
+}
+
+/// Start a real in-process nest serving the auth + sync + filesync + folder +
+/// version-history + escrow WS-RPC kinds and the chunk-store HTTP byte routes
+/// over a bound `TcpListener`, with the owner registered and — for
+/// [`SetCreation::Direct`] — an owner-only folder pre-created.
 ///
 /// `register_filesync_handlers` is the one this file cannot do without: it serves
 /// `fauna.filesync.snapshot.get`, the sealed-plane read whose custody wiring is
 /// the whole subject.
-async fn start_test_nest() -> Nest {
+async fn start_test_nest(creation: SetCreation) -> Nest {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
 
     // The blob dir must outlive the capture engine — the restore's chunk GETs
@@ -143,20 +190,22 @@ async fn start_test_nest() -> Nest {
 
     let owner = ActorKeypair::from_secret(OWNER_SECRET).actor_id();
     db.create_user(&owner.0, "free", "test").await.unwrap();
-    let folder_id = db.create_folder(FOLDER, &owner.0).await.unwrap();
-    // The set's stored nonce — what a signed record's statement is verified
-    // under (the owner's create helper sends it; this fixture creates the row
-    // directly, so it stores it the way the owner's update would).
-    db.update_folder_for_user(
-        FOLDER,
-        &owner.0,
-        fauna_nest::db::FolderUpdate {
-            set_nonce: Some(&SET_NONCE),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
+    if let SetCreation::Direct = creation {
+        db.create_folder(FOLDER, &owner.0).await.unwrap();
+        // The set's stored nonce — what a signed record's statement is
+        // verified under (the owner's create helper sends it; this arm creates
+        // the row directly, so it stores it the way the owner's update would).
+        db.update_folder_for_user(
+            FOLDER,
+            &owner.0,
+            fauna_nest::db::FolderUpdate {
+                set_nonce: Some(&SET_NONCE),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
     db.register_sync_device(&owner.0, &WRITER_DEVICE_ID, "laptop", None, "write")
         .await
         .unwrap();
@@ -176,16 +225,28 @@ async fn start_test_nest() -> Nest {
             fauna_nest::sync_handlers::register_sync_handlers(&mut b);
             // `fauna.filesync.snapshot.get` — the sealed-plane read.
             fauna_nest::filesync_handlers::register_filesync_handlers(&mut b);
+            // `fauna.files.versions.list` — the licence read: every snapshot
+            // entry restores only under the judged change row of the set that
+            // named it, resolved from the version history before any byte
+            // (`backup-restore.md` § Security Properties → Integrity).
+            fauna_nest::files_handlers::register_files_handlers(&mut b);
             // The capture engine resolves the owner-only content binding via
             // `fauna.folders.list`; without it the binding is indeterminate and
             // the engine fails closed instead of sealing.
             fauna_nest::folder_handlers::register_folders_handlers(&mut b);
+            // The generation-escrow doors and `fauna.nest.info` — what the
+            // seat's account plane needs for its first custody write (the
+            // `SetCreation::BySeat` create mints the generation it seals
+            // under and deposits it here).
+            fauna_nest::generation_escrow_handlers::register_generation_escrow_handlers(&mut b);
+            fauna_nest::discovery_handlers::register_discovery_handlers(&mut b);
             b.build()
         }),
         auth: fauna_nest::state::AuthState {
             token_store,
             ..Default::default()
         },
+        nest_signing_key: Some(deployment_key()),
         ..AppState::for_test(db.clone())
     });
 
@@ -200,7 +261,6 @@ async fn start_test_nest() -> Nest {
         base: format!("http://{addr}"),
         db,
         owner_bearer,
-        folder_id,
         _blob_dir: blob_dir,
     }
 }
@@ -208,12 +268,14 @@ async fn start_test_nest() -> Nest {
 /// The owner's seed-holding capture engine (owner-only `BackupKey`, no MLS),
 /// whose control-plane `NestClient` is genuinely connected — the production
 /// upload path, mirroring `conformance_file_provider_client.rs`. It signs every
-/// record directly with the owner's identity key under the set's
-/// [`SET_NONCE`], as a seed-holding engine does.
+/// record directly with the owner's identity key under the set's nonce
+/// (`set_nonce` — [`SET_NONCE`], or the one the seat's create minted), as a
+/// seed-holding engine does.
 fn owner_capture_engine(
     url: &str,
     bearer: &str,
     watch_path: std::path::PathBuf,
+    set_nonce: [u8; 32],
 ) -> (SyncEngine, Arc<NestClient>) {
     let (engine_client, nest_client) = fauna_nest::test_support::sync_engine_auth_client(
         url,
@@ -246,7 +308,7 @@ fn owner_capture_engine(
         Arc::new(fauna_protocol::sync_writer_sig::ChangeSigner::direct(
             &ActorKeypair::from_secret(OWNER_SECRET),
         )),
-        Some(SET_NONCE),
+        Some(set_nonce),
     );
     (engine, nest_client)
 }
@@ -277,8 +339,18 @@ async fn capture_files_and_snapshot(
         std::fs::write(target, body).unwrap();
     }
 
-    let (engine, nest_client) =
-        owner_capture_engine(&nest.base, &nest.owner_bearer, watch.path().to_path_buf());
+    let set = nest.set_row().await;
+    let set_nonce: [u8; 32] = set
+        .set_nonce
+        .as_deref()
+        .and_then(|n| n.try_into().ok())
+        .expect("the set carries its nonce");
+    let (engine, nest_client) = owner_capture_engine(
+        &nest.base,
+        &nest.owner_bearer,
+        watch.path().to_path_buf(),
+        set_nonce,
+    );
     // Force the WS auth handshake up front: without it the first record can time
     // out inside its own deadline and read identically to a genuine rejection.
     nest_client
@@ -297,7 +369,7 @@ async fn capture_files_and_snapshot(
         );
     }
 
-    let snap = nest.db.create_snapshot(nest.folder_id).await.unwrap();
+    let snap = nest.db.create_snapshot(set.id).await.unwrap();
     assert_eq!(
         snap.file_count,
         files.len() as i64,
@@ -347,6 +419,45 @@ struct RestoringSeat {
 }
 
 impl RestoringSeat {
+    /// Create [`FOLDER`] the way the owner's app does
+    /// (`FfiFoldersClient::create` → `fauna_client_folders::create_set`): the
+    /// set nonce minted into this seat's account-plane custody and stored on
+    /// the nest's row. The restore's licence read judges every entry's row
+    /// under the nonce this custody resolves (`backup-restore.md` § Security
+    /// Properties → Integrity), so the positive arms own their set this way
+    /// rather than through a DB write no custody knows of.
+    ///
+    /// The create's first custody write mints the account's generation and
+    /// deposits it in escrow over the runtime's own data path — the store
+    /// principal's client, whose first connect waits for its grant to be
+    /// registered on a runtime pass (`spawn_connect_retry`; a principal the
+    /// process already holds re-registers against this nest first). The
+    /// runtime reports itself assembled before that path is up, so the
+    /// create is retried, poking a pass each time, within one generous
+    /// deadline a green run pays a tick of — exactly the retry the app's user
+    /// makes on the same early error.
+    async fn create_set(&self) {
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(240);
+        loop {
+            match self.client.folders().create(FOLDER.to_string(), None).await {
+                Ok(_) => return,
+                Err(e) if std::time::Instant::now() < deadline => {
+                    println!(
+                        "create_set: retrying at {:?} after {e:?}",
+                        started.elapsed()
+                    );
+                    self.client.account_pump_now().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                Err(e) => panic!(
+                    "the owner's production create (custody on the plane, the row on the \
+                     nest) must succeed within the deadline: {e:?}"
+                ),
+            }
+        }
+    }
+
     /// Stop the account runtime before the next arm starts its own.
     async fn stop(self) {
         self.client.stop_account_runtime().await;
@@ -369,6 +480,16 @@ impl RestoringSeat {
 /// a temp dir rather than the per-user root, and the credential slot is the
 /// harness's file backend ([`isolate_credentials`]).
 async fn restoring_seat(base: &str) -> RestoringSeat {
+    // What this machine PINNED for its nest is the only escrow holder the
+    // seat's account plane trusts (`fauna_client::trust::trusted_escrow_holders`
+    // — never the nest's own claim about itself). Production pins by TOFU on
+    // the first clean connect; the fixture seeds the same pin through the
+    // test door, so the `SetCreation::BySeat` create's first custody write
+    // verifies the receipt the nest's deployment identity signs.
+    fauna_anon_client::trust::pin_identity_for_test(
+        base,
+        deployment_key().verifying_key().to_bytes(),
+    );
     let state_dir = tempfile::tempdir().unwrap();
     let store_dir = tempfile::tempdir().unwrap();
     let client = fauna_ffi::FfiNestClient::new(base.to_string(), OWNER_SECRET.to_vec())
@@ -421,66 +542,30 @@ async fn restoring_seat(base: &str) -> RestoringSeat {
 }
 
 /// **The positive arm.** A sealed snapshot restored through the real
-/// `FfiSyncEngineHost` puts the real bytes on disk.
+/// `FfiSyncEngineHost` puts the real bytes on disk — every entry licensed by
+/// the owner's signed change row, read from the real nest's version history
+/// and judged under the set nonce the seat's custody resolves
+/// (`backup-restore.md` § Security Properties → Integrity): the seat owns the set through its production create door
+/// ([`SetCreation::BySeat`]), so the composition under test is the app's own.
 ///
 /// The assertion that matters is on the **return value and the filesystem**, not
 /// on a log line: the original bug's whole signature was a *successful-looking*
 /// return, so a test that only checked "no error" would have passed against it.
+///
+/// **The snapshot holds a multi-chunk file too.** The walk fetches, opens and
+/// reassembles every chunk a manifest lists, in order; a small file never
+/// lists more than one, so it cannot catch a reassembly that drops, repeats or
+/// reorders chunks. 20 MiB of incompressible bytes is well past the chunker's
+/// single-chunk threshold — the fixture asserts that itself, so the test
+/// cannot quietly degrade to one chunk. (Until 2026-10-01 this was pinned only
+/// end to end through the legacy daemon's `restore`; until 2026-10-13 it was
+/// an arm of its own, folded in here while a SECOND account-runtime start in
+/// one process never brought the store principal's data path up — its client
+/// signed with a writer key the assembly had already rotated away. That is
+/// fixed and pinned by
+/// [`a_second_account_runtime_in_one_process_brings_its_data_path_up`].)
 #[tokio::test]
 async fn a_sealed_snapshot_restores_its_files_to_disk() {
-    isolate_credentials();
-    let _seat_turn = SEAT.lock().await;
-    let nest = start_test_nest().await;
-    let (snapshot_id, _watch) = capture_and_snapshot(&nest).await;
-
-    let seat = restoring_seat(&nest.base).await;
-    let out = tempfile::tempdir().unwrap();
-    let restored = seat
-        .host
-        .restore_snapshot_to_dir(snapshot_id, out.path().to_string_lossy().into_owned())
-        .await;
-    seat.stop().await;
-    let summary = restored.expect("the full restore must succeed");
-
-    // The signature, stated positively: the count is what the snapshot
-    // holds, never the zero a dropped listing would produce.
-    assert_eq!(
-        summary.files_restored, 2,
-        "both sealed rows must restore; `files_restored: 0` here is exactly the \
-         silent data-loss bug this test exists to prevent (summary: {summary:?})",
-    );
-    assert_eq!(
-        summary.skipped, 0,
-        "no row may be skipped (summary: {summary:?})"
-    );
-    assert_eq!(
-        summary.bytes_written,
-        (TOP_CONTENT.len() + NESTED_CONTENT.len()) as u64,
-        "every captured byte must be written (summary: {summary:?})",
-    );
-
-    // The filesystem is the witness the summary cannot fake.
-    assert_eq!(
-        std::fs::read(out.path().join(TOP_PATH)).expect("top-level file restored"),
-        TOP_CONTENT,
-        "the restored bytes must be byte-identical to what was captured",
-    );
-    assert_eq!(
-        std::fs::read(out.path().join(NESTED_PATH)).expect("nested file restored"),
-        NESTED_CONTENT,
-        "the nested file must restore, parent directory created",
-    );
-}
-
-/// **A multi-chunk file restores byte-identically.** The walk fetches, opens and
-/// reassembles every chunk a manifest lists, in order; a two-small-file
-/// snapshot never lists more than one, so it cannot catch a reassembly that
-/// drops, repeats or reorders chunks. 20 MiB of incompressible bytes is well
-/// past the chunker's single-chunk threshold — the fixture asserts that
-/// itself, so the test cannot quietly degrade to one chunk. (Until 2026-10-01
-/// this was pinned only end to end through the legacy daemon's `restore`.)
-#[tokio::test]
-async fn a_multi_chunk_file_restores_byte_identically() {
     isolate_credentials();
     const LARGE_PATH: &str = "media/large.bin";
     // Deterministic, incompressible (xorshift64*), so compression cannot fold
@@ -501,14 +586,19 @@ async fn a_multi_chunk_file_restores_byte_identically() {
     );
 
     let _seat_turn = SEAT.lock().await;
-    let nest = start_test_nest().await;
+    let nest = start_test_nest(SetCreation::BySeat).await;
+    let seat = restoring_seat(&nest.base).await;
+    seat.create_set().await;
     let (snapshot_id, _watch) = capture_files_and_snapshot(
         &nest,
-        &[(TOP_PATH, TOP_CONTENT), (LARGE_PATH, large.as_slice())],
+        &[
+            (TOP_PATH, TOP_CONTENT),
+            (NESTED_PATH, NESTED_CONTENT),
+            (LARGE_PATH, large.as_slice()),
+        ],
     )
     .await;
 
-    let seat = restoring_seat(&nest.base).await;
     let out = tempfile::tempdir().unwrap();
     let restored = seat
         .host
@@ -516,14 +606,35 @@ async fn a_multi_chunk_file_restores_byte_identically() {
         .await;
     seat.stop().await;
     let summary = restored.expect("the full restore must succeed");
-    assert_eq!(summary.files_restored, 2, "summary: {summary:?}");
-    assert_eq!(summary.skipped, 0, "summary: {summary:?}");
+
+    // The signature, stated positively: the count is what the snapshot
+    // holds, never the zero a dropped listing would produce.
+    assert_eq!(
+        summary.files_restored, 3,
+        "every sealed row must restore; `files_restored: 0` here is exactly the \
+         silent data-loss bug this test exists to prevent (summary: {summary:?})",
+    );
+    assert_eq!(
+        summary.skipped, 0,
+        "no row may be skipped (summary: {summary:?})"
+    );
     assert_eq!(
         summary.bytes_written,
-        (TOP_CONTENT.len() + large.len()) as u64,
-        "summary: {summary:?}"
+        (TOP_CONTENT.len() + NESTED_CONTENT.len() + large.len()) as u64,
+        "every captured byte must be written (summary: {summary:?})",
     );
 
+    // The filesystem is the witness the summary cannot fake.
+    assert_eq!(
+        std::fs::read(out.path().join(TOP_PATH)).expect("top-level file restored"),
+        TOP_CONTENT,
+        "the restored bytes must be byte-identical to what was captured",
+    );
+    assert_eq!(
+        std::fs::read(out.path().join(NESTED_PATH)).expect("nested file restored"),
+        NESTED_CONTENT,
+        "the nested file must restore, parent directory created",
+    );
     let restored = std::fs::read(out.path().join(LARGE_PATH)).expect("large file restored");
     assert_eq!(
         restored.len(),
@@ -534,6 +645,40 @@ async fn a_multi_chunk_file_restores_byte_identically() {
         restored == large,
         "the {chunks}-chunk file must restore byte-identically (first difference at byte {:?})",
         restored.iter().zip(&large).position(|(a, b)| a != b)
+    );
+}
+
+/// **A second seat in one process reaches its own data path.** The seat's
+/// account runtime is one per process, but a process starts it more than once
+/// — an account switch, a nest move — and each start's first custody write
+/// deposits its generation over THAT runtime's store-principal connection.
+/// Two cycles against two nests: the second create must land within the
+/// principal's retry backoff, never stall until the app is relaunched.
+#[tokio::test]
+async fn a_second_account_runtime_in_one_process_brings_its_data_path_up() {
+    isolate_credentials();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+    let _seat_turn = SEAT.lock().await;
+
+    let first = start_test_nest(SetCreation::BySeat).await;
+    let seat = restoring_seat(&first.base).await;
+    seat.create_set().await;
+    seat.stop().await;
+
+    let second = start_test_nest(SetCreation::BySeat).await;
+    let seat = restoring_seat(&second.base).await;
+    let started = std::time::Instant::now();
+    seat.create_set().await;
+    let took = started.elapsed();
+    seat.stop().await;
+    second.set_row().await;
+    assert!(
+        took < std::time::Duration::from_secs(45),
+        "the second runtime's first custody write must land within the store \
+         principal's retry backoff (its 30 s ceiling plus a pass), took {took:?}"
     );
 }
 
@@ -554,7 +699,7 @@ async fn a_multi_chunk_file_restores_byte_identically() {
 #[tokio::test]
 async fn a_custody_less_restore_read_errors_instead_of_silently_restoring_nothing() {
     isolate_credentials();
-    let nest = start_test_nest().await;
+    let nest = start_test_nest(SetCreation::Direct).await;
     let (snapshot_id, _watch) = capture_and_snapshot(&nest).await;
 
     let owner_kp = ActorKeypair::from_secret(OWNER_SECRET);

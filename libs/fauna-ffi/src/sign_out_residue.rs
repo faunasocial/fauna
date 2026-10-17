@@ -27,7 +27,7 @@ use std::sync::Arc;
 use fauna_client_accounts::{CredentialSweep, ResidueRetry, SignOutResidue};
 use fauna_core::localized::LocalizedText;
 
-use crate::account_state::{FfiCredentialSweep, FfiEraseSweep, store_root_for};
+use crate::account_state::{FfiCredentialSweep, FfiEraseSweep, store_root_or_logged};
 use crate::erase_guard::{serving_bases, with_own_lock_down};
 use crate::{FfiAccountInstanceLock, FfiAccountRegistry};
 
@@ -81,7 +81,7 @@ impl FfiSignOutResidue {
             &self.record,
             &registry,
             Path::new(&base_dir),
-            &store_root_for(store_container_dir.map(PathBuf::from)),
+            store_root_or_logged(store_container_dir.map(PathBuf::from)).as_deref(),
             own_lock.as_deref(),
             eraser.as_ref(),
         )
@@ -132,7 +132,7 @@ pub fn sign_out_residue_recheck_at_launch(
         &record,
         &registry,
         &base,
-        &store_root_for(store_container_dir.map(PathBuf::from)),
+        store_root_or_logged(store_container_dir.map(PathBuf::from)).as_deref(),
         own_lock.as_deref(),
         eraser.as_ref(),
     )
@@ -144,7 +144,7 @@ fn run_retry(
     record: &SignOutResidue,
     registry: &FfiAccountRegistry,
     base: &Path,
-    store_root: &Path,
+    store_root: Option<&Path>,
     own_lock: Option<&FfiAccountInstanceLock>,
     eraser: &dyn FfiResidueCredentialEraser,
 ) -> Option<Arc<FfiSignOutResidue>> {

@@ -274,6 +274,21 @@ internal static class DocumentRenderer
             ? uniffi.fauna_ffi.FaunaFfiMethods.RenderDocumentProxiedVideos(doc).FirstOrDefault()?.path
             : null;
 
+    /// <summary>The block the <c>video-thumbnail</c> slot plays — a blob <c>Video</c> by
+    /// <see cref="MediaVideoHash"/>, else a bridged <c>ProxiedVideo</c> by
+    /// <see cref="MediaProxiedVideoPath"/> (the slot's own precedence), else <c>null</c>. A
+    /// tap hands it to the shared <c>FeedManager::playback_source</c>
+    /// (<see cref="VideoPlaybackResolver"/>), which mints a <c>ProxiedVideo</c>'s playback
+    /// ticket itself (render-model.md § D6c → <i>Inline playback</i>, answer 4) — so the
+    /// list card and the detail dialog bind this, never a hash or a path they would have to
+    /// turn into a URL. Rebuilt from the slot's key alone: <c>alt</c> is a caption, which
+    /// the decision never reads, so it stays empty.</summary>
+    internal static RenderBlock? MediaVideoBlock(RenderDocument doc)
+    {
+        if (MediaVideoHash(doc) is { } hash) return new RenderBlock.Video(hash, "");
+        return MediaProxiedVideoPath(doc) is { } path ? new RenderBlock.ProxiedVideo(path, "") : null;
+    }
+
     /// <summary>Every <c>Resolved</c> folded <c>LinkPreview</c>, in body order (render-model.md
     /// § D4). The producer's bare-URL rule emits one (<c>state: Resolving</c>) after **each**
     /// standalone paragraph that is a single bare URL, <b>leaving the inline link in place</b>,

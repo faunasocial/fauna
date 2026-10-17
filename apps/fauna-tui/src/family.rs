@@ -74,7 +74,7 @@ use fauna_client_family::family::{
     FamilyApprovalEntry, FamilyContactRequestInfo, FamilyContentNotice, FamilyFeedRequestInfo,
     FamilyIncomingTransferInfo, FamilyWardInfo, ReachPolicy,
 };
-use fauna_client_family::row_text::{own_age_band_text, ward_age_band_text};
+use fauna_client_family::row_text::{approval_item_text, own_age_band_text, ward_age_band_text};
 use fauna_core::data::{FeedSources, UnknownPeerDm, UnknownSenderMail};
 use fauna_core::obligation::{ContentFloor, ContentPolicy, GUARDIAN_FLOOR_CATEGORIES};
 use fauna_i18n::strings::family as t;
@@ -597,12 +597,12 @@ impl Action {
     /// so a new variant cannot skip the question.
     ///
     /// The page splits cleanly, and the split is the guardian/ward asymmetry
-    /// rather than anything about this screen: **editing** a ward's reach
-    /// policy is writing the guardian's own document
-    /// (`fauna.family.policy.update`, `OfflineSafe`) and pre-approving a
-    /// contact or deciding a queued ask are replayable intents
-    /// (`OfflineQueued`), so the editor stays live with no nest — while every
-    /// gesture that **re-points guardianship** is `OnlineOnly`, because the
+    /// rather than anything about this screen: **saving** a ward's policy
+    /// (`fauna.family.policy.update`) is `OnlineOnly` — a policy the nest
+    /// enforces is written online — as is the guardian feature editor's Save
+    /// and Remove; pre-approving a contact or deciding a queued ask are
+    /// replayable intents (`OfflineQueued`), and buffer edits issue no kind.
+    /// Every gesture that **re-points guardianship** is also `OnlineOnly`, because the
     /// nest arbitrates who a ward answers to and a second device must not be
     /// able to compose a conflicting answer offline (`family-safety.md`
     /// § Graduation & transfer).
@@ -640,10 +640,8 @@ impl Action {
             // The guardian tier mints no kind: a feature limit rides the same
             // policy write as the reach knobs (`family-safety.md` § Wire &
             // data shape), so these declare the kind they actually issue. It
-            // is `OfflineSafe`, which leaves the two buttons live with no nest
-            // — unlike the admin and self hosts, whose kinds are `OnlineOnly`;
-            // a save with no nest then fails at its fresh status read and
-            // lands on `error-message`, writing nothing.
+            // is `OnlineOnly`, so the two buttons desensitize with no nest —
+            // at all three hosts alike.
             Action::SaveFeatureLimit | Action::RemoveFeatureLimit => {
                 Some("fauna.family.policy.update")
             }
@@ -2182,14 +2180,19 @@ fn approvals_elements(st: &FamilyState, out: &mut Vec<Element>) {
         return;
     }
     for (i, entry) in st.approvals.iter().enumerate() {
-        // Which field(s) each kind shows — `peer_address` for a hold, the
-        // grant's key for a `feed_source` — is the shared rule
-        // (`fauna_core::format::approval_display_text`, reached through
-        // `FamilyApprovalEntry::display_text`); a truthfully-empty null-path
-        // sender falls back to the localized no-sender label rather than
-        // rendering blank beside live Approve/Deny buttons.
-        let text = entry.display_text();
-        let text = text.as_deref().unwrap_or(t::APPROVAL_NO_SENDER);
+        // Which field(s) each kind shows — `peer_address` and the arrival
+        // time for a hold, the grant's key for a `feed_source` — is the shared
+        // rule (`fauna_client_family::row_text::approval_item_text` over
+        // `fauna_core::format::approval_display_text` /
+        // `approval_timestamp_display`); a truthfully-empty null-path sender
+        // falls back to the localized no-sender label rather than rendering
+        // blank beside live Approve/Deny buttons.
+        let text = approval_item_text(
+            entry,
+            fauna_core::data::Timestamp::now_millis_or_zero() as i64,
+            crate::settings::logs::local_offset_secs(),
+            fauna_core::format::format_unix_local_date_ms,
+        );
         out.push(Element::label(ids::FAMILY_APPROVAL_ITEM, text));
         out.push(
             Element::gesture_button(
@@ -2468,6 +2471,7 @@ mod tests {
                 wards: vec![ward],
                 capabilities: Some(vec![
                     capability::SUBSCRIPTIONS.to_string(),
+                    capability::ZAPS.to_string(),
                     capability::P2P_SHARE.to_string(),
                 ]),
                 ..Default::default()
@@ -2571,6 +2575,49 @@ mod tests {
                 summary,
                 fauna_i18n::strings::lookup("features.authored_unreadable").unwrap()
             );
+        }
+    }
+
+    /// A policy the nest enforces is written online: with no nest the reach
+    /// form's save and the guardian editor's Save / Remove desensitize with the
+    /// standard reason; Cancel stays live; online they are all live again.
+    #[test]
+    fn the_policy_writes_are_desensitized_offline_and_live_online() {
+        use fauna_core::feature_gate::FeaturePolicy;
+        use fauna_ws_substrate::supervisor::ConnectionState;
+        let mut app = limits_app(limited_ward(Some(
+            [("zaps".to_string(), FeaturePolicy::DENIED)]
+                .into_iter()
+                .collect(),
+        )));
+        apply_local(&mut app, Action::OpenFeatureLimitEditor("zaps".into()));
+        assert!(app.family.feature_editor.is_some());
+        let pick = |app: &App, id: &str| {
+            app.page_elements()
+                .into_iter()
+                .find(|el| el.id == id)
+                .unwrap_or_else(|| panic!("{id} paints"))
+        };
+        app.connection = ConnectionState::Disconnected;
+        for id in [
+            ids::FAMILY_POLICY_SAVE_BUTTON,
+            ids::FEATURE_POLICY_EDITOR_SAVE_BUTTON,
+            ids::FEATURE_POLICY_EDITOR_REMOVE_BUTTON,
+        ] {
+            let el = pick(&app, id);
+            assert!(!el.enabled, "{id} needs a nest");
+            assert!(el.label.is_some(), "{id} says why");
+        }
+        assert!(
+            pick(&app, ids::FEATURE_POLICY_EDITOR_CANCEL_BUTTON).enabled,
+            "closing the editor needs no nest"
+        );
+        app.connection = ConnectionState::Connected;
+        for id in [
+            ids::FAMILY_POLICY_SAVE_BUTTON,
+            ids::FEATURE_POLICY_EDITOR_SAVE_BUTTON,
+        ] {
+            assert!(pick(&app, id).enabled, "{id} is live online");
         }
     }
 
@@ -3210,8 +3257,8 @@ mod tests {
         assert!(readout.contains("Adult content: 1 flagged today"));
     }
 
-    /// A `mail_hold` row renders its `peer_address` (its `summary` is always
-    /// empty — a subject line is content), and deciding it passes the entry's own
+    /// A `mail_hold` row renders its `peer_address` and arrival time (its
+    /// `summary` is always empty — a subject line is content), and deciding it passes the entry's own
     /// key through: the message id, never the sender address, so approving one
     /// held message never sweeps every message from that sender.
     #[test]
@@ -3234,6 +3281,10 @@ mod tests {
                         kind: "mail_hold".into(),
                         peer_address: "stranger@example.com".into(),
                         message_id: ByteBuf::from(vec![9u8; 32]),
+                        // Held just now: the row shows today's clock beside the
+                        // sender (envelope metadata only — sender + time).
+                        created_at: (fauna_core::data::Timestamp::now_millis_or_zero() / 1_000)
+                            as i64,
                         ..Default::default()
                     },
                     // A truthfully-empty null-path sender (`MAIL FROM:<>`).
@@ -3275,7 +3326,14 @@ mod tests {
             .map(|e| e.text)
             .collect();
         assert_eq!(texts[0], "hi from bob");
-        assert_eq!(texts[1], "stranger@example.com");
+        let (sender, time) = texts[1]
+            .split_once(" · ")
+            .expect("a held mail's row shows its time");
+        assert_eq!(sender, "stranger@example.com");
+        assert!(
+            time.len() == 5 && time.as_bytes()[2] == b':' || time == "Yesterday",
+            "a clock (or, across midnight, yesterday): {time:?}"
+        );
         assert_eq!(texts[2], t::APPROVAL_NO_SENDER, "never a blank row");
 
         let op = apply_local(
@@ -3310,6 +3368,68 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    /// A feed-source card carries the grant's whole target (up to the nest's
+    /// 2048-character cap, `family-safety.md` § Feed-source approvals), so on a
+    /// narrow terminal the page must wrap it rather than clip it at the pane
+    /// edge — and the Approve button below it must still hit-test to its own row.
+    #[test]
+    fn a_long_feed_source_card_paints_wrapped_not_clipped() {
+        let target = format!("{}TAILMARK", "a".repeat(530));
+        let mut app = family_app();
+        load(
+            &mut app,
+            FamilyView {
+                wards: vec![ward(2, "kid", ReachPolicy::default())],
+                approvals: vec![FamilyApprovalEntry {
+                    supervised_actor_id: ByteBuf::from(vec![2u8; 32]),
+                    kind: "feed_source".into(),
+                    bridge_id: "bluesky".into(),
+                    operation: "follow".into(),
+                    target: target.clone(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+
+        let (width, height) = (60u16, 160u16);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        let mut hits = None;
+        terminal
+            .draw(|frame| hits = Some(crate::ui::render(frame, &app).hits))
+            .unwrap();
+        let hits = hits.unwrap();
+        let buffer = terminal.backend().buffer();
+        // The page pane is the last bordered segment of each row (the sidebar
+        // paints its own right border just left of it).
+        let page_rows: Vec<String> = (0..height)
+            .map(|row| {
+                let line: String = (0..width).map(|col| buffer[(col, row)].symbol()).collect();
+                let segments: Vec<&str> = line.split('│').collect();
+                segments[segments.len().saturating_sub(2)]
+                    .trim()
+                    .to_string()
+            })
+            .collect();
+
+        let painted: String = page_rows.concat().replace(' ', "");
+        assert!(
+            painted.contains(&target),
+            "the whole target must reach the screen, wrapped: {page_rows:?}"
+        );
+
+        let approve_row = page_rows
+            .iter()
+            .position(|r| r.contains("Approve"))
+            .expect("the Approve button paints") as u16;
+        let hit = crate::ui::hit_test(&hits, width - 3, approve_row);
+        let Some(crate::ui::HitTarget::Page(index)) = hit else {
+            panic!("the Approve row must hit-test to a page element, got {hit:?}");
+        };
+        assert_eq!(elements(&app)[index].id, "family-approval-approve-button");
     }
 
     /// The v1.x kinds the queue gained with the three follow-on flows render
@@ -4153,23 +4273,22 @@ mod tests {
                 "fauna.family.transfer.decline",
                 OfflineClass::OnlineOnly,
             ),
-            // The editor half — a guardian may compose a ward's policy, add a
-            // contact and decide the queue with no nest in reach.
+            // A policy the nest enforces is written online.
             (
                 Action::SavePolicy,
                 "fauna.family.policy.update",
-                OfflineClass::OfflineSafe,
+                OfflineClass::OnlineOnly,
             ),
             // A guardian-tier feature limit rides the same policy write.
             (
                 Action::SaveFeatureLimit,
                 "fauna.family.policy.update",
-                OfflineClass::OfflineSafe,
+                OfflineClass::OnlineOnly,
             ),
             (
                 Action::RemoveFeatureLimit,
                 "fauna.family.policy.update",
-                OfflineClass::OfflineSafe,
+                OfflineClass::OnlineOnly,
             ),
             (
                 Action::DeviceMark {

@@ -15,6 +15,12 @@
 //! idempotent: nothing here ever moves a domain back, and a lapsed certificate
 //! lowers only what is *published* (`MtaStsMode::coupled_to_cert`), never the
 //! stored mode.
+//!
+//! The two conditions are two public functions — [`mail_name_trusted`] and
+//! [`advance_clock_half`] — so the one clock seam, the `test-hooks`-only
+//! `mta_sts_advance_test_hook`, runs the production clock half at a shifted
+//! clock without a second implementation. It skips (a): a harness nest never
+//! serves a trusted mail certificate, and the hook forges no trust.
 
 use std::sync::Arc;
 
@@ -25,19 +31,35 @@ pub async fn advance_mta_sts_modes(state: &Arc<AppState>) -> Vec<String> {
     advance_mta_sts_modes_at(state, crate::db::now_epoch_millis()).await
 }
 
-/// [`advance_mta_sts_modes`] with the clock as a parameter. The nest has no
-/// clock seam and gets none for this: tests pass `now_ms`, production passes
-/// the wall clock.
+/// [`advance_mta_sts_modes`] with the clock as a parameter: the trust half
+/// ([`mail_name_trusted`]), then the clock half ([`advance_clock_half`]).
+/// Tests pass `now_ms`, production passes the wall clock.
+///
+/// The one clock seam is the `test-hooks`-only
+/// `mta_sts_advance_test_hook`, which calls [`advance_clock_half`] alone at a
+/// shifted clock — it skips the trust half because a harness nest never serves
+/// a trusted mail certificate (`mail-multidomain.md` § The advance → *No clock
+/// knob — and one compile-gated clock seam*). Nothing on the release image moves
+/// the clock.
 pub async fn advance_mta_sts_modes_at(state: &Arc<AppState>, now_ms: i64) -> Vec<String> {
-    // (a) — every local domain MXes to the one `mail.<primary>` host, so the
-    // whole deployment shares one trust reading. No primary, no resolver, the
-    // floor, or a non-covering certificate all read as untrusted.
+    if !mail_name_trusted(state, now_ms).await {
+        return Vec::new();
+    }
+    advance_clock_half(state, now_ms).await
+}
+
+/// Condition (a): the listener serves a CA-issued, covering certificate for
+/// `mail.<primary>` at `now_ms`. Every local domain MXes to the one
+/// `mail.<primary>` host, so the whole deployment shares one trust reading. No
+/// primary, no resolver, the floor, or a non-covering certificate all read as
+/// untrusted.
+pub async fn mail_name_trusted(state: &Arc<AppState>, now_ms: i64) -> bool {
     let primary = match state.db.lookup_primary_mail_domain().await {
         Ok(Some(p)) => p,
-        Ok(None) => return Vec::new(),
+        Ok(None) => return false,
         Err(e) => {
             tracing::warn!("mta-sts advance: primary lookup failed: {e:#}");
-            return Vec::new();
+            return false;
         }
     };
     let mx_host = format!("mail.{}", primary.domain_name);
@@ -45,14 +67,17 @@ pub async fn advance_mta_sts_modes_at(state: &Arc<AppState>, now_ms: i64) -> Vec
         .served_cert_spki
         .as_ref()
         .and_then(|r| r.served_cert_facts(&mx_host));
-    if matches!(
+    !matches!(
         crate::acme::cert_health_state(mx_facts, now_ms / 1000),
         fauna_protocol::tls::CertHealthState::OnFloorRenewNeeded
-    ) {
-        return Vec::new();
-    }
+    )
+}
 
-    // (b) — the clock half, one idempotent statement.
+/// Condition (b), the clock half: one idempotent statement moving every
+/// `testing` domain whose window has run out at `now_ms` to `enforce`, then the
+/// bridges' config push when anything moved. Returns the names moved. Callers
+/// own the trust gate — production through [`advance_mta_sts_modes_at`].
+pub async fn advance_clock_half(state: &Arc<AppState>, now_ms: i64) -> Vec<String> {
     let advanced = match state.db.advance_mta_sts_testing_to_enforce_at(now_ms).await {
         Ok(names) => names,
         Err(e) => {
@@ -63,7 +88,7 @@ pub async fn advance_mta_sts_modes_at(state: &Arc<AppState>, now_ms: i64) -> Vec
     if !advanced.is_empty() {
         tracing::info!(
             domains = ?advanced,
-            "MTA-STS: testing window over on a trusted mail name — stored mode advanced to enforce"
+            "MTA-STS: testing window over — stored mode advanced to enforce"
         );
         crate::bridge_routing_handlers::notify_bridges_config_changed(
             state,
@@ -169,6 +194,21 @@ mod tests {
         );
         assert_eq!(stored_mode(&state).await, "enforce");
         assert!(advance_mta_sts_modes_at(&state, due).await.is_empty());
+    }
+
+    /// The clock half alone (the test hook's path) advances past the window
+    /// with no served certificate at all, and not before it.
+    #[tokio::test]
+    async fn the_clock_half_alone_ignores_trust() {
+        let (state, added_at) = nest(None).await;
+        let early = added_at + MTA_STS_TESTING_WINDOW_MS - 1;
+        assert!(advance_clock_half(&state, early).await.is_empty());
+        assert!(!mail_name_trusted(&state, early).await);
+        assert_eq!(
+            advance_clock_half(&state, added_at + MTA_STS_TESTING_WINDOW_MS).await,
+            vec!["example.com".to_string()]
+        );
+        assert_eq!(stored_mode(&state).await, "enforce");
     }
 
     /// The boot pass: a nest that was down while the window ran out advances on

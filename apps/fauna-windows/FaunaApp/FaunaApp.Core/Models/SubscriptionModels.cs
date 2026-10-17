@@ -56,9 +56,10 @@ public sealed record SubscriptionSubscriberRow(
 /// One of the consumer's own active subscriptions, projected for the
 /// <c>subscription-settings</c> page (<c>subscription-mine-list</c> rows).
 /// Mirrors apple <c>FfiMineSubscription</c> consumption and linux
-/// <c>build_mine_row</c>. <see cref="AuthorDisplay"/> is the author's handle when
-/// present, else lowercase-hex of the 32-byte actor id (publish-path-gated rich
-/// identity). <see cref="Status"/> is the RAW wire string ("active"/"pending") —
+/// <c>build_mine_row</c>. <see cref="AuthorDisplay"/> is the shared overlay face's
+/// <c>subscription_author_label</c>: the viewer's nickname for the creator, else the
+/// handle the nest resolved, else the lowercase-hex of the 32-byte actor id.
+/// <see cref="Status"/> is the RAW wire string ("active"/"pending") —
 /// never translated or capitalised; a tier_3 e2e asserts the literal text.
 /// </summary>
 public sealed record SubscriptionMineRow(

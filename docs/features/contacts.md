@@ -49,11 +49,11 @@ Stamped 2026-09-19 at 8ac16765e4.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+4bc2efab standalone |
-| linux | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| windows | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| macos | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
-| ios | ⚠ partial | 0.1.2-dev+a1f84cc6 standalone |
+| web | ✅ full | 0.1.2-dev+4bc2efab standalone |
+| linux | ✅ full | 0.1.4-dev+52904896 standalone |
+| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |
 
@@ -66,7 +66,7 @@ Stamped 2026-09-19 at 8ac16765e4.
 | 2 | app | `tests/e2e-unified/tests/test_contacts.py::test_contact_find_error_on_bad_lookup` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_contacts_knock_send_web.py::test_web_add_contact_sends_knock_to_recipient` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): failed |
 | 4 | app | `tests/e2e-unified/tests/test_knock_live_refresh.py::test_knock_push_live_refreshes_mounted_contacts_page` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_contacts_cross_nest_knock.py::test_cross_nest_knock_reaches_the_peers_own_queue` | web (linux): skipped, linux (linux): skipped, windows (windows): failed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_contacts_cross_nest_knock.py::test_cross_nest_knock_reaches_the_peers_own_queue` | web (linux): passed, linux (linux): passed, windows (windows): failed, tui (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/api/test_contacts_api.py::test_contacts_accept_knock` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/api/test_contacts_api.py::test_contacts_list_empty` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/api/test_contacts_api.py::test_inbox_mode_api` | nest (linux): passed |
@@ -74,5 +74,5 @@ Stamped 2026-09-19 at 8ac16765e4.
 | 8 | app | `tests/e2e-unified/tests/test_contacts_edge_actions.py::test_confirming_an_accepted_contact_promotes_it_and_confirm_shows_only_where_it_applies` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_contacts_edge_actions.py::test_each_contact_row_says_where_the_relationship_stands` | web (linux): passed, linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 10 | nest | `tests/e2e-unified/tests/api/test_contacts_api.py::test_delivered_message_confirms_an_accepted_contact_with_no_confirm_call` | nest (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_contact_overlay.py::test_a_nickname_notes_and_label_paint_on_the_roster_and_profile_and_survive_a_relaunch` | linux (linux): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
+| 11 | app | `tests/e2e-unified/tests/test_contact_overlay.py::test_a_nickname_notes_and_label_paint_on_the_roster_and_profile_and_survive_a_relaunch` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed, tui (windows): passed |
 <!-- features-render:end -->

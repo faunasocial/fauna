@@ -90,6 +90,7 @@ pub fn start_conversations_session(
     self_address: String,
     tx: &UnboundedSender<UiMessage>,
     mls_predecessors: Vec<fauna_client_mls_sync::BackupKey>,
+    mls_predecessor_actors: Vec<fauna_core::identity::ActorId>,
     attested_predecessors: Vec<[u8; 32]>,
     runtime: crate::settings::AccountRuntimeSlot,
 ) {
@@ -127,6 +128,7 @@ pub fn start_conversations_session(
         lease_device_hex,
         tx,
         mls_predecessors,
+        mls_predecessor_actors,
         attested_predecessors,
         runtime,
     );
@@ -148,6 +150,7 @@ fn start_with_db(
     lease_device_hex: Option<String>,
     tx: &UnboundedSender<UiMessage>,
     mls_predecessors: Vec<fauna_client_mls_sync::BackupKey>,
+    mls_predecessor_actors: Vec<fauna_core::identity::ActorId>,
     attested_predecessors: Vec<[u8; 32]>,
     runtime: crate::settings::AccountRuntimeSlot,
 ) {
@@ -203,6 +206,25 @@ fn start_with_db(
             tracing::info!(
                 "conv-backend: this account's conversations are served in another \
                  instance — refusing the engine role honestly"
+            );
+            return;
+        }
+        // This build is too old for the MLS state a newer build saved here: the
+        // store refused at open without a single write, so the conversations
+        // are intact and an update restores them (`version-compatibility.md`
+        // § Dimension 1, the `mls.db` row). A standing refusal like the one
+        // above — top precedence in `sync_page_error`, never a silent offline
+        // page; everything non-conversations proceeds normally.
+        Err(fauna_mls::error::MlsError::SchemaIncompatible {
+            db_v,
+            db_min,
+            bin_v,
+        }) => {
+            state.state_needs_newer_app = true;
+            tracing::warn!(
+                "conv-backend: this account's MLS state needs a newer build \
+                 (schema_version={db_v}, min_reader_version={db_min}, this \
+                 build={bin_v}) — conversations refused, the state is untouched"
             );
             return;
         }
@@ -391,6 +413,11 @@ fn start_with_db(
     // every folder welcome is retained un-acked (the pre-gate safe default),
     // so a *contact's* share would wrongly knock.
     session.register_folder_gate(Arc::new(NestFolderGate::new(Arc::clone(&nest))));
+    // The recipient picker's contacts (`conversations.md` § Where logic lives →
+    // *Recipient suggestions*) — the one shared roster source.
+    session.register_contact_roster(Arc::new(
+        fauna_client_conversations::NestContactRoster::new(Arc::clone(&nest)),
+    ));
 
     // Member content-key custody ingest (Phase 0 — the read leg; `folders.md`
     // § Sharing): on join and on each rotation-commit receipt, the session
@@ -502,6 +529,10 @@ fn start_with_db(
         post_restore,
         fauna_client_mls_sync::SuccessionReseal {
             predecessors: mls_predecessors,
+            // The same walk's actor half: the restore door parks the retired
+            // leaf it finds at this identity's `provider` path under the
+            // predecessor these name (`MlsStateSync::with_predecessor_actors`).
+            predecessor_actors: mls_predecessor_actors,
             // The re-seal reports from inside the replica's own load, the one
             // place the work provably happens — see
             // `MlsStateSync::with_reseal_sink`.
@@ -860,6 +891,7 @@ mod tests {
             &tx,
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             Default::default(),
         );
         assert!(is_e2e_real_active(&state), "the first login must wire up");
@@ -878,6 +910,7 @@ mod tests {
             &tx,
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             Default::default(),
         );
 
@@ -889,6 +922,69 @@ mod tests {
         assert!(
             is_e2e_real_active(&state),
             "the re-login must leave the page real-wired, not dark"
+        );
+    }
+
+    /// **The too-old-for-its-own-state pin.** An `mls_state.db` a newer build
+    /// wrote with a breaking change (both stamp numbers above this binary's —
+    /// raising only the reader floor is the `UpgradeOrCurrent` verdict, which
+    /// reconciles and restamps) must latch the standing "update the app, your
+    /// conversations are intact" refusal and leave the file byte-for-byte
+    /// untouched (`version-compatibility.md` § Dimension 1, the `mls.db` row).
+    ///
+    /// Reds without the `SchemaIncompatible` arm in [`start_with_db`]: the
+    /// error falls into the generic init-failure arm, which only logs — the
+    /// page goes offline with nothing on `error-message`.
+    #[tokio::test]
+    async fn a_newer_builds_mls_state_latches_the_update_refusal_and_is_not_written() {
+        let (mut state, tx, _rx) = a_state();
+        let db_path = a_db_path("newer-state");
+
+        // A real store, as an earlier launch leaves it; dropping the engine
+        // releases its role lock before the forge.
+        drop(
+            MlsEngine::new(ActorKeypair::from_secret([7u8; 32]), &db_path).expect("seed the store"),
+        );
+        let future = i64::from(fauna_mls::version::CURRENT_SCHEMA_VERSION) + 1;
+        rusqlite::Connection::open(&db_path)
+            .expect("open the seeded store")
+            .execute(
+                "UPDATE schema_meta SET schema_version = ?1, min_reader_version = ?1 \
+                 WHERE id = 1",
+                [future],
+            )
+            .expect("forge a newer build's stamp");
+        let before = std::fs::read(&db_path).expect("read the forged store");
+
+        start_with_db(
+            &mut state,
+            an_offline_nest(),
+            SECRET,
+            Arc::new(fauna_client_config::test_helpers::FakeMailStore::empty()),
+            "alice@nest.test".into(),
+            &db_path,
+            None,
+            &tx,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Default::default(),
+        );
+
+        assert!(
+            state.state_needs_newer_app,
+            "a newer build's MLS state must latch the update refusal, not fall \
+             into the generic init failure that only logs"
+        );
+        assert!(!state.served_elsewhere, "this is not the role-lock refusal");
+        assert!(
+            !is_e2e_real_active(&state),
+            "no engine opened, so no session may be wired"
+        );
+        assert_eq!(
+            std::fs::read(&db_path).expect("re-read the store"),
+            before,
+            "the refusal must not write a byte of the newer build's state"
         );
     }
 
@@ -908,6 +1004,7 @@ mod tests {
             &a_db_path("wires"),
             None,
             &tx,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Default::default(),
@@ -936,6 +1033,7 @@ mod tests {
             &a_db_path("malformed"),
             None,
             &tx,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Default::default(),

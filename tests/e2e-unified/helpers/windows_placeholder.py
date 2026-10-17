@@ -1,7 +1,7 @@
 """Observe + drive a Windows cfapi placeholder from OUTSIDE the provider process.
 
 Why this exists at all: **cfapi fires no callback for I/O originating in the
-provider's own process** (``docs/goal/behavior/file-sync.md`` § *A placeholder is
+provider's own process** (``docs/goal/behavior/on-demand-files.md`` § *A placeholder is
 present-but-unreadable*), and the sync host (``fauna-sync-agent.exe``) *is* the
 provider. So a placeholder can only be hydrated by some *other* process, and a
 hydration test that reads the file in-process is testing nothing. The pytest
@@ -20,7 +20,7 @@ process reads it"; only one leaves nothing behind. (Neither uses FlaUI
 
 **The ground truth is the OS, not the UI.** A cloud-only placeholder carries
 ``FILE_ATTRIBUTE_OFFLINE`` / ``FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS``; *"a
-hydrated file no longer carries [them]"* (``file-sync.md`` § *A placeholder is
+hydrated file no longer carries [them]"* (``on-demand-files.md`` § *A placeholder is
 present-but-unreadable*). That is what these helpers assert on — an OS file
 attribute a third process can read — never a byte count (a placeholder's
 ``metadata.len()`` is already the file's *real* size, so size proves nothing)

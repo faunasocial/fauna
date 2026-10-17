@@ -26,12 +26,14 @@ namespace FaunaApp.Services;
 /// § Downgrade mirror + abandoned-append recovery), and windows neither reads
 /// nor writes them.</para>
 ///
-/// <para><b>Backend selection.</b> <c>FAUNA_E2E_CREDENTIAL_DIR</c> selects the
-/// file backend (E2E); otherwise Credential Manager, through the shared Rust arm
-/// (<see cref="CredManSecretBackend"/>). This is what lets a test
-/// pre-seed a whole multi-account registry before launch with no app code — and
-/// keeps the suite out of the dev machine's real Credential Manager. Mirrors
-/// linux's <c>cred_file_dir()</c>.</para>
+/// <para><b>Backend selection is the shared crate's</b>, not this class's:
+/// <see cref="SharedSecretBackend"/> hands every read and write to
+/// <c>fauna_credential_store::CredentialStore</c>, which resolves Credential
+/// Manager, or the harness's file when <c>FAUNA_E2E_CREDENTIAL_DIR</c> is set in a
+/// test-capable build — the same <c>cred_file_dir()</c> linux, tui and the sync
+/// agent resolve through. That is what lets a test pre-seed a whole
+/// multi-account registry before launch with no app code, and keeps the suite
+/// out of the dev machine's real Credential Manager.</para>
 /// </summary>
 internal static class CredentialStore
 {
@@ -74,24 +76,31 @@ internal static class CredentialStore
         var harnessNamespace = E2eEnv.KeyringApp;
         var ns = string.IsNullOrEmpty(harnessNamespace) ? DefaultNamespace : harnessNamespace;
 
-        // Via E2eEnv so the read is compiled out of release builds (convention 15).
-        // Ungated, this let whoever controlled the launch environment relocate the
-        // whole credential store — where the identity secret is read AND written —
-        // out of Credential Manager and into a directory of their choosing.
-        var dir = E2eEnv.CredentialDir;
-        if (!string.IsNullOrEmpty(dir))
-        {
-            return new LogicalSecretStore(new FileSecretBackend(dir, ns));
-        }
-
-        return new LogicalSecretStore(new CredManSecretBackend(ns));
+        // The harness's credential-dir redirect is read by the shared crate, gated
+        // there (`cred_file_dir`, compiled out of a release build — convention 15):
+        // ungated, it would let whoever controlled the launch environment relocate
+        // the whole credential store, where the identity secret is read AND
+        // written, out of Credential Manager and into a directory of their choosing.
+        return new LogicalSecretStore(new SharedSecretBackend(ns));
     }
 
     /// <summary>
-    /// A registry view over the one store. Cheap (a stateless view), and
-    /// <c>IDisposable</c> — <c>using</c> it at each call site, exactly as linux
-    /// constructs <c>AccountRegistry::new(store)</c> per use.
+    /// A registry view over the one store, its mutations serialized under the
+    /// install-scoped cross-process lock (<c>long-term-store.md</c> § Multi-account
+    /// evolution → <i>Cross-process mutation lock</i>): two instances on one OS
+    /// login each rewrite the one <c>fauna/index</c> blob, and without the lock one
+    /// rewrite can swallow the other's. The lock lives in
+    /// <see cref="AccountStateDir.Base"/>, the install-scoped base the instance lock
+    /// already uses. Cheap (a stateless view), and <c>IDisposable</c> —
+    /// <c>using</c> it at each call site, exactly as linux constructs its registry
+    /// per use.
+    ///
+    /// <para><b>The app's ONLY registry builder.</b> A registry built anywhere else
+    /// carries no lock, and nothing observable fails — the write lands while
+    /// skipping the lock every other writer takes. <c>RegistryConstructionCensusTests</c>
+    /// fails the build if a second one appears.</para>
     /// </summary>
-    internal static FfiAccountRegistry Registry() => new FfiAccountRegistry(Logical);
+    internal static FfiAccountRegistry Registry() =>
+        FfiAccountRegistry.NewWithLockDir(Logical, AccountStateDir.Base);
 
 }

@@ -11,7 +11,7 @@
 //! This is why the host uses `CapabilityBearer`, not `fauna_nest_http::StaticBearer`:
 //! `StaticBearer` ("tests only") snapshots a single token and never sees a refresh,
 //! so it would silently strand hydration the moment the provisioned bearer expired.
-//! See `docs/goal/behavior/file-sync.md` § On-Demand Files.
+//! See `docs/goal/behavior/on-demand-files.md` § On-Demand Files.
 
 use std::ops::Deref;
 use std::sync::{Arc, Mutex as StdMutex};

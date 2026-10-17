@@ -85,36 +85,6 @@ def dedicated_node_url(app, handle, request):
     return handle.nest["url"]
 
 
-def require_caldav_mailbox_mint_supported(driver) -> None:
-    """Skip unless this app has the ``enable_caldav_mailbox`` test-agent command
-    ``mint_caldav_mailbox`` drives (e2e convention 7 — the platform check lives
-    outside the test body).
-
-    linux/macos/tui have it — proven by `test_mail_settings_caldav_only.py`,
-    which already mints on all three via this exact command; windows joined
-    row 168 (`TestAgent.cs`'s `enable_caldav_mailbox` case), proven by this
-    module's own `test_mailbox_less_attendee_materializes_invite_on_events_page`;
-    web joined in its catalog trickle-down pass (`$lib/mail-caldav-e2e`).
-    ios/android are the remaining cross-app follow-on."""
-    if not (
-        driver.is_linux()
-        or driver.is_macos()
-        or driver.is_tui()
-        or driver.is_windows()
-        or driver.is_web()
-    ):
-        from helpers.app_surface import skip_unbuilt
-
-        skip_unbuilt(
-            driver,
-            surface="the enable_caldav_mailbox test-agent command",
-            detail="linux/macos/tui have it (test_mail_settings_caldav_only.py "
-            "already mints on all three), windows joined row 168 and web "
-            "followed; ios/android are the remaining cross-app follow-on",
-            tracked="mail-settings.md",
-        )
-
-
 def mint_caldav_mailbox(driver, *, password: str | None = None, timeout: float = 30.0) -> None:
     """Mint the logged-in actor's CalDAV MSEK via the ``enable_caldav_mailbox``
     test-agent command, blocking until the reply lands (the materialize-into-

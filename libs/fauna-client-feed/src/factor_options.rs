@@ -5,9 +5,12 @@
 //!
 //! A built-in is a factor the nest computes for every post without any
 //! subscription or training, so every user can weight it from a fresh account:
-//! `engagement` (the cumulative-engagement scalar) and `trending` (the decayed
+//! `engagement` (the cumulative-engagement scalar), `trending` (the decayed
 //! trend velocity, `docs/goal/behavior/trending.md` § The Trending feed — "offered
-//! in `feed-factor-select` like any bus factor"). The value each option carries
+//! in `feed-factor-select` like any bus factor"), then the two Layer-B signals
+//! `signal:watch-complete` and `signal:skip` (the k-anonymized aggregates of who
+//! watched a public post to the end or skipped it,
+//! `docs/goal/behavior/engagement-cues.md` § Layer B). The value each option carries
 //! is the factor key the nest composes on, taken from
 //! [`fauna_core::scoring::factor`] so it cannot drift from the scorer's own name.
 
@@ -30,10 +33,18 @@ pub struct FactorOption {
 }
 
 /// The built-ins, in picker order. `engagement` leads, as it has since the
-/// picker shipped.
-const BUILTIN_FACTORS: [(&str, &str); 2] = [
+/// picker shipped; the two Layer-B signals follow — the k-anonymized
+/// watch-to-the-end and skip aggregates the nest writes for public posts,
+/// which compose through each user's own weights
+/// (`docs/goal/behavior/engagement-cues.md` § Layer B → *Composition*).
+const BUILTIN_FACTORS: [(&str, &str); 4] = [
     (factor::ENGAGEMENT, "feed.create.factor_engagement"),
     (factor::TRENDING, "feed.create.factor_trending"),
+    (
+        factor::SIGNAL_WATCH_COMPLETE,
+        "feed.create.factor_watch_complete",
+    ),
+    (factor::SIGNAL_SKIP, "feed.create.factor_skip"),
 ];
 
 /// The built-in head of every app's `feed-factor-select` list. An app offers
@@ -65,12 +76,31 @@ mod tests {
     /// Pinned as a literal so a reorder or rename fails here rather than
     /// silently changing every app's picker.
     #[test]
-    fn builtin_factor_options_are_engagement_then_trending() {
+    fn builtin_factor_options_are_engagement_trending_then_the_two_signals() {
         let values: Vec<String> = builtin_factor_options()
             .into_iter()
             .map(|o| o.value)
             .collect();
-        assert_eq!(values, ["engagement", "trending"]);
+        assert_eq!(
+            values,
+            [
+                "engagement",
+                "trending",
+                "signal:watch-complete",
+                "signal:skip"
+            ]
+        );
+    }
+
+    /// `engagement-cues.md` § Layer B → *Composition*: the shared
+    /// watch-to-the-end and skip aggregates compose through each user's own
+    /// weights, so the picker offers them under the nest scorer's own keys.
+    #[test]
+    fn the_layer_b_signals_are_offered_under_the_scorer_s_keys() {
+        let watched = builtin_factor_option(factor::SIGNAL_WATCH_COMPLETE).expect("offered");
+        assert_eq!(watched.label.key, "feed.create.factor_watch_complete");
+        let skipped = builtin_factor_option(factor::SIGNAL_SKIP).expect("offered");
+        assert_eq!(skipped.label.key, "feed.create.factor_skip");
     }
 
     /// `trending.md` § The Trending feed: the trend factor is offered like any

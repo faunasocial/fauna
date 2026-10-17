@@ -8,6 +8,11 @@
 
 export const PAYMENTS_IDS = {
   COMPOSE_SELL_ASKING_PRICE: 'compose-sell-asking-price',
+  COMPOSE_SELL_PRICE: 'compose-sell-price',
+  COMPOSE_SELL_SUBSCRIBERS_FREE: 'compose-sell-subscribers-free',
+  GATED_POST_BUY_BUTTON: 'gated-post-buy-button',
+  GATED_POST_PAYMENT_LINK: 'gated-post-payment-link',
+  GATED_POST_PRICE: 'gated-post-price',
   POST_TIP_COUNT: 'post-tip-count',
   POST_TIP_ITEM: 'post-tip-item',
   POST_TIP_LIST: 'post-tip-list',
@@ -23,6 +28,8 @@ export const PAYMENTS_IDS = {
   SUBSCRIPTION_CLAIM_STATUS: 'subscription-claim-status',
   SUBSCRIPTION_CLAIM_TIER: 'subscription-claim-tier',
   SUBSCRIPTION_CLAIM_TIER_SELECT: 'subscription-claim-tier-select',
+  SUBSCRIPTION_OFFER_PAYMENT_LINK: 'subscription-offer-payment-link',
+  SUBSCRIPTION_OFFER_PRICE: 'subscription-offer-price',
   SUBSCRIPTION_PROVIDER_ADD_BUTTON: 'subscription-provider-add-button',
   SUBSCRIPTION_PROVIDER_FORM: 'subscription-provider-form',
   SUBSCRIPTION_PROVIDER_FORM_CANCEL: 'subscription-provider-form-cancel',
@@ -39,6 +46,9 @@ export const PAYMENTS_IDS = {
   SUBSCRIPTION_PROVIDER_SECTION: 'subscription-provider-section',
   SUBSCRIPTION_PROVIDER_STATUS: 'subscription-provider-status',
   SUBSCRIPTION_TIER_FORM_ASKING_PRICE: 'subscription-tier-form-asking-price',
+  SUBSCRIPTION_TIER_FORM_PAYMENT_URL: 'subscription-tier-form-payment-url',
+  SUBSCRIPTION_TIER_FORM_PRICE_HINT: 'subscription-tier-form-price-hint',
+  SUBSCRIPTION_TIER_PRICE: 'subscription-tier-price',
 } as const;
 
 export type PaymentsElementId = (typeof PAYMENTS_IDS)[keyof typeof PAYMENTS_IDS];

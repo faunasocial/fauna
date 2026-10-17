@@ -6,7 +6,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -24,6 +23,7 @@ import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.components.rememberCopyToClipboard
+import com.fauna.app.ui.components.rememberTwoClickArm
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.resolveLocalized
@@ -589,8 +589,10 @@ private fun AliasRow(
     onEnable: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    var menuOpen by remember { mutableStateOf(false) }
     var auditOpen by remember { mutableStateOf(false) }
+    val deleteArm = rememberTwoClickArm()
+    val revokeArm = rememberTwoClickArm()
+    val deleteGate = faunaGate("fauna.bridges.delete_account_alias")
 
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.MAIL_ALIASES_LIST_ITEM)) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -606,31 +608,23 @@ private fun AliasRow(
                         Text(kindLabel(alias.kind), modifier = Modifier.testTag(Ids.MAIL_ALIASES_LIST_ITEM_KIND))
                     },
                 )
-                // Overflow Delete — omitted on the canonical row (read-only).
+                // `mail-aliases-list-item-overflow-menu` is the inline Delete
+                // itself, as on every app — two-click confirm, no dropdown
+                // (`common.md` § Two-click confirm). Omitted on the canonical
+                // row (read-only). Arm and confirm are the same control, so it
+                // declares the destructive kind outright.
                 if (!alias.isCanonical) {
-                    // The overflow ICON opens the menu and stays live — arming
-                    // is local, and a dead opener could not be reached to prove
-                    // the item inside it is gated. The DESTRUCTIVE ITEM declares.
-                    val deleteGate = faunaGate("fauna.bridges.delete_account_alias")
-                    Box {
-                        IconButton(
-                            onClick = { menuOpen = true },
-                            modifier = Modifier.testTag(Ids.MAIL_ALIASES_LIST_ITEM_OVERFLOW_MENU),
-                        ) {
-                            Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.mail_aliases_delete))
-                        }
-                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                            DropdownMenuItem(
-                                text = {
-                                    Column {
-                                        Text(stringResource(R.string.mail_aliases_delete))
-                                        DisabledControlReasonText(deleteGate.reason)
-                                    }
-                                },
-                                enabled = deleteGate.enabled,
-                                onClick = { menuOpen = false; onDelete() },
-                            )
-                        }
+                    TextButton(
+                        onClick = { deleteArm.press(onDelete) },
+                        enabled = deleteGate.enabled,
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                        modifier = Modifier.testTag(Ids.MAIL_ALIASES_LIST_ITEM_OVERFLOW_MENU),
+                    ) {
+                        Text(
+                            stringResource(
+                                if (deleteArm.armed) R.string.common_confirm_q else R.string.mail_aliases_delete,
+                            ),
+                        )
                     }
                 }
             }
@@ -701,11 +695,19 @@ private fun AliasRow(
                         enabled = !working,
                         modifier = Modifier.testTag(Ids.MAIL_ALIASES_LIST_ITEM_EDIT_BUTTON),
                     ) { Text(stringResource(R.string.mail_aliases_edit)) }
+                    // Two-click confirm (`common.md`); the toggle's OFF flip
+                    // stays a direct gesture.
                     OutlinedButton(
-                        onClick = onRevoke,
+                        onClick = { revokeArm.press(onRevoke) },
                         enabled = revokeGate.enabled,
                         modifier = Modifier.testTag(Ids.MAIL_ALIASES_LIST_ITEM_REVOKE_BUTTON),
-                    ) { Text(stringResource(R.string.mail_aliases_revoke)) }
+                    ) {
+                        Text(
+                            stringResource(
+                                if (revokeArm.armed) R.string.common_confirm_q else R.string.mail_aliases_revoke,
+                            ),
+                        )
+                    }
                 }
                 TextButton(
                     onClick = { auditOpen = !auditOpen },
@@ -713,9 +715,9 @@ private fun AliasRow(
                 ) { Text(stringResource(R.string.mail_aliases_show_audit)) }
             }
             if (!alias.isCanonical) {
-                // One reason for the pair — they are disabled by the same
-                // verdict, and two identical lines under one row would be noise.
-                DisabledControlReasonText(activeGate.reason ?: revokeGate.reason)
+                // One reason for the row's mutating controls — they are disabled
+                // by the same verdict, and identical lines under one row would be noise.
+                DisabledControlReasonText(activeGate.reason ?: revokeGate.reason ?: deleteGate.reason)
             }
         }
     }

@@ -32,8 +32,9 @@
 use std::sync::Arc;
 
 use anyhow::Context;
+use fauna_core::chunker::{MAX_MANIFEST_BODY, MAX_STORED_CHUNK_BODY};
 use fauna_core::data::ContentHash;
-use fauna_core::file_download::BlobFetcher;
+use fauna_core::file_download::{BlobFetcher, FolderHint};
 use fauna_nest_http::{BearerSource, NestContentApi, ReqwestNestContentApi, paths};
 
 use crate::NestClient;
@@ -196,12 +197,18 @@ impl ForeignPublicChunkFetcher {
             .map(|_| ())
     }
 
-    async fn get(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+    /// GET `path`, reading at most `max_bytes` of the body (the home is a
+    /// stranger's nest, so it does not choose how much this client allocates;
+    /// the content-address check runs only after the read).
+    async fn get(&self, path: &str, max_bytes: u64) -> anyhow::Result<Vec<u8>> {
         self.ensure_graduated().await?;
         let url = format!("{}{path}", self.base_url);
         let resp = self.http.get(&url).send().await?;
         anyhow::ensure!(resp.status().is_success(), "GET {url}: {}", resp.status());
-        Ok(resp.bytes().await?.to_vec())
+        let max = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+        fauna_nest_http::capped::read_capped(resp, max)
+            .await
+            .map_err(|e| anyhow::anyhow!("GET {url}: {e}"))
     }
 }
 
@@ -254,7 +261,9 @@ pub async fn graduate_home_nest_pin(
 impl BlobFetcher for ForeignPublicChunkFetcher {
     async fn fetch_manifest(&self, hash: &ContentHash) -> anyhow::Result<Vec<u8>> {
         let path = paths::chunk_store::manifest_by_hash(&hex::encode(hash.digest()));
-        self.get(&path).await.with_context(|| format!("GET {path}"))
+        self.get(&path, MAX_MANIFEST_BODY)
+            .await
+            .with_context(|| format!("GET {path}"))
     }
 
     async fn fetch_chunks(
@@ -268,7 +277,7 @@ impl BlobFetcher for ForeignPublicChunkFetcher {
         for key in store_keys {
             let path = paths::chunk_store::chunk_by_hash(&hex::encode(key.digest()));
             let bytes = self
-                .get(&path)
+                .get(&path, MAX_STORED_CHUNK_BODY)
                 .await
                 .with_context(|| format!("GET {path} (chunk of {relative_path})"))?;
             out.push(bytes);
@@ -282,7 +291,7 @@ impl BlobFetcher for NestPublicChunkFetcher {
     async fn fetch_manifest(&self, hash: &ContentHash) -> anyhow::Result<Vec<u8>> {
         let path = paths::chunk_store::manifest_by_hash(&hex::encode(hash.digest()));
         self.content
-            .get(&path)
+            .get_capped(&path, &[], MAX_MANIFEST_BODY)
             .await
             .map(|b| b.to_vec())
             .with_context(|| format!("GET {path}"))
@@ -293,6 +302,33 @@ impl BlobFetcher for NestPublicChunkFetcher {
         store_keys: &[ContentHash],
         relative_path: &str,
     ) -> anyhow::Result<Vec<Vec<u8>>> {
+        self.fetch_each(store_keys, relative_path, &[]).await
+    }
+
+    /// A folder read: the [`FolderHint`]'s two forms ride every chunk GET, and
+    /// the session bearer `content` always attaches is what lets the nest's
+    /// store-miss arm name the caller and relay from a seat (`file-sync.md`
+    /// § Relay serving, step (4)).
+    async fn fetch_folder_chunks(
+        &self,
+        store_keys: &[ContentHash],
+        relative_path: &str,
+        folder: &FolderHint,
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
+        let pairs = folder.query_pairs();
+        let query: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        self.fetch_each(store_keys, relative_path, &query).await
+    }
+}
+
+impl NestPublicChunkFetcher {
+    /// GET each store key's chunk with `query` (empty for a plain read).
+    async fn fetch_each(
+        &self,
+        store_keys: &[ContentHash],
+        relative_path: &str,
+        query: &[(&str, &str)],
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
         // Sequential: reqwest already pools the one pinned connection, and the
         // seam hands over the whole batch precisely so a target can choose — if
         // this ever needs parallelism, a bounded `buffer_unordered` here is the
@@ -302,7 +338,7 @@ impl BlobFetcher for NestPublicChunkFetcher {
             let path = paths::chunk_store::chunk_by_hash(&hex::encode(key.digest()));
             let bytes = self
                 .content
-                .get(&path)
+                .get_capped(&path, query, MAX_STORED_CHUNK_BODY)
                 .await
                 .map(|b| b.to_vec())
                 .with_context(|| format!("GET {path} (chunk of {relative_path})"))?;
@@ -315,6 +351,104 @@ impl BlobFetcher for NestPublicChunkFetcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// An in-process "foreign nest": answers every request `200` with `len`
+    /// bytes, declaring `Content-Length` or not (`Connection: close` framing).
+    async fn serve_oversized(len: usize, declare_length: bool) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let _ = sock.read(&mut buf).await;
+                    let head = if declare_length {
+                        format!("HTTP/1.1 200 OK\r\ncontent-length: {len}\r\n\r\n")
+                    } else {
+                        "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n".to_string()
+                    };
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let block = vec![0u8; 64 * 1024];
+                    let mut sent = 0;
+                    while sent < len {
+                        let n = block.len().min(len - sent);
+                        if sock.write_all(&block[..n]).await.is_err() {
+                            return;
+                        }
+                        sent += n;
+                    }
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// A followed foreign home is a stranger's nest: its chunk and
+    /// manifest replies are refused past the wire cap, whether or not the reply
+    /// declares its length, instead of being buffered whole before the
+    /// content-address check.
+    #[tokio::test]
+    async fn an_oversized_foreign_reply_is_refused_not_buffered() {
+        let chunk_over = fauna_core::chunker::MAX_STORED_CHUNK_BODY as usize + 1;
+        let manifest_over = fauna_core::chunker::MAX_MANIFEST_BODY as usize + 1;
+        for declare in [true, false] {
+            let url = serve_oversized(chunk_over, declare).await;
+            let fetcher = ForeignPublicChunkFetcher::with_http(&url, reqwest::Client::new());
+            let err = fetcher
+                .fetch_chunks(&[ContentHash::of_raw(b"c")], "f.bin")
+                .await
+                .expect_err("an over-cap chunk reply must be refused");
+            assert!(format!("{err:?}").contains("size cap"), "got: {err:?}");
+
+            let url = serve_oversized(manifest_over, declare).await;
+            let fetcher = ForeignPublicChunkFetcher::with_http(&url, reqwest::Client::new());
+            let err = fetcher
+                .fetch_manifest(&ContentHash::of_raw(b"m"))
+                .await
+                .expect_err("an over-cap manifest reply must be refused");
+            assert!(format!("{err:?}").contains("size cap"), "got: {err:?}");
+        }
+    }
+
+    /// `fauna-core` cannot name the nest's parameter constants, so the hint
+    /// spells them itself; this is where the two spellings are held equal.
+    #[test]
+    fn the_folder_hint_speaks_the_nests_parameter_names() {
+        assert_eq!(
+            FolderHint::NAME_PARAM,
+            paths::chunk_store::FOLDER_HINT_PARAM
+        );
+        assert_eq!(
+            FolderHint::HASH_PARAM,
+            paths::chunk_store::FOLDER_HASH_HINT_PARAM
+        );
+        assert_eq!(
+            FolderHint::REF_PARAM,
+            paths::chunk_store::FOLDER_REF_HINT_PARAM
+        );
+        let pairs = FolderHint::new("vault").query_pairs();
+        assert_eq!(
+            pairs,
+            vec![
+                ("folder", "vault".to_string()),
+                (
+                    "folder_hash",
+                    hex::encode(fauna_core::path_crypto::set_name_hash("vault"))
+                ),
+            ],
+            "a name-only hint sends the two name forms and no ref"
+        );
+        // A reader that knows its row sends it as the third form.
+        let pairs = FolderHint::new("vault")
+            .with_ref(Some(fauna_core::folder_keys::FolderRef::Local(42)))
+            .query_pairs();
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(pairs[2], ("folder_ref", "local:42".to_string()));
+    }
 
     /// `graduate_home_nest_pin` hex-decodes the record-delivered
     /// `home_nest_actor_id` BEFORE dialing, so a malformed / wrong-length id

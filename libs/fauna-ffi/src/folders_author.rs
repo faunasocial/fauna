@@ -216,7 +216,15 @@ pub async fn folders_remove_member(
 /// the set's pre-serve files onto the served key before answering (the
 /// flipping client's walk, `webdav-server.md` § Key model (c)); without it
 /// that walk does not run.
-#[fauna_uniffi_async::export(default(device_id = None))]
+///
+/// `accounts` is the app's account registry, handed over as an object: the
+/// walk's attested predecessor ids are resolved in Rust off the owner's own
+/// actor, so a head a retired identity signed is admitted with no
+/// `fauna.recovery.succession.lookup` round trip (writer-signed change
+/// records, ruling (8)(b) source (ii)). `None` keeps the statement-walk
+/// fallback.
+#[allow(clippy::too_many_arguments)]
+#[fauna_uniffi_async::export(default(device_id = None, accounts = None))]
 pub async fn folders_serve_set(
     nest: Arc<FfiNestClient>,
     session: Arc<ConversationsSession>,
@@ -225,18 +233,21 @@ pub async fn folders_serve_set(
     mls_group_id_hex: Option<String>,
     enable: bool,
     device_id: Option<String>,
+    accounts: Option<Arc<crate::accounts_registry::FfiAccountRegistry>>,
 ) -> Result<u32, FfiError> {
     let mut author = author(&nest, &session, &owner_secret)?;
     if let Some(device_id) = device_id {
+        let keypair = keypair_from_bytes(&owner_secret)?;
+        let predecessors = accounts
+            .as_ref()
+            .map(|a| a.attested_predecessor_ids32(&keypair.actor_id().to_hex()))
+            .unwrap_or_default();
         author = author.with_served_set_converge(fauna_client_folders::served_set_converge(
             nest.nest_arc(),
-            &keypair_from_bytes(&owner_secret)?,
+            &keypair,
             crate::account_runtime::folder_key_store(),
             device_id,
-            // The attested ids are not handed across this face yet: the native
-            // hosts (android, apple, windows) pass none, so the walk proves a
-            // retired identity's link by the statement walk until they do.
-            Vec::new(),
+            predecessors,
         ));
     }
     let channel_id = match mls_group_id_hex {
@@ -536,6 +547,24 @@ fn channel_id_from_hex(mls_group_id_hex: &str) -> Option<fauna_mls::types::Chann
 #[uniffi::export]
 pub fn wire_devices_mls_query(devices: Arc<DevicesMachine>, session: Arc<ConversationsSession>) {
     devices.set_mls_query(Arc::new(SessionMlsQuery {
+        session: Arc::downgrade(&session),
+    }));
+}
+
+/// Wire `media`'s member-row join-filter to `session`'s live MLS engine — the
+/// Media page's twin of [`wire_devices_mls_query`], over the same
+/// [`SessionMlsQuery`] (one filter, `fauna_protocol::member_rows`). Until
+/// wired, the page drops every shared set's row (fail-safe): a shared set
+/// reaches it only through its items, as an item-only option by name, with no
+/// owner label and no upload target (`media.md` § Layout & flow → *Where the
+/// offerable sets come from*). Call once per `MediaMachine`, before the first
+/// `refresh()`, with the client's one per-actor `ConversationsSession`.
+#[uniffi::export]
+pub fn wire_media_mls_query(
+    media: Arc<fauna_media_machine::MediaMachine>,
+    session: Arc<ConversationsSession>,
+) {
+    media.set_mls_query(Arc::new(SessionMlsQuery {
         session: Arc::downgrade(&session),
     }));
 }

@@ -60,7 +60,7 @@ use crate::transfer::TransferPool;
 // imports; the only difference is the injected control plane).
 // ─────────────────────────────────────────────────────────────────────
 
-fn test_sync_engine(
+pub(crate) fn test_sync_engine(
     server_uri: &str,
     watch_dir: std::path::PathBuf,
     device_id: [u8; 32],
@@ -103,7 +103,11 @@ fn test_sync_engine(
 /// A peer `create` naming a real manifest hash served by the mock store,
 /// `created_at` fixed well in the past so the local mtime reads as strictly
 /// newer — which is what makes latest-writer-wins pick the LOCAL side.
-fn create_change_with_manifest(seq: i64, path: &str, manifest_hash: ContentHash) -> SyncChange {
+pub(crate) fn create_change_with_manifest(
+    seq: i64,
+    path: &str,
+    manifest_hash: ContentHash,
+) -> SyncChange {
     SyncChange {
         seq,
         path_hash: format!("path-hash-{path}"),

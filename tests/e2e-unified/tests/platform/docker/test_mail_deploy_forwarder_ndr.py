@@ -46,7 +46,7 @@ would catch it. With the fix it seals locally, so the stub stays empty. (The
 forward's own relay is 550-rejected at RCPT before DATA, so it leaves no ``.eml``.)
 
 **Prod-parity posture (Gap 2g — ``testing.md`` § Gap 2 Target).** The box runs the
-live-box shape, not the relaxed opt-out: storage mode **Encrypted** (example.com's
+live-box shape, not the relaxed opt-out: storage mode **Encrypted** (the production
 default) and the inbound AUTH perimeter **ENFORCED** (``enforce_dmarc=true``/
 ``log_only=false``) via the shared ``enforce_mail_perimeter`` +
 ``publish_passing_mail_dns`` helpers. ``EXTERNAL_DOMAIN`` publishes a passing SPF
@@ -177,7 +177,7 @@ def forwarder_ndr_nest(docker_image, ndr_sidecars):
     the stub MX (outbound), and the resolver (``--dns``) pointed at the fake_dns
     sidecar so the inbound ``@external.test`` MAIL FROM resolves a PASSING SPF +
     ``_dmarc`` for the enforced perimeter (Gap 2g — ``testing.md`` § Gap 2 Target).
-    Storage mode committed **Encrypted** — example.com's privacy-respecting default;
+    Storage mode committed **Encrypted** — the production privacy-respecting default;
     the forwarder NDR is sealed into the admin INBOX and read back decrypted, and
     that seal/store/IMAP-decrypt path is storage-mode-independent (msek-gated, not
     ``StorageMode``-gated). Cleaned up after."""

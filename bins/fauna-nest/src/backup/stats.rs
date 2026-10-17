@@ -40,7 +40,8 @@ pub async fn compute_global_stats(db: &Arc<CacheDb>) -> Result<GlobalStats> {
     let folders = db.list_folders().await?;
     let mut total_raw: i64 = 0;
     for fs in &folders {
-        total_raw += db.folder_raw_size(fs.id).await?;
+        // Saturating: each folder's raw size is a sum of owner-declared sizes.
+        total_raw = total_raw.saturating_add(db.folder_raw_size(fs.id).await?);
     }
 
     let dedup_ratio = if total_size > 0 {
@@ -72,17 +73,14 @@ pub async fn compute_global_stats(db: &Arc<CacheDb>) -> Result<GlobalStats> {
 /// cross-user IDOR on aggregate backup stats). Folding "not yours" into "not
 /// found" also closes the folder existence oracle. `name_hash`, when present,
 /// resolves first (S5b, `path-sealing.md` § the set-name plane) — the same
-/// owner-scoped idiom keyed on the address that outlives the plaintext name.
-pub async fn compute_folder_stats(
+/// owner-scoped idiom keyed on the address that outlives the plaintext name —
+/// and a carried row wins over both (`set-addressing.md` § The row form).
+pub(crate) async fn compute_folder_stats(
     db: &Arc<CacheDb>,
-    folder_name: &str,
-    name_hash: Option<&[u8; 32]>,
+    address: crate::folder_authz::FolderAddress<'_>,
     actor_id: &[u8; 32],
 ) -> Result<Option<FolderStats>> {
-    let fs = match name_hash {
-        Some(h) => db.get_folder_for_actor_by_name_hash(h, actor_id).await?,
-        None => db.get_folder_for_actor(folder_name, actor_id).await?,
-    };
+    let fs = crate::folder_authz::resolve_owned_folder(db, address, actor_id).await?;
     let Some(fs) = fs else {
         return Ok(None);
     };
@@ -100,7 +98,7 @@ pub async fn compute_folder_stats(
         if let Ok(arr) = <[u8; 32]>::try_from(mh.as_slice())
             && let Ok(Some(meta)) = db.get_blob_metadata(&arr).await
         {
-            stored_size += meta.size_bytes;
+            stored_size = stored_size.saturating_add(meta.size_bytes);
         }
     }
 

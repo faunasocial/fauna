@@ -1,7 +1,7 @@
 //! The Linux FUSE OS shim: the filesystem the agent mounts **over** an on-demand
 //! location, plus the mount lifecycle (reach / mount / unmount / ghost sweep /
 //! availability probe). The `cfapi_host` twin — see
-//! `docs/goal/behavior/on-demand-files.md` § Linux FUSE binding.
+//! `docs/goal/behavior/on-demand-files-linux.md` § Linux FUSE binding.
 //!
 //! This is the thin boundary between the kernel and the deterministically-tested
 //! core in [`crate::bridge`]. The FUSE session thread translates kernel requests
@@ -560,7 +560,7 @@ fn helper_on_path(path: Option<&OsStr>) -> bool {
 // ---------------------------------------------------------------------------
 
 /// The FUSE root's [`PlaceholderInvalidator`] — what the shared loop asks of the OS
-/// binding when bytes move (`on-demand-files.md` § Linux FUSE binding, the
+/// binding when bytes move (`on-demand-files-linux.md` § Linux FUSE binding, the
 /// dehydrate rule and *Placeholder detection needs no OS attribute*).
 ///
 /// A placeholder here is a row, never a file, so this binding is **off-disk**
@@ -601,16 +601,23 @@ impl crate::bridge::PlaceholderInvalidator for FuseInvalidator {
     /// The unlink — the second half of the off-disk dehydrate. Only ever reached
     /// through [`crate::bridge::free_local_bytes`], which has already proven the
     /// free lossless and flipped the row: this binding has no OS refusal of its own,
-    /// so the gate is the engine's.
-    fn dehydrate(&self, abs_path: &Path) -> Result<()> {
-        std::fs::remove_file(abs_path)
-            .with_context(|| format!("unlinking freed bytes at {}", abs_path.display()))
+    /// so the gate is the engine's. Made in place: an unlink waits on no fetch.
+    fn dehydrate(&self, abs_path: &Path) -> crate::bridge::PlatformCall<'_> {
+        crate::bridge::in_place(
+            std::fs::remove_file(abs_path)
+                .with_context(|| format!("unlinking freed bytes at {}", abs_path.display())),
+        )
     }
 
     /// The unlink, as [`Self::dehydrate`]: a placeholder here is its row, whose size and
     /// mtime the re-point that follows moves — the view reads both from it on every
     /// `getattr`, so there is nothing on the disk left to describe the old version.
-    fn supersede(&self, abs_path: &Path, _size: u64, _mtime: i64) -> Result<()> {
+    fn supersede(
+        &self,
+        abs_path: &Path,
+        _size: u64,
+        _mtime: i64,
+    ) -> crate::bridge::PlatformCall<'_> {
         self.dehydrate(abs_path)
     }
 
@@ -621,8 +628,8 @@ impl crate::bridge::PlaceholderInvalidator for FuseInvalidator {
     }
 
     /// No in-sync bit to set: the view's state is the row's.
-    fn set_in_sync(&self, _abs_path: &Path, _usn: i64) -> Result<()> {
-        Ok(())
+    fn set_in_sync(&self, _abs_path: &Path, _usn: i64) -> crate::bridge::PlatformCall<'_> {
+        crate::bridge::in_place(Ok(()))
     }
 
     /// No update sequence number either; [`Self::set_in_sync`] conditions on nothing.

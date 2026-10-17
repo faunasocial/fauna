@@ -89,17 +89,6 @@ impl CacheDb {
         Ok(rows)
     }
 
-    /// The latest blocklist self-check's `(checked_at, results_json)`.
-    pub async fn latest_blocklist_self_check(&self) -> Result<Option<(i64, String)>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT checked_at, results_json FROM mail_outbound_self_blocklist_check \
-             ORDER BY checked_at DESC, id DESC LIMIT 1",
-        )?;
-        let mut rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        Ok(rows.next().transpose()?)
-    }
-
     /// The latest diagnostics run's `(ran_at, results_json)`.
     pub async fn latest_diagnostic_run(&self) -> Result<Option<(i64, String)>> {
         let conn = self.conn.lock().await;
@@ -132,22 +121,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn latest_rows_are_newest_first() {
+    async fn latest_diagnostic_run_is_the_newest() {
         let db = CacheDb::open_in_memory().unwrap();
-        assert_eq!(db.latest_blocklist_self_check().await.unwrap(), None);
         assert_eq!(db.latest_diagnostic_run().await.unwrap(), None);
-        db.record_blocklist_self_check(1_000, "[]").await.unwrap();
-        db.record_blocklist_self_check(2_000, "[1]").await.unwrap();
         db.record_diagnostic_run(5, "[a]", &[0u8; 32])
             .await
             .unwrap();
         db.record_diagnostic_run(6, "[b]", &[0u8; 32])
             .await
             .unwrap();
-        assert_eq!(
-            db.latest_blocklist_self_check().await.unwrap(),
-            Some((2_000, "[1]".to_string()))
-        );
         assert_eq!(
             db.latest_diagnostic_run().await.unwrap(),
             Some((6, "[b]".to_string()))

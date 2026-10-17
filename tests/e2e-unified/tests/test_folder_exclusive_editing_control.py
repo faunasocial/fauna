@@ -39,8 +39,12 @@ from i18n.strings import S
 pytestmark = [
     pytest.mark.tier2,
     pytest.mark.tier_3,
-    # tui leads; the other six join through the trickle-down row.
+    # tui leads; the other apps join as their legs land.
     pytest.mark.tui,
+    pytest.mark.linux,
+    pytest.mark.web,
+    pytest.mark.android,
+    pytest.mark.windows,
 ]
 
 _FLAG_WINDOW_SECS = 30.0

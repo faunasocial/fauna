@@ -80,7 +80,8 @@ pub fn sign_out_blocked(
     all_accounts_erase_blocked(
         &registry,
         Path::new(&base_dir),
-        &crate::account_state::store_root_for(store_container_dir.map(PathBuf::from)),
+        crate::account_state::store_root_or_logged(store_container_dir.map(PathBuf::from))
+            .as_deref(),
         own_lock.as_deref(),
     )
     .map(|accounts| FfiEraseBlocked {
@@ -103,7 +104,8 @@ pub fn start_over_blocked(
     all_accounts_erase_blocked(
         &registry,
         Path::new(&base_dir),
-        &crate::account_state::store_root_for(store_container_dir.map(PathBuf::from)),
+        crate::account_state::store_root_or_logged(store_container_dir.map(PathBuf::from))
+            .as_deref(),
         own_lock.as_deref(),
     )
     .map(|accounts| FfiEraseBlocked {
@@ -131,7 +133,8 @@ pub fn remove_account_blocked(
     serving_here: Option<String>,
 ) -> Option<FfiEraseRemoveBlocked> {
     use fauna_client_accounts::RemoveAccountBlocked;
-    let store_root = crate::account_state::store_root_for(store_container_dir.map(PathBuf::from));
+    let store_root =
+        crate::account_state::store_root_or_logged(store_container_dir.map(PathBuf::from));
     let own_lock = own_lock.as_deref();
     let serving_here = own_lock
         .and_then(FfiAccountInstanceLock::serving_actor)
@@ -140,7 +143,7 @@ pub fn remove_account_blocked(
     let blocked = with_own_lock_down(own_lock, || {
         fauna_client_accounts::remove_account_blocked_as(
             serving_here.as_deref(),
-            serving_bases(Path::new(&base_dir), &store_root),
+            serving_bases(Path::new(&base_dir), store_root.as_deref()),
             &actor_id_hex,
         )
     })?;
@@ -158,11 +161,11 @@ pub fn remove_account_blocked(
 /// shared store root.
 pub(crate) fn serving_bases<'a>(
     base_dir: &'a Path,
-    store_root: &'a Path,
+    store_root: Option<&'a Path>,
 ) -> fauna_client_accounts::ServingBases<'a> {
     fauna_client_accounts::ServingBases {
         state_base: Some(base_dir),
-        store_root: Some(store_root),
+        store_root,
     }
 }
 
@@ -172,14 +175,15 @@ pub(crate) fn serving_bases<'a>(
 fn all_accounts_erase_blocked(
     registry: &FfiAccountRegistry,
     base_dir: &Path,
-    store_root: &Path,
+    store_root: Option<&Path>,
     own_lock: Option<&FfiAccountInstanceLock>,
 ) -> Option<Vec<String>> {
+    let roots: Vec<&Path> = std::iter::once(base_dir).chain(store_root).collect();
     let blocked = with_own_lock_down(own_lock, || {
         fauna_client_accounts::sign_out_blocked(
             registry.registry(),
             serving_bases(base_dir, store_root),
-            &[base_dir, store_root],
+            &roots,
         )
     })?;
     Some(blocked.accounts)
@@ -252,7 +256,7 @@ mod tests {
         }
 
         fn store_root(&self) -> PathBuf {
-            crate::account_state::store_root_for(Some(PathBuf::from(&self.container)))
+            crate::account_state::store_root_for(Some(PathBuf::from(&self.container))).unwrap()
         }
 
         /// This app's raw shared lock, as apple takes it.

@@ -346,6 +346,11 @@ window.__faunaTestAgent = {
     // could ever have filled it.
     const rawThreads = stores.conversationThreads ? readStore(stores.conversationThreads) : [];
     const conversationThreads = rawThreads || [];
+    // The active sort order (`data.conversation_sort`): the bare shared-Rust
+    // spelling, filled from the wasm manager's `conversationSortJson()`.
+    const conversationSort = stores.conversationSort
+      ? readStore(stores.conversationSort)
+      : null;
     // --- The member side of a succession (`data.succession_witness`) ---
     // Whole-object passthrough: the shape is the shared contract
     // (`fauna_client_recovery::witness::state_json`, rendered in wasm), and the
@@ -397,6 +402,9 @@ window.__faunaTestAgent = {
       // (not `|| null`): an empty string is not a legitimate post id here.
       reposted_post_id: p.reposted_post_id ?? null,
       viewer_repost_id: p.viewer_repost_id ?? null,
+      // The quote carrier: an empty-commentary quote's card text is only its
+      // folded embed, so a test finds it by the post it quotes. tui's key.
+      quoted_post_id: p.quoted_post_id ?? null,
       // Every link preview in the body with its state, in body order (the
       // shared `RenderDocument::link_previews` — render-model.md § D4), so a
       // test can wait for a preview to FAIL before reading "no card". Omitted
@@ -515,11 +523,22 @@ window.__faunaTestAgent = {
       ...(messages === null ? {} : { messages }),
       settings: (() => {
         const checked = document.querySelector('input[name="inbox-mode"]:checked');
-        return { inbox_mode: checked ? checked.value : null };
+        // The Sessions page's painted token ids in card order — the web read of
+        // `settings.session_token_ids` (linux/tui publish the same key); null
+        // before the page's first hydrate. Absent hook ⇒ null.
+        const sessionTokenIds =
+          typeof window.__fauna_sessionTokenIds === "function"
+            ? window.__fauna_sessionTokenIds()
+            : null;
+        return {
+          inbox_mode: checked ? checked.value : null,
+          session_token_ids: sessionTokenIds,
+        };
       })(),
       data: {
         conversations,
         conversation_threads: conversationThreads,
+        conversation_sort: conversationSort,
         conv_real_backend_active: convRealBackendActive,
         groups: groupsOut,
         contacts: contactsOut,

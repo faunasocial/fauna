@@ -24,6 +24,7 @@ use rusqlite::OptionalExtension;
 use super::atproto_pds::{revoke_grant_row, revoke_session_row};
 use super::{CacheDb, now_epoch_millis};
 use fauna_protocol::kind_manifest::ServiceAuthEntry;
+use fauna_protocol::principals::{OracleOp, OracleSummary};
 
 /// Length of a nest-minted `principal_id`.
 pub const PRINCIPAL_ID_LEN: usize = 16;
@@ -104,8 +105,9 @@ pub struct HostedPluginMint {
     pub label: Option<String>,
     /// The host-minted holder key's PUBLIC half.
     pub holder_x25519: [u8; 32],
-    /// The verified manifest's `publisher.key`, raw.
-    pub publisher_key: [u8; 32],
+    /// The verified manifest's `publisher.key`, raw — `None` for a development
+    /// plugin, whose manifest is unsigned (`third-party.md` § Developer loop).
+    pub publisher_key: Option<[u8; 32]>,
     /// The verified manifest's `kinds`, each the full `ext.*` string.
     pub declared_kinds: Vec<String>,
     /// The scopes the document declares and the admin approved the plugin
@@ -120,6 +122,10 @@ pub struct HostedPluginMint {
     pub ingress: serde_json::Value,
     /// The `settings_schema`, verbatim JSON, when declared.
     pub settings_schema: Option<serde_json::Value>,
+    /// The document's `fauna` manifest, the compact JWS the install verified
+    /// — kept so every user's bind card carries the same signed manifest
+    /// every consent card carries, without fetching the document again.
+    pub manifest_jws: Option<String>,
     /// The admin who approved the install.
     pub installed_by: [u8; 32],
 }
@@ -139,6 +145,8 @@ pub struct HostedPluginRow {
     pub hosts: Vec<String>,
     pub ingress: serde_json::Value,
     pub settings_schema: Option<serde_json::Value>,
+    /// The verified manifest JWS ([`HostedPluginMint::manifest_jws`]).
+    pub manifest_jws: Option<String>,
     pub installed_by: Vec<u8>,
     pub installed_at: i64,
     /// Accounts whose own consent bound them to this plugin.
@@ -151,6 +159,26 @@ pub enum InstallRefused {
     /// The document is already installed; update is a different verb.
     #[error("this document is already installed on this nest")]
     AlreadyInstalled,
+}
+
+/// Why a user's bind to a hosted plugin was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum BindRefused {
+    /// No plugin of that document (or id) is installed on this nest.
+    #[error("no such plugin is installed on this nest")]
+    NotInstalled,
+    /// The account has not bound the plugin, so it has nothing to configure.
+    #[error("this account has not connected the plugin")]
+    NotBound,
+}
+
+/// The key a bound account's settings rest under in the plugin's state scope
+/// (`third-party.md` § The principal model → *Hosted principals*): one entry
+/// per account, `settings/<actor hex>`, which the plugin reads through its
+/// `state` import. Written only by the account's own
+/// `fauna.plugins.set_settings`, deleted with the account's binding.
+pub fn plugin_settings_key(actor_id: &[u8; 32]) -> String {
+    format!("settings/{}", hex::encode(actor_id))
 }
 
 /// What one uninstall ended.
@@ -193,6 +221,10 @@ pub struct PrincipalManifest {
     /// manifest) — the roster row's `declared_service_auth`, the set the
     /// oracle's `atproto.service_auth` class is bounded by.
     pub declared_service_auth: Vec<ServiceAuthEntry>,
+    /// The manifest's `activitypub_peers` hosts (`third-party.md` § The
+    /// manifest) — the roster row's `declared_activitypub_peers`, the set the
+    /// oracle's `activitypub.http_sig` class signs to.
+    pub declared_activitypub_peers: Vec<String>,
     /// The validated `bridge` block (`third-party.md` § The manifest → *The
     /// `bridge` block`), `None` for a document that is not a conversation
     /// bridge — the roster row's `declared_bridge`.
@@ -205,15 +237,17 @@ pub struct PrincipalManifest {
 
 impl PrincipalManifest {
     /// The roster's view of a manifest [`fauna_protocol::kind_manifest::verify_manifest`]
-    /// accepted.
-    pub fn of(verified: &fauna_protocol::kind_manifest::VerifiedManifest) -> Self {
-        Self {
-            publisher_key: verified.publisher_key,
+    /// accepted. `None` for the development carve-out's unsigned manifest,
+    /// which no consent ever carries (it reaches only the install leg).
+    pub fn of(verified: &fauna_protocol::kind_manifest::VerifiedManifest) -> Option<Self> {
+        Some(Self {
+            publisher_key: verified.publisher_key?,
             declared_kinds: verified.kinds.iter().map(|k| k.kind.to_string()).collect(),
             declared_service_auth: verified.service_auth.clone(),
+            declared_activitypub_peers: verified.activitypub_peers.clone(),
             bridge: verified.bridge.clone(),
             events_uri: verified.events_uri.clone(),
-        }
+        })
     }
 }
 
@@ -296,6 +330,8 @@ pub struct PrincipalRow {
     pub declared_bridge: Option<fauna_protocol::kind_manifest::BridgeBlock>,
     /// The consented document's `service_auth` entries, `[]` for none.
     pub declared_service_auth: Vec<ServiceAuthEntry>,
+    /// The consented document's `activitypub_peers` hosts, `[]` for none.
+    pub declared_activitypub_peers: Vec<String>,
     /// Live grant families (the `list_atproto_oauth_grants` liveness
     /// predicate: not revoked, not past `expires_at`).
     pub live_grants: u32,
@@ -432,6 +468,13 @@ pub(crate) fn upsert_principal_in_tx(
             .map_or(&[][..], |m| m.declared_service_auth.as_slice()),
     )
     .context("encode declared service auth")?;
+    let declared_activitypub_peers = serde_json::to_string(
+        attestation
+            .manifest
+            .as_ref()
+            .map_or(&[][..], |m| m.declared_activitypub_peers.as_slice()),
+    )
+    .context("encode declared activitypub peers")?;
     let events_uri = attestation
         .manifest
         .as_ref()
@@ -466,8 +509,8 @@ pub(crate) fn upsert_principal_in_tx(
                     (actor_id, principal_id, client_id, holder_x25519, execution_form,
                      declared_kinds, granted_scopes, created_at, last_used_at, label,
                      publisher_key, writer_ed25519, declared_bridge, declared_service_auth,
-                     events_uri)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                     events_uri, declared_activitypub_peers)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 rusqlite::params![
                     &actor_id[..],
                     &principal_id[..],
@@ -483,6 +526,7 @@ pub(crate) fn upsert_principal_in_tx(
                     declared_bridge,
                     declared_service_auth,
                     events_uri,
+                    declared_activitypub_peers,
                 ],
             )
             .context("insert third-party principal")?;
@@ -510,7 +554,8 @@ pub(crate) fn upsert_principal_in_tx(
                         declared_kinds = ?9,
                         declared_bridge = ?10,
                         declared_service_auth = ?11,
-                        events_uri = ?12
+                        events_uri = ?12,
+                        declared_activitypub_peers = ?13
                   WHERE actor_id = ?1 AND principal_id = ?2",
                 rusqlite::params![
                     &actor_id[..],
@@ -525,6 +570,7 @@ pub(crate) fn upsert_principal_in_tx(
                     declared_bridge,
                     declared_service_auth,
                     events_uri,
+                    declared_activitypub_peers,
                 ],
             )
             .context("update third-party principal")?;
@@ -738,6 +784,7 @@ impl CacheDb {
                         p.declared_kinds, p.granted_scopes, p.created_at, p.last_used_at,
                         p.label, p.publisher_key, p.writer_ed25519,
                         p.declared_bridge, p.declared_service_auth,
+                        p.declared_activitypub_peers,
                         (SELECT COUNT(*) FROM atproto_oauth_grants g
                           WHERE g.actor_id = p.actor_id
                             AND g.client_id = p.client_id
@@ -774,7 +821,9 @@ impl CacheDb {
                     // As `declared_kinds`.
                     declared_service_auth: serde_json::from_str(&r.get::<_, String>(12)?)
                         .unwrap_or_default(),
-                    live_grants: u32::try_from(r.get::<_, i64>(13)?).unwrap_or(u32::MAX),
+                    declared_activitypub_peers: serde_json::from_str(&r.get::<_, String>(13)?)
+                        .unwrap_or_default(),
+                    live_grants: u32::try_from(r.get::<_, i64>(14)?).unwrap_or(u32::MAX),
                 })
             })
             .context("query third-party principals")?
@@ -783,6 +832,259 @@ impl CacheDb {
         Ok(rows)
     }
 
+    /// The oracle's summary of every principal of `actor_id` a custodian has
+    /// served, keyed by principal id (`fauna.principals.list`'s `oracle`
+    /// field; `key-material-hierarchy.md` § *The oracle*, the audit split).
+    /// `now` is unix seconds: a rate window that has rolled reads zero, as the
+    /// ceiling itself would. Every custodian keeps one row per principal it
+    /// served, merged into one map: the Nostr one (its tables exist only under
+    /// the `nostr` feature), the ActivityPub one (`activitypub`), and the
+    /// posting and ATProto ones (always compiled in) — the ATProto custodian
+    /// twice: its service-auth record, and the write record at its
+    /// `atproto.commit` door, joined from session to principal.
+    pub async fn principal_oracle_summaries(
+        &self,
+        actor_id: &[u8; 32],
+        now: u64,
+    ) -> Result<std::collections::HashMap<Vec<u8>, OracleSummary>> {
+        let conn = self.conn.lock().await;
+        let mut out: std::collections::HashMap<Vec<u8>, OracleSummary> = Default::default();
+        for (table, sql) in ORACLE_SUMMARY_SOURCES {
+            if super::table_exists(&conn, table)? {
+                merge_oracle_summaries(&conn, sql, actor_id, now, &mut out)?;
+            }
+        }
+        Ok(out)
+    }
+
+    /// One principal's oracle record, newest first, at most `limit` rows
+    /// (`fauna.principals.ops`) — every custodian's rows interleaved by time.
+    /// Scoped to `actor_id`: another account's principal reads as one no
+    /// custodian served — empty.
+    pub async fn list_principal_oracle_ops(
+        &self,
+        actor_id: &[u8; 32],
+        principal_id: &[u8],
+        limit: u32,
+    ) -> Result<Vec<OracleOp>> {
+        let conn = self.conn.lock().await;
+        let mut ops: Vec<OracleOp> = Vec::new();
+        for (table, sql) in ORACLE_OPS_SOURCES {
+            if !super::table_exists(&conn, table)? {
+                continue;
+            }
+            let mut stmt = conn.prepare_cached(sql).context("prepare oracle ops")?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![hex::encode(actor_id), principal_id, limit],
+                    |r| {
+                        Ok(OracleOp {
+                            at: r.get(0)?,
+                            class: r.get(1)?,
+                            detail: r.get(2)?,
+                            extra: Default::default(),
+                        })
+                    },
+                )
+                .context("query oracle ops")?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context("collect oracle ops")?;
+            ops.extend(rows);
+        }
+        // Each source is newest-first already; a stable sort by time keeps a
+        // source's own order among equal seconds.
+        ops.sort_by_key(|o| std::cmp::Reverse(o.at));
+        ops.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+        Ok(ops)
+    }
+}
+
+/// Each custodian's per-principal summary read — `(principal_id, use_count,
+/// window_start, window_count, newest op's at/class/detail)` for every
+/// principal it served on the account `?1` — keyed by the table whose
+/// existence says the custodian is compiled in.
+const ORACLE_SUMMARY_SOURCES: [(&str, &str); 5] = [
+    (
+        "nostr_oracle_clients",
+        "SELECT c.principal_id, c.use_count, c.window_start, c.window_count,
+                o.at, o.class, o.detail
+           FROM nostr_oracle_clients c
+           LEFT JOIN nostr_oracle_ops o ON o.id =
+             (SELECT MAX(id) FROM nostr_oracle_ops WHERE client_id = c.id)
+          WHERE c.actor_id = ?1",
+    ),
+    (
+        "ap_oracle_principals",
+        "SELECT p.principal_id, p.use_count, p.window_start, p.window_count,
+                o.at, o.class, o.detail
+           FROM ap_oracle_principals p
+           LEFT JOIN ap_oracle_ops o ON o.id =
+             (SELECT MAX(id) FROM ap_oracle_ops
+               WHERE actor_id = p.actor_id AND principal_id = p.principal_id)
+          WHERE p.actor_id = ?1",
+    ),
+    (
+        "post_author_principals",
+        "SELECT p.principal_id, p.use_count, p.window_start, p.window_count,
+                o.at, o.class, o.detail
+           FROM post_author_principals p
+           LEFT JOIN post_author_ops o ON o.id =
+             (SELECT MAX(id) FROM post_author_ops
+               WHERE actor_id = p.actor_id AND principal_id = p.principal_id)
+          WHERE p.actor_id = ?1",
+    ),
+    (
+        "atproto_oracle_principals",
+        "SELECT p.principal_id, p.use_count, p.window_start, p.window_count,
+                o.at, o.class, o.detail
+           FROM atproto_oracle_principals p
+           LEFT JOIN atproto_oracle_ops o ON o.id =
+             (SELECT MAX(id) FROM atproto_oracle_ops
+               WHERE actor_id = p.actor_id AND principal_id = p.principal_id)
+          WHERE p.actor_id = ?1",
+    ),
+    // The `atproto.commit` door keeps its record per SESSION, not per
+    // principal: an OAuth session is its grant (`session_id = grant_id`), and
+    // the grant's consent minted the principal row its `client_id` names. One
+    // row per session that has written, each with its own ceiling window; the
+    // record's `at` is milliseconds. An app-password session has no principal
+    // and reads its summary on `fauna.bridges.atproto.list_sessions` instead.
+    (
+        "atproto_external_write_ops",
+        "SELECT p.principal_id, s.write_count, s.write_window_start, s.write_window_count,
+                w.at / 1000, 'atproto.commit',
+                w.action || ' ' || w.collection || '/' || w.rkey
+           FROM third_party_principals p
+           JOIN atproto_oauth_grants g
+             ON g.actor_id = p.actor_id AND g.client_id = p.client_id
+           JOIN atproto_sessions s
+             ON s.actor_id = g.actor_id AND s.session_id = g.grant_id
+           JOIN atproto_external_write_ops w ON w.id =
+             (SELECT MAX(id) FROM atproto_external_write_ops
+               WHERE actor_id = s.actor_id AND session_id = s.session_id)
+          WHERE lower(hex(p.actor_id)) = ?1",
+    ),
+];
+
+/// Each custodian's per-operation record for one principal (`?1` the
+/// account, `?2` the principal, `?3` the limit), newest first.
+const ORACLE_OPS_SOURCES: [(&str, &str); 5] = [
+    (
+        "nostr_oracle_clients",
+        "SELECT o.at, o.class, o.detail
+           FROM nostr_oracle_ops o
+           JOIN nostr_oracle_clients c ON c.id = o.client_id
+          WHERE c.actor_id = ?1 AND c.principal_id = ?2 AND o.actor_id = ?1
+          ORDER BY o.id DESC
+          LIMIT ?3",
+    ),
+    (
+        "ap_oracle_principals",
+        "SELECT at, class, detail
+           FROM ap_oracle_ops
+          WHERE actor_id = ?1 AND principal_id = ?2
+          ORDER BY id DESC
+          LIMIT ?3",
+    ),
+    (
+        "post_author_principals",
+        "SELECT at, class, detail
+           FROM post_author_ops
+          WHERE actor_id = ?1 AND principal_id = ?2
+          ORDER BY id DESC
+          LIMIT ?3",
+    ),
+    (
+        "atproto_oracle_principals",
+        "SELECT at, class, detail
+           FROM atproto_oracle_ops
+          WHERE actor_id = ?1 AND principal_id = ?2
+          ORDER BY id DESC
+          LIMIT ?3",
+    ),
+    // The summary source's join, every recorded write of every session the
+    // principal's grants opened.
+    (
+        "atproto_external_write_ops",
+        "SELECT w.at / 1000, 'atproto.commit',
+                w.action || ' ' || w.collection || '/' || w.rkey
+           FROM third_party_principals p
+           JOIN atproto_oauth_grants g
+             ON g.actor_id = p.actor_id AND g.client_id = p.client_id
+           JOIN atproto_external_write_ops w
+             ON w.actor_id = g.actor_id AND w.session_id = g.grant_id
+          WHERE lower(hex(p.actor_id)) = ?1 AND p.principal_id = ?2
+          ORDER BY w.id DESC
+          LIMIT ?3",
+    ),
+];
+
+/// The operations a ceiling's window holds at `now` (unix seconds), read off
+/// its own position (`RateWindow`'s two integers): a rolled window counts
+/// nothing yet, as the ceiling itself would.
+pub(crate) fn oracle_window_ops(now: u64, window_start: i64, window_count: i64) -> u32 {
+    let rolled = now
+        >= u64::try_from(window_start)
+            .unwrap_or(0)
+            .saturating_add(fauna_core::identity_op::WINDOW_SECS);
+    if rolled {
+        0
+    } else {
+        u32::try_from(window_count).unwrap_or(u32::MAX)
+    }
+}
+
+/// Fold one custodian's summary rows into `out`.
+fn merge_oracle_summaries(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    actor_id: &[u8; 32],
+    now: u64,
+    out: &mut std::collections::HashMap<Vec<u8>, OracleSummary>,
+) -> Result<()> {
+    let mut stmt = conn
+        .prepare_cached(sql)
+        .context("prepare oracle summaries")?;
+    let rows = stmt
+        .query_map(rusqlite::params![hex::encode(actor_id)], |r| {
+            let at: Option<i64> = r.get(4)?;
+            let last_op = match at {
+                Some(at) => Some(OracleOp {
+                    at,
+                    class: r.get(5)?,
+                    detail: r.get(6)?,
+                    extra: Default::default(),
+                }),
+                None => None,
+            };
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                last_op,
+            ))
+        })
+        .context("query oracle summaries")?;
+    for row in rows {
+        let (principal_id, use_count, window_start, window_count, last_op) =
+            row.context("read oracle summary")?;
+        let in_window = oracle_window_ops(now, window_start, window_count);
+        let summary = out.entry(principal_id).or_default();
+        summary.ops_in_window = summary.ops_in_window.saturating_add(in_window);
+        summary.requests_served = summary
+            .requests_served
+            .saturating_add(u64::try_from(use_count).unwrap_or(0));
+        if let Some(op) = last_op
+            && summary.last_op.as_ref().is_none_or(|l| op.at >= l.at)
+        {
+            summary.last_op = Some(op);
+        }
+    }
+    Ok(())
+}
+
+impl CacheDb {
     /// The live half of one principal row a principal session dispatches
     /// under: its granted scopes (the latest ceremony's, space-separated as
     /// recorded) and its two attested keys. `None` when the account holds no
@@ -814,6 +1116,52 @@ impl CacheDb {
         )
         .optional()
         .context("read third-party principal reach")
+    }
+
+    /// Admit one `fauna:follow:write` write for the principal at `now` (unix
+    /// seconds) against its fixed window on the row
+    /// (`fauna_core::identity_op::RateWindow`, the oracle's constant): `true`
+    /// and the window advanced, or `false` with nothing stored — a refused
+    /// write does not consume the window. `false` too when the row is gone.
+    pub async fn admit_follow_write(
+        &self,
+        actor_id: &[u8; 32],
+        principal_id: &[u8],
+        now: u64,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let Some((window_start, count)) = conn
+            .query_row(
+                "SELECT follow_window_start, follow_window_count FROM third_party_principals
+                  WHERE actor_id = ?1 AND principal_id = ?2",
+                rusqlite::params![&actor_id[..], principal_id],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .context("read follow window")?
+        else {
+            return Ok(false);
+        };
+        let window = fauna_core::identity_op::RateWindow {
+            window_start: u64::try_from(window_start).unwrap_or(0),
+            count: u32::try_from(count).unwrap_or(u32::MAX),
+        };
+        let Ok(next) = window.admit(now) else {
+            return Ok(false);
+        };
+        conn.execute(
+            "UPDATE third_party_principals
+                SET follow_window_start = ?3, follow_window_count = ?4
+              WHERE actor_id = ?1 AND principal_id = ?2",
+            rusqlite::params![
+                &actor_id[..],
+                principal_id,
+                i64::try_from(next.window_start).unwrap_or(i64::MAX),
+                i64::from(next.count)
+            ],
+        )
+        .context("advance follow window")?;
+        Ok(true)
     }
 
     /// Every principal row of `actor_id` whose consented document declares an
@@ -972,15 +1320,15 @@ impl CacheDb {
                 mint.requested_scopes,
                 now,
                 mint.label,
-                &mint.publisher_key[..],
+                mint.publisher_key.as_ref().map(|k| &k[..]),
             ],
         )
         .context("insert install row")?;
         tx.execute(
             "INSERT INTO hosted_plugins
                 (principal_id, client_id, module_digest, hosts, ingress, settings_schema,
-                 installed_by, installed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 installed_by, installed_at, manifest_jws)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 &principal_id[..],
                 mint.client_id,
@@ -994,11 +1342,70 @@ impl CacheDb {
                     .context("encode settings schema")?,
                 &mint.installed_by[..],
                 now,
+                mint.manifest_jws,
             ],
         )
         .context("insert hosted plugin")?;
         tx.commit().context("commit mint hosted plugin")?;
         Ok(principal_id.to_vec())
+    }
+
+    /// Replace an installed plugin in place — the developer loop's reinstall
+    /// (`third-party.md` § Developer loop). One transaction rewrites the
+    /// install row's declarations (`label`, `publisher_key`, `declared_kinds`,
+    /// `granted_scopes`) and the hosted half (`module_digest`, `hosts`,
+    /// `ingress`, `settings_schema`, `installed_by`, `manifest_jws`) from `mint`; the
+    /// `principal_id`, the holder key (`mint.holder_x25519` is not read),
+    /// `installed_at`, every user's binding row and the plugin's state scope
+    /// are kept. `false` when no plugin `principal_id` is installed.
+    pub async fn replace_hosted_plugin(
+        &self,
+        principal_id: &[u8],
+        mint: &HostedPluginMint,
+    ) -> Result<bool> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction().context("begin replace plugin")?;
+        let n = tx
+            .execute(
+                "UPDATE hosted_plugins
+                    SET module_digest = ?2, hosts = ?3, ingress = ?4, settings_schema = ?5,
+                        installed_by = ?6, manifest_jws = ?8
+                  WHERE principal_id = ?1 AND client_id = ?7",
+                rusqlite::params![
+                    principal_id,
+                    mint.module_digest,
+                    serde_json::to_string(&mint.hosts).context("encode hosts")?,
+                    serde_json::to_string(&mint.ingress).context("encode ingress")?,
+                    mint.settings_schema
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .context("encode settings schema")?,
+                    &mint.installed_by[..],
+                    mint.client_id,
+                    mint.manifest_jws,
+                ],
+            )
+            .context("update hosted plugin")?;
+        if n == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE third_party_principals
+                SET label = ?3, publisher_key = ?4, declared_kinds = ?5, granted_scopes = ?6
+              WHERE actor_id = ?1 AND principal_id = ?2",
+            rusqlite::params![
+                &NEST_OWNER_ACTOR[..],
+                principal_id,
+                mint.label,
+                mint.publisher_key.as_ref().map(|k| &k[..]),
+                serde_json::to_string(&mint.declared_kinds).context("encode declared kinds")?,
+                mint.requested_scopes,
+            ],
+        )
+        .context("update install row")?;
+        tx.commit().context("commit replace plugin")?;
+        Ok(true)
     }
 
     /// Every installed plugin, oldest first (`fauna.plugins.list`, the
@@ -1009,7 +1416,7 @@ impl CacheDb {
             .prepare(
                 "SELECT h.principal_id, h.client_id, p.label, p.holder_x25519, p.publisher_key,
                         p.declared_kinds, p.granted_scopes, h.module_digest, h.hosts, h.ingress,
-                        h.settings_schema, h.installed_by, h.installed_at
+                        h.settings_schema, h.installed_by, h.installed_at, h.manifest_jws
                    FROM hosted_plugins h JOIN third_party_principals p
                      ON p.actor_id = ?1 AND p.principal_id = h.principal_id
                   ORDER BY h.installed_at ASC, h.principal_id ASC",
@@ -1038,6 +1445,7 @@ impl CacheDb {
                     settings_schema: schema.and_then(|s| serde_json::from_str(&s).ok()),
                     installed_by: r.get(11)?,
                     installed_at: r.get(12)?,
+                    manifest_jws: r.get(13)?,
                     bound_accounts: Vec::new(),
                 })
             })
@@ -1072,6 +1480,182 @@ impl CacheDb {
             .await?
             .into_iter()
             .find(|p| p.client_id == client_id))
+    }
+
+    /// The installed plugin whose install row is `principal_id`, if any.
+    pub async fn get_hosted_plugin_by_id(
+        &self,
+        principal_id: &[u8],
+    ) -> Result<Option<HostedPluginRow>> {
+        Ok(self
+            .list_hosted_plugins()
+            .await?
+            .into_iter()
+            .find(|p| p.principal_id == principal_id))
+    }
+
+    /// Bind `actor_id` to the installed plugin of `client_id` — the approval
+    /// of the user's bind card (`third-party.md` § The principal model →
+    /// *Hosted principals*). One transaction through the one find-or-create
+    /// every consent runs ([`upsert_principal_in_tx`], which copies the
+    /// install's form and holder key), with the install's manifest members,
+    /// and **no OAuth grant family**: a hosted plugin holds no token and
+    /// makes no redemption, so its reach is the row's `granted_scopes`.
+    /// Binding again finds the same row and takes the latest scopes. Returns
+    /// the binding row's `principal_id`.
+    ///
+    /// `card_holder` is the holder key the approved card carried, to which
+    /// the approving app minted the account's grants before resolving.
+    ///
+    /// # Errors
+    /// [`BindRefused::NotInstalled`] when no plugin of `client_id` is
+    /// installed (it was uninstalled while the card was open) — no row is
+    /// written, and the capability grants the account minted to
+    /// `card_holder` end in the same transaction unless another of its rows
+    /// holds that key: they would be reach no roster row names.
+    pub async fn bind_account_to_plugin(
+        &self,
+        actor_id: &[u8; 32],
+        client_id: &str,
+        granted_scopes: &str,
+        label: Option<&str>,
+        card_holder: Option<&[u8; 32]>,
+    ) -> Result<Vec<u8>> {
+        let now = now_epoch_millis();
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction().context("begin bind plugin")?;
+        let install: Option<(Option<Vec<u8>>, String, Option<String>)> = tx
+            .query_row(
+                "SELECT p.publisher_key, p.declared_kinds, h.manifest_jws
+                   FROM hosted_plugins h JOIN third_party_principals p
+                     ON p.actor_id = ?1 AND p.principal_id = h.principal_id
+                  WHERE h.client_id = ?2",
+                rusqlite::params![&NEST_OWNER_ACTOR[..], client_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .context("read installed plugin to bind")?;
+        let Some((publisher_key, declared_kinds, jws)) = install else {
+            if let Some(holder) = card_holder {
+                let named: bool = tx
+                    .query_row(
+                        "SELECT EXISTS (SELECT 1 FROM third_party_principals
+                                         WHERE actor_id = ?1 AND holder_x25519 = ?2)",
+                        rusqlite::params![&actor_id[..], &holder[..]],
+                        |r| r.get(0),
+                    )
+                    .context("read holder key's row")?;
+                if !named {
+                    end_capability_grants_held_by(&tx, actor_id, holder)?;
+                    tx.commit().context("commit refused bind")?;
+                }
+            }
+            return Err(anyhow!(BindRefused::NotInstalled));
+        };
+        // The manifest the install verified, whole when the install kept its
+        // JWS (the same bytes the bind card carries); otherwise the members
+        // the install row holds.
+        let verified = jws.as_deref().and_then(|jws| {
+            let host = fauna_protocol::kind_manifest::client_id_host(client_id)?;
+            fauna_protocol::kind_manifest::verify_manifest(jws, &host).ok()
+        });
+        let manifest = match verified {
+            Some(v) => PrincipalManifest::of(&v),
+            None => publisher_key
+                .as_deref()
+                .and_then(|k| <[u8; 32]>::try_from(k).ok())
+                .map(|publisher_key| PrincipalManifest {
+                    publisher_key,
+                    declared_kinds: serde_json::from_str(&declared_kinds).unwrap_or_default(),
+                    declared_service_auth: Vec::new(),
+                    declared_activitypub_peers: Vec::new(),
+                    bridge: None,
+                    events_uri: None,
+                }),
+        };
+        upsert_principal_in_tx(
+            &tx,
+            actor_id,
+            client_id,
+            label,
+            granted_scopes,
+            &PrincipalAttestation {
+                keys: AttestedKeys::default(),
+                execution_form: ExecutionForm::Wasm,
+                manifest,
+            },
+            now,
+        )?;
+        let principal_id: Vec<u8> = tx
+            .query_row(
+                "SELECT principal_id FROM third_party_principals
+                  WHERE actor_id = ?1 AND client_id = ?2",
+                rusqlite::params![&actor_id[..], client_id],
+                |r| r.get(0),
+            )
+            .context("read back binding row")?;
+        tx.commit().context("commit bind plugin")?;
+        Ok(principal_id)
+    }
+
+    /// Write `actor_id`'s settings for the plugin whose install row is
+    /// `install_id` into the plugin's state scope under
+    /// [`plugin_settings_key`] — `fauna.plugins.set_settings`. Only a bound
+    /// account has settings to write: the binding is read in the same
+    /// transaction as the write.
+    ///
+    /// # Errors
+    /// [`BindRefused::NotInstalled`] / [`BindRefused::NotBound`] — nothing is
+    /// written.
+    pub async fn put_plugin_account_settings(
+        &self,
+        actor_id: &[u8; 32],
+        install_id: &[u8],
+        value: &[u8],
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction().context("begin put plugin settings")?;
+        let client_id: Option<String> = tx
+            .query_row(
+                "SELECT client_id FROM hosted_plugins WHERE principal_id = ?1",
+                rusqlite::params![install_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("read plugin for settings")?;
+        let Some(client_id) = client_id else {
+            return Err(anyhow!(BindRefused::NotInstalled));
+        };
+        let bound: bool = tx
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM third_party_principals
+                                 WHERE actor_id = ?1 AND client_id = ?2)",
+                rusqlite::params![&actor_id[..], client_id],
+                |r| r.get(0),
+            )
+            .context("read binding for settings")?;
+        if !bound {
+            return Err(anyhow!(BindRefused::NotBound));
+        }
+        tx.execute(
+            "INSERT INTO plugin_state (principal_id, key, value) VALUES (?1, ?2, ?3)
+             ON CONFLICT (principal_id, key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![install_id, plugin_settings_key(actor_id), value],
+        )
+        .context("write plugin settings")?;
+        tx.commit().context("commit put plugin settings")?;
+        Ok(())
+    }
+
+    /// `actor_id`'s settings for the plugin whose install row is
+    /// `install_id`, as [`Self::put_plugin_account_settings`] wrote them.
+    pub async fn get_plugin_account_settings(
+        &self,
+        actor_id: &[u8; 32],
+        install_id: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        self.plugin_state_get(install_id, &plugin_settings_key(actor_id))
+            .await
     }
 
     /// Uninstall — the admin's one verb over a hosted plugin
@@ -1211,6 +1795,15 @@ fn revoke_principal_in_tx(
     let Some((client_id, holder)) = found else {
         return Ok(None);
     };
+    // A binding to a hosted plugin leaves no settings behind: the account's
+    // entry in the plugin's state scope goes with the row.
+    tx.execute(
+        "DELETE FROM plugin_state
+          WHERE key = ?1
+            AND principal_id IN (SELECT principal_id FROM hosted_plugins WHERE client_id = ?2)",
+        rusqlite::params![plugin_settings_key(actor_id), client_id],
+    )
+    .context("delete the binding's plugin settings")?;
 
     let families: Vec<Vec<u8>> = {
         let mut stmt = tx
@@ -1259,6 +1852,43 @@ fn revoke_principal_in_tx(
             rusqlite::params![actor_hex, principal_id],
         )
         .context("delete the principal's oracle client")?;
+    }
+    // The ActivityPub class's record of the principal (TP11), the same way and
+    // for the same reason; the `activitypub` feature may be off too.
+    if super::table_exists(tx, "ap_oracle_principals")? {
+        let actor_hex = hex::encode(actor_id);
+        for table in ["ap_oracle_ops", "ap_oracle_principals"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE actor_id = ?1 AND principal_id = ?2"),
+                rusqlite::params![actor_hex, principal_id],
+            )
+            .with_context(|| format!("delete the principal's {table} rows"))?;
+        }
+    }
+    // The posting class's record of the principal (TP11), the same way. Its
+    // tables are core (no feature gates them); the existence check keeps the
+    // revoke uniform with the two above.
+    if super::table_exists(tx, "post_author_principals")? {
+        let actor_hex = hex::encode(actor_id);
+        for table in ["post_author_ops", "post_author_principals"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE actor_id = ?1 AND principal_id = ?2"),
+                rusqlite::params![actor_hex, principal_id],
+            )
+            .with_context(|| format!("delete the principal's {table} rows"))?;
+        }
+    }
+    // The ATProto class's record of the principal (TP11), the same way and
+    // for the same reason; core tables, the existence check kept uniform.
+    if super::table_exists(tx, "atproto_oracle_principals")? {
+        let actor_hex = hex::encode(actor_id);
+        for table in ["atproto_oracle_ops", "atproto_oracle_principals"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE actor_id = ?1 AND principal_id = ?2"),
+                rusqlite::params![actor_hex, principal_id],
+            )
+            .with_context(|| format!("delete the principal's {table} rows"))?;
+        }
     }
     tx.execute(
         "DELETE FROM third_party_principals WHERE actor_id = ?1 AND principal_id = ?2",
@@ -1518,7 +2148,7 @@ mod tests {
             client_id: PLUGIN.into(),
             label: Some("Matrix bridge".into()),
             holder_x25519: key,
-            publisher_key: [0xEE; 32],
+            publisher_key: Some([0xEE; 32]),
             declared_kinds: vec!["ext.plugin.example.room".into()],
             requested_scopes: "fauna:records:rw:ext.plugin.example.* fauna:conversations:bridge"
                 .into(),
@@ -1526,6 +2156,7 @@ mod tests {
             hosts: vec!["matrix.org".into()],
             ingress: serde_json::json!([{ "path": "/matrix/", "sni": null }]),
             settings_schema: None,
+            manifest_jws: None,
             installed_by: ALICE,
         }
     }
@@ -1618,6 +2249,131 @@ mod tests {
             db.list_hosted_plugins().await.unwrap()[0].bound_accounts,
             vec![BOB]
         );
+    }
+
+    /// The settings card's bind (`third-party.md` § The principal model →
+    /// *Hosted principals*): approving the bind card mints the account's
+    /// BINDING row with the install's form, key and manifest members and no
+    /// OAuth grant family — a hosted plugin holds no token, its reach is the
+    /// row. Binding twice is one row; a document nobody installed refuses.
+    #[tokio::test]
+    async fn a_bind_mints_the_binding_without_a_grant_family() {
+        let db = CacheDb::open_in_memory().unwrap();
+        db.mint_hosted_plugin(&plugin_mint([0x11; 32]))
+            .await
+            .unwrap();
+        let scopes = "fauna:records:rw:ext.plugin.example.*";
+        let id = db
+            .bind_account_to_plugin(&ALICE, PLUGIN, scopes, Some("Matrix bridge"), None)
+            .await
+            .unwrap();
+        let alice = db.list_third_party_principals(&ALICE).await.unwrap();
+        assert_eq!(alice.len(), 1);
+        let row = &alice[0];
+        assert_eq!(row.principal_id, id);
+        assert_eq!(row.execution_form, "wasm");
+        assert_eq!(row.holder_x25519.as_deref(), Some(&[0x11u8; 32][..]));
+        assert_eq!(row.publisher_key.as_deref(), Some(&[0xEEu8; 32][..]));
+        assert_eq!(row.declared_kinds, vec!["ext.plugin.example.room"]);
+        assert_eq!(row.granted_scopes, scopes);
+        assert_eq!(row.label.as_deref(), Some("Matrix bridge"));
+        assert_eq!(row.live_grants, 0, "no grant family: the row is the reach");
+        assert!(
+            db.list_atproto_oauth_grants(&ALICE)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            db.list_hosted_plugins().await.unwrap()[0].bound_accounts,
+            vec![ALICE]
+        );
+
+        // Twice is once: the same row, the latest scopes.
+        let again = db
+            .bind_account_to_plugin(&ALICE, PLUGIN, "atproto", Some("Matrix bridge"), None)
+            .await
+            .unwrap();
+        assert_eq!(again, id);
+        let alice = db.list_third_party_principals(&ALICE).await.unwrap();
+        assert_eq!(alice.len(), 1);
+        assert_eq!(alice[0].granted_scopes, "atproto");
+
+        // A document nobody installed binds nothing, and the grant the
+        // approving app minted to the card's key ends with the refusal.
+        db.put_capability_grant(&BOB, &[2; 16], &[0x22; 32], NEVER, b"g")
+            .await
+            .unwrap();
+        let err = db
+            .bind_account_to_plugin(
+                &BOB,
+                "https://nope.example/c.json",
+                "atproto",
+                None,
+                Some(&[0x22; 32]),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<BindRefused>(),
+            Some(&BindRefused::NotInstalled)
+        );
+        assert!(
+            db.list_third_party_principals(&BOB)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.get_capability_grant(&BOB, &[2; 16])
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A bound account's settings rest in the plugin's state scope under the
+    /// account's own key, written only while the account is bound, and its
+    /// revoke deletes them with the binding.
+    #[tokio::test]
+    async fn an_accounts_plugin_settings_follow_its_binding() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let pid = db
+            .mint_hosted_plugin(&plugin_mint([0x11; 32]))
+            .await
+            .unwrap();
+        let key = plugin_settings_key(&ALICE);
+        assert_eq!(key, format!("settings/{}", hex::encode(ALICE)));
+        let err = db
+            .put_plugin_account_settings(&ALICE, &pid, b"{}")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<BindRefused>(),
+            Some(&BindRefused::NotBound)
+        );
+        assert_eq!(db.plugin_state_get(&pid, &key).await.unwrap(), None);
+
+        let binding = db
+            .bind_account_to_plugin(&ALICE, PLUGIN, "atproto", None, None)
+            .await
+            .unwrap();
+        db.put_plugin_account_settings(&ALICE, &pid, br#"{"room":"x"}"#)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.plugin_state_get(&pid, &key).await.unwrap().as_deref(),
+            Some(&br#"{"room":"x"}"#[..])
+        );
+        assert_eq!(
+            db.get_plugin_account_settings(&ALICE, &pid).await.unwrap(),
+            Some(br#"{"room":"x"}"#.to_vec())
+        );
+
+        db.revoke_third_party_principal(&ALICE, &binding)
+            .await
+            .unwrap();
+        assert_eq!(db.plugin_state_get(&pid, &key).await.unwrap(), None);
     }
 
     /// Uninstall ends every binding through the revoke cascade, the state,
@@ -1877,9 +2633,6 @@ mod tests {
         use fauna_protocol::kind_manifest::{BridgeBlock, BridgeCapabilityValue};
         PrincipalManifest {
             publisher_key: [0x9B; 32],
-            declared_kinds: vec![],
-            declared_service_auth: vec![],
-            events_uri: None,
             bridge: Some(BridgeBlock {
                 id: id.into(),
                 glyph: "bridge".into(),
@@ -1892,6 +2645,7 @@ mod tests {
                 .collect(),
                 extra: Default::default(),
             }),
+            ..Default::default()
         }
     }
 

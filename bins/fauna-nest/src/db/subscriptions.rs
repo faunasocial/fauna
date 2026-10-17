@@ -245,6 +245,7 @@ impl CacheDb {
         &self,
         author_id: &[u8; 32],
         name: &str,
+        rank: i64,
         description: Option<&str>,
         price_hint: Option<&str>,
         payment_url: Option<&str>,
@@ -265,12 +266,12 @@ impl CacheDb {
         let conn = self.conn.lock().await;
         let changed = conn.execute(
             "UPDATE subscription_tiers SET description = ?1, price_hint = ?2, payment_url = ?3, auto_approve = ?4,
-                    asking_price_value = ?5, asking_price_unit = ?6
+                    asking_price_value = ?5, asking_price_unit = ?6, rank = ?9
              WHERE author_id = ?7 AND name = ?8",
             rusqlite::params![
                 description, price_hint, payment_url, auto_approve as i64,
                 price_value, price_unit,
-                author_id.as_slice(), name
+                author_id.as_slice(), name, rank
             ],
         ).context("update subscription tier")?;
         Ok(changed > 0)
@@ -511,6 +512,19 @@ impl CacheDb {
             )
             .context("enqueue unlock fan-out for new tier")?;
         Ok(changed)
+    }
+
+    /// Edit-time door of the rank fan-out (`monetization.md` § The unifying
+    /// model → *A tier's rank is editable*, rule (3)): the boot-time
+    /// self-heal's own predicate scoped to one author, run by `tiers.update`
+    /// when a tier's rank moved. One predicate, never a copy — so rules
+    /// (a)–(e) (the `hidden` target exclusion included) hold here by
+    /// construction, and a re-run enqueues nothing twice. Inserts only; an
+    /// enrolment the new rank no longer implies is kept (rule (4)). Returns
+    /// the number of requests enqueued.
+    pub async fn enqueue_unlock_fanout_for_author(&self, author_id: &[u8; 32]) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        super::migrations::reconcile_unlock_fanout_requests(&conn, Some(author_id))
     }
 
     // ── Subscribers ───────────────────────────────────────────────────
@@ -992,6 +1006,40 @@ impl CacheDb {
             )
             .context("delete subscribe request")?;
         Ok(changed > 0)
+    }
+
+    /// Upsert `actor_id`'s subscriber encapsulation-key registry entry
+    /// (`post-quantum.md` § surface B). Idempotent: every device derives the
+    /// same bytes, so a re-publish rewrites the same key.
+    pub async fn put_subscriber_encaps_key(
+        &self,
+        actor_id: &[u8; 32],
+        mlkem_encaps_key: &[u8],
+    ) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO subscriber_encaps_keys (actor_id, mlkem_encaps_key, published_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(actor_id) DO UPDATE SET
+                mlkem_encaps_key = excluded.mlkem_encaps_key,
+                published_at = excluded.published_at",
+            rusqlite::params![actor_id.as_slice(), mlkem_encaps_key, now_epoch_secs()],
+        )
+        .context("put subscriber encaps key")?;
+        Ok(())
+    }
+
+    /// `actor_id`'s published subscriber encapsulation key, `None` while the
+    /// account's apps have published none.
+    pub async fn get_subscriber_encaps_key(&self, actor_id: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT mlkem_encaps_key FROM subscriber_encaps_keys WHERE actor_id = ?1",
+            rusqlite::params![actor_id.as_slice()],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("get subscriber encaps key")
     }
 
     pub async fn has_pending_subscribe_request(

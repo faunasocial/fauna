@@ -164,3 +164,61 @@ pub struct AuthVerdicts {
     pub dmarc: DmarcVerdict,
     pub arc: ArcVerdict,
 }
+
+/// What one inbound message contributes to an outbound DMARC aggregate report
+/// (RFC 7489 §7.2, `docs/goal/behavior/dmarc-reporting.md` § Outbound
+/// aggregate-report sender): the identifiers and the *aligned* results the
+/// four verdicts above flatten away.
+///
+/// Produced beside [`AuthVerdicts`] by `fauna_mail::auth::verify_inbound_observed`
+/// at the SMTP perimeter — before any enforcement gate, so mail the perimeter
+/// refuses is counted too — and carried to the nest on
+/// `fauna.bridges.report_dmarc_observation`. Every field is a plain string,
+/// bool or list, so the Go wire mirror needs no hand-written enum translation;
+/// the result tokens are RFC 7489 §A.1's own vocabulary.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(deny_unknown_fields)]
+pub struct DmarcObservation {
+    /// The RFC 5322.From domain, lowercased — the report's `header_from`, and
+    /// the domain whose DMARC policy addresses the report. Empty when the
+    /// message carries no From address.
+    pub header_from_domain: String,
+    /// The RFC 5321.MailFrom domain (the HELO name for a null sender),
+    /// lowercased — the report's `envelope_from` and the SPF `auth_results`
+    /// domain.
+    pub envelope_from_domain: String,
+    /// DKIM produced an aligned pass (the `policy_evaluated/dkim` result).
+    pub dkim_aligned: bool,
+    /// SPF produced an aligned pass (the `policy_evaluated/spf` result).
+    pub spf_aligned: bool,
+    /// One entry per DKIM signature verified, in verification order.
+    pub dkim_results: Vec<DkimAuthResult>,
+    /// The SPF result for `envelope_from_domain`, as an RFC 7489 §A.1
+    /// `SPFResultType` token (`none`, `neutral`, `pass`, `fail`, `softfail`,
+    /// `temperror`, `permerror`).
+    pub spf_result: String,
+}
+
+/// One DKIM signature's raw (unaligned) result — the `auth_results/dkim` row
+/// of an RFC 7489 §A.1 record.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(deny_unknown_fields)]
+pub struct DkimAuthResult {
+    /// The signature's `d=` domain, lowercased.
+    pub domain: String,
+    /// The signature's `s=` selector.
+    pub selector: String,
+    /// An RFC 7489 §A.1 `DKIMResultType` token (`none`, `pass`, `fail`,
+    /// `policy`, `neutral`, `temperror`, `permerror`).
+    pub result: String,
+}
+
+/// The verdict set and the DMARC observation one verification produces.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct InboundAuthOutcome {
+    pub verdicts: AuthVerdicts,
+    pub observation: DmarcObservation,
+}

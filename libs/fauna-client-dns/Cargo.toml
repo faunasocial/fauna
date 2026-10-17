@@ -159,6 +159,15 @@ fauna-client-config = { path = "../fauna-client-config" }
 # *publish* + the renew-reminder UI, not the order). Web-enablement is a later
 # pure-Rust-crypto slice.
 instant-acme = { workspace = true }
+# The e2e ACME directory seed's CA-trusting, UA-tagged `instant_acme::HttpClient`
+# (`src/e2e_acme_seam.rs`, `e2e-automation-surface-gating.md` § The ACME
+# directory seed). An in-repo crate whose third-party deps (hyper-util /
+# hyper-rustls / rustls) are already in the tree through instant-acme, so no
+# package enters the lock. The dependency line cannot be conditioned on
+# `debug_assertions` (a debug e2e build must reach it), so it is unconditional
+# and the ONLY caller is the gated module: a release build references nothing
+# in it and links none of it — the `fauna-e2e-agent` precedent.
+fauna-pebble-testkit = { path = "../fauna-pebble-testkit" }
 # CSR + cert keypair for the finalize step (this crate's own test fixtures still
 # call it directly; the finalize-step CSR itself now goes through fauna-acme-core).
 rcgen = "0.13"

@@ -72,9 +72,10 @@ pub use backend::{
 };
 pub use capabilities::{DeliveryMode, ThreadCapabilities, ThreadEncryption};
 pub use compose::{
-    AddParticipantState, AttachmentDraft, ComposeState, RecipientPickerState, ReplyPreview,
-    ResolveState, SendState,
+    AddParticipantState, AttachmentDraft, ComposeState, RECIPIENT_SUGGESTION_CAP,
+    RecipientPickerState, ReplyPreview, ResolveState, SendState,
 };
+pub use contacts::{ContactsCache, RosterEntry};
 pub use keying::{ThreadKey, normalize_subject};
 pub use list_send::ListSendView;
 pub use manager::ConversationsManager;
@@ -99,7 +100,7 @@ pub use room::{
     prospective_room_class,
 };
 pub use room_settings::{RoomSettingsDraft, RoomSettingsEdit, room_may_name_labeler_kind};
-pub use session::{ConversationsSession, RoomPostSeam};
+pub use session::{ConversationsSession, KEYPACKAGE_LOW_THRESHOLD, RoomPostSeam, keypackages_low};
 #[cfg(not(target_arch = "wasm32"))]
 pub use session::{KEYPACKAGE_TARGET, SessionClosed};
 pub use snapshot::{

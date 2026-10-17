@@ -282,6 +282,18 @@ A monetized post has two parts: a short **free preview** you write, and the
   show them, your subscription tiers, their prices, and payment links are readable
   by anyone. This is the storefront, meant to be seen.
 
+**What a visitor without a Fauna account sees.** A paid post on your website
+shows the free preview, your price and payment link, and a box to enter an
+access code. A visitor who pays through your payment link comes back to a page
+on your site that shows their access code; one you gave a code to by hand
+enters it directly. Entering the code opens the full post for a few minutes.
+The code itself keeps working: when the link expires, the visitor enters the
+code again on the paywall page (most browsers remember it), so they should keep
+it somewhere safe. The same code can still be added to a Fauna account later.
+A code stops working when the payment is refunded or the subscription it paid
+for runs out. Paid files in a paywalled website folder work the same way, one
+file at a time.
+
 ## Posts for one room — what is public and what is not
 
 A post you address to a room also has a **public teaser** and a **sealed full

@@ -91,6 +91,14 @@ pub(crate) async fn connect_with_subprotocol_bearer(
 fn map_bearer_err(e: NestClientError) -> NestClientError {
     match e {
         e @ NestClientError::NestIdentityChanged { .. } => e,
+        // So is a nest that needs updating: `connect_error_is_terminal` stops
+        // on it, which an `Auth` string would hide.
+        NestClientError::Rpc(r) if r.action() == fauna_protocol::RpcErrorAction::NeedsUpdate => {
+            NestClientError::Rpc(r)
+        }
+        // And so is a nest that no longer signs this identity in (case 5 —
+        // the reconnect after a factory reset that forgot it).
+        NestClientError::Rpc(r) if r.is_not_registered() => NestClientError::Rpc(r),
         other => NestClientError::Auth(format!("ws bearer: {other}")),
     }
 }
@@ -155,6 +163,22 @@ mod tests {
             panic!("the verdict must pass through unchanged, got {e:?}");
         };
         assert_eq!(host, "nest.example");
+    }
+
+    /// So does the sign-in refusal `LaunchMachineBearer` carries typed (linux,
+    /// tui): the reconnect after a factory reset that forgot this identity mints
+    /// it at the dial, and an `Auth` string would hide it from
+    /// `connect_error_is_terminal`'s case 5 — the member then sat on
+    /// "Connecting…" for good instead of the sign-in-refused surface.
+    #[test]
+    fn the_sign_in_refusal_survives_the_connect_paths_bearer_seam() {
+        let e = map_bearer_err(NestClientError::Rpc(
+            fauna_protocol::RpcError::not_registered(),
+        ));
+        assert!(
+            matches!(&e, NestClientError::Rpc(r) if r.is_not_registered()),
+            "the refusal must pass through unchanged, got {e:?}"
+        );
     }
 
     /// …while every other bearer failure keeps the `Auth`-wrapped shape the

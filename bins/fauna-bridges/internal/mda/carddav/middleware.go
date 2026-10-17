@@ -103,7 +103,7 @@ func w1Mitigations(next http.Handler) http.Handler {
 // drove. It sits outermost so it captures auth failures and w1 rejections too,
 // and records the final response status via statusRecorder.
 //
-// Volume discipline (memory: a busy-spun refresh loop once filled example.com's
+// Volume discipline (memory: a busy-spun refresh loop once filled the live nest's
 // disk with a 69 GB JSON log): the rare collection-mutation verbs (MKCOL /
 // PROPPATCH / DELETE) log at Info so they surface on a default-Info box without
 // any config flip, while the high-volume read/sync verbs (PROPFIND / REPORT /

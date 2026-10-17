@@ -11,6 +11,7 @@ import org.robolectric.annotation.Config
 import uniffi.fauna_client_mail_settings.AliasPolicyView
 import uniffi.fauna_client_mail_settings.AuthPolicyView
 import uniffi.fauna_client_mail_settings.BaselinePublishView
+import uniffi.fauna_client_mail_settings.BaselineStateView
 import uniffi.fauna_client_mail_settings.ImapPolicyView
 import uniffi.fauna_client_mail_settings.OutboundPolicyView
 import uniffi.fauna_client_mail_settings.SpamPolicyView
@@ -104,6 +105,8 @@ class AdminMailContentTest {
         onSaveAlias: (AliasPolicyView) -> Unit = {},
         baselinePublishResult: BaselinePublishView? = null,
         onPublishBaseline: () -> Unit = {},
+        baselineState: BaselineStateView? = null,
+        onSetBaselineStanding: (Boolean) -> Unit = {},
         // FFI-free stubs mirroring the shared parse_count / parse_count_u64 (trim +
         // parse) so Robolectric stays off the native path — no host JNA needed.
         parseCount: (String) -> UInt? = { it.trim().toUIntOrNull() },
@@ -129,6 +132,9 @@ class AdminMailContentTest {
                 onSaveAlias = onSaveAlias,
                 baselinePublishResult = baselinePublishResult,
                 onPublishBaseline = onPublishBaseline,
+                baselineState = baselineState,
+                onSetBaselineStanding = onSetBaselineStanding,
+                formatDate = { "2026-10-10" },
                 parseCount = parseCount,
                 parseCountU64 = parseCountU64,
             )
@@ -254,6 +260,55 @@ class AdminMailContentTest {
         )
         composeTestRule.onNodeWithTag("admin-mail-publish-spam-baseline-result")
             .performScrollTo().assertTextContains("2 opted-in contributor(s)", substring = true)
+    }
+
+    @Test
+    fun publishBaselineResultRendersDeferredAsWaiting() {
+        // A delta-floor deferral also carries `published = false`; it must read
+        // "Waiting for more contributor activity.", never "too few contributors".
+        render(
+            baselinePublishResult = BaselinePublishView(
+                published = false, contributors = 2u, sampleCount = 0u, skippedContributors = 0u, deferred = true,
+            ),
+        )
+        composeTestRule.onNodeWithTag("admin-mail-publish-spam-baseline-result")
+            .performScrollTo().assertTextContains("Waiting for more contributor activity.")
+    }
+
+    @Test
+    fun standingBaselineToggleFiresItsOwnGesture() {
+        var flipped: Boolean? = null
+        render(onSetBaselineStanding = { flipped = it })
+        composeTestRule.onNodeWithTag("admin-mail-spam-baseline-standing-toggle")
+            .performScrollTo().performClick()
+        // The spam() fixture carries standing off, so the click turns it on.
+        assertEquals(true, flipped)
+    }
+
+    @Test
+    fun baselineStateRendersPublishedNoneAndWaiting() {
+        render(
+            baselineState = BaselineStateView(
+                published = true, contributors = 3u, sampleCount = 42u,
+                publishedAtMs = 1_760_000_000_000L, skippedContributors = 0u, deferred = true, standing = true,
+            ),
+        )
+        composeTestRule.onNodeWithTag("admin-mail-spam-baseline-state").performScrollTo()
+            .assertTextContains(
+                "Published over 3 contributors on 2026-10-10. Waiting for more contributor activity.",
+            )
+    }
+
+    @Test
+    fun baselineStateRendersNoneWhenNothingIsServed() {
+        render(
+            baselineState = BaselineStateView(
+                published = false, contributors = 0u, sampleCount = 0u,
+                publishedAtMs = null, skippedContributors = 0u, deferred = false, standing = false,
+            ),
+        )
+        composeTestRule.onNodeWithTag("admin-mail-spam-baseline-state").performScrollTo()
+            .assertTextContains("No baseline published.")
     }
 
     @Test

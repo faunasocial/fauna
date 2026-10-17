@@ -59,6 +59,7 @@ public partial class MemberReviewViewModel : ViewModelBase
     internal async Task LoadAsync(ConversationsManager? manager)
     {
         IsLoading = true;
+        _opsInFlight++;
         SetError(null);
         try
         {
@@ -70,6 +71,7 @@ public partial class MemberReviewViewModel : ViewModelBase
         }
         finally
         {
+            _opsInFlight--;
             IsLoading = false;
         }
     }
@@ -85,6 +87,64 @@ public partial class MemberReviewViewModel : ViewModelBase
         }
     }
 
+    /// <summary>Whether two reads of the review roster are the same list — by
+    /// content (the generated rows carry byte arrays, which a record compares by
+    /// reference). The store-change re-read's "nothing changed" test, shared by every
+    /// surface that paints the roster (the page, the member chips, the contact
+    /// badges).</summary>
+    internal static bool SameRoster(
+        IReadOnlyList<FfiMemberReview> a, IReadOnlyList<FfiMemberReview> b)
+    {
+        if (a.Count != b.Count) return false;
+        try
+        {
+            return System.Text.Json.JsonSerializer.Serialize(a)
+                == System.Text.Json.JsonSerializer.Serialize(b);
+        }
+        catch (Exception)
+        {
+            // Unserializable: err toward a repaint.
+            return false;
+        }
+    }
+
+    // Loads and verdicts in flight: a store-change re-read waits them out (their
+    // own answer repaints the roster).
+    private int _opsInFlight;
+
+    /// <summary>Start re-reading the roster on the shared store-change notice —
+    /// call from the page's <c>Page_Loaded</c> after <see cref="LoadAsync"/>, pair
+    /// with <see cref="ViewModelBase.CleanupStoreChange"/> on navigate-away.
+    /// <paramref name="manager"/> resolves handles exactly as the load does (a
+    /// getter, so the page's live session manager is read at each notice).</summary>
+    internal void WatchStore(Func<ConversationsManager?> manager) =>
+        WatchStoreChange(_rpc, () => StoreResyncAsync(manager()));
+
+    /// <summary>The store-change re-read (<c>account-runtime.md</c> § A runtime's
+    /// own pump is a source of the notice too, part 4): a person another device
+    /// (or the pump's own succession fold) put up for review shows on the OPEN
+    /// page with no re-visit. Reads the roster only; skipped while a load or
+    /// verdict is in flight; replaces nothing when the read fails or answers what
+    /// shows; leaves <see cref="ViewModelBase.ErrorMessage"/> alone — a verdict's
+    /// partial-eviction message stays.</summary>
+    internal async Task<bool> StoreResyncAsync(ConversationsManager? manager)
+    {
+        if (_opsInFlight > 0) return false;
+        var roster = await _rpc.MemberReviewsListAsync();
+        if (_opsInFlight > 0) return false;
+        var fresh = roster
+            .Select(r => MemberReviewRow.From(r, manager?.HandleForPerson(r.person)))
+            .ToList();
+        if (fresh.Count == Reviews.Count
+            && fresh.Zip(Reviews).All(p =>
+                p.First.DisplayText == p.Second.DisplayText
+                && p.First.Person.AsSpan().SequenceEqual(p.Second.Person)))
+            return false;
+        Reviews.Clear();
+        foreach (var row in fresh) Reviews.Add(row);
+        return true;
+    }
+
     /// <summary>The owner recognises this person — every open item for them
     /// closes with no group changes. The identical write the ephemeral pass
     /// would make, so the two surfaces cannot drift on what Keep means.
@@ -92,6 +152,7 @@ public partial class MemberReviewViewModel : ViewModelBase
     internal async Task KeepAsync(byte[] person, ConversationsManager? manager)
     {
         SetError(null);
+        _opsInFlight++;
         try
         {
             await _rpc.MemberReviewKeepAsync(person);
@@ -100,6 +161,10 @@ public partial class MemberReviewViewModel : ViewModelBase
         catch (Exception ex)
         {
             ShowError(ex);
+        }
+        finally
+        {
+            _opsInFlight--;
         }
     }
 
@@ -112,6 +177,7 @@ public partial class MemberReviewViewModel : ViewModelBase
     internal async Task RemoveAsync(byte[] person, ConversationsManager manager)
     {
         SetError(null);
+        _opsInFlight++;
         try
         {
             var eviction = await _rpc.MemberReviewRemoveAsync(manager, person);
@@ -132,6 +198,10 @@ public partial class MemberReviewViewModel : ViewModelBase
         catch (Exception ex)
         {
             ShowError(ex);
+        }
+        finally
+        {
+            _opsInFlight--;
         }
     }
 

@@ -74,6 +74,11 @@ struct StripeEventData {
 
 #[derive(Deserialize, Default)]
 struct StripeObject {
+    /// The object's own id — on `checkout.session.completed` the Checkout
+    /// Session id the post-checkout redirect substitutes for
+    /// `{CHECKOUT_SESSION_ID}` (the visitor return door's reference).
+    #[serde(default)]
+    id: Option<String>,
     /// Checkout's buyer↔actor binding (monetization.md § Pillar 3 Q4).
     #[serde(default)]
     client_reference_id: Option<String>,
@@ -139,8 +144,14 @@ impl PaymentProvider for StripeProvider {
             }
             _ => PaymentEventKind::Ignored,
         };
+        let return_ref = if event.event_type == "checkout.session.completed" {
+            event.data.object.id
+        } else {
+            None
+        };
         Ok(VerifiedPaymentEvent {
             kind,
+            return_ref,
             buyer_reference: event.data.object.client_reference_id,
             product_reference: event.data.object.subscription,
             valid_until_secs: event.data.object.current_period_end,
@@ -157,7 +168,7 @@ mod tests {
     const NOW: u64 = 1_750_000_000;
 
     fn checkout_body(reference: Option<&str>) -> Vec<u8> {
-        let mut object = serde_json::json!({});
+        let mut object = serde_json::json!({ "id": "cs_test_1" });
         if let Some(r) = reference {
             object["client_reference_id"] = serde_json::json!(r);
         }
@@ -182,6 +193,8 @@ mod tests {
         assert_eq!(ev.kind, PaymentEventKind::Payment);
         assert_eq!(ev.buyer_reference.as_deref(), Some("deadbeef"));
         assert_eq!(ev.external_ref, "evt_1");
+        // The Checkout Session id is the return door's reference.
+        assert_eq!(ev.return_ref.as_deref(), Some("cs_test_1"));
     }
 
     #[test]
@@ -274,5 +287,20 @@ mod tests {
             .unwrap();
         assert_eq!(ev.kind, PaymentEventKind::Payment);
         assert_eq!(ev.valid_until_secs, Some(1_760_000_000));
+    }
+
+    #[test]
+    fn only_checkout_completion_carries_a_return_ref() {
+        // An invoice's object id is no checkout reference: a renewal's claim
+        // reaches the buyer some other way (ruling (2)).
+        let b = serde_json::to_vec(&serde_json::json!({
+            "id": "evt_i", "type": "invoice.paid",
+            "data": { "object": { "id": "in_1" } },
+        }))
+        .unwrap();
+        let ev = StripeProvider
+            .verify(SECRET, &headers_for(SECRET, NOW, &b), &b, NOW)
+            .unwrap();
+        assert_eq!(ev.return_ref, None);
     }
 }

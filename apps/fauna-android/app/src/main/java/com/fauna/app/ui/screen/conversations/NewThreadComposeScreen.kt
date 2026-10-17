@@ -30,6 +30,7 @@ import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.viewmodel.ConversationsVM
 import kotlinx.coroutines.launch
 import uniffi.fauna_conversations.ComposeState
+import uniffi.fauna_conversations.RoomClass
 import uniffi.fauna_conversations.SendState
 // The room model's class mapping — the shared `fauna_conversations::room`
 // helpers every app paints the picker's class statement from.
@@ -133,6 +134,17 @@ fun NewThreadComposeScreen(
                 manager.acceptCurrentRecipientChip()
             }
         },
+        // `recipient-picker-suggestion[i]` -> `accept_suggestion(i)`: the Enter
+        // path run over that row's spelling (probe, then commit) — never the
+        // typed text's `acceptCurrentRecipientChip`, which ignores `i`. The chip's
+        // × is `remove_recipient_chip(i)`.
+        onAcceptSuggestion = { index ->
+            scope.launch { manager.acceptSuggestion(index.toUInt()) }
+        },
+        onRemoveRecipientChip = { index -> manager.removeRecipientChip(index.toUInt()) },
+        // The composer's home-nest choice (`recipient-picker-home-nest-toggle`):
+        // the shared state owns it, the picker's class statement follows it.
+        onHomeNestToggle = { manager.setNewThreadHomeNest(it) },
         onBodyChange = { manager.setNewThreadBody(it) },
         onSubjectChange = { manager.setNewThreadSubject(it.ifEmpty { null }) },
         onTopicToggle = {
@@ -180,12 +192,15 @@ fun NewThreadComposeContent(
     onDiscard: () -> Unit = onBack,
     onRecipientInputChange: (String) -> Unit,
     onAcceptRecipient: () -> Unit,
+    onAcceptSuggestion: (Int) -> Unit = { onAcceptRecipient() },
+    onRemoveRecipientChip: (Int) -> Unit = {},
     onBodyChange: (String) -> Unit,
     onSubjectChange: (String) -> Unit,
     onTopicToggle: () -> Unit,
     onSend: () -> Unit,
     onAttach: () -> Unit,
     onReplyCancel: () -> Unit,
+    onHomeNestToggle: (Boolean) -> Unit = {},
     onRemoveAttachment: (Int) -> Unit = {},
     decorate: (String) -> List<MarkdownDecoration> = { emptyList() },
     wrap: MarkdownWrap = naiveMarkdownWrap,
@@ -264,14 +279,53 @@ fun NewThreadComposeContent(
                 return@Column
             }
 
+            // Whether this send founds a community room: the home-nest toggle is
+            // on and the shared prospective class is community. That send is the
+            // `room.create` ceremony, never a queued channel append, so it needs
+            // a nest and the send gate must say so.
+            val foundsRoom = compose.recipientPicker?.let { picker ->
+                roomProspectiveClass(picker.chips, picker.includeHomeNest) == RoomClass.COMMUNITY
+            } ?: false
+
             compose.recipientPicker?.let { picker ->
                 RecipientPicker(
                     state = picker,
                     onInputChange = onRecipientInputChange,
                     onAccept = onAcceptRecipient,
+                    onAcceptSuggestion = onAcceptSuggestion,
+                    onRemoveChip = onRemoveRecipientChip,
                     displayAddress = displayAddress,
                     bridgeLabels = bridgeLabels,
                 )
+                // `recipient-picker-home-nest-toggle` — whether this nest joins
+                // the room being created. Painted whether or not a chip is
+                // committed: it is a property of the room, chosen before its
+                // first message. `checked` rides `stateDescription`, this app's
+                // carrier for a string state attribute.
+                Row(
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                ) {
+                    Switch(
+                        checked = picker.includeHomeNest,
+                        onCheckedChange = onHomeNestToggle,
+                        modifier = Modifier
+                            .testTag(Ids.RECIPIENT_PICKER_HOME_NEST_TOGGLE)
+                            .semantics {
+                                stateDescription = if (picker.includeHomeNest) "true" else "false"
+                            },
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        stringResource(
+                            if (picker.includeHomeNest) {
+                                R.string.conversations_unified_room_home_nest_yes
+                            } else {
+                                R.string.conversations_unified_room_home_nest_no
+                            },
+                        ),
+                    )
+                }
                 // The class of the room about to be created, stated once a chip
                 // is committed and before the first message goes out
                 // (`conversation-rooms.md` § The three classes). Derived in
@@ -322,6 +376,7 @@ fun NewThreadComposeContent(
                 composeShowMarkersDimRanges = composeShowMarkersDimRanges,
                 displayAddress = displayAddress,
                 byteSize = byteSize,
+                foundsRoom = foundsRoom,
             )
         }
     }

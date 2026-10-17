@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The shared **Bluesky** settings sub-page (macOS + iOS, one FaunaKit view) —
@@ -511,6 +514,9 @@ public struct AtprotoSettingsView: View {
             }
             // A dispatch-on-change toggle: flipping it IS the nest write.
             .faunaGate("fauna.bridges.atproto.set_external_apps_enabled")
+            Text(L.atprotoSettings.externalAppsHint)
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             delegationSection
         }
@@ -746,3 +752,4 @@ private var isDesktopPlatform: Bool {
     false
     #endif
 }
+#endif // !FAUNA_KIDS

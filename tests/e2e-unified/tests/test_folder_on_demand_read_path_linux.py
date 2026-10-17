@@ -3,7 +3,7 @@
 The linux leg of `docs/features/files-on-demand.md` beyond the switch itself
 (`test_folder_location_mode_toggle.py`): once the user turns a bound folder
 on-demand on the Folders page, the per-user `fauna-sync-agent` mounts a FUSE
-root over that directory (on-demand-files.md § Linux FUSE binding — mount-over:
+root over that directory (on-demand-files-linux.md § Linux FUSE binding — mount-over:
 the bound directory IS the backing store and the mount is a view of it), and
 everything else on the box — a file manager, an editor, `ls`, `cat` — reads and
 writes the folder through that view. This module drives that end to end over
@@ -29,7 +29,10 @@ placeholder needs a file the device does not hold, which one seat cannot
 produce through the app UI (linux has no "free up space" gesture). That
 mechanism — open hydrates, flips the row `Synced`, a dehydrated file is never
 a delete — is pinned live against a real mount by the agent's own
-`fuse_live_integration` suite (the `fuse-live-test-check` merge gate). This
+`fuse_live_integration` suite (the `fuse-live-test-check` merge gate), and
+through the apps by the two-seat journey
+`test_folder_on_demand_hydrate_linux.py` (a second seat of the account
+supplies the file). This
 module pins what that suite cannot: that the APP's switch reaches a real agent
 and the folder the user sees is the one being served.
 
@@ -55,6 +58,7 @@ from helpers.folder_content import (
     on_demand_mount_stands,
     upload_count,
 )
+from helpers.fuse_mount import run_through_mount
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.linux]
 
@@ -78,10 +82,14 @@ def _await_mount(app, location, *, mounted: bool) -> None:
     )
 
 
-def _run(*argv: str) -> subprocess.CompletedProcess:
-    """One short child process — the 'another process' of every assertion.
-    Bounded: a hung FUSE request must fail the test, never wedge the run."""
-    return subprocess.run(argv, capture_output=True, text=True, timeout=120)
+def _run(app, folder, *argv: str) -> subprocess.CompletedProcess:
+    """One short child process through ``folder``'s mount — the 'another
+    process' of every assertion. Bounded even when the agent behind the mount
+    is dead (``helpers.fuse_mount``): a hung FUSE request fails the test naming
+    the agent's state, never wedges the run."""
+    return run_through_mount(
+        folder, *argv, text=True, diagnose=lambda: agent_diagnosis(app, "owner"),
+    )
 
 
 @pytest.mark.parametrize("folder_share_owner_app", ["linux"], indirect=True)
@@ -116,7 +124,7 @@ def test_on_demand_folder_is_read_and_written_through_its_mount(
         f"{app.driver.diagnose('folder-location-mode-toggle')} error={app.error_text()!r}"
     )
     assert loc.mode_toggle_state(scope=scope) == "always", (
-        "a fresh linux binding starts always-resident (on-demand-files.md § Linux "
+        "a fresh linux binding starts always-resident (on-demand-files-linux.md § Linux "
         f"FUSE binding); got {loc.mode_toggle_state(scope=scope)!r}"
     )
     assert loc.toggle_mode(scope=scope) == "on-demand", (
@@ -127,12 +135,12 @@ def test_on_demand_folder_is_read_and_written_through_its_mount(
 
     # VERIFICATION, from other processes: the view lists the file and serves
     # its bytes.
-    listed = _run("ls", "-1", str(folder))
+    listed = _run(app, folder, "ls", "-1", str(folder))
     assert listed.returncode == 0 and first in listed.stdout.split("\n"), (
         f"`ls` through the on-demand mount must list {first!r}; rc={listed.returncode} "
         f"stdout={listed.stdout!r} stderr={listed.stderr!r}"
     )
-    read = _run("cat", str(folder / first))
+    read = _run(app, folder, "cat", str(folder / first))
     assert read.returncode == 0 and read.stdout == first_body, (
         f"`cat` through the on-demand mount must return the file's bytes; "
         f"rc={read.returncode} stdout={read.stdout!r} stderr={read.stderr!r}"
@@ -142,7 +150,9 @@ def test_on_demand_folder_is_read_and_written_through_its_mount(
     # it lands in the directory under the view and the agent uploads it.
     second = f"through-{secrets.token_hex(3)}.txt"
     second_body = f"written through the mount {secrets.token_hex(8)}\n"
-    wrote = _run("sh", "-c", 'printf %s "$1" > "$2"', "sh", second_body, str(folder / second))
+    wrote = _run(
+        app, folder, "sh", "-c", 'printf %s "$1" > "$2"', "sh", second_body, str(folder / second),
+    )
     assert wrote.returncode == 0, (
         f"a write through the on-demand mount failed; rc={wrote.returncode} "
         f"stderr={wrote.stderr!r}"
@@ -156,7 +166,9 @@ def test_on_demand_folder_is_read_and_written_through_its_mount(
     # of the old one.
     uploads_before = upload_count(app, first)
     changed_body = first_body + f"changed through the mount {secrets.token_hex(8)}\n"
-    changed = _run("sh", "-c", 'printf %s "$1" > "$2"', "sh", changed_body, str(folder / first))
+    changed = _run(
+        app, folder, "sh", "-c", 'printf %s "$1" > "$2"', "sh", changed_body, str(folder / first),
+    )
     assert changed.returncode == 0, (
         f"changing a file through the on-demand mount failed; rc={changed.returncode} "
         f"stderr={changed.stderr!r}"

@@ -40,7 +40,7 @@ internal static class ReportSheetDialog
     /// <paramref name="onError"/> is the page's <c>error-message</c> line: a failed
     /// send reports there and keeps the sheet open for a retry.
     /// </summary>
-    internal static async Task<ReportOutcome?> ShowAsync(
+    internal static async Task<ReportOutcome?> OpenAsync(
         XamlRoot xamlRoot, INestRpcClient rpc, FfiReportTarget target, Action<string> onError)
     {
         var vm = new ReportSheetViewModel(rpc, target);

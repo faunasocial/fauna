@@ -16,11 +16,17 @@ public partial class NotificationsViewModel : ViewModelBase
     public ObservableCollection<NotificationItem> Notifications { get; } = new();
 
     private readonly INestRpcClient _rpc;
+    private readonly Func<FfiNotificationDestination, bool> _canNavigate;
     private long? _cursor;
 
-    internal NotificationsViewModel(INestRpcClient rpc)
+    /// <param name="canNavigate">Whether this app can act on a decided destination
+    /// right now (the `Family` target is only reachable while the gated family tab is
+    /// shown). Null = every destination is navigable.</param>
+    internal NotificationsViewModel(INestRpcClient rpc,
+        Func<FfiNotificationDestination, bool>? canNavigate = null)
     {
         _rpc = rpc;
+        _canNavigate = canNavigate ?? (_ => true);
         // Re-fetch notifications on every WS reconnect (the linux ResyncRequired
         // sweep set; transport.md § Push events).
         RefreshOnReconnect(rpc, LoadCommand);
@@ -67,7 +73,15 @@ public partial class NotificationsViewModel : ViewModelBase
                 FfiNotificationText.Verbatim v => v.text,
                 _ => n.summary,
             };
-            Notifications.Add(new NotificationItem(n.id, n.notifType, text, n.isRead, n.createdAt));
+            // The shared destination router (`notifications.md` § Deep-link
+            // destinations): shared Rust decides, the app only navigates. Decided
+            // here, while the raw `FfiNotifItem` (source / contentId / senderId) is
+            // still in hand — `NotificationItem` keeps none of them. A destination
+            // this app cannot act on right now (`_canNavigate`) paints an inert row.
+            var destination = FaunaFfiMethods.NotificationDestinationFor(n);
+            var navigable = destination is not null && _canNavigate(destination);
+            Notifications.Add(new NotificationItem(n.id, n.notifType, text, n.isRead, n.createdAt,
+                navigable ? destination : null));
         }
 
         // A full page (== the requested limit) implies more rows behind it.
@@ -102,15 +116,31 @@ public partial class NotificationsViewModel : ViewModelBase
     }
 }
 
-public class NotificationItem(long id, string type, string text, bool isRead, long createdAt)
+public class NotificationItem
 {
-    public long Id { get; } = id;
-    public string Type { get; } = type;
+    // Internal: the generated FFI destination type is internal.
+    internal NotificationItem(long id, string type, string text, bool isRead, long createdAt,
+        FfiNotificationDestination? destination = null)
+    {
+        Id = id;
+        Type = type;
+        Text = text;
+        IsRead = isRead;
+        CreatedAt = createdAt;
+        Destination = destination;
+    }
+
+    /// <summary>Where a tap goes, as decided by shared Rust and filtered by what this
+    /// app can reach right now; null = the row is inert plain text.</summary>
+    internal FfiNotificationDestination? Destination { get; }
+    public bool IsNavigable => Destination is not null;
+    public long Id { get; }
+    public string Type { get; }
     /// <summary>The decided display text (`notification_text_for`'s answer,
     /// already resolved) — never the nest's raw English `summary`.</summary>
-    public string Text { get; } = text;
-    public bool IsRead { get; set; } = isRead;
-    public long CreatedAt { get; } = createdAt;
+    public string Text { get; }
+    public bool IsRead { get; set; }
+    public long CreatedAt { get; }
     public string TypeIcon => Type switch
     {
         "message" => "\uE715",

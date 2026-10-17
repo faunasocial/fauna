@@ -54,8 +54,10 @@ class AdminWebVM @Inject constructor(
                 try {
                     val current = w.getApexActor()
                     val users = actorOptions(api.adminUsersListAll())
-                    val domain = runCatching { api.nestSetupStatus().domain }
-                        .onFailure { ShellLog.w("AdminWebVM", "setup status fetch failed: ${it.message}") }
+                    // The nest's own `web_serving_domain` (admin.md § 7), never the
+                    // setup-status/handle domain.
+                    val domain = runCatching { w.servingDomain() }
+                        .onFailure { ShellLog.w("AdminWebVM", "serving-domain fetch failed: ${it.message}") }
                         .getOrDefault("")
                     currentActorHex.value = current?.let { HexUtil.bytesToHex(it) }
                     actors.value = users

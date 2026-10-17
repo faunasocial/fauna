@@ -1045,3 +1045,173 @@ async fn a_read_token_opens_no_write_route() {
         "a read token on the relay's answer route"
     );
 }
+
+fn chunk_url_by_ref(h: &Harness, hash: &ContentHash, folder_ref: &str) -> String {
+    format!(
+        "{}{}?{}={folder_ref}",
+        h.http_url,
+        fauna_nest_http::paths::chunk_store::chunk_by_hash(&hex::encode(hash.digest())),
+        fauna_nest_http::paths::chunk_store::FOLDER_REF_HINT_PARAM
+    )
+}
+
+/// `file-sync.md` § Relay serving, step (4) — the ref form of the hint. A
+/// member who owns a set of the same NAME as the shared set it reads cannot
+/// reach the shared set by either name form: the by-name resolver finds the
+/// caller's own row first, so the relay asks that set's seats and misses. The
+/// ref form names the row, so it is admitted on the announce's own gate — the
+/// owner and member arms — and relayed from the shared set's seat. The ref
+/// wins over a name beside it and never falls back to one; a ref the caller
+/// may not read, a malformed one and a `foreign:` ref under a session each
+/// answer `404` and ask nobody. The first ask the seat ever receives is the
+/// causal barrier for every "asked nobody" claim.
+#[tokio::test]
+async fn a_member_owning_a_same_named_set_reads_the_shared_set_by_its_ref() {
+    let h = start().await;
+    let member = h.member_kp.actor_id().0;
+    let own = h.state.db.create_folder(FOLDER, &member).await.unwrap();
+    assert_ne!(own, h.folder_id);
+
+    let mut seat = open_authed(&h.ws_url, &h.owner_kp, &h.owner_token).await;
+    admitted(&announce(&mut seat, 1, OWNER_DEVICE, vec![local_ref(h.folder_id)]).await);
+
+    let data = b"held by the owner's laptop, read by a member with a photos of its own".to_vec();
+    let hash = ContentHash::of_raw(&data);
+
+    // Both name forms resolve the member's OWN same-named set, which has no
+    // seat: a plain miss.
+    for url in [
+        chunk_url(&h, &hash),
+        chunk_url_by_hash(
+            &h,
+            &hash,
+            &hex::encode(fauna_core::path_crypto::set_name_hash(FOLDER)),
+        ),
+        // A ref the member may not read (the stranger's row), a malformed ref,
+        // a `foreign:` ref under a session — each beside a name that WOULD
+        // resolve, to pin that the ref never falls back to the name.
+        format!(
+            "{}&{}={FOLDER}",
+            chunk_url_by_ref(&h, &hash, &local_ref(h.stranger_folder_id)),
+            fauna_nest_http::paths::chunk_store::FOLDER_HINT_PARAM
+        ),
+        format!(
+            "{}&{}={FOLDER}",
+            chunk_url_by_ref(&h, &hash, "local:not-a-row"),
+            fauna_nest_http::paths::chunk_store::FOLDER_HINT_PARAM
+        ),
+        format!(
+            "{}&{}={FOLDER}",
+            chunk_url_by_ref(&h, &hash, &format!("foreign:{}", hex::encode([0x11u8; 32]))),
+            fauna_nest_http::paths::chunk_store::FOLDER_HINT_PARAM
+        ),
+    ] {
+        let (status, _, _) = spawn_get(url.clone(), h.member_token.clone())
+            .await
+            .unwrap();
+        assert_eq!(status, 404, "{url}");
+    }
+
+    // The ref names the shared row: admitted on the member arm, relayed from
+    // the owner's seat. This is the first ask the seat receives, so none of
+    // the GETs above asked it.
+    let get = spawn_get(
+        chunk_url_by_ref(&h, &hash, &local_ref(h.folder_id)),
+        h.member_token.clone(),
+    );
+    let wanted = next_wanted(&mut seat).await;
+    assert_eq!(wanted.folder, local_ref(h.folder_id));
+    assert_eq!(wanted.store_key, hex::encode(hash.digest()));
+    assert_eq!(
+        post_answer(&h, &h.owner_token, wanted.request_id, data.clone()).await,
+        204
+    );
+    let (status, body, _) = get.await.unwrap();
+    assert_eq!(
+        status, 200,
+        "the ref finds the shared set past the same-named own one"
+    );
+    assert_eq!(body, data);
+    assert!(
+        !h.store.exists(&hash).await.unwrap(),
+        "a metadata-only folder's relayed bytes never rest on the nest"
+    );
+
+    // A ref the owner holds no grant on — the member's own set — asks nobody,
+    // and the owner's own ref reads as before (the seat's next ask is that
+    // read, the barrier for the refusal before it).
+    let (status, _, _) = spawn_get(
+        chunk_url_by_ref(&h, &hash, &local_ref(own)),
+        h.owner_token.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        status, 404,
+        "the owner is no reader of the member's own set"
+    );
+    let data2 = b"the owner reads its own set by ref".to_vec();
+    let hash2 = ContentHash::of_raw(&data2);
+    let get = spawn_get(
+        chunk_url_by_ref(&h, &hash2, &local_ref(h.folder_id)),
+        h.owner_token.clone(),
+    );
+    let wanted = next_wanted(&mut seat).await;
+    assert_eq!(wanted.store_key, hex::encode(hash2.digest()));
+    assert_eq!(
+        post_answer(&h, &h.owner_token, wanted.request_id, data2.clone()).await,
+        204
+    );
+    let (status, body, _) = get.await.unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, data2);
+}
+
+/// The ref form on the cross-nest arm (`file-sync.md` § Relay serving → *A
+/// member on another nest*, step (5)): a federated byte-plane token reads by
+/// `foreign:<channel>` — the folder its channel's claimant owns, admitted
+/// through the cross-nest roster alone — while a `local:` ref under such a
+/// token, like a `foreign:` ref naming a channel the token's actor is no
+/// member of, is `404` and asks nobody.
+#[tokio::test]
+async fn a_cross_nest_member_reads_by_relay_under_the_channel_ref() {
+    let h = start().await;
+    let mut seat = open_authed(&h.ws_url, &h.owner_kp, &h.owner_token).await;
+    admitted(&announce(&mut seat, 1, OWNER_DEVICE, vec![local_ref(h.folder_id)]).await);
+    let token = bulk_token(
+        &h,
+        FOREIGN_MEMBER,
+        BulkByteAccess::Read,
+        BulkByteMintPurpose::ForeignFolderRead,
+    )
+    .await;
+    let channel = fauna_mls::types::ChannelId::from_group_id(&GROUP_ID).0;
+
+    let data = b"bytes a cross-nest member reads by the channel ref".to_vec();
+    let hash = ContentHash::of_raw(&data);
+    for bad in [
+        local_ref(h.folder_id),
+        format!("foreign:{}", hex::encode([0x22u8; 32])),
+    ] {
+        let (status, _, _) = spawn_get(chunk_url_by_ref(&h, &hash, &bad), token.clone())
+            .await
+            .unwrap();
+        assert_eq!(status, 404, "{bad}");
+    }
+
+    let get = spawn_get(
+        chunk_url_by_ref(&h, &hash, &format!("foreign:{}", hex::encode(channel))),
+        token,
+    );
+    let wanted = next_wanted(&mut seat).await;
+    assert_eq!(wanted.folder, local_ref(h.folder_id));
+    assert_eq!(wanted.store_key, hex::encode(hash.digest()));
+    assert_eq!(
+        post_answer(&h, &h.owner_token, wanted.request_id, data.clone()).await,
+        204
+    );
+    let (status, body, _) = get.await.unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, data);
+    assert!(!h.store.exists(&hash).await.unwrap());
+}

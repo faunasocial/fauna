@@ -115,6 +115,77 @@ pub fn not_ready_text(e: &anyhow::Error) -> Option<fauna_core::localized::Locali
         .map(fauna_core::localized::LocalizedText::key)
 }
 
+/// What the private section's Save answered, every non-success arm carrying a
+/// finished text, so no app words a refusal (the UniFFI and wasm faces map it
+/// onto their own shapes). On [`Self::Saved`] the app drops its staging; on
+/// every other arm the staged edits stay on screen
+/// (`profile.md` § The private section → *Errors*).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StagedSave {
+    /// Written, unchanged, or nothing was staged: the staging is spent.
+    Saved,
+    /// A bounds refusal or a label cap.
+    Refused(fauna_core::localized::LocalizedText),
+    /// Nowhere to write yet, or the read gate's reason: retry once what it
+    /// waits for has come.
+    NotReady(fauna_core::localized::LocalizedText),
+    /// The write failed (`profile.private_save_failed`, the cause as its
+    /// argument).
+    Failed(fauna_core::localized::LocalizedText),
+}
+
+/// The private section's whole Save, for an app that holds an
+/// `OverlayEditor`: `staged` is its `changes()`, `manager` the conversations
+/// manager the projection lives on, `store` this process's account store.
+///
+/// `manager = None` is a seat that hosts no account runtime at all — a web
+/// tab that lost the MLS-writing role to another tab of the same account —
+/// whose Save is refused (`account-client-lifecycle.md` § The client-side
+/// lifecycle → *Bounds, stated*); `store = None` with a manager is a runtime
+/// still assembling (`common.still_loading`).
+pub async fn save_staged(
+    manager: Option<&ConversationsManager>,
+    store: Option<&AccountStoreHandle>,
+    actor_id_hex: &str,
+    staged: Result<
+        Option<fauna_core::contact_overlay::OverlayChanges>,
+        fauna_core::localized::LocalizedText,
+    >,
+) -> StagedSave {
+    use fauna_core::localized::LocalizedText;
+    let changes = match staged {
+        Ok(Some(changes)) => changes,
+        Ok(None) => return StagedSave::Saved,
+        Err(text) => return StagedSave::Refused(text),
+    };
+    let Some(manager) = manager else {
+        return StagedSave::NotReady(LocalizedText::key("profile.private_save_elsewhere"));
+    };
+    let Some(store) = store else {
+        return StagedSave::NotReady(LocalizedText::key("common.still_loading"));
+    };
+    match save(manager, store, actor_id_hex, OverlayWrite::Changes(changes)).await {
+        Ok(OverlayWriteOutcome::Written(_) | OverlayWriteOutcome::Unchanged(_)) => {
+            StagedSave::Saved
+        }
+        Ok(OverlayWriteOutcome::Refused(text)) => StagedSave::Refused(text),
+        Err(e) => save_failure(&e),
+    }
+}
+
+/// A [`save`] error as the Save's answer: the read gate's reason, else the
+/// save failure with its cause.
+pub fn save_failure(e: &anyhow::Error) -> StagedSave {
+    match not_ready_text(e) {
+        Some(text) => StagedSave::NotReady(text),
+        None => StagedSave::Failed(fauna_core::localized::LocalizedText::key_arg(
+            "profile.private_save_failed",
+            "reason",
+            format!("{e:#}"),
+        )),
+    }
+}
+
 /// The outward half: fold each queued pair, then reload the projection once
 /// per burst (the reload's reconcile finds the fixed point, or asks again).
 ///
@@ -233,5 +304,52 @@ mod tests {
             Some("common.needs_other_device")
         );
         assert_eq!(not_ready_text(&anyhow::anyhow!("no generation tip")), None);
+    }
+
+    #[test]
+    fn a_plain_save_error_is_the_save_failure_with_its_cause() {
+        assert_eq!(
+            save_failure(&anyhow::anyhow!("no generation tip")),
+            StagedSave::Failed(fauna_core::localized::LocalizedText::key_arg(
+                "profile.private_save_failed",
+                "reason",
+                "no generation tip"
+            ))
+        );
+    }
+
+    /// The answers a Save gives before it reaches the store: nothing staged
+    /// is spent, a staging refusal is shown, and a seat with no manager (a
+    /// web tab hosting no runtime) or no store yet says why it cannot write.
+    #[tokio::test]
+    async fn a_save_that_cannot_reach_the_store_says_why() {
+        use fauna_core::contact_overlay::OverlayChanges;
+        use fauna_core::localized::LocalizedText;
+
+        let actor = "ab".repeat(32);
+        let staged = || {
+            Ok(Some(OverlayChanges {
+                nickname: Some(Some("Mum".into())),
+                ..Default::default()
+            }))
+        };
+        assert_eq!(
+            save_staged(None, None, &actor, Ok(None)).await,
+            StagedSave::Saved
+        );
+        let refusal = LocalizedText::key("profile.label_too_long");
+        assert_eq!(
+            save_staged(None, None, &actor, Err(refusal.clone())).await,
+            StagedSave::Refused(refusal)
+        );
+        assert_eq!(
+            save_staged(None, None, &actor, staged()).await,
+            StagedSave::NotReady(LocalizedText::key("profile.private_save_elsewhere"))
+        );
+        let manager = ConversationsManager::new();
+        assert_eq!(
+            save_staged(Some(&manager), None, &actor, staged()).await,
+            StagedSave::NotReady(LocalizedText::key("common.still_loading"))
+        );
     }
 }

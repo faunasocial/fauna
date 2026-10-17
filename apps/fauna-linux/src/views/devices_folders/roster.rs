@@ -76,11 +76,10 @@ pub fn update_device_list(
     machine: &Arc<DevicesMachine>,
     local_device_id: Option<&str>,
     keyed_principals: Option<&std::collections::BTreeSet<[u8; 32]>>,
+    own_fingerprint: Option<&str>,
 ) {
     // Clear existing rows.
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
-    }
+    crate::views::layout::clear_list_box_rows(list_box);
 
     for (index, device) in devices.iter().enumerate() {
         let row = build_device_card(
@@ -89,6 +88,7 @@ pub fn update_device_list(
             machine,
             local_device_id,
             keyed_principals,
+            own_fingerprint,
         );
         list_box.append(&row);
     }
@@ -103,6 +103,7 @@ fn build_device_card(
     machine: &Arc<DevicesMachine>,
     local_device_id: Option<&str>,
     keyed_principals: Option<&std::collections::BTreeSet<[u8; 32]>>,
+    own_fingerprint: Option<&str>,
 ) -> gtk::ListBoxRow {
     // `accessible_role(Group)` at construction: a plain `gtk::Box` defaults
     // to role `Generic`, which Linux AT-SPI omits from the tree under some
@@ -179,6 +180,20 @@ fn build_device_card(
             .build();
         set_test_id(&badge, ids::DEVICE_THIS_MARK_BADGE);
         info.append(&badge);
+
+        // This device's own key fingerprint beside its marker — the user's half
+        // of the comparison against each `device-member-fingerprint` (the shared
+        // `fleet_fingerprint`, rendered by the machine; absent while unknown).
+        if let Some(fingerprint) = own_fingerprint {
+            let own = gtk::Label::builder()
+                .label(strings::devices::own_fingerprint(fingerprint))
+                .halign(gtk::Align::Start)
+                .selectable(true)
+                .css_classes(["caption", "dim-label"])
+                .build();
+            set_test_id(&own, ids::DEVICE_OWN_FINGERPRINT);
+            info.append(&own);
+        }
     }
 
     // The keyless-posture marker (`devices.md` § Custody facet piece 1):

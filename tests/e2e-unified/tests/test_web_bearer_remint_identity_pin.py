@@ -52,11 +52,11 @@ BOGUS_PIN = "ab" * 32
 @pytest.fixture
 def web_pin_env(request):
     """web's plain-HTTP harness + the identity it authenticates with — the
-    same WITHDRAWN-arm shape `test_nest_identity_pin_post_auth.py::pin_env`
-    uses for web (plain HTTP serves no `cert_binding`, so a poisoned pin is
-    *unconfirmable* rather than *contradicted*; both are the same verdict
-    class and reach the same surface — reviewed 2026-08-22: this is the
-    real lever for closing gap 1, TLS is not required)."""
+    same shape `test_nest_identity_pin_post_auth.py::pin_env` uses for web
+    (plain HTTP serves the cert-optional identity binding the re-mint reads
+    before signing, so a poisoned pin is *contradicted* by a
+    possession-proven identity — the Changed verdict, reaching the same
+    surface as native; TLS is not required, reviewed 2026-08-22)."""
     spa_url = request.getfixturevalue("spa_url")
     user = request.getfixturevalue("test_user")
     harness = make_launch_harness("web", spa_url=spa_url)

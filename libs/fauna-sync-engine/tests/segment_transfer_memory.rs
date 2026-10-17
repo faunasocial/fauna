@@ -430,6 +430,7 @@ async fn the_owners_backup_pass_never_allocates_the_segment() {
         device_id: None,
         folder_source: None,
         not_assigned: None,
+        bound_source: None,
     };
 
     PEAK.store(0, Ordering::Relaxed);

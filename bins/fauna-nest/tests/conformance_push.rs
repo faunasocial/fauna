@@ -217,7 +217,7 @@ async fn presence_rejects_empty_device_id() {
         "fauna.push.presence",
         encode(&PresenceRequest {
             device_id: String::new(),
-            extra: Default::default(),
+            ..Default::default()
         }),
     )
     .await

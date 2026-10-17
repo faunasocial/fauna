@@ -461,6 +461,11 @@ pub struct FolderPendingShare {
     /// on accept, which opens it once the join has ingested those keys and
     /// names the recipient's foreign-set record with it.
     pub set_name_seal: Option<label_custody::SealedSetName>,
+    /// The folder's residency as its home nest stamped it (the staged
+    /// `WelcomeInbox.residency` — `"metadata_only"` / `"full"`) — threaded
+    /// into `join_folder_welcome` on accept, which seeds the recipient's
+    /// foreign-set record with it. `None` = not stated, never *full*.
+    pub residency: Option<String>,
 }
 
 /// Page size for the pending-share walk: the nest's `fauna.inbox.fetch` cap
@@ -609,6 +614,7 @@ fn collect_folder_shares(
                 welcome.set_name_sealed.as_deref().map(|b| &b[..]),
                 welcome.set_name_hash.as_deref().map(|b| &b[..]),
             ),
+            residency: welcome.residency,
         });
     }
 }
@@ -963,6 +969,9 @@ mod tests {
             // join, so it must reach the DTO for the accept to open it.
             set_name_sealed: Some(vec![0xED; 40].into()),
             set_name_hash: Some(vec![0x5A; 32].into()),
+            // The home nest's residency stamp — must reach the DTO, which
+            // carries it to the accept's record seed.
+            residency: Some("metadata_only".into()),
             ..Default::default()
         })
         .unwrap()
@@ -1160,6 +1169,8 @@ mod tests {
                     sealed: vec![0xED; 40],
                     name_hash: vec![0x5A; 32],
                 }),
+                // The residency stamp rides to the accept the same way.
+                residency: Some("metadata_only".into()),
             }]
         );
         // A peek — listing never acks (accept/decline is a separate explicit ack).

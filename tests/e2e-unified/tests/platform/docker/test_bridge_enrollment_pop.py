@@ -404,7 +404,7 @@ def test_lenient_box_forged_enrollment_is_accepted(lenient_nest):
 def test_enrollment_strict_reported_on_provisioned_box(serving_nest):
     """(E) The strict-side half of the diagnostic: on the artifact-provisioned
     box the admin reply reports strict enrollment for BOTH mail roles — the
-    exact assert the live-Hetzner e2e / a example.com admin runs over the wire,
+    exact assert the live-Hetzner e2e / a live-nest admin runs over the wire,
     since the no-SSH invariant (`testing.md` § Gap 3) leaves no shell to check
     the registry with on a deployed box."""
     with _admin_ws(serving_nest) as admin_conn:

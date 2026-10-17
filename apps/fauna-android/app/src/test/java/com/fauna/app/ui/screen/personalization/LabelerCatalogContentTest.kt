@@ -59,6 +59,7 @@ class LabelerCatalogContentTest {
         onUnsubscribe: (Int) -> Unit = {},
         onCloseInspect: () -> Unit = {},
         kindBadge: (LabelerCatalogEntry) -> String = { it.artifactKind },
+        subscribeEnabled: (Int) -> Boolean = { true },
         ngramLabels: (UInt, UInt) -> Pair<String, String> = { more, less ->
             (if (more >= less) "More like this" else "Less like this") to "In ${more + less} posts"
         },
@@ -72,9 +73,34 @@ class LabelerCatalogContentTest {
                 onUnsubscribe = onUnsubscribe,
                 onCloseInspect = onCloseInspect,
                 kindBadge = kindBadge,
+                subscribeEnabled = subscribeEnabled,
                 ngramLabels = ngramLabels,
             )
         }
+    }
+
+    /**
+     * The subscribe button paints from the shared gate
+     * (`LabelerCatalogMachine::subscribe_enabled`, handed in by the screen) —
+     * a row the gate refuses (its open inspect view failed verification) shows
+     * the button disabled, and the other rows stay enabled. The content never
+     * re-derives the rule from `verified` itself.
+     */
+    @Test
+    fun aRowTheSharedGateRefusesPaintsItsSubscribeDisabled() {
+        render(
+            snapshot = LabelerCatalogSnapshot(
+                listOf(entry("a", subscribed = false), entry("b", subscribed = false)),
+                null,
+                null,
+                loaded = true,
+            ),
+            subscribeEnabled = { index -> index != 1 },
+        )
+        val buttons = composeTestRule.onAllNodesWithTag("labeler-catalog-item-subscribe-button")
+        buttons.assertCountEquals(2)
+        buttons[0].assertIsEnabled()
+        buttons[1].assertIsNotEnabled()
     }
 
     @Test
@@ -170,10 +196,30 @@ class LabelerCatalogContentTest {
         composeTestRule.onNodeWithTag("labeler-inspect-panel").assertExists()
         val metadata = composeTestRule.onNodeWithTag("labeler-inspect-metadata")
         metadata.assertExists()
-        // Below the eleven-line metadata dump, so off the Robolectric screen
+        // The declared label-output revision rides beside the five input flags;
+        // a current-revision labeler carries no needs-a-newer-app line.
+        metadata.assertTextContains("label_abi: 1", substring = true)
+        // Below the twelve-line metadata dump, so off the Robolectric screen
         // until scrolled — a tap on an unscrolled node is a silent no-op.
         composeTestRule.onNodeWithTag("labeler-inspect-close-button").performScrollTo().performClick()
         assertTrue(closed)
+    }
+
+    // A revision past this app's own reads inert and says so (content-moderation-
+    // and-ranking.md § Tier-3 → *The output half of the `label()` ABI*, position (ii)).
+    @Test
+    fun inspectPanelSaysANewerRevisionNeedsANewerApp() {
+        render(
+            snapshot = LabelerCatalogSnapshot(
+                emptyList(),
+                LabelerInspectViewFixture.make(labelAbi = 999u.toUShort(), newerThanThisApp = true),
+                null,
+                loaded = true,
+            ),
+        )
+        val metadata = composeTestRule.onNodeWithTag("labeler-inspect-metadata")
+        metadata.assertTextContains("label_abi: 999", substring = true)
+        metadata.assertTextContains("needs a newer version of the app", substring = true)
     }
 
     // ── List-kind surfacing (content-moderation-and-ranking.md § Tier-3

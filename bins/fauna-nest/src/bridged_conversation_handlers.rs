@@ -107,15 +107,6 @@ async fn serving_bridges(
     Ok(bridges)
 }
 
-/// The far room id `address` names on `bridge`: the far network's own
-/// spelling, except on a first-party leg that keys its rooms on a canonical
-/// form (the Nostr leg's hex, whichever spelling names the key — the key its
-/// ingest and the gate use).
-fn far_room_for(bridge: &ServingBridge, address: &str) -> String {
-    crate::bridge_legs::far_room_id(&bridge.principal_id, address)
-        .unwrap_or_else(|| address.to_string())
-}
-
 /// The calling principal as a conversation bridge, or the refusal.
 async fn caller_bridge(
     state: &AppState,
@@ -492,44 +483,64 @@ fn rooms_open_handler() -> RpcHandler {
         Box::pin(async move {
             require_permission(&state, &actor_id, KIND_ROOMS_OPEN).await?;
             let req: RoomsOpenRequest = decode(&payload).map_err(malformed)?;
-            far_id("address", &req.address)?;
-            let bridges = serving_bridges(&state, &actor_id).await?;
-            // The one place a declared grammar is matched.
-            let mut admitting = bridges.iter().filter(|b| {
-                req.bridge_id.as_deref().is_none_or(|id| id == b.block.id)
-                    && b.block.address_matches(&req.address)
-            });
-            let (Some(bridge), None) = (admitting.next(), admitting.next()) else {
-                return Err(coded_ns(
-                    NS,
-                    "address_refused",
-                    "no single connected bridge accepts this address",
-                ));
-            };
-            let seat = BridgeSeat {
-                principal_id: &bridge.principal_id,
-                bridge: &bridge.block,
-                bridge_x25519: &bridge.x25519,
-            };
-            let far_room_id = far_room_for(bridge, &req.address);
-            let shape = RoomShape {
-                participants: vec![far_room_id.clone()],
-                ..Default::default()
-            };
-            let (row, created) = state
-                .db
-                .upsert_bridged_room(&actor_id, &seat, &far_room_id, &shape)
-                .await
-                .map_err(store_error)?;
-            if created {
-                notify_changed(&state, &actor_id, &row.room_id);
-            }
-            let gate = crate::bridge_dm_gate::gate_context(&state, &actor_id).await?;
-            encode_reply(&RoomsOpenReply {
-                room: room_info(row, Some(bridge), gate.as_ref()),
-                extra: Default::default(),
-            })
+            let far = crate::bridge_legs::NetResolve { state: &state };
+            encode_reply(&rooms_open(&state, &actor_id, &req, &far).await?)
         })
+    })
+}
+
+/// `conversation.rooms.open` past its permission check: the one place a
+/// declared grammar is matched, and — on a first-party leg — where a human
+/// spelling resolves through `far` to the stable id the room keys on.
+async fn rooms_open(
+    state: &AppState,
+    actor_id: &[u8; 32],
+    req: &RoomsOpenRequest,
+    far: &impl crate::bridge_legs::FarResolve,
+) -> Result<RoomsOpenReply, RpcError> {
+    far_id("address", &req.address)?;
+    let bridges = serving_bridges(state, actor_id).await?;
+    let mut admitting = bridges.iter().filter(|b| {
+        req.bridge_id.as_deref().is_none_or(|id| id == b.block.id)
+            && b.block.address_matches(&req.address)
+    });
+    let (Some(bridge), None) = (admitting.next(), admitting.next()) else {
+        return Err(coded_ns(
+            NS,
+            "address_refused",
+            "no single connected bridge accepts this address",
+        ));
+    };
+    let Some(far_room_id) =
+        crate::bridge_legs::far_room_id(far, &bridge.principal_id, actor_id, &req.address).await
+    else {
+        return Err(coded_ns(
+            NS,
+            "address_refused",
+            "the bridge's network does not know this address",
+        ));
+    };
+    let seat = BridgeSeat {
+        principal_id: &bridge.principal_id,
+        bridge: &bridge.block,
+        bridge_x25519: &bridge.x25519,
+    };
+    let shape = RoomShape {
+        participants: vec![far_room_id.clone()],
+        ..Default::default()
+    };
+    let (row, created) = state
+        .db
+        .upsert_bridged_room(actor_id, &seat, &far_room_id, &shape)
+        .await
+        .map_err(store_error)?;
+    if created {
+        notify_changed(state, actor_id, &row.room_id);
+    }
+    let gate = crate::bridge_dm_gate::gate_context(state, actor_id).await?;
+    Ok(RoomsOpenReply {
+        room: room_info(row, Some(bridge), gate.as_ref()),
+        extra: Default::default(),
     })
 }
 
@@ -776,6 +787,22 @@ pub(crate) mod test_support {
         Ok(decode::<RoomsOpenReply>(&reply).unwrap().room)
     }
 
+    /// `conversation.rooms.open` with no bridge named — the shape every app's
+    /// address probe sends — a human spelling resolving through `far`.
+    pub(crate) async fn open_resolving(
+        state: &Arc<AppState>,
+        account: [u8; 32],
+        address: &str,
+        far: &impl crate::bridge_legs::FarResolve,
+    ) -> Result<BridgedRoomInfo, RpcError> {
+        let req = RoomsOpenRequest {
+            bridge_id: None,
+            address: address.to_string(),
+            extra: Default::default(),
+        };
+        Ok(rooms_open(state, &account, &req, far).await?.room)
+    }
+
     /// `conversation.send` of `text`, sealed to the room's bridge key.
     pub(crate) async fn send(
         state: &Arc<AppState>,
@@ -820,9 +847,6 @@ mod tests {
     fn manifest() -> PrincipalManifest {
         PrincipalManifest {
             publisher_key: [0x9B; 32],
-            declared_kinds: vec![],
-            declared_service_auth: vec![],
-            events_uri: None,
             bridge: Some(BridgeBlock {
                 id: "matrix".into(),
                 glyph: "bridge".into(),
@@ -835,6 +859,7 @@ mod tests {
                 .collect(),
                 extra: Default::default(),
             }),
+            ..Default::default()
         }
     }
 

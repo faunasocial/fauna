@@ -6,7 +6,8 @@
 //!
 //! - Signature: `X-Fauna-Signature: hex(HMAC_SHA256(secret, raw_body))`.
 //! - Body (JSON): `{ "id": "...", "event": "payment"|"refund",
-//!   "reference": "<actor hex>"?, "product": "..."?, "valid_until": secs? }`.
+//!   "reference": "<actor hex>"?, "product": "..."?, "valid_until": secs?,
+//!   "return_ref": "..."? }`.
 //!
 //! No timestamp/replay tolerance — the real-provider replay concern is
 //! covered by the Stripe adapter; this one exists to exercise the engine.
@@ -45,6 +46,8 @@ struct FakeEventBody {
     product: Option<String>,
     #[serde(default)]
     valid_until: Option<u64>,
+    #[serde(default)]
+    return_ref: Option<String>,
 }
 
 pub struct FakeProvider;
@@ -82,6 +85,7 @@ impl PaymentProvider for FakeProvider {
             product_reference: parsed.product,
             valid_until_secs: parsed.valid_until,
             external_ref: parsed.id,
+            return_ref: parsed.return_ref,
         })
     }
 }
@@ -124,6 +128,20 @@ mod tests {
         );
         assert_eq!(ev.valid_until_secs, Some(1_800_000_000));
         assert_eq!(ev.external_ref, "pay_1");
+    }
+
+    #[test]
+    fn return_ref_body_field_is_carried() {
+        let b = br#"{"id":"pay_2","event":"payment","return_ref":"cs_test_9"}"#.to_vec();
+        let ev = FakeProvider
+            .verify(SECRET, &signed_headers(SECRET, &b), &b, 0)
+            .unwrap();
+        assert_eq!(ev.return_ref.as_deref(), Some("cs_test_9"));
+        let b = body("payment", None, None);
+        let ev = FakeProvider
+            .verify(SECRET, &signed_headers(SECRET, &b), &b, 0)
+            .unwrap();
+        assert_eq!(ev.return_ref, None);
     }
 
     #[test]

@@ -209,6 +209,25 @@ pub const KIND_PAYLOAD_COVERAGE: &[(&str, &[&str])] = &[
             "peer_sync_chunks_pull_reply",
         ],
     ),
+    (
+        fauna_protocol::peer_sync::KIND_PEER_SYNC_CHANGES_LIST,
+        &[
+            "peer_sync_changes_list_request",
+            "peer_sync_changes_list_reply",
+            // The reply's element type — the ONE row struct both peer legs
+            // carry (`fauna_protocol::peer_row::PeerChangeRow`); its stem is
+            // shared with the share table's changes row.
+            "peer_change_row",
+        ],
+    ),
+    (
+        fauna_protocol::peer_sync::KIND_PEER_SYNC_MANIFESTS_GET,
+        &[
+            "peer_sync_manifests_get_request",
+            "peer_sync_manifests_get_reply",
+            "peer_sync_manifest",
+        ],
+    ),
 ];
 
 /// Target 3 — the peer-leg kinds' payload structs: arbitrary bytes through
@@ -224,9 +243,12 @@ pub fn check_kind_payload_decode(data: &[u8]) -> usize {
     use fauna_protocol::peer::{
         PeerExchangeReply, PeerExchangeRequest, PeerNodeInfoReply, PeerNodeInfoRequest,
     };
+    use fauna_protocol::peer_row::PeerChangeRow;
     use fauna_protocol::peer_sync::{
         PeerSyncAdmitReply, PeerSyncAdmitRequest, PeerSyncBlock, PeerSyncBlocksPullReply,
-        PeerSyncBlocksPullRequest, PeerSyncChunksPullReply, PeerSyncChunksPullRequest,
+        PeerSyncBlocksPullRequest, PeerSyncChangesListReply, PeerSyncChangesListRequest,
+        PeerSyncChunksPullReply, PeerSyncChunksPullRequest, PeerSyncManifest,
+        PeerSyncManifestsGetReply, PeerSyncManifestsGetRequest,
     };
     use fauna_protocol::sync::{SyncChangesListReply, SyncChangesListRequest};
 
@@ -251,6 +273,12 @@ pub fn check_kind_payload_decode(data: &[u8]) -> usize {
     try_decode!(PeerSyncBlocksPullReply);
     try_decode!(PeerSyncChunksPullRequest);
     try_decode!(PeerSyncChunksPullReply);
+    try_decode!(PeerSyncChangesListRequest);
+    try_decode!(PeerSyncChangesListReply);
+    try_decode!(PeerChangeRow);
+    try_decode!(PeerSyncManifestsGetRequest);
+    try_decode!(PeerSyncManifestsGetReply);
+    try_decode!(PeerSyncManifest);
     try_decode!(SyncChangesListRequest);
     try_decode!(SyncChangesListReply);
     ok
@@ -293,8 +321,10 @@ pub const KIND_PAYLOAD_COVERAGE_P2P_SHARE: &[(&str, &[&str])] = &[
             "peer_share_changes_list_request",
             "peer_share_changes_list_reply",
             // The reply's element type: it crosses the wire inside the reply,
-            // and the row-provenance check decodes it on its own.
-            "peer_share_change",
+            // and the row-provenance check decodes it on its own. The one row
+            // struct both legs carry — the stem the base table's
+            // `fauna.peer.sync.changes.list` row shares.
+            "peer_change_row",
         ],
     ),
     (

@@ -115,12 +115,11 @@
 //! # The two Done-step buttons have no machine action
 //!
 //! `mail-import-view-imported-button` / `mail-import-review-skipped-button`
-//! are not backed by any `MailImportAction` — the shared machine never wired a
-//! "view inbox" / "skip log" RPC. Both navigate to Conversations (where mail
-//! lives), the tui lead app's own resolution: a real navigation, not a stub,
-//! but "Review skipped" cannot deep-link to a skip-log page that exists
-//! nowhere in the app yet (the error log lives inline on the Progress screen
-//! instead).
+//! are not backed by any `MailImportAction`. View imported navigates to
+//! Conversations (where mail lives). Review skipped is a page-local toggle
+//! (`ImportCtx::show_skipped`, the tui `show_skipped` shape): it reveals the
+//! snapshot's `error_log` — one line per skipped message or mailbox — below
+//! the Done card (`mailbox-migration.md` § Wizard steps step 6).
 
 use fauna_ui_ids as ids;
 use std::cell::Cell;
@@ -187,6 +186,20 @@ struct ImportWidgets {
     progress_group: adw::PreferencesGroup,
     progress_summary: gtk::Label,
     progress_bar: gtk::ProgressBar,
+    // The credential a session adopted after a restart asks for beside Resume
+    // (`MailImportSnapshot::resume_needs_credentials`, § Resume protocol step
+    // 2): the Source step's own fields for the session's provider, repainted
+    // on the Progress step under the same ids — only the mapped one answers.
+    resume_notice: gtk::Label,
+    resume_app_password_row: adw::ActionRow,
+    resume_app_password_input: gtk::Entry,
+    resume_oauth_row: adw::ActionRow,
+    resume_port_row: adw::ActionRow,
+    resume_port_input: gtk::Entry,
+    resume_tls_mode_row: adw::ActionRow,
+    resume_tls_mode_picker: gtk::DropDown,
+    resume_password_row: adw::ActionRow,
+    resume_password_input: gtk::Entry,
     error_log: gtk::Label,
     mailbox_progress_group: adw::PreferencesGroup,
     mailbox_progress_rows: Rc<std::cell::RefCell<Vec<adw::ActionRow>>>,
@@ -194,6 +207,11 @@ struct ImportWidgets {
     // Step 5 — Done.
     done_group: adw::PreferencesGroup,
     done_summary: gtk::Label,
+    /// The skip log Review skipped reveals below the Done card — a second
+    /// `mail-import-error-log` label (the Progress step's own is hidden by
+    /// then, and `automation::find` prunes non-showing subtrees).
+    done_error_log: gtk::Label,
+    done_error_log_row: adw::ActionRow,
 }
 
 /// Everything the page's handlers + render need. `Rc`-shared into every closure.
@@ -203,8 +221,15 @@ struct ImportCtx {
     /// Set while `render()` programmatically updates a picker, so its
     /// `selected_notify` handler doesn't echo the change back as a dispatch.
     syncing: Cell<bool>,
+    /// Whether Review skipped has revealed the skip log on the Done screen —
+    /// page-local, the tui `MailImportState::show_skipped` shape; cleared by
+    /// `render()` whenever the wizard is off the Done step.
+    show_skipped: Cell<bool>,
     /// Whether the Progress repaint tick is already running — one at a time.
     ticking: Cell<bool>,
+    /// Whether the last rendered snapshot asked for the resume credential —
+    /// the edge that seeds the port draft and the one that drops the password.
+    resume_asked: Cell<bool>,
     w: ImportWidgets,
 }
 
@@ -481,6 +506,61 @@ fn build_page_parts() -> (adw::PreferencesPage, ImportWidgets, WizardButtons) {
     set_test_id(&progress_bar, ids::MAIL_IMPORT_PROGRESS_BAR);
     progress_group.add(&progress_bar);
 
+    let resume_notice = gtk::Label::builder()
+        .label(S::RESUME_NEEDS_PASSWORD)
+        .wrap(true)
+        .xalign(0.0)
+        .visible(false)
+        .build();
+    resume_notice.add_css_class("dim-label");
+    progress_group.add(&resume_notice);
+    let (resume_app_password_row, resume_app_password_input) = entry_row(
+        ids::MAIL_IMPORT_SOURCE_APP_PASSWORD,
+        S::SOURCE_APP_PASSWORD_LABEL,
+        S::SOURCE_APP_PASSWORD_LABEL,
+    );
+    resume_app_password_input.set_visibility(false);
+    resume_app_password_row.set_visible(false);
+    progress_group.add(&resume_app_password_row);
+    let resume_oauth_button = gtk::Button::builder()
+        .label(S::SOURCE_OAUTH_BUTTON)
+        .valign(gtk::Align::Center)
+        .sensitive(false)
+        .build();
+    set_test_id(&resume_oauth_button, ids::MAIL_IMPORT_SOURCE_OAUTH_BUTTON);
+    let resume_oauth_row = adw::ActionRow::builder()
+        .activatable(false)
+        .visible(false)
+        .build();
+    resume_oauth_row.add_suffix(&resume_oauth_button);
+    progress_group.add(&resume_oauth_row);
+    let (resume_port_row, resume_port_input) = entry_row(
+        ids::MAIL_IMPORT_SOURCE_PORT,
+        S::SOURCE_PORT_PLACEHOLDER,
+        S::SOURCE_PORT_PLACEHOLDER,
+    );
+    resume_port_row.set_visible(false);
+    progress_group.add(&resume_port_row);
+    let resume_tls_options: Vec<String> = TLS_MODES.into_iter().map(tls_mode_label).collect();
+    let resume_tls_refs: Vec<&str> = resume_tls_options.iter().map(String::as_str).collect();
+    let resume_tls_mode_picker = gtk::DropDown::from_strings(&resume_tls_refs);
+    resume_tls_mode_picker.set_valign(gtk::Align::Center);
+    set_test_id(&resume_tls_mode_picker, ids::MAIL_IMPORT_SOURCE_TLS_MODE);
+    let resume_tls_mode_row = adw::ActionRow::builder()
+        .title(S::TLS_IMPLICIT)
+        .visible(false)
+        .build();
+    resume_tls_mode_row.add_suffix(&resume_tls_mode_picker);
+    progress_group.add(&resume_tls_mode_row);
+    let (resume_password_row, resume_password_input) = entry_row(
+        ids::MAIL_IMPORT_SOURCE_PASSWORD,
+        S::SOURCE_PASSWORD_PLACEHOLDER,
+        S::SOURCE_PASSWORD_PLACEHOLDER,
+    );
+    resume_password_input.set_visibility(false);
+    resume_password_row.set_visible(false);
+    progress_group.add(&resume_password_row);
+
     let pause_button = gtk::Button::builder()
         .label(S::PAUSE_BUTTON)
         .valign(gtk::Align::Center)
@@ -541,6 +621,13 @@ fn build_page_parts() -> (adw::PreferencesPage, ImportWidgets, WizardButtons) {
     done_nav_row.add_suffix(&view_imported_button);
     done_nav_row.add_suffix(&review_skipped_button);
     done_group.add(&done_nav_row);
+    let done_error_log = super::blank_value_marker(ids::MAIL_IMPORT_ERROR_LOG);
+    let done_error_log_row = adw::ActionRow::builder()
+        .title(S::ERROR_LOG_TITLE)
+        .visible(false)
+        .build();
+    done_error_log_row.add_suffix(&done_error_log);
+    done_group.add(&done_error_log_row);
     page.add(&done_group);
 
     let widgets = ImportWidgets {
@@ -572,11 +659,23 @@ fn build_page_parts() -> (adw::PreferencesPage, ImportWidgets, WizardButtons) {
         progress_group,
         progress_summary,
         progress_bar,
+        resume_notice,
+        resume_app_password_row,
+        resume_app_password_input,
+        resume_oauth_row,
+        resume_port_row,
+        resume_port_input,
+        resume_tls_mode_row,
+        resume_tls_mode_picker,
+        resume_password_row,
+        resume_password_input,
         error_log,
         mailbox_progress_group,
         mailbox_progress_rows: Rc::new(std::cell::RefCell::new(Vec::new())),
         done_group,
         done_summary,
+        done_error_log,
+        done_error_log_row,
     };
     let buttons = WizardButtons {
         connect_button,
@@ -621,7 +720,9 @@ fn wire_machine(widgets: ImportWidgets, b: WizardButtons) {
         machine,
         rt: client.runtime_handle(),
         syncing: Cell::new(false),
+        show_skipped: Cell::new(false),
         ticking: Cell::new(false),
+        resume_asked: Cell::new(false),
         w: widgets,
     });
 
@@ -655,23 +756,21 @@ fn wire_machine(widgets: ImportWidgets, b: WizardButtons) {
             });
     }
     // TLS mode → SetTlsMode (echo-guarded); a cheap client-only mutation, but
-    // dispatched live so the preset/override distinction stays visible.
-    {
+    // dispatched live so the preset/override distinction stays visible. The
+    // Progress step's resume picker is the same choice for an adopted session.
+    for picker in [&ctx.w.tls_mode_picker, &ctx.w.resume_tls_mode_picker] {
         let ctx = Rc::clone(&ctx);
-        ctx.w
-            .tls_mode_picker
-            .clone()
-            .connect_selected_notify(move |dd| {
-                if ctx.syncing.get() {
-                    return;
-                }
-                dispatch_actions(
-                    &ctx,
-                    vec![MailImportAction::SetTlsMode {
-                        mode: tls_mode_at(dd.selected()),
-                    }],
-                );
-            });
+        picker.clone().connect_selected_notify(move |dd| {
+            if ctx.syncing.get() {
+                return;
+            }
+            dispatch_actions(
+                &ctx,
+                vec![MailImportAction::SetTlsMode {
+                    mode: tls_mode_at(dd.selected()),
+                }],
+            );
+        });
     }
 
     // Step 1→2 — commit the whole Source form, then Connect, in one op.
@@ -691,13 +790,26 @@ fn wire_machine(widgets: ImportWidgets, b: WizardButtons) {
     wire_dispatch(&ctx, &b.confirm_back, MailImportAction::Back);
     wire_dispatch(&ctx, &b.start_button, MailImportAction::Start);
     wire_dispatch(&ctx, &b.pause_button, MailImportAction::Pause);
-    wire_dispatch(&ctx, &b.resume_button, MailImportAction::Resume);
+    // Step 5's Resume — commits the resume credential first when the session
+    // was adopted after a restart (shared `resume_actions`).
+    {
+        let ctx = Rc::clone(&ctx);
+        b.resume_button
+            .connect_clicked(move |_| dispatch_actions(&ctx, resume_actions(&ctx)));
+    }
 
-    // The two Done deep-links have no machine action — both go to
-    // Conversations, where mail lives (module docs).
-    for button in [&b.view_imported_button, &b.review_skipped_button] {
-        button.connect_clicked(|btn| {
-            crate::app::navigate_to_section(btn, "conversations");
+    // View imported has no machine action — it goes to Conversations, where
+    // mail lives (module docs).
+    b.view_imported_button.connect_clicked(|btn| {
+        crate::app::navigate_to_section(btn, "conversations");
+    });
+    // Review skipped is a view toggle: the skip log is already on the
+    // snapshot, so no machine action — flip the flag and repaint.
+    {
+        let ctx = Rc::clone(&ctx);
+        b.review_skipped_button.connect_clicked(move |_| {
+            ctx.show_skipped.set(!ctx.show_skipped.get());
+            render(&ctx, &ctx.machine.snapshot());
         });
     }
 
@@ -753,6 +865,61 @@ fn scope_next_actions(ctx: &Rc<ImportCtx>) -> Vec<MailImportAction> {
         &w.date_from_input.text(),
         &w.max_size_input.text(),
     )
+}
+
+/// Step 5's Resume: on a session adopted after a restart, commit the
+/// credential the Progress step painted first. The wire-action shape is
+/// `fauna_client_mail_settings::resume_actions`; this side's own job is
+/// locating the strings — the password sits in the app-password entry for
+/// Gmail / iCloud and the password entry otherwise, as for [`connect_actions`].
+fn resume_actions(ctx: &Rc<ImportCtx>) -> Vec<MailImportAction> {
+    let w = &ctx.w;
+    let snap = ctx.machine.snapshot();
+    let secret = match snap.source_kind {
+        ImportSourceKind::Gmail | ImportSourceKind::ICloud => w.resume_app_password_input.text(),
+        _ => w.resume_password_input.text(),
+    };
+    fauna_client_mail_settings::resume_actions(
+        snap.resume_needs_credentials,
+        snap.source_kind,
+        &w.resume_port_input.text(),
+        SecretString::from(secret.to_string()),
+    )
+}
+
+/// Paint the resume credential for an adopted session
+/// (`MailImportSnapshot::resume_needs_credentials`): the sentence saying why
+/// and the session provider's own field — the app password, Generic's port,
+/// connection security and password, or the Microsoft sign-in. Seeds the port
+/// draft from the session when the ask begins and drops the typed password
+/// once a Resume has used it.
+fn render_resume_credential(ctx: &Rc<ImportCtx>, snap: &MailImportSnapshot) {
+    let w = &ctx.w;
+    let asked = snap.resume_needs_credentials && snap.step == ImportStep::Progress;
+    if asked && !ctx.resume_asked.get() {
+        w.resume_port_input.set_text(&snap.port.to_string());
+    }
+    if !asked && ctx.resume_asked.get() {
+        w.resume_password_input.set_text("");
+        w.resume_app_password_input.set_text("");
+    }
+    ctx.resume_asked.set(asked);
+    let kind = snap.source_kind;
+    let app_password_kind = matches!(kind, ImportSourceKind::Gmail | ImportSourceKind::ICloud);
+    let outlook = kind == ImportSourceKind::Outlook;
+    let generic = kind == ImportSourceKind::Generic;
+    w.resume_notice.set_visible(asked);
+    w.resume_notice.set_label(if outlook {
+        S::RESUME_NEEDS_MICROSOFT
+    } else {
+        S::RESUME_NEEDS_PASSWORD
+    });
+    w.resume_app_password_row
+        .set_visible(asked && app_password_kind);
+    w.resume_oauth_row.set_visible(asked && outlook);
+    w.resume_port_row.set_visible(asked && generic);
+    w.resume_tls_mode_row.set_visible(asked && generic);
+    w.resume_password_row.set_visible(asked && generic);
 }
 
 fn hydrate_and_render(ctx: &Rc<ImportCtx>) {
@@ -846,9 +1013,17 @@ fn start_progress_tick(ctx: &Rc<ImportCtx>) {
     }
     ctx.ticking.set(true);
     let ctx = Rc::clone(ctx);
+    let generation = crate::actor_scope::current_generation();
     glib::timeout_add_local(
         std::time::Duration::from_millis(u64::from(PROGRESS_TICK_MS)),
         move || {
+            // Retired by the canonical drop: a Paused/Errored session stays on
+            // Progress, so the step test alone would keep this tick (and the
+            // outgoing account's machine) alive across a switch.
+            if !crate::actor_scope::poll_still_current(generation) {
+                ctx.ticking.set(false);
+                return glib::ControlFlow::Break;
+            }
             let snap = ctx.machine.snapshot();
             let keep_going = snap.step == ImportStep::Progress;
             render(&ctx, &snap);
@@ -897,12 +1072,15 @@ fn apply_source_visibility(w: &ImportWidgets, kind: ImportSourceKind) {
     w.username_row.set_visible(true);
     w.app_password_row.set_visible(app_password_kind);
     w.app_password_help.set_visible(app_password_kind);
-    w.app_password_help
-        .set_label(if kind == ImportSourceKind::Gmail {
-            S::SOURCE_APP_PASSWORD_HELP_GMAIL
-        } else {
-            S::SOURCE_APP_PASSWORD_HELP_ICLOUD
-        });
+    let help = if kind == ImportSourceKind::Gmail {
+        S::SOURCE_APP_PASSWORD_HELP_GMAIL
+    } else {
+        S::SOURCE_APP_PASSWORD_HELP_ICLOUD
+    };
+    w.app_password_help.set_label(help);
+    // The explanation also rides the field as its `help` attribute — the
+    // observable the cross-app journey reads (tui's `.attr("help", …)`).
+    crate::testid::set_test_attr_text(&w.app_password_input, "help", help);
     w.oauth_row.set_visible(kind == ImportSourceKind::Outlook);
     w.host_row.set_visible(imap_fields_kind);
     w.port_row.set_visible(imap_fields_kind);
@@ -928,6 +1106,9 @@ fn render(ctx: &Rc<ImportCtx>, snap: &MailImportSnapshot) {
     w.progress_group
         .set_visible(snap.step == ImportStep::Progress);
     w.done_group.set_visible(snap.step == ImportStep::Done);
+    if snap.step != ImportStep::Done {
+        ctx.show_skipped.set(false);
+    }
 
     // Pickers (echo-guarded).
     ctx.syncing.set(true);
@@ -937,6 +1118,10 @@ fn render(ctx: &Rc<ImportCtx>, snap: &MailImportSnapshot) {
     }
     if w.tls_mode_picker.selected() != tls_mode_index(snap.tls_mode) {
         w.tls_mode_picker
+            .set_selected(tls_mode_index(snap.tls_mode));
+    }
+    if w.resume_tls_mode_picker.selected() != tls_mode_index(snap.tls_mode) {
+        w.resume_tls_mode_picker
             .set_selected(tls_mode_index(snap.tls_mode));
     }
     ctx.syncing.set(false);
@@ -991,22 +1176,23 @@ fn render(ctx: &Rc<ImportCtx>, snap: &MailImportSnapshot) {
     w.confirm_summary.set_text(&confirm_text(snap));
 
     // Progress fields.
+    render_resume_credential(ctx, snap);
     w.progress_summary.set_text(&progress_text(snap));
     let frac =
         fauna_core::format::quota_fraction(snap.imported_count as i64, snap.total_count as i64);
     w.progress_bar.set_fraction(frac);
+    // The bar's filled fraction as the `fraction` attribute every app serves
+    // (the bar's own text is a per-app rendering).
+    crate::testid::set_test_attr_text(&w.progress_bar, "fraction", &format!("{frac:.4}"));
     w.error_log.set_text(&snap.error_log.join("\n"));
     {
         let mut rows = w.mailbox_progress_rows.borrow_mut();
         for row in rows.drain(..) {
             w.mailbox_progress_group.remove(&row);
         }
-        // The machine tracks only GLOBAL imported/skipped/errored counts, not a
-        // per-mailbox breakdown (`MailImportSnapshot` has no `mailbox_progress`
-        // field the way export's does) — so each row shows its planned message
-        // count, not a live per-mailbox fraction. The tui lead app's own
-        // accurate-to-what-exists simplification, not a gap this page adds.
-        for mb in snap.mailboxes.iter().filter(|m| m.selected) {
+        // One row per mailbox the run takes (laid at Start), each with its own
+        // counts from the shared machine's `mailbox_progress`.
+        for mb in &snap.mailbox_progress {
             let row = adw::ActionRow::builder().title(&mb.name).build();
             row.add_prefix(&super::marker(ids::MAIL_IMPORT_MAILBOX_PROGRESS_LIST_ITEM));
             let name_marker =
@@ -1015,7 +1201,10 @@ fn render(ctx: &Rc<ImportCtx>, snap: &MailImportSnapshot) {
             row.add_suffix(&name_marker);
             let prog_marker =
                 super::blank_value_marker(ids::MAIL_IMPORT_MAILBOX_PROGRESS_LIST_ITEM_PROGRESS);
-            prog_marker.set_text(&S::progress_row_fmt(&mb.message_count.to_string()));
+            prog_marker.set_text(
+                &fauna_client_mail_settings::import_mailbox_progress_text(mb.clone())
+                    .resolve(crate::i18n::strings::lookup),
+            );
             row.add_suffix(&prog_marker);
             w.mailbox_progress_group.add(&row);
             rows.push(row);
@@ -1024,41 +1213,71 @@ fn render(ctx: &Rc<ImportCtx>, snap: &MailImportSnapshot) {
 
     // Done fields.
     w.done_summary.set_text(&done_text(snap));
+    let reveal = ctx.show_skipped.get() && snap.step == ImportStep::Done;
+    w.done_error_log_row.set_visible(reveal);
+    w.done_error_log.set_text(&snap.error_log.join("\n"));
 }
 
-/// The Confirm summary: the source, the selected-mailbox count, and their
-/// summed `message_count` estimate (§ Wizard steps step 4 — no estimated-bytes
-/// or wall-clock field exists on the snapshot, so neither is claimed here).
+/// The Confirm summary: the source, the selected-mailbox count, their message
+/// total and — when every one of them was sized — roughly how much data
+/// (`mailbox-migration.md` § Wizard steps step 4), all from the shared
+/// `MailImportSnapshot::selected_totals`.
 fn confirm_text(snap: &MailImportSnapshot) -> String {
-    let selected = snap.mailboxes.iter().filter(|m| m.selected).count();
-    let messages: u64 = snap
-        .mailboxes
-        .iter()
-        .filter(|m| m.selected)
-        .map(|m| u64::from(m.message_count))
-        .sum();
-    S::confirm_summary_fmt(
-        &source_kind_label(snap.source_kind),
-        &selected.to_string(),
-        &messages.to_string(),
-    )
+    let totals = snap.selected_totals();
+    let source = source_kind_label(snap.source_kind);
+    let mailboxes = totals.mailboxes.to_string();
+    let messages = totals.messages.to_string();
+    match totals.bytes {
+        Some(bytes) => S::confirm_summary_sized_fmt(
+            &source,
+            &mailboxes,
+            &messages,
+            &crate::i18n::byte_size(bytes),
+        ),
+        None => S::confirm_summary_fmt(&source, &mailboxes, &messages),
+    }
 }
 
+/// The progress summary with the run's elapsed time and, while it is
+/// running, the time left (`mailbox-migration.md` § Wizard steps step 5; the
+/// shared `transfer_timing` decides both).
 fn progress_text(snap: &MailImportSnapshot) -> String {
-    S::progress_summary_fmt(
+    let summary = S::progress_summary_fmt(
         &snap.imported_count.to_string(),
         &snap.total_count.to_string(),
         &snap.skipped_count.to_string(),
         &snap.errored_count.to_string(),
-    )
+    );
+    let t = snap.timing(fauna_core::data::Timestamp::now_secs());
+    match (t.elapsed_secs, t.remaining_secs) {
+        (Some(elapsed), Some(remaining)) => {
+            S::progress_remaining_fmt(&summary, &duration_text(elapsed), &duration_text(remaining))
+        }
+        (Some(elapsed), None) => S::progress_elapsed_fmt(&summary, &duration_text(elapsed)),
+        _ => summary,
+    }
 }
 
+/// A duration in the shared coarse format (`value-formatting.md` § Duration).
+fn duration_text(secs: u64) -> String {
+    fauna_core::format::duration_secs(secs).resolve(crate::i18n::strings::lookup)
+}
+
+/// § Wizard steps step 6: the counts and the time elapsed; a snapshot with
+/// no clock yet keeps the untimed form.
 fn done_text(snap: &MailImportSnapshot) -> String {
-    S::done_summary_fmt(
-        &snap.imported_count.to_string(),
-        &snap.skipped_count.to_string(),
-        &snap.errored_count.to_string(),
-    )
+    let imported = snap.imported_count.to_string();
+    let skipped = snap.skipped_count.to_string();
+    let errored = snap.errored_count.to_string();
+    match snap
+        .timing(fauna_core::data::Timestamp::now_secs())
+        .elapsed_secs
+    {
+        Some(elapsed) => {
+            S::done_summary_timed_fmt(&imported, &skipped, &errored, &duration_text(elapsed))
+        }
+        None => S::done_summary_fmt(&imported, &skipped, &errored),
+    }
 }
 
 #[cfg(test)]
@@ -1100,11 +1319,13 @@ mod tests {
                 name: "INBOX".into(),
                 selected: true,
                 message_count: 7,
+                byte_total: None,
             },
             SourceMailboxOption {
                 name: "Trash".into(),
                 selected: false,
                 message_count: 99,
+                byte_total: None,
             },
         ];
         // Only SELECTED mailboxes count toward either figure.
@@ -1131,6 +1352,29 @@ mod tests {
         snap.errored_count = 1;
         assert_eq!(done_text(&snap), "12 imported · 4 skipped · 1 errored");
         assert_eq!(done_text(&snap), S::done_summary_fmt("12", "4", "1"));
+    }
+
+    /// The timed forms: the Done card says how long the run took, the progress
+    /// summary adds elapsed time — both from the shared `transfer_timing`.
+    #[test]
+    fn timed_summaries_render_through_the_shared_timing() {
+        let mut snap = a_snapshot();
+        snap.started_at = 1_000;
+        snap.last_progress_at = 1_090; // session_state None → not running → 90 s
+        snap.imported_count = 12;
+        snap.skipped_count = 4;
+        snap.errored_count = 1;
+        snap.total_count = 20;
+        let took = duration_text(90);
+        assert_eq!(
+            done_text(&snap),
+            S::done_summary_timed_fmt("12", "4", "1", &took)
+        );
+        assert!(done_text(&snap).contains("took"), "{}", done_text(&snap));
+        assert_eq!(
+            progress_text(&snap),
+            S::progress_elapsed_fmt(&S::progress_summary_fmt("12", "20", "4", "1"), &took)
+        );
     }
 
     /// The module docs' per-provider field table, as code.

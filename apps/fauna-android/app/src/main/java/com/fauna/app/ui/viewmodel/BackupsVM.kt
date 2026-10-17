@@ -145,7 +145,7 @@ class BackupsVM @Inject constructor(
      * device id or a fetch failure (surfaced through [downloadError]); the
      * caller (the screen) does the platform-native save step. */
     suspend fun downloadSnapshotFile(snapshotId: Int, path: String): ByteArray? {
-        val deviceIdHex = secureStorage.deviceId ?: return null
+        val deviceIdHex = secureStorage.resolveDeviceId() ?: return null
         return try {
             api.downloadSnapshotFileBytes(deviceIdHex, snapshotId, path).also {
                 _downloadError.value = null
@@ -214,7 +214,7 @@ class BackupsVM @Inject constructor(
 
     private fun ensureMachine(): BackupsMachine? {
         machine?.let { return it }
-        val built = api.buildBackupsMachine(observer, secureStorage.deviceId) ?: return null
+        val built = api.buildBackupsMachine(observer, secureStorage.resolveDeviceId()) ?: return null
         machine = built
         return built
     }

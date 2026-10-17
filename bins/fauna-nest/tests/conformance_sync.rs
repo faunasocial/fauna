@@ -1157,6 +1157,7 @@ async fn supersede_marks_old_rows_and_hides_them_from_list() {
                 device_id: dev.clone(),
                 path: "pre-bind.txt".into(),
                 manifest_hash: m_head.clone(),
+                source_manifest_hash: Some(m_old.clone()),
                 ..Default::default()
             }),
         )

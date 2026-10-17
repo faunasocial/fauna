@@ -24,13 +24,15 @@ Drives the full production surface of `docs/goal/behavior/monetization.md`
   actor can't take it;
 - a refund landing before approval strips the request's payment marker.
 
-What deliberately is NOT here: completing the grant (the author-client
-KeyBlob mint) and the post-grant `valid_until` expiry/refund behavior need
-the shared-Rust drain pump, which this API harness can't run — they are
-covered deterministically Rust-side: `bins/fauna-nest/tests/
-conformance_payments.rs` (client-minted grant enqueue, expiry lapse, refund void,
-window stamping at approve) and the `fauna-client-subscriptions`
-orchestration test (`drain_approves_a_payment_entitled_request_on_a_non_auto_tier`).
+- the post-grant window: a payment whose period has run out does not entitle,
+  a renewal extends it, and a refund on a granted subscription ends access.
+  The nest only ever ENQUEUES a grant; these tests complete it themselves as
+  the author's client — they keep the tier's period key at create
+  (`ApiActor.subscription_create_tier_with_key`) and mint the approve upload
+  through the same shared Rust every app's drain pump rides
+  (`ApiActor.subscription_grant_pending`), so no app is launched. The drain
+  pump's own scheduling is covered by the `fauna-client-subscriptions`
+  orchestration test (`drain_approves_a_payment_entitled_request_on_a_non_auto_tier`).
 
 Each test registers its own fresh buyer (one grant story per actor —
 module-shared nest, so cross-test actor reuse would make order load-bearing).
@@ -39,6 +41,7 @@ module-shared nest, so cross-test actor reuse would make order load-bearing).
 import hashlib
 import hmac
 import json
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -369,9 +372,8 @@ def test_claims_mint_and_list_cover_the_manual_no_api_path(paid_nest):
 def test_refund_before_approval_strips_the_payment_marker(paid_nest):
     """A refund landing while the request is still queued demotes it to an
     ordinary manual request (the marker clears; the row survives for the
-    creator to judge). Refund/expiry on an ACTIVE subscription is covered
-    Rust-side (conformance_payments.rs) — completing a grant needs the
-    author-client mint this harness can't run."""
+    creator to judge). Refund on an ACTIVE subscription is
+    `test_a_refund_on_a_granted_subscription_ends_access`."""
     buyer, _buyer_actor = _fresh_buyer(paid_nest)
     external_ref = f"pay_{uuid.uuid4().hex[:10]}"
     body = _payment_body(reference=buyer["actor_id_hex"], external_ref=external_ref)
@@ -395,6 +397,144 @@ def test_refund_before_approval_strips_the_payment_marker(paid_nest):
     rows = _requests_for(paid_nest, buyer)
     assert len(rows) == 1 and rows[0]["payment_entitled"] is False, (
         f"the refund strips the payment marker; the row stays manual: {rows!r}"
+    )
+
+
+def _keyed_creator(paid_nest) -> tuple[dict, ApiActor, str, bytes]:
+    """A fresh creator whose tier's period key THIS test keeps — the custody
+    an author's app holds — so the test completes a payment grant itself
+    through the real approve door (`ApiActor.subscription_grant_pending`),
+    with no app. Returns (creator, actor, webhook secret, period key)."""
+    creator = create_actor_and_register(
+        paid_nest["port"], base_url=paid_nest["url"], admin_signing_key=paid_nest["admin_sk"]
+    )
+    creator_actor = ApiActor(
+        paid_nest["url"],
+        creator["token"],
+        creator["actor_id_hex"],
+        bytes(creator["signing_key"]),
+    )
+    reply, period_key = creator_actor.subscription_create_tier_with_key(
+        "gold", rank=1, auto_approve=False, price_hint="$5/mo"
+    )
+    assert reply.get("created") is True, f"tier create failed: {reply!r}"
+    secret = f"whsec_{uuid.uuid4().hex}"
+    saved = creator_actor._ws_call(
+        "fauna.payments.providers.set",
+        {"kind": "fake", "webhook_secret": secret, "tier": "gold"},
+    )
+    assert saved.get("saved") is True, f"providers.set failed: {saved!r}"
+    return creator, creator_actor, secret, period_key
+
+
+def _pay(paid_nest, creator, secret, body) -> dict:
+    status, reply = _post_webhook(
+        paid_nest["url"], creator["actor_id_hex"], "fake", body, _sign_fake(secret, body)
+    )
+    assert status == 200, f"a signed delivery must be accepted: {status} {reply!r}"
+    return reply
+
+
+@pytest.mark.feature("subscriptions-and-tiers")
+def test_a_paid_subscription_ends_when_its_window_runs_out_and_a_renewal_extends_it(paid_nest):
+    """monetization.md § Pillar 3 → *Expiry & revocation — self-healing via
+    `valid_until`*: a renewal webhook extends the window, and a lapsed
+    entitlement simply stops entitling — no revocation list. Mirrors
+    `conformance_payments.rs::expired_window_unentitles_without_revocation_list`
+    at the wire: the grant is completed by this test acting as the author's
+    client (it kept the tier's period key), so every assertion runs against a
+    real approved subscriber row, never a seeded one.
+
+    The lapse is expressed as a window that has ALREADY ended when the grant
+    lands — a state, not a wait (e2e convention 14)."""
+    creator, creator_actor, secret, period_key = _keyed_creator(paid_nest)
+    buyer, buyer_actor = _fresh_buyer(paid_nest)
+    author_id = bytes(creator["actor_id_bytes"])
+    buyer_id = bytes(buyer["actor_id_bytes"])
+    now = int(time.time())
+
+    # 1. A payment whose paid period has already run out: the grant completes,
+    #    and the subscription is NOT in force.
+    reply = _pay(paid_nest, creator, secret,
+                 _payment_body(reference=buyer["actor_id_hex"], valid_until=now - 60))
+    assert reply.get("queued") is True, f"{reply!r}"
+    creator_actor.subscription_grant_pending("gold", period_key, buyer_id)
+    sub = buyer_actor.subscription_status(author_id)
+    assert sub.get("tier") != "gold", (
+        f"a subscription whose paid period has run out must not be in force: {sub!r}"
+    )
+    with pytest.raises(RpcCallError) as exc:
+        buyer_actor.subscription_key_blob(author_id, "gold")
+    assert exc.value.code.endswith("not_subscribed"), (
+        f"a lapsed buyer must not be served the tier's key: {exc.value.code}"
+    )
+
+    # 2. A renewal re-entitles: it queues like a new grant (the lapsed row is
+    #    not active), the author's client completes it, and the window it
+    #    carried is the one in force.
+    first_until = now + 3600
+    reply = _pay(paid_nest, creator, secret,
+                 _payment_body(reference=buyer["actor_id_hex"], valid_until=first_until))
+    assert reply.get("queued") is True, f"a lapsed buyer's renewal re-queues: {reply!r}"
+    creator_actor.subscription_grant_pending("gold", period_key, buyer_id)
+    sub = buyer_actor.subscription_status(author_id)
+    assert sub.get("tier") == "gold", f"the renewal must put the subscription back in force: {sub!r}"
+    assert sub.get("expires_at") == first_until * 1_000_000, (
+        f"status.get must report the paid window (micros): {sub!r}"
+    )
+    buyer_actor.subscription_key_blob(author_id, "gold")  # served again
+
+    # 3. A renewal while still in force extends the window in place — no new
+    #    request, no author action.
+    second_until = now + 7200
+    reply = _pay(paid_nest, creator, secret,
+                 _payment_body(reference=buyer["actor_id_hex"], valid_until=second_until))
+    assert reply.get("queued") is False, (
+        f"an active subscriber's renewal applies directly, never re-queues: {reply!r}"
+    )
+    assert [
+        r for r in creator_actor.subscription_requests_list()
+        if bytes(r["subscriber_id"]) == bytes(buyer["actor_id_bytes"])
+    ] == [], "an in-force renewal leaves nothing for the author's client to do"
+    sub = buyer_actor.subscription_status(author_id)
+    assert sub.get("tier") == "gold"
+    assert sub.get("expires_at") == second_until * 1_000_000, (
+        f"the renewal must extend the window to the new end: {sub!r}"
+    )
+
+
+@pytest.mark.feature("subscriptions-and-tiers")
+def test_a_refund_on_a_granted_subscription_ends_access(paid_nest):
+    """monetization.md § Pillar 3 → *Expiry & revocation*: a refund/dispute
+    event shortens or voids the window. Here on an ACTIVE subscription — the
+    case `test_refund_before_approval_strips_the_payment_marker` leaves to
+    the grant being completed, which this test does itself as the author's
+    client. The fake provider's `refund` event is the normalized form every
+    adapter maps its refund and dispute events to (`PaymentEventKind::Refund`)."""
+    creator, creator_actor, secret, period_key = _keyed_creator(paid_nest)
+    buyer, buyer_actor = _fresh_buyer(paid_nest)
+    author_id = bytes(creator["actor_id_bytes"])
+    external_ref = f"pay_{uuid.uuid4().hex[:10]}"
+    until = int(time.time()) + 30 * 24 * 3600
+
+    reply = _pay(paid_nest, creator, secret, _payment_body(
+        reference=buyer["actor_id_hex"], valid_until=until, external_ref=external_ref))
+    assert reply.get("queued") is True, f"{reply!r}"
+    creator_actor.subscription_grant_pending("gold", period_key, bytes(buyer["actor_id_bytes"]))
+    sub = buyer_actor.subscription_status(author_id)
+    assert sub.get("tier") == "gold", f"the paid grant must be in force: {sub!r}"
+    buyer_actor.subscription_key_blob(author_id, "gold")
+
+    reply = _pay(paid_nest, creator, secret, _payment_body(
+        reference=buyer["actor_id_hex"], event="refund", external_ref=external_ref))
+    assert reply.get("status") == "refund_applied", f"{reply!r}"
+
+    sub = buyer_actor.subscription_status(author_id)
+    assert sub.get("tier") != "gold", f"a refund must end the subscription at once: {sub!r}"
+    with pytest.raises(RpcCallError) as exc:
+        buyer_actor.subscription_key_blob(author_id, "gold")
+    assert exc.value.code.endswith("not_subscribed"), (
+        f"a refunded buyer must not be served the tier's key: {exc.value.code}"
     )
 
 
@@ -467,3 +607,55 @@ def test_provider_status_stamps_at_webhook_ingress(paid_nest):
     assert row.get("last_verified_at") == verified_at, (
         "a rejection must not clear or move the earlier verification stamp"
     )
+
+
+@pytest.mark.feature("paid-posts-and-tips")
+def test_a_bought_post_stays_unlocked_with_no_end_date(paid_nest):
+    """monetization.md § Per-post pay-to-unlock → *Perpetual by default*: a
+    purchase of a single post maps to `valid_until = None` (the
+    `claims_mint(tier, None)` precedent). The creator sells the post as its
+    degenerate unlock tier (`unlocks_post`), hands the buyer a claim code
+    (the no-API path every mechanism reduces to), and the buyer's unlock —
+    completed by this test as the author's client — carries no end date at
+    every place the nest states one: the minted code, the redemption, and the
+    creator's audit row; and the buyer is served the post's key."""
+    from fauna_ffi import open_key_blob
+
+    creator = create_actor_and_register(
+        paid_nest["port"], base_url=paid_nest["url"], admin_signing_key=paid_nest["admin_sk"]
+    )
+    creator_actor = ApiActor(
+        paid_nest["url"], creator["token"], creator["actor_id_hex"],
+        bytes(creator["signing_key"]),
+    )
+    post_id = uuid.uuid4().hex + uuid.uuid4().hex
+    tier = f"post-{post_id[:12]}"
+    reply, period_key = creator_actor.subscription_create_tier_with_key(
+        tier, rank=1, price_hint="$2", unlocks_post=post_id)
+    assert reply.get("created") is True, f"unlock tier create failed: {reply!r}"
+
+    minted = creator_actor._ws_call("fauna.payments.claims.mint", {"tier": tier})
+    assert minted.get("valid_until") is None, f"a sale code carries no end date: {minted!r}"
+
+    buyer, buyer_actor = _fresh_buyer(paid_nest)
+    redeemed = buyer_actor._ws_call("fauna.payments.claims.redeem", {"code": minted["code"]})
+    assert redeemed.get("tier") == tier, f"{redeemed!r}"
+    assert redeemed.get("valid_until") is None, (
+        f"buying a post must grant it with no end date: {redeemed!r}"
+    )
+    assert redeemed.get("queued") is True, f"{redeemed!r}"
+
+    creator_actor.subscription_grant_pending(tier, period_key, bytes(buyer["actor_id_bytes"]))
+
+    # The unlock is in force: the buyer is served the post's key, and it opens
+    # to exactly the key the post is sealed under.
+    blob = buyer_actor.subscription_key_blob(bytes(creator["actor_id_bytes"]), tier)
+    opened, blob_author = open_key_blob(bytes(buyer["signing_key"]), blob["blob_data"])
+    assert opened == period_key, "the bought post's key must open for its buyer"
+    assert blob_author == bytes(creator["actor_id_bytes"])
+
+    # And the creator's audit row says the same: redeemed, no window.
+    listed = creator_actor._ws_call("fauna.payments.claims.list", {})
+    row = [c for c in listed.get("claims", []) if c.get("code") == minted["code"]]
+    assert len(row) == 1 and row[0].get("valid_until") is None, f"{listed!r}"
+    assert row[0].get("redeemed_by") == bytes(buyer["actor_id_bytes"]), f"{row!r}"

@@ -51,6 +51,20 @@ use crate::blob_store::BlobStoreBackend;
 /// then encrypt).
 const SEALED_CHUNK_OVERHEAD: u64 = 1 + fauna_core::chunk_crypto::ENCRYPTION_OVERHEAD as u64;
 
+/// The largest file this walk reassembles in memory (a hard-coded nest
+/// constant; no knob). A manifest declaring more is [`FileOpenError::Oversized`]
+/// before any read.
+const MAX_SERVED_FILE_BYTES: u64 = 1 << 30;
+
+/// The most the output buffer is sized ahead of the bytes that have arrived.
+const MAX_PREALLOC_BYTES: u64 = 16 << 20;
+
+/// An initial buffer capacity from an uploader-declared size: the declared size
+/// up to [`MAX_PREALLOC_BYTES`], never the raw field.
+fn prealloc(declared: u64) -> usize {
+    declared.min(MAX_PREALLOC_BYTES) as usize
+}
+
 /// Why a manifest-addressed file could not be produced as plaintext bytes.
 #[derive(Debug, thiserror::Error)]
 pub enum FileOpenError {
@@ -170,11 +184,20 @@ pub async fn read_file_by_manifest(
     if listed as u64 > manifest.total_size.max(1) {
         return Err(FileOpenError::Oversized);
     }
+    // `total_size` is itself an uploader-chosen u64 that no upload route checks
+    // against the chunks. The running totals below only bind the walk to it, so
+    // an inflated size (matched by inflated repeats) would still walk that far;
+    // and a buffer sized from it asks the allocator for the uploader's number,
+    // whose failure aborts the process. Cap it before any read, and size the
+    // buffer from what has arrived, never from the field.
+    if manifest.total_size > MAX_SERVED_FILE_BYTES {
+        return Err(FileOpenError::Oversized);
+    }
 
     // Plaintext: the store key is the plaintext chunk hash; decoded bytes are
     // the content. (`stored_hashes` absent ⇒ no client-side encryption.)
     if manifest.stored_hashes.is_none() {
-        let mut out = Vec::with_capacity(manifest.total_size as usize);
+        let mut out = Vec::with_capacity(prealloc(manifest.total_size));
         for hash in &manifest.chunk_hashes {
             let chunk = fetch_decoded(db, store, at_rest_key, hash)
                 .await?
@@ -232,7 +255,7 @@ pub async fn read_file_by_manifest(
         // duplicate generations.
         match fauna_core::chunk_crypto::decrypt_chunks(&root, &opened.chunk_hashes, &ciphertexts) {
             Ok(chunks) => {
-                let mut out = Vec::with_capacity(opened.total_size as usize);
+                let mut out = Vec::with_capacity(prealloc(opened.total_size));
                 for (c, hash) in chunks.into_iter().zip(&opened.chunk_hashes) {
                     out.extend_from_slice(&unframe(c, hash)?);
                     if out.len() as u64 > opened.total_size {
@@ -635,6 +658,38 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, FileOpenError::Oversized), "got {err:?}");
+    }
+
+    /// **The preallocation, both arms** — a manifest declaring
+    /// `total_size = 1 << 40` is an ordinary refusal, never a 1 TiB allocation
+    /// request (whose failure aborts the process). The chunk list is a single
+    /// absent entry, so a walk that got past the cap would answer
+    /// `MissingChunk` instead.
+    #[tokio::test]
+    async fn a_manifest_declaring_a_huge_total_size_is_refused_not_preallocated() {
+        for stored in [None, Some(vec![ContentHash::from_digest_raw([0xeeu8; 32])])] {
+            let (store, _dir) = store();
+            let absent = ContentHash::from_digest_raw([0xeeu8; 32]);
+            let manifest = fauna_core::chunk::ChunkManifest {
+                file_hash: absent,
+                total_size: 1 << 40,
+                chunk_hashes: vec![absent],
+                chunk_sizes: vec![1 << 40],
+                stored_hashes: stored.clone(),
+                sealed_hashes: None,
+                min_reader: None,
+            };
+            let crafted = put_manifest(&store, &manifest).await;
+            let key = [0xC5u8; 32];
+            let err = read_file_by_manifest(&db(), &store, None, &crafted, &[&key[..]])
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, FileOpenError::Oversized),
+                "sealed={}: got {err:?}",
+                stored.is_some()
+            );
+        }
     }
 
     /// A raw pre-seed does not darken a public file. A public

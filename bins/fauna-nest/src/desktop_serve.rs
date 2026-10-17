@@ -313,6 +313,7 @@ where
         tokio::spawn(crate::self_signed_cert::floor_renew_task(
             acme_dir.clone(),
             floor_domain.clone(),
+            None, // no relay sidecar and no AppState here — nothing to fan out to
         ));
         tracing::info!("self-signed TLS floor renew + cert-watcher tasks started");
     }
@@ -392,6 +393,7 @@ where
             None, // push_service
             services_json_path.clone(),
             sidecar_tokens.clone(),
+            acme_dir.clone(),
         )
         .await
         {

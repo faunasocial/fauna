@@ -54,6 +54,7 @@ import pytest
 import fauna_ffi
 from clients.ws_rpc_admin_client import RpcCallError, WsRpcAdminClient
 from common.auth import create_actor_and_register, port_base_url
+from helpers.set_names import addressed, audience_update
 
 pytestmark = pytest.mark.tier_3
 
@@ -243,12 +244,10 @@ def test_web_paywall_folder_teaser_token_and_revoke(nest_instance):
                 url, bytes(creator["signing_key"]),
                 {"name": name},
             )
-            ws.call("fauna.folders.update", {"name": name, "website_enabled": True})
+            ws.call("fauna.folders.update", addressed(name, website_enabled=True))
+        ws.call("fauna.folders.update", audience_update(PUBLIC_SET, "public"))
         ws.call(
-            "fauna.folders.update", {"name": PUBLIC_SET, "audience": "public"}
-        )
-        ws.call(
-            "fauna.folders.set_web_paywall", {"name": PAYWALLED_SET, "tier": TIER}
+            "fauna.folders.set_web_paywall", addressed(PAYWALLED_SET, tier=TIER)
         )
         ws.call(
             "fauna.sync.register",
@@ -416,8 +415,8 @@ def test_web_paywall_folder_rotation_renews_the_grant(nest_instance):
             {"name": PAYWALLED_SET},
         )
         # Phase 4: the `web_files` fan-out keys on the website toggle.
-        ws.call("fauna.folders.update", {"name": PAYWALLED_SET, "website_enabled": True})
-        ws.call("fauna.folders.set_web_paywall", {"name": PAYWALLED_SET, "tier": TIER})
+        ws.call("fauna.folders.update", addressed(PAYWALLED_SET, website_enabled=True))
+        ws.call("fauna.folders.set_web_paywall", addressed(PAYWALLED_SET, tier=TIER))
         ws.call(
             "fauna.sync.register",
             {"device_id": DEVICE_ID.hex(), "label": "seed", "capabilities": "read,write"},
@@ -534,8 +533,8 @@ def test_web_paywall_folder_expired_token_serves_teaser(nest_instance):
         )
         # Phase 4: the `web_files` fan-out and the serve walk key on the
         # website toggle.
-        ws.call("fauna.folders.update", {"name": PAYWALLED_SET, "website_enabled": True})
-        ws.call("fauna.folders.set_web_paywall", {"name": PAYWALLED_SET, "tier": TIER})
+        ws.call("fauna.folders.update", addressed(PAYWALLED_SET, website_enabled=True))
+        ws.call("fauna.folders.set_web_paywall", addressed(PAYWALLED_SET, tier=TIER))
         ws.call(
             "fauna.sync.register",
             {"device_id": DEVICE_ID.hex(), "label": "seed", "capabilities": "read,write"},

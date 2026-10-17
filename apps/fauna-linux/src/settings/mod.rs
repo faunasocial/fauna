@@ -27,6 +27,7 @@ pub mod p2p_tab;
 pub mod pending_actions;
 pub mod privacy;
 pub mod recovery_kit;
+pub mod sessions;
 mod stolen_hold;
 pub mod subscriptions;
 pub mod task_delegation;
@@ -230,6 +231,17 @@ pub(super) fn switch_row(
     sw
 }
 
+/// Publish a switch's live position as the cross-app `state` attribute
+/// (`on`/`off`, the marker the agent prefers over its `true`/`false`
+/// fallback), kept in step with every change — user flip or re-hydrate.
+pub(super) fn mirror_on_off_state(sw: &gtk::Switch) {
+    let paint = |sw: &gtk::Switch| {
+        crate::testid::set_test_attr(sw, "state", if sw.is_active() { "on" } else { "off" });
+    };
+    paint(sw);
+    sw.connect_active_notify(paint);
+}
+
 // ---------------------------------------------------------------------------
 // Bridge-settings commit — fire-and-forget `fauna.bridges.set_settings`,
 // error-logged, never awaited by the caller. `views/bridges/detail.rs`'s
@@ -425,6 +437,12 @@ thread_local! {
         const { RefCell::new(None) };
     static CONNECTED_APPS_REHYDRATE_HANDLER: RefCell<Option<AtprotoRehydrateHandler>> =
         const { RefCell::new(None) };
+    /// The Spam page's history re-read, fired off `StaleSurfaces::mail_spam`.
+    static MAIL_SPAM_REHYDRATE_HANDLER: RefCell<Option<AtprotoRehydrateHandler>> =
+        const { RefCell::new(None) };
+    /// The Export wizard's re-read, fired off `StaleSurfaces::mail_export`.
+    static MAIL_EXPORT_REHYDRATE_HANDLER: RefCell<Option<AtprotoRehydrateHandler>> =
+        const { RefCell::new(None) };
     /// The session's mail-settings machine, published by the Mail & Calendar
     /// page when it builds it. Its app passwords are rows of the Connected apps
     /// roster, which reads them through this same machine.
@@ -556,6 +574,42 @@ pub fn notify_atproto_rehydrate() {
         handler();
     }
     let handler = CONNECTED_APPS_REHYDRATE_HANDLER.with(|cell| cell.borrow().clone());
+    if let Some(handler) = handler {
+        handler();
+    }
+}
+
+/// Register the Spam page's history re-read, fired off a training-history push.
+pub fn set_mail_spam_rehydrate_handler(handler: AtprotoRehydrateHandler) {
+    MAIL_SPAM_REHYDRATE_HANDLER.with(|cell| {
+        *cell.borrow_mut() = Some(handler);
+    });
+}
+
+/// Fire the Spam page's re-read, if registered — `StaleSurfaces::mail_spam`, an
+/// undo or a reset on another device (`mail-spam.md` § Undo step 4, § Reset
+/// step 6). The handler itself gates on the page being shown.
+pub fn notify_mail_spam_rehydrate() {
+    let handler = MAIL_SPAM_REHYDRATE_HANDLER.with(|cell| cell.borrow().clone());
+    if let Some(handler) = handler {
+        handler();
+    }
+}
+
+/// Register the Export wizard's push re-read (`StaleSurfaces::mail_export`) —
+/// the [`set_mail_spam_rehydrate_handler`] twin.
+pub fn set_mail_export_rehydrate_handler(handler: AtprotoRehydrateHandler) {
+    MAIL_EXPORT_REHYDRATE_HANDLER.with(|cell| {
+        *cell.borrow_mut() = Some(handler);
+    });
+}
+
+/// Fire the Export wizard's re-read, if registered — `StaleSurfaces::mail_export`,
+/// an export another device started, finished, failed or dismissed
+/// (`mail-export.md` § A failed export is a record the wizard shows until the
+/// user moves on). The handler itself gates on the page being shown.
+pub fn notify_mail_export_rehydrate() {
+    let handler = MAIL_EXPORT_REHYDRATE_HANDLER.with(|cell| cell.borrow().clone());
     if let Some(handler) = handler {
         handler();
     }
@@ -1050,6 +1104,51 @@ pub fn apply_recovery_succeeded(outcome: &fauna_client_recovery::ceremony::Stole
 /// (`recovery_stolen_failed_message_tests::a_persist_failure_parks_the_message_never_the_switch`
 /// / `::a_persist_success_switches_and_never_parks`) reds if this routing
 /// ever reverts.
+/// Fold the stolen-identity ceremony run from the LOCKED launch surface
+/// (`ui/sessions.md` leg 2; `devices.md` § The locked state) — the same landing
+/// steps as [`apply_recovery_succeeded`], in the same order, with `say` (the
+/// locked step's `error-message`) in place of the Account page's handler and no
+/// stolen-ceremony hold: there is no session whose supersession it could owe.
+///
+/// `say(None)` is the adopted arm — the account switch replaces the launch
+/// window. Every message lands on the step itself, the persist-failure seed
+/// included: the locked step is what the user is looking at, and it is the
+/// only way back in (tui's `locked::fold_stolen`).
+pub fn fold_locked_stolen(
+    outcome: &fauna_client_recovery::ceremony::StolenOutcome,
+    say: impl FnOnce(Option<String>),
+) {
+    let landed = match outcome {
+        fauna_client_recovery::ceremony::StolenOutcome::Landed(landed) => landed,
+        unlanded => {
+            say(Some(
+                unlanded
+                    .message()
+                    .map(|m| m.resolve(crate::i18n::strings::lookup))
+                    .unwrap_or_default(),
+            ));
+            return;
+        }
+    };
+    recovery_kit::park_succession_sweep(landed.sweep.clone());
+    let new_actor_hex = landed.new_actor_id.to_hex();
+    recovery_kit::owe_succession_kit(new_actor_hex.clone());
+    if crate::account_registry().secrets(&new_actor_hex).is_some() {
+        say(None);
+        trigger_switch_account(new_actor_hex, false);
+    } else {
+        tracing::error!(
+            "[launch/locked] the succession landed but the successor secret failed to \
+             persist locally"
+        );
+        say(Some(
+            crate::i18n::strings::settings::recovery_kit::stolen_persist_failed(
+                landed.successor_secret_hex.as_str(),
+            ),
+        ));
+    }
+}
+
 fn dispatch_persist_outcome(persisted: bool, secret_hex: &str, switch: impl FnOnce()) {
     if persisted {
         switch();

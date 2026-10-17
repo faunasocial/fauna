@@ -115,10 +115,11 @@ pub(crate) struct Reassemble;
 /// where the run is measured for the change generation (`account-runtime.md`
 /// § Multi-instance concurrency → *A runtime's own pump is a source of
 /// the notice too*, parts 1–2): the store's entry-change count is read
-/// before and after, the local commands served inside the run — a gesture's
-/// own write, which is not a source — are measured on their own and taken
-/// out, and a run that changed anything moves the generation once, at its
-/// end, however it ended (a cut or panicked run's writes landed too).
+/// before and after, the local commands served inside the run are measured
+/// on their own and taken out ([`serve_counted`]: a gesture's own write is
+/// not a source, and a background write is its own source, counted there),
+/// and a run that changed anything moves the generation once, at its end,
+/// however it ended (a cut or panicked run's writes landed too).
 pub(crate) async fn drive_pass<B, R, F>(
     label: &str,
     sign_out: &SignOutWatch,
@@ -186,9 +187,7 @@ where
             cmd = drive.cmd_rx.recv(), if !closed => match cmd {
                 None => closed = true,
                 Some(cmd) if cmd.is_local() => {
-                    let at = drive.local.store.entry_changes();
-                    let served = serve_local_cmd(cmd, &mut drive.local).await;
-                    *gestures += drive.local.store.entry_changes().wrapping_sub(at);
+                    let served = serve_counted(cmd, &mut drive.local, drive.cycles, gestures).await;
                     match served {
                         Served::Done => {}
                         Served::Reassemble => return Driven::Reassemble,
@@ -199,6 +198,37 @@ where
             },
         }
     }
+}
+
+/// Serve one local command, measuring what it wrote — the one place a local
+/// command's writes are weighed against the change generation, inside a run
+/// and between runs alike (`account-runtime.md` § Multi-instance concurrency
+/// → *A runtime's own pump is a source of the notice too*, part 2). A
+/// **gesture's** change is credited to `gestures`, which [`drive_pass`]
+/// takes out of the run's count (a gesture is never a source). A
+/// **background write's** ([`Cmd::is_background_write`]) change moves the
+/// generation at once, here, and is credited to `gestures` too, so a run it
+/// was served inside does not count it a second time at its end.
+pub(crate) async fn serve_counted<B, R>(
+    cmd: Cmd,
+    local: &mut LocalCtx<'_, B, R>,
+    cycles: &PumpCycles,
+    gestures: &mut u64,
+) -> Served
+where
+    B: StoreBackend,
+    R: RpcRequester + Clone,
+    R::Error: RpcErrorClass,
+{
+    let background = cmd.is_background_write();
+    let at = local.store.entry_changes();
+    let served = serve_local_cmd(cmd, local).await;
+    let wrote = local.store.entry_changes().wrapping_sub(at);
+    *gestures += wrote;
+    if background && wrote > 0 {
+        cycles.changed();
+    }
+    served
 }
 
 /// [`pump`] (or the publish step) with panic containment — a poisoned pass is

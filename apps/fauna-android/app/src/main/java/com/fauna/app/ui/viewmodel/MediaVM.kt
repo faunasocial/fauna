@@ -1,5 +1,6 @@
 package com.fauna.app.ui.viewmodel
 
+import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -124,7 +125,7 @@ class MediaVM @Inject constructor(
                     // Point the browse at the item's own set — a deep link
                     // says nothing about the filter the user last left here
                     // (tui `Action::OpenFile`, apps/fauna-tui/src/media/mod.rs).
-                    m.setFilter(item.folder)
+                    m.setFilter(item.filterValue)
                     _deepLinkedItem.value = item
                 }
                 // item == null: deleted, renamed, or in a set this seat cannot
@@ -177,11 +178,12 @@ class MediaVM @Inject constructor(
      */
     fun upload(uri: Uri) {
         val m = machine ?: return
-        val deviceId = secureStorage.deviceId ?: return
+        val deviceId = secureStorage.resolveDeviceId() ?: return
         val backupKey = api.ownerBackupKey() ?: return
         viewModelScope.launch {
             val (name, bytes) = withContext(Dispatchers.IO) {
-                displayName(uri) to readBytes(uri)
+                PickedFile.displayName(appContext.contentResolver, uri) to
+                    PickedFile.readBytes(appContext.contentResolver, uri)
             }
             if (bytes == null || bytes.isEmpty()) return@launch
             m.uploadSelected(deviceId, name, bytes, backupKey)
@@ -240,7 +242,7 @@ class MediaVM @Inject constructor(
      */
     suspend fun restoreVersion(folder: String, path: String, version: FileVersionSummary): Boolean {
         val m = machine ?: return false
-        val deviceId = secureStorage.deviceId ?: return false
+        val deviceId = secureStorage.resolveDeviceId() ?: return false
         m.restoreVersion(folder, deviceId, path, version)
         val snap = m.snapshot()
         _snapshot.value = snap
@@ -252,10 +254,13 @@ class MediaVM @Inject constructor(
      * a tombstone; media.md § User actions). Same snapshot-error read-back as
      * [restoreVersion].
      */
-    suspend fun deleteItem(folder: String, path: String): Boolean {
+    suspend fun deleteItem(filterValue: String, path: String): Boolean {
         val m = machine ?: return false
-        val deviceId = secureStorage.deviceId ?: return false
-        m.delete(folder, deviceId, path)
+        val deviceId = secureStorage.resolveDeviceId() ?: return false
+        // The machine reads the first argument as a filter value (the item's
+        // `filterValue`): a ref resolves to that listed row, a name to the
+        // caller's own set of that name.
+        m.delete(filterValue, deviceId, path)
         val snap = m.snapshot()
         _snapshot.value = snap
         return snap.error == null
@@ -377,6 +382,11 @@ class MediaVM @Inject constructor(
         // Followed public folders as browse scopes (media.md § Followed public
         // folders) — without this `snapshot.followed` is permanently empty.
         api.wireMediaFollowedFolders(built)
+        // The B3 member-row join-filter, beside the Devices page's (media.md
+        // § Layout & flow → *Where the offerable sets come from*): unwired,
+        // every shared set's row is dropped and a shared set is offered only
+        // as an item-only option by name. Before the first refresh.
+        api.wireMediaMlsQuery(built)
         // The share-link author (`share-links.md` § Where logic lives): the
         // session's identity signs the token and seals its filename, and the
         // links point at this session's nest. After the predecessors, which it
@@ -386,20 +396,31 @@ class MediaVM @Inject constructor(
         machine = built
         return built
     }
+}
 
-    /** The picked content Uri's display name (the member path), best-effort. */
-    private fun displayName(uri: Uri): String {
-        appContext.contentResolver
-            .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-            ?.use { cursor ->
-                val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (idx >= 0 && cursor.moveToFirst()) {
-                    cursor.getString(idx)?.let { if (it.isNotBlank()) return it }
+/**
+ * Reads a picked file the way `MediaVM.upload` seals it: its display name (the
+ * member path) and its bytes, off the [ContentResolver]. The picker hands a
+ * `content://` Uri; the e2e pick seam (`TestAgent.mediaFilePick`) hands the
+ * staged file's `file://` Uri — both resolve here, so the two picks upload
+ * through one path.
+ */
+internal object PickedFile {
+    /** The picked Uri's display name, best-effort: the provider's
+     *  `DISPLAY_NAME` column, else the Uri's last path segment. A resolver
+     *  that cannot query the Uri's scheme (a `file://` Uri has no provider)
+     *  falls through to the path. */
+    fun displayName(resolver: ContentResolver, uri: Uri): String {
+        runCatching {
+            resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { cursor ->
+                    val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx)?.takeIf { it.isNotBlank() } else null
                 }
-            }
+        }.getOrNull()?.let { return it }
         return uri.lastPathSegment?.substringAfterLast('/') ?: "upload"
     }
 
-    private fun readBytes(uri: Uri): ByteArray? =
-        runCatching { appContext.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
+    fun readBytes(resolver: ContentResolver, uri: Uri): ByteArray? =
+        runCatching { resolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
 }

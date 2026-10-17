@@ -17,6 +17,9 @@ use super::protocol::{PayloadKind, ProxyCommand, WorkerMessage};
 use crate::routes::AppState;
 use crate::ws::{Beat, ServerHeartbeat};
 
+/// Bound on a caller's wait for the worker: enqueueing a command and awaiting its reply each.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Information reported by the worker on connect.
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkerInfo {
@@ -122,11 +125,14 @@ impl WorkerHandle {
             command: cmd,
             response_tx: tx,
         };
-        self.cmd_tx
-            .send(req)
+        // Bound the enqueue as well as the reply: with the proxy loop stuck in a
+        // send the 64-slot queue fills, and an unbounded `send` would park the
+        // caller past the heartbeat's reap.
+        tokio::time::timeout(REQUEST_TIMEOUT, self.cmd_tx.send(req))
             .await
+            .map_err(|_| anyhow::anyhow!("worker command queue full"))?
             .map_err(|_| anyhow::anyhow!("worker disconnected"))?;
-        let resp = tokio::time::timeout(std::time::Duration::from_secs(30), rx).await??;
+        let resp = tokio::time::timeout(REQUEST_TIMEOUT, rx).await??;
         Ok(resp)
     }
 }
@@ -237,6 +243,27 @@ pub async fn worker_ws_handler(
             let _ = scope.spawn_scoped(handle_worker_ws(state, socket)).await;
         }
     })
+}
+
+/// Send one frame, giving up after the heartbeat's liveness window.
+///
+/// The proxy is a single select loop, so a `send` parked on a full TCP buffer
+/// stops `hb.next_beat()` from being polled and the dead arm never fires. A send
+/// that cannot finish within the liveness window is the same verdict as
+/// `Beat::Dead` — the worker is not draining — so it returns `false` and the
+/// caller tears the link down.
+async fn send_bounded(socket: &mut WebSocket, msg: Message, bound: std::time::Duration) -> bool {
+    match tokio::time::timeout(bound, socket.send(msg)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) => false,
+        Err(_) => {
+            tracing::warn!(
+                timeout_ms = bound.as_millis() as u64,
+                "worker did not drain a send within the liveness window; closing dead link",
+            );
+            false
+        }
+    }
 }
 
 async fn handle_worker_ws(state: Arc<AppState>, mut socket: WebSocket) {
@@ -385,7 +412,7 @@ async fn handle_worker_ws(state: Arc<AppState>, mut socket: WebSocket) {
         tokio::select! {
             beat = hb.next_beat() => match beat {
                 Beat::Ping => {
-                    if socket.send(Message::Ping(Bytes::new())).await.is_err() {
+                    if !send_bounded(&mut socket, Message::Ping(Bytes::new()), hb.liveness_timeout()).await {
                         break;
                     }
                 }
@@ -414,7 +441,7 @@ async fn handle_worker_ws(state: Arc<AppState>, mut socket: WebSocket) {
                     pending.lock().await.insert(rid, req.response_tx);
                 }
                 let json = serde_json::to_string(&req.command).unwrap();
-                if socket.send(Message::Text(json.into())).await.is_err() {
+                if !send_bounded(&mut socket, Message::Text(json.into()), hb.liveness_timeout()).await {
                     break;
                 }
             }

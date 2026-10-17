@@ -85,9 +85,7 @@ internal sealed class EventDraftsService : IDisposable
         _store = store;
         // Shared `fauna_client_drafts::AUTOSAVE_DEBOUNCE` via
         // `FaunaFfiMethods.AutosaveDebounceMs()` — the same window every app now
-        // reads (reserved-folders.md § Drafts Sync), never a re-declared literal
-        // (unlike FeedDraftsService's pre-existing 600ms, which predates the
-        // shared constant and stays as its own windows-side value).
+        // reads (reserved-folders.md § Drafts Sync), never a re-declared literal.
         _debounce = debounce ?? TimeSpan.FromMilliseconds(FaunaFfiMethods.AutosaveDebounceMs());
     }
 

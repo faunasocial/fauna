@@ -32,7 +32,7 @@ Stamped 2026-09-26 at 175da50d99.
 | App | Status | Stamp |
 |---|---|---|
 | web |  no run recorded | |
-| linux | ✅ full | 0.1.2-dev+c4a95c20 standalone |
+| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
 | windows | ✅ full | 0.1.3-dev+862c7d57 standalone |
 | macos |  no run recorded | |
 | ios |  no run recorded | |

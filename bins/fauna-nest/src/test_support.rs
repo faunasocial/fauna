@@ -610,6 +610,7 @@ pub async fn seed_sealed_contribution(
             &sealed_model,
             None,
             Some((&SIM_HOLDER_X25519[..], &model.to_bytes()[..])),
+            None,
         )
         .await
         .unwrap();
@@ -675,6 +676,18 @@ pub async fn run_with_sim_holder<T: Send + 'static>(
     state: &Arc<AppState>,
     run: impl std::future::Future<Output = T> + Send + 'static,
 ) -> T {
+    run_with_sim_holder_after(state, run, async {}).await
+}
+
+/// [`run_with_sim_holder`] with `before_answer` awaited once the run has
+/// registered and before the holder answers it — the deterministic way for a
+/// test to change the world while a run is waiting on its holder.
+#[cfg(test)]
+pub async fn run_with_sim_holder_after<T: Send + 'static>(
+    state: &Arc<AppState>,
+    run: impl std::future::Future<Output = T> + Send + 'static,
+    before_answer: impl std::future::Future<Output = ()>,
+) -> T {
     use fauna_mail::spam::SpamModel;
     use fauna_protocol::wrapped_blob::{
         SpamBaselineWorklistReply, SpamBaselineWorklistRequest, SubmitSpamBaselineRequest,
@@ -694,6 +707,9 @@ pub async fn run_with_sim_holder<T: Send + 'static>(
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    if run_id.is_some() {
+        before_answer.await;
     }
     if let Some(run_id) = run_id
         && let Ok(bytes) = crate::bridge_blob_handlers::spam_baseline_worklist_handler()(

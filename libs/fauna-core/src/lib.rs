@@ -140,6 +140,8 @@ pub mod text_heuristic;
 mod text_heuristic_parity;
 pub mod version;
 pub mod web;
+#[cfg(all(target_arch = "wasm32", feature = "js"))]
+pub mod web_lock;
 
 #[cfg(feature = "format_text")]
 pub mod format_text;

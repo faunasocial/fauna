@@ -1,5 +1,6 @@
 import Foundation
 
+#if !FAUNA_KIDS
 /// Stable UniFFI `AtprotoSettingsObserver` the memoized machine is actually
 /// built with — see `APIClient.atprotoSettingsMachine(observer:)`. Retargets
 /// (weakly) to whichever page's observer is current; mirrors
@@ -10,6 +11,7 @@ private final class AtprotoObserverFanout: AtprotoSettingsObserver, @unchecked S
         target?.onChanged()
     }
 }
+#endif
 
 public class APIClient {
     public let nodeUrl: URL
@@ -174,6 +176,7 @@ public class APIClient {
         return try JSONDecoder().decode(BlobResponse.self, from: responseData)
     }
 
+#if !FAUNA_KIDS
     /// Upload one blob's **already-prepared** parts — from
     /// ``FfiFeedManager/sealComposeAttachment(raw:)`` — and return the nest's hex
     /// hash. Thumbnail first, best-effort, then the primary: the same two POSTs
@@ -195,6 +198,7 @@ public class APIClient {
                                                        sealedBytes: primary.bytes)
         return try JSONDecoder().decode(BlobResponse.self, from: responseData).hash
     }
+#endif
 
     /// Derive the owner's `BackupKey` for the `.library` upload audience from the
     /// authed actor's identity seed (`self.secret`), via the shared-Rust
@@ -1104,6 +1108,7 @@ public class APIClient {
         try await unlinkBridge(bridgeId: Self.nostrBridgeId)
     }
 
+#if !FAUNA_KIDS
     /// The succession-aftermath npub confirm banner's owed-check (`nostr.md`
     /// § Key succession and rotation, leg 3) — a direct `libs/fauna-ffi/src/
     /// nostr_npub_confirm.rs` UniFFI door, not the generic bridge control
@@ -1114,7 +1119,9 @@ public class APIClient {
         return try await FaunaFFISwift.npubConfirmationOwed(
             nest: try await ensureNestConnected(), ownerSecret: hex_to_data(secret))
     }
+#endif
 
+#if !FAUNA_KIDS
     /// "Yes, that's my npub" — records the confirmation; the caller's own
     /// clock, same idiom as every other UniFFI call taking `now`.
     public func confirmNpub() async throws {
@@ -1123,6 +1130,7 @@ public class APIClient {
             nest: try await ensureNestConnected(), ownerSecret: hex_to_data(secret),
             now: Int64(Date().timeIntervalSince1970))
     }
+#endif
 
     public func updateNostrSettings(_ settings: NostrSettings) async throws {
         try await updateBridgeSettings(bridgeId: Self.nostrBridgeId, settings: settings.asBridgeSettings)
@@ -1444,7 +1452,9 @@ public class APIClient {
             }
             actorGeneration += 1
             cachedSeededCaldavClient = nil
+            #if !FAUNA_KIDS
             cachedAtprotoMachine = nil
+            #endif
             conversationsSessionCache = nil
             conversationsSessionTask = nil
             token = nil
@@ -1623,7 +1633,7 @@ public class APIClient {
         #endif
     }
 
-    /// Matches windows' `AccountRuntimeStopBudget` (`App.xaml.cs`):
+    /// Matches windows' `AccountRuntimeStops.StopBudget` (`AccountRuntimeStops.cs`):
     /// [`releaseAccountScopedStores()`]'s FFI call is synchronous and
     /// ordinarily fast, but it waits on the conversations receive loop
     /// noticing a retire signal, which could wedge. Erasing late is safe —
@@ -1717,8 +1727,8 @@ public class APIClient {
     }
 
     #if DEBUG
-    /// The fleet-removal convergence read (`account-data-taxonomy.md` § The
-    /// generation machinery → *Fleet-scope reclamation*, clause (4)) — whether
+    /// The fleet-removal convergence read (`fleet-scope-reclamation.md`
+    /// § *Fleet-scope reclamation*, clause (4)) — whether
     /// `deviceIdHex`'s plane `fauna.state.device-set` row reads Removed/Enrolled
     /// from THIS app's own account runtime, JSON-encoded. `nil` when there is no
     /// connected client to ask; the caller reports that as the same quiet "not
@@ -1734,6 +1744,18 @@ public class APIClient {
     public func deviceSetStateJson(deviceIdHex: String) async -> String? {
         guard let nestClient else { return nil }
         return await nestClient.deviceSetStateJson(deviceIdHex: deviceIdHex)
+    }
+
+    /// The read-state relaunch witness's durability barrier — `channelIdHex`'s
+    /// account-store read marker (`conversation-read-state.md` § The read-marker
+    /// record), JSON-encoded. `nil` when there is no connected client to ask; the
+    /// caller reports that as the same quiet "not found" the shared reader answers
+    /// for a missing store. `#if DEBUG` for the same reason as
+    /// `deviceSetStateJson` above (a `test-helpers` UniFFI export; pinned by
+    /// `test_apple_seam_gating.py`). Only `ReadMarkerStateTestCommand` calls it.
+    public func readMarkerStateJson(channelIdHex: String) async -> String? {
+        guard let nestClient else { return nil }
+        return await nestClient.readMarkerStateJson(channelIdHex: channelIdHex)
     }
 
     /// The `reconnect_backoff` e2e seam on the live connection
@@ -2444,6 +2466,7 @@ public class APIClient {
         return machine
     }
 
+#if !FAUNA_KIDS
     /// Build the **Community labelers** catalog machine
     /// (`libs/fauna-labeler-catalog-machine` via UniFFI) over the shared WS-RPC
     /// connection — backs both the Personalization home's subscribed-labelers
@@ -2462,6 +2485,7 @@ public class APIClient {
             nest: nest, secret: hex_to_data(secret), observer: observer
         )
     }
+#endif
 
     /// Build the **dual-rail** conversations session (FaunaMls + SMTP backends)
     /// over the shared WS-RPC connection — `FfiNestClient.conversationsSession`.
@@ -2549,7 +2573,14 @@ public class APIClient {
                 // The recording device — the same id `serveFolderWebdav` passes
                 // its walk, on iOS too — so the launch resume finishes an
                 // interrupted served-set re-seal (`webdav-server.md` § Key model (c)).
-                recordingDevice: deviceIdHex.isEmpty ? nil : deviceIdHex
+                recordingDevice: deviceIdHex.isEmpty ? nil : deviceIdHex,
+                // The registry, from which Rust resolves this session's attested
+                // predecessor ids once and hands them to the content-index
+                // reader, the launch resume and the served-set walk — so a row
+                // a retired identity signed is admitted with no succession
+                // lookup (`writer-signed-change-records.md` ruling (8)(b)
+                // source (ii)).
+                accounts: FaunaAccounts.registry()
             )
         }
         conversationsSessionTask = task
@@ -2653,6 +2684,7 @@ public class APIClient {
         try await ensureNestConnected().eventDrafts()
     }
 
+#if !FAUNA_KIDS
     /// Build the shared **stateful Feed manager** (`fauna_feed::FeedManager` via
     /// the `FfiFeedManager` UniFFI façade) over the shared WS-RPC connection.
     /// `FeedVM.configure` calls this on entering the Feed page and renders the page
@@ -2669,7 +2701,9 @@ public class APIClient {
         adoptActor(secretHex)
         return try await ensureNestConnected().feedManager(secret: hex_to_data(secretHex))
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Build the shared **stateful Search manager** (`fauna_client_search::SearchManager`
     /// via the `FfiSearchManager` UniFFI façade) over the shared WS-RPC connection —
     /// the `feedManager` twin for the Search page (`docs/goal/ui/search.md` § State &
@@ -2679,7 +2713,9 @@ public class APIClient {
     public func searchManager() async throws -> FfiSearchManager {
         try await ensureNestConnected().searchManager()
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Register this login's sealed local search index (backend 2) on `manager`, so
     /// the Search page merges local rows with the nest's instead of running nest-only
     /// (`search.md` § State & data shape — the local/nest merge). Returns whether an
@@ -2691,9 +2727,11 @@ public class APIClient {
         guard let nest = try? await ensureNestConnected() else { return false }
         return await nest.attachLocalSearchIndex(manager: manager)
     }
+#endif
 
     // MARK: - Critical alerts (critical-alerts.md § Mechanism)
 
+#if !FAUNA_KIDS
     /// Run the critical-alerts session-start + periodic re-sweep loop
     /// (`libs/fauna-client-alert-sweep::run_alert_sweep_loop`, over
     /// `libs/fauna-ffi`'s `runCriticalAlertSweepLoop` free function) — the one
@@ -2708,7 +2746,9 @@ public class APIClient {
         guard let secret else { throw APIError.ffiError("No secret for critical-alert sweep") }
         try await runCriticalAlertSweepLoop(nest: try await ensureNestConnected(), secret: hex_to_data(secret))
     }
+#endif
 
+#if !FAUNA_KIDS
     /// One sweep pass (`runCriticalAlertSweep`) — the same-identity re-establish
     /// arm of `CriticalAlertsHost.startSweepLoop`, where the identity's loop is
     /// already running and a second one would stack.
@@ -2716,6 +2756,7 @@ public class APIClient {
         guard let secret else { throw APIError.ffiError("No secret for critical-alert sweep") }
         try await runCriticalAlertSweep(nest: try await ensureNestConnected(), secret: hex_to_data(secret))
     }
+#endif
 
     /// The identity a critical-alert sweep loop covers — the actor AT a nest, so
     /// a re-point at another nest gets a loop sweeping that nest. `nil` with no
@@ -2736,6 +2777,7 @@ public class APIClient {
     // `libs/fauna-client-{mail-settings,dns}`, surfaced via
     // `libs/fauna-ffi/src/mail_admin.rs`.
 
+#if !FAUNA_KIDS
     /// Build the user-tier `MailSettingsMachine` (mail-settings page). Needs the
     /// actor secret (to sign submission tokens + key the account plane) and the
     /// deployment node URL (to derive MUA connection details), both private to
@@ -2748,7 +2790,9 @@ public class APIClient {
             nest: nest, secret: hex_to_data(secret), nodeUrl: nodeUrl.absoluteString
         )
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Build the `ConnectedAppsMachine` (the Settings → Connected apps page,
     /// `docs/goal/ui/connected-apps.md`) over this session's nest connection.
     /// `mail` is the session's own Mail & Calendar machine: the mail app
@@ -2763,15 +2807,17 @@ public class APIClient {
     public func connectedAppsMachine(
         observer: ConnectedAppsObserver, mail: MailSettingsMachine?
     ) async throws -> ConnectedAppsMachine {
-        let machine = buildConnectedAppsMachine(
-            nest: try await ensureNestConnected(), observer: observer, mail: mail
-        )
+        let nest = try await ensureNestConnected()
+        let machine = buildConnectedAppsMachine(nest: nest, observer: observer, mail: mail)
         if let secret {
-            try? wireConnectedAppsConsentGrant(machine: machine, secret: hex_to_data(secret))
+            try? wireConnectedAppsConsentGrant(
+                machine: machine, nest: nest, secret: hex_to_data(secret))
         }
         return machine
     }
+#endif
 
+#if !FAUNA_KIDS
     /// The post-claim serving enablement (`onboarding.md` § 3b *Mechanism*) —
     /// the ONE shared-Rust call `MailEnableGlue.applyPostClaimServingEnablement`
     /// makes with the four intents read off the wizard's `LoggedIn` handoff,
@@ -2790,7 +2836,9 @@ public class APIClient {
             email: email, caldav: caldav, carddav: carddav, webdav: webdav
         )
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Mark a received conversation/mail message as spam — the live `Insert`
     /// consumer (mail-spam.md § Encrypted-mode interaction + § Wire shapes
     /// `put_spam_model` `history_op`; the `dm-message-mark-as-spam-button` gesture,
@@ -2816,13 +2864,17 @@ public class APIClient {
             subject: subject ?? ""
         )
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Build the admin `BridgeApprovalMachine` (`admin-bridges-pending` page).
     /// Admin-class — needs only the connection handle.
     public func bridgeApprovalMachine() async throws -> BridgeApprovalMachine {
         buildBridgeApprovalMachine(nest: try await ensureNestConnected())
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Build the admin `DnsManagementMachine` (`admin-dns` page — the **full**
     /// surface: record matrix + live verify, managed-mode credential store +
     /// publish, and the TLS-cert lifecycle). Uses the **credentialed** builder
@@ -2838,7 +2890,9 @@ public class APIClient {
             nest: try await ensureNestConnected(), secret: hex_to_data(secret)
         )
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Memoized handle for `atprotoSettingsMachine(observer:)` — built ONCE
     /// per `APIClient` (i.e. per session, not per page-visit). Without this,
     /// each fresh `AtprotoSettingsView`/`AtprotoSettingsVM` (view-local
@@ -2885,6 +2939,7 @@ public class APIClient {
         cachedAtprotoMachine = machine
         return machine
     }
+#endif
 
     // MARK: - Backup-destination management (shared FaunaKit, macOS + iOS)
     //
@@ -2983,13 +3038,24 @@ public class APIClient {
     // MARK: - Deployment-seed custody leg (box-recovery.md § The plane-era recovery floor)
 
     /// The custody leg's post-auth entry — thin accessor over the shared
-    /// `self_heal_deployment_seed_custody` free fn (capture at store-ready and the
-    /// co-admin hand-off self-heal both live in shared Rust; the caller only
-    /// projects the outcome onto the recovery-custody banner).
-    public func selfHealDeploymentSeedCustody() async throws -> FfiDeploymentSeedSelfHeal {
-        guard let secret else { throw APIError.ffiError("No secret for the deployment-seed custody leg") }
-        return try await FaunaFFISwift.selfHealDeploymentSeedCustody(
-            nest: try await ensureNestConnected(), ownerSecret: hex_to_data(secret),
+    /// `self_heal_deployment_seed_custody` free fn (capture at store-ready, the
+    /// co-admin hand-off self-heal and the warning it owes all live in shared Rust;
+    /// the caller only renders the answer onto the recovery-custody banner). `nil`
+    /// when nothing is owed. A leg that cannot even be reached (no secret, no
+    /// connection) answers the shared "not attempted" warning, never a key chosen
+    /// here.
+    public func selfHealDeploymentSeedCustody() async -> LocalizedText? {
+        guard let secret else { return FaunaFFISwift.deploymentSeedCustodyUnattemptedWarning() }
+        let nest: FfiNestClient
+        do {
+            nest = try await ensureNestConnected()
+        } catch {
+            logMessage(level: .warn, target: "fauna.recoveryglue",
+                       message: "deployment-seed custody leg not attempted: \(error)")
+            return FaunaFFISwift.deploymentSeedCustodyUnattemptedWarning()
+        }
+        return await FaunaFFISwift.selfHealDeploymentSeedCustody(
+            nest: nest, ownerSecret: hex_to_data(secret),
             appDataDir: Self.recoveryConfigDataDir)
     }
 
@@ -3077,7 +3143,11 @@ public class APIClient {
     /// point 10).
     static var recoveryConfigDataDir: String {
         #if os(macOS)
+            // No user-domain home (no absolute HOME — logged by `SyncStateDir`)
+            // keeps the replica in the app's own Application Support dir: it is
+            // re-converged from the nest, never the only copy.
             let dir = SyncStateDir.userDomainHome
+                ?? SyncStateDir.appSupportSyncDir.deletingLastPathComponent()
         #else
             if !FaunaE2E.isActive,
                 let container = FileProviderCredentialStore.containerURL()
@@ -3256,6 +3326,7 @@ public class APIClient {
         try await ensureNestConnected().subscriptions().requestsReject(requestId: requestId)
     }
 
+#if !FAUNA_KIDS
     /// One author-pump tick — resume any crash-staged subscriber removal, then
     /// auto-approve every pending `auto_approve` subscribe request (minting the
     /// covering `KeyBlob` per row), in that order, every time
@@ -3271,7 +3342,9 @@ public class APIClient {
         return try await subscriptionsReconcileOnce(
             nest: try await ensureNestConnected(), ownerSecret: hex_to_data(secret))
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Create a tier via the encrypted-mode author orchestration: records a fresh
     /// client-held period key in custody, then creates the tier server-side.
     /// Returns whether a row was created.
@@ -3294,7 +3367,9 @@ public class APIClient {
             paymentUrl: paymentUrl, autoApprove: autoApprove,
             askingPriceSats: askingPriceSats)
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Approve a pending request via the author orchestration: mints + uploads a
     /// roster-covering KeyBlob, retrying roster/rotation races internally.
     @discardableResult
@@ -3303,7 +3378,9 @@ public class APIClient {
         return try await subscriptionsApproveSubscriber(
             nest: try await ensureNestConnected(), ownerSecret: hex_to_data(secret), request: request)
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Remove a subscriber via the author orchestration: rotates the period key,
     /// re-mints over the reduced roster, crash-staged before the upload.
     public func removeSubscriber(tierName: String, subscriberId: Data) async throws {
@@ -3312,6 +3389,7 @@ public class APIClient {
             nest: try await ensureNestConnected(), ownerSecret: hex_to_data(secret),
             tierName: tierName, subscriberId: subscriberId)
     }
+#endif
 
     // MARK: - Subscriptions (consumer side — `subscription-settings` page)
     //
@@ -3527,6 +3605,7 @@ public class APIClient {
         try await ensureNestConnected().subscriptions().statusGet(authorId: hex_to_data(authorIdHex))
     }
 
+#if !FAUNA_KIDS
     /// `fauna.subscriptions.subscribe`, **publishing** the caller's identity-seed
     /// ML-KEM ek (surface B, S4b) unconditionally (no capability token), so the
     /// author can later wrap hybrid `KeyBlob`s to this subscriber. Plaintext +
@@ -3543,6 +3622,7 @@ public class APIClient {
             authorId: hex_to_data(authorIdHex),
             tier: tier)
     }
+#endif
 
     /// Read the per-destination backup status (last-upload time + backlog) for
     /// the configured destinations — the NEST's `fauna.backup.status` projection
@@ -3602,6 +3682,7 @@ public class APIClient {
     // flipped yet. The static destination resolvers (`resolve_destination[_connected]`,
     // reached from the add/edit URL check below) are NOT part of this and stay.
 
+#if !FAUNA_KIDS
     /// Build the admin `LocalDomainMachine` (`admin-dns` page — domain CRUD,
     /// catch-all + role-address designation). Admin-class — needs only the
     /// connection handle (the nest derives authority from the authenticated
@@ -3610,6 +3691,7 @@ public class APIClient {
     public func localDomainsMachine() async throws -> LocalDomainMachine {
         buildLocalDomainsMachine(nest: try await ensureNestConnected())
     }
+#endif
 
     /// The connected nest's own id (`SelfNest.id`) — the `target_nest_id` seal
     /// target for DNS TLS-cert issuance (`tls-certificates.md` § C; linux
@@ -3637,14 +3719,25 @@ public class APIClient {
     /// lead `settings/linked_nests.rs::wire_machine`.
     /// NB: this is the *page* machine; the `thisNestId()` passthrough above stays
     /// hook-less (it only resolves the self-nest id, needs no secret).
+    /// The Fauna Kids build has no mail plane, so it takes the trust-only
+    /// variant (the same machine minus the mailbox auto-provision hook).
     public func linkedNestsMachine() async throws -> LinkedNestsMachine {
         let nest = try await ensureNestConnected()
+        #if FAUNA_KIDS
+        if let secret,
+           let machine = try? buildLinkedNestsMachineWithTrust(
+               nest: nest, secret: hex_to_data(secret))
+        {
+            return machine
+        }
+        #else
         if let secret,
            let machine = try? buildLinkedNestsMachineWithMailRelayAndTrust(
                nest: nest, secret: hex_to_data(secret))
         {
             return machine
         }
+        #endif
         return buildLinkedNestsMachine(nest: nest)
     }
 
@@ -3664,19 +3757,24 @@ public class APIClient {
         try await machine.dispatch(action: .mintDefaultSet)
     }
 
+#if !FAUNA_KIDS
     /// Build the admin `MailPolicyMachine` (flat `admin-mail` policy page).
     /// Admin-class — needs only the connection handle.
     public func mailPolicyMachine() async throws -> MailPolicyMachine {
         buildMailPolicyMachine(nest: try await ensureNestConnected())
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Build the admin `CaldavPolicyMachine` (flat `admin-calendar` page — the
     /// deployment-wide CalDAV-enable toggle, the sibling of `admin-mail`).
     /// Admin-class — needs only the connection handle.
     public func caldavPolicyMachine() async throws -> CaldavPolicyMachine {
         buildCaldavPolicyMachine(nest: try await ensureNestConnected())
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Build the admin `CarddavPolicyMachine` (flat `admin-contacts` page — the
     /// deployment-wide CardDAV-enable toggle, the contacts sibling of `admin-calendar`).
     /// Admin-class — needs only the connection handle. No port twin: CardDAV rides the
@@ -3684,6 +3782,7 @@ public class APIClient {
     public func carddavPolicyMachine() async throws -> CarddavPolicyMachine {
         buildCarddavPolicyMachine(nest: try await ensureNestConnected())
     }
+#endif
 
     /// Build the read-only `FfiCarddavClient` (the Contacts page's Address Book
     /// segment — `contacts.md` § Address Book segment; `carddav-server.md` §
@@ -3693,6 +3792,7 @@ public class APIClient {
         try await ensureNestConnected().carddav()
     }
 
+#if !FAUNA_KIDS
     /// Build the admin `WebdavPolicyMachine` (flat `admin-files` page — the
     /// deployment-wide WebDAV-enable toggle, the files sibling of `admin-contacts`).
     /// Admin-class — needs only the connection handle. No port twin: WebDAV rides the
@@ -3700,13 +3800,17 @@ public class APIClient {
     public func webdavPolicyMachine() async throws -> WebdavPolicyMachine {
         buildWebdavPolicyMachine(nest: try await ensureNestConnected())
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Build the admin `ForwarderMachine` (`admin-aliases` external-forwarder
     /// page). Admin-class — needs only the connection handle.
     public func forwardersMachine() async throws -> ForwarderMachine {
         buildForwardersMachine(nest: try await ensureNestConnected())
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Build the user-facing `MailAliasesMachine` (`mail-aliases` settings
     /// sub-page). User-class — the nest derives the owning actor from the
     /// authenticated caller, so (like `forwardersMachine`) it needs only the
@@ -3714,7 +3818,9 @@ public class APIClient {
     public func mailAliasesMachine() async throws -> MailAliasesMachine {
         buildMailAliasesMachine(nest: try await ensureNestConnected())
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Build the user-facing `MailSpamMachine` (`mail-spam` settings sub-page).
     /// User-class like `mailAliasesMachine` (the nest derives the owning actor).
     /// The per-user Bayesian feedback loop is unbuilt today, so the machine
@@ -3729,7 +3835,9 @@ public class APIClient {
             secret: hex_to_data(secret),
             nodeUrl: nodeUrl.absoluteString)
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Build the user-facing `MailExportMachine` (`mail-export` wizard sub-page)
     /// **with key custody**, because `MailExportVM` spawns the drive loop after a
     /// `Start`/`Resume` that lands `Running` — custody and the spawn are one
@@ -3751,6 +3859,7 @@ public class APIClient {
             handle: handle,
             saveDir: Self.mailExportSaveDir().path)
     }
+#endif
 
     /// Where § Download flow step 5 writes the recovered `.zip.zst`. The shared
     /// sink writes `<name>.part` and renames it into place only once the archive
@@ -3775,6 +3884,7 @@ public class APIClient {
         #endif
     }
 
+#if !FAUNA_KIDS
     /// Build the user-facing `MailImportMachine` (`mail-import` wizard
     /// sub-page). User-class — the foreign-mailbox migration wizard. Unlike the
     /// export twin the backend is REAL end to end (nest RPC surface + the
@@ -3784,14 +3894,18 @@ public class APIClient {
     public func mailImportMachine() async throws -> MailImportMachine {
         buildMailImportMachine(nest: try await ensureNestConnected())
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Build the user-facing `MailListsMachine` (`mail-lists` settings sub-page).
     /// User-class — a person's own mailing lists. The list backend is unbuilt
     /// today → honest `unimplemented` rejection via `error-message`.
     public func mailListsMachine() async throws -> MailListsMachine {
         buildMailListsMachine(nest: try await ensureNestConnected())
     }
+#endif
 
+#if !FAUNA_KIDS
     /// Build the user-facing `MailListMembersMachine` (`mail-list-members`
     /// sub-page) scoped to one list. `listIdHex` comes from a rendered `ListView`
     /// row; `listName` is the page heading. Throws on a malformed `listIdHex`
@@ -3804,6 +3918,7 @@ public class APIClient {
             listIdHex: listIdHex, listName: listName
         )
     }
+#endif
 
     /// The conversations-rail MLS store — the ONE MLS engine on apple, **scoped to
     /// the session's account**: `<Application Support>/Fauna/<actor-id-hex>/mls.db`
@@ -3861,6 +3976,7 @@ public class APIClient {
         return AdminNatModeMachine(nestUrl: nodeUrl.absoluteString, secretHex: secret)
     }
 
+#if !FAUNA_KIDS
     /// The web-content authoring client (`fauna.web.*` kinds) over the shared
     /// connection — drives the user `web-settings` subdomain toggle
     /// (`get/setSubdomainEnabled`, User-class caller-scoped) + the admin
@@ -3870,6 +3986,7 @@ public class APIClient {
     public func webClient() async throws -> FfiWebClient {
         buildWebClient(nest: try await ensureNestConnected())
     }
+#endif
 
     /// `fauna.setup.status` over the shared connection — the authed setup-wizard
     /// read that backs the admin-nest serving-port / router-fronted / host-OS-
@@ -4256,7 +4373,7 @@ public class APIClient {
     /// it — own folders (a delivery seat where `deviceIdHex`'s place accepts)
     /// and the folders shared with the account, read-only unless a writer
     /// (`FfiFoldersClient::presence_sets`, the shared mapping;
-    /// `on-demand-files.md` § Shared sets on a capability host, decision 3).
+    /// `on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 3).
     /// Throws on any failed read: the reconcile must skip, never tear a
     /// domain down on a state it could not see.
     public func folderPresenceSets(deviceIdHex: String) async throws -> [PresenceSet] {
@@ -4428,7 +4545,10 @@ public class APIClient {
             name: name,
             mlsGroupIdHex: mlsGroupIdHex,
             enable: enable,
-            deviceId: (deviceId?.isEmpty ?? true) ? nil : deviceId
+            deviceId: (deviceId?.isEmpty ?? true) ? nil : deviceId,
+            // The registry: Rust resolves the walk's attested predecessor ids
+            // off the owner's own actor (ruling (8)(b) source (ii)).
+            accounts: FaunaAccounts.registry()
         )
         return served
     }

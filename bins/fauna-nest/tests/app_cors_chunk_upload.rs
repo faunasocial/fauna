@@ -61,3 +61,60 @@ async fn an_allowlisted_origins_chunk_upload_preflight_admits_x_content_hash() {
         "the chunk upload's store-key header must pass the preflight; allowed: {allowed:?}"
     );
 }
+
+/// A web app's folder read (`file-sync.md` § Relay serving, step (4)) GETs a
+/// chunk with the folder hint AND the session bearer — the bearer is what lets
+/// the store-miss arm name its caller and relay from a seat. The byte GET
+/// routes ride the open, credential-less sub-router (`Any` origin: a
+/// cross-nest member's app runs on an origin this nest cannot know), and the
+/// browser preflights `Authorization`, so that layer must name it — or every
+/// hinted web read fails before the nest sees it. Still credential-less: a
+/// script-held bearer is not ambient authority, so no origin gains anything
+/// it does not already hold.
+#[tokio::test]
+async fn any_origins_hinted_chunk_read_preflight_admits_authorization() {
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let state = Arc::new(AppState::for_test(db));
+    let req = Request::builder()
+        .method("OPTIONS")
+        .uri(format!(
+            "/api/v1/chunks/{}?folder=vault&folder_ref=local%3A1",
+            "ab".repeat(32)
+        ))
+        .header(header::ORIGIN, "http://foreign-app.example")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+        .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+        .body(Body::empty())
+        .unwrap();
+    let resp = fauna_nest::build_router(state).oneshot(req).await.unwrap();
+
+    let origins: Vec<_> = resp
+        .headers()
+        .get_all(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect();
+    assert_eq!(
+        origins,
+        ["*"],
+        "the byte route stays open to every origin, once"
+    );
+    assert!(
+        resp.headers()
+            .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+            .is_none(),
+        "the byte route stays credential-less"
+    );
+    let allowed = resp
+        .headers()
+        .get_all(header::ACCESS_CONTROL_ALLOW_HEADERS)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect::<Vec<_>>()
+        .join(",")
+        .to_ascii_lowercase();
+    assert!(
+        allowed.contains("authorization"),
+        "the hinted read's bearer must pass the preflight; allowed: {allowed:?}"
+    );
+}

@@ -239,7 +239,7 @@ impl HostResolver {
     /// the precedence).
     pub async fn resolve(&self, host: &str) -> Option<[u8; 32]> {
         // Normalize before matching: strip a port suffix, lowercase, and trim a
-        // trailing FQDN dot — so `App.example.com` / `app.example.com.` can't bypass
+        // trailing FQDN dot — so `App.example.net` / `app.example.net.` can't bypass
         // the reserved-host check or the subdomain-suffix match. Real
         // browsers normalize Host, but an attacker-crafted request need not.
         let host = host.split(':').next().unwrap_or(host);
@@ -272,6 +272,47 @@ impl HostResolver {
         // other unmatched (non-reserved) host resolve to the designated apex
         // actor. `None` ⇒ the caller serves the built-in info page.
         *self.apex_actor.read().await
+    }
+
+    /// Is `host` the nest's OWN host — where a hosted plugin's declared
+    /// ingress prefixes are served (`plugin_ingress`)? The apex domain; or, on
+    /// a domainless box, any host that is neither reserved nor a registered
+    /// custom domain. Never a `<handle>` subdomain or a custom domain, so a
+    /// plugin prefix never shadows a user's published site. The apex site
+    /// (the admin's own, [`resolve`](Self::resolve)'s catch-all) yields to
+    /// the plugins the same admin installed.
+    pub async fn is_nest_host(&self, host: &str) -> bool {
+        let host = host.split(':').next().unwrap_or(host);
+        let host = fauna_core::web::normalize_dns_name(host);
+        if self.is_reserved_host(&host) {
+            return false;
+        }
+        let nest_domain = self.nest_domain.load();
+        if nest_domain.is_empty() {
+            return !self.custom_domains.read().await.contains_key(&host);
+        }
+        host == nest_domain.as_str()
+    }
+
+    /// The user whose published site `host` is — a registered custom domain
+    /// or an opted-in `<handle>` subdomain — and nobody for the apex, a
+    /// reserved host or an unknown one (unlike [`resolve`](Self::resolve),
+    /// no apex catch-all). The plugin install asks this so a hosted plugin's
+    /// whole-name claim never takes a name a user already answers on
+    /// (`plugin_ingress`); the opt-in and the custom-domain registration
+    /// refuse the reverse.
+    pub async fn user_site_for(&self, host: &str) -> Option<[u8; 32]> {
+        let host = host.split(':').next().unwrap_or(host);
+        let host = fauna_core::web::normalize_dns_name(host);
+        if self.is_reserved_host(&host) {
+            return None;
+        }
+        if let Some(&id) = self.custom_domains.read().await.get(&host) {
+            return Some(id);
+        }
+        let suffix = format!(".{}", self.nest_domain.load().as_str());
+        let sub = host.strip_suffix(&suffix)?;
+        self.subdomains.read().await.get(sub).copied()
     }
 
     /// Register a subdomain → actor_id mapping (the `<handle>` label, without the
@@ -643,6 +684,8 @@ async fn folder_teaser_response(
         tier: tier.to_string(),
         price_hint: tier_row.as_ref().and_then(|t| t.price_hint.clone()),
         payment_url: tier_row.as_ref().and_then(|t| t.payment_url.clone()),
+        path: path.to_string(),
+        redeem_url: super::render::paywall_redeem_url(),
     };
     let site = super::render::build_site_context(None, "", "");
     let body = super::render::render_folder_paywall(&site, &paywall, path).unwrap_or_else(|_| {
@@ -1261,37 +1304,37 @@ mod tests {
 
     #[tokio::test]
     async fn host_resolver_apex_catch_all() {
-        let resolver = HostResolver::new("example.com".to_string());
+        let resolver = HostResolver::new("example.net".to_string());
         let apex = make_hash(99);
 
         // No apex designated → node domain + bare + unknown all serve the info
         // page (resolve → None).
-        assert!(resolver.resolve("example.com").await.is_none());
+        assert!(resolver.resolve("example.net").await.is_none());
         assert!(resolver.resolve("").await.is_none());
         assert!(resolver.resolve("random.example.org").await.is_none());
 
         // Designate the apex actor.
         resolver.set_apex_actor(Some(apex)).await;
         // The node domain itself resolves to the apex actor.
-        assert_eq!(resolver.resolve("example.com").await, Some(apex));
+        assert_eq!(resolver.resolve("example.net").await, Some(apex));
         // With a port.
-        assert_eq!(resolver.resolve("example.com:443").await, Some(apex));
+        assert_eq!(resolver.resolve("example.net:443").await, Some(apex));
         // Bare/absent host → apex catch-all.
         assert_eq!(resolver.resolve("").await, Some(apex));
         // Any other unmatched (non-reserved) host → apex catch-all.
         assert_eq!(resolver.resolve("203.0.113.7").await, Some(apex));
-        assert_eq!(resolver.resolve("bob.example.com").await, Some(apex));
+        assert_eq!(resolver.resolve("bob.example.net").await, Some(apex));
 
         // A registered subdomain still wins over the apex catch-all.
         let alice = make_hash(1);
         resolver.register_subdomain("alice", alice).await;
-        assert_eq!(resolver.resolve("alice.example.com").await, Some(alice));
+        assert_eq!(resolver.resolve("alice.example.net").await, Some(alice));
 
         // Clearing reverts everything to the info page.
         resolver.set_apex_actor(None).await;
-        assert!(resolver.resolve("example.com").await.is_none());
+        assert!(resolver.resolve("example.net").await.is_none());
         // …but the explicit subdomain mapping is untouched.
-        assert_eq!(resolver.resolve("alice.example.com").await, Some(alice));
+        assert_eq!(resolver.resolve("alice.example.net").await, Some(alice));
     }
 
     #[tokio::test]
@@ -1323,15 +1366,15 @@ mod tests {
 
     #[tokio::test]
     async fn host_resolver_reserved_hosts_never_resolve() {
-        let resolver = HostResolver::new("example.com".to_string());
+        let resolver = HostResolver::new("example.net".to_string());
         // Even with an apex actor designated, reserved hosts never serve user
         // content (they have their own routes/SNI above the fallback).
         resolver.set_apex_actor(Some(make_hash(99))).await;
         for reserved in [
-            "mail.example.com",
-            "mta-sts.example.com",
-            "app.example.com",
-            "_acme-challenge.example.com",
+            "mail.example.net",
+            "mta-sts.example.net",
+            "app.example.net",
+            "_acme-challenge.example.net",
             "_acme-challenge.alice.com",
         ] {
             assert!(
@@ -1345,13 +1388,13 @@ mod tests {
     async fn host_resolver_reserved_hosts_case_and_dot_insensitive() {
         // A mixed-case or trailing-dot Host must not bypass the
         // reserved-host exclusion into the apex catch-all.
-        let resolver = HostResolver::new("example.com".to_string());
+        let resolver = HostResolver::new("Example.Net".to_string());
         resolver.set_apex_actor(Some(make_hash(99))).await;
         for reserved in [
-            "App.example.com",
-            "MAIL.example.com",
-            "app.example.com.",
-            "mta-sts.example.com",
+            "App.example.net",
+            "MAIL.EXAMPLE.NET",
+            "app.example.net.",
+            "mta-sts.Example.Net",
         ] {
             assert!(
                 resolver.resolve(reserved).await.is_none(),
@@ -1363,12 +1406,12 @@ mod tests {
     #[tokio::test]
     async fn host_resolver_normalizes_subdomain_host() {
         // Subdomain matching is case-/dot-insensitive too.
-        let resolver = HostResolver::new("example.com".to_string());
+        let resolver = HostResolver::new("example.net".to_string());
         let alice = make_hash(1);
         resolver.register_subdomain("alice", alice).await;
-        assert_eq!(resolver.resolve("Alice.example.com").await, Some(alice));
-        assert_eq!(resolver.resolve("alice.example.com.").await, Some(alice));
-        assert_eq!(resolver.resolve("ALICE.example.com:443").await, Some(alice));
+        assert_eq!(resolver.resolve("Alice.Example.Net").await, Some(alice));
+        assert_eq!(resolver.resolve("alice.example.net.").await, Some(alice));
+        assert_eq!(resolver.resolve("ALICE.EXAMPLE.NET:443").await, Some(alice));
     }
 
     #[tokio::test]
@@ -2054,6 +2097,238 @@ mod tests {
             resp.status(),
             StatusCode::PAYMENT_REQUIRED,
             "a revoked grant darkens the file even for a still-valid token"
+        );
+    }
+
+    /// The folder half of ruling (4): a sealed file in a paywalled `web` set
+    /// is redeemed through the same door as a post — an entitling code answers
+    /// `303` to a `?token=` URL that serves the decrypted bytes; a code the
+    /// tier does not reach is the one `403`; a voided one `410`; a public path
+    /// `404`. The claim row is never written.
+    #[cfg(feature = "payments")]
+    #[tokio::test]
+    async fn the_redeem_door_opens_a_paywalled_folder_file_and_refuses_the_rest() {
+        use crate::registration::OptionalConnectInfo;
+        use crate::routes::AppState;
+        use crate::web_content::paywall_doors::{RedeemForm, paywall_redeem};
+        use axum::Form;
+        use axum::extract::State;
+        use axum::http::HeaderMap;
+        use fauna_mls::wrapped_blob::{GrantWindow, ScopeTuple, build_grant_blob_with_epochs};
+
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let owner = [0x11u8; 32];
+        let dir = tempfile::tempdir().unwrap();
+        let holder = crate::web_content::holder::WebServeHolder::init(dir.path(), db.clone())
+            .await
+            .unwrap()
+            .expect("holder inits");
+        let blob_store: Arc<dyn BlobStoreBackend> = Arc::new(MemBlobStore::new());
+
+        // Tiers: gold (rank 3) gates the set; bronze (rank 1) does not reach it.
+        for (name, rank) in [("gold", 3), ("bronze", 1)] {
+            db.create_subscription_tier(
+                &owner, name, rank, None, None, None, false, None, None, false,
+            )
+            .await
+            .unwrap();
+        }
+        let set_id = db
+            .create_folder_with_options("members-site", &owner, Default::default())
+            .await
+            .unwrap();
+        db.update_folder_for_user(
+            "members-site",
+            &owner,
+            crate::db::FolderUpdate {
+                website_enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        db.set_folder_web_paywall_tier_by_id(set_id, Some("gold"))
+            .await
+            .unwrap();
+        let content_key = [0xC1u8; 32];
+        let secret = b"%PDF-1.7 the members-only report".to_vec();
+        let manifest = crate::web_content::file_bytes::seed_synced_file(
+            &blob_store,
+            None,
+            &secret,
+            Some(&content_key),
+        )
+        .await;
+        db.upsert_web_file(
+            &owner,
+            "downloads/report.pdf",
+            &manifest,
+            "application/pdf",
+            Some(set_id),
+            Some(1),
+        )
+        .await
+        .unwrap();
+        let grant = build_grant_blob_with_epochs(
+            &owner,
+            &[9u8; 16],
+            &holder.x25519_pubkey,
+            Some(&holder.mlkem_ek),
+            GrantWindow(0, u64::MAX),
+            &[(
+                ScopeTuple {
+                    class: ScopeTuple::CLASS_CONTENT_READ.to_string(),
+                    kind: Some(ScopeTuple::KIND_FOLDER.to_string()),
+                    tier: None,
+                    set: Some(ScopeTuple::folder_set_qualifier(
+                        &fauna_core::path_crypto::set_name_hash("members-site"),
+                    )),
+                    factor: None,
+                },
+                vec![(Some(1), content_key.to_vec())],
+            )],
+        )
+        .unwrap()
+        .to_canonical_bytes()
+        .unwrap();
+        db.put_capability_grant(&owner, &[9u8; 16], &holder.x25519_pubkey, i64::MAX, &grant)
+            .await
+            .unwrap();
+        holder.registry.refresh().await.unwrap();
+
+        for (code, tier) in [
+            ("GOLDCODE01", "gold"),
+            ("BRONZE0001", "bronze"),
+            ("VOIDED0001", "gold"),
+        ] {
+            db.insert_payment_claim(code, &owner, tier, "manual", code, None)
+                .await
+                .unwrap();
+        }
+        assert!(db.void_payment_claim("VOIDED0001").await.unwrap());
+
+        let resolver = Arc::new(crate::web_content::serve::HostResolver::new(
+            "nest.example".into(),
+        ));
+        resolver.register_subdomain("alice", owner).await;
+        let state = Arc::new(AppState {
+            host_resolver: Some(resolver),
+            web_serve_holder: Some(holder.clone()),
+            ..AppState::for_test(db.clone())
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "alice.nest.example".parse().unwrap());
+        let redeem = |code: &str, path: &str| {
+            let (state, headers) = (state.clone(), headers.clone());
+            let form = RedeemForm {
+                code: code.into(),
+                path: path.into(),
+            };
+            async move {
+                paywall_redeem(State(state), OptionalConnectInfo(None), headers, Form(form)).await
+            }
+        };
+
+        // The entitling code → 303 to the token URL; private, never a cookie.
+        let resp = redeem(" GOLDCODE01 ", "downloads/report.pdf").await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert!(resp.headers().get(header::SET_COOKIE).is_none());
+        assert_eq!(
+            resp.headers().get(header::CACHE_CONTROL).unwrap(),
+            "private, no-store"
+        );
+        let location = resp.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let token = location
+            .strip_prefix("/downloads/report.pdf?token=")
+            .expect("303 to the resource with a token");
+        let served = crate::web_content::serve::serve_web_content_with_token(
+            &db,
+            &blob_store,
+            None,
+            &owner,
+            "/downloads/report.pdf",
+            Some(&holder),
+            Some(token),
+        )
+        .await;
+        assert_eq!(served.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(served.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(bytes.to_vec(), secret, "the code opens the decrypted file");
+
+        // Durable: the same code works again; the claim stays unredeemed.
+        assert_eq!(
+            redeem("GOLDCODE01", "/downloads/report.pdf").await.status(),
+            StatusCode::SEE_OTHER
+        );
+        let claim = db.get_payment_claim("GOLDCODE01").await.unwrap().unwrap();
+        assert!(claim.redeemed_at.is_none() && claim.redeemed_by.is_none());
+
+        // A tier that does not reach the set, an unknown code and an empty one
+        // share the single 403.
+        for code in ["BRONZE0001", "NOSUCHCODE", ""] {
+            assert_eq!(
+                redeem(code, "downloads/report.pdf").await.status(),
+                StatusCode::FORBIDDEN,
+                "{code:?}"
+            );
+        }
+        assert_eq!(
+            redeem("VOIDED0001", "downloads/report.pdf").await.status(),
+            StatusCode::GONE
+        );
+        assert_eq!(
+            redeem("GOLDCODE01", "nothing/here.txt").await.status(),
+            StatusCode::NOT_FOUND
+        );
+
+        // Another site's Host never honours this owner's code.
+        let other = Arc::new(AppState {
+            host_resolver: Some(Arc::new(crate::web_content::serve::HostResolver::new(
+                "nest.example".into(),
+            ))),
+            web_serve_holder: Some(holder.clone()),
+            ..AppState::for_test(db.clone())
+        });
+        let resp = paywall_redeem(
+            State(other),
+            OptionalConnectInfo(None),
+            headers.clone(),
+            Form(RedeemForm {
+                code: "GOLDCODE01".into(),
+                path: "downloads/report.pdf".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "no site on that host");
+
+        // The set-level 402 teaser carries the form.
+        let teaser = crate::web_content::serve::serve_web_content_with_token(
+            &db,
+            &blob_store,
+            None,
+            &owner,
+            "/downloads/report.pdf",
+            Some(&holder),
+            None,
+        )
+        .await;
+        assert_eq!(teaser.status(), StatusCode::PAYMENT_REQUIRED);
+        let body = axum::body::to_bytes(teaser.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains(r#"action="/api/v1/paywall/redeem""#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#"name="path" value="downloads/report.pdf""#),
+            "{body}"
         );
     }
 

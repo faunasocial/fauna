@@ -11,6 +11,8 @@ import org.robolectric.annotation.Config
 import androidx.compose.ui.semantics.SemanticsProperties
 import uniffi.fauna_conversations.GuardianState
 import uniffi.fauna_conversations.Rail
+import uniffi.fauna_conversations.RoomInvitationSnapshot
+import uniffi.fauna_conversations.RoomRole
 import uniffi.fauna_conversations.SortOrder
 import uniffi.fauna_conversations.ThreadFlavor
 import uniffi.fauna_conversations.ThreadSummary
@@ -59,10 +61,20 @@ class ConversationsListContentTest {
         onSort: () -> Unit = {},
         onSearch: (String) -> Unit = {},
         unopenableMail: UInt = 0u,
+        invitations: List<RoomInvitationSnapshot> = emptyList(),
+        onAcceptInvitation: (Long) -> Unit = {},
+        onDeclineInvitation: (Long) -> Unit = {},
+        formatTime: (Long) -> String = { "" },
     ) {
         composeTestRule.setContent {
             ConversationsListContent(
                 threads = threads,
+                invitations = invitations,
+                onAcceptInvitation = onAcceptInvitation,
+                onDeclineInvitation = onDeclineInvitation,
+                // The shared sentence and token are FFI faces; stubbed here.
+                invitationText = { "${it.inviterDisplay} invited you" },
+                invitationRoleToken = { if (it.role == RoomRole.ADMIN) "admin" else "member" },
                 sort = SortOrder.LATEST_ACTIVITY,
                 searchQuery = "",
                 onOpenThread = onOpenThread,
@@ -70,8 +82,37 @@ class ConversationsListContentTest {
                 onSort = onSort,
                 onSearch = onSearch,
                 unopenableMail = unopenableMail,
+                formatTime = formatTime,
             )
         }
+    }
+
+    @Test
+    fun roomInvitationsPaintTheirThreeIdsAndReportTheirIds() {
+        var accepted: Long? = null
+        var declined: Long? = null
+        render(
+            invitations = listOf(RoomInvitationSnapshot(id = 7, inviterDisplay = "alice", role = RoomRole.ADMIN)),
+            onAcceptInvitation = { accepted = it },
+            onDeclineInvitation = { declined = it },
+        )
+        composeTestRule.onNodeWithTag("room-invitation").assertTextEquals("alice invited you")
+        assertEquals(
+            "admin",
+            composeTestRule.onNodeWithTag("room-invitation").fetchSemanticsNode()
+                .config[SemanticsProperties.StateDescription],
+        )
+        composeTestRule.onNodeWithTag("room-invitation-accept-button").performClick()
+        composeTestRule.onNodeWithTag("room-invitation-decline-button").performClick()
+        assertEquals(7L, accepted)
+        assertEquals(7L, declined)
+    }
+
+    @Test
+    fun noInvitationsPaintNoRows() {
+        render()
+        composeTestRule.onNodeWithTag("room-invitation").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("room-invitation-accept-button").assertDoesNotExist()
     }
 
     @Test
@@ -102,6 +143,28 @@ class ConversationsListContentTest {
             3,
             composeTestRule.onAllNodesWithTag("dm-subject", useUnmergedTree = true)
                 .fetchSemanticsNodes().size,
+        )
+    }
+
+    /**
+     * The row's last-activity time is `conversation-item-timestamp`, painted
+     * through the injected (in production the shared) formatter, and absent —
+     * not an empty label — while the thread has no activity time
+     * (`conversations.md` § Layout & flow; ui.yaml).
+     */
+    @Test
+    fun lastActivityTimestampIsTaggedAndAbsentWithoutActivity() {
+        render(
+            threads = listOf(thread("t1"), thread("t2").copy(lastActivityMs = 0L)),
+            formatTime = { "at-$it" },
+        )
+        val stamps = composeTestRule
+            .onAllNodesWithTag("conversation-item-timestamp", useUnmergedTree = true)
+            .fetchSemanticsNodes()
+        assertEquals(1, stamps.size)
+        assertEquals(
+            "at-1700000000000",
+            stamps[0].config[SemanticsProperties.Text].joinToString("") { it.text },
         )
     }
 

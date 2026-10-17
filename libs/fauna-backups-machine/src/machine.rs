@@ -640,6 +640,8 @@ impl BackupsMachine {
 fn transcribe_detail(snapshot_id: i64, reply: &SnapshotGetReply) -> SnapshotDetail {
     SnapshotDetail {
         snapshot_id,
+        folder: reply.folder.clone(),
+        folder_hash: reply.folder_hash.as_ref().map(|b| hex::encode(b.as_ref())),
         files: reply
             .files
             .iter()

@@ -32,6 +32,8 @@ mod follows;
 pub mod follows_port;
 mod grant_marks;
 #[cfg(feature = "account-port")]
+pub mod kind_manifest_port;
+#[cfg(feature = "account-port")]
 pub mod mail_port;
 mod member_reviews;
 mod mutate;
@@ -63,8 +65,9 @@ pub use backup_store::{
     raise_succession_destination_marks, refile_rotated_box_list,
 };
 pub use custody_leg::{
-    CustodyLegReport, CustodySeedFold, DeploymentSeedCustody, LinkedCustodyLeg,
-    PlaneSeedRotationError, SEED_PUBLISH_WAIT, StoreFold, SupersessionMarks, custody_leg_warning,
+    CUSTODY_MISMATCH_KEY, CUSTODY_UNCONFIRMED_KEY, CustodyLegReport, CustodySeedFold,
+    DeploymentSeedCustody, LinkedCustodyLeg, PlaneSeedRotationError, SEED_PUBLISH_WAIT, StoreFold,
+    SupersessionMarks, custody_leg_unattempted_warning, custody_leg_warning,
     rotate_deployment_seed_on_plane, run_deployment_seed_custody_leg,
     run_deployment_seed_custody_leg_over, run_linked_deployment_seed_custody_leg,
 };
@@ -84,7 +87,7 @@ pub use member_reviews::{
 pub use mutate::{
     FolderCoverageLabel, add_backup_destination, attach_backup_destination_folder,
     detach_backup_destination_folder, edit_backup_destination, keep_backup_destination,
-    normalize_muted_keywords, remove_backup_destination,
+    normalize_muted_keywords, refresh_backup_destination_folder_labels, remove_backup_destination,
 };
 pub use muted_words::MutedWordsSnapshot;
 pub use nostr_npub_confirm::{npub_confirmation_owed, npub_confirmation_owed_for};

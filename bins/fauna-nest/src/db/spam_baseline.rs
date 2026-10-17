@@ -416,7 +416,7 @@ mod tests {
     const ALICE: [u8; 32] = [7u8; 32];
 
     async fn contributing(db: &CacheDb, actor: &[u8; 32]) {
-        db.put_spam_model_with_history(actor, &[0xEEu8; 64], None, None)
+        db.put_spam_model_with_history(actor, &[0xEEu8; 64], None, None, None)
             .await
             .unwrap();
         let mut prefs = db.get_spam_preferences(actor).await.unwrap();
@@ -532,10 +532,10 @@ mod tests {
         );
 
         let before = db.snapshot_spam_baseline_run().await.unwrap();
-        db.put_spam_model_with_history(&ALICE, &[0xEEu8; 64], None, None)
+        db.put_spam_model_with_history(&ALICE, &[0xEEu8; 64], None, None, None)
             .await
             .unwrap();
-        db.put_spam_model_with_history(&ALICE, &[0xEEu8; 64], None, None)
+        db.put_spam_model_with_history(&ALICE, &[0xEEu8; 64], None, None, None)
             .await
             .unwrap();
         let after = db.snapshot_spam_baseline_run().await.unwrap();

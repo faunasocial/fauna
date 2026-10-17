@@ -9,8 +9,10 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performSemanticsAction
+import com.fauna.app.core.AftermathProgress
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import com.fauna.app.ui.viewmodel.RecoveryKitUiState
+import com.fauna.ffi.FfiDeadGenerations
 import com.fauna.ffi.FfiRecoveryKitStatus
 import com.fauna.ffi.FfiSweepCopy
 import com.fauna.ffi.FfiSweepView
@@ -62,7 +64,7 @@ class RecoveryKitSectionContentTest {
 
     private val clicks = mutableListOf<String>()
 
-    private fun render(state: RecoveryKitUiState, qr: QrMatrix? = null) {
+    private fun render(state: RecoveryKitUiState, qr: QrMatrix? = null, inheritedFiltersOpen: Int = 0) {
         composeTestRule.setContent {
             RecoveryKitSectionContent(
                 state = state,
@@ -74,6 +76,7 @@ class RecoveryKitSectionContentTest {
                 onVeto = { clicks += "veto" },
                 pendingDays = { 12 },
                 qrMatrixOf = { qr },
+                inheritedFiltersOpen = inheritedFiltersOpen,
             )
         }
     }
@@ -223,6 +226,7 @@ class RecoveryKitSectionContentTest {
     private fun renderLeg(
         state: RecoveryKitUiState,
         copy: FfiSweepCopy = FfiSweepCopy(outcome = null, unattested = null),
+        aftermath: AftermathProgress = AftermathProgress(),
     ) {
         composeTestRule.setContent {
             RecoveryKitSectionContent(
@@ -239,6 +243,7 @@ class RecoveryKitSectionContentTest {
                 pendingDays = { 12 },
                 qrMatrixOf = { null },
                 sweepCopyOf = { copy },
+                aftermath = aftermath,
             )
         }
     }
@@ -302,6 +307,54 @@ class RecoveryKitSectionContentTest {
         assertAbsent(Ids.RECOVERY_KIT_SWEEP_RETRY_BUTTON)
     }
 
+    // The six aftermath leg lines (`settings.md` § Recovery kit → *The
+    // post-succession aftermath's progress lines*): painted verbatim from the
+    // sink's already-resolved `LocalizedText?`, absent on null.
+    private val aftermathIds = listOf(
+        Ids.RECOVERY_KIT_BACKUP_REGRANT_STATUS,
+        Ids.RECOVERY_KIT_MLS_RESEAL_STATUS,
+        Ids.RECOVERY_KIT_GRANT_REMINT_STATUS,
+        Ids.RECOVERY_KIT_DRAFTS_RESEAL_STATUS,
+        Ids.RECOVERY_KIT_MAIL_BURN_STATUS,
+    )
+
+    @Test
+    fun noAftermathRendersNoLegLines() {
+        renderLeg(RecoveryKitUiState(status = status("registered")))
+
+        aftermathIds.forEach { assertAbsent(it) }
+        assertAbsent(Ids.RECOVERY_KIT_CORPUS_RESEAL_STATUS)
+    }
+
+    @Test
+    fun eachLegLineRendersOnlyWhileItsLineIsNonNull() {
+        val line = LocalizedText("settings.recovery_kit.sweep_all_removed", mapOf("groups" to "3"))
+        renderLeg(
+            RecoveryKitUiState(status = status("registered")),
+            aftermath = AftermathProgress(
+                backupRegrant = line, mlsReseal = line, grantRemint = line,
+                draftsReseal = line, mailBurn = line,
+            ),
+        )
+
+        aftermathIds.forEach { node(it).assertExists() }
+        // Leg 5 reports into no FFI app's sink, so it stays null and never paints.
+        assertAbsent(Ids.RECOVERY_KIT_CORPUS_RESEAL_STATUS)
+    }
+
+    @Test
+    fun aNullLegLineIsAbsentWhileItsNeighboursPaint() {
+        val line = LocalizedText("settings.recovery_kit.sweep_all_removed", mapOf("groups" to "3"))
+        renderLeg(
+            RecoveryKitUiState(status = status("registered")),
+            aftermath = AftermathProgress(mlsReseal = line),
+        )
+
+        node(Ids.RECOVERY_KIT_MLS_RESEAL_STATUS).assertExists()
+        assertAbsent(Ids.RECOVERY_KIT_BACKUP_REGRANT_STATUS)
+        assertAbsent(Ids.RECOVERY_KIT_MAIL_BURN_STATUS)
+    }
+
     @Test
     fun aLineTheProjectionWithholdsIsAbsentNotEmpty() {
         renderLeg(
@@ -327,5 +380,101 @@ class RecoveryKitSectionContentTest {
         node(Ids.RECOVERY_KIT_SWEEP_RETRY_BUTTON).assertIsEnabled()
         node(Ids.RECOVERY_KIT_SWEEP_RETRY_BUTTON).performClick()
         assertEquals(listOf("retry"), clicks)
+    }
+
+    // ── The let-go of a dead generation (the fifth act) ─────────────────────
+
+    private val unreadableLine = LocalizedText(
+        "settings.recovery_kit.unreadable_status_undated",
+        mapOf("rows" to "11"),
+    )
+
+    private fun renderLetGo(state: RecoveryKitUiState) {
+        composeTestRule.setContent {
+            RecoveryKitSectionContent(
+                state = state,
+                onPhraseChange = {},
+                onCreate = {},
+                onReplace = {},
+                onLost = {},
+                onEscrowReseal = {},
+                onVeto = {},
+                onLetGoConfirmChange = {},
+                onLetGo = { clicks += "let-go" },
+                pendingDays = { 12 },
+                qrMatrixOf = { null },
+            )
+        }
+    }
+
+    @Test
+    fun theLetGoTrioIsAbsentWhileNothingIsDead() {
+        renderLetGo(RecoveryKitUiState(status = status("registered"), letGoConfirmWord = "LET GO"))
+
+        assertAbsent(Ids.RECOVERY_KIT_UNREADABLE_STATUS)
+        assertAbsent(Ids.RECOVERY_KIT_LET_GO_CONFIRM_FIELD)
+        assertAbsent(Ids.RECOVERY_KIT_LET_GO_BUTTON)
+    }
+
+    @Test
+    fun aDeadGenerationRendersTheSharedLineAndADisarmedButton() {
+        renderLetGo(
+            RecoveryKitUiState(
+                status = status("registered"),
+                deadGenerations = FfiDeadGenerations(listOf(ByteArray(32)), unreadableLine),
+                letGoConfirmWord = "LET GO",
+            ),
+        )
+
+        node(Ids.RECOVERY_KIT_UNREADABLE_STATUS).assertTextContains("11 items of your account data", substring = true)
+        node(Ids.RECOVERY_KIT_LET_GO_CONFIRM_FIELD).assertExists()
+        node(Ids.RECOVERY_KIT_LET_GO_BUTTON).assertIsNotEnabled()
+    }
+
+    @Test
+    fun theConfirmWordArmsTheLetGoButton() {
+        renderLetGo(
+            RecoveryKitUiState(
+                status = status("registered"),
+                deadGenerations = FfiDeadGenerations(listOf(ByteArray(32)), unreadableLine),
+                letGoConfirmWord = "LET GO",
+                letGoConfirmInput = "LET GO",
+            ),
+        )
+
+        node(Ids.RECOVERY_KIT_LET_GO_BUTTON).assertIsEnabled()
+        node(Ids.RECOVERY_KIT_LET_GO_BUTTON).performSemanticsAction(SemanticsActions.OnClick)
+        assertEquals(listOf("let-go"), clicks)
+    }
+
+    @Test
+    fun theTrioRendersEvenWithTheChainStatusUnread() {
+        // The dead read rides the account runtime, not the registration chain:
+        // an unread chain status does not take the let-go away.
+        renderLetGo(
+            RecoveryKitUiState(
+                status = null,
+                deadGenerations = FfiDeadGenerations(listOf(ByteArray(32)), unreadableLine),
+                letGoConfirmWord = "LET GO",
+            ),
+        )
+
+        node(Ids.RECOVERY_KIT_UNREADABLE_STATUS).assertExists()
+        node(Ids.RECOVERY_KIT_LET_GO_BUTTON).assertExists()
+    }
+
+    /** `recovery-kit-inherited-filters-status` is the route to the filter list
+     *  while inherited rules await a verdict — and NOT a leg line: with no
+     *  marks open it is absent, never a "done" line (`ui.yaml`). */
+    @Test
+    fun theInheritedFiltersLineRendersOnlyWhileMarksAreOpen() {
+        render(RecoveryKitUiState(status = null), inheritedFiltersOpen = 2)
+        node(Ids.RECOVERY_KIT_INHERITED_FILTERS_STATUS).assertTextContains("2 of your email filter", substring = true)
+    }
+
+    @Test
+    fun noOpenMarksMeansNoInheritedFiltersLine() {
+        render(RecoveryKitUiState(status = null), inheritedFiltersOpen = 0)
+        assertAbsent(Ids.RECOVERY_KIT_INHERITED_FILTERS_STATUS)
     }
 }

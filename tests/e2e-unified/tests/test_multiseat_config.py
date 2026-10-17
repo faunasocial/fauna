@@ -344,7 +344,7 @@ def test_a_probe_that_cannot_answer_keeps_the_old_wall_clock_settle():
 # --- The live admin seed resolves PER BOX (testing.md § Default app and nest
 # mode, *Live mode*): FAUNA_LIVE_SECRET_HEX > the staging box's own provisioning
 # identity for the live URL's host > ~/.fauna-id. A live run against
-# dev.example.com that signed in with example.com's ~/.fauna-id was refused
+# dev.example.com that signed in with the former live nest's ~/.fauna-id was refused
 # `not_registered` and skipped the whole run as "box not ready" — the
 # misdiagnosis this pins away.
 
@@ -389,7 +389,7 @@ def test_the_box_file_for_the_live_host_beats_the_home_seed(_seed_home):
 
 
 def test_another_hosts_box_file_is_never_used(_seed_home):
-    _write_box(_seed_home, "other.example.com")
+    _write_box(_seed_home, "other.example.net")
     (_seed_home / ".fauna-id").write_text(_HOME_SEED)
     assert cfg.resolve_secret("https://dev.example.com") == (_HOME_SEED, "~/.fauna-id")
 

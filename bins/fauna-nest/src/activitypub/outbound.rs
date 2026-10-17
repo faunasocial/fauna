@@ -133,18 +133,11 @@ pub(crate) async fn ap_outbound_client(
 }
 
 /// The `(request-target)` value an HTTP signature is computed over: path **and**
-/// query.
-///
-/// The remote rebuilds the request-target from the line it received, so signing
-/// the bare path would mismatch for any URL carrying a query and the signature
-/// would be rejected — a failure that only shows up against the peers whose
-/// actor or inbox URLs happen to be parameterised, which is exactly the kind of
-/// interop bug that hides until production.
+/// query — the shared rule
+/// (`fauna_bridge_activitypub::http_signatures::request_target_path`), which
+/// the oracle's class policy reads too.
 pub(crate) fn signing_path(url: &url::Url) -> String {
-    match url.query() {
-        Some(query) => format!("{}?{}", url.path(), query),
-        None => url.path().to_string(),
-    }
+    fauna_bridge_activitypub::http_signatures::request_target_path(url)
 }
 
 /// The AP dial's resolve-override (`crate::ssrf::test_resolve_client` owns the
@@ -177,9 +170,24 @@ fn test_resolve_client(
 /// none of this is compiled into the shipping nest.
 #[cfg(feature = "test-hooks")]
 fn test_loopback_allowed(url_str: &str) -> bool {
-    if std::env::var_os("FAUNA_TEST_AP_ALLOW_LOOPBACK").is_none() {
-        return false;
-    }
+    test_loopback_hook_open() && is_loopback_url(url_str)
+}
+
+/// Whether the loopback exemption above is open: a `test-hooks` build with
+/// `FAUNA_TEST_AP_ALLOW_LOOPBACK` set. Always `false` in a shipped build.
+///
+/// The feature split lives in `crate::ssrf::ap_loopback_hook_open`, outside the
+/// `activitypub` subtree: a `not(feature = "test-hooks")` arm in here needs
+/// activitypub ON and test-hooks OFF, a shape neither `nest-lib-test-check` arm
+/// compiles (`test_no_nest_test_is_dark_to_the_two_arm_lib_gate`).
+pub(super) fn test_loopback_hook_open() -> bool {
+    crate::ssrf::ap_loopback_hook_open()
+}
+
+/// Does `url_str` name a loopback host (`localhost` or a loopback IP)? The
+/// host half of the exemption, kept apart from the env check so its callers
+/// can pin it without touching the process environment.
+pub(super) fn is_loopback_url(url_str: &str) -> bool {
     url::Url::parse(url_str)
         .ok()
         .and_then(|u| u.host_str().map(str::to_owned))

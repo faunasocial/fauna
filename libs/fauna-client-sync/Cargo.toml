@@ -80,6 +80,15 @@ ed25519-dalek = { workspace = true }
 # in the wasm graph via fauna-core.
 hex = { workspace = true }
 
+# The re-seed ceremony's outcome types: the agent runs the shared driver and
+# the app renders its result, so the IPC's wire form and its two conversions
+# live here, beside the provisioner verb that carries them (`reseed_wire`).
+# Unconditional since the lived-in recovery's leg went wasm-clean: `SyncClient`
+# is that leg's `fauna_client_backup::recover_leg::CustodyRecorder` on every
+# target, web included. Wasm-clean (no reverse edge: fauna-client-backup does
+# not depend on this crate).
+fauna-client-backup = { path = "../fauna-client-backup" }
+
 # The shared desktop sync-agent control client (`src/agent.rs`) runs on every
 # desktop: the agent's local IPC seam is a per-user unix socket on linux/macOS
 # and the per-SID named pipe on windows, resolved through the one
@@ -98,10 +107,6 @@ fauna-credential-store = { path = "../fauna-credential-store" }
 # `SecretStore`, the trait that store's `set` lives on. Already in the desktop
 # graph via fauna-credential-store; named directly so the trait is in scope.
 fauna-client-accounts = { workspace = true }
-# The re-seed ceremony's outcome types: the agent runs the shared driver and
-# the app renders its result, so the IPC's wire form and its two conversions
-# live here, beside the provisioner verb that carries them (`reseed_wire`).
-fauna-client-backup = { path = "../fauna-client-backup" }
 
 # wasm: forward fauna-protocol's `js` feature (fauna-core's js-sys time
 # backend) so the transitive wasm build resolves. Off on native.

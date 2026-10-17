@@ -14,7 +14,12 @@ import androidx.compose.ui.res.stringResource
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
+import com.fauna.app.core.RegionPlaneHost
+import com.fauna.app.core.RegionSubject
+import com.fauna.app.core.post
 import com.fauna.app.ui.components.C2paBadge
+import com.fauna.app.ui.components.RegionBlockWitness
+import com.fauna.app.ui.components.RegionPlaceholder
 import com.fauna.app.ui.components.DocumentBlocks
 import com.fauna.app.ui.components.GatedPostBadge
 import com.fauna.app.ui.components.ProtocolBadge
@@ -29,6 +34,7 @@ import com.fauna.app.ui.viewmodel.FeedVM
 import com.fauna.ffi.legalTakedownTombstone
 import uniffi.fauna_core.RenderDocument
 import uniffi.fauna_feed.PostSummary
+import uniffi.fauna_feed.postOffersThreadView
 import java.text.SimpleDateFormat
 import java.util.*
 import social.fauna.generated.Ids
@@ -121,7 +127,17 @@ fun PostDetailScreen(
             ) {
                 item {
                     Box(modifier = Modifier.testTag(Ids.FEED_POST_DETAIL_DIALOG)) {
-                        MainPostContent(post, vm, onQuoteClick = { vm.quote(post.postId, "") })
+                        MainPostContent(
+                            post,
+                            vm,
+                            bridgeRoster = snapshot?.bridgeRoster ?: emptyList(),
+                            onQuoteClick = { vm.quote(post.postId, "") },
+                            onViewThread = {
+                                navController.navigate(
+                                    "feed/post/${java.net.URLEncoder.encode(post.postId, "UTF-8")}/thread"
+                                )
+                            },
+                        )
                     }
                 }
 
@@ -153,7 +169,13 @@ fun PostDetailScreen(
 }
 
 @Composable
-private fun MainPostContent(post: PostSummary, vm: FeedVM, onQuoteClick: () -> Unit) {
+private fun MainPostContent(
+    post: PostSummary,
+    vm: FeedVM,
+    bridgeRoster: List<uniffi.fauna_core.BridgeIdentitySnapshot>,
+    onQuoteClick: () -> Unit,
+    onViewThread: () -> Unit,
+) {
     val overlaysVm: com.fauna.app.ui.viewmodel.ContactOverlaysVM = androidx.hilt.navigation.compose.hiltViewModel()
     val overlayEpoch by overlaysVm.epoch.collectAsState()
     val authorLabel = remember(post.author, post.authorDisplay, overlayEpoch) {
@@ -187,6 +209,28 @@ private fun MainPostContent(post: PostSummary, vm: FeedVM, onQuoteClick: () -> U
         return
     }
 
+    // The region placeholder in place of the detail body when a region policy
+    // withholds the post — an unrevealed `collapse`, or a `block` (no reveal):
+    // the same composed call the list card makes (region-blocking.md § Where it
+    // composes — no render surface reaches the composed verdict for one source
+    // while bypassing it for another; linux's `region_withheld`).
+    val contentPolicyInputs by vm.contentPolicyInputs.collectAsState()
+    val regionRevision by RegionPlaneHost.revision.collectAsState()
+    val decision = remember(post, contentPolicyInputs, regionRevision) {
+        RegionPlaneHost.render(post.labels, contentPolicyInputs, RegionSubject.post(post))
+    }
+    RegionBlockWitness("post-detail:${post.postId}", decision.isRegionBlocked)
+    var regionRevealed by remember(post.postId) { mutableStateOf(false) }
+    val regionPlaceholder = decision.placeholder
+    if (regionPlaceholder != null && (regionPlaceholder.verb == "block" || !regionRevealed)) {
+        RegionPlaceholder(
+            regionPlaceholder,
+            witnessKey = "post-detail:${post.postId}",
+            onReveal = { regionRevealed = true },
+        )
+        return
+    }
+
     // Detail-open unlock for a gated post — the shared manager resolves + fetches
     // the sealed full body and swaps it into the snapshot, so the teaser the list
     // projection carried repaints as the full post (feed.md § Encryption at rest).
@@ -212,7 +256,9 @@ private fun MainPostContent(post: PostSummary, vm: FeedVM, onQuoteClick: () -> U
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (post.source.isNotEmpty()) { ProtocolBadge(source = post.source) }
+                if (post.source.isNotEmpty()) {
+                    ProtocolBadge(source = post.source, bridgeRoster = bridgeRoster)
+                }
                 // The "unverified source" caveat, shown iff this client could not
                 // verify the signed envelope (post.verification == FAILED); mirrors
                 // the list card + linux post_detail (security.md § Client display).
@@ -255,12 +301,26 @@ private fun MainPostContent(post: PostSummary, vm: FeedVM, onQuoteClick: () -> U
             Spacer(Modifier.height(8.dp))
         }
 
+        // `feed-post-view-thread-button` (bridges.md § Bluesky-native thread
+        // view): offered only on a post the shared `post_offers_thread_view`
+        // says has a Bluesky thread; opens [ThreadScreen] over the shared
+        // `FeedManager::open_thread`.
+        if (postOffersThreadView(post)) {
+            TextButton(
+                onClick = onViewThread,
+                modifier = Modifier.testTag(Ids.FEED_POST_VIEW_THREAD_BUTTON),
+            ) {
+                Text(stringResource(R.string.feed_post_view_thread))
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+
         // Media — paint the folded feed `Image`/`Video` block from the post `document`
         // (render-model.md § D6/D6b), the same `FeedPostImage`/`FeedPostVideo` painters
         // (fire-once `resolve_media` fold + blob-bytes fetch) the list card uses.
         if (post.hasMedia) {
             FeedPostImage(document = post.document, postId = post.postId, mediaHash = post.mediaHash, vm = vm)
-            FeedPostVideo(document = post.document)
+            FeedPostVideo(document = post.document, postId = post.postId, vm = vm)
             PostImageC2paBadge(document = post.document, checkC2pa = { vm.checkBlobC2pa(it) })
             Spacer(Modifier.height(8.dp))
         }
@@ -333,8 +393,9 @@ private fun MainPostContent(post: PostSummary, vm: FeedVM, onQuoteClick: () -> U
  * feed-upload path computes `has_c2pa` for real (`process_media`+`c2pa-detect`
  * are default-on for every native UniFFI app, `fauna-ffi/Cargo.toml`), so
  * unlike web's client-side stub this check is meaningful here — one check per
- * resolved media hash (`ApiClient.checkBlobC2pa`, `x-c2pa` server header via a
- * HEAD request), keyed so it only re-fires when the hash changes. Takes the
+ * resolved media hash (`FeedVM.checkBlobC2pa`: the `x-c2pa` HEAD as pre-filter,
+ * then the shared `detectMediaC2pa` verdict over the fetched bytes), keyed so it
+ * only re-fires when the hash changes. Takes the
  * check as an injected suspend lambda (mirrors `ConversationDetailScreen`'s
  * `loadLinkPreviewImageBytes`) so it's testable without a live `FeedVM`.
  */

@@ -72,8 +72,12 @@ pub fn clear() {
 /// + scratch-runtime mechanism (the close handler holds no tokio handle).
 pub fn flush_cues_on_close(bounded: bool) {
     let Some(manager) = manager() else { return };
+    // Fold what is still on screen, and what a leave just handed off, before
+    // the put — else the flush has nothing new to send (`feed::viewport`).
+    crate::feed::viewport::drain_for_close();
     crate::blocking_flush::run_bounded(
         async move {
+            crate::feed::viewport::emits_settled().await;
             let _ = manager.flush_cues().await;
         },
         std::time::Duration::from_millis(2_000),

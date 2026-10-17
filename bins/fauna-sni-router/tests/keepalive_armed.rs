@@ -1,4 +1,4 @@
-//! Regression lock for the 2026-07-31 example.com `:443` outage.
+//! Regression lock for the 2026-07-31 live-nest `:443` outage.
 //!
 //! The unit test in `fauna-conn-limit` proves `arm_dead_peer_detection` sets the
 //! right socket options. That is necessary but not sufficient: what actually
@@ -116,7 +116,7 @@ fn accept_loop_arms_dead_peer_detection_on_spliced_connections() {
             Instant::now() < deadline,
             "the router's accepted socket on :{listen_port} carries no keepalive timer, so a peer \
              that vanishes without a clean close would hold its per-IP permit forever (the \
-             2026-07-31 example.com :443 outage). `ss -tino` said:\n{listing}"
+             2026-07-31 live-nest :443 outage). `ss -tino` said:\n{listing}"
         );
         std::thread::sleep(Duration::from_millis(50));
     };

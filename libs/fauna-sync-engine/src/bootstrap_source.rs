@@ -506,4 +506,41 @@ mod tests {
             "got: {err:#}"
         );
     }
+
+    /// The caller's byte bound reaches the `.meta` half too: a sidecar longer
+    /// than `max_bytes` is refused mid-read as `SegmentBodyTooLarge` naming the
+    /// `.meta`, while the `.dat` before it (within the bound) streamed fine.
+    /// Mutate: fetch the sidecar with `u64::MAX` instead of `max_bytes` and the
+    /// fetch succeeds.
+    #[tokio::test]
+    async fn a_meta_longer_than_the_bound_is_refused_mid_read() {
+        let server = MockServer::start().await;
+        serving_dat(&server, b"real").await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/api/v1/segments/{KIND}/{}/0/meta",
+                actor_hex()
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"sidecar".to_vec()))
+            .mount(&server)
+            .await;
+        let rpc = ListingOnly {
+            blake3_hex: hex::encode(blake3::hash(b"real").as_bytes()),
+            meta_blake3_hex: hex::encode(blake3::hash(b"sidecar").as_bytes()),
+        };
+        let bytes = byte_plane(&server.uri());
+        let source = NestBootstrapSource::new(&rpc, &bytes, binding());
+
+        source.list_segments(&scope()).await.unwrap();
+        // Four bytes of `.dat` fit; the seven-byte sidecar does not.
+        let err = source
+            .fetch_segment(&scope(), &offer(), 5, &mut Collected::default())
+            .await
+            .expect_err("seven sidecar bytes against a five-byte bound");
+        let too_large = err
+            .downcast_ref::<crate::nest_client::SegmentBodyTooLarge>()
+            .unwrap_or_else(|| panic!("got: {err:#}"));
+        assert_eq!(too_large.half, ".meta");
+        assert_eq!(too_large.max_bytes, 5);
+    }
 }

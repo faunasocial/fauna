@@ -74,6 +74,18 @@ impl super::PlacementKind for CardPlacementKind {
     fn tombstone_deleted_at(t: &Self::Tombstone) -> Option<i64> {
         Some(t.deleted_at)
     }
+
+    fn note_pruned(m: &mut Self::Manifest, pruned: &[Self::Tombstone]) {
+        for t in pruned {
+            if let Some(b) = m
+                .addressbooks
+                .iter_mut()
+                .find(|b| b.addressbook_id == t.addressbook_id)
+            {
+                b.pruned_modseq = b.pruned_modseq.max(t.modseq);
+            }
+        }
+    }
 }
 
 /// The addressbook journal is part of the backed-up card corpus — the calendar
@@ -100,6 +112,14 @@ impl super::AdoptableJournal for CardPlacementKind {
                 .tombstones
                 .iter()
                 .all(|t| corpus.tombstones.contains(t))
+    }
+
+    /// Every placed card of the corpus, still placed exactly so.
+    fn extends_adoption_of(
+        current: &CardPlacementManifest,
+        corpus: &CardPlacementManifest,
+    ) -> bool {
+        corpus.cards.iter().all(|c| current.cards.contains(c))
     }
 }
 
@@ -139,6 +159,7 @@ fn apply_record_to_manifest(record: &CardPlacementRecord, m: &mut CardPlacementM
                 addressbook_id: *addressbook_id,
                 encrypted_metadata: encrypted_metadata.clone(),
                 highestmodseq: 1,
+                pruned_modseq: 0,
             });
         }
         CardPlacementRecord::UpdateAddressbookMetadata {

@@ -9,6 +9,7 @@ pub mod client;
 pub mod error;
 pub mod media_upload;
 pub mod push;
+pub mod ranged_nest_reader;
 mod reconnect;
 pub mod remote_image;
 /// Test doubles for driving a real [`NestClient`] with a mocked socket. Behind
@@ -21,6 +22,7 @@ pub mod update_look;
 pub mod write_token_bearer;
 pub mod ws_adapter;
 pub mod ws_challenge_bearer;
+pub mod ws_custodied_fleet_bearer;
 pub mod ws_custody_handshake_bearer;
 pub mod ws_device_handshake_bearer;
 
@@ -52,6 +54,7 @@ pub use media_upload::{
     upload_sealed_post_blob,
 };
 pub use push::PushBroker;
+pub use ranged_nest_reader::{RangedNestReader, RangedReadError};
 pub use types::ConnectionState;
 
 // Re-exports from fauna-protocol so consumers don't need a direct dep.

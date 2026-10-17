@@ -57,6 +57,18 @@ E2E = REPO / "tests" / "e2e-unified"
 #: which no single machine can even collect.
 APP_MARKERS = frozenset({"web", "linux", "windows", "macos", "ios", "android", "tui"})
 
+#: The markers of witnesses a plain app selection does not RECORD: each is an opt-in
+#: suite (its own `-m <marker>` recipe, or an autouse gate that `skip_environment`s
+#: without live credentials / `FAUNA_E2E_LIVE=1`), whose registered description in
+#: `pytest.ini` says so. `features-gaps --runnable` names these apart instead of
+#: printing a selection line that cannot record them. A test under `tests/live/` is
+#: the same class by path (`LIVE_DIR`): that directory's conftest gates it.
+OPT_IN_MARKERS = frozenset({
+    "version_skew", "caldav_matrix", "live_provisioning", "staging_box",
+    "live_box", "live_only", "cd_suite",
+})
+LIVE_DIR = "/tests/live/"
+
 #: The markers are not the app axis's only input: conftest's deselection ALSO keeps a
 #: client-parametrized item only when its client was selected (`_parametrized_clients`
 #: — a real fixture, parametrized with app names), and on a column outside the set
@@ -121,6 +133,14 @@ DRIVER_FACTORY_IMPORTS = frozenset({
     # a driver obtained through a SIBLING TEST MODULE's helper is a door this
     # closure cannot see, and the re-key journey read as launching no app.
     ("helpers.tui_headless_store", "headless_launch"),
+    # The seat rounds' whole setup (nest, account, set, `start_seats`), adopted
+    # by import from its home module by journeys that need two seats of one
+    # account (the linux on-demand hydrate journey) — the same door as above.
+    ("tests.test_filesync_seats", "_seat_run"),
+    # The hosted-ATProto world (nest, real PDS bridge, fake directory and DNS,
+    # and a launched app logged in as its user), lifted out of the custody
+    # journeys' module 2026-10-13 so the published-repo journeys share it.
+    ("helpers.atproto_hosted_world", "hosted_world"),
 })
 
 #: The module form of the same imports — `from helpers import sync_seats`, then
@@ -204,6 +224,10 @@ class TestFacts:
     #: select it. `apps` cannot say *no column*, so it keeps the marks and this flag
     #: is what a pin reads to make the contradiction loud.
     contradictory: bool = False
+    #: The `OPT_IN_MARKERS` it carries (module, class and function folded together),
+    #: plus `live` for a file under `tests/live/` — the witnesses a plain app selection
+    #: collects but does not record.
+    opt_in: tuple = ()
 
     @property
     def rel(self) -> str:
@@ -239,8 +263,9 @@ def _feature_slugs(node: ast.AST) -> list:
     return slugs
 
 
-def _app_marks(node: ast.AST) -> set:
-    """Every `pytest.mark.<app>` in `node` — bare attribute or call, either spelling.
+def _app_marks(node: ast.AST, names: frozenset = APP_MARKERS) -> set:
+    """Every `pytest.mark.<app>` in `node` — bare attribute or call, either spelling
+    (`names` swaps the vocabulary: `OPT_IN_MARKERS` reads the opt-in suites the same way).
 
     Unlike `_mark_calls` this must see the BARE form, because that is how an app
     marker is almost always written (`@pytest.mark.windows`, no parentheses).
@@ -249,18 +274,57 @@ def _app_marks(node: ast.AST) -> set:
     for sub in ast.walk(node):
         target = sub.func if isinstance(sub, ast.Call) else sub
         if (isinstance(target, ast.Attribute)
-                and target.attr in APP_MARKERS
+                and target.attr in names
                 and isinstance(target.value, ast.Attribute)
                 and target.value.attr == "mark"):
             found.add(target.attr)
     return found
 
 
-def _module_scope(tree: ast.Module) -> tuple:
+def _helper_file(module: str, path: Path | None) -> Path | None:
+    """The `tests/e2e-unified` helper module `module` names (`helpers.skew_client`),
+    found beside the scanned file — its own directory and each ancestor — so a
+    fixture world built under a temp dir resolves its own helpers, never the repo's."""
+    if path is None or not module or module.split(".")[0] not in ("helpers", "common"):
+        return None
+    rel = Path(*module.split(".")).with_suffix(".py")
+    for base in path.resolve().parents:
+        if (base / rel).is_file():
+            return base / rel
+    return None
+
+
+def _module_scope(tree: ast.Module, path: Path | None = None, depth: int = 0) -> tuple:
     """`(constants, functions)` bound at module level — the names a client set may be
-    spelled through (`AUTOSTART_APPS = ("windows",)`, `def _clients(*want): …`)."""
+    spelled through (`AUTOSTART_APPS = ("windows",)`, `def _clients(*want): …`).
+
+    An app set IMPORTED from a `helpers.*` module (`from helpers.skew_client import
+    SKEW_CLIENTS, AT_REST_CLIENTS`) is resolved in the HELPER's own scope — the name
+    may be a comprehension over a sibling constant that the importer never sees
+    (`AT_REST_CLIENTS` filters `SKEW_CLIENTS`) — and bound here as the literal set it
+    names; a name the parse cannot reduce to apps stays unbound (= unrestricted). A
+    name the module binds itself wins over an import."""
     constants: dict = {}
     functions: dict = {}
+    if depth < 3:
+        for node in tree.body:
+            if not isinstance(node, ast.ImportFrom) or node.level:
+                continue
+            helper = _helper_file(node.module or "", path)
+            if helper is None:
+                continue
+            try:
+                helper_tree = ast.parse(helper.read_text(encoding="utf-8", errors="replace"))
+            except (OSError, SyntaxError):
+                continue
+            helper_scope = _module_scope(helper_tree, helper, depth + 1)
+            for alias in node.names:
+                if alias.name not in helper_scope[0]:
+                    continue
+                found = _app_set(helper_scope[0][alias.name], helper_scope)
+                if found is not None:
+                    constants[alias.asname or alias.name] = ast.Tuple(
+                        elts=[ast.Constant(a) for a in sorted(found)], ctx=ast.Load())
     for node in tree.body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 \
                 and isinstance(node.targets[0], ast.Name):
@@ -312,6 +376,10 @@ def _app_set(expr: ast.AST, scope: tuple, local: dict | None = None,
             return None
         return _app_set(gen.iter, scope, local, depth + 1)
     if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) \
+            and expr.func.id in ("tuple", "list", "set", "frozenset") \
+            and expr.func.id not in functions and len(expr.args) == 1 and not expr.keywords:
+        return _app_set(expr.args[0], scope, local, depth + 1)
+    if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) \
             and expr.func.id in functions and not expr.keywords:
         fn = functions[expr.func.id].args
         if fn.posonlyargs or fn.args or fn.kwonlyargs:
@@ -342,13 +410,21 @@ def _indirect(call: ast.Call, name: str) -> bool:
     return False
 
 
+class SeatSet(frozenset):
+    """A client set read off a `SECOND_APP_FIXTURES` seat's parametrization. It narrows
+    a test only when the seat is the test's ONLY app (see `client_param_sets`)."""
+
+
 def client_param_sets(node: ast.AST, scope: tuple) -> list:
     """Every client set an `@pytest.mark.parametrize` in `node` restricts the test to.
 
     Only the shape conftest's `_parametrized_clients` deselects on counts: ONE
     argname, parametrized `indirect` (a real fixture runs — a direct parametrization
-    is pytest's pseudo-fixture, a plain value however app-like its strings), not a
-    `SECOND_APP_FIXTURES` seat, over a set the parse can name.
+    is pytest's pseudo-fixture, a plain value however app-like its strings), over a
+    set the parse can name. A `SECOND_APP_FIXTURES` seat comes back as a `SeatSet`:
+    beside the run's own `app` it launches a second app and the column stays the
+    run's, but a test that requests no other app fixture IS its seat (conftest
+    deselects it unless every seat value is selected), and `scan_file` narrows on it.
     """
     sets = []
     for call in _mark_calls(node, "parametrize"):
@@ -356,11 +432,11 @@ def client_param_sets(node: ast.AST, scope: tuple) -> list:
                 or not isinstance(call.args[0].value, str):
             continue
         name = call.args[0].value.strip()
-        if "," in name or name in SECOND_APP_FIXTURES or not _indirect(call, name):
+        if "," in name or not _indirect(call, name):
             continue
         found = _app_set(call.args[1], scope)
         if found is not None:
-            sets.append(found)
+            sets.append(SeatSet(found) if name in SECOND_APP_FIXTURES else found)
     return sets
 
 
@@ -468,19 +544,21 @@ def scan_file(path: Path, repo: Path = REPO, launching: frozenset | None = None)
     launching = app_launching_fixtures(
         own_fixtures, doors=launching or APP_LAUNCHING_FIXTURES)
 
-    scope = _module_scope(tree)
+    scope = _module_scope(tree, path)
     param_fixtures = fixture_param_sets(tree, scope)
 
     module_slugs: list = []
     module_apps: set = set()
     module_params: list = []
     module_overrides: set = set()
+    module_opt: set = {"live"} if LIVE_DIR in "/" + rel else set()
     for node in tree.body:
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id == "pytestmark":
                     module_slugs.extend(_feature_slugs(node.value))
                     module_apps |= _app_marks(node.value)
+                    module_opt |= _app_marks(node.value, OPT_IN_MARKERS)
                     module_params.extend(client_param_sets(node.value, scope))
                     module_overrides |= parametrized_names(node.value)
 
@@ -503,20 +581,32 @@ def scan_file(path: Path, repo: Path = REPO, launching: frozenset | None = None)
     def visit(fn, prefix: str, class_drives: bool = False,
               inherited_apps: frozenset = frozenset(),
               inherited_params: tuple = (),
-              inherited_overrides: frozenset = frozenset()) -> None:
+              inherited_overrides: frozenset = frozenset(),
+              inherited_opt: frozenset = frozenset()) -> None:
         slugs = list(module_slugs)
         apps = set(module_apps) | set(inherited_apps)
         params = list(module_params) + list(inherited_params)
         overridden = set(module_overrides) | set(inherited_overrides)
+        opt = set(module_opt) | set(inherited_opt)
         for dec in fn.decorator_list:
             slugs.extend(_feature_slugs(dec))
             apps |= _app_marks(dec)
+            opt |= _app_marks(dec, OPT_IN_MARKERS)
             params.extend(client_param_sets(dec, scope))
             overridden |= parametrized_names(dec)
         args = list(fn.args.args) + list(fn.args.kwonlyargs)
         requested = {a.arg for a in args}
         params.extend(requested_param_sets(requested, overridden))
         fixtures = requested & launching
+        # A seat narrows only a test that is nothing BUT its seat(s): any other app
+        # fixture (or a browser the module drives) makes the run's own app the first
+        # seat, and the seat a second app beside it.
+        # Several seats are ONE restriction: conftest needs every seat value selected
+        # and then keeps the item on an any-of match, so the test speaks for the union.
+        seats = [p for p in params if isinstance(p, SeatSet)]
+        params = [p for p in params if not isinstance(p, SeatSet)]
+        if seats and not ((fixtures - SECOND_APP_FIXTURES) or browser or class_drives):
+            params.append(frozenset().union(*seats))
         # Marks and a client-set parametrization both narrow — conftest keeps the
         # item only where they agree (`params & marker_platforms`).
         columns = set(apps)
@@ -528,7 +618,7 @@ def scan_file(path: Path, repo: Path = REPO, launching: frozenset | None = None)
             features=tuple(dict.fromkeys(slugs)),
             drives_app=bool(fixtures) or browser or class_drives,
             apps=tuple(sorted(apps if contradictory else columns)),
-            contradictory=contradictory))
+            contradictory=contradictory, opt_in=tuple(sorted(opt))))
 
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
@@ -541,20 +631,23 @@ def scan_file(path: Path, repo: Path = REPO, launching: frozenset | None = None)
             class_apps = set()
             class_params: list = []
             class_overrides: set = set()
+            class_opt: set = set()
             for dec in node.decorator_list:
                 class_apps |= _app_marks(dec)
+                class_opt |= _app_marks(dec, OPT_IN_MARKERS)
                 class_params.extend(client_param_sets(dec, scope))
                 class_overrides |= parametrized_names(dec)
             for sub in node.body:
                 if isinstance(sub, ast.Assign) and any(
                         isinstance(t, ast.Name) and t.id == "pytestmark" for t in sub.targets):
                     class_apps |= _app_marks(sub.value)
+                    class_opt |= _app_marks(sub.value, OPT_IN_MARKERS)
                     class_params.extend(client_param_sets(sub.value, scope))
                     class_overrides |= parametrized_names(sub.value)
             for sub in node.body:
                 if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)) and sub.name.startswith("test"):
                     visit(sub, f"{node.name}::", class_drives, frozenset(class_apps),
-                          tuple(class_params), frozenset(class_overrides))
+                          tuple(class_params), frozenset(class_overrides), frozenset(class_opt))
     return facts
 
 

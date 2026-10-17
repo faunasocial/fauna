@@ -86,8 +86,8 @@ use fauna_ui_ids as ids;
 use std::sync::Arc;
 
 use fauna_client_mail_settings::{
-    ExportFormat, ExportStep, MailExportAction, MailExportMachine, MailExportSnapshot,
-    export_format_label,
+    ExportFormat, ExportSessionState, ExportStep, MailExportAction, MailExportMachine,
+    MailExportSnapshot, export_format_label,
 };
 use fauna_i18n::strings::mail_export as t;
 
@@ -366,12 +366,14 @@ fn scope_step_elements(e: &MailExportState, snapshot: Option<&MailExportSnapshot
 /// Step 3 — confirmation + the durable commit.
 ///
 /// `mail-export.md` § Wizard steps 3 wants "total messages + estimated bytes +
-/// estimated wall-clock time" in the summary. The snapshot carries none of those:
-/// they come from the unbuilt `start_export_session` estimate path, so the
-/// summary states what IS known (format + how many mailboxes are selected) and the
-/// i18n copy `confirm_pending` says the estimate is unavailable until the backend
-/// lands. That is linux's `confirm_text` verbatim in content — an invented
-/// estimate would be the fake-green this page exists to avoid.
+/// estimated wall-clock time" in the summary. The total is the selected
+/// mailboxes' counts (`MailExportSnapshot::selected_message_count`); the two
+/// estimates are the bytes those mailboxes rest in on the nest and that figure
+/// through the shared rate (`selected_byte_estimate` /
+/// `selected_time_estimate_secs`), folded into the summary label so every
+/// driver reads all three off `mail-export-confirm-summary`. A nest that
+/// reports no sizes (selected messages but zero bytes) gets the bare counts
+/// plus `confirm_estimate_unavailable`, never an invented figure.
 fn confirm_step_elements(
     snapshot: Option<&MailExportSnapshot>,
     format: ExportFormat,
@@ -379,13 +381,32 @@ fn confirm_step_elements(
     let selected = snapshot
         .map(|s| s.mailboxes.iter().filter(|m| m.selected).count())
         .unwrap_or(0);
-    vec![
+    let messages = snapshot.map_or(0, MailExportSnapshot::selected_message_count);
+    let bytes = snapshot.map_or(0, MailExportSnapshot::selected_byte_estimate);
+    let counts = t::confirm_summary_count_fmt(
+        &format_label(format),
+        &selected.to_string(),
+        &messages.to_string(),
+    );
+    // Nothing selected has nothing to estimate; selected messages with no
+    // bytes is a nest that reports no sizes, and says so.
+    let summary = if bytes == 0 {
+        counts
+    } else {
+        t::confirm_summary_estimated_fmt(
+            &counts,
+            &bytes_text(bytes),
+            &duration_text(snapshot.map_or(0, MailExportSnapshot::selected_time_estimate_secs)),
+        )
+    };
+    let mut els = vec![
         Element::chrome(t::CONFIRM_TITLE),
-        Element::label(
-            ids::MAIL_EXPORT_CONFIRM_SUMMARY,
-            t::confirm_summary_fmt(&format_label(format), &selected.to_string()),
-        ),
-        Element::chrome(t::CONFIRM_PENDING),
+        Element::label(ids::MAIL_EXPORT_CONFIRM_SUMMARY, summary),
+    ];
+    if bytes == 0 && messages > 0 {
+        els.push(Element::chrome(t::CONFIRM_ESTIMATE_UNAVAILABLE));
+    }
+    els.extend([
         Element::gesture_button(
             ids::WIZARD_BACK_BUTTON,
             t::BACK,
@@ -398,7 +419,8 @@ fn confirm_step_elements(
             true,
             Gesture::Settings(Action::MailExportStart),
         ),
-    ]
+    ]);
+    els
 }
 
 /// Step 4 — progress. Overall counters, the bar, the pause/resume/cancel
@@ -426,11 +448,14 @@ fn progress_step_elements(
         Element::chrome(t::PROGRESS_TITLE),
         Element::label(
             ids::MAIL_EXPORT_PROGRESS_SUMMARY,
-            t::progress_summary_fmt(
-                &exported.to_string(),
-                &total.to_string(),
-                &skipped.to_string(),
-                &errored.to_string(),
+            with_timing(
+                t::progress_summary_fmt(
+                    &exported.to_string(),
+                    &total.to_string(),
+                    &skipped.to_string(),
+                    &errored.to_string(),
+                ),
+                snapshot.map(|s| s.timing(fauna_core::data::Timestamp::now_secs())),
             ),
         ),
         // The bar's painted text is its percentage: tui has no widget-level
@@ -440,38 +465,56 @@ fn progress_step_elements(
             format!("{:.0}%", fraction * 100.0),
         )
         .attr("fraction", format!("{fraction:.4}")),
-        Element::gesture_button(
-            ids::MAIL_EXPORT_PAUSE_BUTTON,
-            t::PAUSE_BUTTON,
+    ];
+    let failed = snapshot.and_then(|s| s.session_state) == Some(ExportSessionState::Errored);
+    if failed {
+        // A failed export is a record, not a run (`mail-export.md` § A failed
+        // export is a record the wizard shows until the user moves on): none
+        // of the three controls applies, and its one control is the Done
+        // step's own discard under its own label.
+        els.push(Element::gesture_button(
+            ids::MAIL_EXPORT_DISCARD_BUTTON,
+            t::DISMISS_FAILED_BUTTON,
             true,
-            Gesture::Settings(Action::MailExportPause),
-        ),
-        Element::gesture_button(
-            ids::MAIL_EXPORT_RESUME_BUTTON,
-            t::RESUME_BUTTON,
-            true,
-            Gesture::Settings(Action::MailExportResume),
-        ),
-        // Two-click inline confirm: the relabel is the gate's only visible
-        // affordance, and the shared action drives it as click-then-click
-        // (`actions/mail_export.py::cancel`).
-        Element::gesture_button(
-            ids::MAIL_EXPORT_CANCEL_BUTTON,
-            if e.cancel_armed {
-                fauna_i18n::strings::common::CONFIRM_Q
-            } else {
-                t::CANCEL_BUTTON
-            },
-            true,
-            Gesture::Settings(Action::MailExportCancel),
-        ),
+            Gesture::Settings(Action::MailExportDiscard),
+        ));
+    } else {
+        els.extend([
+            Element::gesture_button(
+                ids::MAIL_EXPORT_PAUSE_BUTTON,
+                t::PAUSE_BUTTON,
+                true,
+                Gesture::Settings(Action::MailExportPause),
+            ),
+            Element::gesture_button(
+                ids::MAIL_EXPORT_RESUME_BUTTON,
+                t::RESUME_BUTTON,
+                true,
+                Gesture::Settings(Action::MailExportResume),
+            ),
+            // Two-click inline confirm: the relabel is the gate's only visible
+            // affordance, and the shared action drives it as click-then-click
+            // (`actions/mail_export.py::cancel`).
+            Element::gesture_button(
+                ids::MAIL_EXPORT_CANCEL_BUTTON,
+                if e.cancel_armed {
+                    fauna_i18n::strings::common::CONFIRM_Q
+                } else {
+                    t::CANCEL_BUTTON
+                },
+                true,
+                Gesture::Settings(Action::MailExportCancel),
+            ),
+        ]);
+    }
+    els.extend([
         Element::label(
             ids::MAIL_EXPORT_ERROR_LOG,
             snapshot.map(|s| s.error_log.join("\n")).unwrap_or_default(),
         ),
         Element::chrome(t::ERROR_LOG_TITLE),
         Element::label(ids::MAIL_EXPORT_MAILBOX_PROGRESS_LIST, t::PROGRESS_TITLE),
-    ];
+    ]);
     for row in snapshot
         .map(|s| s.mailbox_progress.as_slice())
         .unwrap_or(&[])
@@ -501,6 +544,32 @@ fn mailbox_progress_row_elements(
     ]
 }
 
+/// The progress summary with the run's elapsed time and, while it is
+/// running, the time left (`mail-export.md` § Wizard steps step 4; the shared
+/// `transfer_timing` decides both).
+fn with_timing(
+    summary: String,
+    timing: Option<fauna_client_mail_settings::TransferTiming>,
+) -> String {
+    match timing.map(|t| (t.elapsed_secs, t.remaining_secs)) {
+        Some((Some(elapsed), Some(remaining))) => {
+            t::progress_remaining_fmt(&summary, &duration_text(elapsed), &duration_text(remaining))
+        }
+        Some((Some(elapsed), None)) => t::progress_elapsed_fmt(&summary, &duration_text(elapsed)),
+        _ => summary,
+    }
+}
+
+/// A duration in the shared coarse format (`value-formatting.md` § Duration).
+fn duration_text(secs: u64) -> String {
+    fauna_core::format::duration_secs(secs).resolve(fauna_i18n::strings::lookup)
+}
+
+/// A byte size in the shared format (`value-formatting.md` § Byte sizes).
+fn bytes_text(bytes: u64) -> String {
+    fauna_core::format::byte_size(bytes).resolve(fauna_i18n::strings::lookup)
+}
+
 /// Step 5 — done. The summary card, the sealed-blob download, the copyable
 /// other-device link, and the immediate discard.
 ///
@@ -511,20 +580,43 @@ fn done_step_elements(snapshot: Option<&MailExportSnapshot>, format: ExportForma
     let saved = snapshot
         .map(|s| s.saved_archive_path.as_str())
         .filter(|p| !p.is_empty());
-    let summary = match (snapshot.and_then(|s| s.blob_bytes), saved) {
+    // § Wizard steps step 5: "X messages exported, Y bytes, time elapsed".
+    let exported = snapshot.map_or(0, |s| s.exported_count).to_string();
+    let elapsed = snapshot
+        .and_then(|s| {
+            s.timing(fauna_core::data::Timestamp::now_secs())
+                .elapsed_secs
+        })
+        .map(duration_text);
+    let summary = match (snapshot.and_then(|s| s.blob_bytes), saved, elapsed) {
         // Once the archive is really on disk the summary says WHERE. tui has no
         // save dialog to raise (`tui.md` § Declared platform absences), so
         // without this the Download button is a control that visibly does
         // nothing — the dropped-command shape testing.md point 11 forbids — and
         // the path is exactly what the user needs next.
-        (Some(bytes), Some(path)) => {
+        (Some(bytes), Some(path), Some(elapsed)) => t::saved_summary_timed_fmt(
+            &exported,
+            &format_label(format),
+            &bytes.to_string(),
+            &elapsed,
+            path,
+        ),
+        (Some(bytes), None, Some(elapsed)) => t::done_summary_timed_fmt(
+            &exported,
+            &format_label(format),
+            &bytes.to_string(),
+            &elapsed,
+        ),
+        // A completed session always carries its clock; these two arms are
+        // only a snapshot that has not been read from the nest yet.
+        (Some(bytes), Some(path), None) => {
             t::saved_summary_fmt(&format_label(format), &bytes.to_string(), path)
         }
-        (Some(bytes), None) => t::done_summary_fmt(&format_label(format), &bytes.to_string()),
+        (Some(bytes), None, None) => t::done_summary_fmt(&format_label(format), &bytes.to_string()),
         // Pre-completion there is no blob size yet, so the summary is the format
         // alone — linux's `done_text` shape, and why `done_summary_fmt` is not
         // simply used unconditionally with a zero.
-        (None, _) => format_label(format),
+        (None, _, _) => format_label(format),
     };
     vec![
         Element::chrome(t::DONE_TITLE),
@@ -553,29 +645,10 @@ fn done_step_elements(snapshot: Option<&MailExportSnapshot>, format: ExportForma
 mod tests {
     use super::*;
     use crate::settings::SubPage;
-    use fauna_client_mail_settings::{ExportStatus, MailboxOption, MailboxProgressView};
+    use fauna_client_mail_settings::{MailboxOption, MailboxProgressView};
 
     fn a_snapshot(step: ExportStep) -> MailExportSnapshot {
-        MailExportSnapshot {
-            step,
-            format: ExportFormat::Mbox,
-            mailboxes: Vec::new(),
-            date_from: String::new(),
-            date_to: String::new(),
-            strip_headers: false,
-            session_state: None,
-            exported_count: 0,
-            skipped_count: 0,
-            errored_count: 0,
-            total_count: 0,
-            mailbox_progress: Vec::new(),
-            error_log: Vec::new(),
-            blob_bytes: None,
-            download_url: String::new(),
-            saved_archive_path: String::new(),
-            status: ExportStatus::Idle,
-            error: None,
-        }
+        fauna_client_mail_settings::testing::a_mail_export_snapshot(step)
     }
 
     fn state_with(snapshot: MailExportSnapshot) -> SettingsState {
@@ -623,6 +696,8 @@ mod tests {
         scope_snap.mailboxes = vec![MailboxOption {
             name: "INBOX".into(),
             selected: true,
+            message_count: 0,
+            sealed_bytes: 0,
         }];
         painted.extend(ids(&mail_export_elements(&state_with(scope_snap))));
         for id in [
@@ -777,7 +852,7 @@ mod tests {
         // The keys exist in the registry — what makes these lines translatable at
         // all, and the half a same-text inline `format!` would silently lose.
         for key in [
-            "mail_export.confirm_summary_fmt",
+            "mail_export.confirm_summary_count_fmt",
             "mail_export.progress_summary_fmt",
             "mail_export.done_summary_fmt",
         ] {
@@ -808,11 +883,13 @@ mod tests {
         snap.mailboxes = vec![MailboxOption {
             name: "INBOX".into(),
             selected: true,
+            message_count: 0,
+            sealed_bytes: 0,
         }];
         let els = mail_export_elements(&state_with(snap));
         assert_eq!(
             text_of(&els, "mail-export-confirm-summary", 0),
-            t::confirm_summary_fmt(&format_label(ExportFormat::Mbox), "1"),
+            t::confirm_summary_count_fmt(&format_label(ExportFormat::Mbox), "1", "0"),
         );
 
         let mut snap = a_snapshot(ExportStep::Done);
@@ -877,10 +954,14 @@ mod tests {
             MailboxOption {
                 name: "INBOX".into(),
                 selected: true,
+                message_count: 0,
+                sealed_bytes: 0,
             },
             MailboxOption {
                 name: "Trash".into(),
                 selected: false,
+                message_count: 0,
+                sealed_bytes: 0,
             },
         ];
         let els = mail_export_elements(&state_with(snap));
@@ -1000,28 +1081,189 @@ mod tests {
             MailboxOption {
                 name: "INBOX".into(),
                 selected: true,
+                message_count: 30,
+                sealed_bytes: 0,
             },
             MailboxOption {
                 name: "Sent".into(),
                 selected: true,
+                message_count: 12,
+                sealed_bytes: 0,
             },
             MailboxOption {
                 name: "Trash".into(),
                 selected: false,
+                message_count: 99,
+                sealed_bytes: 0,
             },
         ];
         let els = mail_export_elements(&state_with(snap));
+        // § Wizard steps step 3: the total messages are the SELECTED
+        // mailboxes' counts — Trash's 99 is not coming.
         assert_eq!(
             text_of(&els, "mail-export-confirm-summary", 0),
             format!(
-                "{} · 2 mailbox(es)",
+                "{} · 2 mailbox(es) · 42 messages",
                 format_label(ExportFormat::MaildirPlus)
             ),
         );
     }
 
+    /// § Wizard steps step 3's two estimates: the selected mailboxes' bytes
+    /// through the shared byte formatter, and the shared time estimate through
+    /// the shared duration formatter — Trash's bytes are not coming either. A
+    /// nest that reports no sizes gets the honest "not estimated" line.
+    #[test]
+    fn the_confirm_step_estimates_the_selected_bytes_and_time() {
+        let mut snap = a_snapshot(ExportStep::Confirm);
+        let option = |name: &str, selected, sealed_bytes| MailboxOption {
+            name: name.into(),
+            selected,
+            message_count: 10,
+            sealed_bytes,
+        };
+        snap.mailboxes = vec![
+            option("INBOX", true, 150 << 20),
+            option("Trash", false, 900 << 20),
+        ];
+        let texts = |snap: MailExportSnapshot| -> Vec<String> {
+            mail_export_elements(&state_with(snap))
+                .into_iter()
+                .map(|e| e.text)
+                .collect()
+        };
+        // 150 MiB at the shared 1 MiB/s is 150 s → "2m".
+        let summary = |snap: MailExportSnapshot| {
+            text_of(
+                &mail_export_elements(&state_with(snap)),
+                "mail-export-confirm-summary",
+                0,
+            )
+        };
+        assert_eq!(
+            summary(snap.clone()),
+            t::confirm_summary_estimated_fmt(
+                &t::confirm_summary_count_fmt(&format_label(snap.format), "1", "10"),
+                &fauna_core::format::byte_size(150 << 20).resolve(fauna_i18n::strings::lookup),
+                &fauna_core::format::duration_secs(150).resolve(fauna_i18n::strings::lookup),
+            ),
+        );
+        assert!(summary(snap.clone()).ends_with(" · about 150 MB · about 2m to export"));
+        assert!(
+            !texts(snap.clone())
+                .iter()
+                .any(|s| s == t::CONFIRM_ESTIMATE_UNAVAILABLE)
+        );
+
+        for m in &mut snap.mailboxes {
+            m.sealed_bytes = 0;
+        }
+        assert_eq!(
+            summary(snap.clone()),
+            t::confirm_summary_count_fmt(&format_label(snap.format), "1", "10"),
+        );
+        let shown = texts(snap);
+        assert!(
+            shown.iter().any(|s| s == t::CONFIRM_ESTIMATE_UNAVAILABLE),
+            "no sizes from the nest → no invented figure: {shown:?}"
+        );
+    }
+
+    /// § Wizard steps steps 4–5: a stopped run's progress line carries its
+    /// elapsed time and no estimate (it is not moving), and the Done card
+    /// says how many messages were exported and how long it took — both
+    /// read off the session row's clock, never the tui's.
+    #[test]
+    fn the_progress_and_done_summaries_carry_the_runs_time() {
+        let mut snap = a_snapshot(ExportStep::Progress);
+        snap.session_state = Some(fauna_client_mail_settings::ExportSessionState::Paused);
+        snap.exported_count = 3;
+        snap.total_count = 10;
+        snap.started_at = 1_000;
+        snap.last_progress_at = 1_000 + 2 * 60 + 5;
+        let els = mail_export_elements(&state_with(snap));
+        assert_eq!(
+            text_of(&els, "mail-export-progress-summary", 0),
+            t::progress_elapsed_fmt(&t::progress_summary_fmt("3", "10", "0", "0"), "2m"),
+        );
+
+        let mut snap = a_snapshot(ExportStep::Done);
+        snap.session_state = Some(fauna_client_mail_settings::ExportSessionState::Completed);
+        snap.exported_count = 7;
+        snap.blob_bytes = Some(4096);
+        snap.started_at = 1_000;
+        snap.last_progress_at = 1_000 + 3_600 + 60;
+        let els = mail_export_elements(&state_with(snap));
+        assert_eq!(
+            text_of(&els, "mail-export-done-summary", 0),
+            t::done_summary_timed_fmt("7", &format_label(ExportFormat::Mbox), "4096", "1h 1m"),
+        );
+    }
+
     /// The done step paints the blob size when the session reports one, and the
     /// actor-bound download URL as copyable text.
+    /// A failed export is painted on its Progress step with the reason as the
+    /// error log's one line; Pause / Resume / Cancel are not offered, and its
+    /// one control is Dismiss — the Done step's discard under its own label
+    /// (`mail-export.md` § A failed export is a record the wizard shows until
+    /// the user moves on).
+    #[test]
+    fn a_failed_export_offers_dismiss_and_none_of_the_three_controls() {
+        let mut snap = a_snapshot(ExportStep::Progress);
+        snap.session_state = Some(ExportSessionState::Errored);
+        snap.error_log = vec!["INBOX: uid 2 could not be opened".into()];
+        let els = mail_export_elements(&state_with(snap));
+        let painted = ids(&els);
+        for id in [
+            "mail-export-pause-button",
+            "mail-export-resume-button",
+            "mail-export-cancel-button",
+        ] {
+            assert!(!painted.iter().any(|p| p == id), "{id} on a failed export");
+        }
+        assert_eq!(
+            text_of(&els, "mail-export-discard-button", 0),
+            t::DISMISS_FAILED_BUTTON
+        );
+        assert_eq!(
+            text_of(&els, "mail-export-error-log", 0),
+            "INBOX: uid 2 could not be opened"
+        );
+        assert!(painted.iter().any(|p| p == "mail-export-progress-summary"));
+
+        // A live export keeps its three controls and paints no Dismiss.
+        let mut live = a_snapshot(ExportStep::Progress);
+        live.session_state = Some(ExportSessionState::Running);
+        let painted = ids(&mail_export_elements(&state_with(live)));
+        assert!(painted.iter().any(|p| p == "mail-export-pause-button"));
+        assert!(!painted.iter().any(|p| p == "mail-export-discard-button"));
+    }
+
+    /// The push re-read is page-gated (`StaleSurfaces::mail_export`): only the
+    /// open Export sub-page, and only once a machine exists, produces an op.
+    #[test]
+    fn the_export_push_re_reads_only_the_open_export_page() {
+        let mut state = state_with(a_snapshot(ExportStep::Progress));
+        assert!(
+            crate::settings::mail_export_resync_op(&state).is_none(),
+            "no machine pre-login, no op"
+        );
+        // A dummy nest: building the op reads nothing over it.
+        let nest = fauna_client::NestClient::new(
+            "http://127.0.0.1:9".to_string(),
+            fauna_core::identity::ActorKeypair::from_secret([7u8; 32]),
+        );
+        state.mail_export.machine = Some(Arc::new(
+            crate::mail_glue::build_mail_export_machine_without_key_custody(nest),
+        ));
+        assert!(crate::settings::mail_export_resync_op(&state).is_some());
+        state.sub = SubPage::MailSpam;
+        assert!(
+            crate::settings::mail_export_resync_op(&state).is_none(),
+            "another sub-page shown"
+        );
+    }
+
     #[test]
     fn the_done_step_paints_the_blob_size_and_download_url() {
         let mut snap = a_snapshot(ExportStep::Done);

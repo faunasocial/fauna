@@ -241,23 +241,12 @@ class BridgesActions:
     # (pending, or approved = the "try again" prompt — the app never retries).
 
     def require_source_request_supported(self) -> None:
-        """Skip unless this app renders the ward's feed-source ask (e2e
-        convention 7 — the platform check lives in the action layer).
+        """Every app renders the ward's feed-source ask, so nothing skips (e2e
+        convention 7 — the platform check lives in the action layer, and this is
+        where a future gap would be declared).
 
         tui led 2026-08-28; macOS and iOS, linux, web and android lifted it
-        2026-09-26. windows carries the ids only as generated constants."""
-        if self.driver.is_windows():
-            from helpers.app_surface import skip_unbuilt
-
-            skip_unbuilt(
-                self.driver,
-                surface="the ward's feed-source ask (bridge-source-request-"
-                        "button / -state)",
-                detail="built on tui, macOS, iOS, linux, web and android; "
-                       "windows has the ids as constants only",
-                tracked="family-safety.md § Feed-source approvals → App "
-                        "affordance",
-            )
+        2026-09-26, and windows last."""
 
     def _card_scope(self, bridge_id: str, index: int) -> str:
         """The `bridge-card[i]` scope for `bridge_id`'s card. linux shows one

@@ -23,7 +23,13 @@ namespace FaunaApp.Helpers;
 /// <paramref name="showInspectSubscribe"/> gates the inspect + subscribe
 /// affordances (labeler-catalog page only, per ui.yaml's <c>labeler-catalog-item</c>
 /// description) — unsubscribe is always present so the personalization home can
-/// un-subscribe inline.
+/// un-subscribe inline. <paramref name="subscribeEnabled"/> is the shared
+/// <c>LabelerCatalogMachine.SubscribeEnabled(index)</c> for this row — false while
+/// the open inspect view is THIS row's labeler and fails <c>subscribable</c>
+/// (content-moderation-and-ranking.md § Tier-3: "<c>verified</c> reads false and
+/// subscribe stays disabled"). The machine refuses the gesture regardless; this is
+/// the visible half of the same predicate, never re-derived from <c>verified</c>
+/// here. Unread where <paramref name="showInspectSubscribe"/> is false.
 /// </summary>
 internal static class LabelerCatalogRowBuilder
 {
@@ -31,6 +37,7 @@ internal static class LabelerCatalogRowBuilder
         LabelerCatalogEntry entry,
         uint index,
         bool showInspectSubscribe,
+        bool subscribeEnabled,
         Func<uint, Task> onInspect,
         Func<uint, Task> onSubscribe,
         Func<uint, Task> onUnsubscribe)
@@ -107,6 +114,7 @@ internal static class LabelerCatalogRowBuilder
                 {
                     Content = S.Get("labeler_catalog/subscribe"),
                     Style = (Style)Application.Current.Resources["AccentButtonStyle"],
+                    IsEnabled = subscribeEnabled,
                 };
                 AutomationProperties.SetAutomationId(subscribe, Ids.LabelerCatalogItemSubscribeButton);
                 Grid.SetColumn(subscribe, 2);

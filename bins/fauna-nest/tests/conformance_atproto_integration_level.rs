@@ -52,9 +52,19 @@ const RECORD_TOMBSTONE_KIND: &str = "fauna.bridges.atproto.record_tombstone";
 /// client generates. Content is irrelevant here; only the shape is validated.
 const ROTATION_KEY: &str = "did:key:zDnaerDaTF5BXEavCrfRZEk316dpbLsfPDZ3WJ5hRTPFU2169"; // gitleaks:allow
 
+/// A registerable identity domain: it passes the real-domain gate that hosted
+/// entry requires (`resolve_handle_domain(d).is_public_dns_name`).
+const PUBLIC_DOMAIN: &str = "fauna.example";
+
+/// A router over a box whose identity domain is PUBLIC, so the hosted rungs
+/// are reachable. The for_test box is otherwise domainless (`localhost`); the
+/// gate tests withdraw the domain explicitly.
 async fn router_with_db() -> (RpcRouter, Arc<AppState>) {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
     let state = Arc::new(AppState::for_test(db));
+    state
+        .identity_domain
+        .store(Some(Arc::new(PUBLIC_DOMAIN.to_string())));
     let mut b = RpcRouter::builder();
     register_bridge_atproto_handlers(&mut b);
     (b.build(), state)
@@ -1141,18 +1151,19 @@ async fn the_status_read_tracks_the_ladder_and_keeps_the_deactivated_identity_vi
     let actor = [10u8; 32];
     common::seed_dispatch_actor(&state.db, &actor).await;
 
-    // Never chose: OFF, no identity. The for_test box is domainless
-    // (`handle_domain()` = "localhost"), so the hosted rungs are gated — and
-    // the reply names the domain the verdict came from.
+    // Never chose: OFF, no identity. With its domain withdrawn the for_test
+    // box is domainless (`handle_domain()` = "localhost"), so the hosted rungs
+    // are gated — and the reply names the domain the verdict came from.
+    withdraw_public_domain(&state);
     let s = status(&router, state.clone(), actor).await;
     assert_eq!(s.level, "off");
     assert!(s.identity.is_none());
     assert!(!s.hosted_allowed, "localhost is not a public DNS name");
     assert_eq!(s.handle_domain, "localhost");
 
-    // The level is stored USER INTENT: it walks even on a gated box (the UI
-    // greys the rung; the roster read is the enforcement point that keeps a
-    // non-public domain from ever deriving a servable handle).
+    // The nest enforces the same verdict the read reports (the refusal itself
+    // is pinned by the gate tests below); on a public box the ladder walks.
+    restore_public_domain(&state);
     dispatch(
         &router,
         state.clone(),
@@ -1188,9 +1199,6 @@ async fn the_status_read_derives_preview_and_verdict_from_the_current_domain() {
     let actor = [11u8; 32];
     common::seed_dispatch_actor(&state.db, &actor).await;
     state.db.set_handle(&actor, "alice").await.unwrap();
-    state
-        .identity_domain
-        .store(Some(std::sync::Arc::new("fauna.example".to_string())));
 
     let s = status(&router, state.clone(), actor).await;
     assert!(s.hosted_allowed, "a registerable domain passes the gate");
@@ -1323,4 +1331,157 @@ async fn a_mint_recorded_after_the_user_stepped_off_does_not_resurrect_serving()
         .unwrap();
     assert_eq!(row.status, "active");
     assert_eq!(row.did.as_deref(), Some("did:plc:racedmint"));
+}
+
+// ── the real-domain gate (`atproto-pds-bridge.md` § Enable UX) ─────
+
+/// Withdraw the box's public identity domain, so `handle_domain()` falls back
+/// to the domainless `localhost` the for_test box starts from.
+fn withdraw_public_domain(state: &AppState) {
+    state.identity_domain.store(None);
+    assert_eq!(
+        state.handle_domain(),
+        "localhost",
+        "the fallback is not public"
+    );
+}
+
+fn restore_public_domain(state: &AppState) {
+    state
+        .identity_domain
+        .store(Some(Arc::new(PUBLIC_DOMAIN.to_string())));
+}
+
+#[tokio::test]
+async fn a_hosted_entry_on_a_non_public_domain_is_refused_before_any_effect() {
+    // ATProto presence is impossible on localhost/IP, and the app's greyed
+    // rung is not the enforcement point: a caller that skips the greying (an
+    // older or third-party client, or a card staged before the box lost its
+    // public domain) must get a typed refusal that has changed nothing.
+    let (router, state) = router_with_db().await;
+    let actor = [20u8; 32];
+    withdraw_public_domain(&state);
+
+    for target in [
+        IntegrationLevel::HostedVisible,
+        IntegrationLevel::HostedFull,
+    ] {
+        let err = dispatch(&router, state.clone(), actor, &to(target))
+            .await
+            .expect_err("a hosted entry on a non-public domain must be refused");
+        assert_eq!(
+            err.code, "fauna.bridges.atproto.domain_not_public",
+            "→ {target:?}: the refusal is typed, not a malformed-request guess"
+        );
+    }
+    assert_eq!(
+        state
+            .db
+            .get_atproto_integration_level(&actor)
+            .await
+            .unwrap(),
+        IntegrationLevel::Off,
+        "a refused entry must not have moved the level"
+    );
+    assert!(
+        state
+            .db
+            .get_atproto_identity(&actor)
+            .await
+            .unwrap()
+            .is_none(),
+        "a refused entry must leave no mint intent behind"
+    );
+
+    // Off and Linked are never gated as levels (`ui/atproto.md` § Reveal).
+    dispatch(&router, state.clone(), actor, &to(IntegrationLevel::Linked))
+        .await
+        .expect("Linked stays selectable on any box");
+
+    // Restoring the domain lifts the gate — the same request now applies.
+    restore_public_domain(&state);
+    dispatch(
+        &router,
+        state.clone(),
+        actor,
+        &to(IntegrationLevel::HostedVisible),
+    )
+    .await
+    .expect("a public domain passes the gate");
+    assert_eq!(
+        state
+            .db
+            .get_atproto_integration_level(&actor)
+            .await
+            .unwrap(),
+        IntegrationLevel::HostedVisible
+    );
+}
+
+#[tokio::test]
+async fn losing_the_public_domain_blocks_climbing_but_never_stepping_down() {
+    // A user already hosted when the box loses its public domain keeps every
+    // way OUT (withdrawing consent is never gated), while the one move that
+    // widens the presence — visible → full — is refused like an entry.
+    let (router, state) = router_with_db().await;
+    let actor = [21u8; 32];
+    dispatch(
+        &router,
+        state.clone(),
+        actor,
+        &to(IntegrationLevel::HostedVisible),
+    )
+    .await
+    .expect("enter hosted on the public box");
+    withdraw_public_domain(&state);
+
+    let err = dispatch(
+        &router,
+        state.clone(),
+        actor,
+        &to(IntegrationLevel::HostedFull),
+    )
+    .await
+    .expect_err("climbing to full on a non-public domain must be refused");
+    assert_eq!(err.code, "fauna.bridges.atproto.domain_not_public");
+    assert_eq!(
+        state
+            .db
+            .get_atproto_integration_level(&actor)
+            .await
+            .unwrap(),
+        IntegrationLevel::HostedVisible,
+        "the refused climb left the level where it was"
+    );
+
+    // Re-confirming the level the user is already at stays an idempotent
+    // success (the `!gated || active` rung rule).
+    dispatch(
+        &router,
+        state.clone(),
+        actor,
+        &to(IntegrationLevel::HostedVisible),
+    )
+    .await
+    .expect("re-confirming the current hosted level is not a climb");
+
+    restore_public_domain(&state);
+    dispatch(
+        &router,
+        state.clone(),
+        actor,
+        &to(IntegrationLevel::HostedFull),
+    )
+    .await
+    .expect("climb on the public box");
+    withdraw_public_domain(&state);
+    for level in [
+        IntegrationLevel::HostedVisible,
+        IntegrationLevel::Linked,
+        IntegrationLevel::Off,
+    ] {
+        dispatch(&router, state.clone(), actor, &to(level))
+            .await
+            .unwrap_or_else(|e| panic!("stepping down to {level:?} is never gated: {e:?}"));
+    }
 }

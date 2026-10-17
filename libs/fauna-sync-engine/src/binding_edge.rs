@@ -1,6 +1,6 @@
 //! **Re-resolve edges** — a resident engine's content keys are final at build,
 //! so a host that keeps one resident re-resolves them on its own evidence
-//! (`on-demand-files.md` § Shared sets on a capability host, decision 2): the
+//! (`on-demand-files-shared-sets.md` § Shared sets on a capability host, decision 2): the
 //! set's row says the binding, the caller's access or the owner-stamped
 //! content-key floor moved, or the floor is still ahead of the generation the
 //! engine holds.
@@ -77,7 +77,7 @@ impl BindingBasis {
     /// a reason to rebuild and nothing more. The record's `content_key_floor` is
     /// the home nest's stamp off the federated content-key read, so a floor
     /// move is a basis change at the host's custody edge and the pre-seal hold
-    /// arms from it (`on-demand-files.md` § Shared sets on a capability host →
+    /// arms from it (`on-demand-files-shared-sets.md` § Shared sets on a capability host →
     /// *One mechanism*, question 2); a record without one (an unbound set, no floor held)
     /// arms nothing, and the floor is enforced where it
     /// lives — the home nest's `stale_content_key` refusal.

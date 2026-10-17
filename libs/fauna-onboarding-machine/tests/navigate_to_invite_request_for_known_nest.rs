@@ -60,6 +60,7 @@ fn overwrites_stale_snapshot_from_previous_attempt() {
         continue_enabled: false,
         recheck_visible: false,
         age_notice: None,
+        supervised_notice: None,
         out_of_band_code_state: OobCodeState::Idle,
         oob_message: LocalizedText::default(),
     });

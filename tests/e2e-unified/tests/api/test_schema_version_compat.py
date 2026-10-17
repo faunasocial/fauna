@@ -169,3 +169,75 @@ def test_old_binary_serves_new_db_with_extra_table(schema_skew_nest):
         "the binary must serve normally against a newer additive DB carrying an "
         f"extra table it doesn't know (NewerCompatible verdict); got {info!r}"
     )
+
+
+@pytest.fixture()
+def running_member_nest(request, nest_mode, tmp_path_factory):
+    """A claimed nest with one member, whose ``nest.db`` the test reshapes while
+    the nest keeps running — the mismatch the boot-time gate cannot see."""
+    from conftest import _start_dedicated_nest
+    from common import create_actor_and_register
+
+    nest, cleanup = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "schema-query-skew")
+    nest["member"] = create_actor_and_register(
+        nest["port"], admin_signing_key=nest["admin"]["signing_key"])
+    yield nest
+    cleanup()
+
+
+@pytest.mark.feature("upgrades-never-lose-data")
+def test_a_query_time_mismatch_is_answered_as_needing_an_update(running_member_nest):
+    """A request that fails because the nest's stored data no longer matches its
+    software is answered with the typed ``fauna.nest.schema_mismatch`` — a
+    localized "this nest must be updated" the apps route to an update prompt —
+    never the retried ``internal`` code and never a database message.
+
+    ``schema_meta`` is checked once, at boot; a shape that drifts after it (the
+    software and its data parting ways mid-life) surfaces per request. The test
+    makes exactly that happen: with the nest running, a column the push
+    subscription write names is dropped from ``nest.db`` behind its back, and a
+    member subscribes. The same subscribe is first shown to succeed, so the
+    refusal is the reshaped table's and nothing else's.
+    """
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    nest = running_member_nest
+    member = nest["member"]
+    subscribe = {
+        "device_id": "schema-skew-device",
+        "transport": "web-push",
+        "endpoint": "https://fcm.googleapis.com/fcm/send/schema-skew",
+        "key_p256dh": "schema_skew_p256dh",
+        "key_auth": "schema_skew_auth",
+    }
+
+    def _client():
+        return WsRpcAdminClient(
+            nest["url"], actor_id=member["actor_id_bytes"],
+            signing_key=bytes(member["signing_key"]))
+
+    with _client() as c:
+        assert c.call("fauna.push.subscribe", subscribe)["ok"] is True, (
+            "the subscribe must succeed on a matching database, or the refusal "
+            "below proves nothing")
+
+    db = sqlite3.connect(nest["db_path"], timeout=30)
+    try:
+        db.execute("ALTER TABLE push_subscriptions DROP COLUMN key_auth")
+        db.commit()
+    finally:
+        db.close()
+
+    with _client() as c:
+        with pytest.raises(RpcCallError) as exc:
+            c.call("fauna.push.subscribe", subscribe)
+    err = exc.value
+    assert err.code == "fauna.nest.schema_mismatch", (
+        f"a query-time schema mismatch must be answered as the nest needing an "
+        f"update, got {err.code!r} (details={err.details!r})")
+    assert err.message_key == "error.nest.schema_mismatch", err.message_key
+    leaked = repr((err.details, err.message_args))
+    for phrase in ("key_auth", "push_subscriptions", "no column", "SQL"):
+        assert phrase not in leaked, (
+            f"the refusal carried a database message ({phrase!r}): {leaked}")

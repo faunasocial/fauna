@@ -192,134 +192,200 @@ pub enum GroupGenerationMintRecord {
     /// The absorbing shred marker; this row's surviving bytes carry no wrap
     /// ciphertext.
     ///
-    /// **What a reader does with it, stated as built** (ruled
-    /// 2026-09-19 — `account-data-taxonomy.md` § The recipient-set
-    /// scheme → *Severance, per axis*, the shred clause). The join absorbs and
-    /// the resolver drops the generation's candidacy on ANY decodable
-    /// `Shredded`, authored or not: that is availability only (the group
-    /// needs a re-mint), the same class any machinery-root holder already
-    /// reaches by same-key `Minted`-variant suppression. **Dropping a key is
-    /// a different act and never rides an unauthored row**: the machinery
-    /// root is held by every member ever admitted, so R14's `BackupKey`-gated
-    /// acceptance does not transplant — a consumer may discard a generation
-    /// key only when [`Self::shred_is_authored`] answers `Ok`.
+    /// **The availability marker and attribution only** (ruled
+    /// 2026-10-13 — `recipient-set-scheme.md` § The
+    /// recipient-set scheme → *Severance, per axis*, the shred clause, which
+    /// points at `fleet-scope-reclamation.md`'s *the shred cell*). The join
+    /// absorbs and the resolver drops the generation's candidacy on ANY
+    /// decodable `Shredded`: that is availability only (the group needs a
+    /// re-mint), the same class any machinery-root holder already reaches by
+    /// same-key `Minted`-variant suppression. **Dropping a key never consults
+    /// this row**: the machinery root is held by every member ever admitted,
+    /// and between two markers the join keeps the byte-order max — so the
+    /// authored act lives in the shredder's own cell, a
+    /// [`GroupShredAttestation`] in `fauna.group.generation-shred`, and a
+    /// consumer may discard a generation key only on one
+    /// [`GroupShredAttestation::is_authored_at`] admits.
     Shredded {
         core: GroupMintCore,
-        /// Shred stamp, unix ms. Advisory; the instant the shredder's cert
-        /// expiry anchors to.
+        /// Shred stamp, unix ms. Advisory.
         shredded_at_ms: i64,
-        /// The shredding writer's 32-byte device id. **Attribution only
-        /// unless the row is authored** — no reader consults it on its own.
+        /// The shredding writer's 32-byte device id. Attribution only — no
+        /// reader consults it.
         #[serde(with = "serde_bytes")]
         shredded_by: [u8; 32],
-        /// `shredded_by`'s `DeviceAuthorization` in the
-        /// [`crate::encoding::EmbedAsBytes`] carriage. Additive: empty on a
-        /// row written before the ruling (which is then unauthored), skipped
-        /// when empty so such a row encodes exactly as it always did.
-        #[serde(default, skip_serializing_if = "Vec::is_empty", with = "serde_bytes")]
-        authorization: Vec<u8>,
-        /// Ed25519 by `shredded_by` over [`group_shred_signing_bytes`].
-        #[serde(default, skip_serializing_if = "Vec::is_empty", with = "serde_bytes")]
-        shredder_sig: Vec<u8>,
     },
 }
 
 /// Domain-separation tag for an authored shred's signature (frozen — the
-/// [`GROUP_MINT_MINTER_SIG_CONTEXT`] replay discipline).
-pub const GROUP_SHRED_SIG_CONTEXT: &[u8] = b"fauna.group.generation-shred.v1\0";
+/// [`GROUP_MINT_MINTER_SIG_CONTEXT`] replay discipline). v2 (2026-10-14)
+/// added the carried cert to the preimage, so a v1 signature never verifies
+/// over it.
+pub const GROUP_SHRED_SIG_CONTEXT: &[u8] = b"fauna.group.generation-shred.v2\0";
 
 /// The exact bytes a shredder signs: the domain tag, the content-derived
-/// generation id (which commits to the whole core), the shredder's device id
-/// and the big-endian stamp — fixed-width throughout.
+/// generation id (which commits to the whole core), the shredder's device id,
+/// the big-endian stamp and the BLAKE3 of the carried `authorization` —
+/// fixed-width throughout. The cert is signed so a copy with it swapped no
+/// longer verifies at the shredder's cell: the join ranks on
+/// [`GroupShredAttestation::verifies_at`] and never consults the cert, so an
+/// unsigned cert would let byte-greater junk displace the authored row.
 #[must_use]
 pub fn group_shred_signing_bytes(
     generation_id: &[u8; 32],
     shredded_by: &[u8; 32],
     shredded_at_ms: i64,
+    authorization: &[u8],
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(GROUP_SHRED_SIG_CONTEXT.len() + 32 * 2 + 8);
+    let mut out = Vec::with_capacity(GROUP_SHRED_SIG_CONTEXT.len() + 32 * 3 + 8);
     out.extend_from_slice(GROUP_SHRED_SIG_CONTEXT);
     out.extend_from_slice(generation_id);
     out.extend_from_slice(shredded_by);
     out.extend_from_slice(&shredded_at_ms.to_be_bytes());
+    out.extend_from_slice(blake3::hash(authorization).as_bytes());
     out
 }
 
-/// Build one **authored** shred as an authority device — the ONE production
-/// shape of a `Shredded` row since the ruling. `authorization` is the
-/// canonical `EmbedAsBytes` carriage of that device's `DeviceAuthorization`.
+/// One authority device's shred attestation in
+/// `fauna.group.generation-shred`, at the two-segment logical key
+/// [`group_shred_cell_key`] (`"<generation-id-hex>/<shredder-device-id-hex>"`)
+/// — the [`crate::generation::ShredAttestation`] cell transplanted (one
+/// lattice, two planes), carrying the shredder's cert under the signature
+/// because this plane's authority is a cert chain no reader holds as a view.
 ///
-/// # Errors
-/// Only on a core that fails canonical encoding.
+/// The join ([`join_group_generation_shred`]) ranks on [`Self::verifies_at`]
+/// — pure over the record and the cell key, so the cert is NOT consulted
+/// there (a merge never consults the authority line) — and a reader counts
+/// the shred authored only through [`Self::is_authored_at`], which runs the
+/// plane's one authority-device check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupShredAttestation {
+    /// The shredded generation — echoes cell segment 1.
+    #[serde(with = "serde_bytes")]
+    pub generation_id: [u8; 32],
+    /// The shredder's device id — echoes cell segment 2, and IS the Ed25519
+    /// verification key for `shredder_sig`.
+    #[serde(with = "serde_bytes")]
+    pub shredded_by: [u8; 32],
+    /// Shred stamp, unix ms. Signed; the instant the shredder's cert expiry
+    /// anchors to.
+    pub shredded_at_ms: i64,
+    /// `shredded_by`'s `DeviceAuthorization` in the
+    /// [`crate::encoding::EmbedAsBytes`] carriage. Signed (its BLAKE3 is in
+    /// the preimage).
+    #[serde(with = "serde_bytes")]
+    pub authorization: Vec<u8>,
+    /// Ed25519 by `shredded_by` over [`group_shred_signing_bytes`].
+    #[serde(with = "serde_bytes")]
+    pub shredder_sig: Vec<u8>,
+}
+
+impl GroupShredAttestation {
+    /// Does this record verify **at its cell** — both ids echoing the cell
+    /// key's segments, and `shredder_sig` verifying under the cell's shredder
+    /// over exactly these fields? Pure over the record and the cell
+    /// coordinates. The cert's bytes are signed here, its validity is the
+    /// reader's half ([`Self::is_authored_at`]).
+    #[must_use]
+    pub fn verifies_at(&self, cell_generation: &[u8; 32], cell_shredder: &[u8; 32]) -> bool {
+        self.generation_id == *cell_generation
+            && self.shredded_by == *cell_shredder
+            && crate::identity::verify_detached(
+                &self.shredded_by,
+                &group_shred_signing_bytes(
+                    &self.generation_id,
+                    &self.shredded_by,
+                    self.shredded_at_ms,
+                    &self.authorization,
+                ),
+                &self.shredder_sig,
+            )
+    }
+
+    /// Is this the **authored** shred of `cell_generation` — the only shape
+    /// a consumer may drop a generation key on? It verifies at its cell, and
+    /// the carried authorization passes the plane's one authority-device
+    /// check ([`GroupAuthority::verify_device_cert`]: chain, expiry at the
+    /// stamp, not learned revoked) and covers exactly the shredder.
+    #[must_use]
+    pub fn is_authored_at(
+        &self,
+        cell_generation: &[u8; 32],
+        cell_shredder: &[u8; 32],
+        authority: &GroupAuthority,
+    ) -> bool {
+        self.verifies_at(cell_generation, cell_shredder)
+            && authority
+                .verify_device_cert(
+                    "shred authorization",
+                    &self.authorization,
+                    self.shredded_at_ms,
+                )
+                .is_ok_and(|device| device == *cell_shredder)
+    }
+}
+
+/// Build one authority device's shred attestation for `generation_id`.
+/// `authorization` is the canonical `EmbedAsBytes` carriage of that device's
+/// `DeviceAuthorization`.
+#[must_use]
 pub fn sign_group_shred(
     authority_device: &ed25519_dalek::SigningKey,
-    core: GroupMintCore,
+    generation_id: &[u8; 32],
     authorization: Vec<u8>,
     shredded_at_ms: i64,
-) -> Result<GroupGenerationMintRecord, Error> {
+) -> GroupShredAttestation {
     use ed25519_dalek::Signer;
-    let id = group_generation_id(&core)?;
     let shredded_by = authority_device.verifying_key().to_bytes();
     let shredder_sig = authority_device
         .sign(&group_shred_signing_bytes(
-            &id,
+            generation_id,
             &shredded_by,
             shredded_at_ms,
+            &authorization,
         ))
         .to_bytes()
         .to_vec();
-    Ok(GroupGenerationMintRecord::Shredded {
-        core,
-        shredded_at_ms,
+    GroupShredAttestation {
+        generation_id: *generation_id,
         shredded_by,
+        shredded_at_ms,
         authorization,
         shredder_sig,
-    })
+    }
 }
 
-impl GroupGenerationMintRecord {
-    /// Is this a `Shredded` row **authored by a live authority device** —
-    /// the only shape a consumer may drop a generation key on? The carried
-    /// authorization must pass the plane's one authority-device check
-    /// ([`GroupAuthority::verify_device_cert`]: chain, expiry, not learned
-    /// revoked), cover exactly `shredded_by`, and `shredder_sig` must verify
-    /// under it over the **recomputed** generation id. Returns that id.
-    ///
-    /// # Errors
-    /// A `Minted` row, an unauthored (pre-ruling or forged) shred, or any
-    /// failure of the authority check or the signature.
-    pub fn shred_is_authored(&self, authority: &GroupAuthority) -> Result<[u8; 32], String> {
-        let GroupGenerationMintRecord::Shredded {
-            core,
-            shredded_at_ms,
-            shredded_by,
-            authorization,
-            shredder_sig,
-        } = self
-        else {
-            return Err("a Minted row shreds nothing".to_string());
-        };
-        if authorization.is_empty() || shredder_sig.is_empty() {
-            return Err("shred is unauthored — it carries no authorization".to_string());
-        }
-        let id =
-            group_generation_id(core).map_err(|e| format!("shred core does not encode: {e}"))?;
-        let device_key =
-            authority.verify_device_cert("shred authorization", authorization, *shredded_at_ms)?;
-        if device_key != *shredded_by {
-            return Err("shred authorization covers a different device id".to_string());
-        }
-        if shredder_sig.len() != 64
-            || !crate::identity::verify_detached(
-                shredded_by,
-                &group_shred_signing_bytes(&id, shredded_by, *shredded_at_ms),
-                shredder_sig,
-            )
-        {
-            return Err("shred signature does not verify under the authorized device".to_string());
-        }
-        Ok(id)
-    }
+/// The `fauna.group.generation-shred` cell key.
+#[must_use]
+pub fn group_shred_cell_key(generation_id: &[u8; 32], shredder: &[u8; 32]) -> String {
+    crate::generation::shred_cell_key(generation_id, shredder)
+}
+
+/// Parse a group shred logical key — canonical-or-nothing, two segments.
+#[must_use]
+pub fn parse_group_shred_cell_key(key: &str) -> Option<([u8; 32], [u8; 32])> {
+    crate::generation::parse_shred_cell_key(key)
+}
+
+/// The `fauna.group.generation-shred` join — byte-level, decode-or-fail,
+/// rank = (verifies-at-this-cell, bytes); the
+/// [`crate::generation::join_generation_shred`] contract at the group record
+/// type.
+pub fn join_group_generation_shred<'a>(
+    generation_id: &[u8; 32],
+    shredder: &[u8; 32],
+    current: &'a [u8],
+    incoming: &'a [u8],
+) -> Result<&'a [u8], Error> {
+    let rank = |bytes: &[u8]| -> Result<bool, Error> {
+        Ok(canonical_decode::<GroupShredAttestation>(bytes)?.verifies_at(generation_id, shredder))
+    };
+    let (cur, inc) = (rank(current)?, rank(incoming)?);
+    Ok(if (cur, current) >= (inc, incoming) {
+        current
+    } else {
+        incoming
+    })
 }
 
 /// The content-derived group generation id of a mint: `BLAKE3` of the
@@ -1818,8 +1884,6 @@ mod tests {
             core,
             shredded_at_ms: 9_000,
             shredded_by: [0x08; 32],
-            authorization: Vec::new(),
-            shredder_sig: Vec::new(),
         })
         .unwrap();
         assert_eq!(
@@ -2185,8 +2249,6 @@ mod tests {
             core: b_core,
             shredded_at_ms: 9_000,
             shredded_by: [0x08; 32],
-            authorization: Vec::new(),
-            shredder_sig: Vec::new(),
         })
         .unwrap();
         let (c_key, c_val) = mint_row(vec![b_id], &[e31], &[e31], 0x03);
@@ -2303,67 +2365,142 @@ mod tests {
         );
     }
 
-    /// The shred ruling: an unauthored `Shredded` still drops candidacy
-    /// (availability — nothing new to a root holder), but it is never a
-    /// licence to drop a key. Only a live authority device's signed shred is.
+    /// The shred ruling, at the shred cell: the mint row's
+    /// `Shredded` drops candidacy on any decodable marker (availability —
+    /// nothing new to a root holder), and only a live authority device's
+    /// attestation at its own cell is a licence to drop a key.
     #[test]
     fn only_an_authored_shred_by_a_live_authority_device_may_drop_a_key() {
         let e31 = entry_id_of(0x31);
         let shredder = device(0x41);
+        let shredder_id = shredder.verifying_key().to_bytes();
         let core = GroupMintCore {
             parents: vec![],
             member_entries: vec![e31],
-            minter: shredder.verifying_key().to_bytes(),
+            minter: shredder_id,
             key_commitment: [0x04; 32],
             minted_at_ms: 5_000,
             revoked_past: Vec::new(),
         };
         let id = group_generation_id(&core).unwrap();
-        let cert = cert_bytes(&authority(), shredder.verifying_key().to_bytes(), None);
+        let cert = cert_bytes(&authority(), shredder_id, None);
 
-        // What any machinery-root holder — a FORMER MEMBER included — can write.
-        let unauthored = GroupGenerationMintRecord::Shredded {
-            core: core.clone(),
+        // Carrying the authority device's public cert verbatim, over junk.
+        let cert_only = GroupShredAttestation {
+            generation_id: id,
+            shredded_by: shredder_id,
             shredded_at_ms: 9_000,
-            shredded_by: shredder.verifying_key().to_bytes(),
-            authorization: Vec::new(),
-            shredder_sig: Vec::new(),
-        };
-        assert!(
-            unauthored
-                .shred_is_authored(&line(&[]))
-                .unwrap_err()
-                .contains("unauthored")
-        );
-        // ...even carrying the authority device's public cert verbatim.
-        let cert_only = GroupGenerationMintRecord::Shredded {
-            core: core.clone(),
-            shredded_at_ms: 9_000,
-            shredded_by: shredder.verifying_key().to_bytes(),
             authorization: cert.clone(),
             shredder_sig: vec![0u8; 64],
         };
-        assert!(
-            cert_only
-                .shred_is_authored(&line(&[]))
-                .unwrap_err()
-                .contains("shred signature")
-        );
+        assert!(!cert_only.is_authored_at(&id, &shredder_id, &line(&[])));
+        // Signed, but carrying no cert: verifies at its cell, authored nowhere.
+        let no_cert = sign_group_shred(&shredder, &id, Vec::new(), 9_000);
+        assert!(no_cert.verifies_at(&id, &shredder_id));
+        assert!(!no_cert.is_authored_at(&id, &shredder_id, &line(&[])));
+        // A device the authority never certified signs its own cell under a
+        // foreign device's cert.
+        let rogue = device(0x43);
+        let rogue_id = rogue.verifying_key().to_bytes();
+        let foreign = sign_group_shred(&rogue, &id, cert.clone(), 9_000);
+        assert!(foreign.verifies_at(&id, &rogue_id));
+        assert!(!foreign.is_authored_at(&id, &rogue_id, &line(&[])));
 
-        let authored = sign_group_shred(&shredder, core, cert, 9_000).unwrap();
-        assert_eq!(authored.shred_is_authored(&line(&[])), Ok(id));
+        let authored = sign_group_shred(&shredder, &id, cert, 9_000);
+        assert!(authored.is_authored_at(&id, &shredder_id, &line(&[])));
+        // Filed at another device's cell, or another generation's.
+        assert!(!authored.is_authored_at(&id, &rogue_id, &line(&[])));
+        assert!(!authored.is_authored_at(&[0x09; 32], &shredder_id, &line(&[])));
         // A revoked authority device shreds nothing.
-        assert!(
-            authored
-                .shred_is_authored(&line(&[revocation_row(0x42, 0x41)]))
-                .unwrap_err()
-                .contains("revoked authority device")
-        );
+        assert!(!authored.is_authored_at(&id, &shredder_id, &line(&[revocation_row(0x42, 0x41)])));
 
-        // Compat: the unauthored shape encodes exactly as before the ruling.
-        let bytes = canonical_encode(&unauthored).unwrap();
-        assert!(!bytes.windows(12).any(|w| w == b"shredder_sig"));
-        assert!(!bytes.windows(13).any(|w| w == b"authorization"));
+        // The marker is attribution only: no signature, no cert.
+        let marker = canonical_encode(&GroupGenerationMintRecord::Shredded {
+            core,
+            shredded_at_ms: 9_000,
+            shredded_by: shredder_id,
+        })
+        .unwrap();
+        assert!(!marker.windows(12).any(|w| w == b"shredder_sig"));
+        assert!(!marker.windows(13).any(|w| w == b"authorization"));
+    }
+
+    /// **The forged-marker pin at the group join.** A forger's attestation at the
+    /// honest shredder's own cell, bytes sorting above the honest one, never
+    /// displaces it — in both orders — and the join is a join.
+    #[test]
+    fn the_group_shred_join_keeps_the_verifying_row_and_obeys_the_laws() {
+        let shredder = device(0x41);
+        let shredder_id = shredder.verifying_key().to_bytes();
+        let id = [0x0D; 32];
+        let cert = cert_bytes(&authority(), shredder_id, None);
+        let honest = sign_group_shred(&shredder, &id, cert.clone(), 9_000);
+        let later = sign_group_shred(&shredder, &id, cert, 9_500);
+        let forged = |sig: u8| GroupShredAttestation {
+            shredder_sig: vec![sig; 64],
+            ..honest.clone()
+        };
+        let enc = |r: &GroupShredAttestation| canonical_encode(r).unwrap();
+        let (h, l, f1, f2) = (
+            enc(&honest),
+            enc(&later),
+            enc(&forged(0x01)),
+            enc(&forged(0xff)),
+        );
+        assert!(f2 > h, "the forgery sorts above the honest bytes");
+        let join = |x: &[u8], y: &[u8]| {
+            join_group_generation_shred(&id, &shredder_id, x, y)
+                .unwrap()
+                .to_vec()
+        };
+        assert_eq!(join(&h, &f2), h);
+        assert_eq!(join(&f2, &h), h);
+        assert!(join_group_generation_shred(&id, &shredder_id, &h, b"junk").is_err());
+        assert!(join_group_generation_shred(&id, &shredder_id, b"junk", &h).is_err());
+        let all = [&h, &l, &f1, &f2];
+        for x in all {
+            assert_eq!(join(x, x), **x, "idempotent");
+            for y in all {
+                assert_eq!(join(x, y), join(y, x), "commutative");
+                for z in all {
+                    assert_eq!(join(&join(x, y), z), join(x, &join(y, z)), "associative");
+                }
+            }
+        }
+    }
+
+    /// **The cert-swap pin.** The honest signature kept, the carried
+    /// cert swapped for byte-greater junk: the signature covers the cert, so
+    /// the copy no longer verifies at the cell and never displaces the
+    /// authored row — in both orders.
+    #[test]
+    fn a_swapped_cert_never_displaces_an_authored_group_shred() {
+        let shredder = device(0x41);
+        let shredder_id = shredder.verifying_key().to_bytes();
+        let id = [0x0D; 32];
+        let cert = cert_bytes(&authority(), shredder_id, None);
+        let honest = sign_group_shred(&shredder, &id, cert.clone(), 9_000);
+        let swapped = GroupShredAttestation {
+            authorization: vec![0xff; cert.len()],
+            ..honest.clone()
+        };
+        assert!(
+            !swapped.verifies_at(&id, &shredder_id),
+            "the cert is signed"
+        );
+        let (h, s) = (
+            canonical_encode(&honest).unwrap(),
+            canonical_encode(&swapped).unwrap(),
+        );
+        assert!(s > h, "the swap sorts above the honest bytes");
+        for (x, y) in [(&h, &s), (&s, &h)] {
+            let merged = join_group_generation_shred(&id, &shredder_id, x, y)
+                .unwrap()
+                .to_vec();
+            assert_eq!(merged, h);
+            let row: GroupShredAttestation = canonical_decode(&merged).unwrap();
+            assert!(row.is_authored_at(&id, &shredder_id, &line(&[])));
+        }
     }
 
     #[test]

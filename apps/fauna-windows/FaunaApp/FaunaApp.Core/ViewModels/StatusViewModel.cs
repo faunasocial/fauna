@@ -79,11 +79,18 @@ public partial class StatusViewModel : ViewModelBase
     // here, not from `_nest.GetServiceStatusAsync()`.
     private readonly IAgentStatusProbe _agentStatus;
 
-    internal StatusViewModel(INestHttpClient nest, INestRpcClient rpc, IAgentStatusProbe agentStatus)
+    // The conversations manager's secure_channel_count — the MLS leg's second half.
+    // The manager host lives in the app assembly (FaunaApp.Core cannot reach it), so
+    // the page hands the read in; null (unit tests) leaves the MLS leg absent.
+    private readonly Func<ulong>? _secureChannelCount;
+
+    internal StatusViewModel(INestHttpClient nest, INestRpcClient rpc, IAgentStatusProbe agentStatus,
+        Func<ulong>? secureChannelCount = null)
     {
         _nest = nest;
         _rpc = rpc;
         _agentStatus = agentStatus;
+        _secureChannelCount = secureChannelCount;
     }
 
     [RelayCommand]
@@ -138,6 +145,8 @@ public partial class StatusViewModel : ViewModelBase
                 BytesPending = agentSync.@bytesPending;
                 LastSync = agentSync.@lastSync;
             }
+
+            await LoadStatusLegsAsync(agentSync);
 
             // Query bridge status from nest via `fauna.bridges.list`. A linked
             // bridge is an active account (the WS-RPC roster has no separate
@@ -200,15 +209,48 @@ public partial class StatusViewModel : ViewModelBase
         }
     }
 
-    /// <summary>Pure last-sync → i18n text mapping (<c>status/sync/last_sync</c> row).
-    /// null (the agent has never finished a transfer/clean pass) ⇒ the shared "Never"
-    /// baseline; a real reading (unix seconds) renders through the shared
-    /// <see cref="ValueFormat.RelativeTime"/> (epoch ms — hence the ×1000). Static +
-    /// pure so unit tests pin the mapping without a live FFI read (<paramref
-    /// name="nowMs"/> injected for determinism). Mirrors
-    /// <c>BackupsViewModel.LastUploadText</c>/<c>LastAuditText</c>'s shape.</summary>
-    internal static string LastSyncText(ulong? lastSync, long nowMs) =>
-        lastSync is { } secs
-            ? ValueFormat.RelativeTime(nowMs, (long)secs * 1000)
-            : Strings.Get("common/never");
+    /// <summary>The seven <c>status-*</c> element texts over the legs loaded so far —
+    /// <c>fauna_client_status::render</c> via the FFI (<c>ui/status.md</c> § State &amp;
+    /// data shape). A <c>null</c> text means "do not render that element": its leg is
+    /// not loaded (or not applicable), or — for the build SHA — this is an unstamped
+    /// build. This VM derives none of the texts; <paramref name="nowMs"/> is injected
+    /// for determinism.</summary>
+    internal FfiStatusText StatusTexts(long nowMs, FfiStatusLookup lookup) =>
+        FaunaFfiMethods.StatusText(StatusLegs, nowMs, lookup);
+
+    /// <summary>The node, sync and MLS legs as loaded so far. A leg whose read has not
+    /// resolved (or failed, or does not apply here) stays <c>null</c> and its section
+    /// is not painted — an unreachable nest is the connection row's to say, never a
+    /// zero here.</summary>
+    internal FfiStatusLegs StatusLegs { get; private set; } = new(null, null, null);
+
+    private async Task LoadStatusLegsAsync(FfiAgentSyncStatus? agentSync)
+    {
+        FfiNodeLeg? node = null;
+        try
+        {
+            node = await _rpc.StatusNodeAsync();
+        }
+        catch
+        {
+            // Node read failed — the Node section stays absent.
+        }
+
+        FfiMlsLeg? mls = null;
+        try
+        {
+            var keyPackages = await _rpc.KeypackageCountAsync();
+            if (_secureChannelCount is { } channels)
+                mls = new FfiMlsLeg((ulong)Math.Max(keyPackages, 0), channels());
+        }
+        catch
+        {
+            // MLS read failed — the Encryption section stays absent.
+        }
+
+        // The sync leg IS the agent read; an unreachable agent (or none) leaves it
+        // absent, exactly like an app with no local agent.
+        var sync = agentSync is null ? null : FaunaFfiMethods.StatusSyncLeg(agentSync);
+        StatusLegs = new FfiStatusLegs(node, sync, mls);
+    }
 }

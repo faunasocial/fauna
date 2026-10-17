@@ -33,6 +33,7 @@ pub mod personalization;
 pub mod quote;
 pub mod sealed_compose;
 pub mod snapshot;
+pub mod thread;
 // `debug_assertions` arm: see the gate rationale on `manager.rs`'s
 // `set_feed_snapshot_for_test` (testing.md convention 15 — visibility is
 // profile-aware so a plain debug build of linux/tui reaches the seams without the
@@ -44,7 +45,9 @@ pub use compose::{
     AttachedFile, BridgeFormState, ComposeAttachmentUpload, ComposeUploadPart, FactorWeightInput,
     FeedComposeState, FilterRuleInput, GateRoomOption, SellComposeState,
 };
-pub use cue_tracker::{CueRow, CueTracker, LeaveModel};
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+pub use cue_tracker::{CueProbe, CueProbeCard, CueProbeExposure};
+pub use cue_tracker::{CueRow, CueTracker, ExposureEnd, LeaveModel};
 pub use cues::{
     CueEngine, CueObservation, CueRollup, CueVerdict, ItemCues, seal_cue_rollup, unseal_cue_rollup,
 };
@@ -52,7 +55,10 @@ pub use drafts::{PostDraftRestoreError, PostDrafts};
 pub use manager::{FeedManager, feed_posts_json, feed_reloads_json, refusal_i18n_key};
 pub use observer::FeedSnapshotObserver;
 pub use personalization::{
-    ReviewNgram, ScoredExemplar, TrainResult, TrainVerb, TrainedModelReview,
+    ReviewNgram, ScoredExemplar, TrainResult, TrainVerb, TrainedModelReview, model_text,
+};
+pub use thread::{
+    ThreadPage, ThreadPostView, ThreadStatus, post_offers_thread_view, thread_post_author_label,
 };
 // Re-exported for `FeedManager::set_trained_factor_for_test`'s signature: a
 // client unit-testing its train-verb render has to be able to name the model
@@ -61,9 +67,9 @@ pub use personalization::{
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 pub use fauna_text_model::topic::TopicModel;
 pub use snapshot::{
-    AuthorDisplayView, AvailableBridge, BridgeFeedView, FeedEmptyState, FeedSnapshot, FeedStatus,
-    FeedSummaryView, PlaybackSource, PostResolution, PostSummary, QuotedPostView, ReplyAudience,
-    TipSenderView, TipView, UnlockOfferView, feed_empty_state,
+    AuthorDisplayView, AvailableBridge, BridgeFeedView, CardGate, FeedEmptyState, FeedSnapshot,
+    FeedStatus, FeedSummaryView, PlaybackSource, PostResolution, PostSummary, QuotedPostView,
+    ReplyAudience, TipSenderView, TipView, UnlockOfferView, feed_empty_state, post_card_gate,
 };
 
 use fauna_core::source_glyph::{BridgeIdentitySnapshot, SourceGlyph};
@@ -215,6 +221,16 @@ impl SourceKind {
             self,
             SourceKind::Fauna | SourceKind::Facebook | SourceKind::Instagram
         )
+    }
+
+    /// Whether this source's badge paints its label beside the glyph even
+    /// where an app's badge is otherwise the glyph alone. A first-party glyph
+    /// IS its source's name; a [`SourceKind::Bridged`] glyph is one member of
+    /// the shared fixed set any bridge may declare, so only the declared label
+    /// names it (`ui/feed.md` § Implementation status today, `SourceKind::
+    /// Bridged` — the words the conversations row paints beside the glyph).
+    pub fn badge_paints_label(&self) -> bool {
+        matches!(self, SourceKind::Bridged { .. })
     }
 }
 
@@ -441,6 +457,8 @@ mod tests {
         assert_eq!(bridged.label(), "Matrix");
         assert_eq!(bridged.glyph(), SourceGlyph::Bridge);
         assert!(!bridged.is_native());
+        assert!(bridged.badge_paints_label());
+        assert!(!SourceKind::Fauna.badge_paints_label());
         assert_eq!(
             classify_sources("matrix", &[]),
             vec![SourceKind::Other {

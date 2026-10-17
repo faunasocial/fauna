@@ -66,6 +66,12 @@ pub mod agent_spawner;
 #[cfg(any(unix, windows))]
 pub mod attachment;
 #[cfg(any(unix, windows))]
+pub mod recover_wire;
+// Native-only like the `agent` module whose job it carries (it reads the
+// agent's state and polls on tokio); every consumer — the agent, fauna-ffi's
+// provisioning face — is native, and the wasm graph that reaches this crate
+// must not compile it.
+#[cfg(any(unix, windows))]
 pub mod reseed_wire;
 
 // The projection readers' judge (writer-signed change records, ruling (3)):
@@ -189,6 +195,32 @@ impl ConflictLabels {
 /// (`R: RpcRequester`): native call sites pass `Arc<NestClient>`, the wasm
 /// SPA passes its `WsRpcClient`. Errors propagate as the transport's
 /// `R::Error`.
+/// What one `fauna.files.versions.list` read asks for beyond its `path_hash`
+/// ([`SyncClient::versions_list_at`], [`SyncClient::versions_list_judged_at`]):
+/// the set, addressed as the caller holds it, and the projection's width.
+#[derive(Debug, Clone, Default)]
+pub struct VersionsListing {
+    /// The set's name; `None` unions across every readable set holding the
+    /// path (a bare `path_hash` is set-relative and can collide across sets,
+    /// so a scoped read is the normal one).
+    pub folder: Option<String>,
+    /// The set's wire hash as a reply named it (a `SnapshotGetReply`'s
+    /// `folder_hash`, a `FolderSummary`'s `name_hash`) — sent as the request's
+    /// `name_hash`, so the read addresses the set even where its plaintext
+    /// name rests scrubbed; `None` derives the hash from `folder`.
+    pub name_hash: Option<Vec<u8>>,
+    /// The set's row when the caller holds it (`set-addressing.md` § The row
+    /// form → *Whoever holds the row sends it*).
+    pub row: Option<fauna_core::folder_keys::FolderRef>,
+    /// The recovery browse (`file-versions.md` § Retention (3)): soft-pruned
+    /// rows inside their `purge_after` window.
+    pub include_pruned: bool,
+    /// The snapshot restore's licence read (`backup-restore.md` § Security
+    /// Properties → Integrity): rows the GC purge stamped `superseded_at`,
+    /// served for their signed statement — never for a listing.
+    pub include_superseded: bool,
+}
+
 pub struct SyncClient<R: RpcRequester> {
     nest: R,
     /// Writer signing for [`Self::changes_record`] — every record through this
@@ -259,6 +291,24 @@ impl SetNonceSource {
         }
     }
 
+    /// [`Self::lookup`] for a request that names its **row** too: a resolver
+    /// answers by the row ([`fauna_core::folder_keys::FolderKeyResolver::set_nonce_ref`])
+    /// and falls back to the name only when it has no by-row answer (a
+    /// resolver that keys by name alone); a fixed or snapshot source is
+    /// unchanged.
+    pub async fn lookup_at(
+        &self,
+        folder: &str,
+        row: Option<&fauna_core::folder_keys::FolderRef>,
+    ) -> anyhow::Result<Option<[u8; 32]>> {
+        if let (SetNonceSource::Resolver(resolver), Some(row)) = (self, row)
+            && let Some(nonce) = resolver.set_nonce_ref(row).await?
+        {
+            return Ok(Some(nonce));
+        }
+        self.lookup(folder).await
+    }
+
     /// `folder`'s nonce **lineage** — the live nonce with its minter and the
     /// set's retired nonces with theirs (`writer-signed-change-records.md`
     /// ruling (11)(b)), what a projection reader judges history under. A fixed
@@ -282,6 +332,27 @@ impl SetNonceSource {
             }),
         }
     }
+
+    /// [`Self::lookup_lineage`] for a projected row that names its **row**
+    /// too: a resolver answers by the row
+    /// ([`fauna_core::folder_keys::FolderKeyResolver::set_lineage_ref`]) and
+    /// falls back to the hash only when it has no by-row answer — the
+    /// [`Self::lookup_at`] shape, for the reader's half. Beside an own set of
+    /// the same name the by-hash answer is the OWN set's lineage, so a member
+    /// row judged by it would be held (`set-addressing.md` § The row form).
+    pub async fn lookup_lineage_at(
+        &self,
+        folder: &str,
+        name_hash: &[u8; 32],
+        row: Option<&fauna_core::folder_keys::FolderRef>,
+    ) -> anyhow::Result<fauna_core::folder_keys::SetNonceLineage> {
+        if let (SetNonceSource::Resolver(resolver), Some(row)) = (self, row)
+            && let Some(lineage) = resolver.set_lineage_ref(row).await?
+        {
+            return Ok(lineage);
+        }
+        self.lookup_lineage(folder, name_hash).await
+    }
 }
 
 impl RecordSigning {
@@ -290,7 +361,14 @@ impl RecordSigning {
     /// outside [`SyncClient::changes_record`] (the engine's cross-nest relay,
     /// the re-seed delivery) take the same funnel.
     pub async fn sign(&self, req: &mut SyncChangeRecordRequest) {
-        let Some(nonce) = self.nonce_for(&req.folder, "change record").await else {
+        // By the row the record names when it names one — the nonce the nest
+        // verifies that row under, which a name lookup misses when the writer
+        // also owns a set of the same name (`set-addressing.md` § The row form).
+        let row = req.folder_id.map(fauna_core::folder_keys::FolderRef::Local);
+        let Some(nonce) = self
+            .nonce_for(&req.folder, row.as_ref(), "change record")
+            .await
+        else {
             return;
         };
         if let Err(e) = self.signer.sign_record(req, nonce) {
@@ -307,7 +385,7 @@ impl RecordSigning {
         if req.resolution.is_none() {
             return;
         }
-        let Some(nonce) = self.nonce_for(&req.folder, "conflict report").await else {
+        let Some(nonce) = self.nonce_for(&req.folder, None, "conflict report").await else {
             return;
         };
         if let Err(e) = self.signer.sign_report(req, nonce) {
@@ -325,7 +403,10 @@ impl RecordSigning {
         if req.winning_manifest_hash.is_none() {
             return;
         }
-        let Some(nonce) = self.nonce_for(&conflict.folder, "conflict resolve").await else {
+        let Some(nonce) = self
+            .nonce_for(&conflict.folder, None, "conflict resolve")
+            .await
+        else {
             return;
         };
         if let Err(e) = self.signer.sign_choose_winner(req, conflict, nonce) {
@@ -335,8 +416,13 @@ impl RecordSigning {
 
     /// The set nonce `folder`'s records bind to, or `None` (warned: the
     /// `what` goes out unsigned) when it does not resolve.
-    async fn nonce_for(&self, folder: &str, what: &str) -> Option<[u8; 32]> {
-        let nonce = match self.set_nonce.lookup(folder).await {
+    async fn nonce_for(
+        &self,
+        folder: &str,
+        row: Option<&fauna_core::folder_keys::FolderRef>,
+        what: &str,
+    ) -> Option<[u8; 32]> {
+        let nonce = match self.set_nonce.lookup_at(folder, row).await {
             Ok(nonce) => nonce,
             Err(e) => {
                 tracing::warn!(%folder, "{what} left unsigned: {e}");
@@ -406,21 +492,32 @@ impl<R: RpcRequester> SyncClient<R> {
     /// owned set's changes with `seq > since` (optionally excluding one hex
     /// `device_id`'s own echoes); without it, the connection actor's changes.
     /// Replay-safe pure read.
+    ///
+    /// `row` here and on every per-set wrapper below is the set's identity
+    /// when the sender holds it: `Local(id)` stamps `folder_id`, which the nest
+    /// resolves by that row alone; `None` and a foreign ref send the name forms
+    /// alone (`set-addressing.md` § The row form →
+    /// *Whoever holds the row sends it*; the funnel
+    /// [`addressed_at`](fauna_protocol::folders::addressed_at)).
     pub async fn changes_list(
         &self,
         folder: Option<String>,
         device_id: Option<String>,
         since: i64,
+        row: Option<fauna_core::folder_keys::FolderRef>,
     ) -> Result<SyncChangesListReply, R::Error> {
         self.nest
             .request(
                 "fauna.sync.changes.list",
-                fauna_protocol::folders::addressed(SyncChangesListRequest {
-                    folder,
-                    device_id,
-                    since,
-                    ..Default::default()
-                }),
+                fauna_protocol::folders::addressed_at(
+                    SyncChangesListRequest {
+                        folder,
+                        device_id,
+                        since,
+                        ..Default::default()
+                    },
+                    row,
+                ),
             )
             .await
     }
@@ -431,25 +528,34 @@ impl<R: RpcRequester> SyncClient<R> {
     /// `manifest_hash` is the path's current head, which the caller MUST have
     /// verified retrievable + decryptable end-to-end first — the nest refuses
     /// (head-mismatch) if it isn't the live head, so the head itself is never
-    /// markable and a stale/wrong verify can't reclaim live data. Owner-only,
-    /// write-capable device. Idempotent (a re-run marks 0 rows).
+    /// markable and a stale/wrong verify can't reclaim live data.
+    /// `source_manifest_hash` is the head the re-seal sourced its plaintext
+    /// from; the nest refuses (source-not-head) unless the row directly below
+    /// the head carries it, so a stale reissue never buries a newer edit.
+    /// Owner-only, write-capable device. Idempotent (a re-run marks 0 rows).
     pub async fn changes_supersede(
         &self,
         folder: impl Into<String>,
         device_id: impl Into<String>,
         path: impl Into<String>,
         manifest_hash: impl Into<String>,
+        source_manifest_hash: impl Into<String>,
+        row: Option<fauna_core::folder_keys::FolderRef>,
     ) -> Result<SyncChangesSupersedeReply, R::Error> {
         self.nest
             .request(
                 "fauna.sync.changes.supersede",
-                fauna_protocol::folders::addressed(SyncChangesSupersedeRequest {
-                    folder: folder.into(),
-                    device_id: device_id.into(),
-                    path: path.into(),
-                    manifest_hash: manifest_hash.into(),
-                    ..Default::default()
-                }),
+                fauna_protocol::folders::addressed_at(
+                    SyncChangesSupersedeRequest {
+                        folder: folder.into(),
+                        device_id: device_id.into(),
+                        path: path.into(),
+                        manifest_hash: manifest_hash.into(),
+                        source_manifest_hash: Some(source_manifest_hash.into()),
+                        ..Default::default()
+                    },
+                    row,
+                ),
             )
             .await
     }
@@ -474,14 +580,21 @@ impl<R: RpcRequester> SyncClient<R> {
     /// `source_online`. The WS-RPC twin of `GET /api/v1/sync/status`; the
     /// handler ownership-checks `folder` (an unowned set → `fauna.sync.not_found`
     /// / permission error). Replay-safe pure read.
-    pub async fn status(&self, folder: impl Into<String>) -> Result<SyncStatusReply, R::Error> {
+    pub async fn status(
+        &self,
+        folder: impl Into<String>,
+        row: Option<fauna_core::folder_keys::FolderRef>,
+    ) -> Result<SyncStatusReply, R::Error> {
         self.nest
             .request(
                 "fauna.sync.status",
-                fauna_protocol::folders::addressed(SyncStatusRequest {
-                    folder: folder.into(),
-                    ..Default::default()
-                }),
+                fauna_protocol::folders::addressed_at(
+                    SyncStatusRequest {
+                        folder: folder.into(),
+                        ..Default::default()
+                    },
+                    row,
+                ),
             )
             .await
     }
@@ -490,14 +603,21 @@ impl<R: RpcRequester> SyncClient<R> {
     /// manifest hash, size, and last-update time (the media page's file list).
     /// The WS-RPC twin of `GET /api/v1/sync/files`; ownership-checked like
     /// `status`. Replay-safe pure read.
-    pub async fn files(&self, folder: impl Into<String>) -> Result<SyncFilesReply, R::Error> {
+    pub async fn files(
+        &self,
+        folder: impl Into<String>,
+        row: Option<fauna_core::folder_keys::FolderRef>,
+    ) -> Result<SyncFilesReply, R::Error> {
         self.nest
             .request(
                 "fauna.sync.files",
-                fauna_protocol::folders::addressed(SyncFilesRequest {
-                    folder: folder.into(),
-                    ..Default::default()
-                }),
+                fauna_protocol::folders::addressed_at(
+                    SyncFilesRequest {
+                        folder: folder.into(),
+                        ..Default::default()
+                    },
+                    row,
+                ),
             )
             .await
     }
@@ -514,8 +634,9 @@ impl<R: RpcRequester> SyncClient<R> {
         &self,
         path_hash: [u8; 32],
         folder: Option<String>,
+        row: Option<fauna_core::folder_keys::FolderRef>,
     ) -> Result<FilesVersionsListReply, R::Error> {
-        self.versions_list_with(path_hash, folder, false).await
+        self.versions_list_with(path_hash, folder, false, row).await
     }
 
     /// [`Self::versions_list_with`] scoped to `folder`, every version paired
@@ -528,11 +649,51 @@ impl<R: RpcRequester> SyncClient<R> {
     /// and a restore refuses the rest. The verdict comes from the LIST because
     /// only the list reply carries the certs a delegated signer's row chains
     /// through (`fauna.files.versions.get` answers a bare version).
+    ///
+    /// `row` is the set's row when the caller holds it, narrowing the list to
+    /// that row among same-named sets (`set-addressing.md` § The row form →
+    /// *Whoever holds the row sends it*); `None` sends the name forms alone.
     pub async fn versions_list_judged(
         &self,
         path_hash: [u8; 32],
         folder: &str,
         include_pruned: bool,
+        seat: &row_judge::ReaderSeat,
+        row: Option<fauna_core::folder_keys::FolderRef>,
+    ) -> Result<
+        Vec<(
+            fauna_protocol::files::FileVersionInfo,
+            fauna_protocol::sync_row_verify::RowVerdict,
+        )>,
+        R::Error,
+    >
+    where
+        R::Error: RpcErrorClass + core::fmt::Display,
+    {
+        self.versions_list_judged_at(
+            path_hash,
+            &VersionsListing {
+                folder: Some(folder.to_string()),
+                row,
+                include_pruned,
+                ..Default::default()
+            },
+            seat,
+        )
+        .await
+    }
+
+    /// [`Self::versions_list_judged`] over a [`VersionsListing`] — the set
+    /// addressed as the caller holds it (its wire hash beside, or instead of,
+    /// its name) and the projection widened as the read needs: the snapshot
+    /// restore's licence read takes the purged rows too
+    /// (`backup-restore.md` § Security Properties → Integrity). The judge
+    /// binds each row by the listing's hash and the row's `folder_id`, exactly
+    /// as the name form does.
+    pub async fn versions_list_judged_at(
+        &self,
+        path_hash: [u8; 32],
+        listing: &VersionsListing,
         seat: &row_judge::ReaderSeat,
     ) -> Result<
         Vec<(
@@ -544,15 +705,15 @@ impl<R: RpcRequester> SyncClient<R> {
     where
         R::Error: RpcErrorClass + core::fmt::Display,
     {
-        let reply = self
-            .versions_list_with(path_hash, Some(folder.to_string()), include_pruned)
-            .await?;
+        let reply = self.versions_list_at(path_hash, listing).await?;
+        let folder = listing.folder.as_deref().unwrap_or_default();
         let rows: Vec<_> = reply
             .versions
             .iter()
             .map(|v| row_judge::ProjectedRow {
                 folder,
-                folder_hash: None,
+                folder_hash: listing.name_hash.as_deref(),
+                folder_id: v.folder_id,
                 row: v.as_change_row(),
             })
             .collect();
@@ -585,16 +746,45 @@ impl<R: RpcRequester> SyncClient<R> {
         path_hash: [u8; 32],
         folder: Option<String>,
         include_pruned: bool,
+        row: Option<fauna_core::folder_keys::FolderRef>,
+    ) -> Result<FilesVersionsListReply, R::Error> {
+        self.versions_list_at(
+            path_hash,
+            &VersionsListing {
+                folder,
+                row,
+                include_pruned,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    /// `fauna.files.versions.list` over a [`VersionsListing`] — the one
+    /// request builder every listing form above goes through. A listing that
+    /// carries the set's wire hash sends it as `name_hash` (the hash-first
+    /// address, S5b), which [`fauna_protocol::folders::addressed`] keeps in
+    /// place of deriving one from the name — so a set whose plaintext name
+    /// rests scrubbed still addresses. Replay-safe pure read.
+    pub async fn versions_list_at(
+        &self,
+        path_hash: [u8; 32],
+        listing: &VersionsListing,
     ) -> Result<FilesVersionsListReply, R::Error> {
         self.nest
             .request(
                 "fauna.files.versions.list",
-                fauna_protocol::folders::addressed(FilesVersionsListRequest {
-                    path_hash: ByteBuf::from(path_hash.to_vec()),
-                    folder,
-                    include_pruned: include_pruned.then_some(true),
-                    ..Default::default()
-                }),
+                fauna_protocol::folders::addressed_at(
+                    FilesVersionsListRequest {
+                        path_hash: ByteBuf::from(path_hash.to_vec()),
+                        folder: listing.folder.clone(),
+                        name_hash: listing.name_hash.clone().map(ByteBuf::from),
+                        include_pruned: listing.include_pruned.then_some(true),
+                        include_superseded: listing.include_superseded.then_some(true),
+                        ..Default::default()
+                    },
+                    listing.row,
+                ),
             )
             .await
     }
@@ -822,6 +1012,9 @@ impl<R: RpcRequester> SyncClient<R> {
         if let Some(signing) = &self.signing {
             signing.sign_report(&mut req).await;
         }
+        // Addressed after signing, as `changes_record` is: the signature
+        // binds no address field.
+        let req = fauna_protocol::folders::addressed(req);
         self.nest.request("fauna.sync.conflicts.report", req).await
     }
 
@@ -1278,6 +1471,11 @@ where
     /// (`SyncChangeRecordRequest::derived_through` has the contract). Writers
     /// that do not track an anchor pass `None` — honestly "unknown causality",
     /// which readers read as no anchor.
+    ///
+    /// `row` is the set's identity when the sender holds it — `Local(id)`
+    /// stamps the request's `folder_id`, which the nest resolves by row and
+    /// never by the name (`set-addressing.md` § The row form); `None` (and a
+    /// foreign ref) sends the name forms alone.
     #[allow(clippy::too_many_arguments)]
     pub async fn changes_record(
         &self,
@@ -1292,10 +1490,12 @@ where
         path_sealed: Option<Vec<u8>>,
         derived_through: Option<i64>,
         is_resolution: Option<bool>,
+        row: Option<fauna_core::folder_keys::FolderRef>,
     ) -> Result<SyncChangeRecordReply, R::Error> {
         let mut req = SyncChangeRecordRequest {
             nest_url: None,
             channel_id: None,
+            folder_id: None,
             folder: folder.into(),
             device_id: device_id.into(),
             path: path.into(),
@@ -1313,10 +1513,14 @@ where
             signer_key: None,
             signer_cert: None,
         };
-        // Signed BEFORE the address funnel: the set's nonce resolves by the
-        // set's name, which `addressed` takes off the request. The signature
-        // binds no address field, so addressing after it changes nothing it
-        // covers.
+        // The row half of the funnel first — the nest resolves the record by
+        // that row and never by the name forms, and the signer resolves the
+        // nonce by it (`set-addressing.md` § The row form); a foreign ref
+        // names no row on this nest. Signed BEFORE the name half: the nonce
+        // falls back to the set's name, which `addressed` takes off the
+        // request. The signature binds no address field, so addressing after
+        // it changes nothing it covers.
+        fauna_protocol::folders::stamp_row(&mut req, row);
         if let Some(signing) = &self.signing {
             signing.sign(&mut req).await;
         }
@@ -1359,6 +1563,11 @@ where
     /// `modify`, so it seals its path exactly as any other record does (see
     /// [`Self::changes_record`]). A caller holding no seal root passes `None`
     /// and records plaintext-only, as before the expand phase.
+    ///
+    /// `row` is the restored version's own set row when the caller holds it
+    /// (`FileVersionInfo::folder_id`), stamped as [`Self::changes_record`]
+    /// stamps it — a writer member's restore of a shared set's version then
+    /// lands there, never in a same-named own set.
     #[allow(clippy::too_many_arguments)]
     pub async fn restore_version(
         &self,
@@ -1369,6 +1578,7 @@ where
         size_bytes: i64,
         content_key_version: Option<u64>,
         path_sealed: Option<Vec<u8>>,
+        row: Option<fauna_core::folder_keys::FolderRef>,
     ) -> Result<SyncChangeRecordReply, R::Error> {
         self.changes_record(
             folder,
@@ -1385,8 +1595,48 @@ where
             // catch-up anchor, so causality is honestly unknown.
             None,
             None,
+            row,
         )
         .await
+    }
+}
+
+/// The lived-in recovery's reserved-set arm
+/// (`fauna_client_backup::recover_leg`): every custody row that leg lands on
+/// the source, and every tombstone it retires at a destination, goes through
+/// the one self-healing record entry ([`SyncClient::changes_record`]) —
+/// unsigned (a reserved set's rows carry no writer signature) and with no
+/// sealed path (machine-authored routing keys).
+impl<R: RpcRequester> fauna_client_backup::recover_leg::CustodyRecorder for SyncClient<R>
+where
+    R::Error: RpcErrorClass,
+{
+    async fn record_custody(
+        &self,
+        set: &str,
+        device_id: &str,
+        path: &str,
+        manifest_hash: Option<String>,
+        size_bytes: i64,
+        change_type: &str,
+    ) -> Result<(), String> {
+        self.changes_record(
+            set,
+            device_id,
+            path,
+            manifest_hash,
+            size_bytes,
+            change_type,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
     }
 }
 
@@ -1398,6 +1648,68 @@ mod tests {
     #[test]
     fn constructor_builds_over_generic_requester() {
         let _c = SyncClient::new(MockRequester);
+    }
+
+    /// The caller's own `photos` by name, someone else's `photos` (row 9) by
+    /// its row — what a writer member holding a same-named pair resolves.
+    struct SameNamedPair;
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl fauna_core::folder_keys::FolderKeyResolver for SameNamedPair {
+        async fn resolve(
+            &self,
+            _name_hash: &[u8; 32],
+        ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+            anyhow::bail!("not a key read")
+        }
+
+        async fn resolve_ref(
+            &self,
+            _folder_ref: &fauna_core::folder_keys::FolderRef,
+        ) -> anyhow::Result<fauna_core::folder_keys::ResolvedCustody> {
+            anyhow::bail!("not a key read")
+        }
+
+        async fn set_nonce(&self, _folder: &str) -> anyhow::Result<Option<[u8; 32]>> {
+            Ok(Some([0x01; 32]))
+        }
+
+        async fn set_nonce_ref(
+            &self,
+            folder_ref: &fauna_core::folder_keys::FolderRef,
+        ) -> anyhow::Result<Option<[u8; 32]>> {
+            Ok((*folder_ref == fauna_core::folder_keys::FolderRef::Local(9)).then_some([0x09; 32]))
+        }
+    }
+
+    /// A record naming its row binds that row's nonce — the one the nest
+    /// verifies it under — and one naming none, or a row the resolver has no
+    /// answer for, the name's (`set-addressing.md` § The row form).
+    #[test]
+    fn a_record_naming_its_row_signs_under_that_rows_nonce() {
+        use fauna_core::folder_keys::FolderRef;
+        let source = SetNonceSource::Resolver(std::sync::Arc::new(SameNamedPair));
+        block_on(async {
+            assert_eq!(
+                source
+                    .lookup_at("photos", Some(&FolderRef::Local(9)))
+                    .await
+                    .unwrap(),
+                Some([0x09; 32])
+            );
+            assert_eq!(
+                source.lookup_at("photos", None).await.unwrap(),
+                Some([0x01; 32])
+            );
+            assert_eq!(
+                source
+                    .lookup_at("photos", Some(&FolderRef::Local(7)))
+                    .await
+                    .unwrap(),
+                Some([0x01; 32])
+            );
+        });
     }
 
     // ── restore_version + self-healing record ───────────────────────────────
@@ -1486,6 +1798,7 @@ mod tests {
             100,
             Some(5),
             None,
+            None,
         ))
         .expect("infallible mock");
 
@@ -1530,6 +1843,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         ))
         .expect("self-heal then succeed");
         assert_eq!(reply.seq, 42);
@@ -1557,6 +1871,7 @@ mod tests {
             "docs/report.txt",
             "aabb".to_string(),
             100,
+            None,
             None,
             None,
         ))
@@ -1604,8 +1919,9 @@ mod tests {
         }
 
         let client = SyncClient::new(AlwaysDenied);
-        let err = block_on(client.restore_version("docs", "d", "p", "aa".into(), 1, None, None))
-            .expect_err("permission_denied must propagate");
+        let err =
+            block_on(client.restore_version("docs", "d", "p", "aa".into(), 1, None, None, None))
+                .expect_err("permission_denied must propagate");
         assert_eq!(err.0.code, "fauna.auth.permission_denied");
     }
 
@@ -1621,6 +1937,12 @@ mod tests {
                 changes: vec![],
                 ..Default::default()
             }),
+            "fauna.files.versions.list" => {
+                fauna_protocol::encode_canonical(&FilesVersionsListReply {
+                    versions: vec![],
+                    ..Default::default()
+                })
+            }
             "fauna.sync.changes.record" => {
                 fauna_protocol::encode_canonical(&SyncChangeRecordReply {
                     seq: 1,
@@ -1699,7 +2021,7 @@ mod tests {
     fn changes_list_composes_kind_and_payload() {
         let rec = std::sync::Arc::new(RecordingRequester::new(reply));
         let client = SyncClient::new(rec.clone());
-        block_on(client.changes_list(Some("docs".into()), None, 7)).expect("infallible mock");
+        block_on(client.changes_list(Some("docs".into()), None, 7, None)).expect("infallible mock");
         let (kind, payload) = rec.recorded();
         assert_eq!(kind, "fauna.sync.changes.list");
         let req: SyncChangesListRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
@@ -1707,6 +2029,56 @@ mod tests {
             &req, "docs"
         ));
         assert_eq!(req.since, 7);
+    }
+
+    /// The snapshot restore's licence read (`backup-restore.md` § Security
+    /// Properties → Integrity): a [`VersionsListing`] carrying the set's wire
+    /// hash sends it as the request's `name_hash` — kept by `addressed`, never
+    /// re-derived from the name — and asks for the pruned and the purged rows
+    /// alike; the plain form sends neither flag (the wire is unchanged).
+    #[test]
+    fn versions_list_at_sends_the_listings_hash_and_both_projection_flags() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = SyncClient::new(rec.clone());
+        let wire_hash = vec![0x5c; 32];
+        block_on(client.versions_list_at(
+            [0x4b; 32],
+            &VersionsListing {
+                folder: Some("site".into()),
+                name_hash: Some(wire_hash.clone()),
+                row: None,
+                include_pruned: true,
+                include_superseded: true,
+            },
+        ))
+        .expect("infallible mock");
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.files.versions.list");
+        let req: FilesVersionsListRequest =
+            fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(
+            req.name_hash.as_deref().map(Vec::as_slice),
+            Some(wire_hash.as_slice()),
+            "the listing's own hash addresses the set"
+        );
+        assert_eq!(req.include_pruned, Some(true));
+        assert_eq!(req.include_superseded, Some(true));
+
+        block_on(client.versions_list([0x4b; 32], Some("site".into()), None))
+            .expect("infallible mock");
+        let (_, payload) = rec.recorded();
+        let req: FilesVersionsListRequest =
+            fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(
+            req.name_hash.as_deref().map(Vec::as_slice),
+            Some(&fauna_core::path_crypto::set_name_hash("site")[..]),
+            "the plain form derives the hash from the name"
+        );
+        assert_eq!(req.include_pruned, None);
+        assert_eq!(
+            req.include_superseded, None,
+            "a listing never asks for purged rows"
+        );
     }
 
     #[test]
@@ -1725,6 +2097,7 @@ mod tests {
             None,
             Some(17),
             Some(true),
+            None,
         ))
         .expect("infallible mock");
         let (kind, payload) = rec.recorded();
@@ -1749,7 +2122,8 @@ mod tests {
     fn changes_supersede_composes_kind_and_payload() {
         let rec = std::sync::Arc::new(RecordingRequester::new(reply));
         let client = SyncClient::new(rec.clone());
-        block_on(client.changes_supersede("docs", "aabb", "a.txt", "c3")).expect("infallible mock");
+        block_on(client.changes_supersede("docs", "aabb", "a.txt", "c3", "b2", None))
+            .expect("infallible mock");
         let (kind, payload) = rec.recorded();
         assert_eq!(kind, "fauna.sync.changes.supersede");
         let req: SyncChangesSupersedeRequest =
@@ -1760,6 +2134,7 @@ mod tests {
         assert_eq!(req.device_id, "aabb");
         assert_eq!(req.path, "a.txt");
         assert_eq!(req.manifest_hash, "c3");
+        assert_eq!(req.source_manifest_hash.as_deref(), Some("b2"));
     }
 
     #[test]
@@ -1777,7 +2152,7 @@ mod tests {
     fn status_composes_kind_and_payload() {
         let rec = std::sync::Arc::new(RecordingRequester::new(reply));
         let client = SyncClient::new(rec.clone());
-        block_on(client.status("photos")).expect("infallible mock");
+        block_on(client.status("photos", None)).expect("infallible mock");
         let (kind, payload) = rec.recorded();
         assert_eq!(kind, "fauna.sync.status");
         let req: SyncStatusRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
@@ -1790,7 +2165,7 @@ mod tests {
     fn files_composes_kind_and_payload() {
         let rec = std::sync::Arc::new(RecordingRequester::new(reply));
         let client = SyncClient::new(rec.clone());
-        block_on(client.files("photos")).expect("infallible mock");
+        block_on(client.files("photos", None)).expect("infallible mock");
         let (kind, payload) = rec.recorded();
         assert_eq!(kind, "fauna.sync.files");
         let req: SyncFilesRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
@@ -1840,7 +2215,12 @@ mod tests {
         let (kind, payload) = rec.recorded();
         assert_eq!(kind, "fauna.sync.conflicts.report");
         let req: ConflictReportRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
-        assert_eq!(req.folder, "photos");
+        assert!(req.folder.is_empty(), "the plaintext set name stays home");
+        assert_eq!(
+            req.name_hash.as_deref().map(|b| &b[..]),
+            Some(&fauna_core::path_crypto::set_name_hash("photos")[..]),
+            "the set travels by its hash"
+        );
         assert_eq!(req.path, "notes.txt");
         assert_eq!(req.conflict_type, "concurrent_edit");
         assert_eq!(req.candidates.len(), 1);
@@ -1974,6 +2354,7 @@ mod tests {
                 None,
                 None,
                 Some(b"sealed-path".to_vec()),
+                None,
                 None,
                 None,
             ))

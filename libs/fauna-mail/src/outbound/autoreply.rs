@@ -1,12 +1,13 @@
 //! RFC 5322 vacation auto-reply composer (Sieve `vacation`, RFC 5230).
 //!
-//! Returns the message bytes for a canned auto-reply, composed at the MTA
-//! perimeter from the user-authored `subject`/`body` filter config plus the
-//! triggering message's envelope + Message-ID. The caller (`server.go`) DKIM-signs
-//! the result with the existing outbound signer and hands it to
-//! `fauna.bridges.send_auto_reply`, which enqueues it with a null envelope-from
-//! (`MAIL FROM:<>` — an auto-reply must never itself be bounceable into a loop,
-//! RFC 3834). Pure and allocation-only; no sockets, no signing.
+//! Returns the message bytes for a canned auto-reply, composed by the nest's
+//! `fauna.bridges.send_auto_reply` handler from the recipient's stored
+//! `subject`/`body` filter rule plus the triggering message's envelope +
+//! Message-ID the MTA names (`mail-multidomain.md` § From: header ownership →
+//! *Per door, nest-side*). The nest enqueues the result with a null
+//! envelope-from (`MAIL FROM:<>` — an auto-reply must never itself be
+//! bounceable into a loop, RFC 3834) and signs it at the outbound hand-out.
+//! Pure and allocation-only; no sockets, no signing.
 //!
 //! Header-injection safety: `subject`/`body` are user config and `to_addr` is the
 //! attacker-influenced envelope sender, so every header value is stripped of
@@ -15,11 +16,10 @@
 
 /// The inputs for one composed auto-reply. All addresses/dates/ids are formatted
 /// by the caller (mirrors `dsn::DsnReport`, where the caller formats dates).
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutoReplyMessage {
-    /// `From:` — the recipient's address (the vacationing user). The reply is
-    /// DKIM-signed under this address's domain by the caller.
+    /// `From:` — the recipient's address (the vacationing user). The nest
+    /// signs the reply under this address's domain at the outbound hand-out.
     pub from_addr: String,
     /// `To:` — the envelope sender we are replying to.
     pub to_addr: String,
@@ -40,7 +40,6 @@ pub struct AutoReplyMessage {
 /// Compose the RFC 5322 wire bytes for a vacation auto-reply. `Auto-Submitted:
 /// auto-replied` marks it as automated so a conforming peer won't auto-reply back
 /// (RFC 3834), closing the reply-to-a-reply loop.
-#[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn compose_auto_reply(msg: &AutoReplyMessage) -> Vec<u8> {
     let mut out = Vec::with_capacity(512 + msg.body.len());
     push_header(&mut out, "From", &msg.from_addr);

@@ -66,6 +66,8 @@ struct Account {
     succeeded_by: Option<[u8; 32]>,
     /// Succession statements from this identity forward, oldest first.
     successions: Vec<Vec<u8>>,
+    /// Unix seconds until which `fauna.account.lockout` blocked this account.
+    locked_until: Option<i64>,
 }
 
 #[derive(Default)]
@@ -133,6 +135,16 @@ impl FakeNest {
                 nest_url: Some(nest_url.to_string()),
                 extra: Default::default(),
             });
+    }
+
+    /// The window `fauna.account.lockout` last applied to `actor`, if any.
+    pub fn locked_until(&self, actor: &ActorId) -> Option<i64> {
+        self.state
+            .lock()
+            .unwrap()
+            .accounts
+            .get(&actor.0)
+            .and_then(|a| a.locked_until)
     }
 
     /// The escrow blob currently at rest, if any.
@@ -423,6 +435,32 @@ impl FakeNest {
         let session = *self.session.lock().unwrap();
 
         match kind {
+            // The pre-identity, seed-signed lockout: no session, the signature
+            // is the authorization. Runs the real signed-message builder and
+            // verifier, and the nest's supersession consult.
+            "fauna.account.lockout" => {
+                let req: fauna_protocol::account::AccountLockoutRequest =
+                    fauna_protocol::decode_strict(payload).unwrap();
+                let actor: [u8; 32] = fauna_core::hex32::decode(&req.actor_id).expect("actor hex");
+                let message =
+                    fauna_protocol::account::account_lockout_signed_message(&actor, req.timestamp);
+                let sig = fauna_core::format::hex_decode(&req.signature).expect("signature hex");
+                if !fauna_core::identity::verify_detached(&actor, &message, &sig) {
+                    return refuse("fauna.account.signature_failed");
+                }
+                let account = state.accounts.entry(actor).or_default();
+                if account.succeeded_by.is_some() {
+                    return superseded(account);
+                }
+                let locked_until = now_secs() + 86_400;
+                account.locked_until = Some(locked_until);
+                encode(&fauna_protocol::account::AccountLockoutReply {
+                    ok: true,
+                    locked_until,
+                    extra: Default::default(),
+                })
+            }
+
             "fauna.recovery.registration.submit" => {
                 let req: wire::RegistrationSubmitRequest =
                     fauna_protocol::decode_strict(payload).unwrap();

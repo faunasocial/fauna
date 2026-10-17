@@ -55,6 +55,7 @@ fun PrivacySettingsScreen(
     val creatingFilter by vm.creatingFilter.collectAsState()
     val editingFilterId by vm.editingFilterId.collectAsState()
     val editFilterPrefill by vm.editFilterPrefill.collectAsState()
+    val filterMarks by vm.filterMarks.collectAsState()
 
     val spamThreshold by vm.spamThreshold.collectAsState()
     val phishingThreshold by vm.phishingThreshold.collectAsState()
@@ -83,6 +84,8 @@ fun PrivacySettingsScreen(
         onBack = { navController.popBackStack() },
         onInboxModeChange = vm::updateInboxMode,
         onDeleteFilter = vm::deleteFilter,
+        filterMarks = filterMarks,
+        onKeepFilterMark = vm::keepFilterMark,
         onCreateFilter = vm::createFilter,
         onEditFilter = vm::beginEditFilter,
         onSaveFilter = vm::saveFilter,
@@ -121,6 +124,12 @@ fun PrivacySettingsContent(
     onSpamThresholdChange: (Float) -> Unit,
     onPhishingThresholdChange: (Float) -> Unit,
     onSaveSpamPrefs: () -> Unit,
+    // The ids of the rules awaiting the owner's post-succession verdict
+    // (`succession-aftermath.md` § Adjudicating what the aftermath carries
+    // across) — empty by default, so a harness that never seeds them renders
+    // no mark.
+    filterMarks: List<Long> = emptyList(),
+    onKeepFilterMark: (Long) -> Unit = {},
 ) {
     // showCreateForm opens the shared form empty; editingFilterId (VM state,
     // set only after a successful filters_get decode) opens it pre-populated
@@ -254,6 +263,32 @@ fun PrivacySettingsContent(
                     val actionLabel = localized(com.fauna.ffi.emailFilterActionLabel(filter.action)).orEmpty()
                     ListItem(
                         headlineContent = { Text(filter.name, modifier = Modifier.testTag(Ids.FILTER_NAME)) },
+                        // The post-succession review mark and its Keep half —
+                        // only on a rule the aftermath carried across and the
+                        // owner has not answered. No remove button of its own:
+                        // `filter-delete` below is the Remove half (no second
+                        // removal mechanism; the VM records the verdict after
+                        // the delete lands).
+                        supportingContent = if (filter.id in filterMarks) {
+                            {
+                                Column {
+                                    Text(
+                                        stringResource(R.string.settings_privacy_page_filter_inherited),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.testTag(Ids.FILTER_UNATTESTED_MARK),
+                                    )
+                                    TextButton(
+                                        onClick = { onKeepFilterMark(filter.id) },
+                                        modifier = Modifier.testTag(Ids.FILTER_REVIEW_KEEP_BUTTON),
+                                    ) {
+                                        Text(stringResource(R.string.settings_privacy_page_filter_keep))
+                                    }
+                                }
+                            }
+                        } else {
+                            null
+                        },
                         trailingContent = {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -333,7 +368,8 @@ fun PrivacySettingsContent(
                         Text(
                             bandLabel,
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag(Ids.SPAM_THRESHOLD_BAND)
                         )
 
                         Spacer(Modifier.height(8.dp))

@@ -10,6 +10,8 @@ import com.fauna.app.data.db.PhotoBackupRecord
 import com.fauna.app.data.db.SyncFileState
 import com.fauna.app.ui.util.getStringFmt
 import com.fauna.ffi.FfiPhotoLibrarySet
+import com.fauna.ffi.FfiSyncEngineHost
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.yield
@@ -50,8 +52,14 @@ class PhotoBackupEngine @Inject constructor(
         private const val SNAPSHOT_INTERVAL = 50
     }
 
-    private val _totalScanned = MutableStateFlow(0)
-    val totalScanned: StateFlow<Int> = _totalScanned
+    /**
+     * The per-pass countdown, the pass size and the cycle counters — what the
+     * progress surface and the e2e `photo_backup` state key read. Per PASS, never a
+     * session total (see [PhotoBackupPassProgress]).
+     */
+    val progress = PhotoBackupPassProgress()
+
+    private val gate = PhotoBackupPassGate()
 
     private val _uploadedCount = MutableStateFlow(0)
     val uploadedCount: StateFlow<Int> = _uploadedCount
@@ -90,22 +98,65 @@ class PhotoBackupEngine @Inject constructor(
      */
     private suspend fun photoLibrarySet(): FfiPhotoLibrarySet {
         photoSet?.let { return it }
-        val deviceIdHex = secureStorage.deviceId
+        val deviceIdHex = secureStorage.resolveDeviceId()
             ?: throw IllegalStateException("Photo backup is not configured (no device id)")
         val set = apiClient.resolvePhotoLibrarySet(deviceIdHex, stateDir())
         photoSet = set
         return set
     }
 
+    /**
+     * Back up every photo/video not yet backed up.
+     *
+     * **Single-flight, with a trailing re-run** ([PhotoBackupPassGate]). The Sync-now
+     * [com.fauna.app.service.SyncService] and the periodic
+     * [com.fauna.app.service.PhotoBackupWorker] are not mutually exclusive, and a
+     * photo taken while one pass runs is not in that pass's MediaStore snapshot, so
+     * a request arriving mid-pass is *remembered*, not dropped, and the finishing
+     * pass runs once more. The bare `if (isSyncing) return 0` this replaced lost
+     * that photo until the next WorkManager slice, and raced on its own check.
+     *
+     * Returns the total uploaded across this call's pass and any trailing pass; 0
+     * when a pass was already in flight (it will run again on its way out).
+     */
     suspend fun syncNewPhotos(): Int {
-        if (_isSyncing.value) return 0
+        if (!gate.claim()) return 0
 
         _isSyncing.value = true
         _uploadedCount.value = 0
         _lastError.value = null
 
+        var uploadedAcrossPasses = 0
         try {
-            val deviceIdHex = secureStorage.deviceId ?: return 0
+            do {
+                uploadedAcrossPasses += runOnePass()
+            } while (gate.finish())
+        } catch (t: Throwable) {
+            // Release unconditionally (cancellation included): a pass that threw
+            // would almost certainly throw again at once, so the trailing re-run is
+            // dropped rather than spun — and nothing is lost by dropping it, since
+            // an item that failed has no synced ledger row and the next trigger of
+            // any kind re-attempts it.
+            gate.release()
+            throw t
+        } finally {
+            _currentFile.value = null
+            _isSyncing.value = false
+        }
+        return uploadedAcrossPasses
+    }
+
+    /**
+     * One pass: scan MediaStore, then ingest what is new. The caller owns
+     * [_isSyncing] and the gate, so this body may assume it is the only pass running.
+     */
+    private suspend fun runOnePass(): Int {
+        // Bumped synchronously at the in-flight edge, before the first suspension
+        // point (convention 14), so a consumer that read the baseline cannot miss
+        // this pass's start. The total is unknown until the scan below has counted.
+        progress.beginPass(0)
+        try {
+            val deviceIdHex = secureStorage.resolveDeviceId() ?: return 0
             val host = apiClient.syncEngineHost(deviceIdHex, stateDir()) ?: return 0
 
             // Resolve (creating if needed) the target set BEFORE the first
@@ -126,78 +177,102 @@ class PhotoBackupEngine @Inject constructor(
             scanMediaStore(MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
 
             val pending = photoBackupDao.getPending()
+            // The pass's starting position: the countdown runs DOWN from here as
+            // each item leaves the loop, and the position readout counts up.
+            progress.setTotal(pending.size)
             var uploaded = 0
 
             for (record in pending) {
-                yield()
-                if (!networkMonitor.shouldSyncPhotos()) {
-                    _lastError.value = context.getString(R.string.photo_backup_error_wifi_lost)
-                    break
-                }
-
-                if (record.sizeBytes > MAX_FILE_SIZE) {
-                    continue
-                }
-
-                var stagedFile: File? = null
+                // Each item leaves this iteration by one of several paths (wifi
+                // lost, oversize skip, unreadable, ingested, ingest threw); a
+                // decrement on the success path alone would stall the readout
+                // precisely on the passes whose progress matters most.
                 try {
-                    _currentFile.value = record.contentUri
-
-                    val uri = android.net.Uri.parse(record.contentUri)
-                    val rawBytes = context.contentResolver.openInputStream(uri)?.use {
-                        it.readBytes()
-                    } ?: continue
-                    val bytes = ExifStripper.strip(rawBytes, record.mediaType)
-
-                    val creationDate = Date(record.creationDate)
-                    val displayName = resolveDisplayName(uri)
-                    val remotePath = "${dateFormat.format(creationDate)}/$displayName"
-
-                    // Sealed ingest: stage the stripped bytes to a temp file
-                    // (the host takes a path — mirrors apple's exported-asset
-                    // temp file), push it through the ordinary sealed chunk
-                    // pipeline + `changes.record` custody upsert, then delete
-                    // the staged copy. No watch dir, no reconcile pass, so
-                    // deleting our temp cannot tombstone the ingested file.
-                    val stagingDir = File(context.cacheDir, "photo-backup-staging").apply { mkdirs() }
-                    val staged = File(stagingDir, UUID.randomUUID().toString())
-                    stagedFile = staged
-                    staged.writeBytes(bytes)
-                    host.ingestFile(photoSet.folderId, staged.absolutePath, remotePath)
-
-                    // The engine host's own SyncDb owns sync state now — this
-                    // row is only the OS-asset dedup ledger (claim 8,
-                    // `file-sync.md:148-160`/`:283`), so manifestHash stays
-                    // NULL post-ingest (mirrors apple's `PhotoBackupRecord`).
-                    photoBackupDao.markSynced(
-                        id = record.mediaStoreId,
-                        state = SyncFileState.SYNCED,
-                        remotePath = remotePath
-                    )
-
-                    uploaded++
-                    _uploadedCount.value = uploaded
-
-                    // Control-plane call, never engine work — same resolved
-                    // set as the ingest above: snapshotting a set we didn't
-                    // write to is worse than either bug alone.
-                    if (uploaded % SNAPSHOT_INTERVAL == 0) {
-                        apiClient.createSnapshot(photoSet.name)
+                    yield()
+                    if (!networkMonitor.shouldSyncPhotos()) {
+                        _lastError.value = context.getString(R.string.photo_backup_error_wifi_lost)
+                        break
                     }
-                } catch (e: Exception) {
-                    _lastError.value = context.getStringFmt(
-                        R.string.photo_backup_error_upload_item, record.contentUri, e.message
-                    )
-                    // Continue with next file
+
+                    if (record.sizeBytes > MAX_FILE_SIZE) {
+                        continue
+                    }
+
+                    if (backUpOne(record, host, photoSet)) {
+                        uploaded++
+                        _uploadedCount.value += 1
+
+                        // Control-plane call, never engine work — same resolved
+                        // set as the ingest: snapshotting a set we didn't write
+                        // to is worse than either bug alone.
+                        if (uploaded % SNAPSHOT_INTERVAL == 0) {
+                            apiClient.createSnapshot(photoSet.name)
+                        }
+                    }
                 } finally {
-                    stagedFile?.delete()
+                    progress.itemLeft()
                 }
             }
 
             return uploaded
         } finally {
-            _currentFile.value = null
-            _isSyncing.value = false
+            // Every exit path — a pass that threw, was cancelled or returned early
+            // must not leave a stale "{n} pending" row on screen.
+            progress.endPass()
+        }
+    }
+
+    /** Ingest one scanned item. `true` ⇒ uploaded; a failure is recorded in [lastError] and returns `false`. */
+    private suspend fun backUpOne(
+        record: PhotoBackupRecord,
+        host: FfiSyncEngineHost,
+        photoSet: FfiPhotoLibrarySet,
+    ): Boolean {
+        var stagedFile: File? = null
+        try {
+            _currentFile.value = record.contentUri
+
+            val uri = android.net.Uri.parse(record.contentUri)
+            val rawBytes = context.contentResolver.openInputStream(uri)?.use {
+                it.readBytes()
+            } ?: return false
+            val bytes = ExifStripper.strip(rawBytes, record.mediaType)
+
+            val creationDate = Date(record.creationDate)
+            val displayName = resolveDisplayName(uri)
+            val remotePath = "${dateFormat.format(creationDate)}/$displayName"
+
+            // Sealed ingest: stage the stripped bytes to a temp file
+            // (the host takes a path — mirrors apple's exported-asset
+            // temp file), push it through the ordinary sealed chunk
+            // pipeline + `changes.record` custody upsert, then delete
+            // the staged copy. No watch dir, no reconcile pass, so
+            // deleting our temp cannot tombstone the ingested file.
+            val stagingDir = File(context.cacheDir, "photo-backup-staging").apply { mkdirs() }
+            val staged = File(stagingDir, UUID.randomUUID().toString())
+            stagedFile = staged
+            staged.writeBytes(bytes)
+            host.ingestFile(photoSet.folderId, staged.absolutePath, remotePath)
+
+            // The engine host's own SyncDb owns sync state now — this
+            // row is only the OS-asset dedup ledger (claim 8,
+            // `file-sync.md:148-160`/`:283`), so manifestHash stays
+            // NULL post-ingest (mirrors apple's `PhotoBackupRecord`).
+            photoBackupDao.markSynced(
+                id = record.mediaStoreId,
+                state = SyncFileState.SYNCED,
+                remotePath = remotePath
+            )
+            return true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            _lastError.value = context.getStringFmt(
+                R.string.photo_backup_error_upload_item, record.contentUri, e.message
+            )
+            return false // Continue with next file
+        } finally {
+            stagedFile?.delete()
         }
     }
 
@@ -218,7 +293,6 @@ class PhotoBackupEngine @Inject constructor(
             "${MediaStore.MediaColumns.DATE_ADDED} DESC LIMIT 500"
         ) ?: return
 
-        var scanned = 0
         cursor.use {
             val idCol = it.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
             val nameCol = it.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
@@ -247,12 +321,8 @@ class PhotoBackupEngine @Inject constructor(
 
                 // insert uses IGNORE so duplicates are silently skipped
                 photoBackupDao.insert(record)
-
-                scanned++
             }
         }
-
-        _totalScanned.value += scanned
     }
 
     private fun resolveDisplayName(uri: android.net.Uri): String {

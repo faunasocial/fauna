@@ -10,6 +10,9 @@
     adminUsersCancelEviction,
     adminAdminsAdd,
     adminAdminsRemove,
+    adminPendingActionsList,
+    adminPendingActionApprove,
+    adminPendingActionCancel,
     adminTiersList,
     adminInviteCodesList,
     adminInviteCodesCreate,
@@ -23,6 +26,7 @@
     asRegistrationMode,
     setupStatus,
     type AdminUser,
+    type AdminPendingAction,
     type AdminTier,
     type AdminInviteCode,
     type AdminInviteRequest,
@@ -40,6 +44,7 @@
     ageClaimLabel,
     ageBandLabel,
     shortId,
+    describePendingAction,
     totalPages,
     currentPage,
     nextPageOffset,
@@ -63,6 +68,8 @@
   let requests = $state<AdminInviteRequest[]>([]);
   let inviteCodes = $state<AdminInviteCode[]>([]);
   let users = $state<AdminUser[]>([]);
+  // Section 6 — pending admin actions (admin.md § Pending admin actions).
+  let pendingActions = $state<AdminPendingAction[]>([]);
   let total = $state(0);
   let offset = $state(0);
   let actionError = $state('');
@@ -103,6 +110,7 @@
   let admitActorInput = $state('');
   let admitHandleInput = $state('');
   let admitTier = $state('');
+  let admitGuardianIdx = $state(0);
   // Section 4 — invite: create form.
   let showCreateForm = $state(false);
   let newCodeTier = $state('');
@@ -200,6 +208,7 @@
     // The guardian pickers' source — every account, read before the page so a
     // rendered Users page never shows pickers still missing accounts.
     pickerUsers = await adminUsersListAll(s);
+    pendingActions = await adminPendingActionsList(s);
     const page = await adminUsersList(s, PAGE_SIZE, offset);
     users = page.users;
     total = page.total;
@@ -336,7 +345,9 @@
     }
     const handle = admitHandleInput.trim() || undefined;
     try {
-      await adminUsersCreate(s, actor, admitTier || defaultTier(), handle);
+      // A guardian on a handle-less admit is refused by the nest and lands in
+      // `actionError` below — no local rule.
+      await adminUsersCreate(s, actor, admitTier || defaultTier(), handle, guardianActorAt(admitGuardianIdx));
       await refresh();
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
@@ -465,6 +476,33 @@
     try {
       await adminAdminsRemove(s, toBytes(user.actor_id));
       await refresh();
+    } catch (e) {
+      actionError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  // Approve / cancel a pending admin action — one click each, no confirm. The
+  // nest refuses self-approval and a row no longer pending; the re-read below
+  // ends on the live list either way.
+  async function approvePending(id: number) {
+    const s = secret();
+    if (!s) return;
+    actionError = '';
+    try {
+      await adminPendingActionApprove(s, id);
+      pendingActions = await adminPendingActionsList(s);
+    } catch (e) {
+      actionError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function cancelPending(id: number) {
+    const s = secret();
+    if (!s) return;
+    actionError = '';
+    try {
+      await adminPendingActionCancel(s, id);
+      pendingActions = await adminPendingActionsList(s);
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
     }
@@ -631,6 +669,16 @@
       {#each tiers as tier (tier.name)}
         <option value={tier.name}>{tier.name}</option>
       {/each}
+    </select>
+    <!-- Guardian for the directly admitted account ("None" ⇒ ordinary); no age
+         band here — that id is unapproved. -->
+    <span class="caption">{t.admin.users_page.guardian_label}</span>
+    <select
+      data-testid={IDS.ADMIN_USERS_ADMIT_GUARDIAN_SELECT}
+      value={guardianOptionAt(admitGuardianIdx)}
+      onchange={(e) => (admitGuardianIdx = (e.currentTarget as HTMLSelectElement).selectedIndex)}
+    >
+      {#each guardians.options as opt}<option value={opt}>{opt}</option>{/each}
     </select>
     <button class="btn" data-testid={IDS.ADMIN_USERS_ADMIT_BUTTON} onclick={admitUser}
       >{t.admin.users_page.admit_button}</button>
@@ -823,6 +871,44 @@
         disabled={nextPageOffset(offset, total, PAGE_SIZE) === undefined}
         onclick={nextPage}>{t.admin.users_page.next_page}</button>
     </div>
+  </section>
+
+  <!-- Section 6 — Pending admin actions (admin.md § Pending admin actions): the
+       standing co-admin approve / veto surface. The container text answers in
+       the settings page's states: empty line or counted title. -->
+  <section class="section">
+    <h2 data-testid={IDS.ADMIN_USERS_PENDING_SECTION}>
+      {pendingActions.length === 0
+        ? t.admin.users_page.pending_none
+        : t.admin.users_page.pending_count({ count: String(pendingActions.length) })}
+    </h2>
+    {#each pendingActions as action (action.id)}
+      <div data-testid={IDS.ADMIN_PENDING_ACTION_ITEM} class="pending-action-item">
+        <span data-testid={IDS.ADMIN_PENDING_ACTION_DESCRIPTION}>
+          {describePendingAction(action.action_type, action.target)}
+          {t.admin.users_page.pending_by({ who: shortId(actorHex(action.actor_id)) })}
+        </span>
+        <span data-testid={IDS.ADMIN_PENDING_ACTION_EXECUTE_AFTER}>
+          {t.settings.pending_actions.applies({
+            time: new Date(action.execute_after * 1000).toLocaleString(),
+          })}
+        </span>
+        <span data-testid={IDS.ADMIN_PENDING_ACTION_APPROVALS}>
+          {t.admin.users_page.pending_approvals({
+            given: String(action.approvals.length),
+            needed: String(action.requires_quorum),
+          })}
+        </span>
+        <button
+          class="btn small"
+          data-testid={IDS.ADMIN_PENDING_ACTION_APPROVE_BUTTON}
+          onclick={() => approvePending(action.id)}>{t.admin.users_page.pending_approve}</button>
+        <button
+          class="btn danger small"
+          data-testid={IDS.ADMIN_PENDING_ACTION_CANCEL_BUTTON}
+          onclick={() => cancelPending(action.id)}>{t.settings.pending_actions.cancel}</button>
+      </div>
+    {/each}
   </section>
 {/if}
 

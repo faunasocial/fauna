@@ -161,13 +161,14 @@ pub fn build_event_form_prefilled(
     // dialog opened still reaches the fields the user is looking at, and drop
     // the registration when the window goes away.
     drafts::attach_form(drafts::OpenForm {
+        window: dialog.clone().upcast(),
         summary: summary_entry.clone(),
         dtstart: start_entry.clone(),
         dtend: end_entry.clone(),
         location: location_entry.clone(),
         description: desc_view.clone(),
     });
-    dialog.connect_destroy(|_| drafts::detach_form());
+    dialog.connect_destroy(|d| drafts::detach_form(d.upcast_ref()));
 
     // Attendance mode dropdown.
     let mode_list = gtk::StringList::new(&[
@@ -198,6 +199,10 @@ pub fn build_event_form_prefilled(
     crate::testid::set_test_id(&create_btn, ids::CREATE_EVENT);
     crate::offline_gate::declare_wire_kind(&create_btn, "fauna.bridges.put_event_ciphertext");
 
+    let discard_btn = gtk::Button::with_label(events_strings::DISCARD_EVENT);
+    crate::testid::set_test_id(&discard_btn, ids::EVENT_FORM_DISCARD);
+
+    btn_row.append(&discard_btn);
     btn_row.append(&cancel_btn);
     btn_row.append(&create_btn);
     form.append(&btn_row);
@@ -221,6 +226,17 @@ pub fn build_event_form_prefilled(
             })),
         ));
         dialog.add_controller(escape);
+    }
+
+    // Wire Discard (`event-form-discard`) — the one close that forgets: it empties
+    // the rail (`drafts::clear` ticks it) before closing, so New Event has nothing
+    // to resume (`events.md` § Persistence: "an explicit discard, clears the rail").
+    {
+        let d = dialog.clone();
+        discard_btn.connect_clicked(move |_| {
+            drafts::clear();
+            d.close();
+        });
     }
 
     // Wire Create.

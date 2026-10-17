@@ -43,6 +43,11 @@ zeroize = { workspace = true }
 fauna-sleep = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `NestClient` for the native replica transport (`nest_transport.rs`) — the one
+# adapter both the conversations plane and the recovery crate's sweep retry
+# (which sits below `fauna-client-conversations`) reach the `__mls` plane
+# through. Safe direction: `fauna-client` has no mls-sync edge.
+fauna-client = { workspace = true }
 # Native builds get fauna-mls' rusqlite-backed storage (its `native` default).
 fauna-mls = { path = "../fauna-mls", default-features = false, features = ["native"] }
 # `rt` + `sync` for the shared tokio trigger (`launcher.rs`: the autosave

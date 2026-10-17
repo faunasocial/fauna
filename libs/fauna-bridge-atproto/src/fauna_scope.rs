@@ -7,7 +7,7 @@
 //! ceiling names it — or, for a bridge-doored arm, while the BridgeMda relay
 //! kind that admits its token exists ([`FaunaScopeArm::door`]; a nest-side
 //! sweep test holds both sets). A plane the goal doc lists and no slice has
-//! built yet — `post`, `follow` … — matches no arm and is `invalid_scope` at PAR; so does a
+//! built yet — `post` … — matches no arm and is `invalid_scope` at PAR; so does a
 //! built arm's qualifier the arm does not accept (an `identity:op` class not
 //! yet built, or a sovereign operation's name, which never will be).
 //!
@@ -33,6 +33,15 @@ pub const FAUNA_SCOPE_PREFIX: &str = "fauna:";
 /// `fauna:feed:read` — the nest's public timelines.
 pub const SCOPE_FEED_READ: &str = "fauna:feed:read";
 
+/// `fauna:feed:read:account` — the account's own reading of the feed plane:
+/// its custom feeds, and its like and repost state on the public timelines,
+/// public posts only.
+pub const SCOPE_FEED_READ_ACCOUNT: &str = "fauna:feed:read:account";
+
+/// The fixed qualifier of [`FaunaScopeArm::FeedReadAccount`] — the server's,
+/// never the client's or the user's.
+const FEED_ACCOUNT_QUALIFIER: &str = "account";
+
 /// `fauna:identity:op:nostr.sign_event` — ask the nest to sign Nostr events
 /// with the user's deposited key (`key-material-hierarchy.md` § *The oracle*).
 pub const SCOPE_IDENTITY_OP_NOSTR_SIGN_EVENT: &str = "fauna:identity:op:nostr.sign_event";
@@ -41,11 +50,23 @@ pub const SCOPE_IDENTITY_OP_NOSTR_SIGN_EVENT: &str = "fauna:identity:op:nostr.si
 /// decrypt with the user's deposited key.
 pub const SCOPE_IDENTITY_OP_NOSTR_NIP44: &str = "fauna:identity:op:nostr.nip44";
 
+/// `fauna:identity:op:activitypub.http_sig` — ask the nest to sign an
+/// outbound ActivityPub request with the user's actor key, to a host the
+/// manifest's `activitypub_peers` member declares (`third-party.md` § The
+/// manifest).
+pub const SCOPE_IDENTITY_OP_ACTIVITYPUB_HTTP_SIG: &str = "fauna:identity:op:activitypub.http_sig";
+
+/// `fauna:identity:op:post.author` — ask the nest to author public posts as
+/// the user, and to retract the ones this client authored, signed with the
+/// account's delegated authoring sub-key (`authorization-server.md` § Scope
+/// grammar → *The planes ruled 2026-10-02*: the posting door, in place of the
+/// retired `fauna:post:write`).
+pub const SCOPE_IDENTITY_OP_POST_AUTHOR: &str = "fauna:identity:op:post.author";
+
 /// `fauna:identity:op:atproto.service_auth` — ask the atproto bridge's
 /// custodian for a service-auth token, bounded by the manifest's declared
-/// `service_auth` set (`third-party.md` § The manifest). The class is not in
-/// the operation-class table yet, so no arm grants it; the resolver already
-/// refuses a document asking for it without declaring the set.
+/// `service_auth` set (`third-party.md` § The manifest); the resolver refuses
+/// a document asking for it without declaring the set.
 pub const SCOPE_IDENTITY_OP_ATPROTO_SERVICE_AUTH: &str = "fauna:identity:op:atproto.service_auth";
 
 /// `fauna:records:rw` — the `records` arm's plane and verb, as discovery
@@ -69,9 +90,20 @@ pub const SCOPE_FOLDER_DEPOSIT: &str = "fauna:folder:deposit";
 /// the folder's row id (`fauna:folder:read:<id>`).
 pub const SCOPE_FOLDER_READ: &str = "fauna:folder:read";
 
+/// `fauna:personalization:rw` — read and train the account's sealed
+/// personalization models (`authorization-server.md` § Scope grammar → *The
+/// fifth arm*). Device apps and nest-hosted code only: PAR refuses it to a
+/// remote-form client.
+pub const SCOPE_PERSONALIZATION_RW: &str = "fauna:personalization:rw";
+
 /// `fauna:events:subscribe` — be told which of the principal's own scopes
 /// changed (`transport.md` § Push events → *Third-party event doors*).
 pub const SCOPE_EVENTS_SUBSCRIBE: &str = "fauna:events:subscribe";
+
+/// `fauna:follow:write` — follow and unfollow as the account, the free
+/// `followers` tier only (`authorization-server.md` § Scope grammar → *The
+/// sixth arm*).
+pub const SCOPE_FOLLOW_WRITE: &str = "fauna:follow:write";
 
 /// The BridgeMda relay kind that admits a `fauna:folder:read` token at the
 /// MDA's WebDAV door (`webdav-server.md` § Key model → *A principal's read*):
@@ -102,6 +134,16 @@ pub enum FaunaScopeArm {
     /// timelines as any reader of them would get them: public posts only,
     /// nothing of the account's own state.
     FeedRead,
+    /// `fauna:feed:read:account` — the qualifier is REQUIRED and is the fixed
+    /// word `account`; no grant twin (nothing it reads is sealed). The
+    /// account's own reading of the feed plane (`authorization-server.md`
+    /// § Scope grammar → *The fourth arm*): the three custom-feed kinds over
+    /// the account's own feeds, and — a *refining* qualifier arm
+    /// (`apps/bridges.md` rule (c)) — the account's viewer state on the two
+    /// public timelines the bare arm covers, which stays their one arm
+    /// ([`reads_feed_as_account`]). Public posts only on every kind: a gated
+    /// or room-restricted post never appears.
+    FeedReadAccount,
     /// `fauna:identity:op:<class>` — the keyless oracle arm
     /// (`key-material-hierarchy.md` § Audience: deployment infrastructure →
     /// *The oracle*). The qualifier names one built
@@ -140,6 +182,18 @@ pub enum FaunaScopeArm {
     /// ([`Door::Mda`]). Form-gated at PAR: a remote-form (confidential)
     /// client is refused it ([`FaunaScopeArm::refused_to_remote_form`]).
     FolderRead,
+    /// `fauna:personalization:rw` — no qualifier, a keyed grant twin. The
+    /// sealed personalization plane (`authorization-server.md` § Scope
+    /// grammar → *The fifth arm*): the model fetch and put, and the `state`
+    /// scope's feed, read only — the trained-factor registry is the sealed
+    /// account-plane kind `fauna.state.personalization`, listed as the
+    /// delegable cluster's ciphertext. Its twin is two `content.read` tuples,
+    /// each the ordinary delegable unit: the registry kind's pair and the
+    /// `fauna.personalization.model` pair the blobs are sealed under.
+    /// Form-gated at PAR: TP4 reserves personalization models for device
+    /// apps and nest-hosted code, so a remote-form client is refused it
+    /// ([`FaunaScopeArm::refused_to_remote_form`]).
+    PersonalizationRw,
     /// `fauna:events:subscribe` — no qualifier, no grant twin. The events
     /// doors (`transport.md` § Push events → *Third-party event doors*): the
     /// scope-tagged change nudge for exactly the scopes the session's other
@@ -147,31 +201,44 @@ pub enum FaunaScopeArm {
     /// `fauna.events.poll` kind; the filtered push on a principal session and
     /// the HTTP long-poll are that kind's other two faces.
     EventsSubscribe,
+    /// `fauna:follow:write` — no qualifier, no grant twin. Follow and unfollow
+    /// as the account: subscribing to and leaving the free `followers` tier
+    /// (`monetization.md` § The unifying model), and the followers bit of the
+    /// subscription status — never a paid tier. A nest-side relationship row,
+    /// no key of the account's and no signature; the subscriber's ML-KEM
+    /// encapsulation key the author wraps to is read from the account's
+    /// published registry entry, never held by the principal.
+    FollowWrite,
 }
 
 impl FaunaScopeArm {
     /// Every built arm, in the order discovery advertises them.
     pub const ALL: &'static [FaunaScopeArm] = &[
         FaunaScopeArm::FeedRead,
+        FaunaScopeArm::FeedReadAccount,
         FaunaScopeArm::IdentityOp,
         FaunaScopeArm::Records,
         FaunaScopeArm::ConversationsBridge,
         FaunaScopeArm::FolderDeposit,
         FaunaScopeArm::FolderRead,
+        FaunaScopeArm::PersonalizationRw,
         FaunaScopeArm::EventsSubscribe,
+        FaunaScopeArm::FollowWrite,
     ];
 
     /// The arm's plane and verb.
     #[must_use]
     pub const fn plane_verb(self) -> (&'static str, &'static str) {
         match self {
-            FaunaScopeArm::FeedRead => ("feed", "read"),
+            FaunaScopeArm::FeedRead | FaunaScopeArm::FeedReadAccount => ("feed", "read"),
             FaunaScopeArm::IdentityOp => ("identity", "op"),
             FaunaScopeArm::Records => ("records", "rw"),
             FaunaScopeArm::ConversationsBridge => ("conversations", "bridge"),
             FaunaScopeArm::FolderDeposit => ("folder", "deposit"),
             FaunaScopeArm::FolderRead => ("folder", "read"),
+            FaunaScopeArm::PersonalizationRw => ("personalization", "rw"),
             FaunaScopeArm::EventsSubscribe => ("events", "subscribe"),
+            FaunaScopeArm::FollowWrite => ("follow", "write"),
         }
     }
 
@@ -185,23 +252,31 @@ impl FaunaScopeArm {
                 relay_kind: WEBDAV_ADMIT_PRINCIPAL_KIND,
             },
             FaunaScopeArm::FeedRead
+            | FaunaScopeArm::FeedReadAccount
             | FaunaScopeArm::IdentityOp
             | FaunaScopeArm::Records
             | FaunaScopeArm::ConversationsBridge
             | FaunaScopeArm::FolderDeposit
-            | FaunaScopeArm::EventsSubscribe => Door::Nest,
+            | FaunaScopeArm::PersonalizationRw
+            | FaunaScopeArm::EventsSubscribe
+            | FaunaScopeArm::FollowWrite => Door::Nest,
         }
     }
 
     /// Whether PAR refuses the arm to a remote-form principal — a
     /// confidential client, `remote` by rule 3's derivation
     /// ([`crate::oauth_client::ResolvedClient::is_remote_form`]). TP4 grants a
-    /// remote principal a read only over a folder it created, and no door
-    /// lets a principal create one (`authorization-server.md` § Scope grammar
-    /// → *The read arm*).
+    /// remote principal keys only to a scope it created: the read arm because
+    /// no door lets a principal create a folder (`authorization-server.md`
+    /// § Scope grammar → *The read arm*), the personalization arm because TP4
+    /// reserves personalization models by name for device apps and
+    /// nest-hosted code (*The fifth arm*).
     #[must_use]
     pub const fn refused_to_remote_form(self) -> bool {
-        matches!(self, FaunaScopeArm::FolderRead)
+        matches!(
+            self,
+            FaunaScopeArm::FolderRead | FaunaScopeArm::PersonalizationRw
+        )
     }
 
     /// Whether the arm takes a qualifier. A string carrying one where the arm
@@ -211,8 +286,11 @@ impl FaunaScopeArm {
         match self {
             FaunaScopeArm::FeedRead
             | FaunaScopeArm::ConversationsBridge
-            | FaunaScopeArm::EventsSubscribe => false,
-            FaunaScopeArm::IdentityOp
+            | FaunaScopeArm::PersonalizationRw
+            | FaunaScopeArm::EventsSubscribe
+            | FaunaScopeArm::FollowWrite => false,
+            FaunaScopeArm::FeedReadAccount
+            | FaunaScopeArm::IdentityOp
             | FaunaScopeArm::Records
             | FaunaScopeArm::FolderDeposit
             | FaunaScopeArm::FolderRead => true,
@@ -230,9 +308,12 @@ impl FaunaScopeArm {
             (
                 FaunaScopeArm::FeedRead
                 | FaunaScopeArm::ConversationsBridge
-                | FaunaScopeArm::EventsSubscribe,
+                | FaunaScopeArm::PersonalizationRw
+                | FaunaScopeArm::EventsSubscribe
+                | FaunaScopeArm::FollowWrite,
                 q,
             ) => q.is_none(),
+            (FaunaScopeArm::FeedReadAccount, q) => q == Some(FEED_ACCOUNT_QUALIFIER),
             (FaunaScopeArm::IdentityOp, None) => false,
             (FaunaScopeArm::IdentityOp, Some(q)) => {
                 fauna_core::identity_op::IdentityOpClass::parse(q).is_ok()
@@ -278,17 +359,21 @@ impl FaunaScopeArm {
     /// `FolderDeposit`'s twin is keyless too: one `deposit` tuple naming the
     /// folder, the audit + revocation record the deposit door re-resolves.
     /// `FolderRead`'s twin is keyed: the `content.read{folder, set}` tuple
-    /// with one wrap per content-key generation.
+    /// with one wrap per content-key generation. `PersonalizationRw`'s twin
+    /// is keyed too: two `content.read` tuples, each a kind's delegable pair.
     #[must_use]
     pub const fn has_grant_twin(self) -> bool {
         match self {
             FaunaScopeArm::FeedRead
+            | FaunaScopeArm::FeedReadAccount
             | FaunaScopeArm::ConversationsBridge
-            | FaunaScopeArm::EventsSubscribe => false,
+            | FaunaScopeArm::EventsSubscribe
+            | FaunaScopeArm::FollowWrite => false,
             FaunaScopeArm::IdentityOp
             | FaunaScopeArm::Records
             | FaunaScopeArm::FolderDeposit
-            | FaunaScopeArm::FolderRead => true,
+            | FaunaScopeArm::FolderRead
+            | FaunaScopeArm::PersonalizationRw => true,
         }
     }
 
@@ -300,15 +385,21 @@ impl FaunaScopeArm {
     pub const fn advertised(self) -> &'static [&'static str] {
         match self {
             FaunaScopeArm::FeedRead => &[SCOPE_FEED_READ],
+            FaunaScopeArm::FeedReadAccount => &[SCOPE_FEED_READ_ACCOUNT],
             FaunaScopeArm::IdentityOp => &[
                 SCOPE_IDENTITY_OP_NOSTR_SIGN_EVENT,
                 SCOPE_IDENTITY_OP_NOSTR_NIP44,
+                SCOPE_IDENTITY_OP_ACTIVITYPUB_HTTP_SIG,
+                SCOPE_IDENTITY_OP_POST_AUTHOR,
+                SCOPE_IDENTITY_OP_ATPROTO_SERVICE_AUTH,
             ],
             FaunaScopeArm::Records => &[SCOPE_RECORDS_RW],
             FaunaScopeArm::ConversationsBridge => &[SCOPE_CONVERSATIONS_BRIDGE],
             FaunaScopeArm::FolderDeposit => &[SCOPE_FOLDER_DEPOSIT],
             FaunaScopeArm::FolderRead => &[SCOPE_FOLDER_READ],
+            FaunaScopeArm::PersonalizationRw => &[SCOPE_PERSONALIZATION_RW],
             FaunaScopeArm::EventsSubscribe => &[SCOPE_EVENTS_SUBSCRIBE],
+            FaunaScopeArm::FollowWrite => &[SCOPE_FOLLOW_WRITE],
         }
     }
 
@@ -342,12 +433,19 @@ pub fn records_qualifier(scope: &str) -> Option<fauna_core::ext_kind::ExtQualifi
     parse(scope)?.qualifier?.parse().ok()
 }
 
+/// The account plane's delegable scope — the one first-party scope the fifth
+/// arm, [`FaunaScopeArm::PersonalizationRw`], lets a session list. The same
+/// spelling as the plane's `ACCOUNT_STATE_SCOPE` (`fauna-protocol`, which this
+/// crate does not depend on; the nest's events tests pin the two equal).
+pub const PERSONALIZATION_LIST_SCOPE: &str = "state";
+
 /// Does a change nudge for `scope_tag` reach a session holding `scopes`? The
 /// one filter both events doors apply (`transport.md` § Push events →
 /// *Third-party event doors*): the session holds `fauna:events:subscribe`
-/// **and** the scope is one its other arms let it list — today an
-/// `ext:<kind>` scope whose kind a `records` qualifier covers, structurally
-/// (the record door's own reach check). Every other tag — `state`, a folder
+/// **and** the scope is one its other arms let it list — an `ext:<kind>`
+/// scope whose kind a `records` qualifier covers, structurally (the record
+/// door's own reach check), or [`PERSONALIZATION_LIST_SCOPE`] when it holds
+/// `fauna:personalization:rw`. Every other tag — `state-fleet`, a folder
 /// nudge, another publisher's kind — reaches nothing.
 #[must_use]
 pub fn event_reaches(scopes: &[String], scope_tag: &str) -> bool {
@@ -356,6 +454,11 @@ pub fn event_reaches(scopes: &[String], scope_tag: &str) -> bool {
         .any(|s| arm_of(s) == Some(FaunaScopeArm::EventsSubscribe))
     {
         return false;
+    }
+    if scope_tag == PERSONALIZATION_LIST_SCOPE {
+        return scopes
+            .iter()
+            .any(|s| arm_of(s) == Some(FaunaScopeArm::PersonalizationRw));
     }
     let Some(kind) = scope_tag.strip_prefix(EXT_SCOPE_PREFIX).and_then(|k| {
         // Strict, never repairing: only the canonical spelling is a scope.
@@ -367,6 +470,18 @@ pub fn event_reaches(scopes: &[String], scope_tag: &str) -> bool {
     scopes
         .iter()
         .any(|s| records_qualifier(s).is_some_and(|q| q.covers(&kind)))
+}
+
+/// Does a session holding `scopes` read the feed plane as the account — does
+/// it hold [`FaunaScopeArm::FeedReadAccount`]? The refining arm's one
+/// question (`apps/bridges.md` rule (c)'s refinement): the two public
+/// timelines stay the bare arm's kinds, and their handlers read the account's
+/// view off the session's scopes with this.
+#[must_use]
+pub fn reads_feed_as_account<S: AsRef<str>>(scopes: &[S]) -> bool {
+    scopes
+        .iter()
+        .any(|s| arm_of(s.as_ref()) == Some(FaunaScopeArm::FeedReadAccount))
 }
 
 /// The `ext` scope family's tag (`third-party-kinds.md` § The `ext`
@@ -399,6 +514,35 @@ pub fn folder_read_qualifier(scope: &str) -> Option<i64> {
         return None;
     }
     parse_folder_id(parse(scope)?.qualifier?)
+}
+
+/// The operation class a `fauna:identity:op:<class>` scope names — `None`
+/// for any other string, a sovereign or unknown name included (the arm
+/// accepts only a built class). What the approving app's consent mint reads
+/// to declare the keyless `identity.op` tuple.
+#[must_use]
+pub fn identity_op_qualifier(scope: &str) -> Option<fauna_core::identity_op::IdentityOpClass> {
+    if arm_of(scope)? != FaunaScopeArm::IdentityOp {
+        return None;
+    }
+    fauna_core::identity_op::IdentityOpClass::parse(parse(scope)?.qualifier?).ok()
+}
+
+/// The `fauna:identity:op:<class>` scope naming `class` — the inverse of
+/// [`identity_op_qualifier`]. What a surface describing one operation the
+/// oracle ran under `class` words through the describe path, so the record
+/// reads as the consent card did. Exhaustive: a new class cannot be built
+/// without its scope.
+#[must_use]
+pub const fn identity_op_scope(class: fauna_core::identity_op::IdentityOpClass) -> &'static str {
+    use fauna_core::identity_op::IdentityOpClass;
+    match class {
+        IdentityOpClass::NostrSignEvent => SCOPE_IDENTITY_OP_NOSTR_SIGN_EVENT,
+        IdentityOpClass::NostrNip44 => SCOPE_IDENTITY_OP_NOSTR_NIP44,
+        IdentityOpClass::ActivityPubHttpSig => SCOPE_IDENTITY_OP_ACTIVITYPUB_HTTP_SIG,
+        IdentityOpClass::PostAuthor => SCOPE_IDENTITY_OP_POST_AUTHOR,
+        IdentityOpClass::AtprotoServiceAuth => SCOPE_IDENTITY_OP_ATPROTO_SERVICE_AUTH,
+    }
 }
 
 /// Whether PAR must refuse `scope` to a remote-form (confidential) client:
@@ -497,6 +641,10 @@ pub fn card_row(scope: &str) -> Option<&'static str> {
         FaunaScopeArm::FeedRead => {
             Some("Read this server's public timelines (public posts only; no keys are shared)")
         }
+        FaunaScopeArm::FeedReadAccount => Some(
+            "Read your feeds and which posts you liked and reposted (public posts only; no keys \
+             are shared)",
+        ),
         FaunaScopeArm::IdentityOp => {
             fauna_core::identity_op::IdentityOpClass::parse(parse(scope)?.qualifier?)
                 .ok()
@@ -518,10 +666,17 @@ pub fn card_row(scope: &str) -> Option<&'static str> {
             "Read the files in one of your folders, everything already in it included (keys to \
              exactly that folder are shared with it)",
         ),
+        FaunaScopeArm::PersonalizationRw => Some(
+            "Read and train your personalization — trained topics and viewing cues (keys to \
+             exactly those models are shared with this app; nothing else)",
+        ),
         FaunaScopeArm::EventsSubscribe => Some(
             "Be told when this app's own records in your account change (it learns only that \
              something changed, never what; no keys are shared)",
         ),
+        FaunaScopeArm::FollowWrite => {
+            Some("Follow and unfollow accounts as you (no keys are shared)")
+        }
     }
 }
 
@@ -689,16 +844,52 @@ mod tests {
         }
     }
 
+    /// The fourth arm (`authorization-server.md` § Scope grammar → *The
+    /// fourth arm*): the qualifier is required and is the fixed word
+    /// `account` — no other word, no bare string — with no grant twin and a
+    /// card row of its own; the bare string stays the bare arm's.
+    #[test]
+    fn the_fourth_arm_takes_exactly_the_word_account() {
+        assert_eq!(
+            arm_of(SCOPE_FEED_READ_ACCOUNT),
+            Some(FaunaScopeArm::FeedReadAccount)
+        );
+        assert_eq!(arm_of(SCOPE_FEED_READ), Some(FaunaScopeArm::FeedRead));
+        for near in [
+            "fauna:feed:read:accounts",
+            "fauna:feed:read:home",
+            "fauna:feed:read:account.x",
+            "fauna:feed:write:account",
+        ] {
+            assert_eq!(arm_of(near), None, "{near:?} is not the arm");
+        }
+        let arm = FaunaScopeArm::FeedReadAccount;
+        assert!(arm.takes_qualifier());
+        assert!(!arm.has_grant_twin());
+        assert!(!arm.qualifier_is_users());
+        assert!(!arm.refused_to_remote_form());
+        assert_eq!(arm.door(), Door::Nest);
+        assert_eq!(arm.advertised(), &[SCOPE_FEED_READ_ACCOUNT]);
+        assert_eq!(user_qualified_bare_arm(SCOPE_FEED_READ), None);
+        assert_ne!(card_row(SCOPE_FEED_READ_ACCOUNT), card_row(SCOPE_FEED_READ));
+        assert!(
+            card_row(SCOPE_FEED_READ_ACCOUNT)
+                .is_some_and(|r| r.contains("public posts only") && r.contains("no keys"))
+        );
+
+        assert!(reads_feed_as_account(&[
+            SCOPE_FEED_READ,
+            SCOPE_FEED_READ_ACCOUNT
+        ]));
+        assert!(!reads_feed_as_account(&[SCOPE_FEED_READ]));
+        assert!(!reads_feed_as_account(&["fauna:feed:read:home"]));
+    }
+
     /// Every plane the goal doc's table lists but no slice has built matches
     /// no arm — `invalid_scope` at PAR until its own slice adds it.
     #[test]
     fn the_listed_but_unbuilt_planes_match_no_arm() {
-        for unbuilt in [
-            "fauna:personalization:rw",
-            "fauna:post:write",
-            "fauna:follow:write",
-            "fauna:identity:op:rotate",
-        ] {
+        for unbuilt in ["fauna:post:write", "fauna:identity:op:rotate"] {
             assert!(parse(unbuilt).is_some(), "{unbuilt:?} is well-formed");
             assert_eq!(arm_of(unbuilt), None, "{unbuilt:?} is not built");
         }
@@ -996,6 +1187,11 @@ mod tests {
         for class in IdentityOpClass::ALL {
             let s = format!("fauna:identity:op:{}", class.name());
             assert_eq!(card_row(&s), Some(class.card_row()));
+            assert_eq!(identity_op_scope(*class), s);
+            assert_eq!(
+                identity_op_qualifier(identity_op_scope(*class)),
+                Some(*class)
+            );
         }
         assert!(FaunaScopeArm::IdentityOp.has_grant_twin());
     }
@@ -1022,6 +1218,36 @@ mod tests {
         }
     }
 
+    /// The fifth arm (`authorization-server.md` § Scope grammar → *The fifth
+    /// arm*): exactly its one string, a keyed twin, the nest's door, and
+    /// refused to a remote-form client.
+    #[test]
+    fn the_personalization_arm_is_one_string_keyed_and_form_gated() {
+        let arm = FaunaScopeArm::PersonalizationRw;
+        assert_eq!(arm_of(SCOPE_PERSONALIZATION_RW), Some(arm));
+        assert_eq!(arm.advertised(), &[SCOPE_PERSONALIZATION_RW]);
+        assert!(arm.has_grant_twin());
+        assert!(!arm.takes_qualifier());
+        assert!(!arm.qualifier_is_users());
+        assert_eq!(arm.door(), Door::Nest);
+        assert!(refused_to_remote_form(SCOPE_PERSONALIZATION_RW));
+        assert!(
+            card_row(SCOPE_PERSONALIZATION_RW)
+                .is_some_and(|r| r.contains("keys to exactly those models"))
+        );
+        for near in [
+            "fauna:personalization:rw:topic",
+            "fauna:personalization:read",
+            "fauna:personalization:write",
+            "fauna:personalisation:rw",
+        ] {
+            assert_eq!(arm_of(near), None, "{near:?} is not the arm");
+            assert!(!refused_to_remote_form(near), "{near:?}");
+        }
+        assert_eq!(user_qualified_bare_arm(SCOPE_PERSONALIZATION_RW), None);
+        assert_eq!(bare_form(SCOPE_PERSONALIZATION_RW), None);
+    }
+
     #[test]
     fn the_events_arm_takes_no_qualifier_and_shares_no_keys() {
         assert_eq!(
@@ -1037,6 +1263,22 @@ mod tests {
             assert_eq!(arm_of(near), None, "{near:?} is not the arm");
         }
         assert!(card_row(SCOPE_EVENTS_SUBSCRIBE).is_some());
+    }
+
+    #[test]
+    fn the_follow_arm_takes_no_qualifier_and_shares_no_keys() {
+        assert_eq!(arm_of(SCOPE_FOLLOW_WRITE), Some(FaunaScopeArm::FollowWrite));
+        assert!(!FaunaScopeArm::FollowWrite.has_grant_twin());
+        assert!(!FaunaScopeArm::FollowWrite.refused_to_remote_form());
+        assert_eq!(FaunaScopeArm::FollowWrite.door(), Door::Nest);
+        for near in [
+            "fauna:follow:write:followers",
+            "fauna:follow:read",
+            "fauna:follows:write",
+        ] {
+            assert_eq!(arm_of(near), None, "{near:?} is not the arm");
+        }
+        assert!(card_row(SCOPE_FOLLOW_WRITE).is_some());
     }
 
     /// The filter both events doors apply: the events arm plus a `records`
@@ -1073,5 +1315,27 @@ mod tests {
         ];
         assert!(event_reaches(&exact, "ext:ext.a.example.notes"));
         assert!(!event_reaches(&exact, "ext:ext.a.example.todo"));
+    }
+
+    /// The fifth arm lists `state`, so `state` reaches a session holding it
+    /// beside the events arm — and only `state`: the fleet scope and every
+    /// other first-party tag still reach nothing.
+    #[test]
+    fn a_state_event_reaches_only_a_personalization_session() {
+        let both = vec![
+            SCOPE_EVENTS_SUBSCRIBE.to_string(),
+            SCOPE_PERSONALIZATION_RW.to_string(),
+        ];
+        assert!(event_reaches(&both, "state"));
+        for other in ["state-fleet", "__state", "State", "ext:ext.a.example.notes"] {
+            assert!(!event_reaches(&both, other), "{other:?} must not reach");
+        }
+        let personalization_only = vec![SCOPE_PERSONALIZATION_RW.to_string()];
+        assert!(!event_reaches(&personalization_only, "state"));
+        let records_and_events = vec![
+            SCOPE_EVENTS_SUBSCRIBE.to_string(),
+            "fauna:records:rw:ext.a.example.*".to_string(),
+        ];
+        assert!(!event_reaches(&records_and_events, "state"));
     }
 }

@@ -154,9 +154,8 @@ def test_web_sign_out_erases_the_account_registry(nest_instance, spa_url):
 # for. A sign-out retires the grant, severs the writer on the plane and erases
 # the store, in that order behind one durable record.
 
-#: The root every account store's name sits under
-#: (`fauna_account_store::root::PLATFORM_ROOT`).
-ACCOUNT_STORE_ROOT = "fauna-account-store"
+#: The root every account store's name sits under (`helpers/web_store.py`).
+ACCOUNT_STORE_ROOT = web_store.ACCOUNT_STORE_ROOT
 
 #: The install-scoped sign-out record (`fauna_client_accounts::sign_out_record`)
 #: — outside the `fauna/` prefix the registry and the e2e agent sweep.
@@ -169,26 +168,6 @@ REMOVED_VISIBLE_S = 240.0
 #: A reload finishing a recorded sign-out: one boot, one credential wipe, one
 #: database delete.
 RECONCILE_S = 60.0
-
-
-def _account_store_names(driver) -> dict:
-    """Every account store this origin holds, by home: the IndexedDB databases
-    and the OPFS root's directories under the account-store root. The OPFS
-    directory is the database name folded to one path component, so both are
-    matched on the root prefix."""
-    return driver.eval_js(
-        "(async () => {"
-        " const dbs = (await indexedDB.databases()).map(d => d.name);"
-        " const dirs = [];"
-        " try {"
-        "  const root = await navigator.storage.getDirectory();"
-        "  for await (const name of root.keys()) dirs.push(name);"
-        " } catch (e) { dirs.push('opfs-unreadable: ' + e); }"
-        f" const ours = n => String(n).startsWith({json.dumps(ACCOUNT_STORE_ROOT)})"
-        " || String(n).startsWith('opfs-unreadable');"
-        " return { indexeddb: dbs.filter(ours).sort(), opfs: dirs.filter(ours).sort() };"
-        "})()"
-    )
 
 
 @pytest.mark.feature("account")
@@ -217,7 +196,7 @@ def test_web_sign_out_retires_the_enrollment_and_erases_the_account_store(
     enrollment.sign_in(app, request, nest_instance, user)
     writer, _row, _ = enrollment.await_enrollment(app, nest_url, user)
     first_member = fleet.fleet_id_hex(writer)
-    before = _account_store_names(driver)
+    before = web_store.account_store_names(driver)
     assert f"{ACCOUNT_STORE_ROOT}/{actor}" in before["indexeddb"], (
         "precondition: the signed-in account's store must exist in this origin — it is "
         f"what the sign-out has to erase; the origin holds {before}"
@@ -225,7 +204,7 @@ def test_web_sign_out_retires_the_enrollment_and_erases_the_account_store(
 
     app.settings.sign_out()
 
-    after = _account_store_names(driver)
+    after = web_store.account_store_names(driver)
     assert not after["indexeddb"] and not after["opfs"], (
         "a web sign-out must erase the account store of every account it reaches "
         f"(account-scoping.md § Erasure follows scope), but the origin still holds {after}. "
@@ -291,7 +270,7 @@ def test_web_load_after_a_tab_closed_mid_sign_out_finishes_the_sign_out(
 
     enrollment.sign_in(app, request, nest_instance, user)
     enrollment.await_enrollment(app, nest_url, user)
-    before = _account_store_names(driver)
+    before = web_store.account_store_names(driver)
     assert f"{ACCOUNT_STORE_ROOT}/{actor}" in before["indexeddb"], (
         f"precondition: the account's store must exist for the load to erase; got {before}"
     )
@@ -313,7 +292,7 @@ def test_web_load_after_a_tab_closed_mid_sign_out_finishes_the_sign_out(
         last.clear()
         last.update(
             registry=_registry_keys(driver),
-            stores=_account_store_names(driver),
+            stores=web_store.account_store_names(driver),
             record=_ls(driver, SIGN_OUT_RECORD_KEY),
         )
         return (
@@ -384,9 +363,9 @@ def _release_account_store(driver) -> None:
 def _hold_engine_role(tab, actor: str) -> None:
     """Take `actor`'s conversations-engine role Web Lock in `tab` and keep it —
     what a tab serving the account holds, and the lock the erase probes
-    (`$lib/webLocks::engineLockName`). The lock is taken directly because no
-    signed-in tab can be arranged here: the sign-out already wiped the
-    credentials a tab would sign in with."""
+    (`fauna_mls::engine_role::web_role_lock_name`). The lock is taken
+    directly because no signed-in tab can be arranged here: the sign-out
+    already wiped the credentials a tab would sign in with."""
     name = f"fauna.mls.conversations-engine/{actor.lower()}"
     granted = tab.eval_js(
         "(async () => new Promise((granted) => {"
@@ -434,7 +413,7 @@ def test_web_sign_out_that_cannot_erase_a_store_says_so_and_a_later_load_finishe
 
     enrollment.sign_in(app, request, nest_instance, user)
     enrollment.await_enrollment(app, nest_url, user)
-    assert store in _account_store_names(driver)["indexeddb"], (
+    assert store in web_store.account_store_names(driver)["indexeddb"], (
         "precondition: the signed-in account's store must exist to be held open"
     )
     _hold_account_store(driver, store)
@@ -464,7 +443,7 @@ def test_web_sign_out_that_cannot_erase_a_store_says_so_and_a_later_load_finishe
                 f"(account-scoping.md § Erasure follows scope → The residue surface), but it "
                 f"reads {last.get('line')!r}; error-message reads {last.get('error')!r}, the "
                 f"sign-out record reads {last.get('record')!r} and the origin holds "
-                f"{_account_store_names(driver)}."
+                f"{web_store.account_store_names(driver)}."
             ),
         )
         assert "credentials" not in last["line"], (
@@ -488,7 +467,7 @@ def test_web_sign_out_that_cannot_erase_a_store_says_so_and_a_later_load_finishe
             "the credential wipe must not wait for the store erase; these registry keys "
             f"survived: {_registry_keys(driver)}"
         )
-        assert store in _account_store_names(driver)["indexeddb"], (
+        assert store in web_store.account_store_names(driver)["indexeddb"], (
             "the fault injection must still hold: the store is present while the line is up"
         )
     finally:
@@ -501,7 +480,7 @@ def test_web_sign_out_that_cannot_erase_a_store_says_so_and_a_later_load_finishe
     def finished():
         after.clear()
         after.update(
-            stores=_account_store_names(driver),
+            stores=web_store.account_store_names(driver),
             record=_ls(driver, SIGN_OUT_RECORD_KEY),
         )
         return (
@@ -559,7 +538,7 @@ def test_web_sign_out_residue_retry_refuses_beside_another_tab_and_finishes_the_
 
     enrollment.sign_in(app, request, nest_instance, user)
     enrollment.await_enrollment(app, nest_url, user)
-    assert store in _account_store_names(driver)["indexeddb"], (
+    assert store in web_store.account_store_names(driver)["indexeddb"], (
         "precondition: the signed-in account's store must exist to be held open"
     )
     _hold_account_store(driver, store)
@@ -583,12 +562,12 @@ def test_web_sign_out_residue_retry_refuses_beside_another_tab_and_finishes_the_
                 f"{what}: sign-out-residue-message must read {expected!r} but reads "
                 f"{last.get('line')!r}; error-message reads {app.error_text()!r}, the sign-out "
                 f"record reads {_ls(driver, SIGN_OUT_RECORD_KEY)!r} and the origin holds "
-                f"{_account_store_names(driver)}."
+                f"{web_store.account_store_names(driver)}."
             ),
         )
 
     def assert_nothing_erased(what: str) -> None:
-        assert store in _account_store_names(driver)["indexeddb"], (
+        assert store in web_store.account_store_names(driver)["indexeddb"], (
             f"{what}: the store is still held, so it must still be here"
         )
         record = json.loads(_ls(driver, SIGN_OUT_RECORD_KEY) or "null")
@@ -631,7 +610,7 @@ def test_web_sign_out_residue_retry_refuses_beside_another_tab_and_finishes_the_
         after.update(
             view=app.onboarding.sign_out_residue_text(),
             showing=app.onboarding.sign_out_residue_showing(),
-            stores=_account_store_names(driver),
+            stores=web_store.account_store_names(driver),
             record=_ls(driver, SIGN_OUT_RECORD_KEY),
         )
         return (

@@ -78,11 +78,10 @@ const MEMOS: Record<
   conversations: {
     url: new URL("./conversations.ts", import.meta.url),
     memo: "managerPromise",
-    // `engineRole` too: the MLS-writing role is module state this build
-    // acquires across an await, exactly like the manager itself. It is not
-    // RETRACTED, though — it is the account's, and the replacement writes
-    // under it.
-    slots: ["engineRole", "manager"],
+    // The MLS-writing role is no slot here: `conversationsManager` takes it
+    // inside the wasm engine-construction path and the tab's holds live in
+    // `fauna_mls::engine_role`, so no module state of this build carries it.
+    slots: ["manager"],
     retract: "manager",
   },
   search: {

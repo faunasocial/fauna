@@ -56,9 +56,11 @@ pytestmark = [pytest.mark.tier_3]
 # gesture where this page's contract is to ignore it.
 @pytest.mark.web
 @pytest.mark.linux
+@pytest.mark.android
 @pytest.mark.tui
 @pytest.mark.macos
 @pytest.mark.ios
+@pytest.mark.windows
 @pytest.mark.feature("notifications")
 def test_tapping_a_like_notification_opens_the_liked_post(
     logged_in_app, api_actor_peer

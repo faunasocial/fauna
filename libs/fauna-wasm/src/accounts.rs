@@ -67,6 +67,30 @@ fn mutate(
     })
 }
 
+/// [`mutate`] for the two add exports. An add refused because the device's
+/// account list is full rejects with the SHARED line as a `LocalizedText`
+/// `{ key, args }` (`fauna_client_accounts::add_refused_copy`) — the SPA
+/// resolves it with `resolveLocalized`, as for [`activate`] — instead of the
+/// registry's English `Display` as a JS `Error`; any other failure still
+/// rejects as the `Error` the `?` of a synchronous export would throw
+/// (`long-term-store.md` § Multi-account evolution → *The index is bounded*).
+fn mutate_add(
+    add: impl FnOnce(&AccountRegistry) -> Result<String, fauna_client_accounts::AccountError> + 'static,
+) -> js_sys::Promise {
+    future_to_promise(async move {
+        with_web_mutation_lock(move || {
+            let registry = AccountRegistry::new(Arc::new(LocalStorageSecretStore));
+            add(&registry).map(JsValue::from).map_err(|err| {
+                match fauna_client_accounts::add_refused_copy(&err) {
+                    Some(line) => crate::rpc::to_js(&line).unwrap_or_else(|e| e),
+                    None => JsValue::from(JsError::from(err)),
+                }
+            })
+        })
+        .await
+    })
+}
+
 /// The activation both switch exports share, under the same cross-tab lock as
 /// every mutator. A refusal rejects with the SHARED line as a `LocalizedText`
 /// `{ key, args }` (`fauna_client_accounts::switch_refused_copy`) — never the
@@ -161,10 +185,7 @@ impl WasmAccountRegistry {
         device_id: Option<String>,
     ) -> js_sys::Promise {
         let secret_hex = secret_hex.to_string();
-        mutate(move |r| {
-            let id = r.add_account(&secret_hex, nest_url.as_deref(), device_id.as_deref())?;
-            Ok(JsValue::from(id))
-        })
+        mutate_add(move |r| r.add_account(&secret_hex, nest_url.as_deref(), device_id.as_deref()))
     }
 
     /// Persist the predecessor seeds a phrase-only restore recovered
@@ -252,15 +273,14 @@ impl WasmAccountRegistry {
     ) -> js_sys::Promise {
         let secret_hex = secret_hex.to_string();
         let nest_url = nest_url.to_string();
-        mutate(move |r| {
-            let id = fauna_client_accounts::persist_logged_in(
+        mutate_add(move |r| {
+            fauna_client_accounts::persist_logged_in(
                 r,
                 &secret_hex,
                 &nest_url,
                 device_id.as_deref(),
                 reach_ipv4.as_deref(),
-            )?;
-            Ok(JsValue::from(id))
+            )
         })
     }
 
@@ -291,16 +311,21 @@ impl WasmAccountRegistry {
         })
     }
 
-    /// Remove an account: its per-actor slots and index entry, then everything
-    /// else this origin holds for it — its account store
-    /// (`crate::account_scope`; registry first, then the erase, the native
-    /// `account_scope::remove_account` order). If it was active, the first
-    /// remaining account becomes active.
+    /// Remove an account: its per-actor slots and index entry, then this
+    /// browser's retirement from the account's nest, then everything else this
+    /// origin holds for it — its account store (`crate::account_scope`). The
+    /// native order, ask → remove → retire → erase (`account-scoping.md`
+    /// § Erasure follows scope → *Removing an account retires this machine
+    /// from it, as a sign-out does*). If it was active, the first remaining
+    /// account becomes active.
     ///
     /// The account is named in the sign-out record before the removal, so a
     /// store the erase could not remove — or a tab closed between the two —
     /// is erased at a later load; a removal the registry refuses leaves the
-    /// store untouched and the record clean.
+    /// store untouched and the record clean. The registry removal takes the
+    /// account's slots into memory in the same mutation, and the nest half
+    /// rides that snapshot (`crate::account_runtime::retire_removed_account`)
+    /// — best-effort under its budget, never holding the erase back past it.
     #[wasm_bindgen(unchecked_return_type = "Promise<void>")]
     pub fn remove(&self, actor_id: &str) -> js_sys::Promise {
         let actor_id = actor_id.to_string();
@@ -313,13 +338,20 @@ impl WasmAccountRegistry {
                 let actor_id = actor_id.clone();
                 move || {
                     AccountRegistry::new(Arc::new(LocalStorageSecretStore))
-                        .remove(&actor_id)
+                        .remove_with_snapshot(&actor_id)
                         .map_err(JsError::from)
                 }
             })
             .await;
+            let removed = match removed {
+                Ok(removed) => {
+                    crate::account_runtime::retire_removed_account(Arc::new(removed)).await;
+                    Ok(JsValue::UNDEFINED)
+                }
+                Err(e) => Err(JsValue::from(e)),
+            };
             crate::account_scope::finish_removed_account(&actor_id).await;
-            removed.map(|()| JsValue::UNDEFINED).map_err(JsValue::from)
+            removed
         })
     }
 
@@ -533,6 +565,23 @@ impl Default for WasmAccountRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The profile SELF header's display handle — `<handle>@<current primary>`
+/// from the session handle + the account's cached handle/domain
+/// (`fauna_client_accounts::display_handle`; `mail-primary-domain-rename.md`
+/// § Display-handle interaction). `undefined` while nothing resolves.
+#[wasm_bindgen(js_name = accountDisplayHandle)]
+pub fn account_display_handle(
+    session_handle: &str,
+    entry_handle: Option<String>,
+    entry_domain: Option<String>,
+) -> Option<String> {
+    fauna_client_accounts::display_handle(
+        session_handle,
+        entry_handle.as_deref(),
+        entry_domain.as_deref(),
+    )
 }
 
 #[cfg(test)]

@@ -165,9 +165,9 @@ public sealed partial class BackupsPage : Page
             // observation high-water suppress the other's freshness failures).
             var actorIdHex = clients.Crypto is { HasKey: true } cc ? cc.ActorIdHex : null;
             _rpc = clients.Rpc;
-            _deviceIdHex = clients.Account.DeviceId ?? "";
+            _deviceIdHex = clients.Account.ResolveDeviceId() ?? "";
             _viewModel = new BackupsViewModel(
-                clients.Rpc!, clients.Account.DeviceId ?? "",
+                clients.Rpc!, clients.Account.ResolveDeviceId() ?? "",
                 fileSaver: fileSaver,
                 auditStatePath: Core.Services.AccountStateDir.BackupAuditStatePath(actorIdHex),
                 // Resolved per call, never captured — the agent session is rebuilt
@@ -188,6 +188,11 @@ public sealed partial class BackupsPage : Page
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
         base.OnNavigatedFrom(e);
+        if (_viewModel is not null)
+        {
+            _viewModel.CleanupStoreChange();
+            _viewModel.StoreResynced -= OnStoreResynced;
+        }
         if (ReferenceEquals(Current, this)) Current = null;
     }
 
@@ -250,6 +255,22 @@ public sealed partial class BackupsPage : Page
             RestoreSnapshotSelect.SelectedIndex = 0;
         RestoreSourceSelect.IsEnabled = _viewModel.HasDestinations;
         RestoreProgress.Text = _viewModel.RestoreProgressText;
+
+        // The shared store-change notice (account-runtime.md § A runtime's own
+        // pump is a source of the notice too): a destination another device
+        // enrolled paints on this open page with no re-visit.
+        _viewModel.StoreResynced -= OnStoreResynced;
+        _viewModel.StoreResynced += OnStoreResynced;
+        _viewModel.WatchStore();
+    }
+
+    /// <summary>The destinations half re-read changed the list: repaint the rows
+    /// and the restore source gate. Dialogs and their buffers are untouched.</summary>
+    private void OnStoreResynced()
+    {
+        if (_viewModel is null) return;
+        RenderDestinations();
+        RestoreSourceSelect.IsEnabled = _viewModel.HasDestinations;
     }
 
     private void ViewModel_PropertyChanged(object? sender,
@@ -278,6 +299,10 @@ public sealed partial class BackupsPage : Page
             case nameof(BackupsViewModel.ReseedResultText):
             case nameof(BackupsViewModel.ReseedRunning):
                 RenderReseed();
+                break;
+            case nameof(BackupsViewModel.RecoverResultText):
+            case nameof(BackupsViewModel.RecoverRunning):
+                RenderAuditRecover();
                 break;
             case nameof(BackupsViewModel.IsBusy):
                 // Single-flight: EVERY mutating control is gated on the ONE
@@ -783,17 +808,89 @@ public sealed partial class BackupsPage : Page
     {
         if (_viewModel is null) return;
         DestinationsAuditAlerts.Children.Clear();
-        foreach (var text in _viewModel.AuditAlerts)
+        foreach (var alert in _viewModel.AuditAlerts)
         {
-            var banner = new TextBlock
+            // The banner is a container so a recover button can sit INSIDE it
+            // (scoped `backup-audit-alert[i]` → `backup-audit-recover-button`);
+            // get_text on it scrapes the child TextBlock.
+            var banner = new StackPanel { Spacing = 4 };
+            banner.Children.Add(new TextBlock
             {
-                Text = text,
+                Text = alert.Text,
                 TextWrapping = TextWrapping.Wrap,
                 Foreground = ThemeBrush("SystemFillColorCriticalBrush"),
-            };
+            });
+            if (alert.OfferRecover)
+            {
+                var recover = new Button
+                {
+                    Content = S.Get("backups/backup_audit_recover_button"),
+                    Tag = alert.DestinationId,
+                    IsEnabled = !_viewModel.RecoverRunning,
+                };
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(recover, Ids.BackupAuditRecoverButton);
+                recover.Click += AuditRecover_Click;
+                banner.Children.Add(recover);
+            }
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(banner, Ids.BackupAuditAlert);
             DestinationsAuditAlerts.Children.Add(banner);
         }
+    }
+
+    /// <summary>Paint <c>backup-audit-recover-result</c> (present only after a
+    /// run) and disarm or re-arm every recover button with the running flag.</summary>
+    private void RenderAuditRecover()
+    {
+        if (_viewModel is null) return;
+        if (_viewModel.RecoverResultText is { } text)
+        {
+            AuditRecoverResultText.Text = text;
+            AuditRecoverResultText.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            AuditRecoverResultText.Visibility = Visibility.Collapsed;
+        }
+        foreach (var banner in DestinationsAuditAlerts.Children.OfType<StackPanel>())
+            foreach (var button in banner.Children.OfType<Button>())
+                button.IsEnabled = !_viewModel.RecoverRunning;
+    }
+
+    /// <summary><c>backup-audit-recover-button</c> — opens the plain confirm; it
+    /// never runs the recovery itself.</summary>
+    private async void AuditRecover_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null || sender is not Button { Tag: string destinationId }) return;
+        _viewModel.ArmRecover(destinationId);
+        if (_viewModel.RecoverConfirming is null) return;
+        AuditRecoverConfirmTitle.Text = S.Get("backups/backup_recover_confirm_title");
+        AuditRecoverConfirmBody.Text = S.Get("backups/backup_recover_confirm_body");
+        AuditRecoverCancelButton.Content = S.Get("backups/backup_recover_cancel_button");
+        AuditRecoverConfirmButton.Content = S.Get("backups/backup_recover_confirm_button");
+        AuditRecoverConfirmDialog.XamlRoot = this.XamlRoot;
+        await Controls.Dialogs.ShowAsync(AuditRecoverConfirmDialog);
+        // Dismissed (Esc / light-dismiss) rather than confirmed: disarm.
+        _viewModel.CancelRecover();
+    }
+
+    private void AuditRecoverCancel_Click(object sender, RoutedEventArgs e)
+    {
+        _viewModel?.CancelRecover();
+        AuditRecoverConfirmDialog.Hide();
+    }
+
+    /// <summary><c>backup-audit-recover-confirm-button</c> — the confirmed
+    /// recovery. The VM paints how it ended and re-runs the audit pass; the page
+    /// re-renders the banners it moved. The run starts (and clears the armed
+    /// destination) before the dialog hides, so the dismissed-path disarm above
+    /// finds nothing left to cancel.</summary>
+    private async void AuditRecoverConfirm_Click(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is null) return;
+        var run = _viewModel.ConfirmRecoverAsync();
+        AuditRecoverConfirmDialog.Hide();
+        await run;
+        RenderDestinations();
     }
 
     private static Microsoft.UI.Xaml.Media.Brush? ThemeBrush(string key)

@@ -309,7 +309,10 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   purposes — search, labels (the next bullet), the post pass and its labels
   all landed that day, and "the unbounded fan-out" was struck from the
   purposes, delivery never having needed the read — only the client half,
-  the six-app trickle-down that paints it and authors room posts.
+  the app trickle-down that paints it and authors room posts, which has
+  since landed on all seven apps (tui 2026-09-10, linux and web 2026-09-13,
+  macOS, iOS, windows and android 2026-09-14 —
+  [`restricted-posts.md`](restricted-posts.md) § Implementation status today).
 - **Labels land — the read's second purpose, served end to end (2026-09-10,
   schema 60).** A room names its labelers in a **signed record of its own**,
   `fauna_mls::room_policy::SignedRoomLabelers` `{room, version, labelers}`,
@@ -1255,8 +1258,9 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   is the signer; named admins are live members; an incoming owner is a local
   user). The birth salt rides the roster read beside a version asked for
   (additive `birth_salt`, both cross-nest legs — they forward the home's reply
-  unchanged); the client seam is `RoomRosterReader::read_policy_version`
-  (default: not held — fails closed), one helper for the native and wasm arms.
+  unchanged); the client seam is `RoomRosterReader::read_policy_version` and its run form
+  `read_policy_versions` (defaults: not held — fail closed), one helper for the
+  native and wasm arms.
   The backend judges a record on ingest (`floor_delete_verdict`: the
   signature, this room, then the author's rank in the **anchored** policy of
   the named version, the chain fetched from the head it already proved and
@@ -1379,9 +1383,16 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   community room since 2026-09-25, but no journey parks a floor delete behind
   a cross-nest retired name (below: no journey deletes in one yet);
   *(b)* a room founded before schema 68 whose founding version was
-  already overwritten can never anchor; *(c)* a long chain costs one full
-  roster read per unproven version, once per session — a range serve is the
-  optimization; *(d)* **settled 2026-09-20 — two shapes, not one.** The
+  already overwritten can never anchor; *(c)* **closed 2026-10-12** — a long
+  chain costs one roster read per RUN of versions, not per version: the roster
+  read's additive `policy_version_span` (both cross-nest legs) is answered with
+  up to `MAX_POLICY_VERSION_SPAN` (16) consecutive retained versions in an
+  additive `policy_versions`, and `anchor_policy_chain` consumes a run per read
+  (the 32-read cap now counts reads, so it bounds ~512 versions), every link
+  still judged by `CommunityPolicyChain::extend`. A nest older than the field
+  serves the one version asked for and the walk continues a version a read.
+  Pinned by `the_roster_read_serves_a_run_of_policy_versions_up_to_a_cap` and
+  `a_long_policy_chain_anchors_in_one_read_per_run`; *(d)* **settled 2026-09-20 — two shapes, not one.** The
   member's anchor chain (`FaunaMlsBackend::room_policy_chains`) and its three
   neighbours — the verified succession lines (`room_seats`), a fetched-but-
   refused next version (`RoomSeats::pending`) and the harvest's settled set

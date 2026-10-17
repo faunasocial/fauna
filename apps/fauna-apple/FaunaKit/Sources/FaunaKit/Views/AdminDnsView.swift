@@ -1,3 +1,6 @@
+// Excised from the Fauna Kids build — a whole plane the kids flavor compiles
+// out (family-safety.md § The account age band, the kids-app bullet, item (4)).
+#if !FAUNA_KIDS
 import SwiftUI
 
 /// The admin **`admin-dns`** page (`docs/goal/behavior/dns-management.md`
@@ -1146,3 +1149,4 @@ public struct AdminDnsView: View {
 private extension String {
     var trimmed: String { trimmingCharacters(in: .whitespacesAndNewlines) }
 }
+#endif // !FAUNA_KIDS

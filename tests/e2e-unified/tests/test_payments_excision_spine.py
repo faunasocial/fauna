@@ -1223,8 +1223,26 @@ _FAUNAKIT = _REPO / "apps/fauna-apple/FaunaKit/Sources/FaunaKit"
 #: host-visibility pin below because it is exactly as invisible to the macOS
 #: artifact witness as an `#if os(iOS)` block inside FaunaKit is.
 _APPLE_SWIFT_ROOTS = (_FAUNAKIT, _REPO / "apps/fauna-apple/Fauna-iOS")
-#: The rendered payments surface, as element-id PREFIXES (never whole ids, so a
-#: new §4/§5 element is covered on the day it is added). Shared by the two
+#: The price-and-route class's ten full ids that joined `gated_features.payments`
+#: with the 2026-10-07 ruling's catalog entry (dynamic-features.md § Platform-family
+#: surface excision → *The price-and-route class*). A full id is a legal prefix: every
+#: pin matches by `startswith`/`in`. Each app's tuple below appends this one.
+_PRICE_ROUTE_CLASS_IDS = (
+    "subscription-tier-form-price-hint",
+    "subscription-tier-form-payment-url",
+    "compose-sell-price",
+    "compose-sell-subscribers-free",
+    "subscription-tier-price",
+    "subscription-offer-price",
+    "subscription-offer-payment-link",
+    "gated-post-price",
+    "gated-post-payment-link",
+    "gated-post-buy-button",
+)
+
+#: The rendered payments surface, as element-id PREFIXES (prefixes, so a new §4/§5
+#: element is covered on the day it is added; the price-and-route class is listed as
+#: full ids, which are prefixes of themselves). Shared by the two
 #: source pins below so they cannot drift apart.
 #:
 #: ⚠ `nostr-zap-signer-` is here because on apple the SUBSET MEMBER rides the same
@@ -1236,7 +1254,9 @@ _APPLE_SWIFT_ROOTS = (_FAUNAKIT, _REPO / "apps/fauna-apple/Fauna-iOS")
 #: leg landed (2026-08-22), and the gap cost a red merge gate six days later: the
 #: glue half was caught only by `apple-store-safe-check`, which needs an Apple
 #: toolchain — precisely the mac-less-fleet blindness this pin exists to remove.
-_APPLE_ID_PREFIXES = ("subscription-provider-", "subscription-claim-", "nostr-zap-signer-")
+_APPLE_ID_PREFIXES = (
+    "subscription-provider-", "subscription-claim-", "nostr-zap-signer-",
+) + _PRICE_ROUTE_CLASS_IDS
 
 #: The `p2p-share` member's apple condition, and what it covers. It is a registry
 #: member of its own — NOT a subset of `payments` the way `zaps` is — so it takes a
@@ -2043,7 +2063,7 @@ _ANDROID_ELEMENT_ID_PREFIXES = (
     "subscription-claim-",
     "post-tip-",
     "nostr-zap-signer-",
-)
+) + _PRICE_ROUTE_CLASS_IDS
 
 
 def _android_shared_sources() -> list[Path]:
@@ -2543,20 +2563,41 @@ def test_every_android_p2p_share_render_carries_its_compile_condition():
 
 def test_the_android_witness_watches_the_p2p_share_member():
     """All four catalog prefixes in the store-safe column; in the DEFAULT column,
-    the prefix the default dex MEASURABLY carries. The plane's two are painted
-    nowhere on android, and `offline-receive-` measured 0 in the default release
-    dex on 2026-09-30: R8 folds the ceremony section's gates in every minified
-    build, a release-only defect that predates this leg. Add `offline-receive-` here and to the recipe when that lands."""
+    the two the default dex carries — the plane's two are painted nowhere on
+    android. `offline-receive-` is the one that caught a minified-build defect:
+    with the `uniffi.*` binding packages unkept, R8 folded the ceremony
+    section's gates to false and the default dex kept only
+    `offline-share-own-code` (measured 2026-09-30, fixed 2026-10-08)."""
     body = _recipe_body("android-store-safe-check")
     ss_col, sep, default_col = body.partition("column 2")
     assert sep, "android-store-safe-check lost its `column 2` marker, so the columns cannot be told apart"
     for pat in _gated_catalog()["p2p-share"]["id_prefixes"]:
         assert f"'{pat}'" in ss_col, f"android-store-safe-check's store-safe column lost its '{pat}' pattern"
-    for pat in ("offline-share-",):
+    for pat in ("offline-share-", "offline-receive-"):
         assert f"'{pat}'" in default_col, (
             f"android-store-safe-check's DEFAULT column no longer checks '{pat}', so "
             "the store-safe absence is indistinguishable from a renamed id"
         )
+
+
+def test_android_minified_builds_keep_every_jna_binding_package():
+    """Every minified android build (release, and the three `initWith` it) shares
+    one rules file, and it must keep JNA plus EVERY UniFFI-generated package —
+    `com.fauna.ffi` and each `uniffi.<crate>` one. Native code writes their JNA
+    Structures' fields by reflection, so an unkept package's `RustBuffer.data`
+    folds to null: on 2026-10-08 that compiled `ApiClient.authenticate` out of
+    the launch path and every secret-gated render to its hidden branch, and the
+    default column's `offline-receive-` scan was the first thing to notice."""
+    rules_text = (_REPO / "apps/fauna-android/proguard-rules.pro").read_text(encoding="utf-8")
+    rules = "\n".join(line.strip() for line in rules_text.splitlines() if not line.lstrip().startswith("#"))
+    for rule in (
+        "-keep class com.fauna.ffi.** { *; }",
+        "-keep class uniffi.** { *; }",
+        "-keep class com.sun.jna.** { *; }",
+    ):
+        assert rule in rules, f"apps/fauna-android/proguard-rules.pro lost `{rule}`"
+    gradle = _ANDROID_GRADLE.read_text(encoding="utf-8")
+    assert '"../proguard-rules.pro"' in gradle, "the release build type no longer takes proguard-rules.pro"
 
 
 # ── the WEB app shell (2026-08-16, the web excision leg) ─────────────────────
@@ -2597,7 +2638,7 @@ _WEB_COMPONENT_DIR = _WEB_SRC / "lib/components/payments"
 _WEB_ELEMENT_ID_PREFIXES = (
     "subscription-provider-", "subscription-claim-", "post-tip-",
     "subscription-tier-form-asking-price", "compose-sell-asking-price",
-)
+) + _PRICE_ROUTE_CLASS_IDS
 
 # The faces a store-safe bundle must not name — web's twin of the UniFFI symbols
 # `ffi-store-safe-check` greps. Kept in step with `web-store-safe-check`.

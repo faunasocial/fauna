@@ -46,7 +46,7 @@ func TestNextDelayFailureUsesBackoffCapped(t *testing.T) {
 }
 
 // TestNextDelayNeverZeroOnFailure is the load-bearing regression guard
-// for the example.com disk-fill incident (2026-06-01): the previous
+// for the live-nest disk-fill incident (2026-06-01): the previous
 // scheduler interleaved a "next scheduled tick" deadline that, once it
 // fell into the past during a long failure streak, collapsed the sleep
 // to zero and span the loop at full CPU — a single mail-bridge json log

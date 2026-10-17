@@ -53,7 +53,6 @@ from helpers.mail_dedicated_nest import (
     dedicated_node_url,
     login_as_nest_admin,
     mint_caldav_mailbox,
-    require_caldav_mailbox_mint_supported,
 )
 from helpers.scheduling_inbox import utc_offset as _utc
 
@@ -137,8 +136,6 @@ def test_admin_caldav_port_change_rebinds_listener(
     round-trip survives on the NEW port (event written on the old port is still
     visible) and the OLD port goes dead. The headless, on-principle proof of the
     user's "change the port from the client and the round-trip survives" ask."""
-    require_caldav_mailbox_mint_supported(app.driver)
-
     handle = dedicated_caldav_admin_port_nest
     nest = handle.nest
     domain = handle.domain  # fauna.test

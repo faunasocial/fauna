@@ -39,6 +39,7 @@ import requests
 
 from clients.ws_rpc_admin_client import RpcCallError, WsRpcAdminClient
 from common.auth import create_actor_and_register, create_folder_snapshot, user_create_folder
+from helpers.set_names import addressed
 
 # One home for the second-boundary wait and its justification (see the import
 # in `test_snapshot_diff.py`): `snapshots` carries `UNIQUE(folder_id,
@@ -83,7 +84,7 @@ def _ws(nest, actor) -> WsRpcAdminClient:
 
 def _row(nest, actor, folder, snapshot_id) -> dict:
     with _ws(nest, actor) as ws:
-        rows = ws.call("fauna.filesync.snapshot.list", {"folder": folder})["rows"]
+        rows = ws.call("fauna.filesync.snapshot.list", addressed(folder))["rows"]
     match = [r for r in rows if r["id"] == snapshot_id]
     assert match, f"snapshot {snapshot_id} vanished from the folder listing: {rows!r}"
     return match[0]

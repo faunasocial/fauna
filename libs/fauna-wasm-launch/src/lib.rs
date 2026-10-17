@@ -44,9 +44,17 @@ fn store() -> Arc<dyn SecretStore> {
 
 /// A fresh adapter view over the one localStorage-backed registry store.
 /// Stateless and cheap — every read/write goes straight to localStorage.
+///
+/// **Bound to this tab's account** — every export below goes through here, so
+/// "the active account" in their docs means the account this tab serves: a tab
+/// pinned to a non-active account (a secondary) reads and writes its own
+/// account's slots, as a `FAUNA_BOUND_ACCOUNT` instance does natively, and the
+/// primary follows `active` (`AccountRegistry::tab_launch_persistence`). Without
+/// it, a reset dispatched from a tab pinned to B minted into A's slot, the
+/// collision CR-3 rules out (`nest/common.md` § Client-state recoverability).
 #[cfg(target_arch = "wasm32")]
 fn persistence() -> RegistryLaunchPersistence {
-    registry().launch_persistence()
+    registry().tab_launch_persistence(fauna_client_accounts::tab_pin().as_deref())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -279,6 +287,19 @@ impl LaunchMachine {
     #[wasm_bindgen(js_name = snapshotJson)]
     pub fn snapshot_json(&self) -> String {
         serde_json::to_string(&self.0.snapshot()).unwrap_or_default()
+    }
+
+    /// Whether the locked notice the SPA shows for `shown_locked_until_secs`
+    /// (epoch seconds, the snapshot's `locked_until_secs` it painted) still
+    /// stands on the current snapshot — the shared
+    /// `LaunchSnapshot::lock_notice_holds`, the one rule every app's notice
+    /// follows (`devices.md` § The locked state). `false` is the SPA's cue to
+    /// route the snapshot afresh; it keeps no timer of its own.
+    #[wasm_bindgen(js_name = lockNoticeHolds)]
+    pub fn lock_notice_holds(&self, shown_locked_until_secs: f64) -> bool {
+        self.0
+            .snapshot()
+            .lock_notice_holds(shown_locked_until_secs as u64)
     }
 
     /// Bearer token if the machine is `Online`, else `null`.

@@ -87,9 +87,92 @@ public abstract partial class ViewModelBase : ObservableObject
     /// <summary>Unsubscribe the reconnect handler wired by
     /// <see cref="RefreshOnReconnect"/>. Idempotent; safe to call when none was
     /// wired. The owning page calls this on <c>OnNavigatedFrom</c>.</summary>
+    /// <summary>True while a <see cref="RefreshOnReconnect"/> handler is wired — the
+    /// owning page is open and will re-pull on the next reconnect itself.</summary>
+    public bool IsReconnectWired => _reconnectUnsub is not null;
+
     public void CleanupReconnect()
     {
         _reconnectUnsub?.Invoke();
         _reconnectUnsub = null;
     }
+
+    // ── store-change re-read ────────────────────────────────────────────
+
+    private Action? _storeChangeUnsub;
+    private Task? _storeResyncTask;
+    private bool _storeResyncAgain;
+
+    /// <summary>Raised on the UI thread after a store-change resync that CHANGED
+    /// what the surface shows — the owning page re-renders on it. A resync that
+    /// answered what is already painted raises nothing (the level rule:
+    /// <c>account-runtime.md</c> § Multi-instance concurrency → <i>A runtime's own
+    /// pump is a source of the notice too</i>, part 4).</summary>
+    public event Action? StoreResynced;
+
+    /// <summary>
+    /// Re-run <paramref name="resync"/> whenever the shared store-change notice
+    /// arrives (<see cref="INestRpcClient.StoreChanged"/>) while this VM's page is
+    /// OPEN: the derived VM exposes a public <c>WatchStore()</c> the page calls
+    /// from <c>Page_Loaded</c>, and the page calls <see cref="CleanupStoreChange"/>
+    /// from <c>OnNavigatedFrom</c> — so only the open surface re-reads and the
+    /// app-lifetime rpc seam never holds a left page's VM. Idempotent.
+    ///
+    /// <para><paramref name="resync"/> is the surface's own store-backed load,
+    /// written to the level rule: it answers <c>true</c> only when the read
+    /// changed what the surface shows, replaces nothing when it fails, and never
+    /// touches an edit in progress. A notice that arrives mid-resync coalesces
+    /// into exactly one more pass. <see cref="INestRpcClient.StoreChanged"/> is
+    /// raised on the UI thread, so the resync's bound-state mutation is
+    /// thread-safe.</para>
+    /// </summary>
+    private protected void WatchStoreChange(INestRpcClient rpc, Func<Task<bool>> resync)
+    {
+        if (_storeChangeUnsub is not null) return;
+
+        async Task RunAsync()
+        {
+            do
+            {
+                _storeResyncAgain = false;
+                try
+                {
+                    if (await resync()) StoreResynced?.Invoke();
+                }
+                catch (Exception ex)
+                {
+                    // A background re-read must never surface into the page: the
+                    // next visit's own load reports a real fault.
+                    ShellLog.Warn(GetType().Name, $"store-change re-read failed: {ex.Message}");
+                }
+            }
+            while (_storeResyncAgain);
+        }
+
+        void Handler()
+        {
+            if (_storeResyncTask is { IsCompleted: false })
+            {
+                _storeResyncAgain = true;
+                return;
+            }
+            _storeResyncTask = RunAsync();
+        }
+
+        rpc.StoreChanged += Handler;
+        _storeChangeUnsub = () => rpc.StoreChanged -= Handler;
+    }
+
+    /// <summary>Stop re-reading on the store-change notice (the
+    /// <see cref="WatchStoreChange"/> subscription). Idempotent; the owning page
+    /// calls it on <c>OnNavigatedFrom</c>.</summary>
+    public void CleanupStoreChange()
+    {
+        _storeChangeUnsub?.Invoke();
+        _storeChangeUnsub = null;
+    }
+
+    /// <summary>Completes when the store-change resync in flight (if any) has
+    /// finished — the tests' barrier.</summary>
+    internal Task WhenStoreResyncedAsync() => _storeResyncTask ?? Task.CompletedTask;
 }

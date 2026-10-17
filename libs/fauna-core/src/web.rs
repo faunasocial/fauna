@@ -512,17 +512,17 @@ mod tests {
     #[test]
     fn subdomain_url_shape() {
         assert_eq!(
-            subdomain_url("alice", "example.com").as_deref(),
-            Some("https://alice.example.com/")
+            subdomain_url("alice", "example.org").as_deref(),
+            Some("https://alice.example.org/")
         );
-        assert_eq!(subdomain_url("", "example.com"), None);
+        assert_eq!(subdomain_url("", "example.org"), None);
         assert_eq!(subdomain_url("alice", ""), None);
-        assert_eq!(subdomain_url("www", "example.com"), None);
+        assert_eq!(subdomain_url("www", "example.org"), None);
     }
 
     #[test]
     fn apex_url_shape() {
-        assert_eq!(apex_url("example.com"), "https://example.com/");
+        assert_eq!(apex_url("example.org"), "https://example.org/");
     }
 
     #[test]
@@ -790,23 +790,20 @@ mod tests {
 
     #[test]
     fn nest_owned_host_covers_apex_and_reserved_subhosts() {
-        let apex = "example.com";
+        let apex = "example.org";
         // The apex itself and the reserved sub-hosts are nest-owned.
-        assert!(is_nest_owned_host("example.com", apex));
-        assert!(is_nest_owned_host("mail.example.com", apex));
-        assert!(is_nest_owned_host("mta-sts.example.com", apex));
-        assert!(is_nest_owned_host("app.example.com", apex));
+        assert!(is_nest_owned_host("example.org", apex));
+        assert!(is_nest_owned_host("mail.example.org", apex));
+        assert!(is_nest_owned_host("mta-sts.example.org", apex));
+        assert!(is_nest_owned_host("app.example.org", apex));
         // A user's own subdomain or a third-party domain is not.
-        assert!(!is_nest_owned_host("alice.example.com", apex));
-        // ⚠ The third-party domain must NOT be `example.com`: the publish scrub
-        // rules rewrite `example.com` -> `example.com`, so an `example.com` here
-        // collapses into the apex above and this assertion contradicts its own
-        // first line in the public tree. Found by the local public-CI replay
-        // 2026-08-24; `example.net` is the codebase's established contrast
-        // domain and the scrub leaves it alone.
+        assert!(!is_nest_owned_host("alice.example.org", apex));
+        // ⚠ The third-party domain must differ from the apex above, or this
+        // assertion contradicts its own first line; `example.net` is the
+        // codebase's established contrast domain.
         assert!(!is_nest_owned_host("example.net", apex));
         // A domainless box owns no web host.
-        assert!(!is_nest_owned_host("example.com", ""));
+        assert!(!is_nest_owned_host("example.org", ""));
     }
 
     #[test]

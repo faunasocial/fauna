@@ -19,25 +19,25 @@ use fauna_protocol::{
         CreateMailboxReply, CreateMailboxRequest, DeleteMailboxReply, DeleteMailboxRequest,
         ExpungeReply, ExpungeRequest, FetchIndexSegmentsSinceReply, FetchIndexSegmentsSinceRequest,
         FetchMessageCiphertextReply, FetchMessageCiphertextRequest, FetchMessageMetadataReply,
-        FetchMessageMetadataRequest, GetQuotaReply, GetQuotaRequest, GetSpamBaselineStateReply,
-        GetSpamBaselineStateRequest, HeaderField, IndexSegment, ListMailboxesReply,
-        ListMailboxesRequest, ListMessagesReply, ListMessagesRequest, ListSpamTrainingHistoryReply,
-        ListSpamTrainingHistoryRequest, MailboxEntry, MailboxStateEvent, MessageMeta,
-        MoveMessagesReply, MoveMessagesRequest, MoveSide, PublishSpamBaselineReply,
-        PublishSpamBaselineRequest, RenameMailboxReply, RenameMailboxRequest, ResetSpamModelReply,
-        ResetSpamModelRequest, SearchMessagesReply, SearchMessagesRequest, SearchTerm,
-        SelectMailboxReply, SelectMailboxRequest, SetBaselineContributionReply,
-        SetBaselineContributionRequest, SpamHistoryOp, SpamLabel, SpamTrainingHistoryRow,
-        StoreFlagsOp, StoreFlagsReply, StoreFlagsRequest, StoreFlagsResultEntry,
-        SubscribeMailboxReply, SubscribeMailboxRequest, SubscribeMailboxStateReply,
-        SubscribeMailboxStateRequest, TrainingSource, UnsubscribeMailboxReply,
-        UnsubscribeMailboxRequest,
+        FetchMessageMetadataRequest, GetMailQuotasReply, GetMailQuotasRequest, GetQuotaReply,
+        GetQuotaRequest, GetSpamBaselineStateReply, GetSpamBaselineStateRequest, HeaderField,
+        IndexSegment, ListMailboxesReply, ListMailboxesRequest, ListMessagesReply,
+        ListMessagesRequest, ListSpamTrainingHistoryReply, ListSpamTrainingHistoryRequest,
+        MailboxEntry, MailboxStateEvent, MessageMeta, MoveMessagesReply, MoveMessagesRequest,
+        MoveSide, PublishSpamBaselineReply, PublishSpamBaselineRequest, RenameMailboxReply,
+        RenameMailboxRequest, ResetSpamModelReply, ResetSpamModelRequest, SearchMessagesReply,
+        SearchMessagesRequest, SearchTerm, SelectMailboxReply, SelectMailboxRequest,
+        SetBaselineContributionReply, SetBaselineContributionRequest, SpamHistoryOp, SpamLabel,
+        SpamTrainingHistoryRow, StoreFlagsOp, StoreFlagsReply, StoreFlagsRequest,
+        StoreFlagsResultEntry, SubscribeMailboxReply, SubscribeMailboxRequest,
+        SubscribeMailboxStateReply, SubscribeMailboxStateRequest, TrainingSource,
+        UnsubscribeMailboxReply, UnsubscribeMailboxRequest,
     },
     decode_strict as decode,
     wrapped_blob::{
         FetchSpamModelReply, FetchSpamModelRequest, GetSpamScoringPolicyReply,
         GetSpamScoringPolicyRequest, HolderSealTarget, PutSpamModelOutcome, PutSpamModelReply,
-        PutSpamModelRequest,
+        PutSpamModelRequest, SpamModelPrecondition,
     },
 };
 use serde_bytes::ByteBuf;
@@ -1752,6 +1752,53 @@ fn get_quota_handler() -> crate::rpc_router::RpcHandler {
     })
 }
 
+// ── get_mail_quotas ───────────────────────────────────────────────
+//
+// The CALLER's own two quotas for the `mail-settings` readout
+// (`imap-server.md` § Composition with submission quota): the mailbox usage
+// and effective limit `get_quota` reports, plus today's submission recipient
+// units and the effective daily allowance — read, never debited. A `()`
+// request: the handler reads only the caller's numbers, so a User needs no
+// target-actor check, and `get_quota` stays the MDA's per-target read.
+
+fn get_mail_quotas_handler() -> crate::rpc_router::RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_class(&state, &actor_id, "fauna.bridges.get_mail_quotas").await?;
+            let _req: GetMailQuotasRequest = decode(&payload).map_err(malformed)?;
+            let (storage_bytes_used, message_count_used) =
+                imap_quota_usage(&state, &actor_id).await?;
+            let imap = state
+                .db
+                .get_imap_policy()
+                .await
+                .map_err(internal)?
+                .effective();
+            let submission_max_per_day = state
+                .db
+                .get_submission_policy()
+                .await
+                .map_err(internal)?
+                .effective()
+                .max_per_day;
+            let submission_used_today = state
+                .db
+                .get_submission_quota_used(&actor_id, now_epoch_secs() / 86_400)
+                .await
+                .map_err(internal)?;
+            encode_reply(&GetMailQuotasReply {
+                storage_bytes_used,
+                storage_bytes_limit: imap.storage_bytes_default,
+                message_count_used,
+                message_count_limit: imap.message_count_default,
+                submission_used_today,
+                submission_max_per_day,
+                ..Default::default()
+            })
+        })
+    })
+}
+
 // ── fetch_spam_model ───────────────────────────────────────────────
 //
 // Return the actor's per-user Bayesian model, **sealed to their MSEK-derived
@@ -2226,6 +2273,23 @@ pub(crate) fn put_spam_model_handler() -> crate::rpc_router::RpcHandler {
                     if c.sealed_copy.is_empty() {
                         return Err(malformed("holder_copy.sealed_copy must not be empty"));
                     }
+                    // A copy is stored only for the RESOLVED aggregation
+                    // holder's x25519 — the key the client seals to
+                    // (`holder_seal_target`), not the holder's Ed25519 id. Any
+                    // other pubkey would add a never-served row per call. The
+                    // refusal is `StaleModel`: the writer's recovery is the same
+                    // — re-fetch (which re-volunteers the current seal target,
+                    // or none after a holder left) and retry — so a write racing
+                    // a holder switch loses nothing. Nothing is written.
+                    let resolved = resolve_content_processor_holder_seal_target(&state)
+                        .await
+                        .map_err(internal)?;
+                    if resolved.map(|t| t.x25519_pubkey) != Some(c.holder_pubkey.to_vec()) {
+                        return encode_reply(&PutSpamModelReply {
+                            outcome: PutSpamModelOutcome::StaleModel,
+                            extra: Default::default(),
+                        });
+                    }
                     Some((c.holder_pubkey.as_slice(), c.sealed_copy.as_slice()))
                 }
                 None => None,
@@ -2244,9 +2308,25 @@ pub(crate) fn put_spam_model_handler() -> crate::rpc_router::RpcHandler {
             // row and holder copy — so the stored model stays byte-identical to
             // the last accepted write, and the reply says so rather than
             // acking a write that did not happen.
+            // The compare-and-swap precondition (`mail-spam.md` § Transactional
+            // update): the stored model the writer computed this write from,
+            // compared under the lock that serializes the write. Absent ⇒
+            // last-write-wins (a writer from before the field).
+            let expected = match &req.expected_model {
+                Some(bytes) => Some(SpamModelPrecondition::from_wire(bytes).ok_or_else(|| {
+                    invalid_params("expected_model must be empty or a 32-byte digest")
+                })?),
+                None => None,
+            };
             let write = state
                 .db
-                .put_spam_model_with_history(&target, &req.sealed_model, history_db_op, holder_copy)
+                .put_spam_model_with_history(
+                    &target,
+                    &req.sealed_model,
+                    history_db_op,
+                    holder_copy,
+                    expected,
+                )
                 .await
                 .map_err(internal)?;
             let undone = match write {
@@ -2254,6 +2334,13 @@ pub(crate) fn put_spam_model_handler() -> crate::rpc_router::RpcHandler {
                     // Nothing was written, so nothing is captured either.
                     return encode_reply(&PutSpamModelReply {
                         outcome: PutSpamModelOutcome::DuplicateSignal,
+                        extra: Default::default(),
+                    });
+                }
+                crate::db::moderation::SpamModelWrite::StaleModel => {
+                    // Nothing was written: the writer re-fetches and retries.
+                    return encode_reply(&PutSpamModelReply {
+                        outcome: PutSpamModelOutcome::StaleModel,
                         extra: Default::default(),
                     });
                 }
@@ -3290,6 +3377,15 @@ pub fn register_bridge_imap_handlers(b: &mut RpcRouterBuilder) {
             handler: get_quota_handler(),
         },
     );
+    // The caller's own mailbox + submission quotas (User). Read-only.
+    b.add(
+        "fauna.bridges.get_mail_quotas",
+        RpcKindMeta {
+            forbid_replay: false,
+            default_deadline: Duration::from_secs(5),
+            handler: get_mail_quotas_handler(),
+        },
+    );
     // Slice 4 item 1 — fetch_spam_model. A self-only model read +
     // seal-on-read: one `spam_models` row read, an MSEK-pubkey lookup, and
     // one HPKE seal (bounded by `mail.spam.model_max_bytes`, default 1 MiB).
@@ -3443,7 +3539,7 @@ pub fn register_bridge_imap_handlers(b: &mut RpcRouterBuilder) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
@@ -3786,7 +3882,7 @@ mod tests {
     /// Used by T9 tests that read body bytes or index hints through the
     /// segment store (`fetch_message_ciphertext`,
     /// `fetch_index_segments_since`).
-    async fn seed_message_for_handler_with_hint(
+    pub(crate) async fn seed_message_for_handler_with_hint(
         state: &crate::routes::AppState,
         actor: &[u8; 32],
         mailbox: &str,
@@ -3886,7 +3982,7 @@ mod tests {
     /// record's segment up from the mirror and sizes it through the same index
     /// path production uses (`segments::mail::record_size`). Requires a real
     /// segment (seed via [`seed_message_for_handler_with_hint`]).
-    async fn real_record_size(
+    pub(crate) async fn real_record_size(
         state: &crate::routes::AppState,
         actor: &[u8; 32],
         msg_id: &[u8; 32],
@@ -7975,6 +8071,84 @@ mod tests {
         assert_eq!(err.code, "fauna.protocol.malformed");
     }
 
+    // ── get_mail_quotas (the caller's own two quotas) ─────────────────
+
+    async fn call_get_mail_quotas(
+        state: &Arc<crate::routes::AppState>,
+        caller: [u8; 32],
+    ) -> Result<fauna_protocol::bridge_routing::GetMailQuotasReply, fauna_protocol::RpcError> {
+        use fauna_protocol::bridge_routing::GetMailQuotasRequest;
+        let payload = Bytes::from(encode_canonical(&GetMailQuotasRequest {}).unwrap().to_vec());
+        let bytes = get_mail_quotas_handler()(state.clone(), caller, payload).await?;
+        Ok(fauna_cbor::decode_strict(&bytes).unwrap())
+    }
+
+    /// A user reads its own mailbox usage + limits and today's recipient
+    /// spend + allowance; a second user sees only its own numbers; reading
+    /// debits nothing (`imap-server.md` § Composition with submission quota).
+    #[tokio::test]
+    async fn get_mail_quotas_reports_only_the_callers_own_numbers() {
+        let state = fixture_state().await;
+        let alice = [84u8; 32];
+        let bob = [85u8; 32];
+        state.db.create_user(&alice, "free", "test").await.unwrap();
+        state.db.create_user(&bob, "free", "test").await.unwrap();
+        state.db.ensure_bridge_imap_mailboxes(&alice).await.unwrap();
+        let (_u, m) = seed_message_for_handler_with_hint(
+            &state,
+            &alice,
+            "INBOX",
+            &[b'q'; 150],
+            1_700_000_010,
+            "",
+            &[7u8; 4],
+        )
+        .await;
+        let alice_bytes = real_record_size(&state, &alice, &m).await;
+        let submission = state.db.get_submission_policy().await.unwrap().effective();
+        state
+            .db
+            .try_consume_submission_quota(
+                &alice,
+                now_epoch_secs() / 86_400,
+                3,
+                submission.max_per_day,
+            )
+            .await
+            .unwrap();
+        let imap = state.db.get_imap_policy().await.unwrap().effective();
+
+        let a = call_get_mail_quotas(&state, alice).await.expect("alice ok");
+        assert_eq!(a.storage_bytes_used, alice_bytes);
+        assert_eq!(a.message_count_used, 1);
+        assert_eq!(a.storage_bytes_limit, imap.storage_bytes_default);
+        assert_eq!(a.message_count_limit, imap.message_count_default);
+        assert_eq!(a.submission_used_today, 3);
+        assert_eq!(a.submission_max_per_day, submission.max_per_day);
+        // A read debits nothing.
+        let again = call_get_mail_quotas(&state, alice).await.unwrap();
+        assert_eq!(again.submission_used_today, 3);
+
+        let b = call_get_mail_quotas(&state, bob).await.expect("bob ok");
+        assert_eq!(b.storage_bytes_used, 0);
+        assert_eq!(b.message_count_used, 0);
+        assert_eq!(b.submission_used_today, 0);
+        assert_eq!(b.submission_max_per_day, submission.max_per_day);
+    }
+
+    #[tokio::test]
+    async fn get_mail_quotas_refuses_bridge_callers() {
+        let state = fixture_state().await;
+        let mta = [1u8; 32];
+        let mda = [9u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
+        for caller in [mta, mda] {
+            let err = call_get_mail_quotas(&state, caller).await.unwrap_err();
+            assert_eq!(err.code, "fauna.bridges.permission_denied");
+        }
+    }
+
     // ── the training lesson: put_spam_model's history op ─────────────
     //
     // Every training lesson — the MDA's `\Junk` STORE/MOVE and the Fauna app's
@@ -8464,7 +8638,10 @@ mod tests {
         let state = fixture_state().await;
         let user = [90u8; 32];
         state.db.create_user(&user, "free", "test").await.unwrap();
-        let holder = [0x44u8; 32];
+        // The resolved aggregation holder: `put_spam_model` stores a copy only for
+        // its attested x25519 (the fixture default, `[9; 32]`).
+        approve_bridge(&state.db, &[200u8; 32], BridgeRole::ContentProcessor).await;
+        let holder = [9u8; 32];
 
         // Write 1: model + copy v1.
         call_put_spam_model(
@@ -8572,6 +8749,99 @@ mod tests {
         );
     }
 
+    /// A holder copy is stored only for the RESOLVED aggregation
+    /// holder's x25519: a random pubkey (or any pubkey when no holder is
+    /// enrolled) is refused whole as `StaleModel` — the typed outcome whose
+    /// recovery is re-fetch (which re-volunteers `holder_seal_target`) and retry
+    /// — and nothing is written, so one actor cannot grow
+    /// `spam_model_holder_copies` without bound. A holder switch drops the
+    /// copies of the holder that went.
+    #[tokio::test]
+    async fn put_spam_model_holder_copy_for_an_unresolved_pubkey_is_refused() {
+        let state = fixture_state().await;
+        let user = [92u8; 32];
+        state.db.create_user(&user, "free", "test").await.unwrap();
+        let copy_for = |pk: [u8; 32], model: u8| PutSpamModelRequest {
+            sealed_model: vec![model; 64],
+            holder_copy: Some(fauna_protocol::wrapped_blob::SpamModelHolderCopy {
+                holder_pubkey: pk.to_vec(),
+                sealed_copy: vec![model; 32],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // No holder enrolled: any copy is refused and the model is not written.
+        let refused = call_put_spam_model(state.clone(), user, copy_for([0x77; 32], 0xA1))
+            .await
+            .expect("a refused copy is a typed outcome");
+        assert_eq!(refused.outcome, PutSpamModelOutcome::StaleModel);
+        assert!(state.db.get_spam_model(&user).await.unwrap().is_none());
+        assert!(
+            state
+                .db
+                .list_spam_model_holder_copies(&[0x77; 32])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // Holder enrolled (x25519 [9; 32]): a random pubkey is still refused…
+        approve_bridge(&state.db, &[201u8; 32], BridgeRole::ContentProcessor).await;
+        let refused = call_put_spam_model(state.clone(), user, copy_for([0x78; 32], 0xA2))
+            .await
+            .expect("typed outcome");
+        assert_eq!(refused.outcome, PutSpamModelOutcome::StaleModel);
+        assert!(
+            state
+                .db
+                .list_spam_model_holder_copies(&[0x78; 32])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // …while the resolved holder's copy is stored.
+        let ok = call_put_spam_model(state.clone(), user, copy_for([9; 32], 0xA3))
+            .await
+            .expect("resolved holder's copy ok");
+        assert_eq!(ok.outcome, PutSpamModelOutcome::Written);
+        assert_eq!(
+            state
+                .db
+                .list_spam_model_holder_copies(&[9; 32])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // A stale row for a holder that went is dropped by the next accepted copy.
+        state
+            .db
+            .put_spam_model_with_history(
+                &user,
+                &[0xA4; 64],
+                None,
+                Some((&[0x66; 32], &[0xC9; 8])),
+                None,
+            )
+            .await
+            .unwrap();
+        call_put_spam_model(state.clone(), user, copy_for([9; 32], 0xA5))
+            .await
+            .expect("resolved holder's copy ok");
+        assert!(
+            state
+                .db
+                .list_spam_model_holder_copies(&[0x66; 32])
+                .await
+                .unwrap()
+                .is_empty(),
+            "a copy for a holder that is no longer resolved is deleted"
+        );
+    }
+
     /// Opt-out (`set_baseline_contribution(false)`) and model reset both
     /// delete the actor's sealed-to-holder copies — the at-rest artifact
     /// follows the consent / the model it mirrors (`mail-spam.md`
@@ -8581,7 +8851,10 @@ mod tests {
         let state = fixture_state().await;
         let user = [91u8; 32];
         state.db.create_user(&user, "free", "test").await.unwrap();
-        let holder = [0x45u8; 32];
+        // The resolved aggregation holder: `put_spam_model` stores a copy only for
+        // its attested x25519 (the fixture default, `[9; 32]`).
+        approve_bridge(&state.db, &[200u8; 32], BridgeRole::ContentProcessor).await;
+        let holder = [9u8; 32];
         let seed = |st: Arc<crate::routes::AppState>| async move {
             call_put_spam_model(
                 st,
@@ -8906,7 +9179,10 @@ mod tests {
         let state = fixture_state().await;
         let user = [98u8; 32];
         state.db.create_user(&user, "free", "test").await.unwrap();
-        let holder = [0x45u8; 32];
+        // The resolved aggregation holder: `put_spam_model` stores a copy only for
+        // its attested x25519 (the fixture default, `[9; 32]`).
+        approve_bridge(&state.db, &[200u8; 32], BridgeRole::ContentProcessor).await;
+        let holder = [9u8; 32];
         let msg = vec![0x57u8; 32];
         let put = |model: u8, label: SpamLabel, copy: bool| PutSpamModelRequest {
             sealed_model: vec![model; 64],
@@ -8980,6 +9256,120 @@ mod tests {
             .expect("list ok")
             .events;
         assert_eq!(rows.len(), 3, "spam, ham, spam");
+    }
+
+    /// The compare-and-swap precondition (`mail-spam.md` § Transactional
+    /// update): a write naming a stored model that is no longer the stored one
+    /// — another writer's put landed after this writer's fetch — is refused
+    /// WHOLE with `stale_model`: the model, the history rows and the holder
+    /// copies stay byte-identical. A write naming the current model (or, on an
+    /// untrained actor, the "no stored model" marker) lands; a write naming
+    /// nothing keeps last-write-wins; a malformed precondition is refused.
+    #[tokio::test]
+    async fn put_spam_model_naming_a_stale_model_is_refused_and_writes_nothing() {
+        let state = fixture_state().await;
+        let user = [97u8; 32];
+        state.db.create_user(&user, "free", "test").await.unwrap();
+        // The resolved aggregation holder: `put_spam_model` stores a copy only for
+        // its attested x25519 (the fixture default, `[9; 32]`).
+        approve_bridge(&state.db, &[200u8; 32], BridgeRole::ContentProcessor).await;
+        let holder = [9u8; 32];
+        let put =
+            |model: u8, msg: u8, expected: Option<SpamModelPrecondition>| PutSpamModelRequest {
+                sealed_model: vec![model; 64],
+                history_op: Some(SpamHistoryOp::Insert {
+                    message_id: vec![msg; 32],
+                    mailbox: "INBOX".into(),
+                    sealed_subject: vec![0x58u8; 24],
+                    sealed_delta: vec![0x59u8; 48],
+                    label: SpamLabel::Spam,
+                    source: TrainingSource::ImapJunkFlag,
+                }),
+                holder_copy: Some(fauna_protocol::wrapped_blob::SpamModelHolderCopy {
+                    holder_pubkey: holder.to_vec(),
+                    sealed_copy: vec![model; 32],
+                    ..Default::default()
+                }),
+                expected_model: expected.map(SpamModelPrecondition::to_wire),
+                ..Default::default()
+            };
+        let stored_copy = |state: Arc<crate::routes::AppState>| async move {
+            state
+                .db
+                .list_spam_model_holder_copies(&holder)
+                .await
+                .unwrap()
+        };
+
+        // Two writers fetched the untrained actor; the first one's write lands…
+        let first = call_put_spam_model(
+            state.clone(),
+            user,
+            put(0xB1, 1, Some(SpamModelPrecondition::NoStoredModel)),
+        )
+        .await
+        .expect("first write ok");
+        assert_eq!(first.outcome, PutSpamModelOutcome::Written);
+        let copies_after_first = stored_copy(state.clone()).await;
+
+        // …and the second, computed from the same "no stored model", is stale.
+        let stale = call_put_spam_model(
+            state.clone(),
+            user,
+            put(0xB2, 2, Some(SpamModelPrecondition::NoStoredModel)),
+        )
+        .await
+        .expect("a stale write is a typed outcome, not an error");
+        assert_eq!(stale.outcome, PutSpamModelOutcome::StaleModel);
+        let (stored, ..) = state.db.get_spam_model(&user).await.unwrap().unwrap();
+        assert_eq!(
+            stored,
+            vec![0xB1u8; 64],
+            "the model is the last ACCEPTED write"
+        );
+        let rows = call_list_spam_training_history(state.clone(), user, None, None)
+            .await
+            .expect("list ok")
+            .events;
+        assert_eq!(rows.len(), 1, "the stale write's row did not land");
+        assert_eq!(
+            stored_copy(state.clone()).await,
+            copies_after_first,
+            "the stale write's holder copy did not land"
+        );
+
+        // The retry names the model it re-fetched, and lands.
+        let current = SpamModelPrecondition::of_stored(Some(&stored));
+        let retry = call_put_spam_model(state.clone(), user, put(0xB3, 2, Some(current)))
+            .await
+            .expect("retry ok");
+        assert_eq!(retry.outcome, PutSpamModelOutcome::Written);
+
+        // Naming the model the retry replaced is stale in turn.
+        let old = call_put_spam_model(state.clone(), user, put(0xB4, 3, Some(current)))
+            .await
+            .expect("typed outcome");
+        assert_eq!(old.outcome, PutSpamModelOutcome::StaleModel);
+        let (stored, ..) = state.db.get_spam_model(&user).await.unwrap().unwrap();
+        assert_eq!(stored, vec![0xB3u8; 64]);
+
+        // A writer from before the field names nothing: last-write-wins.
+        let blind = call_put_spam_model(state.clone(), user, put(0xB5, 4, None))
+            .await
+            .expect("blind write ok");
+        assert_eq!(blind.outcome, PutSpamModelOutcome::Written);
+        let rows = call_list_spam_training_history(state.clone(), user, None, None)
+            .await
+            .expect("list ok")
+            .events;
+        assert_eq!(rows.len(), 3, "messages 1, 2 (the retry) and 4");
+
+        // A precondition that is neither the marker nor a digest is malformed.
+        let mut bad = put(0xB6, 5, None);
+        bad.expected_model = Some(ByteBuf::from(vec![0u8; 16]));
+        assert!(call_put_spam_model(state.clone(), user, bad).await.is_err());
+        let (stored, ..) = state.db.get_spam_model(&user).await.unwrap().unwrap();
+        assert_eq!(stored, vec![0xB5u8; 64]);
     }
 
     /// The definition of done for the sealed-at-rest ruling (2026-10-01 survey
@@ -10101,21 +10491,20 @@ mod tests {
         // no holder is enrolled, so nobody ever answers the drain.
         for actor in [[70u8; 32], [71u8; 32], [72u8; 32]] {
             state.db.create_user(&actor, "free", "test").await.unwrap();
-            call_put_spam_model(
-                state.clone(),
-                actor,
-                PutSpamModelRequest {
-                    sealed_model: vec![0xEE; 64],
-                    holder_copy: Some(fauna_protocol::wrapped_blob::SpamModelHolderCopy {
-                        holder_pubkey: vec![0x44; 32],
-                        sealed_copy: vec![0xC1; 96],
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("sealed write ok");
+            // Seeded through the DB: with no holder resolved the RPC refuses a
+            // copy, so these are copies left behind by a holder that has
+            // since gone — the honest-erosion shape this test pins.
+            state
+                .db
+                .put_spam_model_with_history(
+                    &actor,
+                    &[0xEE; 64],
+                    None,
+                    Some((&[0x44; 32], &[0xC1; 96])),
+                    None,
+                )
+                .await
+                .expect("sealed write ok");
             call_set_baseline_contribution(state.clone(), actor, true)
                 .await
                 .expect("sealed contributor opts in");
@@ -10553,6 +10942,50 @@ mod tests {
             .await
             .unwrap();
         assert!(!read.published && !read.standing);
+    }
+
+    /// Standing publish turned off while a cadence run waits on its holder:
+    /// the run must not land a baseline after the admin's unpublish — but the
+    /// admin's own click, with standing off, still publishes.
+    #[tokio::test]
+    async fn a_cadence_run_in_flight_when_standing_turns_off_lands_nothing() {
+        let state = fixture_state().await;
+        let (admin, _) = publish_over_three_contributors(&state).await;
+        // Three changes since the served baseline, so the delta floor passes.
+        for (i, name) in [[21u8; 32], [22u8; 32], [23u8; 32]].into_iter().enumerate() {
+            join(&state, name, &format!("newcomer{i} spam words")).await;
+        }
+        set_standing_publish(&state, admin, true).await;
+        let now = crate::db::now_epoch_millis();
+        let flip = {
+            let state = state.clone();
+            async move { set_standing_publish(&state, admin, false).await }
+        };
+        let outcome = {
+            let state = state.clone();
+            crate::test_support::run_with_sim_holder_after(
+                &state.clone(),
+                async move {
+                    crate::spam_baseline::run_standing_publish_if_due(&state, now + 10 * DAY_MS)
+                        .await
+                },
+                flip,
+            )
+            .await
+        }
+        .unwrap()
+        .expect("standing was on when the tick started");
+        assert!(
+            outcome.deferred && !outcome.published,
+            "a cadence run must not land once standing is off"
+        );
+        assert_baseline_withdrawn(&state, 0x60, "the unpublish stands").await;
+
+        // The click is not a cadence run: it still publishes with standing off.
+        let reply = call_publish_spam_baseline(state.clone(), admin)
+            .await
+            .unwrap();
+        assert!(reply.published, "publish now works with standing off");
     }
 
     /// Leaving and rejoining before the next publish counts ONCE: dave's
@@ -11312,6 +11745,7 @@ mod tests {
                         label: "spam",
                         source: "imap_junk_flag",
                     }),
+                    None,
                     None,
                 )
                 .await

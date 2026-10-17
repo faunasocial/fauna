@@ -49,11 +49,13 @@ pub fn perform(req: &ElementReq) -> Value {
             Some(w) => gate(&w, "double-click", req).unwrap_or_else(|| actuate_double_click(&w)),
             None => json!({ "error": "not found" }),
         },
-        ElementKind::Type => match find::find_scoped(scope, id) {
+        // Indexed like every other actuation: a flat indexed field (the n-th
+        // `invite-request-row-deny-reason-field`) must receive the text, not row 0.
+        ElementKind::Type => match find::find_indexed_scoped(scope, id, req.index) {
             Some(w) => gate(&w, "type", req).unwrap_or_else(|| type_text(&w, &req.arg)),
             None => json!({ "error": "not found" }),
         },
-        ElementKind::Clear => match find::find_scoped(scope, id) {
+        ElementKind::Clear => match find::find_indexed_scoped(scope, id, req.index) {
             Some(w) => gate(&w, "clear", req).unwrap_or_else(|| clear(&w)),
             None => json!({ "error": "not found" }),
         },
@@ -244,6 +246,21 @@ fn attr(scope: &[find::ScopeStep], id: &str, name: &str, index: usize) -> Value 
         // ancestor cannot be scrolled out of view and answers by whether it is
         // mapped. `Value::Null` only when its bounds cannot be computed.
         "in-viewport" => in_viewport(&w),
+        // `position`: an inline player's live position in seconds
+        // (`video-thumbnail`, render-model.md § D6c → *Inline playback*) — the
+        // GTK media stream's `timestamp` (µs) off the `gtk::Video` standing in
+        // the element, the twin of web's `<video>.currentTime`: an ended stream
+        // reads its whole length, as a `<video>` does, not the 0 GTK snaps its
+        // timestamp back to (`played_position_us`). With no player there, the
+        // element's own published `"0.000"` answers.
+        "position" => video_in(&w)
+            .and_then(|video| video.media_stream())
+            .map(|media| {
+                let played = crate::views::feed::played_position_us(&media);
+                json!(format!("{:.3}", played / 1_000_000.0))
+            })
+            .or_else(|| crate::testid::test_attr_text(&w, name).map(|t| json!(t)))
+            .unwrap_or(Value::Null),
         "visible" => {
             if let Some(tv) = w.downcast_ref::<gtk::TextView>() {
                 let buffer = tv.buffer();
@@ -302,15 +319,31 @@ fn attr(scope: &[find::ScopeStep], id: &str, name: &str, index: usize) -> Value 
             } else {
                 w.downcast_ref::<adw::ComboRow>().map(|c| c.model())
             };
+            // The PAINTED texts (`drivers/base.py::option_texts`): a dropdown
+            // whose model holds stable keys paints each through its own
+            // expression (`feed-factor-select` names a trained topic, not its
+            // `topic:<hex>` key), so the expression answers when there is one.
+            let painter = w
+                .downcast_ref::<gtk::DropDown>()
+                .and_then(gtk::DropDown::expression);
             model.map_or(Value::Null, |model| {
-                let options: Vec<String> = model_strings(model.as_ref())
-                    .into_iter()
-                    .map(|(_, s)| s)
-                    .collect();
+                let options: Vec<String> = match (&painter, model.as_ref()) {
+                    (Some(expr), Some(list)) => (0..list.n_items())
+                        .filter_map(|i| list.item(i))
+                        .filter_map(|item| expr.evaluate_as::<String, _>(Some(&item)))
+                        .collect(),
+                    _ => model_strings(model.as_ref())
+                        .into_iter()
+                        .map(|(_, s)| s)
+                        .collect(),
+                };
                 json!(serde_json::to_string(&options).unwrap_or_default())
             })
         }
         _ => {
+            if let Some(text) = crate::testid::test_attr_text(&w, name) {
+                return json!(text);
+            }
             let prefix = format!("test-attr-{name}-");
             w.css_classes()
                 .iter()
@@ -358,14 +391,29 @@ fn tag_look(tag: &gtk::TextTag) -> Value {
 /// own `move-cursor` keybinding signal — the signal GTK's ArrowLeft/ArrowRight/
 /// Home/End bindings emit — so the buffer's `cursor-position` notify fires and
 /// every caret-move handler runs exactly as for a real key (the compose field's
-/// caret-edge marker reveal among them). Only the caret keys have a consumer;
-/// any other key or widget is refused, never acked (point 11).
+/// caret-edge marker reveal among them). Enter in a single-line entry emits its
+/// `activate` signal, the commit gesture of a page's one-field setting. Those are
+/// the only consumers; any other key or widget is refused, never acked (point 11).
 ///
 /// Escape is the one key bound by a shortcut rather than a widget signal (a
 /// dialog's "close me"), so it runs [`press_escape`] instead.
 fn press_key(w: &gtk::Widget, key: &str) -> Value {
     if key == "Escape" {
         return press_escape(w);
+    }
+    // A single-line entry's Enter is its `activate` signal (the page's commit
+    // gesture: a threshold, a search box) — emitted only on an entry a user
+    // could type into, as the real key would be.
+    if key == "Enter"
+        && let Some(entry) = w.downcast_ref::<gtk::Entry>()
+    {
+        if !entry.is_sensitive() || !entry.is_editable() {
+            return json!({
+                "error": "press_key \"Enter\": the entry is not editable (insensitive or read-only)"
+            });
+        }
+        entry.emit_activate();
+        return json!({ "ok": true });
     }
     // Enter on a focused control is its keyboard activation — the same effect
     // a click has (a row's `row-activated`, a button's `clicked`), and it
@@ -449,6 +497,22 @@ fn picture_of(w: &gtk::Widget) -> Option<gtk::Picture> {
 /// `ScrolledWindow` ancestor's viewport by driving the real vadjustment — the
 /// same adjustment the engagement-cue viewport observer samples, so an e2e
 /// dwell driven through this is an honest exposure, not an injected one.
+/// The `gtk::Video` that is `w` or one of its direct children — where
+/// `video-thumbnail` hosts its player.
+fn video_in(w: &gtk::Widget) -> Option<gtk::Video> {
+    if let Some(video) = w.downcast_ref::<gtk::Video>() {
+        return Some(video.clone());
+    }
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        if let Ok(video) = c.clone().downcast::<gtk::Video>() {
+            return Some(video);
+        }
+        child = c.next_sibling();
+    }
+    None
+}
+
 fn in_viewport(w: &gtk::Widget) -> Value {
     let Some(scrolled) = nearest_scrolled_window(w) else {
         return json!(if w.is_mapped() { "true" } else { "false" });
@@ -743,6 +807,13 @@ fn clear(w: &gtk::Widget) -> Value {
 /// a no-op under headless, coordinate-degraded automation.
 fn select(w: &gtk::Widget, value: &str) -> Value {
     if let Some(d) = w.downcast_ref::<gtk::DropDown>() {
+        // A declared option key wins over the painted label (`set_test_option_keys`).
+        if let Some(i) = crate::testid::test_option_keys(d)
+            .and_then(|keys| fauna_e2e_agent::select_match(&keys, value))
+        {
+            d.set_selected(i as u32);
+            return json!({ "ok": true });
+        }
         return match string_model_index(d.model().as_ref(), value) {
             Some(i) => {
                 d.set_selected(i);
@@ -752,6 +823,12 @@ fn select(w: &gtk::Widget, value: &str) -> Value {
         };
     }
     if let Some(c) = w.downcast_ref::<adw::ComboRow>() {
+        if let Some(i) = crate::testid::test_option_keys(c)
+            .and_then(|keys| fauna_e2e_agent::select_match(&keys, value))
+        {
+            c.set_selected(i as u32);
+            return json!({ "ok": true });
+        }
         return match string_model_index(c.model().as_ref(), value) {
             Some(i) => {
                 c.set_selected(i);
@@ -1149,6 +1226,26 @@ mod tests {
             let reply = select(drop.upcast_ref(), "alpha");
             assert_eq!(reply, json!({ "ok": true }));
             assert_eq!(drop.selected(), 0);
+        });
+    }
+
+    /// A picker whose painted labels are not its tokens (the report sheet's
+    /// "Something else" for `other`) selects by the token it declares, as tui,
+    /// android, apple and windows do; the label still selects.
+    #[test]
+    fn a_select_by_a_declared_option_key_lands_on_its_label() {
+        crate::testid::run_on_gtk_thread(|| {
+            let model = gtk::StringList::new(&["Why?", "Spam", "Something else"]);
+            let drop = gtk::DropDown::new(Some(model), gtk::Expression::NONE);
+            crate::testid::set_test_option_keys(&drop, &["", "spam", "other"]);
+
+            assert_eq!(select(drop.upcast_ref(), "other"), json!({ "ok": true }));
+            assert_eq!(drop.selected(), 2);
+            assert_eq!(select(drop.upcast_ref(), "Spam"), json!({ "ok": true }));
+            assert_eq!(drop.selected(), 1);
+
+            let reply = select(drop.upcast_ref(), "hate");
+            assert_eq!(reply.get("status").and_then(|s| s.as_u64()), Some(409));
         });
     }
 

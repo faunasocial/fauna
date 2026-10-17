@@ -17,10 +17,10 @@ use fauna_client_capabilities::rpc::CapabilitiesClient;
 use fauna_client_labelers::LabelersClient;
 use fauna_core::encoding::canonical_decode;
 use fauna_core::format::hex_full;
-use fauna_core::identity::ActorKeypair;
+use fauna_core::identity::{ActorId, ActorKeypair};
 use fauna_core::scoring::{
     AlgorithmLabeler, artifact_kind, validate_list_artifact, validate_text_model_artifact,
-    verify_labeler_metadata,
+    verify_labeler_metadata_for,
 };
 use fauna_protocol::{NestSeamError, RpcErrorClass, RpcRequester};
 
@@ -86,7 +86,15 @@ where
         &self,
         labeler_id: Vec<u8>,
     ) -> Result<InspectResult, LabelerCatalogApiError> {
-        let reply = self.labelers().inspect(labeler_id).await.map_err(map_err)?;
+        // A malformed id (not 32 bytes) can name no labeler: it never verifies.
+        let requested = <[u8; 32]>::try_from(labeler_id.as_slice())
+            .ok()
+            .map(ActorId);
+        let reply = self
+            .labelers()
+            .inspect(labeler_id.clone())
+            .await
+            .map_err(map_err)?;
         let metadata: AlgorithmLabeler =
             canonical_decode(reply.metadata_blob.as_ref()).map_err(|e| {
                 LabelerCatalogApiError::Transient {
@@ -96,9 +104,13 @@ where
         // Re-verify client-side (hash/size/signature) rather than trusting the
         // nest's word for it — the inspect-before-subscribe transparency gate
         // holds even against a compromised/lying nest (the same
-        // `verify_labeler_metadata` the nest's publish gate + the FFI holder
-        // use, so the check can't silently drift between the three call sites).
-        let mut verified = verify_labeler_metadata(&metadata, reply.wasm_bytes.as_ref()).is_ok();
+        // `verify_labeler_metadata_for` every by-id position shares), and pin the
+        // artifact's signed `algorithm_id` to the id the user asked about: a
+        // lying nest answering `inspect(X)` with publisher Y's validly signed
+        // artifact must not read as verified for X.
+        let mut verified = requested.as_ref().is_some_and(|id| {
+            verify_labeler_metadata_for(&metadata, reply.wasm_bytes.as_ref(), id).is_ok()
+        });
 
         // For a `list` artifact, inspect's whole promise is the decoded content
         // (frame § Tier-3 artifact kinds: "the client renders the exact
@@ -163,9 +175,20 @@ where
             (None, Vec::new())
         };
 
+        // The output half of the `label()` ABI, position (ii): a module whose
+        // signed `label_abi` this build cannot decode reads inert and says so,
+        // with subscribe disabled (`LabelerInspectView::subscribe_refusal_key`).
+        // Not folded into `verified`, for the text-model `version` reason above:
+        // newer is not tampered. Only a `wasm` module emits labels, so only its
+        // stamp is read.
+        let newer_than_this_app = artifact_kind == artifact_kind::WASM
+            && metadata.output_schema.label_abi > fauna_core::scoring::LABEL_ABI_CURRENT;
+
         Ok(InspectResult {
             view: LabelerInspectView {
-                labeler_id: hex_full(&metadata.algorithm_id.0),
+                // The requested id, never the artifact's own claim: the panel
+                // must not name a publisher the user did not ask about.
+                labeler_id: hex_full(&labeler_id),
                 version: metadata.version,
                 artifact_kind,
                 wasm_hash: hex_full(metadata.wasm_hash.as_bytes()),
@@ -175,6 +198,8 @@ where
                 needs_media_metadata: metadata.input_schema.needs_media_metadata,
                 needs_author: metadata.input_schema.needs_author,
                 needs_attachment_bytes: metadata.input_schema.needs_attachment_bytes,
+                label_abi: metadata.output_schema.label_abi,
+                newer_than_this_app,
                 verified,
                 list_name,
                 list_entries,
@@ -443,6 +468,15 @@ mod tests {
     }
 
     fn signed_metadata(kp: &ActorKeypair, wasm_bytes: &[u8]) -> AlgorithmLabeler {
+        signed_metadata_at_abi(kp, wasm_bytes, 1)
+    }
+
+    /// [`signed_metadata`] declaring output revision `label_abi`.
+    fn signed_metadata_at_abi(
+        kp: &ActorKeypair,
+        wasm_bytes: &[u8],
+        label_abi: u16,
+    ) -> AlgorithmLabeler {
         let mut labeler = AlgorithmLabeler {
             algorithm_id: kp.actor_id(),
             version: 3,
@@ -455,7 +489,7 @@ mod tests {
                 needs_author: false,
                 needs_attachment_bytes: false,
             },
-            output_schema: LabelerOutput::default(),
+            output_schema: LabelerOutput { label_abi },
             resource_limits: ScorerLimits {
                 max_memory_bytes: 16 * 1024 * 1024,
                 max_cpu_microseconds: 100_000,
@@ -514,7 +548,7 @@ mod tests {
             artifact_kind: "wasm".into(),
         });
 
-        let result = block_on(seam.do_inspect(vec![0u8; 32])).expect("inspect succeeds");
+        let result = block_on(seam.do_inspect(kp.actor_id().0.to_vec())).expect("inspect succeeds");
         assert!(result.view.verified, "a genuine signed artifact verifies");
         assert_eq!(result.view.labeler_id, hex::encode(kp.actor_id().0));
         assert_eq!(result.view.version, 3);
@@ -526,6 +560,64 @@ mod tests {
         );
         assert!(result.view.list_name.is_none());
         assert!(result.view.list_entries.is_empty());
+    }
+
+    /// The output-ABI ruling's position (ii) (content-moderation-and-ranking.md
+    /// § Tier-3 → *The output half of the `label()` ABI*): inspect transcribes
+    /// the signed `label_abi`; a revision this build reads is subscribable, and
+    /// one past `LABEL_ABI_CURRENT` reads newer-than-this-app — still verified
+    /// (newer is not tampered) — with subscribe refused for that reason.
+    #[test]
+    fn inspect_reads_a_newer_label_abi_as_inert_not_tampered() {
+        let current = fauna_core::scoring::LABEL_ABI_CURRENT;
+        for (abi, newer) in [(1, false), (current, false), (current + 1, true)] {
+            let kp = ActorKeypair::generate();
+            let wasm_bytes = b"pretend wasm module bytes".to_vec();
+            let seam = WsRpcLabelerCatalogNest::new(InspectRequester {
+                metadata: signed_metadata_at_abi(&kp, &wasm_bytes, abi),
+                wasm_bytes,
+                artifact_kind: "wasm".into(),
+            });
+            let view = block_on(seam.do_inspect(kp.actor_id().0.to_vec()))
+                .expect("inspect succeeds")
+                .view;
+            assert!(
+                view.verified,
+                "label_abi={abi}: a newer stamp is not tampering"
+            );
+            assert_eq!(view.label_abi, abi);
+            assert_eq!(view.newer_than_this_app, newer, "label_abi={abi}");
+            assert_eq!(view.subscribable(), !newer, "label_abi={abi}");
+            assert_eq!(
+                view.subscribe_refusal_key(),
+                newer.then_some(crate::machine::NEEDS_NEWER_APP_KEY),
+                "label_abi={abi}"
+            );
+        }
+    }
+
+    /// Only a `wasm` module emits labels, so only its revision stamp can make a
+    /// labeler newer than this app: a `list` carrying a future stamp is still
+    /// an ordinary, subscribable list.
+    #[test]
+    fn a_newer_label_abi_on_a_list_artifact_is_not_read() {
+        let kp = ActorKeypair::generate();
+        let bytes =
+            fauna_core::scoring::build_list_artifact(None, vec![([0x11u8; 32], 400)]).unwrap();
+        let seam = WsRpcLabelerCatalogNest::new(InspectRequester {
+            metadata: signed_metadata_at_abi(
+                &kp,
+                &bytes,
+                fauna_core::scoring::LABEL_ABI_CURRENT + 1,
+            ),
+            wasm_bytes: bytes,
+            artifact_kind: "list".into(),
+        });
+        let view = block_on(seam.do_inspect(kp.actor_id().0.to_vec()))
+            .expect("inspect succeeds")
+            .view;
+        assert!(!view.newer_than_this_app);
+        assert!(view.subscribable());
     }
 
     /// The frame's claim this machine exists to meet (content-moderation-and-
@@ -548,7 +640,7 @@ mod tests {
             artifact_kind: "list".into(),
         });
 
-        let result = block_on(seam.do_inspect(vec![0u8; 32])).expect("inspect succeeds");
+        let result = block_on(seam.do_inspect(kp.actor_id().0.to_vec())).expect("inspect succeeds");
         assert!(result.view.verified, "a genuine signed List verifies");
         assert_eq!(result.view.artifact_kind, "list");
         assert_eq!(result.view.list_name.as_deref(), Some("Small orange cats"));
@@ -571,7 +663,8 @@ mod tests {
     /// A `list` whose bytes don't decode as a List artifact must NOT read as
     /// verified — even when the metadata's hash/size/signature bind those very
     /// bytes (a signed blob of garbage). What cannot be inspected cannot be
-    /// trusted, and `verified` is what gates subscribe.
+    /// trusted: `verified` feeds `LabelerInspectView::subscribable`, which the
+    /// machine's subscribe re-reads at every gesture and refuses on.
     #[test]
     fn inspect_flags_an_undecodable_list_as_unverified() {
         let kp = ActorKeypair::generate();
@@ -585,13 +678,53 @@ mod tests {
             artifact_kind: "list".into(),
         });
 
-        let result = block_on(seam.do_inspect(vec![0u8; 32])).expect("inspect still answers");
+        let result =
+            block_on(seam.do_inspect(kp.actor_id().0.to_vec())).expect("inspect still answers");
         assert!(
             !result.view.verified,
             "an undecodable List must not read as verified"
         );
         assert!(result.view.list_name.is_none());
         assert!(result.view.list_entries.is_empty());
+    }
+
+    /// A lying nest answers `inspect(X)` with publisher Y's validly
+    /// signed, self-consistent artifact: hash, size and signature all check, so
+    /// only the id pin catches it. The view must read unverified (subscribe
+    /// disabled) and name the REQUESTED id, never Y.
+    #[test]
+    fn inspect_flags_another_publishers_signed_artifact_as_unverified() {
+        let requested = ActorKeypair::generate();
+        let other = ActorKeypair::generate();
+        let wasm_bytes = b"pretend wasm module bytes".to_vec();
+        let seam = WsRpcLabelerCatalogNest::new(InspectRequester {
+            metadata: signed_metadata(&other, &wasm_bytes),
+            wasm_bytes,
+            artifact_kind: "wasm".into(),
+        });
+
+        let view = block_on(seam.do_inspect(requested.actor_id().0.to_vec()))
+            .expect("inspect still answers")
+            .view;
+        assert!(!view.verified, "another publisher's artifact is not X's");
+        assert!(!view.subscribable());
+        assert_eq!(view.labeler_id, hex::encode(requested.actor_id().0));
+    }
+
+    /// An id that is not 32 bytes names no labeler: never verified, no panic.
+    #[test]
+    fn inspect_of_a_malformed_id_is_unverified() {
+        let kp = ActorKeypair::generate();
+        let wasm_bytes = b"pretend wasm module bytes".to_vec();
+        let seam = WsRpcLabelerCatalogNest::new(InspectRequester {
+            metadata: signed_metadata(&kp, &wasm_bytes),
+            wasm_bytes,
+            artifact_kind: "wasm".into(),
+        });
+        let view = block_on(seam.do_inspect(vec![1, 2, 3]))
+            .expect("inspect still answers")
+            .view;
+        assert!(!view.verified);
     }
 
     #[test]
@@ -607,7 +740,8 @@ mod tests {
             artifact_kind: String::new(),
         });
 
-        let result = block_on(seam.do_inspect(vec![0u8; 32])).expect("inspect still decodes");
+        let result =
+            block_on(seam.do_inspect(kp.actor_id().0.to_vec())).expect("inspect still decodes");
         assert!(
             !result.view.verified,
             "hash/size mismatch must NOT read as verified"

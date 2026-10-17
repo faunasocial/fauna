@@ -793,6 +793,61 @@ impl CacheDb {
         Ok(outcome)
     }
 
+    /// [`Self::replace_caldav_event_by_uid`], but **create-only across the whole
+    /// actor**: the row is written only if no event carries `uid_hash` on ANY of
+    /// `actor`'s calendars, tested in the same transaction as the write, so no
+    /// interleaving can replace or duplicate a same-UID event. `Ok(None)` is the
+    /// refusal — nothing was touched. The placement of an emailed invitation
+    /// (`caldav-server.md` § Server-side auto-schedule, rule (4)), whose body is
+    /// written by an unauthenticated stranger.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_caldav_event_if_uid_absent(
+        &self,
+        actor: &[u8; 32],
+        calendar_id: &[u8; 32],
+        uid_hash: &[u8],
+        new_event_id: &[u8; 32],
+        new_record_cid: &fauna_cbor::Cid,
+        new_encrypted_index_hint: &[u8],
+        timestamp: i64,
+        ciphertext_size: u32,
+        now: i64,
+    ) -> Result<Option<ReplaceCaldavEventOutcome>> {
+        let conn = self.conn.lock().await;
+        let tx = conn
+            .unchecked_transaction()
+            .context("create_caldav_event_if_uid_absent: begin tx")?;
+        let taken: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM bridge_caldav_events \
+                 WHERE actor_id = ?1 AND uid_hash = ?2 LIMIT 1",
+                rusqlite::params![&actor[..], uid_hash],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("create_caldav_event_if_uid_absent: uid lookup")?;
+        if taken.is_some() {
+            return Ok(None);
+        }
+        let outcome = replace_caldav_event_by_uid_in(
+            &tx,
+            actor,
+            calendar_id,
+            uid_hash,
+            None,
+            new_event_id,
+            new_record_cid,
+            new_encrypted_index_hint,
+            None,
+            timestamp,
+            ciphertext_size,
+            now,
+        )?;
+        tx.commit()
+            .context("create_caldav_event_if_uid_absent: commit")?;
+        Ok(Some(outcome))
+    }
+
     /// DELETE-by-UID: remove the event row for `(actor, calendar_id, uid_hash)`
     /// and write a tombstone. All SQL under a **single `conn.lock()` scope**;
     /// the tombstone-INSERT + row-DELETE + calendar-state bump commit in one
@@ -1092,6 +1147,12 @@ impl CacheDb {
     /// handling); the MDA then emits `DAV:valid-sync-token` and the MUA
     /// full-resyncs. Pure read; the `(actor_id, calendar_id, modseq)` index
     /// covers the `modseq >` range, then `expunged_at` is checked per row.
+    ///
+    /// Also `true` when `since_modseq` is below the calendar's prune floor
+    /// (`bridge_caldav_calendars.pruned_modseq`, set by a restore from a
+    /// retention-pruned placement manifest): the rebuilt log is then missing
+    /// at least one past-retention deletion after `since_modseq`, which the
+    /// row check above can no longer see.
     pub async fn caldav_has_expunged_past_retention(
         &self,
         actor: &[u8; 32],
@@ -1107,7 +1168,11 @@ impl CacheDb {
                 "SELECT EXISTS( \
                      SELECT 1 FROM bridge_caldav_expunged \
                      WHERE actor_id = ?1 AND calendar_id = ?2 \
-                       AND modseq > ?3 AND expunged_at < ?4)",
+                       AND modseq > ?3 AND expunged_at < ?4) \
+                 OR EXISTS( \
+                     SELECT 1 FROM bridge_caldav_calendars \
+                     WHERE actor_id = ?1 AND calendar_id = ?2 \
+                       AND pruned_modseq > ?3)",
                 rusqlite::params![&actor[..], &calendar_id[..], since_modseq, cutoff_ts],
                 |row| row.get(0),
             )
@@ -2140,6 +2205,109 @@ mod tests {
             }
             other => panic!("expected Created; got {:?}", other),
         }
+    }
+
+    /// Every event row of `actor`, as comparable tuples.
+    async fn event_rows(
+        db: &CacheDb,
+        actor: &[u8; 32],
+    ) -> Vec<(Vec<u8>, Vec<u8>, Vec<u8>, String)> {
+        let conn = db.conn().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT calendar_id, uid_hash, event_id, etag FROM bridge_caldav_events \
+                 WHERE actor_id = ?1 ORDER BY calendar_id, event_id",
+            )
+            .unwrap();
+        stmt.query_map([&actor[..]], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+    }
+
+    /// `create_caldav_event_if_uid_absent` for a body/hint, deriving identity as
+    /// the handler does (see `replace_caldav_event_by_uid_deriving`).
+    async fn create_if_uid_absent_deriving(
+        db: &CacheDb,
+        actor: &[u8; 32],
+        cal: &[u8; 32],
+        uid: &[u8],
+        body: &[u8],
+    ) -> Option<ReplaceCaldavEventOutcome> {
+        let event_id = derive_caldav_event_id(actor, 1_700_000_000, body);
+        let cid = caldav_record_cid(body, b"hint").expect("derive record_cid");
+        ensure_cal_mirror_record(db, actor, &cid).await;
+        db.create_caldav_event_if_uid_absent(
+            actor,
+            cal,
+            uid,
+            &event_id,
+            &cid,
+            b"hint",
+            1_700_000_000,
+            body.len() as u32,
+            1_700_000_100,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// The emailed-invitation placement is create-only in the SAME
+    /// transaction as its UID test: a same-UID event already on ANY of the
+    /// actor's calendars — stored by a calendar app after the placement's
+    /// pre-check — is left byte-for-byte untouched, and nothing lands beside it.
+    #[tokio::test]
+    async fn create_if_uid_absent_refuses_a_uid_on_any_calendar_and_touches_nothing() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let actor = make_actor(130);
+        let personal = make_calendar_id(131);
+        let other = make_calendar_id(132);
+        for cal in [&personal, &other] {
+            db.insert_bridge_caldav_calendar(&actor, cal, b"m", 1_700_000_000)
+                .await
+                .unwrap();
+        }
+        let uid = make_uid_hash(140);
+        // The user's own app stores the UID on a different calendar.
+        db.replace_caldav_event_by_uid_deriving(
+            &actor,
+            &other,
+            &uid,
+            None,
+            b"users-body",
+            b"hint",
+            None,
+            1_700_000_000,
+            10,
+            1_700_000_050,
+        )
+        .await
+        .unwrap();
+        let before = event_rows(&db, &actor).await;
+
+        let refused =
+            create_if_uid_absent_deriving(&db, &actor, &personal, &uid, b"strangers-body").await;
+        assert!(refused.is_none(), "same-UID placement must be refused");
+        assert_eq!(
+            event_rows(&db, &actor).await,
+            before,
+            "no row replaced, none added"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_if_uid_absent_creates_when_the_uid_is_new() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let actor = make_actor(133);
+        let cal = make_calendar_id(134);
+        db.insert_bridge_caldav_calendar(&actor, &cal, b"m", 1_700_000_000)
+            .await
+            .unwrap();
+        let o =
+            create_if_uid_absent_deriving(&db, &actor, &cal, &make_uid_hash(141), b"body").await;
+        assert!(matches!(o, Some(ReplaceCaldavEventOutcome::Created { .. })));
     }
 
     #[tokio::test]

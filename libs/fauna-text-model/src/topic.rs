@@ -426,6 +426,16 @@ impl TopicModel {
         self.more_examples.saturating_add(self.less_examples)
     }
 
+    /// Total **engagement** training documents (`watch-complete` + `skip`
+    /// transitions currently counted) — the weak-weighted v2 twin of
+    /// [`example_count`](Self::example_count), never sent to the nest. An
+    /// owner-side read: what lets a reader confirm activity taught the model
+    /// without reaching into its per-n-gram counts.
+    pub fn engagement_example_count(&self) -> u32 {
+        self.more_engagement_examples
+            .saturating_add(self.less_engagement_examples)
+    }
+
     /// Raw NB posterior `P(more | text)` as integer per-mille `[0, 1000]`.
     /// An empty/untrained model returns the neutral `500`; the cold-start gate
     /// is the damp ([`damped_score`](Self::damped_score)), not this raw score.
@@ -1087,6 +1097,30 @@ mod tests {
             "fully reversed engagement restores pristine bytes"
         );
         assert_eq!(m, TopicModel::new());
+    }
+
+    #[test]
+    fn engagement_example_count_tracks_engagement_only() {
+        // The engagement documents counted, apart from the explicit ones: a
+        // watch counts, a flip to skip stays one document, clearing drops it,
+        // and an explicit mark never moves it (nor engagement `example_count`).
+        let mut m = TopicModel::new();
+        m.train("aa", "fluffy cat", ExampleLabel::MoreLikeThis);
+        assert_eq!((m.example_count(), m.engagement_example_count()), (1, 0));
+        m.train_engagement("purring dog", None, Some(ExampleLabel::MoreLikeThis));
+        assert_eq!((m.example_count(), m.engagement_example_count()), (1, 1));
+        m.train_engagement(
+            "purring dog",
+            Some(ExampleLabel::MoreLikeThis),
+            Some(ExampleLabel::LessLikeThis),
+        );
+        assert_eq!(
+            m.engagement_example_count(),
+            1,
+            "a flip is still one document"
+        );
+        m.train_engagement("purring dog", Some(ExampleLabel::LessLikeThis), None);
+        assert_eq!((m.example_count(), m.engagement_example_count()), (1, 0));
     }
 
     #[test]

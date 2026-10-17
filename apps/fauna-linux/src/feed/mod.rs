@@ -13,4 +13,5 @@ pub mod drafts;
 pub mod host;
 pub mod observer;
 pub mod post_media;
+pub mod ranged_stream;
 pub mod viewport;

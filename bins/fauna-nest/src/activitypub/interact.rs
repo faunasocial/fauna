@@ -44,10 +44,21 @@ pub async fn route_unified_interaction(
             ApiError::internal("failed to look up ActivityPub account")
         })?
         .ok_or_else(|| {
-            ApiError::bad_request(
+            ApiError::refused(
+                fauna_protocol::RpcError::CODE_ACTIVITYPUB_NOT_LINKED,
                 "no linked ActivityPub account; enable the ActivityPub bridge from the Bridges page first",
             )
         })?;
+
+    // Every verb federates under this actor, whose document answers 404 while
+    // federation is switched off — so no verb signs an activity in its name
+    // (`activitypub.md` § Architecture → *Outbound interactions*).
+    if !account.enabled {
+        return Err(ApiError::refused(
+            fauna_protocol::RpcError::CODE_ACTIVITYPUB_SWITCHED_OFF,
+            "ActivityPub federation is switched off; enable it from the Bridges page first",
+        ));
+    }
 
     let actor_url = &account.actor_url;
 
@@ -74,6 +85,10 @@ pub async fn route_unified_interaction(
                     ApiError::internal("failed to enqueue AP delivery")
                 },
             )?;
+            // Enqueue-then-nudge, as every producer does (`activitypub.md`
+            // § Outbound delivery): without it the activity waited out the
+            // worker's 30 s backstop poll.
+            state.activitypub.delivery_nudge.notify_one();
 
             tracing::info!(
                 actor = actor_hex,
@@ -105,6 +120,10 @@ pub async fn route_unified_interaction(
                     ApiError::internal("failed to enqueue AP delivery")
                 },
             )?;
+            // Enqueue-then-nudge, as every producer does (`activitypub.md`
+            // § Outbound delivery): without it the activity waited out the
+            // worker's 30 s backstop poll.
+            state.activitypub.delivery_nudge.notify_one();
 
             tracing::info!(
                 actor = actor_hex,
@@ -123,18 +142,11 @@ pub async fn route_unified_interaction(
         // The eligibility door: the caller must be able to federate the post
         // it is about to compose; the native arm's ack verbatim (the
         // dispatcher adds the target's counters — it is a local row).
-        "reply" | "quote" => {
-            if !account.enabled {
-                return Err(ApiError::bad_request(
-                    "ActivityPub federation is switched off; enable it from the Bridges page first",
-                ));
-            }
-            Ok(Json(json!({
-                "action": action,
-                "target_post_id": post_id_hex,
-                "source": "activitypub",
-            })))
-        }
+        "reply" | "quote" => Ok(Json(json!({
+            "action": action,
+            "target_post_id": post_id_hex,
+            "source": "activitypub",
+        }))),
         _ => Err(ApiError::bad_request(format!(
             "action '{action}' is not supported on ActivityPub"
         ))),
@@ -226,6 +238,62 @@ mod tests {
                 "{enabled:?}"
             );
             assert!(err.message.contains("Bridges page"), "{}", err.message);
+            let want = match enabled {
+                None => fauna_protocol::RpcError::CODE_ACTIVITYPUB_NOT_LINKED,
+                Some(_) => fauna_protocol::RpcError::CODE_ACTIVITYPUB_SWITCHED_OFF,
+            };
+            assert_eq!(err.code, Some(want), "{enabled:?}");
+        }
+    }
+
+    /// `activitypub.md` § Architecture → *Outbound interactions*: a like or a
+    /// boost takes the same two refusals as the reply door, and a refused one
+    /// enqueues nothing — a switched-off actor's document answers 404, so no
+    /// activity may be signed in its name.
+    #[tokio::test]
+    async fn like_and_repost_are_refused_without_a_linked_and_enabled_account() {
+        let actor_hex = hex::encode([0x23u8; 32]);
+        for action in ["like", "repost"] {
+            for enabled in [None, Some(false)] {
+                let state = door_state(&actor_hex, enabled).await;
+                let err = route_unified_interaction(&state, &actor_hex, TARGET, action)
+                    .await
+                    .expect_err("must refuse");
+                assert_eq!(
+                    err.status,
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "{action} {enabled:?}"
+                );
+                assert!(err.message.contains("Bridges page"), "{}", err.message);
+                let want = match enabled {
+                    None => fauna_protocol::RpcError::CODE_ACTIVITYPUB_NOT_LINKED,
+                    Some(_) => fauna_protocol::RpcError::CODE_ACTIVITYPUB_SWITCHED_OFF,
+                };
+                assert_eq!(err.code, Some(want), "{action} {enabled:?}");
+                let conn = state.db.conn().await;
+                let queued: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM ap_delivery_queue", [], |r| r.get(0))
+                    .unwrap();
+                assert_eq!(queued, 0, "{action} {enabled:?}");
+            }
+        }
+    }
+
+    /// An enabled account still federates a like and a boost.
+    #[tokio::test]
+    async fn like_and_repost_enqueue_with_an_enabled_account() {
+        let actor_hex = hex::encode([0x24u8; 32]);
+        for (action, kind) in [("like", "Like"), ("repost", "Announce")] {
+            let state = door_state(&actor_hex, Some(true)).await;
+            let Json(ack) = route_unified_interaction(&state, &actor_hex, TARGET, action)
+                .await
+                .unwrap_or_else(|e| panic!("{action} must enqueue: {}", e.message));
+            assert_eq!(ack["activity_type"], kind);
+            let conn = state.db.conn().await;
+            let queued: i64 = conn
+                .query_row("SELECT COUNT(*) FROM ap_delivery_queue", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(queued, 1, "{action}");
         }
     }
 }

@@ -66,6 +66,13 @@ impl ArchiveSourceKind {
             Self::Instagram => "Instagram",
         }
     }
+
+    /// Where the export is requested (`Platform::export_request_url`).
+    pub fn export_request_url(self) -> &'static str {
+        self.platform()
+            .export_request_url()
+            .expect("every picker entry is a platform this build names")
+    }
 }
 
 /// Step 3's audience-mode switch (`archive-import.md` § Audience mapping).
@@ -135,6 +142,10 @@ pub struct ArchiveSummaryView {
 pub struct ArchiveImportSnapshot {
     pub step: ArchiveImportStep,
     pub source_kind: ArchiveSourceKind,
+    /// Step 1's deep link: the page on the chosen platform where the export
+    /// is requested (`ArchiveSourceKind::export_request_url`; derived — the
+    /// machine fills it on every read).
+    pub source_export_url: String,
     /// `archive-import-archive-path` — path entry on tui/desktop; web's file
     /// input writes the picked name here for display.
     pub archive_path: String,
@@ -156,6 +167,12 @@ pub struct ArchiveImportSnapshot {
     pub skipped: u64,
     pub errored: u64,
     pub current_category: Option<String>,
+    /// Step 5's elapsed time and estimate, whole seconds: the run's active
+    /// time as this app watched it (it stops while paused), and the time
+    /// left at the rate watched — `None` until a record has settled under
+    /// this app's clock. Derived on every read (`timing.rs`).
+    pub elapsed_secs: u64,
+    pub eta_secs: Option<u64>,
     /// `archive-import-error-log`, newest last.
     pub skip_log: Vec<String>,
     /// `Some(false)` ⇒ the nest predates hidden tiers: non-public categories
@@ -175,6 +192,7 @@ impl ArchiveImportSnapshot {
         Self {
             step: ArchiveImportStep::Source,
             source_kind: ArchiveSourceKind::Facebook,
+            source_export_url: ArchiveSourceKind::Facebook.export_request_url().to_string(),
             archive_path: String::new(),
             summary: None,
             categories: Vec::new(),
@@ -190,6 +208,8 @@ impl ArchiveImportSnapshot {
             skipped: 0,
             errored: 0,
             current_category: None,
+            elapsed_secs: 0,
+            eta_secs: None,
             skip_log: Vec::new(),
             nest_supports_hidden_tiers: None,
             resume_available: false,
@@ -238,6 +258,12 @@ mod vocabulary_tests {
                 "the snapshot's picker mirrors the named set"
             );
             assert_eq!(kind.label(), platform.label());
+            let url = kind.export_request_url();
+            assert!(url.starts_with("https://"), "{url}");
+            assert!(
+                url.contains(platform.token()),
+                "step 1 links to the chosen platform's own export page: {url}"
+            );
         }
     }
 }

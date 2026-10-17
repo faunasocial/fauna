@@ -174,7 +174,7 @@ pub enum RequestMethod {
 
     // Location ↔ folder binding (multi-root on-demand). Binds an already-added
     // location to a nest folder; does NOT start the hydration host (that is the
-    // host slice). See `docs/goal/behavior/file-sync.md`
+    // host slice). See `docs/goal/behavior/on-demand-files.md`
     // § On-Demand Files (*Hosting multiple on-demand folders*).
     //
     // Wire note (applies to every variant here): serde's externally-tagged repr
@@ -349,14 +349,31 @@ pub enum RequestMethod {
     /// The same-account peer listener lives in the engine holder's pump, which
     /// on a desktop is usually this agent; the app writes the device-local row
     /// first and then sends this, so the pass whose ensure step reads the row
-    /// runs within the gesture rather than at the 300 s backstop. Structurally
-    /// local: it names this process's own pump and carries nothing. A no-op
-    /// `Empty` when no store is mounted or this agent is not the engine holder
-    /// (an app's runtime holds it and ran its own pass); the pass's own outcome
-    /// is its report's, never the reply's. Best-effort on the caller's side:
+    /// runs within the gesture rather than at the 300 s backstop. Also sent by
+    /// an app runtime that just yielded the engine role to this agent, so the
+    /// role is taken now (`account-runtime.md` § Multi-instance concurrency →
+    /// *The agent holds the role when present*, part 4): the agent runs
+    /// `reconcile_now` whether or not it holds the engine — a non-holder's is
+    /// the re-election. Structurally local: it names this process's own pump
+    /// and carries nothing. A no-op `Empty` when no store is mounted; the
+    /// pass's own outcome is its report's, never the reply's. Best-effort on the caller's side:
     /// the row is the fact the next full pass reads either way. Additive unit
     /// variant (2026-10-06); replies [`ResponsePayload::Empty`].
     ReconcileAccountRuntime,
+
+    /// Walk the fleet scope of the account store this agent has mounted, now,
+    /// on an app runtime's behalf, and say whether the walk landed — the
+    /// holder's arm of a non-holder's awaited walk (`account-runtime.md`
+    /// § Multi-instance concurrency → *A non-holder's awaited fleet walk
+    /// reaches the holder*): the app's runtime beside this agent is not the
+    /// engine-role holder, its mail refresh needs a walked custody before it
+    /// re-seals, and so it asks the holder to walk and then reads the walked
+    /// rows from the store the two share. Invoke-and-reply, never a silent
+    /// drop: replies [`ResponsePayload::FleetWalked`] within
+    /// [`WALK_FLEET_NOW_BOUND`] — `walked: false` with the reason when no
+    /// store is mounted, the walk failed, or it outlived the bound (the pass
+    /// runs on). Additive unit variant (2026-10-12).
+    WalkFleetNow,
 
     /// One page of ACCEPTED peer-served share rows handed to the resident
     /// engine serving `folder` for provisional ingest (slice E): the app owns
@@ -454,6 +471,35 @@ pub enum RequestMethod {
     /// Additive variant (2026-09-26).
     GetCustodianReseed,
 
+    /// Recover the owner's nest from this device's sealed custodian store
+    /// after an accepted source regression: the confirmed
+    /// `backup-audit-recover-button` action on this device's own client-device
+    /// row (`docs/goal/architecture/segment-backup-protocol.md` § Client-device
+    /// custodian (pull) → *Restore* → *Recovery from this device's own store*,
+    /// question (2)). Replies [`ResponsePayload::CustodianRecover`] with the
+    /// job's state at once.
+    ///
+    /// The re-seed's carrier ([`Self::ReseedCustodianStore`]) for the
+    /// recovery's leg: a job, not a call; run here because this agent is the
+    /// store's one writer and the leg's duties write it; a live custodian stint
+    /// is stopped first; **one store-job slot serves both ceremonies**, so a
+    /// press while either runs starts nothing, and a reclaim refuses during
+    /// either. The sets are the ones the store's own record stands for.
+    ///
+    /// Carries the owner's `NestBackupKey` for this one job, never persisted
+    /// (`docs/goal/architecture/owner-key-material.md` § Path A-sibling-0): the
+    /// job grants it to the owner's nest first, then re-seals under it.
+    ///
+    /// Additive variant (2026-10-09).
+    RecoverCustodianStore(CustodianRecoverRequest),
+
+    /// Read the recovery job's state. Replies
+    /// [`ResponsePayload::CustodianRecover`]. Read-only; `Idle` when no job ran
+    /// since the agent started.
+    ///
+    /// Additive variant (2026-10-09).
+    GetCustodianRecover,
+
     /// The display names this device's sealed custodian store learned for its
     /// covered-folder sets (`fauna_sync_engine::custodian_store::CustodianStore::
     /// folder_names`). Replies [`ResponsePayload::CustodianFolderNames`].
@@ -520,6 +566,20 @@ pub enum RequestMethod {
         #[serde(default)]
         now_offset_secs: i64,
     },
+
+    /// **Test-only.** How the `ws-device` push arm has decided every
+    /// `fauna.push.notification` frame it heard since the agent started, and
+    /// how many apps hold an attachment right now. Replies
+    /// [`ResponsePayload::PushArmTally`].
+    ///
+    /// The arm decides a frame after the nest has offered it, on its own task,
+    /// and a frame it withholds for an attached app leaves nothing behind to
+    /// observe — so "the agent stayed silent" is assertable only once the
+    /// agent says it decided (`testing.md` convention 14). Compiled out of
+    /// release artifacts exactly as [`Self::CustodianRunPassNow`] is
+    /// (convention 15); a release agent refuses the name.
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    GetPushArmTally,
 }
 
 impl RequestMethod {
@@ -566,14 +626,19 @@ impl RequestMethod {
             Self::ApplyHeldDeletes { .. } => "ApplyHeldDeletes",
             Self::GetShareServeInfo => "GetShareServeInfo",
             Self::ReconcileAccountRuntime => "ReconcileAccountRuntime",
+            Self::WalkFleetNow => "WalkFleetNow",
             Self::ShareIngest { .. } => "ShareIngest",
             Self::GetCustodianStore => "GetCustodianStore",
             Self::ReclaimCustodianStore => "ReclaimCustodianStore",
             Self::ReseedCustodianStore(_) => "ReseedCustodianStore",
             Self::GetCustodianReseed => "GetCustodianReseed",
+            Self::RecoverCustodianStore(_) => "RecoverCustodianStore",
+            Self::GetCustodianRecover => "GetCustodianRecover",
             Self::GetCustodianFolderNames => "GetCustodianFolderNames",
             #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
             Self::CustodianRunPassNow { .. } => "CustodianRunPassNow",
+            #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+            Self::GetPushArmTally => "GetPushArmTally",
         }
     }
 }
@@ -583,7 +648,7 @@ impl RequestMethod {
 // The identity-holding WinUI app provisions the user-session sync helper with the
 // least-privilege capability it needs to hydrate on-demand files — never the identity
 // seed. Phase 1 = the owner's `BackupKey` (opens owner-only file chunks for decrypt) +
-// a renewable nest bearer. See `docs/goal/behavior/file-sync.md` § On-Demand Files and
+// a renewable nest bearer. See `docs/goal/behavior/on-demand-files.md` § On-Demand Files and
 // `docs/goal/architecture/key-material-hierarchy.md` rule #7. Held in memory only and
 // re-provisioned each login; every cleartext copy is zeroized on drop and redacted in Debug.
 
@@ -944,7 +1009,7 @@ pub const SIGNED_OUT_KEY: &str = "signed-out/v1";
 
 /// A durable record that an account **signed out on this machine** — the
 /// reconcile that `sync-agent.md` § Credential model owes consequence 1 of
-/// `on-demand-files.md` § Multi-account × File Provider.
+/// `on-demand-files-apple.md` § Multi-account × File Provider.
 ///
 /// **Why it exists.** Tearing the agent down is one best-effort local RPC
 /// (`SyncAgentProvisioner::unprovision`), and what that RPC must revoke is
@@ -1133,6 +1198,8 @@ pub enum ResponsePayload {
     /// Reply to [`RequestMethod::GetShareServeInfo`] — one row per bound
     /// folder with a state DB on disk.
     ShareServeInfo(Vec<ShareServeFolderInfo>),
+    /// Reply to [`RequestMethod::WalkFleetNow`].
+    FleetWalked(FleetWalkOutcome),
     /// Reply to [`RequestMethod::ShareIngest`].
     ShareIngested(ShareIngestOutcome),
     /// Reply to [`RequestMethod::GetCustodianStore`].
@@ -1142,11 +1209,41 @@ pub enum ResponsePayload {
     /// Reply to [`RequestMethod::ReseedCustodianStore`] and
     /// [`RequestMethod::GetCustodianReseed`].
     CustodianReseed(CustodianReseedState),
+    /// Reply to [`RequestMethod::RecoverCustodianStore`] and
+    /// [`RequestMethod::GetCustodianRecover`].
+    CustodianRecover(CustodianRecoverState),
     /// Reply to [`RequestMethod::GetCustodianFolderNames`], sorted.
     CustodianFolderNames(Vec<String>),
     /// **Test-only.** Reply to [`RequestMethod::CustodianRunPassNow`].
     #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
     CustodianPassReport(CustodianPassReport),
+    /// **Test-only.** Reply to [`RequestMethod::GetPushArmTally`].
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    PushArmTally(PushArmTally),
+}
+
+/// The `ws-device` push arm's decisions so far — the reply to
+/// [`RequestMethod::GetPushArmTally`]. Every frame the arm hears lands in
+/// exactly one of the four outcome counts, after its decision (and, for a
+/// post, after the platform answered), so a count that moved is a frame
+/// already decided.
+///
+/// **Test-only**, compiled out of release artifacts (`testing.md`
+/// convention 15).
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushArmTally {
+    /// Apps holding an attachment lease right now (`RequestMethod::AttachApp`
+    /// connections still open).
+    pub attached_apps: u64,
+    /// Frames withheld because an app was attached — it owns the banner.
+    pub withheld: u64,
+    /// Frames dropped because the agent had no sink to post to.
+    pub no_sink: u64,
+    /// Frames posted as a banner.
+    pub posted: u64,
+    /// Frames whose post the platform refused.
+    pub failed: u64,
 }
 
 /// What this device's sealed custodian store occupies — the reply to
@@ -1189,6 +1286,11 @@ pub struct CustodianSourceRegression {
     pub served: u32,
     /// Unix seconds of the first pass that found the source there.
     pub observed_at: i64,
+    /// Unix seconds of the pass whose `fauna.segments.counter_floor` landed on
+    /// the source at `held`; `None` until one lands.
+    /// `#[serde(default)]`: an older agent's reply decodes as not yet floored.
+    #[serde(default)]
+    pub floored_at: Option<i64>,
 }
 
 impl CustodianStoreInfo {
@@ -1338,6 +1440,85 @@ pub enum CustodianReseedSetOutcome {
     Unknown(fauna_cbor::CarriedValue),
 }
 
+/// What [`RequestMethod::RecoverCustodianStore`] carries: the owner's
+/// `NestBackupKey` alone, exactly as [`CustodianReseedRequest`] carries it — the
+/// same zeroize-on-drop, redacted-`Debug` frame, since the recovery's store end
+/// grants and re-seals under the same key the re-seed does.
+pub type CustodianRecoverRequest = CustodianReseedRequest;
+
+/// The recovery job, as [`RequestMethod::GetCustodianRecover`] reports it —
+/// the re-seed job's state machine ([`CustodianReseedState`]) over the
+/// recovery's outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CustodianRecoverState {
+    /// No job since the agent started.
+    Idle,
+    /// A job is running.
+    Running,
+    /// The shared driver reached its end; each set's result is in the report.
+    Finished(CustodianRecoverReport),
+    /// The run stopped early. Re-running is always safe (the grant replaces,
+    /// the leg resumes by content address, the verb recovers nothing twice),
+    /// and `phase` says where: `store` (no store to read, the stint would not
+    /// stop, or the other store ceremony is running), `grant` or `transport`.
+    Failed { phase: String, detail: String },
+    /// A state a newer agent names that this build does not, carried whole
+    /// (`transport.md` § Rule 3 in full). It reads as [`Self::Failed`], never
+    /// as running (`fauna_client_sync::recover_wire::job_from_state`). Never
+    /// written by this build.
+    #[serde(untagged)]
+    Unknown(fauna_cbor::CarriedValue),
+}
+
+/// The wire form of `fauna_client_backup::recover::RecoveryOutcome`.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustodianRecoverReport {
+    /// One entry per set, in run order.
+    pub sets: Vec<CustodianRecoverSet>,
+}
+
+/// One set's line in the recovery's result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustodianRecoverSet {
+    pub set_name: String,
+    pub outcome: CustodianRecoverSetOutcome,
+    /// A post-recovery duty that did not complete, and why.
+    #[serde(default)]
+    pub duties_unfinished: Option<String>,
+}
+
+/// `fauna.backup.custody.recover`'s counts, as the result view reads them
+/// (`fauna_client_backup::recover::RecoveredCounts`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustodianRecoveredCounts {
+    pub recovered: u64,
+    pub already_held: u64,
+    pub filed: u64,
+    pub inboxed: u64,
+    pub unplaceable: u64,
+}
+
+/// What happened to one set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CustodianRecoverSetOutcome {
+    Recovered {
+        counts: CustodianRecoveredCounts,
+    },
+    NothingToRecover {
+        counts: CustodianRecoveredCounts,
+    },
+    /// `code` is `SetRefusal::code`: the nest's wire code, or a local one.
+    Refused {
+        code: String,
+        detail: String,
+    },
+    /// An outcome a newer agent names that this build does not, carried whole.
+    /// It reads as [`Self::Refused`] — nothing is claimed for the set. Never
+    /// written by this build.
+    #[serde(untagged)]
+    Unknown(fauna_cbor::CarriedValue),
+}
+
 /// One bound folder's serve-side locations
 /// ([`RequestMethod::GetShareServeInfo`]): everything the app process needs
 /// to open the second read connection and range-read the local tree.
@@ -1398,6 +1579,34 @@ pub struct HeldDeletesAppliedInfo {
     /// Whether a hold was actually active when the verb ran; `false` means
     /// nothing was applied by design (the re-derive-now rule).
     pub floor_was_active: bool,
+}
+
+/// How long the agent waits on a [`RequestMethod::WalkFleetNow`] walk before
+/// answering `walked: false` — a fleet walk is a nest round trip per linked
+/// nest, so it is bounded well past the participation nudge's 10 s. The app's
+/// request waits [`WALK_FLEET_NOW_REQUEST_TIMEOUT`], a margin past it, so the
+/// agent's own answer — never the pipe's timeout — is what the app reads.
+pub const WALK_FLEET_NOW_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The app's wait on a [`RequestMethod::WalkFleetNow`] reply:
+/// [`WALK_FLEET_NOW_BOUND`] plus a margin for the reply's own trip.
+pub const WALK_FLEET_NOW_REQUEST_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(WALK_FLEET_NOW_BOUND.as_secs() + 5);
+
+/// Outcome of a [`RequestMethod::WalkFleetNow`]: whether the agent's walk of
+/// the fleet scope landed, and when it did not, why (no store mounted, the
+/// walk failed, it outlived [`WALK_FLEET_NOW_BOUND`]).
+///
+/// `Default` is deliberate: this wire struct grows additively. Construct with
+/// `..Default::default()`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetWalkOutcome {
+    /// The agent's walk landed: the fleet rows it walked rest in the shared
+    /// store.
+    pub walked: bool,
+    /// Why the walk did not land; `None` when it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 // ── Server-pushed events ──
@@ -1482,7 +1691,7 @@ pub struct LocationInfo {
     pub access_revoked: bool,
     /// Why this **on-demand** binding's root is running without its placeholder
     /// surface — one of the `ON_DEMAND_MOUNT_*` codes, set while the root's
-    /// mount attempt has failed (`on-demand-files.md` § Linux FUSE binding, the
+    /// mount attempt has failed (`on-demand-files-linux.md` § Linux FUSE binding, the
     /// lifecycle rule: the one refusal the boot probe cannot see is per
     /// location). The hydrated files keep syncing two-way and no placeholder is
     /// listed; an app renders its line for the code on the binding's row.
@@ -1647,7 +1856,7 @@ pub struct ServiceStatusInfo {
     pub notification_sink: Option<bool>,
     /// **Can this agent serve an on-demand binding here?** — whether the
     /// platform's placeholder surface is usable by this agent
-    /// (`on-demand-files.md` § Linux FUSE binding, the lifecycle rule).
+    /// (`on-demand-files-linux.md` § Linux FUSE binding, the lifecycle rule).
     /// windows: always `Some(true)` (cfapi). linux: the boot probe's answer —
     /// an openable `/dev/fuse` and the `fuse3` package's mount helper on
     /// `PATH`. macOS: `Some(false)` — on-demand there is the File Provider
@@ -1662,6 +1871,28 @@ pub struct ServiceStatusInfo {
     /// reason the app has no line for (it renders its generic one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_demand_unavailable_reason: Option<String>,
+    /// **The same-account peer data plane's reading** — the siblings this
+    /// agent's peer leg holds right now and what its downloads moved over
+    /// them since start (`p2p.md` § Implementation status today; the
+    /// agent's `fauna_sync_engine::sibling_chunks::SiblingChannels`). The
+    /// observable that says whether a file body came from another of this
+    /// account's devices or from the nest. An in-memory read, ack-path safe.
+    /// `None` reads as "cannot tell".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_files: Option<PeerFilesInfo>,
+}
+
+/// [`ServiceStatusInfo::peer_files`]. Counters are since the agent started.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerFilesInfo {
+    /// Sibling devices whose admitted channel the peer leg holds now.
+    pub siblings: u32,
+    /// Chunk bodies a sibling served (each verified on arrival).
+    pub chunks: u64,
+    /// The bytes of those bodies.
+    pub bytes: u64,
+    /// Chunks wanted from a sibling and left to the nest instead.
+    pub to_nest: u64,
 }
 
 /// [`ServiceStatusInfo::on_demand_unavailable_reason`]: `/dev/fuse` cannot be
@@ -2023,6 +2254,7 @@ mod tests {
                 held: 40,
                 served: 0,
                 observed_at: 1_800_000_000,
+                floored_at: Some(1_800_000_060),
             }],
         };
         let bytes = fauna_cbor::encode_canonical(&info).expect("encodes");
@@ -2427,6 +2659,36 @@ mod tests {
             }
             other => panic!("wrong payload: {other:?}"),
         }
+    }
+
+    /// The peer data plane's reading crosses the pipe whole, and a reply
+    /// without it decodes as "cannot tell" — the e2e witnesses of
+    /// `device-to-device-file-transfer` read exactly these four numbers.
+    #[test]
+    fn the_peer_files_reading_round_trips_and_is_optional() {
+        let reading = PeerFilesInfo {
+            siblings: 1,
+            chunks: 3,
+            bytes: 4096,
+            to_nest: 2,
+        };
+        let status_of = |info: ServiceStatusInfo| -> ServiceStatusInfo {
+            let frame = encode_frame(&Response {
+                id: 23,
+                result: ResponseResult::Ok(ResponsePayload::ServiceStatus(info)),
+            })
+            .unwrap();
+            match decode_payload::<Response>(&frame[4..]).unwrap().result {
+                ResponseResult::Ok(ResponsePayload::ServiceStatus(s)) => s,
+                other => panic!("wrong payload: {other:?}"),
+            }
+        };
+        let reported = status_of(ServiceStatusInfo {
+            peer_files: Some(reading),
+            ..Default::default()
+        });
+        assert_eq!(reported.peer_files, Some(reading));
+        assert_eq!(status_of(ServiceStatusInfo::default()).peer_files, None);
     }
 
     #[test]
@@ -3119,6 +3381,10 @@ mod tests {
                     folder_hash: None,
                 },
             ),
+            // The account-pass nudge: the e2e harness's `poked_pass` sends it
+            // to a seat's co-located agent once the app yielded the engine role
+            // (`tests/e2e-unified/helpers/sync_agent_ipc.py` pins this hex).
+            (15, RequestMethod::ReconcileAccountRuntime),
         ] {
             let name = method.name();
             let payload = fauna_cbor::encode_canonical(&Request { id, method }).unwrap();
@@ -3302,6 +3568,59 @@ mod unknown_arm_tests {
         match payload(&bytes) {
             ResponsePayload::CustodianReseed(CustodianReseedState::Finished(r)) => assert!(
                 matches!(r.sets[0].outcome, CustodianReseedSetOutcome::Unknown(_)),
+                "got {:?}",
+                r.sets[0].outcome
+            ),
+            other => panic!("expected a finished report, got {other:?}"),
+        }
+        assert_reencodes_identically(&bytes);
+    }
+
+    #[test]
+    fn an_unknown_recover_state_decodes_and_is_never_running() {
+        let bytes = newer_reply_bytes(
+            &ok(ResponsePayload::CustodianRecover(
+                CustodianRecoverState::Idle,
+            )),
+            &["result", "Ok", "CustodianRecover"],
+            &newer_data(),
+        );
+        match payload(&bytes) {
+            ResponsePayload::CustodianRecover(CustodianRecoverState::Unknown(_)) => {}
+            other => panic!("expected the unknown arm, got {other:?}"),
+        }
+        assert_reencodes_identically(&bytes);
+    }
+
+    #[test]
+    fn an_unknown_recover_set_outcome_decodes_inside_a_finished_report() {
+        let report = CustodianRecoverReport {
+            sets: vec![CustodianRecoverSet {
+                set_name: "__mail".into(),
+                outcome: CustodianRecoverSetOutcome::NothingToRecover {
+                    counts: CustodianRecoveredCounts::default(),
+                },
+                duties_unfinished: None,
+            }],
+        };
+        let bytes = newer_reply_bytes(
+            &ok(ResponsePayload::CustodianRecover(
+                CustodianRecoverState::Finished(report),
+            )),
+            &[
+                "result",
+                "Ok",
+                "CustodianRecover",
+                "Finished",
+                "sets",
+                "0",
+                "outcome",
+            ],
+            &newer_data(),
+        );
+        match payload(&bytes) {
+            ResponsePayload::CustodianRecover(CustodianRecoverState::Finished(r)) => assert!(
+                matches!(r.sets[0].outcome, CustodianRecoverSetOutcome::Unknown(_)),
                 "got {:?}",
                 r.sets[0].outcome
             ),

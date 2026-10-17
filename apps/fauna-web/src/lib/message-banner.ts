@@ -56,10 +56,19 @@ export interface FiredBanner {
 let started = 0;
 let completed = 0;
 const fired: FiredBanner[] = [];
+// The threads of the snapshot that seeded the shared tracker — the batch its
+// first rule keeps silent, which a reader cannot infer from a thread list it
+// read itself (the rails load asynchronously). Re-read after every tick.
+let seededWith: string[] = [];
 
-/** `{started, completed, fired}` — read by the e2e bridge's state assembly. */
-export function messageBanners(): { started: number; completed: number; fired: FiredBanner[] } {
-  return { started, completed, fired: [...fired] };
+/** `{started, completed, fired, seeded_with}` — read by the e2e bridge's state assembly. */
+export function messageBanners(): {
+  started: number;
+  completed: number;
+  fired: FiredBanner[];
+  seeded_with: string[];
+} {
+  return { started, completed, fired: [...fired], seeded_with: [...seededWith] };
 }
 
 /**
@@ -98,6 +107,7 @@ export function raiseNewMessageBanners(manager: WasmConversationsManager): void 
       }
       fired.push({ thread_id: row.threadId, label: row.label });
     }
+    seededWith = manager.messageBannerSeed() as string[];
   } catch (e) {
     console.warn('message banner diff failed:', e);
   } finally {

@@ -26,9 +26,14 @@ that returns you to the regular app.
 
 ## Dashboard
 
-The at-a-glance page: stat cards for the nest's vitals — members, storage,
-activity, plus a **Mail** card carrying the one-line mail verdict from the
-[Mail](#mail) page. Start here when you just want to know "is everything fine?"
+The at-a-glance page: stat cards for the nest's vitals — how many members it
+has, how many are suspended and how many are on each tier; the total storage it
+holds, split into inbox storage and file storage; how many connections are live;
+a **Mail** card carrying the one-line mail verdict from the [Mail](#mail) page;
+whether connections are secure; the nest's domain and version; and how people
+may join (open, invite required, or closed). If one of these can't be read, the
+page says so and shows the rest. Start here when you just want to know "is
+everything fine?"
 
 ## Users
 
@@ -58,7 +63,9 @@ about to change. Six sections:
 - **Admit someone directly** — for when you already have the person's account
   key (the 64-character code their app shows them): paste it, type the handle
   they'll go by, pick their tier, and they're in — no code to hand out, no
-  request to wait for. Name the handle carefully: you can clear a member's
+  request to wait for. For a child or supervised member, pick their guardian
+  here too (leave it on "None" for an ordinary account); a supervised account
+  needs a handle. Name the handle carefully: you can clear a member's
   handle later, but not change it for them, and without a handle they can't
   send email from your nest's domains. Leaving the handle blank admits them
   without one, for exactly that restricted state.
@@ -76,7 +83,9 @@ about to change. Six sections:
 - **Users** — the member list. Per member you can change their tier, see
   whether their mailbox is being served, and take the removal actions:
   **suspend** (immediate, reversible), **evict** (a timed warn → suspend →
-  delete pipeline), and **cancel** an eviction in progress. You can cancel
+  delete pipeline — during the warning the member sees a banner on every page
+  with both dates and how to export their data), and **cancel** an eviction
+  in progress. You can cancel
   until the deletion starts. After that the account is being removed and
   can no longer be restored. Each row also
   offers **Make admin** or **Remove admin**, the way you give a trusted
@@ -232,6 +241,11 @@ Nest-wide settings that belong to no single feature:
   saw while they had access, they still saw. Rotation closes the door going
   forward; it does not rewrite the past.
 
+  Rotate from one place only. If an app ever sees two *different* new identities
+  for the same nest — two copies of it rotated separately, or someone
+  impersonating it — it stops at a warning that names both and offers no way to
+  trust either. The only way past it is to point the app at a different nest.
+
   Afterwards the nest carries on serving normally — it never restarts and nobody
   is signed out. Your own recovery list quietly drops the old identity. If it
   still shows the old one, the app will tell you so and clear it the next time it
@@ -271,9 +285,8 @@ Nest-wide settings that belong to no single feature:
   Each button reports what it did: which key signs now, which keys stopped
   working, and since when the saved sign-ins it ended had been issued.
 
-  Your nest is taking these sign-ins over from the Bluesky bridge. Until it
-  has, Bluesky apps still check the key on that bridge's own card (see
-  [Bridges](#bridges)) — after an exposure, replace that one too.
+  These are the only sign-in keys to replace: the Bluesky bridge's card no
+  longer has a key of its own (see [Bridges](#bridges)).
 - **Legal takedown** — the one way any content is ever removed for everyone,
   and it exists solely for legal compulsion: a court order, a statutory demand,
   genuinely illegal material. Fauna has no "remove this post for everyone
@@ -377,9 +390,11 @@ The policy groups follow:
   message-count defaults, deletion semantics.
 - **Outbound delivery** — retry schedule, failure timeouts, delay warnings,
   bounce-handling behavior, IPv6.
-- **Alias policy** — per-member alias caps, reserved local-parts
-  (`postmaster` and friends), and whether plus-addressing and wildcard
-  aliases are available.
+- **Alias policy** — per-member alias caps, extra reserved names no member
+  may take as an address, and whether plus-addressing and wildcard aliases
+  are available. The standard role addresses (`postmaster`, `abuse`, `noc`,
+  `security`, `dmarc-report`, `tlsrpt`) are always reserved, as addresses
+  and as usernames, so the box lists only the names you add.
 - **Shared spam baseline** — publish an aggregated starting model from
   members who opted in (it refuses to publish unless enough members
   contribute — no one member's mail is inferable). When a contributing
@@ -445,7 +460,13 @@ The domain manager, and the page that saves you from copy-pasting DNS records:
 - **"Fauna controls DNS"** — the master switch. On, with a DNS-provider
   credential stored, Fauna publishes and maintains the records itself.
   Off, the rows become your checklist: copy each value to your DNS host and
-  watch the checks go green.
+  watch the checks go green. While the page stays open it re-checks every
+  record by itself every few minutes, and the refresh button re-checks on
+  the spot. For a domain Fauna controls, a check that finds a record missing
+  or out of date publishes it again — a changed mail policy goes out at its
+  new value, and the old one is taken down instead of being left beside it.
+  If your provider refuses a write, the page says why and the domain stays
+  under Fauna's control until you fix the credential.
 - **Provider credentials** — API credentials for your DNS provider(s), held
   by your app. They are write-only: enterable, verifiable, clearable —
   never displayed back.
@@ -460,7 +481,16 @@ The domain manager, and the page that saves you from copy-pasting DNS records:
   that lapsed, or a name taken from you: register the replacement, add it,
   and start the rename. The nest stops asking the dead name to prove itself
   so the move can complete, and everyone's handles are held for them at the
-  new domain.
+  new domain. Once a rename has switched over, a member who has not set a
+  display name sees their handle on the new domain at the top of their own
+  profile.
+- **DMARC policy** — every domain asks receiving servers to reject mail
+  that claims to come from it but fails the authentication checks. If a
+  domain also sends through another service — a newsletter tool, or your
+  old mail host while you move — that mail can fail those checks, so its row
+  lets you soften the policy to *Quarantine* (receivers file it as spam) or
+  *None — reports only* while you fix or finish the move. Setting it back to
+  *Reject* restores the default; your other domains are never affected.
 - **The expiry watch** — you should not find out about a lapse from the
   failures. The nest checks its main domain's registration with the registry
   itself, and if that registration is within a week of expiring, has expired,

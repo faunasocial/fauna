@@ -115,7 +115,8 @@ def test_e2e_ffi_cargo_step_is_freshness_gated_outside_the_slot():
     # command — a separately-gated copy would re-import whichever foreign
     # flavor last touched the shared `target/<profile>/` slot, the exact
     # collision this recipe exists to avoid (`e2e-ffi-slot`'s comment).
-    cp_pos = joined.index('cp "$CARGO_LIB" "$LIB"')
+    # (It lands by rename — `test_ffi_slot_atomic_replace.py` pins why.)
+    cp_pos = joined.index('mv -f "$LIB.$$.tmp" "$LIB"')
     assert cargo_pos < cp_pos, "the private-slot copy must run after the cargo build, in the same gated command"
 
 
@@ -233,13 +234,13 @@ def test_nest_variant_stamp_is_per_variant():
 def test_build_recovery_fixture_warm_path_runs_no_subprocess(tmp_path, monkeypatch):
     """A fresh stamp + existing binary returns with no cargo and no slot."""
     target_dir = tmp_path / "cargo-target"
-    binary, stamp = common_nest._recovery_fixture_build_paths(target_dir)
+    binary, stamp = common_nest._example_build_paths(target_dir, "recovery_fixture")
     binary.parent.mkdir(parents=True)
     binary.write_text("fake exe")
     stamp.write_text("stamp")
     monkeypatch.setenv("CARGO_TARGET_DIR", str(target_dir))
     monkeypatch.setattr(common_nest, "get_repo_root", lambda: tmp_path)
-    monkeypatch.setattr(common_nest, "_recovery_fixture_newest_source_mtime",
+    monkeypatch.setattr(common_nest, "_example_newest_source_mtime",
                         lambda repo: stamp.stat().st_mtime - 3600)
 
     def _no_subprocess(*a, **k):
@@ -269,10 +270,10 @@ def test_recovery_fixture_is_stale_when_a_shared_crate_changes(tmp_path):
     for path in (tmp_path / "Cargo.lock", tmp_path / "rust-toolchain.toml"):
         os.utime(path, (1_000, 1_000))
     stamp_mtime = 2_000.0
-    assert common_nest._recovery_fixture_newest_source_mtime(tmp_path) <= stamp_mtime
+    assert common_nest._example_newest_source_mtime(tmp_path) <= stamp_mtime
 
     os.utime(shared, (3_000, 3_000))  # only the SHARED crate moved
-    assert common_nest._recovery_fixture_newest_source_mtime(tmp_path) > stamp_mtime
+    assert common_nest._example_newest_source_mtime(tmp_path) > stamp_mtime
 
 
 # ── conftest wiring: the prebuild map covers the nest-build aliases ───────────
@@ -322,8 +323,10 @@ _STAMP_WRITERS = [
      lambda td: common_nest._nest_variant_paths(td, "test-hooks,nostr", "debug"), "fauna-nest"),
     ("build_sync_service_win", "_sync_service_win_newest_source_mtime",
      common_nest._sync_service_win_build_paths, "fauna-sync-agent"),
-    ("build_recovery_fixture", "_recovery_fixture_newest_source_mtime",
-     common_nest._recovery_fixture_build_paths, "recovery_fixture"),
+    ("build_recovery_fixture", "_example_newest_source_mtime",
+     lambda td: common_nest._example_build_paths(td, "recovery_fixture"), "recovery_fixture"),
+    ("build_render_cloud_init", "_example_newest_source_mtime",
+     lambda td: common_nest._example_build_paths(td, "render_cloud_init"), "render_cloud_init"),
 ]
 _STAMP_WRITER_IDS = [w[0] for w in _STAMP_WRITERS]
 
@@ -695,3 +698,89 @@ def test_the_ffi_cdylib_is_warmed_with_the_loaders_profile():
     assert -1 < build_at < load_at, "build before load, both under `load_ffi`"
     assert "_ensure_fauna_ffi_built" not in conftest._NOT_PREWARMED_BUILDERS
     assert "_ensure_fauna_ffi_loaded" in conftest._NOT_PREWARMED_BUILDERS
+
+
+@pytest.mark.parametrize(
+    ("machine", "expected"),
+    [
+        ("ARM64", ["just", "windows-ffi-test", "dev"]),
+        ("AMD64", ["just", "windows-ffi-test", "dev", "x86_64-pc-windows-msvc"]),
+    ],
+)
+def test_the_windows_ffi_cdylib_is_warmed_with_the_loaders_recipe(monkeypatch, machine, expected):
+    """On windows the loader builds `just windows-ffi-test dev` at import (the
+    host's RID), so the warm pass must compile that flavor too. Skipping it left
+    the loader's in-hold build to the refuse mode, which refuses it: a run whose
+    modules did not import `fauna_ffi` at collection lost the cdylib for the
+    whole session (measured 2026-10-09: `fauna-ffi unavailable … exit 75` on a
+    tier_3 run that seeds nothing through it). The profile and the x64 triple are
+    the loader's literals, pinned to it here."""
+    loader = (_REPO / "tests" / "e2e-unified" / "fauna_ffi.py").read_text(encoding="utf-8")
+    profile = re.search(r'^_WINDOWS_FFI_PROFILE = "(\w+)"$', loader, re.MULTILINE)
+    assert profile, "fauna_ffi._WINDOWS_FFI_PROFILE must stay a literal this pin can read"
+    assert profile.group(1) == expected[2]
+    assert '"x86_64-pc-windows-msvc"' in loader
+
+    ran: list = []
+    monkeypatch.setattr(conftest, "_IS_WINDOWS", True)
+    monkeypatch.setattr(conftest.platform, "machine", lambda: machine)
+    monkeypatch.setattr(conftest, "_BINARY_BUILD_MEMO", {})
+    monkeypatch.setattr(
+        conftest.subprocess, "run", lambda cmd, **kw: ran.append((cmd, kw)),
+    )
+    conftest._ensure_fauna_ffi_built()
+    assert [cmd for cmd, _ in ran] == [expected]
+    assert ran[0][1].get("check") is True
+
+
+# ── recovery_fixture: reached through a helper call, hoisted by module import ─
+
+
+def test_recovery_fixture_import_scan_matches_only_the_building_helper(tmp_path):
+    """`helpers.succession` builds `recovery_fixture` on first call, from inside
+    a test body, so `_prebuild_binaries` keys the hoist on the module's import
+    (measured 2026-09-26: a cold build inside the test's 900 s budget killed the
+    whole pytest process on Windows). Its siblings `succession_ceremony` /
+    `succession_retry` never build it and must not trigger a cold cargo build."""
+    cases = {
+        "from helpers.succession import register_recovery_kit\n": True,
+        "    from helpers.succession import succeed_identity\n": True,
+        "from helpers import succession\n": True,
+        "import helpers.succession\n": True,
+        "from helpers.succession_ceremony import settled_actor_id\n": False,
+        "from helpers.succession_retry import x\n": False,
+        "from helpers import succession_ceremony\n": False,
+        "# from helpers.succession import nothing\n": False,
+    }
+    for i, (text, expected) in enumerate(cases.items()):
+        path = tmp_path / f"test_case_{i}.py"
+        path.write_text(text)
+        item = type("Item", (), {"path": path})()
+        assert conftest._item_reaches_recovery_fixture(item) is expected, text
+
+
+def test_prebuild_binaries_hoists_the_recovery_fixture_build(monkeypatch, tmp_path):
+    """An item whose module imports `helpers.succession` makes the collection-
+    time prebuild run `_ensure_recovery_fixture_built`; an unrelated item does
+    not (laziness preserved)."""
+    from helpers import nest_mode as nest_mode_mod
+
+    monkeypatch.setattr(nest_mode_mod, "builds_local_nest", lambda mode: True)
+    ran = []
+    monkeypatch.setattr(
+        conftest, "_ensure_recovery_fixture_built", lambda: ran.append("rf")
+    )
+    monkeypatch.setattr(conftest, "_real_fixture_closure", lambda item: set())
+    monkeypatch.setattr(conftest, "_prebuild_app_set", lambda s, r: set())
+
+    def item_for(text, name):
+        path = tmp_path / name
+        path.write_text(text)
+        return type("Item", (), {"path": path})()
+
+    user = item_for("from helpers.succession import register_recovery_kit\n", "a.py")
+    other = item_for("import os\n", "b.py")
+    conftest._prebuild_binaries(type("S", (), {"items": [other]})())
+    assert ran == []
+    conftest._prebuild_binaries(type("S", (), {"items": [other, user]})())
+    assert ran == ["rf"]

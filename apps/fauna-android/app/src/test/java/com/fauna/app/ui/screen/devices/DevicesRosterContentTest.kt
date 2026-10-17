@@ -9,13 +9,19 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import org.robolectric.annotation.Config
+import com.fauna.app.ui.viewmodel.CustodyGesture
+import uniffi.fauna_client_capabilities.CustodyHeldRowView
 import uniffi.fauna_client_capabilities.CustodyHolderRowView
+import uniffi.fauna_client_capabilities.CustodyMintCandidateView
+import uniffi.fauna_client_capabilities.CustodyOfferRowView
+import uniffi.fauna_client_capabilities.CustodyScopesView
 import uniffi.fauna_client_capabilities.CustodyReceiptRowView
 import uniffi.fauna_client_capabilities.CustodyReceiptStateView
 import uniffi.fauna_core.LocalizedText
 import uniffi.fauna_devices_machine.DeviceFolderRole
 import uniffi.fauna_devices_machine.DeviceSummary
 import uniffi.fauna_devices_machine.DevicesSnapshot
+import uniffi.fauna_devices_machine.FleetMemberSummary
 
 /**
  * Compose-level coverage for the stateless [DevicesRosterContent] (Settings →
@@ -41,6 +47,7 @@ class DevicesRosterContentTest {
         guardianMarked: Boolean = false,
         deviceId: String = "ab".repeat(32),
         folders: List<DeviceFolderRole> = emptyList(),
+        principal: String? = null,
     ) = DeviceSummary(
         deviceId = deviceId,
         label = label,
@@ -50,7 +57,7 @@ class DevicesRosterContentTest {
         online = online,
         guardianMarked = guardianMarked,
         folders = folders,
-        principal = null,
+        principal = principal,
         // Sibling field-adds (the device's p2p participation): unknown, and no
         // pending off-request.
         p2pParticipation = null,
@@ -60,6 +67,8 @@ class DevicesRosterContentTest {
     private fun snapshot(
         devices: List<DeviceSummary> = listOf(device("Phone")),
         error: LocalizedText? = null,
+        members: List<FleetMemberSummary> = emptyList(),
+        ownFingerprint: String? = null,
     ) = DevicesSnapshot(
         devices = devices,
         folders = emptyList(),
@@ -71,11 +80,11 @@ class DevicesRosterContentTest {
         conflicts = emptyList(),
         wizard = null,
         error = error,
-        // Sibling field-adds (the fleet-removal door): no unaccounted members,
-        // and no own fleet id, so no own fingerprint either.
-        members = emptyList(),
+        // The fleet-removal door's reads: unaccounted members, and this device's
+        // own fingerprint (the fleet id itself is not rendered).
+        members = members,
         ownFleetId = null,
-        ownFingerprint = null,
+        ownFingerprint = ownFingerprint,
         // Sibling field-add: this device's own p2p participation, unknown.
         ownP2pParticipation = null,
     )
@@ -123,15 +132,60 @@ class DevicesRosterContentTest {
         pending = pending,
     )
 
+    private fun held(
+        grantId: ByteArray = ByteArray(16) { 4 },
+        owner: ByteArray = ByteArray(32) { 5 },
+        scopes: CustodyScopesView? = CustodyScopesView(wholeAccount = true, scopes = emptyList()),
+        // An unknown key resolves to itself, so the seed text is the key.
+        budgetDraft: String = "8 GB",
+        stopped: Boolean = false,
+    ) = CustodyHeldRowView(
+        grantId = grantId,
+        owner = owner,
+        scopes = scopes,
+        retainedBytesCap = 8uL * 1024uL * 1024uL * 1024uL,
+        budgetDraft = LocalizedText(budgetDraft, emptyMap()),
+        receipt = receipt(),
+        stopped = stopped,
+    )
+
+    private fun offer(
+        grantId: ByteArray = ByteArray(16) { 6 },
+        nestCanHold: Boolean = false,
+    ) = CustodyOfferRowView(
+        grantId = grantId,
+        owner = ByteArray(32) { 9 },
+        scopes = CustodyScopesView(wholeAccount = true, scopes = emptyList()),
+        offeredAtSecs = 1_700_000_000L,
+        nestCanHold = nestCanHold,
+    )
+
+    private fun candidate(n: Int, label: String) = CustodyMintCandidateView(
+        host = ByteArray(32) { n.toByte() },
+        channelHex = "chan$n",
+        label = label,
+    )
+
+    private fun hex(bytes: ByteArray) = bytes.joinToString("") { "%02x".format(it) }
+
     private fun render(
         snapshot: DevicesSnapshot? = snapshot(),
         localDeviceId: String? = null,
         actorId: String? = "cd".repeat(32),
         onRemoveDevice: (Int) -> Unit = {},
+        keylessPrincipals: Set<String> = emptySet(),
         custodyRows: List<CustodyHolderRowView> = emptyList(),
-        onRevokeCustody: (ByteArray, ByteArray?) -> Unit = { _, _ -> },
+        custodyHeld: List<CustodyHeldRowView> = emptyList(),
+        custodyOffers: List<CustodyOfferRowView> = emptyList(),
+        custodyOfferTargets: Set<String> = emptySet(),
+        mintCandidates: List<CustodyMintCandidateView>? = null,
+        onCustodyGesture: (CustodyGesture) -> Unit = {},
         receiptStatusLine: (CustodyReceiptRowView) -> String = { "STATUS:${it.statusLabel.key}" },
         heldBytesLine: (CustodyReceiptRowView) -> String = { "HELD:${it.heldBytes}" },
+        memberRemovePending: String? = null,
+        onMemberArm: (String) -> Unit = {},
+        onMemberCancel: () -> Unit = {},
+        onMemberConfirm: (String) -> Unit = {},
     ) {
         composeTestRule.setContent {
             DevicesRosterContent(
@@ -141,13 +195,29 @@ class DevicesRosterContentTest {
                 onRemoveDevice = onRemoveDevice,
                 statusLabel = { online -> if (online) "Online" else "Offline" },
                 placeLabel = { o, a, d -> "PLACE:$o/$a/$d" },
+                keylessPrincipals = keylessPrincipals,
                 custodyRows = custodyRows,
-                onRevokeCustody = onRevokeCustody,
+                custodyHeld = custodyHeld,
+                custodyOffers = custodyOffers,
+                custodyOfferTargets = custodyOfferTargets,
+                mintCandidates = mintCandidates,
+                onCustodyGesture = onCustodyGesture,
                 receiptStatusLine = receiptStatusLine,
                 heldBytesLine = heldBytesLine,
+                memberRemovePending = memberRemovePending,
+                onMemberArm = onMemberArm,
+                onMemberCancel = onMemberCancel,
+                onMemberConfirm = onMemberConfirm,
+                memberEnrolledAt = { ms -> "WHEN:$ms" },
             )
         }
     }
+
+    private fun member(n: Int) = FleetMemberSummary(
+        deviceId = "%02x".format(n).repeat(32),
+        fingerprint = "fp$n",
+        enrolledAtMs = 1_700_000_000_000L + n,
+    )
 
     @Test
     fun deviceCardRendersWithCanonicalIds() {
@@ -382,7 +452,9 @@ class DevicesRosterContentTest {
                 custody(grantId = ByteArray(16) { 1 }, custodianKey = ByteArray(32) { 7 }),
                 custody(grantId = ByteArray(16) { 2 }, custodianKey = ByteArray(32) { 8 }),
             ),
-            onRevokeCustody = { g, h -> grant = g; holder = h },
+            onCustodyGesture = { g ->
+                if (g is CustodyGesture.Revoke) { grant = g.grantId; holder = g.holder }
+            },
         )
         composeTestRule.onAllNodesWithTag("custody-holder-revoke-button")[1]
             .performScrollTo().performClick()
@@ -443,5 +515,285 @@ class DevicesRosterContentTest {
         statuses[0].assertTextEquals("STATUS:devices.custody_receipt_fresh")
         statuses[1].assertTextEquals("STATUS:devices.custody_receipt_stale")
         statuses[2].assertTextEquals("STATUS:devices.custody_receipt_none")
+    }
+
+    // ── Piece 1: the keyless-posture marker ──────────────────────────────────
+
+    // The badge rides exactly the rows the shared `keyless_posture` answer
+    // names, by enrolled principal — never a principal-less row.
+    @Test
+    fun keylessPostureBadgeRendersOnlyOnRowsTheSharedRuleMarks() {
+        render(
+            snapshot(
+                devices = listOf(
+                    device("Kiosk", deviceId = "01".repeat(32), principal = "aa"),
+                    device("Phone", deviceId = "02".repeat(32), principal = "bb"),
+                    device("Legacy", deviceId = "03".repeat(32), principal = null),
+                ),
+            ),
+            keylessPrincipals = setOf("aa"),
+        )
+        val cards = composeTestRule.onAllNodesWithTag("device-card")
+        cards[0].assert(hasAnyDescendant(hasTestTag("device-keyless-posture-badge")))
+        cards[1].assert(!hasAnyDescendant(hasTestTag("device-keyless-posture-badge")))
+        cards[2].assert(!hasAnyDescendant(hasTestTag("device-keyless-posture-badge")))
+        assertEquals(
+            1,
+            composeTestRule.onAllNodesWithTag("device-keyless-posture-badge")
+                .fetchSemanticsNodes().size,
+        )
+        composeTestRule.onNodeWithTag("device-keyless-posture-badge")
+            .assertTextEquals("Relay only — holds no keys")
+    }
+
+    // ── Piece 3: held-for-others cards ───────────────────────────────────────
+
+    @Test
+    fun heldSectionIsAbsentWithNothingHeld() {
+        render()
+        composeTestRule.onAllNodesWithTag("custody-held-card").assertCountEquals(0)
+    }
+
+    @Test
+    fun heldCardRendersItsCanonicalFamilyAndSeedsTheBudget() {
+        render(custodyHeld = listOf(held()))
+        for (id in listOf(
+            "custody-held-card", "custody-held-owner", "custody-held-scope",
+            "custody-held-bytes", "custody-held-stop-button", "custody-held-remove-button",
+        )) {
+            composeTestRule.onNodeWithTag(id).assertExists()
+        }
+        composeTestRule.onNodeWithTag("custody-held-scope")
+            .assertTextEquals("Their account's sealed planes — unreadable on this device")
+        composeTestRule.onNodeWithTag("custody-held-bytes").assertTextEquals("HELD:1024")
+        composeTestRule.onNodeWithTag("custody-held-budget-input").assertTextContains("8 GB")
+    }
+
+    @Test
+    fun aNamedScopeSetRendersItsScopes() {
+        render(
+            custodyHeld = listOf(
+                held(scopes = CustodyScopesView(wholeAccount = false, scopes = listOf("feed", "files"))),
+            ),
+        )
+        composeTestRule.onNodeWithTag("custody-held-scope").assertTextEquals("feed, files")
+    }
+
+    // The budget commits the TYPED text on the keyboard's Done — the VM parses it
+    // with the shared parser; this Content never does.
+    @Test
+    fun theBudgetCommitsTheTypedTextOnDone() {
+        val seen = mutableListOf<CustodyGesture>()
+        render(custodyHeld = listOf(held(grantId = ByteArray(16) { 4 })), onCustodyGesture = { seen += it })
+        val input = composeTestRule.onNodeWithTag("custody-held-budget-input")
+        input.performScrollTo().performTextReplacement("3072 MB")
+        assertEquals(0, seen.size)
+        input.performImeAction()
+        val g = seen.single() as CustodyGesture.SetBudget
+        assertEquals("3072 MB", g.typed)
+        assertEquals(4, g.grantId[0].toInt())
+    }
+
+    // The e2e driver commits with a hardware Enter (`drivers/android.py`), which a
+    // single-line field turns into its IME action — pinned so the two never drift.
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun aHardwareEnterCommitsTheBudgetToo() {
+        val seen = mutableListOf<CustodyGesture>()
+        render(custodyHeld = listOf(held()), onCustodyGesture = { seen += it })
+        val input = composeTestRule.onNodeWithTag("custody-held-budget-input")
+        input.performScrollTo().performTextReplacement("1 GB")
+        input.performClick()
+        input.performKeyInput { pressKey(androidx.compose.ui.input.key.Key.Enter) }
+        assertEquals("1 GB", (seen.single() as CustodyGesture.SetBudget).typed)
+    }
+
+    @Test
+    fun stopAndRemoveCarryTheRowsGrantId() {
+        val seen = mutableListOf<CustodyGesture>()
+        render(
+            custodyHeld = listOf(held(grantId = ByteArray(16) { 1 }), held(grantId = ByteArray(16) { 2 })),
+            onCustodyGesture = { seen += it },
+        )
+        composeTestRule.onAllNodesWithTag("custody-held-stop-button")[1].performScrollTo().performClick()
+        composeTestRule.onAllNodesWithTag("custody-held-remove-button")[0].performScrollTo().performClick()
+        assertEquals(2, (seen[0] as CustodyGesture.Stop).grantId[0].toInt())
+        assertEquals(1, (seen[1] as CustodyGesture.Remove).grantId[0].toInt())
+    }
+
+    // Stopping pauses and keeps the bytes: the control says so and disables,
+    // while remove — the reclaim — stays available.
+    @Test
+    fun aStoppedHoldDisablesStopAndKeepsRemove() {
+        render(custodyHeld = listOf(held(stopped = true)))
+        composeTestRule.onNodeWithTag("custody-held-stop-button")
+            .assertIsNotEnabled()
+            .assertTextEquals("Stopped — stored bytes remain until removed")
+        composeTestRule.onNodeWithTag("custody-held-remove-button").assertIsEnabled()
+    }
+
+    // ── Piece 3: the consent card ────────────────────────────────────────────
+
+    @Test
+    fun anOfferRendersTheFloorCopyBeforeAcceptAndNoTargetSelectWithoutTheAnswer() {
+        // `nestCanHold` alone never renders the select — only the shared
+        // `custody_offer_shows_target_select` answer does.
+        render(custodyOffers = listOf(offer(nestCanHold = true)))
+        composeTestRule.onNodeWithTag("custody-offer-card").assertExists()
+        composeTestRule.onNodeWithTag("custody-offer-floor-note").assertTextEquals(
+            "This device would store sealed data it cannot read. It would see only the shape: " +
+                "which scopes exist, how much is stored, and when it changes — never the content.",
+        )
+        composeTestRule.onAllNodesWithTag("custody-offer-target-select").assertCountEquals(0)
+    }
+
+    @Test
+    fun acceptWithoutTheSelectBindsThisDevice() {
+        val seen = mutableListOf<CustodyGesture>()
+        render(custodyOffers = listOf(offer()), onCustodyGesture = { seen += it })
+        composeTestRule.onNodeWithTag("custody-offer-accept-button").performScrollTo().performClick()
+        val g = seen.single() as CustodyGesture.Accept
+        assertEquals(false, g.onNest)
+        assertEquals(6, g.grantId[0].toInt())
+    }
+
+    @Test
+    fun theTargetSelectRendersWhereTheSharedAnswerSaysAndAcceptBindsWhatItPicks() {
+        val seen = mutableListOf<CustodyGesture>()
+        val o = offer(grantId = ByteArray(16) { 6 })
+        render(
+            custodyOffers = listOf(o),
+            custodyOfferTargets = setOf(hex(o.grantId)),
+            onCustodyGesture = { seen += it },
+        )
+        composeTestRule.onNodeWithTag("custody-offer-target-select").performScrollTo().performClick()
+        composeTestRule.onNodeWithText("My nest").performClick()
+        composeTestRule.onNodeWithTag("custody-offer-accept-button").performScrollTo().performClick()
+        assertEquals(true, (seen.single() as CustodyGesture.Accept).onNest)
+    }
+
+    @Test
+    fun declineCarriesTheOffersGrantId() {
+        val seen = mutableListOf<CustodyGesture>()
+        render(custodyOffers = listOf(offer(grantId = ByteArray(16) { 3 })), onCustodyGesture = { seen += it })
+        composeTestRule.onNodeWithTag("custody-offer-decline-button").performScrollTo().performClick()
+        assertEquals(3, (seen.single() as CustodyGesture.Decline).grantId[0].toInt())
+    }
+
+    // ── The mint ─────────────────────────────────────────────────────────────
+
+    @Test
+    fun theMintButtonAlwaysRendersAndOpensTheFlow() {
+        val seen = mutableListOf<CustodyGesture>()
+        render(onCustodyGesture = { seen += it })
+        composeTestRule.onAllNodesWithTag("custody-mint-host-select").assertCountEquals(0)
+        composeTestRule.onNodeWithTag("custody-mint-button").performScrollTo().performClick()
+        assertEquals(CustodyGesture.MintOpen, seen.single())
+    }
+
+    @Test
+    fun anOpenFlowConfirmsOnlyOnceAHostIsChosenAndPassesTheRowBack() {
+        val seen = mutableListOf<CustodyGesture>()
+        render(
+            mintCandidates = listOf(candidate(1, "Alice"), candidate(2, "Bob")),
+            onCustodyGesture = { seen += it },
+        )
+        composeTestRule.onNodeWithTag("custody-mint-floor-note").assertExists()
+        composeTestRule.onNodeWithTag("custody-mint-confirm-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("custody-mint-host-select").performScrollTo().performClick()
+        composeTestRule.onNodeWithText("Bob").performClick()
+        composeTestRule.onNodeWithTag("custody-mint-confirm-button").assertIsEnabled()
+            .performScrollTo().performClick()
+        val g = seen.single() as CustodyGesture.Mint
+        assertEquals(2, g.host[0].toInt())
+        assertEquals("chan2", g.channelHex)
+    }
+
+    @Test
+    fun cancelClosesTheFlow() {
+        val seen = mutableListOf<CustodyGesture>()
+        render(mintCandidates = listOf(candidate(1, "Alice")), onCustodyGesture = { seen += it })
+        composeTestRule.onNodeWithTag("custody-mint-cancel-button").performScrollTo().performClick()
+        assertEquals(CustodyGesture.MintCancel, seen.single())
+    }
+
+    // ── Members without a matching entry (devices.md § Members without a matching entry) ──
+
+    // The whole group — title, note, cards — is absent while `members` is empty.
+    @Test
+    fun memberGroupRendersNothingWhenThereAreNoMembers() {
+        render(snapshot(members = emptyList()))
+        composeTestRule.onNodeWithTag("device-member-note").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("device-member-card").assertDoesNotExist()
+    }
+
+    @Test
+    fun memberCardShowsTheSharedFingerprintAndEnrolledAt() {
+        render(snapshot(members = listOf(member(1), member(2))))
+        composeTestRule.onNodeWithTag("device-member-note").assertExists()
+        assertEquals(2, composeTestRule.onAllNodesWithTag("device-member-card").fetchSemanticsNodes().size)
+        composeTestRule.onNodeWithText("Device fp1").assertExists()
+        composeTestRule.onNodeWithText("Device fp2").assertExists()
+        composeTestRule.onNodeWithText("Says it signed in WHEN:1700000000001").assertExists()
+        assertEquals(2, composeTestRule.onAllNodesWithTag("device-member-remove-button").fetchSemanticsNodes().size)
+        composeTestRule.onNodeWithTag("device-member-remove-confirm-button").assertDoesNotExist()
+    }
+
+    // The remove button arms THAT card by its fleet id.
+    @Test
+    fun removeButtonArmsTheCardByItsFleetId() {
+        val armed = mutableListOf<String>()
+        render(snapshot(members = listOf(member(1), member(2))), onMemberArm = { armed += it })
+        composeTestRule.onAllNodesWithTag("device-member-remove-button")[1].performScrollTo().performClick()
+        assertEquals(listOf(member(2).deviceId), armed)
+    }
+
+    // Only the armed card swaps its button for the confirm/cancel pair, and the
+    // arm follows the id, not the position: the same pending id still lands on
+    // its card after a refresh inserts another member ahead of it.
+    @Test
+    fun onlyTheArmedCardPaintsConfirmAndCancelAndTheArmFollowsTheId() {
+        val confirmed = mutableListOf<String>()
+        var cancelled = 0
+        render(
+            snapshot(members = listOf(member(3), member(1), member(2))),
+            memberRemovePending = member(2).deviceId,
+            onMemberConfirm = { confirmed += it },
+            onMemberCancel = { cancelled++ },
+        )
+        assertEquals(1, composeTestRule.onAllNodesWithTag("device-member-remove-confirm-button").fetchSemanticsNodes().size)
+        assertEquals(1, composeTestRule.onAllNodesWithTag("device-member-remove-cancel-button").fetchSemanticsNodes().size)
+        assertEquals(2, composeTestRule.onAllNodesWithTag("device-member-remove-button").fetchSemanticsNodes().size)
+        composeTestRule.onNodeWithTag("device-member-remove-cancel-button").performScrollTo().performClick()
+        assertEquals(1, cancelled)
+        composeTestRule.onNodeWithTag("device-member-remove-confirm-button").performScrollTo().performClick()
+        assertEquals(listOf(member(2).deviceId), confirmed)
+    }
+
+    // `device-own-fingerprint` rides the this-device row only, and only while the
+    // snapshot carries one.
+    @Test
+    fun ownFingerprintRendersOnTheMarkedRowOnly() {
+        render(
+            snapshot(
+                devices = listOf(
+                    device("Phone", deviceId = "aa".repeat(32)),
+                    device("This laptop", deviceId = "bb".repeat(32)),
+                ),
+                ownFingerprint = "ownfp",
+            ),
+            localDeviceId = "bb".repeat(32),
+        )
+        assertEquals(1, composeTestRule.onAllNodesWithTag("device-own-fingerprint").fetchSemanticsNodes().size)
+        composeTestRule.onNodeWithText("Key ownfp").assertExists()
+    }
+
+    @Test
+    fun ownFingerprintAbsentWhenSnapshotCarriesNone() {
+        render(
+            snapshot(devices = listOf(device("This laptop", deviceId = "bb".repeat(32)))),
+            localDeviceId = "bb".repeat(32),
+        )
+        composeTestRule.onNodeWithTag("device-own-fingerprint").assertDoesNotExist()
     }
 }

@@ -27,6 +27,7 @@
     <application
         android:name=".FaunaApp"
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:label="Fauna"
         android:networkSecurityConfig="@xml/network_security_config"
         android:supportsRtl="true"
@@ -35,10 +36,22 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- The `fauna://` in-app routes (android.md § Navigation → In-app
+                 routes): one door, `ConsentHandoff.offer`, fed by the launch
+                 intent and `onNewIntent`. `singleTask` above so a route opened
+                 from another app reaches the one running shell instead of
+                 stacking a second MainActivity into the caller's task. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="fauna" />
             </intent-filter>
         </activity>
 

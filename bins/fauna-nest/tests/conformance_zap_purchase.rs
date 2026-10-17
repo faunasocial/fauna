@@ -264,9 +264,22 @@ mod purchase {
             None => None,
         };
         let conn = state.db.conn().await;
-        zap_ingest::record_zap_as(&conn, &zap, purchased.as_deref());
+        let newly = zap_ingest::record_zap_as(&conn, &zap, purchased.as_deref());
         drop(conn);
+        zap_ingest::notify_tip(state, &zap, subject.as_ref(), purchased.as_deref(), newly).await;
         Ok(purchased)
+    }
+
+    /// How many `tip` notifications the author holds — a sale must ring none.
+    async fn tip_notifications(state: &AppState, author: [u8; 32]) -> usize {
+        state
+            .db
+            .list_notifications(&author, None, 50)
+            .await
+            .expect("list notifications")
+            .into_iter()
+            .filter(|n| n.notif_type == fauna_protocol::notifications::NotifType::Tip)
+            .count()
     }
 
     /// The ordinary form: the receipt is expected to pass the gate.
@@ -344,7 +357,7 @@ mod purchase {
             &payee.public_key_hex(),
             &payee.public_key_hex(),
             &note_id,
-            &buyer_kp.public_key_hex(),
+            &buyer_kp,
             Some(LNBC_21_SATS),
             1_700_000_100,
         );
@@ -366,6 +379,11 @@ mod purchase {
             tips_on(&state, &post_id).await.is_empty(),
             "a sale is not appreciation: counting the purchase as a tip would inflate \
              the post's tip total with its own sale price"
+        );
+        assert_eq!(
+            tip_notifications(&state, author).await,
+            0,
+            "a purchase is a grant, not a tip: it must not ring the tip notification"
         );
     }
 
@@ -393,7 +411,7 @@ mod purchase {
             &payee.public_key_hex(),
             &payee.public_key_hex(),
             &note_id,
-            &buyer_kp.public_key_hex(),
+            &buyer_kp,
             Some(LNBC_20_SATS),
             1_700_000_200,
         );
@@ -410,6 +428,11 @@ mod purchase {
             tips_on(&state, &post_id).await,
             vec![20_000],
             "the under-threshold zap is still recorded and attributed as a tip"
+        );
+        assert_eq!(
+            tip_notifications(&state, author).await,
+            1,
+            "a zap that stays a tip rings its author"
         );
     }
 
@@ -433,7 +456,7 @@ mod purchase {
             &payee.public_key_hex(),
             &payee.public_key_hex(),
             &note_id,
-            &buyer_kp.public_key_hex(),
+            &buyer_kp,
             Some(LNBC_21_SATS),
             1_700_000_300,
         );
@@ -467,7 +490,7 @@ mod purchase {
             &payee.public_key_hex(),
             &payee.public_key_hex(),
             &note_id,
-            &buyer_kp.public_key_hex(),
+            &buyer_kp,
             Some(LNBC_21_SATS),
             1_700_000_400,
         );
@@ -508,7 +531,7 @@ mod purchase {
             &payee.public_key_hex(),
             &payee.public_key_hex(),
             &note_id,
-            &buyer_kp.public_key_hex(),
+            &buyer_kp,
             None,
             1_700_000_500,
         );
@@ -546,7 +569,7 @@ mod purchase {
             &payee.public_key_hex(),
             &payee.public_key_hex(),
             &note_id,
-            &stranger.public_key_hex(),
+            &stranger,
             Some(LNBC_21_SATS),
             1_700_000_600,
         );
@@ -587,7 +610,7 @@ mod purchase {
             &payee.public_key_hex(),
             &payee.public_key_hex(),
             &note_id,
-            &buyer_kp.public_key_hex(),
+            &buyer_kp,
             Some(LNBC_21_SATS),
             1_700_000_700,
         );
@@ -647,7 +670,7 @@ mod purchase {
             &payee.public_key_hex(),
             &payee.public_key_hex(),
             &note_id,
-            &buyer_kp.public_key_hex(),
+            &buyer_kp,
             Some(LNBC_21_SATS),
             1_700_000_800,
         );
@@ -723,7 +746,7 @@ mod purchase {
             &payee.public_key_hex(),
             &payee.public_key_hex(),
             &note_id,
-            &buyer_kp.public_key_hex(),
+            &buyer_kp,
             Some(LNBC_21_SATS),
             1_700_000_900,
         );
@@ -792,7 +815,7 @@ mod purchase {
             &payee.public_key_hex(),
             &payee.public_key_hex(),
             &note_id,
-            &buyer_kp.public_key_hex(),
+            &buyer_kp,
             Some(LNBC_21_SATS),
             1_700_001_000,
         );
@@ -868,7 +891,7 @@ mod purchase {
             &payee.public_key_hex(),
             &payee.public_key_hex(),
             &note_id,
-            &buyer_kp.public_key_hex(),
+            &buyer_kp,
             Some(LNBC_21_SATS),
             1_700_001_100,
         );

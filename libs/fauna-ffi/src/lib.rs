@@ -133,12 +133,6 @@ mod search_manager;
 #[cfg(feature = "search-manager")]
 pub use search_manager::*;
 
-// Shared spam/phishing text heuristic (`fauna_core::text_heuristic::classify_text`). Like
-// `markdown`/`feed`, its `#[uniffi::export]` fn returns a fauna-ffi-LOCAL `uniffi::Record`
-// (FfiClassifyLabel, `String`/`f64` fields), so the Go binding is self-contained — no
-// feature gate. Lets native apps drop hand-rolled copies (android `TextHeuristic.kt`).
-mod text_heuristic;
-
 mod email;
 pub use email::*;
 
@@ -448,6 +442,15 @@ mod custody;
 #[cfg(feature = "custody")]
 pub use custody::*;
 
+// The Sessions page's face (`ui/sessions.md` § Where logic lives) — the shared
+// act-then-refold pass and its one Record, for the four UniFFI apps. Gated
+// default-on so the Go mail-bridge `--no-default-features` build drops it — no
+// settings UI on the bridge; keeps the Go bindings byte-identical.
+#[cfg(feature = "sessions")]
+mod sessions;
+#[cfg(feature = "sessions")]
+pub use sessions::*;
+
 // Trained-topic lifecycle FFI (the Personalization home's Trained-topics facet
 // CRUD over the shared fauna_client_personalization::topics::TrainedTopics
 // service — topic-factors.md § Authoring surface & picker). Gated default-on
@@ -496,6 +499,15 @@ pub use nest_client::*;
 // does the same natively). security.md § Transport trust.
 mod trust;
 pub use trust::*;
+
+// The native-player leg's ranged reader (src/ranged_nest_reader.rs) — every
+// native app's inline player reads nest bytes through it, never a URL handed to
+// the OS media stack. security.md § Transport trust → *The native-player leg*.
+// Gated with the `nest-trust` exports: the Go mail bridge plays no media.
+#[cfg(feature = "nest-trust")]
+mod ranged_nest_reader;
+#[cfg(feature = "nest-trust")]
+pub use ranged_nest_reader::*;
 
 mod account;
 pub use account::*;
@@ -548,8 +560,38 @@ pub use sign_out_residue::*;
 #[cfg(feature = "account-runtime")]
 mod account_runtime;
 
-// The let-go of a dead generation (`account-data-taxonomy.md` § The generation
-// machinery → *Fleet-scope reclamation*, clause (3)(j); `ui/settings.md`
+// The whole remove-account gesture — ask, snapshot and remove, retire this
+// machine from the removed account's nest, erase (account-scoping.md § Erasure
+// follows scope → *Removing an account retires this machine from it, as a
+// sign-out does*) — so each FFI seat makes one call. Rides `account-runtime`:
+// the retirement assembles the account runtime over the removal's snapshot.
+#[cfg(feature = "account-runtime")]
+mod remove_account;
+#[cfg(feature = "account-runtime")]
+pub use remove_account::*;
+
+// The Events page's refused-change list (`ui/events.md` § Refused scheduling
+// changes) — the read and the dismiss over the runtime handle, the rows
+// composed by the shared view. Rides `account-runtime`: the handle is its
+// whole surface.
+// Named `refused_changes_ffi` so the private module does not shadow the
+// `refused_changes` module `conversations::*` re-exports (`hidden_glob_reexports`).
+#[cfg(feature = "account-runtime")]
+#[path = "refused_changes.rs"]
+mod refused_changes_ffi;
+#[cfg(feature = "account-runtime")]
+pub use refused_changes_ffi::*;
+
+// The nest_retire page's held-DNS read (`nest-retirement.md` § Credential
+// stance (b)) — `fauna.state.dns` through the runtime handle, as the machine's
+// setters take it. Rides `account-runtime`: the handle is its whole surface.
+#[cfg(feature = "account-runtime")]
+mod retire_inputs;
+#[cfg(feature = "account-runtime")]
+pub use retire_inputs::*;
+
+// The let-go of a dead generation (`fleet-scope-reclamation.md`
+// § *Fleet-scope reclamation*, clause (3)(j); `ui/settings.md`
 // § Recovery kit, the fifth act) — the UniFFI door to the runtime handle's
 // dead read and act, the shared copy projection and the confirm word. Rides
 // `account-runtime`: the handle is its whole surface.
@@ -739,6 +781,14 @@ pub use nostr_npub_confirm::*;
 // — the `mail-spam` page's threshold input). Gated
 // default-on so the Go mail-bridge `--no-default-features` build drops it —
 // no settings UI on the bridge; keeps the Go bindings byte-identical.
+// The `mail-settings` Forwarding section's four RPCs (mail-forwarding.md
+// § Per-account "forward all") — gated on `mail-admin`,
+// which already carries the `nest_arc()` accessor and the mail-settings crate.
+#[cfg(feature = "mail-admin")]
+mod mail_forwarding;
+#[cfg(feature = "mail-admin")]
+pub use mail_forwarding::*;
+
 #[cfg(feature = "spam-threshold-override")]
 mod spam_threshold_override;
 #[cfg(feature = "spam-threshold-override")]
@@ -749,13 +799,6 @@ pub use notifications_client::*;
 
 mod inbox_client;
 pub use inbox_client::*;
-
-// Bluesky-native thread-view RPC seam (`bluesky.feed.thread`), wrapped as
-// FfiBlueskyClient — the crossposted-post thread the post-detail surface shows,
-// off the deleted GET /api/v1/bluesky/{feed/thread,thread} HTTP twins. A pure
-// RPC client over a flat display projection of the proto thread types.
-mod bluesky_client;
-pub use bluesky_client::*;
 
 // The client-facing `fauna.moderation.*` seam (FfiModerationClient) — queue
 // read + training correction + report-/signal-sharing opt-ins. (`scan_report`
@@ -784,7 +827,15 @@ pub use caldav_client::*;
 mod carddav_client;
 pub use carddav_client::*;
 
+// The feed plane's thin RPC client (FfiFeedClient over `fauna.feed.*`) and the
+// filter-rule codec faces beside it. Gated behind `feed-client` (in
+// `store-safe`'s tail) so the kids flavor carries no feed sender — and,
+// with `fauna-client-feed` optional, none of the plane's kind-catalog text
+// (`dynamic-features.md` § What "completely compiled away" means, criterion
+// 2). The Go mail-bridge build drops it too: no Go code calls it.
+#[cfg(feature = "feed-client")]
 mod feed_client;
+#[cfg(feature = "feed-client")]
 pub use feed_client::*;
 
 mod posts_client;
@@ -808,7 +859,12 @@ mod profile_client;
 #[cfg(feature = "profile-client")]
 pub use profile_client::*;
 
+// The search plane's thin RPC client (FfiSearchClient over the full-text
+// query kind). Gated behind `search-client` for the same reason as
+// `feed-client` above.
+#[cfg(feature = "search-client")]
 mod search_client;
+#[cfg(feature = "search-client")]
 pub use search_client::*;
 
 // The push-subscription-management seam (`fauna.push.{vapid_key,subscribe,
@@ -898,7 +954,7 @@ pub use sync_engine_host::*;
 // The control-inverted on-demand host (src/file_provider_host.rs) — the
 // hydration host apple's `NSFileProviderReplicatedExtension` and android's SAF
 // `DocumentsProvider` call, vending the shared `fauna_sync_engine::provider_face`
-// callback→engine primitives (`on-demand-files.md` § Apple File Provider binding,
+// callback→engine primitives (`on-demand-files-apple.md` § Apple File Provider binding,
 // § Android SAF DocumentsProvider binding). Reuses the byte-sync host's
 // `HostContext` (requires `sync-engine-host`), but is its own default-OFF
 // feature so windows, which has no use for it, doesn't compile it. The apple and
@@ -906,6 +962,10 @@ pub use sync_engine_host::*;
 // comment has the full rationale + the recipe list).
 #[cfg(feature = "file-provider-host")]
 mod file_provider_host;
+// Relay serving from the on-demand hosts (`docs/goal/behavior/file-sync.md`
+// § Relay serving) — beside the host it serves, never behind `p2p-share`.
+#[cfg(feature = "file-provider-host")]
+mod relay_serving;
 #[cfg(feature = "file-provider-host")]
 pub use file_provider_host::*;
 
@@ -1072,6 +1132,19 @@ pub enum FfiError {
     /// app still rendering the error's description shows what it showed before.
     #[error("account locked until {locked_until_secs} (Unix seconds)")]
     AccountLocked { locked_until_secs: u64 },
+    /// **A newer build wrote this account's `mls.db` with a breaking change** —
+    /// `MlsError::SchemaIncompatible` at engine construction (`ui/conversations.md`
+    /// § Errors & edge cases, the sixth standing truth). The store is intact and
+    /// untouched; only a newer app can open it.
+    ///
+    /// Distinct from [`Self::General`] because the app owes the standing
+    /// `conversations.errors.state_needs_newer_app` notice on `error-message`
+    /// (everything non-conversations proceeds), and the display text cannot tell
+    /// it apart. Raised by the conversations-session factory
+    /// (`FfiNestClient::build_conversations_session`), the one seam apple,
+    /// windows and android all route through.
+    #[error("{msg}")]
+    StateNeedsNewerApp { msg: String },
 }
 
 impl From<String> for FfiError {
@@ -1144,12 +1217,7 @@ pub(crate) fn ledger_seam() -> std::sync::Arc<dyn fauna_client_config::Successio
 /// `account-runtime` feature has no store, so it reads the empty state and
 /// refuses every write — never a fall back to any other store.
 #[cfg_attr(
-    not(any(
-        feature = "pairing",
-        feature = "mail-admin",
-        feature = "backup-destinations",
-        feature = "recovery-aftermath"
-    )),
+    not(any(feature = "pairing", feature = "backup-destinations")),
     allow(dead_code)
 )]
 pub(crate) fn backup_seam() -> std::sync::Arc<dyn fauna_client_config::BackupStateStore> {

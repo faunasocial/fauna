@@ -111,11 +111,94 @@ pub enum NoPinPolicy {
 /// borrow four lines, and the nest's mail-deliverability probe was reaching
 /// into this crate for exactly that. The bootstrap crate is where the shared
 /// rustls preamble lives, so the store lives there and both copies are gone.
+///
+/// This is the ONE door every app nest leg classifies through — the
+/// pre-identity WS dial ([`capturing_client_config`]), the bearer dial
+/// ([`spki_pinned_client_config`]) and the reqwest byte plane
+/// ([`dynamic_pinned_client_config`]) — so it is also where the e2e nest-leg
+/// trust seed sits (`e2e_extra_nest_roots`): no leg can be the one that forgot
+/// it.
 fn webpki_verifier() -> Arc<WebPkiServerVerifier> {
-    WebPkiServerVerifier::builder(Arc::new(fauna_tls_bootstrap::webpki_root_store()))
+    let mut roots = fauna_tls_bootstrap::webpki_root_store();
+    e2e_extra_nest_roots(&mut roots);
+    WebPkiServerVerifier::builder(Arc::new(roots))
         .build()
         .expect("static webpki roots build a verifier")
 }
+
+/// The e2e nest-leg trust seed's variable: PEM text of one or more CA
+/// certificates the harness wants this process's nest legs to treat as
+/// publicly trusted (`docs/goal/architecture/e2e-automation-surface-gating.md`
+/// § The nest-leg trust seed). Spelled like the source-IMAP seed's
+/// `FAUNA_E2E_IMAP_EXTRA_CA_PEM` — the two client-side seams read the same
+/// launch environment — and compiled out of every release artifact with its
+/// reader.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+pub const E2E_NEST_EXTRA_CA_ENV: &str = "FAUNA_E2E_NEST_EXTRA_CA_PEM";
+
+/// Add the harness CA(s) in [`E2E_NEST_EXTRA_CA_ENV`] to the root set the
+/// nest-leg verifier is built from.
+///
+/// Why it exists: rule (1) of `security.md` § The login's pin — a login on a
+/// nest presenting a publicly trusted certificate records the identity it
+/// verified as the pin — lives on the `webpki_valid == true` branch, and no
+/// harness can mint a publicly-chained certificate for a LAN address. Every e2e
+/// nest otherwise serves the self-signed floor, a branch on which the binding
+/// was always required, and a journey there witnesses nothing. The ruling's
+/// terms, each held here:
+///
+/// 1. **Compiled out.** This body exists only under the convention-15 gate; the
+///    production twin below names no variable.
+/// 2. **It ADDS an anchor and changes no policy.** The seed extends the
+///    `RootCertStore` and touches nothing else — not [`NoPinPolicy`], not the
+///    pin compare, not the anon client's waiver. A self-signed nest is refused
+///    under the seed wherever it is refused without it.
+/// 3. **A malformed value panics.** Only the harness writes it; a silently
+///    dropped anchor would read as a trust bug in the app.
+/// 4. **Never default-on.** The harness sets it per launch, for the one journey
+///    whose nest serves a harness-CA leaf — never for a whole session.
+///
+/// A declared consequence: the nest's federation dial shares this verifier, so
+/// a debug or `test-helpers` nest honours the variable too; the release image
+/// carries no arm.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+fn e2e_extra_nest_roots(roots: &mut rustls::RootCertStore) {
+    use rustls::pki_types::pem::PemObject;
+    let Ok(pem) = std::env::var(E2E_NEST_EXTRA_CA_ENV) else {
+        return;
+    };
+    if pem.trim().is_empty() {
+        return;
+    }
+    let mut added = 0usize;
+    for cert in CertificateDer::pem_slice_iter(pem.as_bytes()) {
+        let cert = cert.unwrap_or_else(|e| {
+            panic!(
+                "{E2E_NEST_EXTRA_CA_ENV} is set but is not a usable PEM trust anchor: {e}. \
+                 Only the e2e harness sets this variable, so this is a harness bug."
+            )
+        });
+        roots.add(cert).unwrap_or_else(|e| {
+            panic!(
+                "{E2E_NEST_EXTRA_CA_ENV} holds a certificate rustls cannot use as a trust \
+                 anchor: {e}. Only the e2e harness sets this variable."
+            )
+        });
+        added += 1;
+    }
+    assert!(
+        added > 0,
+        "{E2E_NEST_EXTRA_CA_ENV} is set but holds no CERTIFICATE block — a harness bug \
+         (only the e2e harness sets this variable)"
+    );
+}
+
+/// The production twin: a shipped build has no nest-leg trust seed, so the
+/// root set is the bundled Mozilla roots and nothing else. Same signature, so
+/// [`webpki_verifier`] — unconditional plumbing — compiles in every build
+/// (convention 15's same-signature no-op twin).
+#[cfg(not(any(test, debug_assertions, feature = "test-helpers")))]
+fn e2e_extra_nest_roots(_roots: &mut rustls::RootCertStore) {}
 
 /// The capturing (and optionally SPKI-pinning) `ServerCertVerifier`.
 struct CapturingVerifier {
@@ -230,10 +313,23 @@ fn config_with(resolve_pin: PinResolver, no_pin: NoPinPolicy) -> (ClientConfig, 
         resolve_pin,
         no_pin,
     });
-    let config = ClientConfig::builder()
+    let mut config = ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
+    // No session resumption on a capturing or pinned config (ruled 2026-10-08,
+    // security.md § Cross-connection binding → *No session resumption on a
+    // pinned config*). A TLS 1.3 session resumed from a cached ticket never runs
+    // the verifier above, so rustls' default client-side session cache would
+    // (a) let a reqwest leg keep talking to a host's OLD identity after a re-pin
+    // for as long as the ticket lived, the pin store read only on full
+    // handshakes, and (b) leave `capture` holding nothing for a connect path that
+    // reads it after the handshake. Every connection is a full handshake, so the
+    // verifier is the one path to a connection, and "per-handshake" means per
+    // connection. The cost is a cert parse plus one signature verification per
+    // new TCP connection (TLS 1.3 resumption saves no round trip without early
+    // data, which is off), behind reqwest's connection pool.
+    config.resumption = rustls::client::Resumption::disabled();
     (config, capture)
 }
 

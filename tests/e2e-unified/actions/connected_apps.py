@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from helpers.app_surface import app_name
 from helpers.budgets import RPC_ROUNDTRIP_S
 from i18n.strings import S
 
@@ -12,22 +11,10 @@ if TYPE_CHECKING:
 
 
 # The Connected apps page is built on all 7 apps, so the rows it lifted (the
-# AT Protocol consent card + connected-app rows, the Nostr bunker rows) render
-# HERE and nowhere else
-# (docs/goal/ui/connected-apps.md § Implementation status today).
-#
-# The apps whose roster also lists the mail app passwords — moved off Mail &
-# Calendar (docs/goal/ui/mail-settings.md § Where the credential rows render).
-# Its own set because an app's page can land before its mail rows can (web's
-# page lives in a wasm chunk that does not hold the mail machine — web is still
-# out of the set for that reason). It disappears when web joins.
-MAIL_ROWS_ON_CONNECTED_APPS = frozenset(
-    {"tui", "android", "linux", "macos", "ios", "windows"}
-)
-
-
-def mail_rows_on_connected_apps(driver: PlatformDriver) -> bool:
-    return app_name(driver) in MAIL_ROWS_ON_CONNECTED_APPS
+# AT Protocol consent card + connected-app rows, the Nostr bunker rows, and Mail
+# & Calendar's app passwords) render HERE and nowhere else
+# (docs/goal/ui/connected-apps.md § Implementation status today;
+# docs/goal/ui/mail-settings.md § Where the credential rows render).
 
 
 class ConnectedAppsActions:
@@ -173,10 +160,14 @@ class ConnectedAppsActions:
         feeds the URI to the same door the app's own route intake takes
         (`apps/tui.md` § System integration → *In-app routes*). The command
         acks once the route's page work has landed, so the card is painted
-        on return. Built on tui, macos, ios and windows so far (the Apple pair
-        take it through `onOpenURL`'s one FaunaKit door, `apps/ios.md` § App
-        Entry → *In-app routes*; windows through `App.ApplyRoute`, the argv
-        leg's door); the other apps' intake rides the trickle-down row.
+        on return. Built on tui, macos, ios, windows, android and linux (the
+        Apple pair take it through `onOpenURL`'s one FaunaKit door,
+        `apps/ios.md` § App Entry → *In-app routes*; windows through
+        `App.ApplyRoute`, the argv leg's door; android through
+        `ConsentHandoff.offer`, the door its `fauna://` intent filter feeds,
+        `apps/android.md` § Navigation → *In-app routes*; linux through
+        `routes::offer`, the door GApplication's `open` leg feeds,
+        `apps/linux.md` § System integration → *In-app routes*).
         **web is a declared absence** (`apps/web.md` § Implementation
         status today): a browser tab is launched by no OS link, and a device
         app whose open finds no handler takes the nest's browser door instead
@@ -200,6 +191,50 @@ class ConnectedAppsActions:
 
     def item_text(self, index: int) -> str:
         return self.driver.get_text("connected-apps-item", index=index) or ""
+
+    def item_status(self, index: int) -> str:
+        """Whether the row can act — `connected`, `not_connected`, or `paused`
+        (the account's external-apps switch is OFF) — the item's `status`
+        attr beside its words. Built on tui; the other apps' render rides the
+        trickle-down lift."""
+        return self.driver.get_attr("connected-apps-item", "status", index) or ""
+
+    def wait_for_item_status(
+        self, needle: str, status: str, timeout: float = RPC_ROUNDTRIP_S
+    ) -> int | None:
+        """Wait for the row whose text contains `needle` to read `status`,
+        re-reading by revisiting the page (a switch flip on another page
+        pushes nothing here); its index or None."""
+
+        def probe():
+            index = self.item_index_containing(needle)
+            if index is not None and self.item_status(index) == status:
+                return index
+            return None
+
+        return self._poll(probe, timeout, renavigate=True)
+
+    def item_oracle_ops(self, index: int) -> str | None:
+        """The operations the oracle ran for a served principal in the current
+        window — the item's `oracle_ops` attr beside its words; `None` on a row
+        the oracle never served. Built on tui; the other apps' render rides the
+        trickle-down lift."""
+        return self.driver.get_attr("connected-apps-item", "oracle_ops", index)
+
+    def wait_for_oracle_item_containing(
+        self, needle: str, timeout: float = RPC_ROUNDTRIP_S
+    ) -> int | None:
+        """Wait for a row whose text contains `needle` and which carries the
+        oracle summary, re-reading by revisiting the page (an operation the
+        oracle runs pushes nothing here); its index or None."""
+
+        def probe():
+            index = self.item_index_containing(needle)
+            if index is not None and self.item_oracle_ops(index) is not None:
+                return index
+            return None
+
+        return self._poll(probe, timeout, renavigate=True)
 
     def item_index_containing(self, needle: str) -> int | None:
         for i in range(self.item_count()):
@@ -298,6 +333,17 @@ class ConnectedAppsActions:
         return sum(
             1
             for i in self.mail_row_items()
+            if self.driver.get_attr("connected-apps-item", "revoked", i) == "true"
+        )
+
+    def revoked_item_count(self) -> int:
+        """How many roster rows of ANY class read *access revoked* — the
+        identity-succession burn's state (a mail app password, a Nostr signer
+        client), the item's `revoked` attr beside its words. Built on tui; the
+        other apps' signer paint rides the trickle-down."""
+        return sum(
+            1
+            for i in range(self.item_count())
             if self.driver.get_attr("connected-apps-item", "revoked", i) == "true"
         )
 

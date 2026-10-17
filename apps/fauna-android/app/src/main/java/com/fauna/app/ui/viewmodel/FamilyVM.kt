@@ -9,7 +9,9 @@ import com.fauna.app.core.UndenyDecide
 import com.fauna.ffi.FfiFamilyApprovalEntry
 import com.fauna.ffi.FfiFamilyStatus
 import com.fauna.ffi.FfiReachPolicy
+import com.fauna.app.ui.util.resolveLocalizedNested
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -34,6 +36,7 @@ class FamilyVM @Inject constructor(
     private val api: ApiClient,
     private val screenTimeStore: ScreenTimeStore,
     private val contentPolicyStore: ContentPolicyStore,
+    @ApplicationContext private val appContext: android.content.Context,
 ) : ViewModel() {
 
     private val _status = MutableStateFlow<FfiFamilyStatus?>(null)
@@ -50,6 +53,21 @@ class FamilyVM @Inject constructor(
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
     val errorMessage = MutableStateFlow<String?>(null)
+
+    // The guardian host of the shared feature-policy editor: the selected
+    // ward's rows (`family-policy-feature-limits-*`) and the one open editor,
+    // which is one ward's — so [selectWard] closes it. The host decides
+    // nothing; the rows and the draft are shared Rust's (`FfiFeaturesClient`).
+    val featureLimits = FeatureAuthoringHost(
+        scope = viewModelScope,
+        tier = "guardian",
+        readRows = { _ -> api.fetchWardAuthoredFeatureRows(requireSelectedWard()) },
+        openEditor = { _, feature -> api.openFeatureEditorForWard(requireSelectedWard(), feature) },
+        resolve = { resolveLocalizedNested(appContext, it).orEmpty() },
+    )
+
+    private fun requireSelectedWard(): ByteArray =
+        _selectedWardActorId.value ?: throw IllegalStateException("no ward selected")
 
     /** Re-read status + approvals (mount + after every mutation). */
     fun refresh() {
@@ -79,6 +97,9 @@ class FamilyVM @Inject constructor(
                     _selectedWardActorId.value = s.wards.firstOrNull()?.actorId
                 }
                 _approvals.value = api.familyApprovalsList()
+                // The rows follow the selected ward; a save or remove re-reads
+                // them through the host itself.
+                if (_selectedWardActorId.value != null) featureLimits.refresh()
             } catch (e: Exception) {
                 errorMessage.value = e.message ?: "error"
             } finally {
@@ -88,7 +109,13 @@ class FamilyVM @Inject constructor(
     }
 
     fun selectWard(actorId: ByteArray) {
+        val changed = _selectedWardActorId.value?.contentEquals(actorId) != true
         _selectedWardActorId.value = actorId
+        if (changed) {
+            // An open editor is one ward's: close it, then read the new ward's rows.
+            featureLimits.cancel()
+            featureLimits.refresh()
+        }
     }
 
     /** `family-policy-save-button` — persist the selected ward's reach policy. */

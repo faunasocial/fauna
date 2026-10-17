@@ -407,6 +407,10 @@ pub struct FfiCustodianSourceRegression {
     pub served: u32,
     /// Unix seconds of the first pass that found the source there.
     pub observed_at: i64,
+    /// Unix seconds of the pass whose `fauna.segments.counter_floor` landed on
+    /// the source at `held`; `None` until one lands.
+    #[uniffi(default = None)]
+    pub floored_at: Option<i64>,
 }
 
 /// This device's own custodian store as a shell hands it to
@@ -487,6 +491,7 @@ pub async fn custodian_store_footprint(
             held: r.held,
             served: r.served,
             observed_at: r.observed_at,
+            floored_at: r.floored_at,
         })
         .collect();
     Ok(FfiCustodianStoreInfo {
@@ -607,6 +612,25 @@ pub async fn reseed_custodian_store(
     device_id: Vec<u8>,
     data_dir: String,
 ) -> Result<crate::FfiReseedResult, FfiError> {
+    reseed_store_at(
+        nest,
+        owner_secret,
+        device_id,
+        data_dir,
+        RECLAIM_TEARDOWN_BUDGET,
+    )
+    .await
+}
+
+/// [`reseed_custodian_store`]'s body, with the teardown budget as an argument
+/// so a test can name a short one (as [`reclaim_store_at`] does).
+async fn reseed_store_at(
+    nest: Arc<FfiNestClient>,
+    owner_secret: Vec<u8>,
+    device_id: Vec<u8>,
+    data_dir: String,
+    budget: Duration,
+) -> Result<crate::FfiReseedResult, FfiError> {
     use fauna_client_backup::reseed::run_reseed;
     use fauna_core::crypto::{BackupKey, NestBackupKey, OwnerSealKey};
     use fauna_core::identity::ActorKeypair;
@@ -617,7 +641,7 @@ pub async fn reseed_custodian_store(
     let device_hex = hex::encode(device_id_bytes);
     let root = store_root_for(&owner_secret, &data_dir)?;
 
-    if !custodian_work_stopped_within(RECLAIM_TEARDOWN_BUDGET).await {
+    if !custodian_work_stopped_within(budget).await {
         return Ok(crate::FfiReseedResult::stopped(
             "this device's backup would not pause; nothing was sent",
         ));
@@ -682,6 +706,106 @@ pub async fn reseed_custodian_store(
         Ok(outcome) => crate::reseed::finish(&nest, outcome, &device_hex).await,
         Err(e) => crate::FfiReseedResult::stopped(e.to_string()),
     })
+}
+
+/// Recover the signed-in nest from this device's own sealed store after an
+/// accepted source regression, in this process — the confirm of
+/// `backup-audit-recover-button` on this device's own client-device row, on a
+/// phone (`segment-backup-protocol.md` § Client-device custodian (pull) →
+/// *Restore* → *Recovery from this device's own store*, question (2): the app
+/// hosts the store, so it runs the leg).
+///
+/// [`reseed_custodian_store`]'s posture over the recovery: nothing about the
+/// run's order is decided here — the composition is the shared
+/// `fauna_sync_engine::recovery::recover_from_own_store` (the sets the store's
+/// own record stands for, the grant, the store end of the leg, the
+/// store-backed duties) and the tail is `backup_destinations`'
+/// `recovery_result`, the one finish every recovery entry point ends in. What
+/// this adds is only what the in-process host alone can promise: this
+/// process's custodian work is stopped first and a pass guard is held for the
+/// whole run, so no pull pass or reclaim writes under the copy being read.
+///
+/// `nest` is the owner's keyed connection to their own nest; `device_id` is
+/// this device's stable sync id (32 bytes); `data_dir` the unscoped per-user
+/// base, as for [`reclaim_custodian_store`]. After it returns, run the audit
+/// pass again for the page — the cleared notice is read from the store, never
+/// assumed.
+///
+/// # Errors
+///
+/// `FfiError::General` for a run that never reached the shared driver or that
+/// the driver stopped — work that would not pause, the grant refused, a
+/// transport fault mid-run — in every case nothing the owner can lose: a re-run
+/// resumes by content address, and the verb recovers nothing twice.
+#[cfg(feature = "backup-audit")]
+#[fauna_uniffi_async::export]
+pub async fn recover_custodian_store(
+    nest: Arc<FfiNestClient>,
+    owner_secret: Vec<u8>,
+    device_id: Vec<u8>,
+    data_dir: String,
+) -> Result<crate::FfiRecoveryResult, FfiError> {
+    recover_store_at(
+        nest,
+        owner_secret,
+        device_id,
+        data_dir,
+        RECLAIM_TEARDOWN_BUDGET,
+    )
+    .await
+}
+
+/// [`recover_custodian_store`]'s body, with the teardown budget as an argument
+/// (as [`reseed_store_at`] takes it).
+#[cfg(feature = "backup-audit")]
+async fn recover_store_at(
+    nest: Arc<FfiNestClient>,
+    owner_secret: Vec<u8>,
+    device_id: Vec<u8>,
+    data_dir: String,
+    budget: Duration,
+) -> Result<crate::FfiRecoveryResult, FfiError> {
+    use fauna_core::crypto::{BackupKey, NestBackupKey, OwnerSealKey};
+    use fauna_core::identity::ActorKeypair;
+    use fauna_sync_engine::recovery::{OwnStoreRecovery, recover_from_own_store};
+
+    let secret = secret32(&owner_secret)?;
+    let device_id_bytes = device32(&device_id)?;
+    let root = store_root_for(&owner_secret, &data_dir)?;
+
+    if !custodian_work_stopped_within(budget).await {
+        return Err(FfiError::General {
+            msg: "this device's backup would not pause; nothing was sent".into(),
+        });
+    }
+    let _active = ActivityGuard::pass();
+
+    // `at`, never `ensure_root`: a recovery reads and tombstones in a store
+    // this device holds, and must not create one where it never held a copy.
+    let store = CustodianStore::at(root);
+    let ws = nest.nest_arc();
+    let actor_id = ActorKeypair::from_secret(secret).actor_id().0;
+    let auth = Arc::new(fauna_client::AuthClient::new(
+        ws.nest_url().to_string(),
+        ActorKeypair::from_secret(secret),
+    ));
+    let sync_client = fauna_sync_engine::nest_client::SyncClient::new(auth, &device_id_bytes);
+    let nest_key = NestBackupKey::derive(&secret);
+    let outcome = recover_from_own_store(OwnStoreRecovery {
+        store: &store,
+        source: ws.as_ref(),
+        bytes: &sync_client,
+        scope_id: actor_id,
+        device_id: hex::encode(device_id_bytes),
+        local: OwnerSealKey::Client(BackupKey::derive(&secret)),
+        nest_key: &nest_key,
+        now: now_secs(),
+    })
+    .await;
+    drop(nest_key);
+    outcome
+        .map(|outcome| crate::backup_destinations::recovery_result(&outcome))
+        .map_err(|e| FfiError::General { msg: e.to_string() })
 }
 
 /// Fold one pass's per-kind reports into the shell's summary.
@@ -923,6 +1047,109 @@ mod tests {
         );
         assert!(cancel.is_cancelled(), "the loop was told to stop");
         loop_side.await.expect("loop side");
+    }
+
+    /// A keyed connection that can never reach a nest: built, then torn down,
+    /// so every call on it fails at once rather than waiting out a deadline.
+    async fn unreachable_nest(secret: &[u8]) -> Arc<FfiNestClient> {
+        let nest = FfiNestClient::new("ws://127.0.0.1:1".into(), secret.to_vec()).expect("client");
+        nest.nest_arc().disconnect().await;
+        nest
+    }
+
+    /// The re-seed makes the reclaim's guarantee in reverse: while this
+    /// process's own custodian work will not stop, it answers `stopped` and
+    /// sends NOTHING — a pull pass writing under a corpus that is being
+    /// delivered could ship a set with blobs written but not yet recorded.
+    ///
+    /// The stop is a record, never an error: the page puts it on
+    /// `error-message` inside `backups.backup_reseed_failed`, and every other
+    /// field stays empty so no shell can paint a verdict beside it.
+    ///
+    /// Mutation check: dropping the `custodian_work_stopped_within` call from
+    /// `reseed_store_at` still answers `stopped` (the nest is unreachable), but
+    /// with the delivery's own failure — the reason assertion is the
+    /// load-bearing half.
+    #[tokio::test]
+    async fn a_reseed_stops_while_this_process_is_still_hosting() {
+        let _serial = activity_test_lock().await;
+        let base = tempfile::tempdir().expect("tempdir");
+        let secret = secret_bytes(4);
+        let dir = base.path().to_str().unwrap().to_string();
+        let nest = unreachable_nest(&secret).await;
+
+        let in_flight = ActivityGuard::pass();
+        let result = reseed_store_at(nest, secret, vec![9u8; 32], dir, Duration::from_millis(150))
+            .await
+            .expect("a stop is an outcome, never an error");
+        drop(in_flight);
+
+        assert_eq!(
+            result.stopped.as_deref(),
+            Some("this device's backup would not pause; nothing was sent"),
+            "the re-seed must refuse to start under this device's own writer"
+        );
+        assert!(result.result_lines.is_empty(), "a stop carries no verdict");
+        assert!(!result.is_whole, "a stop is never a restore");
+        assert!(
+            result.reenroll_error.is_none(),
+            "nothing ran, so there is no re-enrollment to have failed"
+        );
+    }
+
+    /// Past the pause, a ceremony that cannot reach its nest stops with the
+    /// cause — and the read-only rule holds: a re-seed opens the store with
+    /// `at`, so a device that never held a copy gains no store root (and no
+    /// cloud-backup exclusion over a directory that is not there).
+    ///
+    /// Mutation check: swapping `CustodianStore::at` for `ensure_root` in
+    /// `reseed_store_at` reds the `!root.exists()` assertion.
+    #[tokio::test]
+    async fn a_reseed_that_cannot_reach_its_nest_stops_and_never_creates_the_store() {
+        let _serial = activity_test_lock().await;
+        let base = tempfile::tempdir().expect("tempdir");
+        let secret = secret_bytes(5);
+        let dir = base.path().to_str().unwrap().to_string();
+        let root = store_root_for(&secret, &dir).expect("root");
+        let nest = unreachable_nest(&secret).await;
+
+        let result = reseed_store_at(nest, secret, vec![9u8; 32], dir, Duration::from_millis(150))
+            .await
+            .expect("a stop is an outcome, never an error");
+
+        let reason = result
+            .stopped
+            .expect("an unreachable nest stops the ceremony");
+        assert!(
+            !reason.contains("would not pause"),
+            "nothing was hosting, so the stop is the delivery's own: {reason}"
+        );
+        assert!(result.result_lines.is_empty() && !result.is_whole);
+        assert!(
+            !root.exists(),
+            "a re-seed only reads the store; it must not create one"
+        );
+    }
+
+    /// A malformed device id is refused at the boundary, before the pause —
+    /// the same 32-byte rule every custodian verb applies.
+    #[tokio::test]
+    async fn a_reseed_refuses_a_malformed_device_id() {
+        let _serial = activity_test_lock().await;
+        let base = tempfile::tempdir().expect("tempdir");
+        let secret = secret_bytes(6);
+        let nest = unreachable_nest(&secret).await;
+        assert!(
+            reseed_store_at(
+                nest,
+                secret,
+                vec![9u8; 31],
+                base.path().to_str().unwrap().to_string(),
+                Duration::from_millis(150),
+            )
+            .await
+            .is_err()
+        );
     }
 
     /// Two owners on one device never share a store root.

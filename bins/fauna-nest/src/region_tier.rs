@@ -132,6 +132,28 @@ fn registry_snapshot() -> RegionRegistry {
     compiled_in_registry()
 }
 
+/// The registry the admin status read (`fauna.admin.region.get`) judges
+/// *enrolled* against: [`registry_snapshot`], unless a `test-hooks` build has
+/// armed `AppState::region_status_registry_override`
+/// (`crate::region_status_test_hook`). Only the status read consults it — the
+/// refresh worker and every ingest keep [`registry_snapshot`], so a synthetic
+/// enrollment can make the warning reachable without ever sending a fetch to
+/// [`REGION_LOG_BASE_URL`].
+fn status_registry(state: &AppState) -> RegionRegistry {
+    #[cfg(feature = "test-hooks")]
+    if let Some(registry) = state
+        .region_status_registry_override
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        return registry;
+    }
+    #[cfg(not(feature = "test-hooks"))]
+    let _ = state;
+    registry_snapshot()
+}
+
 /// The witness roster this nest counts a checkpoint's cosignatures against —
 /// the same seam shape as [`registry_snapshot`], for the same two reasons.
 fn witness_roster_snapshot() -> WitnessRoster {
@@ -465,7 +487,7 @@ fn region_get_handler() -> crate::rpc_router::RpcHandler {
                 declaration,
                 crate::db::region_tier::DeclaredRegion::Unreadable
             );
-            let registry = registry_snapshot();
+            let registry = status_registry(&state);
             let enrolled = declared
                 .as_ref()
                 .is_some_and(|region| registry.region(region).is_some());

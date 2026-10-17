@@ -113,8 +113,9 @@ The two shapes a raw-byte value may take:
 
 A bare `[u8; N]` with a plain derive is not a third shape but a
 defect: its array encoding is refused at strict decode wherever a byte
-string is expected (`schema mismatch: major type mismatch: expected
-0x02 (byte string), got 0x98 (array)` — the codec names both shapes
+string is expected (`schema mismatch: actor_id: major type mismatch: expected
+0x02 (byte string), got 0x98 (array)` — the codec leads with the dotted field path
+(`scope.actor_id`, `scopes[1].actor_id`; none for a root mismatch, found by re-running the refused decode through `libs/fauna-cbor/src/path_track.rs`, which no accepted input passes through), names both shapes
 and, for exactly this pair, points here: `libs/fauna-cbor/src/codec.rs`,
 `map_decode_error`).
 

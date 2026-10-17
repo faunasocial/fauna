@@ -4,7 +4,7 @@
 //! `key-material-hierarchy.md` § Audience: deployment infrastructure → *The
 //! oracle* → *The DKIM class is the outbound spool's own door*).
 //!
-//! Five claims, each driven through the production kinds:
+//! Six claims, each driven through the production kinds:
 //!
 //! 1. a spool row whose one From field is on an active local domain leaves
 //!    `fauna.bridges.fetch_outbound_due` carrying a `DKIM-Signature` that an
@@ -16,7 +16,11 @@
 //! 4. a deployment-seed rotation leaves the key signing under the same
 //!    published record (the satellite walk re-wraps it);
 //! 5. no kind hands the key to a bridge: the router serves neither
-//!    `fauna.bridges.fetch_dkim_blob` nor `fauna.bridges.provision_dkim_blob`.
+//!    `fauna.bridges.fetch_dkim_blob` nor `fauna.bridges.provision_dkim_blob`;
+//! 6. a forwarded row leaves byte-identical to what was enqueued even when
+//!    its From is on a local domain — the nest signs no forward
+//!    (`mail-multidomain.md` § From: header ownership → *Per door,
+//!    nest-side*, the forward door).
 //!
 //! Run with: cargo test -p fauna-nest --test mail_dkim_oracle
 
@@ -141,6 +145,34 @@ async fn enqueue(db: &CacheDb, msgid: &str, raw: &[u8]) -> i64 {
     ids[0]
 }
 
+/// Enqueue `raw` as a forward (`is_forwarded`), the shape `forward_message`
+/// and the forward-queue promotion write: the forwarder actor and rule ride
+/// the row, the envelope is the original sender's.
+async fn enqueue_forward(db: &CacheDb, msgid: &str, raw: &[u8]) -> i64 {
+    let forwarder = [0x33u8; 32];
+    let ids = db
+        .enqueue_outbound(NewOutbound {
+            original_msgid: msgid,
+            original_sender: "someone@elsewhere.test",
+            recipients: &["bob@external.test"],
+            raw_message: raw,
+            inbound_verdicts: InboundVerdictsSnapshot {
+                spf: "pass".into(),
+                dmarc: "pass".into(),
+                dmarc_policy: "none".into(),
+            },
+            is_forwarded: true,
+            forward_actor_id: Some(&forwarder),
+            forward_rule_id: Some("forward_all"),
+            forward_copy_mode: Some(fauna_protocol::bridge_routing::ForwardCopyMode::Copy),
+            submit_actor_id: None,
+        })
+        .await
+        .expect("enqueue the forward");
+    assert_eq!(ids.len(), 1);
+    ids[0]
+}
+
 async fn call(
     router: &RpcRouter,
     state: &Arc<AppState>,
@@ -183,20 +215,38 @@ async fn fetch_unit(router: &RpcRouter, state: &Arc<AppState>, id: i64) -> Outbo
         .expect("the enqueued row is due")
 }
 
-/// The `(selector, public_dns_value)` the nest reports for [`DOMAIN`] — what
-/// the DNS page publishes.
-async fn published(state: &Arc<AppState>) -> (String, String) {
+/// The `(selector, public_dns_value)` pairs the nest reports for [`DOMAIN`] —
+/// what the DNS page publishes: `default-rsa` then `default-ed25519`.
+async fn published(state: &Arc<AppState>) -> Vec<(String, String)> {
     let rows = state
         .db
         .list_dkim_selectors(Some(DOMAIN))
         .await
         .expect("list selectors");
+    let published: Vec<(String, String)> = rows
+        .into_iter()
+        .map(|row| (row.selector, row.public_dns_value))
+        .collect();
     assert_eq!(
-        rows.len(),
-        1,
-        "the domain has exactly one selector — minted when the domain was added"
+        published
+            .iter()
+            .map(|(selector, _)| selector.as_str())
+            .collect::<Vec<_>>(),
+        ["default-rsa", "default-ed25519"],
+        "the domain has one label's two selectors — minted when the domain was added"
     );
-    (rows[0].selector.clone(), rows[0].public_dns_value.clone())
+    published
+}
+
+/// Whether `signed` carries, for EACH published record, a DKIM signature
+/// that verifies against that record alone.
+async fn verifies_each(signed: &[u8], published: &[(String, String)]) -> bool {
+    for (selector, record) in published {
+        if !verifies(signed, selector, record).await {
+            return false;
+        }
+    }
+    true
 }
 
 /// Whether `signed` carries a DKIM signature that verifies against `record`
@@ -239,11 +289,12 @@ async fn a_local_from_leaves_signed_and_verifies_against_the_published_record() 
         unit.raw_message.ends_with(&raw),
         "the message itself leaves untouched behind the signature"
     );
-    let (selector, record) = published(&state).await;
-    assert!(
-        verifies(&unit.raw_message, &selector, &record).await,
-        "the signature must verify against the published `{selector}` record {record}"
-    );
+    for (selector, record) in published(&state).await {
+        assert!(
+            verifies(&unit.raw_message, &selector, &record).await,
+            "a signature must verify against the published `{selector}` record {record}"
+        );
+    }
 }
 
 /// (b) A From the deployment does not sign for, and a message carrying two
@@ -270,6 +321,47 @@ async fn a_foreign_from_and_a_doubled_from_leave_as_they_rest() {
 
     assert_eq!(unit(foreign_id).raw_message, foreign);
     assert_eq!(unit(doubled_id).raw_message, doubled);
+}
+
+/// (f) A forward keeps the original From, which the forwarder never owns
+/// (`mail-forwarding.md` § SRS rewrites envelope MAIL FROM; never the From:
+/// header): the nest's signature would vouch for an authorship it never
+/// checked, so a forwarded unit leaves as it rests — even one whose From is on
+/// the local domain, which is either a spoof the perimeter admitted or a
+/// message already carrying the signature its own hand-out gave it.
+#[tokio::test]
+async fn a_forwarded_unit_leaves_as_it_rests_even_with_a_local_from() {
+    let (router, state) = nest(&seed(0xa1)).await;
+    let local = message("From: alice@example.test\r\n", "forwarded-local");
+    let foreign = message("From: mallory@elsewhere.test\r\n", "forwarded-foreign");
+    let local_id = enqueue_forward(&state.db, "<fwd-local@example.test>", &local).await;
+    let foreign_id = enqueue_forward(&state.db, "<fwd-foreign@example.test>", &foreign).await;
+    // The control: the same local From, submitted rather than forwarded, is
+    // signed at this very hand-out.
+    let submitted = message("From: alice@example.test\r\n", "submitted-local");
+    let submitted_id = enqueue(&state.db, "<submitted@example.test>", &submitted).await;
+
+    let reply = try_fetch_due(&router, &state).await.expect("fetch ok");
+    let unit = |id| {
+        reply
+            .units
+            .iter()
+            .find(|u| u.id == id)
+            .expect("the enqueued row is due")
+    };
+
+    assert_eq!(
+        unit(local_id).raw_message,
+        local,
+        "a forward is never signed"
+    );
+    assert_eq!(unit(foreign_id).raw_message, foreign);
+    assert!(
+        unit(submitted_id)
+            .raw_message
+            .starts_with(b"DKIM-Signature:"),
+        "the submitted control leaves signed"
+    );
 }
 
 /// (c) Revoking the MTA cuts its hand-out and leaves the deployment's DKIM
@@ -305,7 +397,7 @@ async fn revoking_the_mta_refuses_its_hand_out_and_leaves_the_key_alone() {
     assert_eq!(
         published(&state).await,
         before,
-        "an MTA revoke touches neither the selector nor its published record"
+        "an MTA revoke touches neither the selectors nor their published records"
     );
 
     // The successor MTA is handed the same message, signed under the same key.
@@ -337,7 +429,7 @@ async fn revoking_the_mta_refuses_its_hand_out_and_leaves_the_key_alone() {
     )
     .unwrap();
     let unit = reply.units.into_iter().find(|u| u.id == id).expect("due");
-    assert!(verifies(&unit.raw_message, &before.0, &before.1).await);
+    assert!(verifies_each(&unit.raw_message, &before).await);
 }
 
 /// (d) A deployment-seed rotation re-wraps the key: the nest keeps signing,
@@ -365,8 +457,8 @@ async fn a_deployment_seed_rotation_leaves_the_key_signing() {
 
     assert_eq!(published(&state).await, before);
     assert!(
-        verifies(&unit.raw_message, &before.0, &before.1).await,
-        "after the rotation the hand-out still signs under the published key"
+        verifies_each(&unit.raw_message, &before).await,
+        "after the rotation the hand-out still signs under both published keys"
     );
 }
 

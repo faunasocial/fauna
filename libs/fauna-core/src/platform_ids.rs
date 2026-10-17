@@ -94,12 +94,48 @@ pub const APPLE_MACOS_ACCOUNT_KEYCHAIN_GROUP: &str = "7457N3M72H.group.social.fa
 /// uploaded to the store record.
 pub const APPLE_BUNDLE_ID: &str = "social.fauna.fauna";
 
+/// The linux app's **application id** — the GtkApplication id, the Flatpak
+/// app-id, the AppStream id and the basename of the one XDG desktop entry
+/// every linux channel installs (`<id>.desktop`; `apps/linux.md`
+/// § Desktop Entry). The app registers under it and the sync agent launches the
+/// app through that entry when a banner is tapped. `fauna-linux`'s
+/// `packaging_identity_test.rs` pins the files that re-type it.
+pub const LINUX_APP_ID: &str = "social.fauna.fauna";
+
+/// The android app's Play **application id** — the permanent store identity
+/// (`installers/android.md` § Store identity; the Gradle namespace
+/// `com.fauna.app` is deliberately not it). Play Integrity names it as the
+/// verdict's package, so it is the `application_id` the attested age claim
+/// signs over (`family-safety.md` § The account age band, D5). Pinned against
+/// `apps/fauna-android/app/build.gradle.kts` by test below.
+pub const ANDROID_APPLICATION_ID: &str = "social.fauna.fauna";
+
+/// The Fauna Kids android app's Play **application id** — its own Play record
+/// (a Families-policy listing), never a suffix of [`ANDROID_APPLICATION_ID`]
+/// (`family-safety.md` § The account age band, the kids-app bullet, item (2)).
+/// The kids build signs its age claim over this id and Play names it in the
+/// verdict, under the kids record's own response-encryption keys.
+pub const ANDROID_KIDS_APPLICATION_ID: &str = "social.fauna.faunakids";
+
 /// The iOS app's **App ID** — [`APPLE_TEAM_ID`] + [`APPLE_BUNDLE_ID`] (pinned
 /// equal by test below): the RP-ID App Attest hashes into its `authData`, and
 /// so the `application_id` the attested age claim signs over
 /// (`fauna_protocol::age::FAUNA_IOS_APP_ID`, `family-safety.md` § The account
 /// age band, D5).
 pub const APPLE_IOS_APP_ID: &str = "7457N3M72H.social.fauna.fauna";
+
+/// The Fauna Kids iOS app's **bundle id** — its own store record, not a
+/// second spelling of [`APPLE_BUNDLE_ID`]: a Kids-Category listing cannot
+/// share an identifier with the 13+ main listing (`family-safety.md` § The
+/// account age band, the kids-app bullet, item (2); `installers/ios.md`).
+pub const APPLE_KIDS_BUNDLE_ID: &str = "social.fauna.faunakids";
+
+/// The Fauna Kids iOS app's **App ID** — [`APPLE_TEAM_ID`] +
+/// [`APPLE_KIDS_BUNDLE_ID`] (pinned equal by test below). App Attest signs
+/// under the RUNNING bundle's App ID, so this — not [`APPLE_IOS_APP_ID`] — is
+/// the RP-ID a kids-app attestation hashes and the `application_id` its age
+/// claim signs over (`fauna_protocol::age::FAUNA_IOS_KIDS_APP_ID`).
+pub const APPLE_IOS_KIDS_APP_ID: &str = "7457N3M72H.social.fauna.faunakids";
 
 /// Whether `p` is absolute by POSIX rules (`/`-rooted) — unlike
 /// [`Path::is_absolute`], which on Windows additionally requires a drive
@@ -126,16 +162,21 @@ pub fn is_posix_absolute(p: &Path) -> bool {
 /// (unsandboxed, TCC-silent) app that stewards it. This resolver is kept as
 /// the one Rust spelling of that path for the pin test and for tooling.
 ///
-/// **The result is always ABSOLUTE**: a missing, empty, or relative home falls
-/// back to `/tmp` rather than producing a relative path, because every consumer
-/// runs under launchd with a cwd of `/`, where a relative base dir panics the
-/// first thing that touches it. Callers pass `home` in rather than reading the
+/// **`None` for a missing, empty, or relative home — never a derived path.** The
+/// result when present is always ABSOLUTE (every consumer runs under launchd
+/// with a cwd of `/`, where a relative base dir panics the first thing that
+/// touches it), and there is deliberately NO world-writable fallback such as
+/// `/tmp`: another local account could pre-create it and read or plant the
+/// per-user state beneath it. Callers refuse with a logged
+/// reason instead. Callers pass `home` in rather than reading the
 /// environment, so tests never mutate process env. Absoluteness is POSIX
 /// absoluteness ([`is_posix_absolute`]), not [`Path::is_absolute`] — see there.
-pub fn apple_group_container(home: Option<PathBuf>) -> PathBuf {
-    apple_absolute_home(home)
-        .join("Library/Group Containers")
-        .join(APPLE_MACOS_APP_GROUP)
+pub fn apple_group_container(home: Option<PathBuf>) -> Option<PathBuf> {
+    Some(
+        apple_absolute_home(home)?
+            .join("Library/Group Containers")
+            .join(APPLE_MACOS_APP_GROUP),
+    )
 }
 
 /// `<home>/Library/Application Support` — the macOS **user-domain** home every
@@ -148,20 +189,26 @@ pub fn apple_group_container(home: Option<PathBuf>) -> PathBuf {
 /// 2026-08-23 matrix bisected `~/Library/Application Support/Fauna` out as a
 /// confound (`installers/macos.md` § Identifier domain, record item 3).
 ///
-/// Same absoluteness guarantee and `/tmp` fallback as
-/// [`apple_group_container`], for the same launchd reason.
-pub fn apple_user_domain_home(home: Option<PathBuf>) -> PathBuf {
-    apple_absolute_home(home).join("Library/Application Support")
+/// Same absoluteness guarantee and same refusal (`None`, no `/tmp` fallback)
+/// as [`apple_group_container`].
+pub fn apple_user_domain_home(home: Option<PathBuf>) -> Option<PathBuf> {
+    Some(apple_absolute_home(home)?.join("Library/Application Support"))
 }
 
-/// The shared absolute-home floor of the two resolvers above.
-fn apple_absolute_home(home: Option<PathBuf>) -> PathBuf {
+/// The shared absolute-home floor of the two resolvers above: the home when it
+/// is POSIX-absolute, else `None`.
+fn apple_absolute_home(home: Option<PathBuf>) -> Option<PathBuf> {
     home.filter(|h| is_posix_absolute(h))
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
-/// `$XDG_CONFIG_HOME`, falling back to `$HOME/.config` — always absolute (a
-/// missing or relative value falls back further, ultimately to `/tmp`), the
+/// The one refusal text every consumer of the floors below logs (or panics
+/// with) when no absolute home exists — the no-shared-fallback rule of
+/// `account-data-plane.md` § The account store → Placement.
+pub const NO_HOME_REFUSAL: &str = "no usable absolute home directory (HOME is unset, empty or relative and no absolute XDG_CONFIG_HOME is set): refusing to place per-user Fauna state under a shared fallback such as /tmp";
+
+/// `$XDG_CONFIG_HOME`, falling back to `$HOME/.config` — always absolute, and
+/// `None` when neither is (a missing, empty or relative `HOME` with no usable
+/// `XDG_CONFIG_HOME` is REFUSED, never mapped to `/tmp`), the
 /// shared floor under linux's and other unix's `<config root>/fauna[/…]`
 /// resolvers — the XDG counterpart to [`apple_absolute_home`], which plays
 /// the same role for the two apple resolvers above. Unlike
@@ -177,14 +224,12 @@ fn apple_absolute_home(home: Option<PathBuf>) -> PathBuf {
 pub fn xdg_config_root(
     xdg_config_home: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
-) -> PathBuf {
+) -> Option<PathBuf> {
     let absolute_or_none =
         |v: Option<std::ffi::OsString>| v.map(PathBuf::from).filter(|p| is_posix_absolute(p));
     match absolute_or_none(xdg_config_home) {
-        Some(xdg) => xdg,
-        None => absolute_or_none(home)
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join(".config"),
+        Some(xdg) => Some(xdg),
+        None => Some(absolute_or_none(home)?.join(".config")),
     }
 }
 
@@ -245,6 +290,31 @@ mod tests {
     }
 
     #[test]
+    fn ios_kids_app_id_is_the_team_prefixed_kids_bundle_id() {
+        assert_eq!(
+            APPLE_IOS_KIDS_APP_ID,
+            format!("{APPLE_TEAM_ID}.{APPLE_KIDS_BUNDLE_ID}")
+        );
+        assert_ne!(APPLE_IOS_KIDS_APP_ID, APPLE_IOS_APP_ID);
+    }
+
+    #[test]
+    fn android_application_ids_match_the_gradle_build() {
+        // The nest's Play arm pins these; the Gradle build is what Play sees.
+        let gradle = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../apps/fauna-android/app/build.gradle.kts"),
+        )
+        .expect("read the android app's build.gradle.kts");
+        assert!(gradle.contains(&format!("applicationId = \"{ANDROID_APPLICATION_ID}\"")));
+        assert!(gradle.contains(&format!(
+            "applicationId.set(\"{ANDROID_KIDS_APPLICATION_ID}\")"
+        )));
+        assert_ne!(ANDROID_KIDS_APPLICATION_ID, ANDROID_APPLICATION_ID);
+        assert!(!ANDROID_KIDS_APPLICATION_ID.starts_with(&format!("{ANDROID_APPLICATION_ID}.")));
+    }
+
+    #[test]
     fn account_keychain_group_is_team_prefixed_org_domain_and_not_the_shared_one() {
         // Same authorization model as the container group (a Developer-ID app
         // is entitled to a Team-ID-prefixed group), same org domain — and a
@@ -261,14 +331,14 @@ mod tests {
     }
 
     #[test]
-    fn container_is_absolute_even_without_a_home() {
+    fn container_is_refused_without_an_absolute_home() {
+        // No `/tmp` fallback: a world-writable base is refused.
         for home in [
             None,
             Some(PathBuf::from("")),
             Some(PathBuf::from("rel/ative")),
         ] {
-            let base = apple_group_container(home);
-            assert!(is_posix_absolute(&base), "{base:?} must be absolute");
+            assert_eq!(apple_group_container(home), None);
         }
     }
 
@@ -276,15 +346,15 @@ mod tests {
     fn container_hangs_off_the_passed_home() {
         assert_eq!(
             apple_group_container(Some(PathBuf::from("/Users/alice"))),
-            PathBuf::from(
+            Some(PathBuf::from(
                 "/Users/alice/Library/Group Containers/7457N3M72H.group.social.fauna.shared"
-            )
+            ))
         );
     }
 
     #[test]
     fn user_domain_home_is_application_support_and_never_the_container() {
-        let home = apple_user_domain_home(Some(PathBuf::from("/Users/alice")));
+        let home = apple_user_domain_home(Some(PathBuf::from("/Users/alice"))).unwrap();
         assert_eq!(
             home,
             PathBuf::from("/Users/alice/Library/Application Support")
@@ -295,8 +365,31 @@ mod tests {
             Some(PathBuf::from("")),
             Some(PathBuf::from("rel/ative")),
         ] {
-            let base = apple_user_domain_home(home);
-            assert!(is_posix_absolute(&base), "{base:?} must be absolute");
+            assert_eq!(apple_user_domain_home(home), None);
+        }
+    }
+
+    #[test]
+    fn xdg_config_root_prefers_absolute_xdg_then_home() {
+        assert_eq!(
+            xdg_config_root(Some("/x/cfg".into()), Some("/home/u".into())),
+            Some(PathBuf::from("/x/cfg"))
+        );
+        // Relative/empty XDG counts as unset.
+        for xdg in [Some("rel".into()), Some("".into()), None] {
+            assert_eq!(
+                xdg_config_root(xdg, Some("/home/u".into())),
+                Some(PathBuf::from("/home/u/.config"))
+            );
+        }
+    }
+
+    #[test]
+    fn xdg_config_root_is_refused_without_an_absolute_home() {
+        // No `/tmp/.config` fallback: nothing absolute → refusal.
+        for home in [None, Some("".into()), Some("rel".into())] {
+            assert_eq!(xdg_config_root(None, home.clone()), None);
+            assert_eq!(xdg_config_root(Some("rel".into()), home), None);
         }
     }
 

@@ -73,18 +73,23 @@ internal sealed class FakeMailExportMachine : MailExportMachineFakeBase
     /// <summary>A Progress-step snapshot for the running/paused session projection.</summary>
     public static MailExportSnapshot AtProgress(
         ExportSessionState state, uint exported, uint total,
-        MailboxProgressView[]? progress = null) =>
+        MailboxProgressView[]? progress = null, long startedAt = 0, long lastProgressAt = 0) =>
         new(ExportStep.Progress, ExportFormat.Mbox, Array.Empty<MailboxOption>(),
             "", "", false, state, exported, 0, 0, total,
             progress ?? Array.Empty<MailboxProgressView>(), Array.Empty<string>(), null, "",
-            "", ExportStatus.Idle, null);
+            "", ExportStatus.Idle, null, startedAt: startedAt, lastProgressAt: lastProgressAt);
 
-    /// <summary>A Done-step snapshot; <paramref name="savedPath"/> non-empty once Download ran.</summary>
-    public static MailExportSnapshot AtDone(ulong blobBytes, string savedPath = "") =>
+    /// <summary>
+    /// A Done-step snapshot; <paramref name="savedPath"/> non-empty once Download ran. The
+    /// default clock is 0 (no session read yet) — the untimed summary; a real
+    /// <paramref name="startedAt"/> gives the timed one.
+    /// </summary>
+    public static MailExportSnapshot AtDone(
+        ulong blobBytes, string savedPath = "", long startedAt = 0, long lastProgressAt = 0) =>
         new(ExportStep.Done, ExportFormat.Mbox, Array.Empty<MailboxOption>(),
             "", "", false, ExportSessionState.Completed, 3, 0, 0, 3,
             Array.Empty<MailboxProgressView>(), Array.Empty<string>(), blobBytes, "/api/v1/export/x",
-            savedPath, ExportStatus.Idle, null);
+            savedPath, ExportStatus.Idle, null, startedAt: startedAt, lastProgressAt: lastProgressAt);
 }
 
 /// <summary>
@@ -353,6 +358,39 @@ public class MailExportViewModelTests
 
         // The visible answer to the Download press (mail_export.saved_summary_fmt).
         Assert.Equal("mail_export/saved_summary_fmt", vm.DoneSummary);
+    }
+
+    [Fact]
+    public async Task DoneSummary_ReportsHowLongTheExportTook()
+    {
+        // A finished session carries its clock (frozen at the last transition): the Done
+        // card says how long it took, through the timed templates.
+        var fake = new FakeMailExportMachine
+        {
+            NextSnapshot = FakeMailExportMachine.AtDone(4096, startedAt: 1_000, lastProgressAt: 1_090),
+        };
+        var vm = new MailExportViewModel(fake, () => "alice");
+        await vm.LoadCommand.ExecuteAsync(null);
+        Assert.Equal("mail_export/done_summary_timed_fmt", vm.DoneSummary);
+
+        fake.NextSnapshot = FakeMailExportMachine.AtDone(
+            4096, @"C:\x.zst", startedAt: 1_000, lastProgressAt: 1_090);
+        vm.Repaint();
+        Assert.Equal("mail_export/saved_summary_timed_fmt", vm.DoneSummary);
+    }
+
+    [Fact]
+    public async Task ProgressSummary_AddsElapsedTime()
+    {
+        // Paused at 1_040 after 25 of 100: the clock stops there and there is no time left.
+        var fake = new FakeMailExportMachine
+        {
+            NextSnapshot = FakeMailExportMachine.AtProgress(
+                ExportSessionState.Paused, 25, 100, startedAt: 1_000, lastProgressAt: 1_040),
+        };
+        var vm = new MailExportViewModel(fake, () => "alice");
+        await vm.LoadCommand.ExecuteAsync(null);
+        Assert.Equal("mail_export/progress_elapsed_fmt", vm.ProgressSummary);
     }
 
     [Fact]

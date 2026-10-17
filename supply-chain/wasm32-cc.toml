@@ -1,0 +1,24 @@
+# The wasm32 C compiler pin: ONE upstream LLVM release (clang + llvm-ar of the same
+# release) compiles the C in the web tree's wasm chunks (zstd-sys) on every builder —
+# the image's `rust-wasm` stage, `just wasm` on the primary dev VM, a verifier's
+# `just web-verify`. Design: docs/goal/architecture/release-integrity.md § Release signing
+# → *Web-app verifiability*, the paragraph "The wasm32 C compiler". A dependency: it moves
+# only in a bump round (docs/goal/architecture/dependency-bump-report.md § Who opens a round).
+#
+# Each tarball is the upstream GitHub release asset; its SHA-256 is the release's own
+# published asset digest, and a `<tarball>.jsonl` GitHub attestation beside it is
+# verifiable with `gh attestation verify <tarball> --repo llvm/llvm-project`.
+
+release = "23.1.2"
+published = "2026-09-22"
+# The exact first line of the installed `clang --version`; recorded from the first
+# install, before any builder selects this pin.
+clang_version_line = ""
+
+[arch.aarch64]
+url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.2/LLVM-23.1.2-Linux-ARM64.tar.xz"
+sha256 = "075da47cb832273717d4c7bad4b6b4848d7c154262e9ba0dcc0025426d4073f0"
+
+[arch.x86_64]
+url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.2/LLVM-23.1.2-Linux-X64.tar.xz"
+sha256 = "b5ed9675149cc837c282e9b6962c276c9fa62863d5b2f91537b60848552995b7"

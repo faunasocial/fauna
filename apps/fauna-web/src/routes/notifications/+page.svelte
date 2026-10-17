@@ -1,8 +1,12 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { identity, reconnectTick } from '$lib/store';
+  import { goto } from '$app/navigation';
+  import { identity, reconnectTick, familyTabGated } from '$lib/store';
   import { t } from '$lib/i18n/strings';
-  import { getNotifications, markNotificationsRead, notificationRowText, notificationTypeGlyph, type UnifiedNotification } from '$lib/notifications';
+  import { getNotifications, markNotificationsRead, navigableDestination, notificationRowText, notificationTypeGlyph, type UnifiedNotification } from '$lib/notifications';
+  import type { NotificationDestination } from '$lib/wasm';
+  import { setPendingSearchNav } from '$lib/search';
+  import { isSafeNavUrl } from '$lib/safe-url';
   import { onPushEvent, staleSurfacesForPushKind } from '$lib/rpc';
   import { relativeTime } from '$lib/value-format';
   import MessageBanner from '$lib/components/MessageBanner.svelte';
@@ -66,6 +70,25 @@
     unsubReconnect?.();
   });
 
+  /** Open a row's destination as a direct click on that page would — the Post
+   *  arm through the same cross-page deep-link slot a search result uses (the
+   *  feed's own `openPostDetail` resolves a post its window never loaded), Knock
+   *  into Contacts (its People segment lists pending knocks), Family into the
+   *  Family page, External in a new tab through the ordinary external-link guard
+   *  (`notifications.md` § Deep-link destinations). */
+  function openDestination(dest: NotificationDestination): void {
+    if (dest === 'Family') {
+      void goto('/app/family');
+    } else if ('Post' in dest) {
+      setPendingSearchNav({ kind: 'post', postId: dest.Post.post_id });
+      void goto('/app/feed');
+    } else if ('Knock' in dest) {
+      void goto('/app/contacts');
+    } else if (isSafeNavUrl(dest.External.url)) {
+      window.open(dest.External.url, '_blank', 'noopener,noreferrer');
+    }
+  }
+
   async function markAllRead() {
     const id = $identity;
     if (!id) return;
@@ -97,14 +120,36 @@
     <p class="muted">No notifications yet.</p>
   {:else}
     {#each notifications as notif}
-      <div data-testid={IDS.NOTIFICATION_ITEM} class="notification-item" class:unread={!notif.is_read}>
+      {@const dest = navigableDestination(notif, $familyTabGated)}
+      {#snippet rowBody()}
         <span data-testid={IDS.NOTIFICATION_TYPE_ICON} class="type-icon">{notificationTypeGlyph(notif.type)}</span>
         <div class="notif-content">
           <span class="notif-summary">{notificationRowText(notif)}</span>
           <!-- notif.created_at is epoch micros (NotifItem) → ms -->
           <span class="notif-meta muted">{notif.source} · {relativeTime(notif.created_at / 1000)}</span>
         </div>
-      </div>
+      {/snippet}
+      {#if dest}
+        <!-- Navigable — a real interactive control (static role/tabindex so the
+             a11y linter can verify it). -->
+        <div
+          data-testid={IDS.NOTIFICATION_ITEM}
+          class="notification-item clickable"
+          class:unread={!notif.is_read}
+          role="button"
+          tabindex="0"
+          onclick={() => openDestination(dest)}
+          onkeydown={(e) => { if (e.key === 'Enter') openDestination(dest); }}
+        >
+          {@render rowBody()}
+        </div>
+      {:else}
+        <!-- Inert — the shared decision has no destination: plain text, never a
+             control that silently does nothing. -->
+        <div data-testid={IDS.NOTIFICATION_ITEM} class="notification-item" class:unread={!notif.is_read}>
+          {@render rowBody()}
+        </div>
+      {/if}
     {/each}
   {/if}
 {/if}
@@ -114,6 +159,7 @@
   .badge { background: var(--accent); color: white; padding: 0.25rem 0.75rem; border-radius: 1rem; font-size: 0.8rem; }
   .muted { color: var(--text-muted); }
   .notification-item { display: flex; align-items: flex-start; gap: 0.75rem; padding: 0.75rem; border-bottom: 1px solid var(--border); }
+  .notification-item.clickable { cursor: pointer; }
   .notification-item.unread { font-weight: 600; background: var(--bg-surface); }
   .type-icon { font-size: 1.2rem; flex-shrink: 0; width: 1.5rem; text-align: center; }
   .notif-content { display: flex; flex-direction: column; gap: 0.15rem; }

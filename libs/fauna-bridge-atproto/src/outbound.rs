@@ -540,10 +540,11 @@ pub struct ProjectionMediaItem {
 ///   manifest plus per-resolution segments, so it is assembled rather than
 ///   republished — a different mapping, not a variation of this one. It has its
 ///   own extractor, [`extract_projection_video`], and its own embed.
-/// - **`alt_text` lands on the FIRST image only.** `PostBody::Media` carries
-///   one alt for the whole set, and repeating it on every image would assert
-///   something false about images 2..n; the lexicon's per-image `alt` has no
-///   honest way to carry a set-level description.
+/// - **An item's own `alt` rides on its image; `alt_text` lands on the FIRST
+///   image only, and only when that image has none of its own.**
+///   `PostBody::Media` carries one alt for the whole set, and repeating it on
+///   every image would assert something false about images 2..n; the lexicon's
+///   per-image `alt` has no honest way to carry a set-level description.
 ///
 /// Dropping an unmappable attachment — rather than skipping the post — is the
 /// same reading § Projection & backfill's translation-edge row already ratified
@@ -569,8 +570,9 @@ pub fn extract_projection_media(post: &Post) -> Vec<ProjectionMediaItem> {
             size_bytes: item.size_bytes,
             width: item.dimensions.as_ref().map(|d| d.width),
             height: item.dimensions.as_ref().map(|d| d.height),
-            alt: match (idx, alt_text) {
-                (0, Some(alt)) => alt.to_string(),
+            alt: match (item.alt.as_deref(), idx, alt_text) {
+                (Some(own), _, _) => own.to_string(),
+                (None, 0, Some(alt)) => alt.to_string(),
                 _ => String::new(),
             },
         })
@@ -1366,6 +1368,30 @@ mod tests {
         // well would be a claim the post never made.
         assert_eq!(items[0].alt, "the set");
         assert_eq!(items[1].alt, "");
+    }
+
+    /// An item's own `alt` is what its image carries; the post-level `alt_text`
+    /// still lands on the FIRST image only when that image has none of its own
+    /// (bridges.md § Unified feed ingestion ruling 4 — the two are independent).
+    #[test]
+    fn extract_media_carries_each_items_own_alt_and_keeps_the_alt_text_rule() {
+        let mut first = media_item("image/png", b"one");
+        let mut second = media_item("image/png", b"two");
+        let third = media_item("image/png", b"three");
+        second.alt = Some("the second".into());
+        let post = media_post(vec![first.clone(), second, third], Some("the set"));
+        let items = extract_projection_media(&post);
+        assert_eq!(items[0].alt, "the set", "no own alt: alt_text on the first");
+        assert_eq!(items[1].alt, "the second", "own alt wins on a later image");
+        assert_eq!(items[2].alt, "", "no own alt, not the first: empty");
+
+        first.alt = Some("the first".into());
+        let post = media_post(vec![first], Some("the set"));
+        assert_eq!(
+            extract_projection_media(&post)[0].alt,
+            "the first",
+            "own alt wins over alt_text on the first image too"
+        );
     }
 
     /// Non-image attachments are dropped (no generic ATProto file embed), and

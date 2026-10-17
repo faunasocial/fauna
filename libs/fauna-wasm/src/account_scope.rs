@@ -5,11 +5,16 @@
 //! *Erasure follows scope*, the paragraph "Web's account store is in the erase
 //! too").
 //!
-//! One per-actor erase, [`erase_actor_scope`], with one arm today: the
-//! account store — the IndexedDB database and the OPFS segment directory named
-//! `StoreRoot::store_name(actor)`. The actor-keyed `localStorage` state web's
-//! wasm modules mint beside the registry namespace joins it as a second
-//! arm.
+//! One per-actor erase, [`erase_actor_scope`], with two arms: the actor-keyed
+//! `localStorage` state web's wasm modules mint beside the registry namespace
+//! — every key [`ACTOR_KEY_BUILDERS`] builds — and the account store, the
+//! IndexedDB database and the OPFS segment directory named
+//! `StoreRoot::store_name(actor)`. The builders are ONE list, never hand-listed
+//! at a call site; a tier_1 drift guard
+//! (`tests/e2e-unified/tests/test_wasm_actor_key_builders.py`) reds when a
+//! module that writes `localStorage` builds an actor-keyed `fauna…` key the list
+//! does not name. `sessionStorage` keys (succession's) are per-tab and die with
+//! the tab, so they are not in it.
 //!
 //! **Every erase runs behind the sign-out record**
 //! (`fauna_client_accounts::SignOutRecord`): the gesture names the accounts it
@@ -29,7 +34,8 @@
 //! `sign-out-residue` view paints, and the next load sweeps again. A sweep at a
 //! load or at the view's Remove Again is asked the sign-out's own question
 //! first — does another tab serve one of these accounts — and erases nothing
-//! when one does; the probe is the caller's (Web Locks, `$lib/webLocks`), its
+//! when one does; the probe is [`actors_served_by_another_tab`] (the
+//! conversations-engine role's Web Lock, `fauna_mls::engine_role`), its
 //! answer the `erase_refused` argument.
 
 #![cfg(target_arch = "wasm32")]
@@ -57,11 +63,33 @@ use wasm_bindgen_futures::future_to_promise;
 /// is counted in the line; the next load settles it.
 pub(crate) const ERASE_BUDGET: Duration = Duration::from_secs(5);
 
+/// Every `localStorage` key a wasm module builds from an actor id outside the
+/// registry's `fauna/{actor}/…` namespace — the erase's first arm. A new
+/// actor-keyed `localStorage` builder joins this list (the drift guard named in
+/// the module docs enforces it); install-scoped keys (push opt-in, region) are
+/// class 2 and never belong here.
+pub(crate) const ACTOR_KEY_BUILDERS: &[fn(&str) -> String] = &[crate::backup_audit::storage_key];
+
+/// Remove every [`ACTOR_KEY_BUILDERS`] key for `actor_hex`. Cannot fail in a way
+/// the caller could act on: no `localStorage` (a worker, a storage-blocked
+/// context) holds nothing to erase, and a refused removal is logged.
+fn erase_actor_keys(actor_hex: &str) {
+    let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else {
+        return;
+    };
+    for build in ACTOR_KEY_BUILDERS {
+        let key = build(actor_hex);
+        if let Err(e) = storage.remove_item(&key) {
+            tracing::warn!("[account-scope] remove localStorage {key:?}: {e:?}");
+        }
+    }
+}
+
 /// Erase everything this origin holds for `actor_hex` outside the registry
 /// namespace, within [`ERASE_BUDGET`]. Idempotent: an account with no store
 /// erases cleanly. `Err` is "its store may still be here".
 pub(crate) async fn erase_actor_scope(actor_hex: &str) -> anyhow::Result<()> {
-    erase_actor_scope_under(&StoreRoot::platform(), actor_hex).await
+    erase_actor_scope_under(&StoreRoot::platform()?, actor_hex).await
 }
 
 /// [`erase_actor_scope`] under an explicit store root (tests).
@@ -70,6 +98,7 @@ pub(crate) async fn erase_actor_scope_under(
     actor_hex: &str,
 ) -> anyhow::Result<()> {
     let name = root.store_name(actor_hex)?;
+    erase_actor_keys(actor_hex);
     let erase = std::pin::pin!(IndexedDbBackend::delete(&name));
     let budget = std::pin::pin!(fauna_sleep::sleep(ERASE_BUDGET));
     match select(erase, budget).await {
@@ -94,7 +123,7 @@ fn registry_accounts() -> Vec<String> {
 /// next load and answers `false`; an id that is no actor's can never be erased
 /// and is dropped. The name goes to the log, never to the user.
 async fn erase_and_settle(actor: &str) -> bool {
-    if StoreRoot::platform().store_name(actor).is_err() {
+    if StoreRoot::platform().is_ok_and(|root| root.store_name(actor).is_err()) {
         tracing::warn!("[account-scope] sign-out record names {actor:?}, no actor id — dropped");
         SignOutRecord::settle(&LocalStorageSecretStore, actor);
         return true;
@@ -271,4 +300,70 @@ pub fn sign_out_planned_erase() -> Vec<String> {
 )]
 pub fn sign_out_finish(erase_refused: bool) -> js_sys::Promise {
     future_to_promise(async move { crate::rpc::to_js(&finish_recorded(erase_refused).await) })
+}
+
+/// The accounts among `actor_ids` whose conversations-engine role ANOTHER tab
+/// of this browser profile holds right now — web's leg of *An erase refuses
+/// while a sibling serves the account* (`apps/account-scoping.md` § Concurrent
+/// instances), asked before a sign-out or a load's sweep erases anything. One
+/// probe per account over the role's one name
+/// (`fauna_mls::engine_role::conversations_engine_role_held_elsewhere`, which
+/// owns the posture: this tab's own hold consulted, never probed;
+/// `ifAvailable`, never a wait; degrades OPEN). Duplicate spellings of one
+/// account are probed once.
+pub(crate) async fn actors_served_elsewhere(actor_ids: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut served = Vec::new();
+    for actor in actor_ids {
+        if !seen.insert(fauna_mls::engine_role::web_role_lock_name(actor)) {
+            continue;
+        }
+        if fauna_mls::engine_role::conversations_engine_role_held_elsewhere(actor).await {
+            served.push(actor.clone());
+        }
+    }
+    served
+}
+
+/// [`actors_served_elsewhere`], for the SPA's sign-out guard and the load's
+/// sweep over [`sign_out_planned_erase`].
+#[wasm_bindgen(js_name = actorsServedByAnotherTab, unchecked_return_type = "Promise<string[]>")]
+pub fn actors_served_by_another_tab(actor_ids: Vec<String>) -> js_sys::Promise {
+    future_to_promise(async move {
+        let served = actors_served_elsewhere(&actor_ids).await;
+        Ok(served
+            .into_iter()
+            .map(JsValue::from)
+            .collect::<js_sys::Array>()
+            .into())
+    })
+}
+
+/// Remove-account's question, in the order the ruling fixes
+/// (`apps/account-scoping.md` § Concurrent instances → *Remove-account also
+/// refuses the account THIS instance serves*): `'this_tab'` when `actor_id` is
+/// the account this tab serves — its own role says nothing about that, since
+/// the probe skips it — else `'other_tab'` when another tab holds its role,
+/// else `null`. `served_here` is this tab's signed-in actor (it follows the
+/// per-tab pin), not the registry's active pointer.
+#[wasm_bindgen(
+    js_name = removeAccountBlock,
+    unchecked_return_type = "Promise<'this_tab' | 'other_tab' | null>"
+)]
+pub fn remove_account_block(actor_id: String, served_here: Option<String>) -> js_sys::Promise {
+    future_to_promise(async move {
+        let name = fauna_mls::engine_role::web_role_lock_name;
+        if served_here.is_some_and(|here| !here.trim().is_empty() && name(&here) == name(&actor_id))
+        {
+            return Ok(JsValue::from_str("this_tab"));
+        }
+        if actors_served_elsewhere(std::slice::from_ref(&actor_id))
+            .await
+            .is_empty()
+        {
+            Ok(JsValue::NULL)
+        } else {
+            Ok(JsValue::from_str("other_tab"))
+        }
+    })
 }

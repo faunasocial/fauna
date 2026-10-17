@@ -514,6 +514,31 @@
                                            Opacity="0.7" TextWrapping="Wrap"
                                            Margin="12,0,12,4" />
 
+                                <!-- Per-domain DMARC policy picker
+                                     (admin-dns-domain-dmarc-policy-select;
+                                     dmarc-reporting.md § Multi-domain deployments).
+                                     A RAW-VALUE picker over the shared
+                                     dmarc_policy_options() catalog (reject, the default,
+                                     which clears the override; quarantine; none): each
+                                     ComboBoxItem's AutomationProperties.Name + Tag is the
+                                     RFC 7489 tag — what the FlaUI bridge's select and
+                                     get_text match — and its Content the localized text
+                                     (built in AddDomainItem). The same SelectedIndex
+                                     render-echo guard as catch-all; ItemsSource BEFORE
+                                     SelectedIndex. Shown only when the authoritative
+                                     local-domains row is in (DmarcPolicyVisibility). -->
+                                <StackPanel Orientation="Horizontal" Spacing="8"
+                                            Visibility="{x:Bind DmarcPolicyVisibility}"
+                                            VerticalAlignment="Center">
+                                    <TextBlock Text="{x:Bind DmarcPolicyLabel}" Opacity="0.6"
+                                               VerticalAlignment="Center" />
+                                    <ComboBox AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminDnsDomainDmarcPolicySelect}"
+                                              ItemsSource="{x:Bind DmarcPolicyItems}"
+                                              SelectedIndex="{x:Bind DmarcPolicySelectedIndex}"
+                                              SelectionChanged="DmarcPolicy_SelectionChanged"
+                                              VerticalAlignment="Center" />
+                                </StackPanel>
+
                                 <!-- Per-domain role-address override pickers
                                      (admin-dns-domain-role-address-<role>-select;
                                      mail-multidomain.md § Per-domain role-address routing).

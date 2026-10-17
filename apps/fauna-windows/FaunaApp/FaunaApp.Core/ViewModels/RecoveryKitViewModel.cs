@@ -79,6 +79,18 @@ internal partial class RecoveryKitViewModel : ViewModelBase
     [ObservableProperty] private string? _mintedSecretHex;
 
     /// <summary>
+    /// The <c>fauna://recovery</c> URI behind the minted kit's QR <b>and</b> copy
+    /// button (<c>identity-succession.md</c> § The RecoveryKey — the on-screen display
+    /// alone is the bare <see cref="MintedSecretHex"/>). Built once per mint, set
+    /// BEFORE <see cref="MintedSecretHex"/> so no frame paints a copy button the URI
+    /// has not reached. Null for a secret that is a seed rather than a kit (the
+    /// stolen ceremony's persist-failure fallback) and when the builder refuses —
+    /// the view then falls back to the bare secret, which the restore parser accepts
+    /// too. It embeds the secret, so it is dropped with it.
+    /// </summary>
+    [ObservableProperty] private string? _mintedKitUri;
+
+    /// <summary>
     /// Whether the escrow blob landed with the registration that minted
     /// <see cref="MintedSecretHex"/>. ⚠ <c>false</c> is <b>not</b> an error to
     /// render: the registration has already landed, so the shown secret is live and
@@ -114,6 +126,31 @@ internal partial class RecoveryKitViewModel : ViewModelBase
     /// ceremony.
     /// </summary>
     [ObservableProperty] private FfiSweepView? _sweepView;
+
+    /// <summary>
+    /// The account runtime's last dead read — what the let-go renders from
+    /// (<c>settings.md</c> § Recovery kit, the fifth act;
+    /// <c>account-data-taxonomy.md</c> clause (3)(j)). Empty until the read lands,
+    /// and whenever there is no runtime.
+    /// </summary>
+    [ObservableProperty] private FfiDeadGenerations _deadGenerations = NothingDead;
+
+    /// <summary>The type-to-confirm buffer behind
+    /// <c>recovery-kit-let-go-confirm-field</c>.</summary>
+    [ObservableProperty] private string _letGoConfirmInput = string.Empty;
+
+    private static readonly FfiDeadGenerations NothingDead = new(Array.Empty<byte[]>(), null);
+
+    private static readonly Lazy<string> LetGoConfirmWordOnce =
+        new(FaunaFfiMethods.RecoveryLetGoConfirmWord);
+
+    /// <summary>
+    /// The let-go's confirm word — shared Rust's one constant
+    /// (<c>generation_let_go::LET_GO_CONFIRM_WORD</c>, through
+    /// <c>recovery_let_go_confirm_word</c>), so every app gates on the same text.
+    /// Never localized; only its prompt is.
+    /// </summary>
+    internal static string LetGoConfirmWord => LetGoConfirmWordOnce.Value;
 
     /// <summary>
     /// True while a stolen-identity ceremony's persist-failure message
@@ -162,14 +199,12 @@ internal partial class RecoveryKitViewModel : ViewModelBase
     /// lines</i>). Selected off the carried view by the SHARED
     /// <c>sweep_copy</c> projection, never matched on <c>Kind</c> here —
     /// which arm says what is that projection's alone, not this view model's.
-    /// <c>rendersRetry: true</c> unconditionally: whether THIS device can retry
-    /// is <see cref="FfiSweepView.owesWork"/>'s question, independent of whether
-    /// the platform HAS a retry affordance at all — windows does, as of this
-    /// leg.
+    /// Whether THIS device can retry is <see cref="FfiSweepView.owesWork"/>'s
+    /// question; windows renders the retry button, so the degraded lines name it.
     /// </summary>
     public string? SweepOutcomeLine =>
         SweepView is { } view
-            ? FaunaFfiMethods.SweepCopy(view, rendersRetry: true).outcome is { } outcome
+            ? FaunaFfiMethods.SweepCopy(view).outcome is { } outcome
                 ? S.Resolve(outcome)
                 : null
             : null;
@@ -179,7 +214,7 @@ internal partial class RecoveryKitViewModel : ViewModelBase
     /// as that property.</summary>
     public string? SweepUnattestedLine =>
         SweepView is { } view
-            ? FaunaFfiMethods.SweepCopy(view, rendersRetry: true).unattested is { } unattested
+            ? FaunaFfiMethods.SweepCopy(view).unattested is { } unattested
                 ? S.Resolve(unattested)
                 : null
             : null;
@@ -265,6 +300,25 @@ internal partial class RecoveryKitViewModel : ViewModelBase
     public bool StolenArmed =>
         string.Equals(StolenConfirmInput, StolenConfirmWord, StringComparison.Ordinal) && !Busy;
 
+    /// <summary>
+    /// <c>recovery-kit-unreadable-status</c>, resolved — the shared projection's
+    /// line, or null while nothing is dead.
+    /// </summary>
+    public string? LetGoStatus =>
+        DeadGenerations.unreadableStatus is { } line ? S.Resolve(line) : null;
+
+    /// <summary>
+    /// The render gate of the whole trio: the line, its confirm field and its
+    /// button render only while the shared projection answers one — never
+    /// re-derived here from the id list.
+    /// </summary>
+    public bool LetGoVisible => DeadGenerations.unreadableStatus is not null;
+
+    /// <summary>Whether <c>recovery-kit-let-go-button</c> is armed — on the confirm
+    /// word alone.</summary>
+    public bool LetGoArmed =>
+        string.Equals(LetGoConfirmInput, LetGoConfirmWord, StringComparison.Ordinal) && !Busy;
+
     partial void OnStatusChanged(FfiRecoveryKitStatus? value)
     {
         OnPropertyChanged(nameof(StatusLine));
@@ -282,7 +336,19 @@ internal partial class RecoveryKitViewModel : ViewModelBase
 
     partial void OnStolenConfirmInputChanged(string value) => OnPropertyChanged(nameof(StolenArmed));
 
-    partial void OnBusyChanged(bool value) => OnPropertyChanged(nameof(StolenArmed));
+    partial void OnDeadGenerationsChanged(FfiDeadGenerations value)
+    {
+        OnPropertyChanged(nameof(LetGoStatus));
+        OnPropertyChanged(nameof(LetGoVisible));
+    }
+
+    partial void OnLetGoConfirmInputChanged(string value) => OnPropertyChanged(nameof(LetGoArmed));
+
+    partial void OnBusyChanged(bool value)
+    {
+        OnPropertyChanged(nameof(StolenArmed));
+        OnPropertyChanged(nameof(LetGoArmed));
+    }
 
     /// <summary>
     /// Read the section's state from the <b>registration chain</b>, never a local
@@ -306,6 +372,74 @@ internal partial class RecoveryKitViewModel : ViewModelBase
         finally
         {
             Loading = false;
+        }
+    }
+
+    /// <summary>
+    /// Read the dead generations from the account runtime, at hydrate. The door
+    /// never errs — no runtime, or a failed read, answers empty — so a throw here
+    /// can only be the binding itself, and it folds the same way: a let-go that
+    /// cannot be shown is not offered.
+    /// </summary>
+    public async Task LoadDeadGenerationsAsync()
+    {
+        try
+        {
+            DeadGenerations = await _nest.RecoveryDeadGenerationsAsync();
+        }
+        catch (Exception ex)
+        {
+            ShellLog.Error(GetType().Name, $"[settings] dead-generation read failed: {ex.Message}");
+            DeadGenerations = NothingDead;
+        }
+    }
+
+    /// <summary>
+    /// <c>recovery-kit-let-go-button</c> — the user's confirmed act
+    /// (<c>account-data-taxonomy.md</c> clause (3)(j)). apple's <c>letGo()</c> and
+    /// tui's <c>Action::RecoveryLetGo</c> are the twins.
+    ///
+    /// <para>The confirm word is re-checked <b>here</b>, not only in the render, for
+    /// the stolen gate's reason: a test agent driving the id reaches this handler,
+    /// and the data cannot be brought back. The outcome's refreshed dead read
+    /// REPLACES the list, so the trio leaves the screen once nothing is dead; what
+    /// the act did is said on <c>error-message</c>, and a generation that became
+    /// readable again since the render is named as kept, never silently
+    /// skipped.</para>
+    /// </summary>
+    public async Task LetGoAsync()
+    {
+        if (Busy) return;
+        if (!string.Equals(LetGoConfirmInput, LetGoConfirmWord, StringComparison.Ordinal))
+        {
+            SetGuardedError(S.Get("settings/recovery_kit/let_go_confirm_placeholder"));
+            return;
+        }
+        Busy = true;
+        try
+        {
+            var outcome = await _nest.RecoveryLetGoAsync(DeadGenerations.generationIds);
+            LetGoConfirmInput = string.Empty;
+            DeadGenerations = outcome.dead;
+            var message = S.Format("settings/recovery_kit/let_go_done", outcome.retired);
+            if (outcome.kept)
+            {
+                message += " " + S.Get("settings/recovery_kit/let_go_kept");
+            }
+            SetGuardedError(message);
+        }
+        catch (Exception ex)
+        {
+            LetGoConfirmInput = string.Empty;
+            // The cause verbatim inside the shared sentence — a shared-Rust
+            // refusal's own msg, never Strings.Error's transport wrapper, which
+            // would put a second headline inside this one.
+            var cause = ex is FfiException.General general ? general.@msg : ex.Message;
+            SetGuardedError(S.Format("settings/recovery_kit/let_go_failed", cause));
+        }
+        finally
+        {
+            Busy = false;
         }
     }
 
@@ -365,6 +499,9 @@ internal partial class RecoveryKitViewModel : ViewModelBase
     {
         ClearHeldSecrets();
         Status = null;
+        // The previous account's dead read lists ITS generations: the let-go must
+        // not be offered to this one until its own read lands.
+        DeadGenerations = NothingDead;
         SetGuardedError(null);
     }
 
@@ -375,11 +512,15 @@ internal partial class RecoveryKitViewModel : ViewModelBase
     /// </summary>
     public void ClearHeldSecrets()
     {
+        MintedKitUri = null;
         MintedSecretHex = null;
         MintedLandsAt = null;
         MintedEscrowStored = true;
         PhraseInput = string.Empty;
         StolenConfirmInput = string.Empty;
+        // An armed gate must not survive a page leave: returning to the page never
+        // finds an irreversible act already unlocked.
+        LetGoConfirmInput = string.Empty;
         LandedSuccession = null;
         AcknowledgeStolenPersistFailure();
     }
@@ -548,6 +689,9 @@ internal partial class RecoveryKitViewModel : ViewModelBase
                 {
                     // The one landed arm where the secret must go on screen. Never
                     // phrased as "nothing happened" — the account DID move.
+                    // A seed, not a kit: it has no `fauna://recovery` form, and an
+                    // earlier mint's URI must not ride along on this secret.
+                    MintedKitUri = null;
                     MintedSecretHex = landed.successorSecretHex;
                     MintedEscrowStored = true;
                     ParkStolenMessage(S.Format(
@@ -751,7 +895,20 @@ internal partial class RecoveryKitViewModel : ViewModelBase
             FaunaApp.Core.Logs.ShellLog.Debug("RecoveryKitViewModel", "[mint] ceremony() returned");
             // Display BEFORE anything else can fail: at this instant the secret
             // exists nowhere else in the world, and a ceremony whose kit is never
-            // shown leaves a kit nobody holds.
+            // shown leaves a kit nobody holds. The URI is built first (a LOCAL
+            // read) so the secret never paints ahead of it; a refusal costs the
+            // account params, never the display — copy and QR then carry the
+            // bare kit.
+            try
+            {
+                MintedKitUri = await _nest.RecoveryKitDisplayUriAsync(kit.secretHex);
+            }
+            catch (Exception ex)
+            {
+                MintedKitUri = null;
+                FaunaApp.Core.Logs.ShellLog.Warn("RecoveryKitViewModel",
+                    $"[recovery-kit] display URI unavailable ({ex.GetType().Name}) — copy and QR carry the bare kit");
+            }
             MintedSecretHex = kit.secretHex;
             MintedEscrowStored = kit.escrowStored;
             MintedLandsAt = kit.landsAt;

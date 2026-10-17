@@ -20,12 +20,14 @@ the bridge). We still seed a random pubkey and assert *that* card rather than an
 absolute count.
 """
 
+import datetime
 import secrets
 import time
 
 import pytest
 
 from i18n.strings import S
+from helpers.audit_time import audit_time_near
 from helpers.bridge_enrollment import enroll_bridge
 
 # Scoped to the apps that render the per-role `admin-bridges-pending-card-name`
@@ -195,4 +197,36 @@ def test_mda_card_names_mail_and_calendar(bridges_pending_admin_app, bridges_pen
     name_txt = admin_app.driver.get_text("admin-bridges-pending-card-name", index=idx) or ""
     assert name_txt.strip() == S.admin.bridges_pending.name_mail_calendar, (
         f"mda card name {name_txt!r} should be {S.admin.bridges_pending.name_mail_calendar!r}"
+    )
+
+
+@pytest.mark.feature("admin-bridges")
+def test_pending_card_shows_when_it_first_asked(bridges_pending_admin_app, bridges_pending_nest):
+    """A pending helper's card shows when it first asked to join (``admin.md``
+    § Bridges → the pending card's first-seen time) — a helper that enrolled a
+    moment ago reads as the fixed local audit timestamp, never the empty
+    placeholder."""
+    admin_app = bridges_pending_admin_app
+    made = datetime.datetime.now()
+    pubkey_hex, _ = _seed_pending_bridge(bridges_pending_nest, "mta")
+
+    admin_app.admin.navigate_bridges_pending()
+    deadline = time.time() + 10.0
+    idx = None
+    while time.time() < deadline:
+        idx, _ = _find_card(admin_app, pubkey_hex)
+        if idx is not None:
+            break
+        time.sleep(0.5)  # sleep-ok: poll interval of a deadline loop
+    assert idx is not None, (
+        f"seeded pending bridge {pubkey_hex[:16]}… not found "
+        f"(error: {admin_app.driver.get_text('error-message') if admin_app.has_error() else 'none'})"
+    )
+
+    first_seen = (
+        admin_app.driver.get_text("admin-bridges-pending-first-seen-at", index=idx) or ""
+    ).strip()
+    assert audit_time_near(first_seen, made), (
+        f"the pending card must say when the helper first asked (YYYY-MM-DD HH:MM, "
+        f"near {made:%Y-%m-%d %H:%M}), got {first_seen!r}"
     )

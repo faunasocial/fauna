@@ -33,9 +33,9 @@ func TestMain(m *testing.M) {
 // the suite. The verdict mapping is pinned where it lives — the Rust pipeline's
 // own hermetic test (libs/fauna-mail/tests/auth_tests.rs) — so this package pins
 // only what Session.Data does with a verdict or a verify error.
-func hermeticVerifyInbound(raw []byte, _, _, _ string) (mailfauna.AuthVerdicts, error) {
+func hermeticVerifyInbound(raw []byte, _, _, _ string) (mailfauna.InboundAuthOutcome, error) {
 	if string(raw) == verifyUnparseableFixture {
-		return mailfauna.AuthVerdicts{}, mailfauna.ErrAuthErrorUnparseable
+		return mailfauna.InboundAuthOutcome{}, mailfauna.ErrAuthErrorUnparseable
 	}
 	var dmarc faunaCore.DmarcVerdict = faunaCore.DmarcVerdictNone{}
 	switch {
@@ -45,14 +45,31 @@ func hermeticVerifyInbound(raw []byte, _, _, _ string) (mailfauna.AuthVerdicts, 
 		// policy=none: the publisher observes only, so no enforce gate rejects
 		// and the message is delivered with its DMARC fail on record.
 		dmarc = faunaCore.DmarcVerdictFail{Policy: faunaCore.DmarcPolicyNone}
+	case bytes.Contains(raw, []byte(hermeticDmarcHeader+": reject\r\n")):
+		// policy=reject: the DMARC enforce gate refuses it (550 5.7.1).
+		dmarc = faunaCore.DmarcVerdictFail{Policy: faunaCore.DmarcPolicyReject}
 	}
-	return mailfauna.AuthVerdicts{
-		Dkim:  faunaCore.DkimVerdictNone{},
-		Spf:   faunaCore.SpfVerdictNone,
-		Dmarc: dmarc,
-		Arc:   faunaCore.ArcVerdictNone,
+	return mailfauna.InboundAuthOutcome{
+		Verdicts: mailfauna.AuthVerdicts{
+			Dkim:  faunaCore.DkimVerdictNone{},
+			Spf:   faunaCore.SpfVerdictNone,
+			Dmarc: dmarc,
+			Arc:   faunaCore.ArcVerdictNone,
+		},
+		// A fixed observation: the DMARC report pipeline is pinned in Rust
+		// (fauna-mail's hermetic auth test, the nest handler tests); this
+		// package pins only that Data hands one on per verified message.
+		Observation: mailfauna.DmarcObservation{
+			HeaderFromDomain:   hermeticObservedFromDomain,
+			EnvelopeFromDomain: hermeticObservedFromDomain,
+			SpfResult:          "none",
+		},
 	}, nil
 }
+
+// hermeticObservedFromDomain is the From domain every hermetic verification
+// reports to the DMARC aggregate (see hermeticVerifyInbound).
+const hermeticObservedFromDomain = "hermetic-from.test"
 
 // hermeticDmarcHeader is this test double's per-message DMARC knob: a DATA
 // payload carrying `X-Hermetic-Dmarc: pass` (or `: fail`, CRLF-terminated) is

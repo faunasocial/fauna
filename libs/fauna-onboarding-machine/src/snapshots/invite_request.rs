@@ -131,6 +131,15 @@ pub struct InviteRequestSnapshot {
     /// resolve with `resolve_nested`.
     #[serde(default)]
     pub age_notice: Option<LocalizedText>,
+    /// `invite-code-supervised-notice` — "This account will be supervised by
+    /// {guardian}", plus "as a {band} account" when the code was minted with
+    /// an age band (`family-safety.md` § App surface → *Age-band surfaces*).
+    /// Derived on every `invite_request_snapshot()` read from a `Valid` OOB
+    /// code that names a guardian ([`fauna_protocol::age::supervised_notice`]);
+    /// `None` = no notice. Args mix data (the handle) and a nested key (the
+    /// band) — resolve with `resolve_nested`.
+    #[serde(default)]
+    pub supervised_notice: Option<LocalizedText>,
 }
 
 impl InviteRequestSnapshot {
@@ -147,6 +156,7 @@ impl InviteRequestSnapshot {
             out_of_band_code_state: OobCodeState::Idle,
             oob_message: oob_message_for(&OobCodeState::Idle),
             age_notice: None,
+            supervised_notice: None,
         }
     }
 }

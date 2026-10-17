@@ -161,11 +161,13 @@ public struct ThreadDetailView: View {
                                     Task { await vm.deleteMessage(detail.threadId, mid) }
                                 },
                                 onMarkAsSpam: { mid in
+                                    #if !FAUNA_KIDS
                                     guard let client else { return }
                                     Task {
                                         await client.api.markMessageAsSpam(
                                             messageId: mid, body: msg.body, subject: msg.subjectLine)
                                     }
+                                    #endif
                                 },
                                 linkPreviewImageURL: { vm.linkPreviewImageURL($0) },
                                 onResolveLinkPreview: { url in Task { await vm.resolveLinkPreview(url) } }

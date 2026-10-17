@@ -103,7 +103,7 @@ def _caldav_propfind_status(base_url: str, auth_username: str, password: str, *,
     Retries only connection-level errors while the MDA's self-signed HTTPS CalDAV
     listener cold-boots its bind — a real 401/207 reply returns immediately.
     `verify=False` because the local bridge serves a self-signed dev cert (the
-    live example.com deployment serves a real ACME cert, so prefer verify=True
+    live nest serves a real ACME cert, so prefer verify=True
     there)."""
     import requests
     import urllib3
@@ -163,7 +163,7 @@ def test_second_credential_authenticates_over_caldav_and_imap(app, dedicated_mai
     app.mail_settings.navigate()
     assert app.mail_settings.is_page_visible(), "mail-settings page must be reachable"
     app.mail_settings.enable_mail_plain(_DEFAULT_PASSWORD)
-    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(1, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "enabling mail must mint the first ('default') credential; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )
@@ -207,7 +207,7 @@ def test_second_credential_authenticates_over_caldav_and_imap(app, dedicated_mai
     #    credential, chosen password. Sealed under credential_id "phone"
     #    (≠ "default"). ──
     app.mail_settings.add_credential_plain(_SECOND_NAME, _SECOND_PASSWORD)
-    assert app.mail_settings.wait_for_credential_count_at_least(2, timeout=15.0), (
+    assert app.mail_settings.wait_for_credential_count_at_least(2, timeout=app.mail_settings.ENABLE_SETTLE_S), (
         "adding a second PLAIN credential must mint a 2nd credential row; "
         f"error: {app.mail_settings.page_error_text(timeout=2.0)!r}"
     )

@@ -963,6 +963,140 @@ mod tests {
         server.shutdown().await.expect("relay shutdown");
     }
 
+    /// A relay-only endpoint under `seed` that answers every inbound
+    /// connection's first stream with `tag`, until the endpoint is dropped.
+    /// Returns its task; aborting it drops the endpoint.
+    async fn tagged_answerer(
+        relay_url: RelayUrl,
+        seed: u8,
+        tag: u8,
+        relay_roots: Vec<CertificateDer<'static>>,
+    ) -> tokio::task::JoinHandle<()> {
+        let ep = relay_only_endpoint(relay_url, seed, Some(vec![ALPN.to_vec()]), relay_roots).await;
+        tokio::spawn(async move {
+            while let Some(incoming) = ep.accept().await {
+                let Ok(conn) = incoming.await else { continue };
+                tokio::spawn(async move {
+                    if let Ok((mut send, _recv)) = conn.accept_bi().await {
+                        let _ = send.write_all(&[tag]).await;
+                        let _ = send.finish();
+                    }
+                    conn.closed().await;
+                });
+            }
+        })
+    }
+
+    /// Which device answers a relayed dial: a fresh member endpoint dials
+    /// `target` through the relay and reads the one tag byte back, or `None`
+    /// when nothing answered within the bound.
+    async fn who_answers(
+        relay_url: &RelayUrl,
+        seed: u8,
+        target: iroh::EndpointId,
+        relay_roots: &[CertificateDer<'static>],
+    ) -> Option<u8> {
+        let dialer = relay_only_endpoint(relay_url.clone(), seed, None, relay_roots.to_vec()).await;
+        let addr = EndpointAddr::new(target).with_relay_url(relay_url.clone());
+        let answered = tokio::time::timeout(Duration::from_secs(10), async {
+            let conn = dialer.connect(addr, ALPN).await.ok()?;
+            let (mut send, mut recv) = conn.open_bi().await.ok()?;
+            // A stream opens on the peer only once it carries data.
+            send.write_all(b"?").await.ok()?;
+            let mut tag = [0u8; 1];
+            recv.read_exact(&mut tag).await.ok()?;
+            conn.close(0u32.into(), b"done");
+            Some(tag[0])
+        })
+        .await
+        .ok()
+        .flatten();
+        dialer.close().await;
+        answered
+    }
+
+    /// One actor key, two devices: what our relay does with two connections
+    /// under one key, measured with our own binary (`behavior/p2p.md` § The
+    /// relay → *The cross-user seat and the relay*, ruling 4 — a liveness
+    /// matter in a best-effort plane, never a correctness one). Device A
+    /// connects; device B connects under the same secret, and dials run until
+    /// B first answers (its registration with the relay lands a moment after
+    /// its bind); then a steady round; then B leaves and dials run until A
+    /// answers again. What it pins: every relayed dial toward the key is
+    /// answered by one of its devices while either is connected, the later
+    /// connection takes the dials once it is registered, and the earlier one is
+    /// not displaced for good — it answers again once the later one leaves. The
+    /// numbers print beside the verdict for the build ledger
+    /// (`p2p-shared-set-build.md`).
+    #[tokio::test]
+    async fn two_devices_under_one_key_the_later_answers_and_the_earlier_survives() {
+        const SHARED: u8 = 0xa1;
+        const SETTLE: usize = 10;
+        let seeds: Vec<u8> = (0xc0..0xf0).collect();
+        let mut members = vec![endpoint_key(SHARED)];
+        members.extend(seeds.iter().map(|&s| endpoint_key(s)));
+        let (server, relay_url, relay_roots) = spawn_test_relay(members).await;
+        let target = SecretKey::from_bytes(&{
+            let mut sk = [0u8; 32];
+            sk[0] = SHARED;
+            sk
+        })
+        .public();
+        let mut seeds = seeds.into_iter();
+        // Dial `n` times, or — with `until` — until that device answers, at
+        // most `SETTLE` times.
+        let mut round = async |n: usize, until: Option<u8>| {
+            let mut answers = Vec::new();
+            for _ in 0..n {
+                let seed = seeds.next().expect("a fresh dialer seed");
+                let answer = who_answers(&relay_url, seed, target, &relay_roots).await;
+                answers.push(answer.map(char::from));
+                if until.is_some() && answer == until {
+                    break;
+                }
+            }
+            answers
+        };
+
+        let device_a = tagged_answerer(relay_url.clone(), SHARED, b'A', relay_roots.clone()).await;
+        let a_alone = round(4, None).await;
+        let device_b = tagged_answerer(relay_url.clone(), SHARED, b'B', relay_roots.clone()).await;
+        let b_settling = round(SETTLE, Some(b'B')).await;
+        let both = round(6, None).await;
+        device_b.abort();
+        let _ = device_b.await;
+        let b_gone_settling = round(SETTLE, Some(b'A')).await;
+        let a_again = round(4, None).await;
+        eprintln!(
+            "[seat-relay measurement] one key, two devices: A alone {a_alone:?}; \
+             B joining {b_settling:?}; both steady {both:?}; B gone {b_gone_settling:?}; \
+             then {a_again:?}"
+        );
+
+        assert!(a_alone.iter().all(|t| *t == Some('A')), "{a_alone:?}");
+        assert_eq!(
+            b_settling.last(),
+            Some(&Some('B')),
+            "the later connection takes the dials once registered: {b_settling:?}"
+        );
+        assert!(
+            b_settling.iter().chain(&both).all(Option::is_some),
+            "every dial is answered while both are connected: {b_settling:?} {both:?}"
+        );
+        assert!(
+            both.iter().all(|t| *t == Some('B')),
+            "the later connection answers every steady dial: {both:?}"
+        );
+        assert_eq!(
+            b_gone_settling.last(),
+            Some(&Some('A')),
+            "the earlier connection answers again once the later leaves: {b_gone_settling:?}"
+        );
+        assert!(a_again.iter().all(|t| *t == Some('A')), "{a_again:?}");
+        device_a.abort();
+        server.shutdown().await.expect("relay shutdown");
+    }
+
     /// `quic_bind` alone decides whether the address-discovery server runs: with
     /// none, the relay serves only the relay protocol; given a bind, the QUIC
     /// server comes up beside it under the same certificate

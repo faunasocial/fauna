@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn dkim_pubkey_extract_and_match() {
-        // The pubkey from the deploy-verify NEXT's example.com DKIM record.
+        // The pubkey from the deploy-verify NEXT's live-nest DKIM record.
         let p = "CcxUQyfB/vzMnyjSzF/sK/WDzuNE3Be/sAqpqOWXrss=";
         let observed = vec![format!("v=DKIM1; k=ed25519; p={p}")];
         assert!(dkim_record_present(&observed));

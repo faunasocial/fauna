@@ -733,6 +733,129 @@ async fn a_secondary_active_domain_still_admits_your_own_handle() {
     .expect("her own handle on a secondary active domain is hers to send from");
 }
 
+/// The trailing-dot spelling of a claimed domain IS that domain (`fauna.test.`
+/// is the FQDN of `fauna.test`), so the handle gate must read it as claimed.
+/// The From reader returns the host as written, dot included; an exact string
+/// compare once read `bob@<primary>.` as off-domain, skipped the handle check,
+/// and the dotted string went out as the envelope sender.
+#[tokio::test]
+async fn a_trailing_dot_spelling_of_a_claimed_domain_is_gated_like_the_bare_name() {
+    let (router, state) = router_and_state().await;
+    state
+        .db
+        .add_mail_domain("second.test", false, "testing", "self_signed", None, None)
+        .await
+        .expect("add a second active local domain");
+
+    let mallory: [u8; 32] = [0xB7; 32];
+    state
+        .db
+        .create_user_with_handle(&mallory, "free", "mallory", None)
+        .await
+        .expect("admit mallory with her own handle");
+
+    // The primary, a secondary, a mixed-case spelling and a doubled dot (the
+    // shared normaliser strips every trailing dot, so `..` reads as claimed).
+    let primary_upper = format!("bob@{}.", DOMAIN.to_ascii_uppercase());
+    let primary_dot = format!("bob@{DOMAIN}.");
+    let primary_double = format!("bob@{DOMAIN}..");
+    for from in [
+        primary_dot.as_str(),
+        primary_upper.as_str(),
+        primary_double.as_str(),
+        "bob@second.test.",
+    ] {
+        let err = send(
+            &router,
+            &state,
+            mallory,
+            vec!["victim@external.test".into()],
+            message(from, "victim@external.test", "not from bob", "body\r\n"),
+        )
+        .await
+        .expect_err(&format!(
+            "`{from}` must be gated like the bare claimed domain"
+        ));
+        assert_eq!(err.code, "fauna.email.permission_denied", "From: {from}");
+        let detail = format!("{:?}", err.details);
+        assert!(
+            detail.contains("does not match your handle"),
+            "the refusal must be the handle-mismatch arm for `{from}`; got {detail}"
+        );
+    }
+}
+
+/// The STORED side is canonical too: a domain registered with a trailing dot
+/// (`add_local_domain` and `ensure_mail_domain_registered` both admit one) is
+/// stored dotless, so the gate still claims it. Stored dotted, the compare never
+/// matched, the gate never fired, and any account could forge any handle there.
+#[tokio::test]
+async fn a_domain_registered_with_a_trailing_dot_is_still_gated() {
+    let (router, state) = router_and_state().await;
+    state
+        .db
+        .add_mail_domain("second.test.", false, "testing", "self_signed", None, None)
+        .await
+        .expect("add a second active local domain, dotted spelling");
+
+    let mallory: [u8; 32] = [0xB9; 32];
+    state
+        .db
+        .create_user_with_handle(&mallory, "free", "mallory", None)
+        .await
+        .expect("admit mallory with her own handle");
+
+    let err = send(
+        &router,
+        &state,
+        mallory,
+        vec!["victim@external.test".into()],
+        message(
+            "bob@second.test",
+            "victim@external.test",
+            "not from bob",
+            "body\r\n",
+        ),
+    )
+    .await
+    .expect_err("a dotted-registered domain must gate a foreign handle");
+    assert_eq!(err.code, "fauna.email.permission_denied");
+    let detail = format!("{:?}", err.details);
+    assert!(
+        detail.contains("does not match your handle"),
+        "the refusal must be the handle-mismatch arm; got {detail}"
+    );
+}
+
+/// The dotted spelling still admits the caller's OWN handle — the fix reads the
+/// domain as claimed, it does not refuse the FQDN form — and the envelope
+/// sender carries the canonical (dotless) host.
+#[tokio::test]
+async fn a_trailing_dot_claimed_domain_still_admits_your_own_handle() {
+    let (router, state) = router_and_state().await;
+    let mallory: [u8; 32] = [0xB8; 32];
+    state
+        .db
+        .create_user_with_handle(&mallory, "free", "mallory", None)
+        .await
+        .expect("admit mallory with her own handle");
+
+    send(
+        &router,
+        &state,
+        mallory,
+        vec!["victim@external.test".into()],
+        message(
+            &format!("mallory@{DOMAIN}."),
+            "victim@external.test",
+            "her own address, FQDN spelling",
+            "body\r\n",
+        ),
+    )
+    .await
+    .expect("her own handle on the dotted spelling of a claimed domain is hers to send from");
+}
+
 /// The owned-alias arm of the one sender-ownership rule (`mail-multidomain.md`
 /// § From: header ownership; this door's statement: `mail-app-surface.md`
 /// § Sender-handle verification): a `From:` whose local part is not the

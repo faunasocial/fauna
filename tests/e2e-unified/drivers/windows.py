@@ -551,7 +551,7 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         """Where THIS launch's `fauna-sync-agent` keeps its state — the agent's
         `--data-dir`, the BASE the per-actor scope nests under:
         `service.rs::apply_actor_scope` scopes every layout since 2026-09-26, the
-        override included (`on-demand-files.md` § Multi-account × File Provider,
+        override included (`on-demand-files-apple.md` § Multi-account × File Provider,
         consequence 3). Until then the override stayed flat, so every account one
         launch signed in shared one binding store and one `fsid-<ref>.db` per
         folder id — two fresh nests both mint `local:N`, so a later account
@@ -1001,10 +1001,15 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         # (`BackupPaths.DataDir`), so an isolated launch reproduces the real
         # *relationship* between the two roots (the unified root is `<data dir>\sync`)
         # instead of only isolating them individually. A caller-supplied `data_dir`
-        # is honoured verbatim and is NOT re-parented: those two seams hand one root
-        # to a sequence of drivers and must keep the exact path they were given, so
-        # there the two roots simply stay unrelated — which is why the store root is
-        # published separately above rather than derived from the data dir.
+        # is honoured verbatim and is NOT re-parented: a caller handing one root to a
+        # sequence of drivers must keep the exact path it gave. Supplied ALONE it
+        # leaves the two roots unrelated — each driver still relocates
+        # `%LOCALAPPDATA%` to its own fresh dir, so it opens a fresh account store —
+        # which is why the store root is published separately above rather than
+        # derived from the data dir. A caller whose drivers must share the account
+        # store too (the at-rest grid's `skew_client.state_home_config`, the
+        # two-instance worlds) pins `local_appdata` as well, with `data_dir` laid out
+        # under it as production lays it out.
         if self._data_dir is None:
             supplied = config.get("data_dir")
             self._data_dir = supplied or os.path.join(self._local_appdata, "Fauna")
@@ -1501,7 +1506,7 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         return "\n".join(lines[-limit:]) if lines else "(bridge logged nothing)"
 
     @staticmethod
-    def _diagnostic_lines(captured: list[str]) -> list[str]:
+    def _diagnostic_lines(captured: list[str], *, bridge: bool = True) -> list[str]:
         """The `[bridge] …` lines, plus any `[fauna] FATAL` report IN FULL.
 
         The app's three unhandled-exception hooks (`App.xaml.cs`) write a header
@@ -1510,6 +1515,10 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         on a prefix therefore keeps the headline and throws away the only part
         that says WHERE the app died, so a fatal report stays sticky here until
         the app's ordinary timestamped logging resumes.
+
+        ``bridge=False`` keeps the app's own reports alone — the view
+        :meth:`ack_timeout_diagnostics` adds beside its unfiltered tail, which
+        already carries the bridge's most recent narration.
         """
         out: list[str] = []
         in_fatal = False
@@ -1533,10 +1542,13 @@ class WindowsBridgeDriver(HttpBridgeDriver):
                 # trace is over; anything else is still part of it.
                 if _APP_LOG_LINE_RE.search(stripped):
                     in_fatal = False
-                else:
+                elif "[bridge]" not in stripped:
+                    # The bridge writes the same handle from its own threads, so
+                    # its narration can land mid-trace: it is the bridge's line,
+                    # not the trace's, and the trace goes on after it.
                     out.append(stripped)
                     continue
-            if "[bridge]" in stripped:
+            if bridge and "[bridge]" in stripped:
                 out.append(stripped)
         return out
 
@@ -1597,6 +1609,16 @@ class WindowsBridgeDriver(HttpBridgeDriver):
           ``_bridge_lines()`` filters to ``[bridge]``, which is precisely the
           half the *app* never writes, so this reads the deque UNFILTERED.
 
+        And a third, because a tail is the wrong shape for it: **the app's own
+        crash report, whole.** ``ReportFatal`` writes a header, the exception's
+        ``ToString()`` and the reporting thread's live stack; the dying app's
+        pumps and the bridge keep writing after it, so that block is the first
+        thing to scroll out of the last ``tail_lines``. Measured 2026-10-08: a re-sign-in died on the UI thread and the
+        failure carried the header alone. The section is the
+        :meth:`_diagnostic_lines` view without the bridge narration, and only a
+        captured ``[fauna] FATAL`` or a dead app earns it — a wedge with neither
+        stays a tail, its handled ``FIRST-CHANCE`` chatter left out.
+
         Never raises. It runs inside a ``raise``, so an exception here would
         replace the real failure with its own.
         """
@@ -1622,6 +1644,15 @@ class WindowsBridgeDriver(HttpBridgeDriver):
                 parts.append(f"app process: DEAD — {self._exit_code_phrase(status)}")
 
             tail = [str(ln).rstrip() for ln in (getattr(self, "_bridge_log", None) or [])]
+            reports = self._diagnostic_lines(tail, bridge=False)
+            dead = status is not None and not status.get("running")
+            if reports and (dead or any("[fauna] FATAL" in ln for ln in reports)):
+                body = "\n".join(reports[-self._CRASH_REPORT_LINES:])
+                parts.append(
+                    "--- the app's own crash reports, whole (`[fauna] FATAL` is an "
+                    "unhandled exception; the LAST `[fauna] FIRST-CHANCE` before a "
+                    f"death is the candidate for one no hook saw) ---\n{body}"
+                )
             if tail:
                 body = "\n".join(tail[-tail_lines:])
                 parts.append(
@@ -1636,6 +1667,11 @@ class WindowsBridgeDriver(HttpBridgeDriver):
             return "\n" + "\n".join(parts)
         except Exception as exc:  # noqa: BLE001 - must never mask the real failure
             return f"\n(ack diagnostics unavailable: {type(exc).__name__}: {exc})"
+
+    #: How much of the app's own crash reports to carry: the same budget
+    #: :meth:`bridge_error_diagnostics` gives them, since a single report is a
+    #: header, an exception and a whole live stack.
+    _CRASH_REPORT_LINES = 200
 
     #: How much of the shared core's `tracing` log to carry, and why it is two
     #: windows rather than one tail. The decisions that name a cause are written
@@ -1794,7 +1830,7 @@ class WindowsBridgeDriver(HttpBridgeDriver):
             + "\n".join("  " + ln for ln in shown)
         )
 
-    def teardown(self, *, sweep_data_dir_peers: bool = True) -> None:
+    def _stop_app(self, *, sweep_data_dir_peers: bool = True) -> None:
         """Stop the app and reclaim what this driver owns.
 
         ``sweep_data_dir_peers=False`` stops ONLY the app this bridge tracks: by
